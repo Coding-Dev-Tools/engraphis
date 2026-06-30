@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-and-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy pytest
+      - name: Unit tests
+        run: python -m pytest tests/ -q
+      - name: Retrieval eval gate (MASTER_PLAN.md §14.3)
+        run: python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
+      - name: Ablation (vector-only vs hybrid)
+        run: python -m eval.ablation

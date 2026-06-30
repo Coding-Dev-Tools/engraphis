@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/x-icon" href="/static/engraphis.ico">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+<title>Engraphis</title>
+<style>
+:root{--bg:#0a0a0f;--surface:#12121a;--surface2:#1a1a24;--surface3:#22222e;--border:#2a2a38;--border-light:#3a3a48;--text:#d8d8e2;--text-muted:#7a7a8c;--text-dim:#4a4a5c;--accent:#9d7cf6;--accent-dim:#6d4cc6;--accent-bg:rgba(157,124,246,.08);--green:#4ade80;--amber:#fbbf24;--red:#f87171;--blue:#60a5fa;--cyan:#22d3ee;--radius:6px;--radius-sm:4px;--radius-lg:10px;--sidebar-w:220px;--font:-apple-system,BlinkMacSystemFont,"Segoe UI","Inter",sans-serif;--mono:"SF Mono","JetBrains Mono","Cascadia Code",Consolas,monospace;--transition:.15s cubic-bezier(.4,0,.2,1)}
+*{margin:0;padding:0;box-sizing:border-box}html{font-size:14px}body{font-family:var(--font);background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased;overflow:hidden}
+::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--surface3);border-radius:3px}::-webkit-scrollbar-thumb:hover{background:var(--border-light)}
+a{color:var(--accent);text-decoration:none}button{font-family:inherit;cursor:pointer}
+.app{display:flex;height:100vh}.sidebar{width:var(--sidebar-w);background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;z-index:50}.main{flex:1;display:flex;flex-direction:column;min-width:0}.content{flex:1;overflow-y:auto;padding:0}
+.brand{padding:16px 14px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}.brand-mark{width:20px;height:20px;flex-shrink:0}.brand-name{font-size:14px;font-weight:600;letter-spacing:-.2px}.brand-sub{font-size:10px;color:var(--text-dim);letter-spacing:.5px;text-transform:uppercase}
+.vault-switcher{padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-muted);transition:all var(--transition)}.vault-switcher:hover{background:var(--surface2);color:var(--text)}.vault-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}.vault-switcher-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nav{flex:1;padding:6px;overflow-y:auto}.nav-section{font-size:10px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;padding:12px 8px 4px}.nav-item{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:var(--radius-sm);cursor:pointer;color:var(--text-muted);transition:all var(--transition);font-size:13px;user-select:none}.nav-item:hover{background:var(--surface2);color:var(--text)}.nav-item.active{background:var(--accent-bg);color:var(--accent)}.nav-icon{width:15px;height:15px;flex-shrink:0;color:var(--text-dim)}.nav-item:hover .nav-icon{color:var(--text-muted)}.nav-badge{margin-left:auto;font-size:10px;color:var(--text-dim);font-variant-numeric:tabular-nums}
+.sidebar-footer{padding:8px 12px;border-top:1px solid var(--border);font-size:11px;color:var(--text-dim);display:flex;align-items:center;gap:6px}.pulse-dot{width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 2s ease-in-out infinite}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.topbar{height:42px;border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:12px;flex-shrink:0;background:var(--surface)}.topbar-title{font-size:13px;font-weight:600}.topbar-sub{font-size:12px;color:var(--text-dim)}.topbar-spacer{flex:1}.topbar-search{display:flex;align-items:center;gap:6px;padding:4px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;color:var(--text-dim);cursor:pointer;transition:all var(--transition)}.topbar-search:hover{border-color:var(--border-light);color:var(--text-muted)}kbd{font-family:var(--mono);font-size:10px;padding:1px 5px;background:var(--surface3);border-radius:3px;border:1px solid var(--border)}
+.view{display:none;padding:24px 28px;max-width:1200px}.view.active{display:block}.view-head{margin-bottom:20px}.view-title{font-size:20px;font-weight:600;letter-spacing:-.4px}.view-desc{color:var(--text-muted);margin-top:3px;font-size:13px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:12px}.card-head{font-size:11px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.8px;margin-bottom:12px;display:flex;align-items:center;gap:8px}.card-head .count{margin-left:auto;font-size:11px;color:var(--text-dim);font-weight:400;text-transform:none}
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:18px}.stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;position:relative;overflow:hidden;transition:border-color var(--transition)}.stat:hover{border-color:var(--border-light)}.stat-val{font-size:26px;font-weight:600;letter-spacing:-.5px;font-variant-numeric:tabular-nums}.stat-lbl{font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.6px;margin-top:2px}.stat-bar{position:absolute;bottom:0;left:0;height:2px;transition:width .6s ease}
+.cols-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}.cols-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}@media(max-width:1000px){.cols-2,.cols-3{grid-template-columns:1fr}}
+.tbl{width:100%;border-collapse:collapse;font-size:13px}.tbl th{text-align:left;padding:7px 10px;color:var(--text-dim);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid var(--border)}.tbl td{padding:9px 10px;border-bottom:1px solid var(--surface2)}.tbl tr{cursor:pointer;transition:background var(--transition)}.tbl tr:hover{background:var(--surface2)}.truncate{max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pill{display:inline-flex;align-items:center;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:500}.pill-accent{background:var(--accent-bg);color:var(--accent)}.pill-green{background:rgba(74,222,128,.1);color:var(--green)}.pill-blue{background:rgba(96,165,250,.1);color:var(--blue)}.pill-amber{background:rgba(251,191,36,.1);color:var(--amber)}.pill-red{background:rgba(248,113,113,.1);color:var(--red)}.pill-cyan{background:rgba(34,211,238,.1);color:var(--cyan)}.pill-muted{background:var(--surface2);color:var(--text-muted)}
+.field{margin-bottom:12px}.field-lbl{display:block;font-size:12px;color:var(--text-muted);margin-bottom:5px;font-weight:500}.input,.textarea,.select{width:100%;padding:8px 11px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:13px;font-family:inherit;transition:border-color var(--transition)}.input:focus,.textarea:focus,.select:focus{outline:none;border-color:var(--accent-dim)}.textarea{min-height:120px;resize:vertical;font-family:var(--mono);font-size:12px;line-height:1.6}.field-hint{font-size:11px;color:var(--text-dim);margin-top:3px}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:var(--radius-sm);border:1px solid transparent;font-size:13px;font-weight:500;transition:all var(--transition);white-space:nowrap}.btn-primary{background:var(--accent-dim);color:#fff;border-color:var(--accent-dim)}.btn-primary:hover{background:var(--accent);border-color:var(--accent)}.btn-ghost{background:var(--surface2);color:var(--text-muted);border-color:var(--border)}.btn-ghost:hover{background:var(--surface3);color:var(--text)}.btn-danger{background:rgba(248,113,113,.08);color:var(--red);border-color:rgba(248,113,113,.2)}.btn-danger:hover{background:rgba(248,113,113,.15)}.btn-sm{padding:5px 10px;font-size:12px}.btn:disabled{opacity:.4;cursor:not-allowed}
+.search-row{display:flex;gap:8px;margin-bottom:14px}.search-row .input{flex:1}
+.browser{display:flex;height:calc(100vh - 84px)}.browser-list{width:320px;border-right:1px solid var(--border);overflow-y:auto;flex-shrink:0}.browser-reader{flex:1;overflow-y:auto;padding:24px 28px}
+.mem-card{padding:10px 12px;border-bottom:1px solid var(--surface2);cursor:pointer;transition:background var(--transition)}.mem-card:hover{background:var(--surface2)}.mem-card.active{background:var(--accent-bg);border-left:2px solid var(--accent)}.mem-card-title{font-size:13px;font-weight:500;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mem-card-meta{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-dim)}.ret-bar{display:inline-block;width:36px;height:3px;background:var(--surface3);border-radius:1.5px;overflow:hidden;vertical-align:middle}.ret-fill{height:100%;border-radius:1.5px}.ret-h{background:var(--green)}.ret-m{background:var(--amber)}.ret-l{background:var(--red)}
+.md-reader h1{font-size:22px;font-weight:600;margin-bottom:6px;letter-spacing:-.3px}.md-reader h2{font-size:17px;font-weight:600;margin:20px 0 8px}.md-reader h3{font-size:14px;font-weight:600;margin:16px 0 6px}.md-reader p{margin-bottom:10px;line-height:1.7}.md-reader ul,.md-reader ol{margin:0 0 10px 20px;line-height:1.7}.md-reader li{margin-bottom:3px}.md-reader code{font-family:var(--mono);font-size:12px;background:var(--surface2);padding:2px 5px;border-radius:3px;color:var(--cyan)}.md-reader pre{background:var(--surface2);padding:12px;border-radius:var(--radius-sm);overflow-x:auto;margin-bottom:10px;border:1px solid var(--border)}.md-reader pre code{background:none;padding:0;color:var(--text)}.md-reader blockquote{border-left:2px solid var(--accent-dim);padding-left:14px;color:var(--text-muted);margin-bottom:10px}.md-reader table{width:100%;border-collapse:collapse;margin-bottom:10px;font-size:13px}.md-reader th,.md-reader td{padding:6px 8px;border:1px solid var(--border)}.md-reader th{background:var(--surface2);font-weight:600}.md-reader hr{border:none;border-top:1px solid var(--border);margin:16px 0}.md-meta{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--border)}
+.editor-wrap{display:flex;flex-direction:column;height:calc(100vh - 84px)}.editor-toolbar{display:flex;gap:6px;padding:8px 12px;border-bottom:1px solid var(--border);background:var(--surface);align-items:center}.editor-body{flex:1;display:flex;overflow:hidden}.editor-edit{flex:1;border:none;background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;line-height:1.7;padding:20px 24px;resize:none;outline:none}.editor-preview{flex:1;overflow-y:auto;padding:20px 24px;border-left:1px solid var(--border)}
+.dropzone{border:1px dashed var(--border-light);border-radius:var(--radius);padding:32px;text-align:center;cursor:pointer;transition:all var(--transition)}.dropzone:hover,.dropzone.drag{border-color:var(--accent);background:var(--accent-bg)}.dropzone-icon{width:28px;height:28px;margin:0 auto 8px;color:var(--text-dim)}
+.recall-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:8px;transition:border-color var(--transition)}.recall-card:hover{border-color:var(--border-light)}.recall-head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px}.recall-title{font-size:13px;font-weight:500}.recall-scores{display:flex;gap:14px;font-size:11px;color:var(--text-dim)}.recall-body{font-size:13px;line-height:1.6;color:var(--text-muted);white-space:pre-wrap;max-height:180px;overflow-y:auto}
+.chat-wrap{display:flex;flex-direction:column;height:calc(100vh - 84px)}.chat-msgs{flex:1;overflow-y:auto;padding:16px 24px}.chat-msg{margin-bottom:16px;max-width:760px}.chat-role{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px}.chat-role.user{color:var(--blue)}.chat-role.assistant{color:var(--accent)}.chat-bubble{padding:12px 16px;border-radius:var(--radius);font-size:14px;line-height:1.7;white-space:pre-wrap}.chat-bubble.user{background:var(--surface2);border:1px solid var(--border)}.chat-bubble.assistant{background:var(--surface);border:1px solid var(--border);border-left:2px solid var(--accent)}.chat-input-row{display:flex;gap:8px;padding:10px 24px 16px;border-top:1px solid var(--border);background:var(--surface)}.chat-input-row .textarea{min-height:48px;max-height:96px;flex:1}
+.thought{background:var(--surface);border:1px solid var(--border);border-left:2px solid var(--accent);border-radius:var(--radius);padding:14px;margin-bottom:8px}.thought-meta{font-size:11px;color:var(--text-dim);margin-bottom:8px;display:flex;gap:6px;align-items:center}.thought-field{margin-bottom:6px}.thought-key{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--text-dim)}.thought-val{font-size:13px;line-height:1.6;margin-top:2px}
+.graph-wrap{display:flex;gap:12px;height:calc(100vh - 120px)}.graph-canvas{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);position:relative;overflow:hidden}.graph-sidebar{width:260px;flex-shrink:0;overflow-y:auto}.graph-stats{position:absolute;top:10px;right:10px;z-index:10;font-size:11px;color:var(--text-dim);background:var(--surface2);padding:5px 10px;border-radius:var(--radius-sm);border:1px solid var(--border)}
+.tl-item{display:flex;gap:12px;padding:8px 0;border-bottom:1px solid var(--surface2)}.tl-time{font-size:11px;color:var(--text-dim);white-space:nowrap;min-width:120px;font-variant-numeric:tabular-nums}.tl-body{flex:1;font-size:13px;line-height:1.5}
+.empty{text-align:center;padding:50px 20px;color:var(--text-dim)}.empty-icon{width:36px;height:36px;margin:0 auto 12px;opacity:.4}
+.spinner{width:18px;height:18px;border:2px solid var(--surface3);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+.toast{position:fixed;top:14px;right:14px;padding:9px 14px;border-radius:var(--radius-sm);font-size:13px;z-index:999;opacity:0;transform:translateY(-6px);transition:all .25s;pointer-events:none}.toast.show{opacity:1;transform:translateY(0)}.toast-ok{background:rgba(74,222,128,.1);border:1px solid rgba(74,222,128,.3);color:var(--green)}.toast-err{background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3);color:var(--red)}
+.cfg-row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--surface2);font-size:13px}.cfg-key{color:var(--text-muted)}.cfg-val{font-family:var(--mono);font-size:12px}
+.vault-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;cursor:pointer;transition:all var(--transition);position:relative}.vault-card:hover{border-color:var(--border-light)}.vault-card.active{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-dim)}.vault-card-name{font-size:15px;font-weight:600;margin-bottom:4px;display:flex;align-items:center;gap:8px}.vault-card-desc{font-size:12px;color:var(--text-muted);margin-bottom:8px}.vault-card-stats{display:flex;gap:12px;font-size:11px;color:var(--text-dim)}.vault-card-actions{position:absolute;top:12px;right:12px;display:flex;gap:4px;opacity:0;transition:opacity var(--transition)}.vault-card:hover .vault-card-actions{opacity:1}
+.dup-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-bottom:8px}.dup-pair{display:flex;gap:12px}.dup-side{flex:1}.dup-side-title{font-size:12px;font-weight:500;margin-bottom:3px}.dup-side-content{font-size:11px;color:var(--text-muted);line-height:1.5;max-height:60px;overflow:hidden}
+.ctx-preview{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:14px;font-family:var(--mono);font-size:12px;line-height:1.6;white-space:pre-wrap;max-height:400px;overflow-y:auto;color:var(--text-muted)}
+.cmd-overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:200;display:none;align-items:flex-start;justify-content:center;padding-top:100px}.cmd-overlay.show{display:flex}.cmd-box{width:460px;background:var(--surface);border:1px solid var(--border-light);border-radius:var(--radius-lg);box-shadow:0 12px 40px rgba(0,0,0,.5);overflow:hidden}.cmd-input{width:100%;padding:13px 16px;background:none;border:none;border-bottom:1px solid var(--border);color:var(--text);font-size:14px;font-family:inherit;outline:none}.cmd-list{max-height:300px;overflow-y:auto}.cmd-item{padding:9px 16px;cursor:pointer;display:flex;align-items:center;gap:10px;font-size:13px;transition:background var(--transition)}.cmd-item:hover,.cmd-item.sel{background:var(--surface2)}
+.progress-bar{width:100%;height:4px;background:var(--surface3);border-radius:2px;overflow:hidden;margin-top:8px}.progress-fill{height:100%;background:var(--accent);border-radius:2px;transition:width .3s ease}
+.import-result{padding:8px 12px;border-bottom:1px solid var(--surface2);font-size:12px;display:flex;align-items:center;gap:8px}.import-status-ok{color:var(--green)}.import-status-err{color:var(--red)}
+</style>
+</head>
+<body>
+<div class="app">
+<!-- SIDEBAR -->
+<div class="sidebar">
+<div class="brand">
+<svg class="brand-mark" viewBox="0 0 24 24" fill="none"><path d="M12 2L3 7v10l9 5 9-5V7l-9-5z" stroke="var(--accent)" stroke-width="1.5" stroke-linejoin="round"/><path d="M12 12L3 7m9 5l9-5m-9 5v10" stroke="var(--accent-dim)" stroke-width="1.2" stroke-linejoin="round"/><circle cx="12" cy="12" r="2" fill="var(--accent)"/></svg>
+<div><div class="brand-name">Engraphis</div><div class="brand-sub">Memory Engine</div></div>
+</div>
+<div class="vault-switcher" id="vault-switcher" onclick="navTo('vaults')">
+<span class="vault-dot" id="vault-dot" style="background:var(--accent)"></span>
+<span class="vault-switcher-name" id="vault-name">Default</span>
+<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+</div>
+<div class="nav" id="nav">
+<div class="nav-section">Workspace</div>
+<div class="nav-item active" data-view="overview"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><rect x="1" y="1" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="1" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="1" y="9" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="9" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.3"/></svg>Overview</div>
+<div class="nav-item" data-view="memories"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M2 4c0-1 .5-1.5 1.5-1.5h3L8 4h4.5c1 0 1.5.5 1.5 1.5v6c0 1-.5 1.5-1.5 1.5h-9C2.5 13 2 12.5 2 11.5V4z" stroke="currentColor" stroke-width="1.3"/></svg>Memories<span class="nav-badge" id="nav-mem-count"></span></div>
+<div class="nav-item" data-view="import"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M8 2v10M4 7l4-5 4 5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M2 13v1h12v-1" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Import</div>
+<div class="nav-item" data-view="recall"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Recall</div>
+<div class="nav-item" data-view="chat"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M2 4c0-1 .5-1.5 1.5-1.5h9c1 0 1.5.5 1.5 1.5v6c0 1-.5 1.5-1.5 1.5H6l-3 3V4z" stroke="currentColor" stroke-width="1.3"/></svg>Chat</div>
+<div class="nav-item" data-view="thoughts"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M8 2c-3 0-5 2-5 5 0 2 1 3 1 4 0 .5-.5 1-.5 1.5 0 .5.5 1 1 1h7c.5 0 1-.5 1-1 0-.5-.5-1-.5-1.5 0-1 1-2 1-4 0-3-2-5-5-5z" stroke="currentColor" stroke-width="1.3"/></svg>Thoughts<span class="nav-badge" id="nav-thought-count"></span></div>
+<div class="nav-section">Knowledge</div>
+<div class="nav-item" data-view="graph"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="3" cy="3" r="2" stroke="currentColor" stroke-width="1.3"/><circle cx="13" cy="3" r="2" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="13" r="2" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 4.5L7 11M11.5 4.5L9 11M5 3h6" stroke="currentColor" stroke-width="1.1"/></svg>Graph</div>
+<div class="nav-item" data-view="timeline"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="11" rx="1" stroke="currentColor" stroke-width="1.3"/><path d="M2 6h12M5 1v3M11 1v3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Timeline</div>
+<div class="nav-section">Management</div>
+<div class="nav-item" data-view="vaults"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M2 4c0-1 .5-1.5 1.5-1.5h3L8 4h4.5c1 0 1.5.5 1.5 1.5v6c0 1-.5 1.5-1.5 1.5h-9C2.5 13 2 12.5 2 11.5V4z" stroke="currentColor" stroke-width="1.3"/><path d="M2 8h12" stroke="currentColor" stroke-width="1.1"/></svg>Vaults</div>
+<div class="nav-item" data-view="health"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M8 2v6M5 5l3-3 3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 9c0 3 2 5 5 5s5-2 5-5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Health</div>
+<div class="nav-item" data-view="settings"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Settings</div>
+</div>
+<div class="sidebar-footer"><span class="pulse-dot" id="health-dot"></span><span id="health-text">Connected</span><span style="margin-left:auto;font-family:var(--mono);font-size:10px" id="llm-badge"></span></div>
+</div>
+<!-- MAIN -->
+<div class="main">
+<div class="topbar">
+<div class="topbar-title" id="topbar-title">Overview</div>
+<div class="topbar-sub" id="topbar-sub"></div>
+<div class="topbar-spacer"></div>
+<div class="topbar-search" onclick="openPalette()"><svg width="13" height="13" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Search...<kbd>Ctrl K</kbd></div>
+</div>
+<div class="content">
+
+<!-- OVERVIEW -->
+<div class="view active" id="view-overview">
+<div class="view-head"><div class="view-title">Overview</div><div class="view-desc">Your memory system at a glance</div></div>
+<div class="stat-grid" id="stat-grid"></div>
+<div class="cols-2">
+<div class="card"><div class="card-head">Memory Growth <span class="count">last 30 days</span></div><div id="chart-timeline"></div></div>
+<div class="card"><div class="card-head">Retention Distribution <span class="count" id="ret-avg"></span></div><div id="chart-retention"></div></div>
+</div>
+<div class="cols-2">
+<div class="card"><div class="card-head">Namespaces <span class="count" id="ns-count"></span></div><div id="chart-namespaces"></div></div>
+<div class="card"><div class="card-head">Top Entities <span class="count">by connections</span></div><div id="chart-entities"></div></div>
+</div>
+<div class="card"><div class="card-head">Recent Activity</div><div id="recent-activity"></div></div>
+</div>
+
+<!-- MEMORIES -->
+<div class="view" id="view-memories">
+<div class="browser">
+<div class="browser-list" id="mem-list">
+<div style="padding:10px 12px;border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--surface);z-index:5">
+<div class="search-row" style="margin:0 0 6px"><input class="input" id="mem-search" placeholder="Search memories..." oninput="searchMemories()" style="font-size:12px;padding:6px 10px"></div>
+<div style="display:flex;gap:6px"><select class="select" id="mem-ns-filter" onchange="loadMemList()" style="font-size:12px;padding:5px 8px;flex:1"></select>
+<button class="btn btn-primary btn-sm" onclick="newMemoryFile()" style="padding:5px 8px">New</button></div>
+<div style="margin-top:6px"><select class="select" id="mem-type-filter" onchange="loadMemList()" style="font-size:11px;padding:4px 8px;width:100%"><option value="">All memory types</option><option value="semantic">Semantic (facts)</option><option value="episodic">Episodic (events)</option><option value="procedural">Procedural (how-to)</option><option value="working">Working (task context)</option></select></div>
+</div>
+<div id="mem-cards"></div>
+</div>
+<div class="browser-reader" id="mem-reader">
+<div class="empty"><svg class="empty-icon" viewBox="0 0 40 40" fill="none"><path d="M8 10c0-1 .5-2 2-2h20c1.5 0 2 1 2 2v20c0 1-.5 2-2 2H10c-1.5 0-2-1-2-2V10z" stroke="currentColor" stroke-width="1.5"/><path d="M14 16h12M14 20h12M14 24h8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg><div>Select a memory to read</div></div>
+</div>
+</div>
+</div>
+
+<!-- IMPORT -->
+<div class="view" id="view-import">
+<div class="view-head"><div class="view-title">Import Memories</div><div class="view-desc">Upload a folder, select individual files, or import from a disk path</div></div>
+<div class="cols-2">
+<div class="card">
+<div class="card-head">Select Folder (native picker)</div>
+<div class="field"><label class="field-lbl">Target vault</label><select class="select" id="import-ns"></select></div>
+<div class="field"><label class="field-lbl">Default memory type</label><select class="select" id="import-type"><option value="semantic">Semantic (facts, knowledge)</option><option value="episodic">Episodic (events, time-stamped)</option><option value="procedural">Procedural (how-to, workflows)</option><option value="working">Working (current task context)</option></select><div class="field-hint">Used as fallback; auto-categorize overrides per file</div></div>
+<div class="field" style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--surface2);border-radius:var(--radius-sm);border:1px solid var(--border)"><input type="checkbox" id="auto-categorize-folder" checked style="cursor:pointer"><label for="auto-categorize-folder" style="font-size:12px;color:var(--text-muted);cursor:pointer;margin:0">Auto-categorize with LLM (classifies each file + splits conflicted memories)</label></div>
+<div class="dropzone" id="dropzone-folder" onclick="document.getElementById('folder-dir-input').click()">
+<svg class="dropzone-icon" viewBox="0 0 32 32" fill="none"><path d="M4 8c0-1 .5-2 2-2h6l2 2h12c1.5 0 2 1 2 2v14c0 1-.5 2-2 2H6c-1.5 0-2-1-2-2V8z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M16 12v8M12 16l4-4 4 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+<div style="font-size:13px;color:var(--text-muted)">Click to browse and select a folder</div>
+<div class="field-hint" style="margin-top:6px">Opens your OS file picker — no path typing needed</div>
+<input type="file" id="folder-dir-input" webkitdirectory directory multiple style="display:none" onchange="handleFolderSelect(event)">
+</div>
+<div id="folder-info" style="margin-top:10px;display:none"></div>
+<button class="btn btn-primary" id="upload-folder-btn" onclick="uploadFolder()" disabled style="margin-top:10px">Import Selected Folder</button>
+</div>
+<div class="card">
+<div class="card-head">Select Individual Files</div>
+<div class="field"><label class="field-lbl">Target vault</label><select class="select" id="upload-ns"></select></div>
+<div class="field"><label class="field-lbl">Memory type</label><select class="select" id="upload-type"><option value="semantic">Semantic (facts, knowledge)</option><option value="episodic">Episodic (events, time-stamped)</option><option value="procedural">Procedural (how-to, workflows)</option><option value="working">Working (current task context)</option></select></div>
+<div class="dropzone" id="dropzone-files" onclick="document.getElementById('folder-file-input').click()">
+<svg class="dropzone-icon" viewBox="0 0 32 32" fill="none"><path d="M16 4v18M9 12l7-8 7 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 24v3c0 1 .5 1.5 1.5 1.5h19c1 0 1.5-.5 1.5-1.5v-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+<div style="font-size:13px;color:var(--text-muted)">Click to select files or drag them here</div>
+<div class="field-hint" style="margin-top:6px">.md, .txt, .json — multiple files supported</div>
+<input type="file" id="folder-file-input" multiple style="display:none" onchange="handleFilesSelect(event)">
+</div>
+<div id="files-list" style="margin-top:10px"></div>
+<button class="btn btn-primary" id="upload-files-btn" onclick="uploadFiles()" disabled style="margin-top:10px">Upload Files</button>
+</div>
+</div>
+<div class="card">
+<div class="card-head">Import from Disk Path (advanced)</div>
+<div class="field-hint" style="margin-bottom:10px">For paths the browser file picker can't reach. Type or paste a folder path on disk:</div>
+<div style="display:flex;gap:8px;align-items:flex-end">
+<div class="field" style="flex:1;margin:0"><label class="field-lbl">Folder path</label><input class="input" id="import-path" placeholder="C:\Users\home\OneDrive\Documents\..."></div>
+<div class="field" style="width:160px;margin:0"><label class="field-lbl">Vault</label><select class="select" id="import-path-ns"></select></div>
+<div class="field" style="width:150px;margin:0"><label class="field-lbl">Type</label><select class="select" id="import-path-type"><option value="semantic">Semantic</option><option value="episodic">Episodic</option><option value="procedural">Procedural</option><option value="working">Working</option></select></div>
+<button class="btn btn-primary" onclick="importFromPath()" id="import-btn">Import</button>
+</div>
+<div id="import-progress" style="margin-top:12px;display:none"></div>
+</div>
+<div class="card" id="import-results-card" style="display:none">
+<div class="card-head">Import Results <span class="count" id="import-results-count"></span></div>
+<div id="import-results-list" style="max-height:300px;overflow-y:auto"></div>
+</div>
+</div>
+
+<!-- RECALL -->
+<div class="view" id="view-recall">
+<div class="view-head"><div class="view-title">Recall</div><div class="view-desc">Semantic retrieval with retention-aware scoring</div></div>
+<div class="card">
+<div class="search-row"><input class="input" id="recall-query" placeholder="What do you want to recall?" onkeydown="if(event.key==='Enter')doRecall()"><select class="select" id="recall-ns" style="width:180px"></select><button class="btn btn-primary" onclick="doRecall()">Recall</button></div>
+<div style="display:flex;align-items:center;gap:12px"><label class="field-lbl" style="margin:0">Max results: <span id="recall-num-lbl">10</span></label><input type="range" id="recall-num" min="1" max="50" value="10" style="flex:1" oninput="document.getElementById('recall-num-lbl').textContent=this.value"><label style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--text-muted);cursor:pointer"><input type="checkbox" id="recall-ctx-toggle"> Context preview</label></div>
+</div>
+<div id="recall-results"></div>
+</div>
+
+<!-- CHAT -->
+<div class="view" id="view-chat">
+<div class="chat-wrap">
+<div class="chat-msgs" id="chat-msgs"><div class="empty"><svg class="empty-icon" viewBox="0 0 40 40" fill="none"><path d="M6 10c0-1 .5-2 2-2h24c1.5 0 2 1 2 2v14c0 1-.5 2-2 2H16l-6 6v-6H8c-1.5 0-2-1-2-2V10z" stroke="currentColor" stroke-width="1.5"/><path d="M13 17h14M13 21h10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg><div>Start a conversation. Your AI will use stored memories as context.</div></div></div>
+<div class="chat-input-row"><textarea class="textarea" id="chat-input" placeholder="Ask anything..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat()}"></textarea><button class="btn btn-primary" onclick="sendChat()" id="chat-btn">Send</button></div>
+</div>
+</div>
+
+<!-- THOUGHTS -->
+<div class="view" id="view-thoughts">
+<div class="view-head"><div class="view-title">Thoughts</div><div class="view-desc">AI-synthesized latent state from your memories</div></div>
+<div style="display:flex;gap:10px;margin-bottom:14px;align-items:center"><button class="btn btn-primary" onclick="generateThought()" id="thought-gen-btn">Generate Thought</button><select class="select" id="thought-ns" style="width:200px"></select></div>
+<div id="thoughts-list"></div>
+</div>
+
+<!-- GRAPH -->
+<div class="view" id="view-graph">
+<div class="view-head"><div class="view-title">Knowledge Graph</div><div class="view-desc">Entity-relation network extracted from your memories</div></div>
+<div class="graph-wrap">
+<div class="graph-canvas" id="graph-canvas"><div class="graph-stats" id="graph-stats"></div></div>
+<div class="graph-sidebar">
+<div class="card" style="margin:0"><div class="card-head">Controls</div><select class="select" id="graph-ns" style="margin-bottom:8px" onchange="loadGraph()"></select><button class="btn btn-ghost btn-sm" style="width:100%" onclick="loadGraph()">Refresh Graph</button></div>
+<div class="card"><div class="card-head">Legend</div><div id="graph-legend"></div></div>
+<div class="card"><div class="card-head">Top Connected</div><div id="graph-top-nodes"></div></div>
+</div>
+</div>
+</div>
+
+<!-- TIMELINE -->
+<div class="view" id="view-timeline">
+<div class="view-head"><div class="view-title">Timeline</div><div class="view-desc">Chronological feed of memory events</div></div>
+<div style="margin-bottom:12px"><select class="select" id="timeline-ns" style="width:200px" onchange="loadTimeline()"></select></div>
+<div class="card" id="timeline-list" style="padding:6px 12px"></div>
+</div>
+
+<!-- VAULTS -->
+<div class="view" id="view-vaults">
+<div class="view-head"><div class="view-title">Memory Vaults</div><div class="view-desc">Switchable memory collections — each vault can contain all 4 memory types</div></div>
+<div style="margin-bottom:16px"><button class="btn btn-primary" onclick="showVaultForm()">Create New Vault</button></div>
+<div id="vault-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px"></div>
+<div id="vault-form" class="card" style="display:none;margin-top:16px">
+<div class="card-head" id="vault-form-title">Create Vault</div>
+<div class="field-row">
+<div class="field"><label class="field-lbl">Namespace (unique ID)</label><input class="input" id="vf-namespace" placeholder="e.g. coding, research, personal"></div>
+<div class="field"><label class="field-lbl">Display name</label><input class="input" id="vf-name" placeholder="e.g. Coding Knowledge"></div>
+</div>
+<div class="field"><label class="field-lbl">Description</label><input class="input" id="vf-desc" placeholder="What is this vault for?"></div>
+<div class="field-row">
+<div class="field"><label class="field-lbl">Color</label><input class="input" id="vf-color" value="#9d7cf6" type="color" style="height:36px;padding:2px"></div>
+<div class="field"><label class="field-lbl">Default memory type <span style="font-weight:400;color:var(--text-dim)">(vault can contain all 4 types)</span></label><select class="select" id="vf-type"><option value="semantic">Semantic (facts, knowledge)</option><option value="episodic">Episodic (events, time-stamped)</option><option value="procedural">Procedural (how-to, workflows)</option><option value="working">Working (current task context)</option></select></div>
+</div>
+<div style="display:flex;gap:8px"><button class="btn btn-primary" onclick="saveVault()" id="vault-save-btn">Create</button><button class="btn btn-ghost" onclick="hideVaultForm()">Cancel</button></div>
+</div>
+</div>
+
+<!-- HEALTH -->
+<div class="view" id="view-health">
+<div class="view-head"><div class="view-title">Memory Health</div><div class="view-desc">Monitor and optimize your memory system</div></div>
+<div class="stat-grid" id="health-stats"></div>
+<div class="cols-2">
+<div class="card"><div class="card-head">Duplicate Memories <span class="count" id="dup-count"></span></div><div id="dup-list" style="max-height:300px;overflow-y:auto"></div></div>
+<div class="card"><div class="card-head">Stale Memories <span class="count" id="stale-count"></span></div><div id="stale-list" style="max-height:300px;overflow-y:auto"></div></div>
+</div>
+<div class="card">
+<div class="card-head">Bulk Operations</div>
+<div style="display:flex;gap:8px;flex-wrap:wrap">
+<button class="btn btn-ghost btn-sm" onclick="bulkAutoCategorize()">Auto-Categorize All (LLM)</button>
+<button class="btn btn-ghost btn-sm" onclick="bulkDecay()">Force Decay Pass</button>
+<button class="btn btn-ghost btn-sm" onclick="bulkReembed()">Re-embed All (Active Vault)</button>
+<button class="btn btn-danger btn-sm" onclick="bulkDeleteStale()">Delete All Stale</button>
+</div>
+<div class="field-hint" style="margin-top:8px">Auto-categorize uses your LLM to classify each memory as semantic/episodic/procedural/working and splits conflicted memories</div>
+</div>
+</div>
+
+<!-- SETTINGS -->
+<div class="view" id="view-settings">
+<div class="view-head"><div class="view-title">Settings</div><div class="view-desc">Current server configuration</div></div>
+<div class="cols-2">
+<div class="card"><div class="card-head">LLM Configuration</div><div id="cfg-llm"></div></div>
+<div class="card"><div class="card-head">System</div><div id="cfg-sys"></div></div>
+</div>
+<div class="card"><div class="card-head" style="color:var(--red)">Danger Zone</div><div style="display:flex;gap:10px;align-items:center"><select class="select" id="danger-ns" style="width:200px"></select><button class="btn btn-danger" onclick="deleteNamespace()">Delete Namespace</button></div></div>
+</div>
+
+</div>
+</div>
+</div>
+<div class="toast" id="toast"></div>
+<div class="cmd-overlay" id="cmd-overlay" onclick="if(event.target===this)closePalette()"><div class="cmd-box"><input class="cmd-input" id="cmd-input" placeholder="Search memories, navigate, or run commands..." oninput="filterPalette()" onkeydown="handleCmdKey(event)"><div class="cmd-list" id="cmd-list"></div></div></div>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+<script>
+const API=location.origin+'/memory';let selectedFiles=[],chatHistory=[],network=null,activeVault=null,editMode=false;
+const NS_COLORS=['#9d7cf6','#60a5fa','#4ade80','#fbbf24','#f87171','#22d3ee','#f472b6','#a78bfa','#34d399','#fb923c'];
+const TITLES={overview:'Overview',memories:'Memories',import:'Import',recall:'Recall',chat:'Chat',thoughts:'Thoughts',graph:'Knowledge Graph',timeline:'Timeline',vaults:'Vaults',health:'Health',settings:'Settings'};
+const SUBS={overview:'Your memory system at a glance',memories:'Browse, edit, and manage stored memories',import:'Upload files or import folders',recall:'Semantic retrieval with retention scoring',chat:'Converse with your AI using memory context',thoughts:'AI-synthesized latent state',graph:'Entity-relation network',timeline:'Chronological event feed',vaults:'Switchable memory collections',health:'Monitor and optimize memory system',settings:'Server configuration'};
+async function api(p,o={}){const r=await fetch(p.startsWith('http')?p:API+p,o);if(!r.ok)throw new Error(r.status+': '+await r.text());return r.json()}
+function toast(m,t='ok'){const e=document.getElementById('toast');e.textContent=m;e.className='toast toast-'+t+' show';setTimeout(()=>e.classList.remove('show'),2500)}
+function fmtDate(ts){if(!ts)return'—';return new Date(ts*1000).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})}
+function fmtRel(ts){if(!ts)return'';const d=Date.now()/1000-ts;if(d<60)return'just now';if(d<3600)return Math.floor(d/60)+'m ago';if(d<86400)return Math.floor(d/3600)+'h ago';return Math.floor(d/86400)+'d ago'}
+function esc(s){if(!s)return'';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function retColor(r){return r>0.6?'ret-h':r>0.2?'ret-m':'ret-l'}
+function retHex(r){return r>0.6?'#4ade80':r>0.2?'#fbbf24':'#f87171'}
+function nsColor(ns){let h=0;for(const c of ns)h=(h*31+c.charCodeAt(0))%NS_COLORS.length;return NS_COLORS[h]}
+
+// Navigation
+document.querySelectorAll('.nav-item').forEach(item=>{
+item.addEventListener('click',()=>{
+const v=item.dataset.view;
+document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
+item.classList.add('active');document.getElementById('view-'+v).classList.add('active');
+document.getElementById('topbar-title').textContent=TITLES[v];document.getElementById('topbar-sub').textContent=SUBS[v];
+const loaders={overview:loadOverview,memories:loadMemList,import:loadImport,recall:loadNS,chat:()=>{},thoughts:loadThoughts,graph:loadGraph,timeline:loadTimeline,vaults:loadVaults,health:loadHealth,settings:loadSettings};
+if(loaders[v])loaders[v]();
+});
+});
+function navTo(v){document.querySelector(`.nav-item[data-view="${v}"]`).click()}
+
+// Charts
+function lineChart(data,container,w=500,h=150){if(!data||data.length===0){container.innerHTML='<div class="empty" style="padding:16px">No data</div>';return}const pad={l:28,r:8,t:8,b:18};const max=Math.max(...data.map(d=>d.count),1);const cw=w-pad.l-pad.r,ch=h-pad.t-pad.b;const stepX=cw/Math.max(data.length-1,1);const pts=data.map((d,i)=>({x:pad.l+i*stepX,y:pad.t+ch-(d.count/max)*ch,val:d.count,label:d.label}));const pathD=pts.map((p,i)=>(i===0?'M':'L')+p.x+' '+p.y).join(' ');const areaD=pathD+' L'+pts[pts.length-1].x+' '+(pad.t+ch)+' L'+pts[0].x+' '+(pad.t+ch)+' Z';let s=`<svg style="width:100%" viewBox="0 0 ${w} ${h}"><path d="${areaD}" fill="var(--accent-bg)"/><path d="${pathD}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/>`;for(let i=0;i<=3;i++){const y=pad.t+ch-(i/3)*ch;s+=`<line x1="${pad.l}" y1="${y}" x2="${w-pad.r}" y2="${y}" stroke="var(--border)"/><text x="${pad.l-4}" y="${y+3}" text-anchor="end" font-size="10" fill="var(--text-dim)">${Math.round(max*i/3)}</text>`}pts.forEach((p,i)=>{if(i%5===0||i===pts.length-1)s+=`<text x="${p.x}" y="${h-4}" text-anchor="middle" font-size="10" fill="var(--text-dim)">${p.label}</text>`});pts.forEach(p=>{if(p.val>0)s+=`<circle cx="${p.x}" cy="${p.y}" r="2.5" fill="var(--accent)"/>`});s+='</svg>';container.innerHTML=s}
+function barChart(data,container,w=500,h=150){if(!data||data.length===0){container.innerHTML='<div class="empty" style="padding:16px">No data</div>';return}const pad={l:36,r:8,t:8,b:28};const max=Math.max(...data.map(d=>d.count),1);const cw=w-pad.l-pad.r,ch=h-pad.t-pad.b;const bw=cw/data.length;let s=`<svg style="width:100%" viewBox="0 0 ${w} ${h}">`;for(let i=0;i<=3;i++){const y=pad.t+ch-(i/3)*ch;s+=`<line x1="${pad.l}" y1="${y}" x2="${w-pad.r}" y2="${y}" stroke="var(--border)"/><text x="${pad.l-4}" y="${y+3}" text-anchor="end" font-size="10" fill="var(--text-dim)">${Math.round(max*i/3)}</text>`}data.forEach((d,i)=>{const bh=(d.count/max)*ch;const x=pad.l+i*bw+bw*0.15,y=pad.t+ch-bh;s+=`<rect x="${x}" y="${y}" width="${bw*0.7}" height="${bh}" rx="2" fill="var(--accent-dim)"/>`;if(data.length<=12)s+=`<text x="${x+bw*0.35}" y="${h-6}" text-anchor="middle" font-size="10" fill="var(--text-dim)">${d.label||d.bucket||''}</text>`});s+='</svg>';container.innerHTML=s}
+function donutChart(data,container,w=170,h=170){if(!data||data.length===0){container.innerHTML='<div class="empty" style="padding:16px">No data</div>';return}const total=data.reduce((s,d)=>s+d.count,0);if(total===0){container.innerHTML='<div class="empty" style="padding:16px">No data</div>';return}const cx=w/2,cy=h/2,r=Math.min(w,h)/2-8,ir=r-18;let angle=-90;let s=`<svg viewBox="0 0 ${w} ${h}" style="width:${w}px;height:${h}px;flex-shrink:0">`;data.forEach((d,i)=>{const slice=(d.count/total)*360;const color=NS_COLORS[i%NS_COLORS.length];const a1=angle*Math.PI/180,a2=(angle+slice)*Math.PI/180;const x1=cx+r*Math.cos(a1),y1=cy+r*Math.sin(a1),x2=cx+r*Math.cos(a2),y2=cy+r*Math.sin(a2),x3=cx+ir*Math.cos(a2),y3=cy+ir*Math.sin(a2),x4=cx+ir*Math.cos(a1),y4=cy+ir*Math.sin(a1);const large=slice>180?1:0;s+=`<path d="M${x1} ${y1} A${r} ${r} 0 ${large} 1 ${x2} ${y2} L${x3} ${y3} A${ir} ${ir} 0 ${large} 0 ${x4} ${y4} Z" fill="${color}" opacity=".85" stroke="var(--bg)" stroke-width="1"/>`;angle+=slice});s+=`<text x="${cx}" y="${cy-4}" text-anchor="middle" fill="var(--text)" font-size="20" font-weight="600">${total}</text><text x="${cx}" y="${cy+12}" text-anchor="middle" fill="var(--text-dim)" font-size="9">total</text></svg>`;const legend='<div style="flex:1;font-size:12px">'+data.map((d,i)=>`<div style="display:flex;align-items:center;gap:6px;padding:2px 0"><div style="width:8px;height:8px;border-radius:2px;background:${NS_COLORS[i%NS_COLORS.length]}"></div>${esc(d.namespace)}<span style="margin-left:auto;color:var(--text-dim)">${d.count}</span></div>`).join('')+'</div>';container.innerHTML=`<div style="display:flex;align-items:center;gap:16px">${s}${legend}</div>`}
+
+// Vaults
+async function loadVaultSwitcher(){try{const d=(await api('/vaults/active')).data;activeVault=d;if(d){document.getElementById('vault-name').textContent=d.name;document.getElementById('vault-dot').style.background=d.color||'var(--accent)'}}catch(e){}}
+async function loadNS(){try{const d=(await api('/namespaces')).data;const sels=['mem-ns-filter','recall-ns','graph-ns','timeline-ns','thought-ns','danger-ns','import-ns','upload-ns'];sels.forEach(id=>{const sel=document.getElementById(id);if(!sel)return;const cur=sel.value;sel.innerHTML='<option value="">All namespaces</option>'+d.map(n=>`<option value="${esc(n.namespace)}">${esc(n.namespace)} (${n.count})</option>`).join('');sel.value=cur})}catch(e){}}
+
+// Overview
+async function loadOverview(){try{const[sR,aR]=await Promise.all([api('/stats'),api('/analytics')]);const s=sR.data,a=aR.data;const stats=[{lbl:'Memories',val:s.memories,max:Math.max(s.memories,1),c:'var(--accent)'},{lbl:'Entities',val:s.entities,max:Math.max(s.entities,1),c:'var(--blue)'},{lbl:'Relations',val:s.edges,max:Math.max(s.edges,1),c:'var(--cyan)'},{lbl:'Thoughts',val:s.thoughts,max:Math.max(s.thoughts,1),c:'var(--green)'},{lbl:'Events',val:s.events,max:Math.max(s.events,1),c:'var(--amber)'},{lbl:'Interactions',val:s.interactions,max:Math.max(s.interactions,1),c:'var(--red)'}];document.getElementById('stat-grid').innerHTML=stats.map(st=>`<div class="stat"><div class="stat-val">${st.val}</div><div class="stat-lbl">${st.lbl}</div><div class="stat-bar" style="width:${st.val/st.max*100}%;background:${st.c}"></div></div>`).join('');document.getElementById('nav-mem-count').textContent=s.memories||'';document.getElementById('nav-thought-count').textContent=s.thoughts||'';lineChart(a.timeline,document.getElementById('chart-timeline'));barChart(a.retention_histogram,document.getElementById('chart-retention'));document.getElementById('ret-avg').textContent='avg '+(a.avg_retention*100).toFixed(0)+'%';donutChart(a.namespace_distribution,document.getElementById('chart-namespaces'));document.getElementById('ns-count').textContent=s.namespaces.length+' namespaces';const te=a.top_entities.slice(0,8);const teMax=Math.max(...te.map(e=>e.degree),1);document.getElementById('chart-entities').innerHTML=te.length?te.map((e,i)=>`<div style="display:flex;align-items:center;gap:6px;padding:3px 0"><div style="width:100px;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.name)}</div><div style="flex:1;height:5px;background:var(--surface2);border-radius:2px;overflow:hidden"><div style="height:100%;width:${e.degree/teMax*100}%;background:${NS_COLORS[i%NS_COLORS.length]};border-radius:2px"></div></div><div style="font-size:10px;color:var(--text-dim);width:20px;text-align:right">${e.degree}</div></div>`).join(''):'<div class="empty" style="padding:14px">No entities</div>';const items=[];s.recent_memories.forEach(m=>items.push({type:'M',text:m.title||m.document_id,ts:m.updated_at,c:'var(--accent)'}));s.recent_events.forEach(e=>items.push({type:'E',text:e.event_type+': '+e.entity_name,ts:e.timestamp,c:'var(--blue)'}));s.recent_thoughts.forEach(t=>items.push({type:'T',text:t.content.substring(0,80),ts:t.created_at,c:'var(--green)'}));items.sort((a,b)=>b.ts-a.ts);document.getElementById('recent-activity').innerHTML=items.length?items.slice(0,10).map(i=>`<div class="tl-item"><div class="tl-time">${fmtRel(i.ts)}</div><div class="tl-body"><span class="pill pill-muted" style="font-size:9px;padding:1px 4px;color:${i.c}">${i.type}</span> ${esc(i.text)}</div></div>`).join(''):'<div class="empty" style="padding:14px">No activity yet</div>'}catch(e){toast('Load failed: '+e.message,'err')}}
+
+// Memory browser
+async function loadMemList(){await loadNS();const ns=document.getElementById('mem-ns-filter').value;const q=document.getElementById('mem-search').value;const memType=document.getElementById('mem-type-filter').value;try{let mems;if(q){mems=(await api(`/search?q=${encodeURIComponent(q)}&namespace=${ns||''}&limit=200`)).data.results}else{mems=(await api(`/documents?namespace=${ns||''}&limit=200`)).data.documents}if(memType){mems=mems.filter(m=>(m.memory_type||'semantic')===memType)}renderMemCards(mems)}catch(e){toast('Load failed: '+e.message,'err')}}
+function searchMemories(){clearTimeout(window._st);window._st=setTimeout(loadMemList,250)}
+const MT_COLORS={semantic:'pill-accent',episodic:'pill-blue',procedural:'pill-green',working:'pill-amber'};
+const MT_LABELS={semantic:'S',episodic:'E',procedural:'P',working:'W'};
+function renderMemCards(mems){const el=document.getElementById('mem-cards');if(!mems||mems.length===0){el.innerHTML='<div class="empty" style="padding:30px"><div>No memories found</div></div>';return}el.innerHTML=mems.map(m=>{const days=(Date.now()/1000-(m.last_access||m.updated_at||0))/86400;const ret=Math.exp(-days/Math.max(m.stability||1,.01));const retPct=Math.round(Math.min(ret,1)*100);const mt=m.memory_type||'semantic';return `<div class="mem-card" id="mc-${esc(m.namespace)}-${esc(m.document_id)}" onclick="showMem('${esc(m.namespace)}','${esc(m.document_id)}')"><div class="mem-card-title">${esc(m.title||m.document_id)}</div><div class="mem-card-meta"><span class="pill ${MT_COLORS[mt]||'pill-muted'}" style="font-size:9px;padding:1px 4px" title="${mt}">${MT_LABELS[mt]||'S'}</span><span class="pill pill-muted" style="font-size:9px;padding:1px 5px">${esc(m.namespace)}</span><span class="ret-bar"><span class="ret-fill ${retColor(ret)}" style="width:${retPct}%"></span></span>${retPct}%<span style="margin-left:auto">${fmtRel(m.updated_at)}</span></div></div>`}).join('')}
+
+async function showMem(ns,docId){document.querySelectorAll('.mem-card').forEach(c=>c.classList.remove('active'));const card=document.getElementById('mc-'+ns+'-'+docId);if(card)card.classList.add('active');try{const d=(await api(`/documents/${encodeURIComponent(docId)}?namespace=${encodeURIComponent(ns)}`)).data;const days=(Date.now()/1000-(d.last_access||d.updated_at||0))/86400;const ret=Math.exp(-days/Math.max(d.stability||1,.01));const retPct=Math.round(Math.min(ret,1)*100);const mdHtml=marked.parse(d.content||'(empty)');const mt=d.memory_type||'semantic';const mtFull={semantic:'Semantic (facts)',episodic:'Episodic (events)',procedural:'Procedural (how-to)',working:'Working (task)'};document.getElementById('mem-reader').innerHTML=`<div class="md-reader"><h1>${esc(d.title||d.document_id)}</h1><div class="md-meta"><span class="pill ${MT_COLORS[mt]||'pill-accent'}">${mtFull[mt]||mt}</span><span class="pill pill-muted">${esc(d.namespace)}</span><span class="pill pill-green">Accessed ${d.access_count||0}x</span><span class="pill pill-amber">Stability ${(d.stability||0).toFixed(2)}</span><span class="pill" style="background:var(--surface2);color:${retHex(ret)}">Retention ${retPct}%</span><span style="margin-left:auto;font-size:11px;color:var(--text-dim)">${fmtDate(d.updated_at)}</span></div><div id="md-content">${mdHtml}</div>${d.metadata&&Object.keys(d.metadata).length?`<details><summary style="cursor:pointer;font-size:12px;color:var(--text-dim);padding:6px 0">Metadata</summary><pre style="font-size:11px;color:var(--text-muted);background:var(--surface2);padding:10px;border-radius:var(--radius-sm);margin-top:6px;overflow-x:auto">${esc(JSON.stringify(d.metadata,null,2))}</pre></details>`:''}<div style="margin-top:20px;padding-top:12px;border-top:1px solid var(--border);display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="editMem('${esc(ns)}','${esc(d.document_id)}')">Edit</button><button class="btn btn-ghost btn-sm" onclick="recordInteraction('${esc(ns)}','${esc(d.document_id)}','read')">Mark Read</button><button class="btn btn-ghost btn-sm" onclick="recordInteraction('${esc(ns)}','${esc(d.document_id)}','engage')">Engage</button><button class="btn btn-danger btn-sm" style="margin-left:auto" onclick="deleteDoc('${esc(ns)}','${esc(d.document_id)}')">Delete</button></div></div>`}catch(e){toast('Failed: '+e.message,'err')}}
+
+async function editMem(ns,docId){try{const d=(await api(`/documents/${encodeURIComponent(docId)}?namespace=${encodeURIComponent(ns)}`)).data;const mt=d.memory_type||'semantic';document.getElementById('mem-reader').innerHTML=`<div class="editor-wrap"><div class="editor-toolbar"><button class="btn btn-primary btn-sm" onclick="saveEdit('${esc(ns)}','${esc(d.document_id)}')">Save</button><button class="btn btn-ghost btn-sm" onclick="showMem('${esc(ns)}','${esc(d.document_id)}')">Cancel</button><select id="edit-mem-type" style="margin-left:auto;font-size:12px;padding:4px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text)"><option value="semantic" ${mt==='semantic'?'selected':''}>Semantic</option><option value="episodic" ${mt==='episodic'?'selected':''}>Episodic</option><option value="procedural" ${mt==='procedural'?'selected':''}>Procedural</option><option value="working" ${mt==='working'?'selected':''}>Working</option></select></div><div class="editor-body"><textarea class="editor-edit" id="edit-title" style="height:40px;font-size:16px;font-weight:600;border-bottom:1px solid var(--border);padding:10px 20px" placeholder="Title">${esc(d.title)}</textarea><textarea class="editor-edit" id="edit-content" placeholder="Content (markdown)...">${esc(d.content)}</textarea><div class="editor-preview" id="edit-preview"></div></div></div>`;const ec=document.getElementById('edit-content');const ep=document.getElementById('edit-preview');function updatePreview(){ep.innerHTML='<div class="md-reader">'+marked.parse(ec.value||'')+'</div>'}ec.addEventListener('input',updatePreview);updatePreview()}catch(e){toast('Edit failed: '+e.message,'err')}}
+
+async function saveEdit(ns,docId){const title=document.getElementById('edit-title').value.trim();const content=document.getElementById('edit-content').value.trim();const memType=document.getElementById('edit-mem-type')?document.getElementById('edit-mem-type').value:'semantic';if(!content){toast('Content cannot be empty','err');return}try{await api(`/documents/${encodeURIComponent(docId)}?namespace=${encodeURIComponent(ns)}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({title,content,memory_type:memType})});toast('Memory updated and re-embedded');showMem(ns,docId);loadMemList()}catch(e){toast('Save failed: '+e.message,'err')}}
+
+async function newMemoryFile(){const ns=activeVault?activeVault.namespace:'default';document.getElementById('mem-reader').innerHTML=`<div class="editor-wrap"><div class="editor-toolbar"><button class="btn btn-primary btn-sm" onclick="createNewMem()">Create</button><button class="btn btn-ghost btn-sm" onclick="navTo('memories')">Cancel</button><select id="new-mem-type" style="margin-left:auto;font-size:12px;padding:4px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text)"><option value="semantic">Semantic (facts)</option><option value="episodic">Episodic (events)</option><option value="procedural">Procedural (how-to)</option><option value="working">Working (task)</option></select></div><div class="editor-body"><textarea class="editor-edit" id="new-title" style="height:40px;font-size:16px;font-weight:600;border-bottom:1px solid var(--border);padding:10px 20px" placeholder="Title"></textarea><textarea class="editor-edit" id="new-content" placeholder="Content (markdown)..."></textarea><div class="editor-preview" id="new-preview"></div></div></div>`;const nc=document.getElementById('new-content');const np=document.getElementById('new-preview');nc.addEventListener('input',()=>{np.innerHTML='<div class="md-reader">'+marked.parse(nc.value||'')+'</div>'})}
+
+async function createNewMem(){const title=document.getElementById('new-title').value.trim()||'Untitled';const content=document.getElementById('new-content').value.trim();const memType=document.getElementById('new-mem-type')?document.getElementById('new-mem-type').value:'semantic';if(!content){toast('Content required','err');return}const ns=activeVault?activeVault.namespace:'default';try{await api('/files/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title,content,namespace:ns,memory_type:memType})});toast('Memory created ('+memType+')');loadMemList();const d=(await api('/documents?namespace='+ns+'&limit=1')).data;if(d.documents.length>0)showMem(ns,d.documents[0].document_id)}catch(e){toast('Create failed: '+e.message,'err')}}
+
+async function recordInteraction(ns,docId,level){try{await api('/interactions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({namespace:ns,entityNames:[docId],interactionLevel:level})});toast('Recorded: '+level)}catch(e){toast('Failed: '+e.message,'err')}}
+
+async function deleteDoc(ns,docId){if(!confirm('Delete this memory?'))return;try{await fetch(API+'/documents/'+encodeURIComponent(docId)+'?namespace='+encodeURIComponent(ns),{method:'DELETE'});toast('Deleted');loadMemList();document.getElementById('mem-reader').innerHTML='<div class="empty"><div>Select a memory to read</div></div>'}catch(e){toast('Delete failed: '+e.message,'err')}}
+
+// Import
+async function loadImport(){await loadNS();const sels=['import-ns','upload-ns','import-path-ns'];sels.forEach(id=>{const sel=document.getElementById(id);if(sel&&activeVault)sel.value=activeVault.namespace})}
+
+// Folder picker (native OS dialog via webkitdirectory)
+let selectedFolderFiles=[];
+function handleFolderSelect(e){selectedFolderFiles=Array.from(e.target.files).filter(f=>f.name.endsWith('.md')||f.name.endsWith('.txt')||f.name.endsWith('.json')||f.name.endsWith('.markdown'));const info=document.getElementById('folder-info');const btn=document.getElementById('upload-folder-btn');if(selectedFolderFiles.length>0){const totalKB=(selectedFolderFiles.reduce((s,f)=>s+f.size,0)/1024).toFixed(0);info.style.display='block';info.innerHTML=`<div style="padding:10px;background:var(--surface2);border-radius:var(--radius-sm);font-size:12px"><strong>${selectedFolderFiles.length}</strong> files selected (${totalKB} KB)<div style="margin-top:4px;color:var(--text-dim);font-size:11px">${selectedFolderFiles.slice(0,4).map(f=>f.webkitRelativePath||f.name).join(' · ')}${selectedFolderFiles.length>4?' · ...':''}</div></div>`;btn.disabled=false}else{info.innerHTML='<div style="color:var(--red);font-size:12px">No .md/.txt/.json files found in selected folder</div>';btn.disabled=true}}
+
+async function uploadFolder(){
+  if(selectedFolderFiles.length===0)return;
+  const ns=document.getElementById('import-ns').value||'default';
+  const memType=document.getElementById('import-type').value;
+  const autoCat=document.getElementById('auto-categorize-folder')&&document.getElementById('auto-categorize-folder').checked;
+  const btn=document.getElementById('upload-folder-btn');
+  btn.disabled=true;btn.textContent='Importing...';
+  try{
+    const fd=new FormData();
+    selectedFolderFiles.forEach(f=>fd.append('files',f));
+    fd.append('namespace',ns);
+    fd.append('memory_type',memType);
+    fd.append('auto_categorize_flag',autoCat?'true':'false');
+    const endpoint=autoCat?'/vaults/upload-folder-smart':'/vaults/upload-folder';
+    const d=(await api(endpoint,{method:'POST',body:fd})).data;
+    let msg=`Imported ${d.imported} files into ${ns}`;
+    if(d.categorized)msg+=` (${d.categorized} auto-categorized`;
+    if(d.split)msg+=`, ${d.split} splits`;
+    if(d.categorized)msg+=`)`;
+    toast(msg);
+    showImportResults(d);
+    selectedFolderFiles=[];
+    document.getElementById('folder-info').style.display='none';
+    btn.disabled=true;btn.textContent='Import Selected Folder';
+    const dz=document.getElementById('dropzone-folder');
+    dz.innerHTML='<svg class="dropzone-icon" viewBox="0 0 32 32" fill="none"><path d="M4 8c0-1 .5-2 2-2h6l2 2h12c1.5 0 2 1 2 2v14c0 1-.5 2-2 2H6c-1.5 0-2-1-2-2V8z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M16 12v8M12 16l4-4 4 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg><div style="font-size:13px;color:var(--text-muted)">Click to browse and select a folder</div><div class="field-hint" style="margin-top:6px">Opens your OS file picker — no path typing needed</div>';
+  }catch(e){toast('Import failed: '+e.message,'err')}
+  btn.disabled=false;btn.textContent='Import Selected Folder';
+}
+
+function showImportResults(d){
+  const rc=document.getElementById('import-results-card');rc.style.display='block';
+  let countText=d.imported+' imported';
+  if(d.categorized)countText+=' · '+d.categorized+' auto-categorized';
+  if(d.split)countText+=' · '+d.split+' splits';
+  if(d.errors)countText+=' · '+d.errors+' errors';
+  document.getElementById('import-results-count').textContent=countText;
+  document.getElementById('import-results-list').innerHTML=d.files.map(f=>{
+    const typeBadge=f.type?`<span class="pill ${MT_COLORS[f.type]||'pill-muted'}" style="font-size:9px;padding:1px 4px">${MT_LABELS[f.type]||'S'}</span>`:'';
+    const splitBadge=f.split?`<span class="pill pill-amber" style="font-size:9px;padding:1px 4px">${f.split} splits</span>`:'';
+    const catBadge=f.categorized?`<span class="pill pill-cyan" style="font-size:9px;padding:1px 4px" title="${esc(f.reason||'')}">AI ${(f.confidence*100||0).toFixed(0)}%</span>`:'';
+    return `<div class="import-result"><span class="import-status-${f.status==='ok'?'ok':'err'}">${f.status==='ok'?'OK':'ERR'}</span>${typeBadge}${catBadge}${splitBadge}<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.path)}</span>${f.title?'<span style="color:var(--text-dim);font-size:11px">'+esc(f.title.substring(0,40))+'</span>':''}</div>`;
+  }).join('');
+}
+
+// Path import (advanced)
+async function importFromPath(){const path=document.getElementById('import-path').value.trim();const ns=document.getElementById('import-path-ns').value;const memType=document.getElementById('import-path-type').value;if(!path){toast('Enter a folder path','err');return}const btn=document.getElementById('import-btn');btn.disabled=true;btn.textContent='Importing...';const prog=document.getElementById('import-progress');prog.style.display='block';prog.innerHTML='<div class="spinner" style="margin:0 auto"></div><div style="text-align:center;margin-top:8px;font-size:12px;color:var(--text-dim)">Scanning and importing files...</div>';try{const d=(await api('/vaults/import-folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path,namespace:ns,file_pattern:'*.md',memory_type:memType})})).data;prog.innerHTML=`<div style="text-align:center;font-size:14px"><strong>${d.imported}</strong> imported, ${d.errors} errors, ${d.skipped} skipped</div><div class="progress-bar"><div class="progress-fill" style="width:100%"></div></div>`;toast(`Imported ${d.imported} files`);showImportResults(d)}catch(e){prog.innerHTML='<div style="color:var(--red);text-align:center">'+esc(e.message)+'</div>';toast('Import failed: '+e.message,'err')}btn.disabled=false;btn.textContent='Import'}
+
+// Individual file upload
+function handleFilesSelect(e){selectedFiles=Array.from(e.target.files);const dz=document.getElementById('dropzone-files');if(selectedFiles.length>0){dz.innerHTML=`<div style="font-size:13px">${selectedFiles.length} files selected</div><div class="field-hint" style="margin-top:4px">${selectedFiles.map(f=>f.name).slice(0,5).join(', ')}${selectedFiles.length>5?'...':''}</div>`;document.getElementById('upload-files-btn').disabled=false}}
+const dzf=document.getElementById('dropzone-files');dzf.addEventListener('dragover',e=>{e.preventDefault();dzf.classList.add('drag')});dzf.addEventListener('dragleave',()=>dzf.classList.remove('drag'));dzf.addEventListener('drop',e=>{e.preventDefault();dzf.classList.remove('drag');selectedFiles=Array.from(e.dataTransfer.files);handleFilesSelect({target:{files:e.dataTransfer.files}})});
+
+async function uploadFiles(){if(selectedFiles.length===0)return;const ns=document.getElementById('upload-ns').value||'default';const memType=document.getElementById('upload-type').value;const btn=document.getElementById('upload-files-btn');btn.disabled=true;btn.textContent='Uploading...';try{const fd=new FormData();selectedFiles.forEach(f=>fd.append('files',f));fd.append('namespace',ns);fd.append('memory_type',memType);const d=(await api('/vaults/upload-folder',{method:'POST',body:fd})).data;toast(`Uploaded ${d.imported} files`);showImportResults(d);selectedFiles=[];document.getElementById('dropzone-files').innerHTML='<svg class="dropzone-icon" viewBox="0 0 32 32" fill="none"><path d="M16 4v18M9 12l7-8 7 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 24v3c0 1 .5 1.5 1.5 1.5h19c1 0 1.5-.5 1.5-1.5v-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><div style="font-size:13px;color:var(--text-muted)">Click to select files or drag them here</div><div class="field-hint" style="margin-top:6px">.md, .txt, .json — multiple files supported</div>';btn.disabled=true;btn.textContent='Upload Files'}catch(e){toast('Upload failed: '+e.message,'err')}btn.disabled=false;btn.textContent='Upload Files'}
+
+// Recall
+async function doRecall(){const q=document.getElementById('recall-query').value.trim();if(!q){toast('Enter a query','err');return}const ns=document.getElementById('recall-ns').value;const num=document.getElementById('recall-num').value;const ctxToggle=document.getElementById('recall-ctx-toggle').checked;const el=document.getElementById('recall-results');el.innerHTML='<div style="text-align:center;padding:30px"><div class="spinner" style="margin:0 auto"></div></div>';try{const d=(await api('/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q,namespace:ns||null,maxChunks:parseInt(num)})})).data;if(d.count===0){el.innerHTML='<div class="empty"><div>No matching memories found</div></div>';return}let html=`<div style="margin-bottom:10px;font-size:12px;color:var(--text-dim)">${d.count} memories recalled</div>`;if(ctxToggle){const pd=(await api('/context-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q,namespace:ns||null,max_chunks:parseInt(num)})})).data;html+=`<div class="card"><div class="card-head">Context Preview <span class="count">~${pd.estimated_tokens} tokens</span></div><div class="ctx-preview">${esc(pd.context_text)}</div></div>`}html+=d.chunks.map(c=>{const sPct=Math.round(Math.min(c.score,1)*100),rPct=Math.round(Math.min(c.retention,1)*100);return `<div class="recall-card"><div class="recall-head"><div class="recall-title">${esc(c.title||c.documentId)} <span class="pill pill-muted" style="font-size:10px;margin-left:4px">${esc(c.namespace)}</span></div><div class="recall-scores"><span>Score ${sPct}%</span><span>Retention ${rPct}%</span></div></div><div class="recall-body">${esc(c.content)}</div></div>`}).join('');el.innerHTML=html}catch(e){el.innerHTML='<div class="empty"><div>'+esc(e.message)+'</div></div>'}}
+
+// Chat
+async function sendChat(){const inp=document.getElementById('chat-input');const msg=inp.value.trim();if(!msg)return;inp.value='';chatHistory.push({role:'user',content:msg});renderChat();const btn=document.getElementById('chat-btn');btn.disabled=true;btn.textContent='...';try{const d=(await api('/conversations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:chatHistory.map(m=>({role:m.role,content:m.content})),temperature:.3,maxTokens:1024})})).data;chatHistory.push({role:'assistant',content:d.answer,ctx:d.context_count})}catch(e){chatHistory.push({role:'assistant',content:'Error: '+e.message})}renderChat();btn.disabled=false;btn.textContent='Send'}
+function renderChat(){const el=document.getElementById('chat-msgs');if(chatHistory.length===0){el.innerHTML='<div class="empty"><div>Start a conversation. Your AI will use stored memories as context.</div></div>';return}el.innerHTML=chatHistory.map(m=>`<div class="chat-msg"><div class="chat-role ${m.role}">${m.role==='user'?'You':'AI'}</div><div class="chat-bubble ${m.role}">${esc(m.content)}</div>${m.ctx?`<div style="font-size:11px;color:var(--text-dim);margin-top:4px">Based on ${m.ctx} memories</div>`:''}</div>`).join('');el.scrollTop=el.scrollHeight}
+
+// Thoughts
+async function loadThoughts(){await loadNS();try{const ns=document.getElementById('thought-ns').value;const d=(await api(`/thoughts?namespace=${ns||''}&limit=50`)).data;const el=document.getElementById('thoughts-list');if(d.count===0){el.innerHTML='<div class="empty"><div>No thoughts yet. Click "Generate Thought" to synthesize one.</div></div>';return}el.innerHTML=d.thoughts.map(t=>{const p=t.parsed||{};return `<div class="thought"><div class="thought-meta"><span class="pill pill-accent" style="font-size:10px">${esc(t.namespace)}</span><span>${fmtRel(t.created_at)}</span></div>${p.inference?`<div class="thought-field"><div class="thought-key">Inference</div><div class="thought-val">${esc(p.inference)}</div></div>`:''}${p.contradiction?`<div class="thought-field"><div class="thought-key">Contradiction</div><div class="thought-val" style="color:var(--red)">${esc(p.contradiction)}</div></div>`:''}${p.follow_up?`<div class="thought-field"><div class="thought-key">Follow-up</div><div class="thought-val" style="color:var(--amber)">${esc(p.follow_up)}</div></div>`:''}${p.next_action?`<div class="thought-field"><div class="thought-key">Next Action</div><div class="thought-val" style="color:var(--green)">${esc(p.next_action)}</div></div>`:''}${!t.parsed?`<div class="thought-val" style="white-space:pre-wrap">${esc(t.content)}</div>`:''}</div>`}).join('')}catch(e){toast('Failed: '+e.message,'err')}}
+async function generateThought(){const ns=document.getElementById('thought-ns').value;const el=document.getElementById('thoughts-list');el.innerHTML='<div style="text-align:center;padding:30px"><div class="spinner" style="margin:0 auto"></div><div style="margin-top:8px;font-size:12px;color:var(--text-dim)">Synthesizing thought...</div></div>';try{await api('/memories/thoughts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({namespace:ns||null,maxChunks:10})});toast('Thought generated');loadThoughts()}catch(e){toast('Failed: '+e.message,'err');loadThoughts()}}
+
+// Graph
+let graphEntityData={};
+async function loadGraph(){
+  await loadNS();
+  const nsSel=document.getElementById('graph-ns');
+  if(!nsSel)return;
+  const ns=nsSel.value;
+  try{
+    const d=(await api(`/admin/graph-snapshot?namespace=${ns||''}&limit=500`)).data;
+    const statsEl=document.getElementById('graph-stats');
+    if(statsEl)statsEl.textContent=d.entity_count+' nodes / '+d.edge_count+' edges';
+    const canvasEl=document.getElementById('graph-canvas');
+    if(!canvasEl){return}
+    if(d.entity_count===0){
+      if(network){network.destroy();network=null}
+      canvasEl.innerHTML='<div class="empty" style="padding-top:200px"><div>No entities found. Add memories to build the graph.</div></div>';
+      return;
+    }
+    const degree={};
+    d.edges.forEach(e=>{degree[e.source_entity]=(degree[e.source_entity]||0)+1;degree[e.target_entity]=(degree[e.target_entity]||0)+1});
+    d.entities.forEach(e=>{if(!degree[e.name])degree[e.name]=0});
+    // Store entity data for click handler
+    graphEntityData={};
+    d.entities.forEach(e=>{graphEntityData[e.name]=e});
+    const typeColors={person_or_concept:'#9d7cf6',email:'#60a5fa',hashtag:'#fbbf24',mention:'#22d3ee',concept:'#9d7cf6'};
+    const nodes=new vis.DataSet(d.entities.map(e=>{
+      const deg=degree[e.name]||0;
+      const color=typeColors[e.entity_type]||'#9d7cf6';
+      return{id:e.name,label:e.name,size:10+Math.min(deg*3,25),
+        font:{color:'#d8d8e2',size:deg>3?14:11},
+        color:{background:color,border:color,highlight:{background:color,border:'#fff'}},
+        borderWidth:deg>2?2:1,
+        title:e.preview_title?(e.preview_title+' — click to open'):'Click to see memories'
+      };
+    }));
+    const edges=new vis.DataSet(d.edges.map(e=>({
+      from:e.source_entity,to:e.target_entity,label:e.relation,
+      width:Math.max(.5,Math.log(e.weight+1)*.8),
+      font:{color:'#4a4a5c',size:9},
+      arrows:{to:{enabled:true,scaleFactor:.5}},
+      color:{color:'rgba(157,124,246,.3)',highlight:'#9d7cf6'},
+      smooth:{type:'continuous',roundness:.3}
+    })));
+    if(network)network.destroy();
+    network=new vis.Network(canvasEl,{nodes,edges},{
+      nodes:{shape:'dot',scaling:{min:8,max:35}},
+      edges:{smooth:{type:'continuous'}},
+      physics:{stabilization:{iterations:80},barnesHut:{gravitationalConstant:-4000,centralGravity:.15,springLength:120,springStrength:.04,damping:.5}},
+      interaction:{hover:true,zoomView:true}
+    });
+    // Click handler — open the first memory that references this entity
+    network.on('click',function(params){
+      if(params.nodes.length>0){
+        const nodeName=params.nodes[0];
+        const ent=graphEntityData[nodeName];
+        if(ent&&ent.documents&&ent.documents.length>0){
+          const entNs=ent.namespace||ns||'default';
+          showMem(entNs,ent.documents[0]);
+        }else if(ent){
+          // No documents linked — show entity info in a toast
+          toast('Entity: '+nodeName+' (type: '+(ent.entity_type||'concept')+')','ok');
+        }
+      }
+    });
+    // Legend
+    const types={};
+    d.entities.forEach(e=>{types[e.entity_type||'concept']=(types[e.entity_type||'concept']||0)+1});
+    const legendEl=document.getElementById('graph-legend');
+    if(legendEl)legendEl.innerHTML=Object.entries(types).map(([t,c])=>`<div style="display:flex;align-items:center;gap:6px;padding:3px 0;font-size:12px"><div style="width:8px;height:8px;border-radius:50%;background:${typeColors[t]||'#9d7cf6'}"></div>${esc(t)}<span style="margin-left:auto;color:var(--text-dim);font-size:11px">${c}</span></div>`).join('');
+    // Top connected
+    const topNodes=Object.entries(degree).sort((a,b)=>b[1]-a[1]).slice(0,8);
+    const topMax=topNodes[0]?topNodes[0][1]:1;
+    const topEl=document.getElementById('graph-top-nodes');
+    if(topEl)topEl.innerHTML=topNodes.map(([n,deg],i)=>`<div style="display:flex;align-items:center;gap:6px;padding:2px 0;cursor:pointer" onclick="openEntityMem('${esc(n)}')"><div style="width:90px;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(n)}</div><div style="flex:1;height:4px;background:var(--surface2);border-radius:2px;overflow:hidden"><div style="height:100%;width:${deg/topMax*100}%;background:${NS_COLORS[i%NS_COLORS.length]};border-radius:2px"></div></div><div style="font-size:10px;color:var(--text-dim);width:18px;text-align:right">${deg}</div></div>`).join('')||'<div class="empty" style="padding:10px;font-size:11px">No connections</div>';
+  }catch(e){toast('Graph failed: '+e.message,'err')}
+}
+
+function openEntityMem(name){
+  const ent=graphEntityData[name];
+  if(ent&&ent.documents&&ent.documents.length>0){
+    const ns=ent.namespace||document.getElementById('graph-ns').value||'default';
+    navTo('memories');
+    setTimeout(()=>showMem(ns,ent.documents[0]),300);
+  }
+}
+
+// Timeline
+async function loadTimeline(){await loadNS();const ns=document.getElementById('timeline-ns').value;try{const d=(await api(`/timeline?namespace=${ns||''}&limit=200`)).data;const el=document.getElementById('timeline-list');if(d.count===0){el.innerHTML='<div class="empty" style="padding:24px"><div>No events yet</div></div>';return}el.innerHTML=d.events.map(e=>`<div class="tl-item"><div class="tl-time">${fmtDate(e.timestamp)}</div><div class="tl-body"><span class="pill pill-accent" style="font-size:10px">${esc(e.event_type)}</span> <strong>${esc(e.entity_name)}</strong>${e.description?' — '+esc(e.description):''}</div></div>`).join('')}catch(e){toast('Failed: '+e.message,'err')}}
+
+// Vaults management
+async function loadVaults(){try{const d=(await api('/vaults')).data;const grid=document.getElementById('vault-grid');if(d.length===0){grid.innerHTML='<div class="empty" style="grid-column:1/-1"><div>No vaults yet. Create one to get started.</div></div>';return}grid.innerHTML=d.map(v=>`<div class="vault-card ${v.is_active?'active':''}" onclick="activateVault('${esc(v.namespace)}')"><div class="vault-card-name"><span style="width:10px;height:10px;border-radius:50%;background:${v.color||'#9d7cf6'};flex-shrink:0"></span>${esc(v.name)}${v.is_active?'<span class="pill pill-green" style="font-size:9px;margin-left:4px">Active</span>':''}</div><div class="vault-card-desc">${esc(v.description||'No description')}</div><div class="vault-card-stats"><span>${v.memory_count} memories</span><span class="pill pill-muted" style="font-size:9px">${esc(v.memory_type)}</span></div><div class="vault-card-actions"><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();editVault('${esc(v.namespace)}')">Edit</button><button class="btn btn-danger btn-sm" onclick="event.stopPropagation();deleteVault('${esc(v.namespace)}')">Delete</button></div></div>`).join('')}catch(e){toast('Failed: '+e.message,'err')}}
+
+function showVaultForm(ns){document.getElementById('vault-form').style.display='block';document.getElementById('vault-form-title').textContent='Create Vault';document.getElementById('vault-save-btn').textContent='Create';document.getElementById('vault-save-btn').onclick=saveVault;document.getElementById('vf-namespace').value='';document.getElementById('vf-namespace').disabled=false;document.getElementById('vf-name').value='';document.getElementById('vf-desc').value='';document.getElementById('vf-color').value='#9d7cf6';document.getElementById('vf-type').value='semantic'}
+function hideVaultForm(){document.getElementById('vault-form').style.display='none'}
+
+async function saveVault(){const ns=document.getElementById('vf-namespace').value.trim();const name=document.getElementById('vf-name').value.trim();if(!ns||!name){toast('Namespace and name required','err');return}try{await api('/vaults',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({namespace:ns,name:name,description:document.getElementById('vf-desc').value,color:document.getElementById('vf-color').value,memory_type:document.getElementById('vf-type').value})});toast('Vault created');hideVaultForm();loadVaults()}catch(e){toast('Failed: '+e.message,'err')}}
+
+async function editVault(ns){try{const d=(await api('/vaults')).data;const v=d.find(x=>x.namespace===ns);if(!v)return;document.getElementById('vault-form').style.display='block';document.getElementById('vault-form-title').textContent='Edit Vault: '+v.name;document.getElementById('vault-save-btn').textContent='Save';document.getElementById('vault-save-btn').onclick=()=>updateVault(ns);document.getElementById('vf-namespace').value=v.namespace;document.getElementById('vf-namespace').disabled=true;document.getElementById('vf-name').value=v.name;document.getElementById('vf-desc').value=v.description||'';document.getElementById('vf-color').value=v.color||'#9d7cf6';document.getElementById('vf-type').value=v.memory_type||'semantic'}catch(e){toast('Failed: '+e.message,'err')}}
+
+async function updateVault(ns){try{await api('/vaults/'+encodeURIComponent(ns),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:document.getElementById('vf-name').value,description:document.getElementById('vf-desc').value,color:document.getElementById('vf-color').value,memory_type:document.getElementById('vf-type').value})});toast('Vault updated');hideVaultForm();loadVaults();loadVaultSwitcher()}catch(e){toast('Failed: '+e.message,'err')}}
+
+async function activateVault(ns){try{await api(`/vaults/${encodeURIComponent(ns)}/activate`,{method:'POST'});toast('Switched to: '+ns);loadVaults();loadVaultSwitcher()}catch(e){toast('Failed: '+e.message,'err')}}
+
+async function deleteVault(ns){if(!confirm('Delete vault "'+ns+'" and ALL its memories?'))return;try{await fetch(API+'/vaults/'+encodeURIComponent(ns),{method:'DELETE'});toast('Vault deleted');loadVaults();loadVaultSwitcher()}catch(e){toast('Failed: '+e.message,'err')}}
+
+// Health
+async function loadHealth(){try{const[ho,dup,stale]=await Promise.all([api('/health/overview'),api('/health/duplicates'),api('/health/stale')]);const h=ho.data,d=dup.data,s=stale.data;const stats=[{lbl:'Total',val:h.total,c:'var(--accent)'},{lbl:'Healthy',val:h.healthy,c:'var(--green)'},{lbl:'Decaying',val:h.decaying,c:'var(--amber)'},{lbl:'Critical',val:h.critical,c:'var(--red)'},{lbl:'Never Accessed',val:h.never_accessed,c:'var(--blue)'},{lbl:'Health Score',val:(h.health_score*100).toFixed(0)+'%',c:'var(--accent)'}];document.getElementById('health-stats').innerHTML=stats.map(st=>`<div class="stat"><div class="stat-val">${st.val}</div><div class="stat-lbl">${st.lbl}</div><div class="stat-bar" style="width:100%;background:${st.c}"></div></div>`).join('');document.getElementById('dup-count').textContent=d.count+' found';document.getElementById('dup-list').innerHTML=d.count?d.duplicates.slice(0,10).map(dup=>`<div class="dup-card"><div style="display:flex;justify-content:space-between;margin-bottom:6px"><span class="pill pill-amber" style="font-size:10px">${(dup.similarity*100).toFixed(0)}% similar</span><span class="pill pill-muted" style="font-size:10px">${esc(dup.namespace)}</span></div><div class="dup-pair"><div class="dup-side"><div class="dup-side-title">${esc(dup.memory_a.title)}</div><div class="dup-side-content">${esc(dup.memory_a.content)}</div></div><div class="dup-side"><div class="dup-side-title">${esc(dup.memory_b.title)}</div><div class="dup-side-content">${esc(dup.memory_b.content)}</div></div></div></div>`).join(''):'<div class="empty" style="padding:20px"><div>No duplicates found</div></div>';document.getElementById('stale-count').textContent=s.count+' found';document.getElementById('stale-list').innerHTML=s.count?s.stale.slice(0,15).map(st=>`<div class="mem-card" onclick="showMem('${esc(st.namespace)}','${esc(st.document_id)}')"><div class="mem-card-title">${esc(st.title)}</div><div class="mem-card-meta"><span class="pill pill-muted" style="font-size:9px">${esc(st.namespace)}</span><span class="ret-bar"><span class="ret-fill ret-l" style="width:${Math.round(st.retention*100)}%"></span></span>${(st.retention*100).toFixed(0)}%<span>${st.age_days}d old</span><span>${st.access_count}x</span></div></div>`).join(''):'<div class="empty" style="padding:20px"><div>No stale memories</div></div>'}catch(e){toast('Health load failed: '+e.message,'err')}}
+
+async function bulkDecay(){try{const d=(await api('/bulk/decay',{method:'POST'})).data;toast(`Decayed ${d.decayed} memories`);loadHealth()}catch(e){toast('Failed: '+e.message,'err')}}
+async function bulkAutoCategorize(){const ns=activeVault?activeVault.namespace:null;try{toast('Auto-categorizing with LLM...');const d=(await api('/auto-categorize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({namespace:ns})})).data;toast(`Categorized ${d.categorized} memories (${d.errors} errors)`);loadHealth()}catch(e){toast('Failed: '+e.message,'err')}}
+async function bulkReembed(){const ns=activeVault?activeVault.namespace:'default';try{toast('Re-embedding...');const d=(await api('/bulk/reembed',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({namespace:ns})})).data;toast(`Re-embedded ${d.reembedded} memories`)}catch(e){toast('Failed: '+e.message,'err')}}
+async function bulkDeleteStale(){if(!confirm('Delete ALL stale memories? This cannot be undone.'))return;try{const s=(await api('/health/stale')).data;if(s.count===0){toast('No stale memories');return}const ids=s.stale.map(st=>st.document_id);const ns=[...new Set(s.stale.map(st=>st.namespace))];let deleted=0;for(const n of ns){const nIds=s.stale.filter(st=>st.namespace===n).map(st=>st.document_id);const d=(await api('/bulk/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({namespace:n,document_ids:nIds})})).data;deleted+=d.deleted}toast(`Deleted ${deleted} stale memories`);loadHealth()}catch(e){toast('Failed: '+e.message,'err')}}
+
+// Settings
+async function loadSettings(){await loadNS();try{const d=(await api('/config')).data;document.getElementById('cfg-llm').innerHTML=`<div class="cfg-row"><span class="cfg-key">Provider</span><span class="cfg-val">${esc(d.llm_provider)}</span></div><div class="cfg-row"><span class="cfg-key">Model</span><span class="cfg-val">${esc(d.llm_model)}</span></div><div class="cfg-row"><span class="cfg-key">API Key</span><span class="cfg-val">${d.llm_api_key_set?'Set':'Not set'}</span></div><div class="cfg-row"><span class="cfg-key">Base URL</span><span class="cfg-val">${esc(d.llm_base_url)}</span></div>`;document.getElementById('cfg-sys').innerHTML=`<div class="cfg-row"><span class="cfg-key">Embedding</span><span class="cfg-val">${esc(d.embed_model)}</span></div><div class="cfg-row"><span class="cfg-key">Loop</span><span class="cfg-val">${d.loop_interval>0?d.loop_interval+'s (active)':'disabled'}</span></div><div class="cfg-row"><span class="cfg-key">Decay Half-Life</span><span class="cfg-val">${d.decay_halflife_days} days</span></div><div class="cfg-row"><span class="cfg-key">Host</span><span class="cfg-val">${esc(d.host)}:${d.port}</span></div>`;document.getElementById('llm-badge').textContent=d.llm_provider+'/'+d.llm_model}catch(e){toast('Failed: '+e.message,'err')}}
+async function deleteNamespace(){const ns=document.getElementById('danger-ns').value;if(!ns){toast('Select a namespace','err');return}if(!confirm('Delete ALL memories in "'+ns+'"?'))return;try{const d=(await api('/admin/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({namespace:ns,delete_all:true})})).data;toast('Deleted '+d.deleted+' memories');loadNS()}catch(e){toast('Failed: '+e.message,'err')}}
+
+// Command palette
+const COMMANDS=[{l:'Go to Overview',a:()=>navTo('overview')},{l:'Go to Memories',a:()=>navTo('memories')},{l:'Go to Import',a:()=>navTo('import')},{l:'Go to Recall',a:()=>navTo('recall')},{l:'Go to Chat',a:()=>navTo('chat')},{l:'Go to Thoughts',a:()=>navTo('thoughts')},{l:'Go to Graph',a:()=>navTo('graph')},{l:'Go to Timeline',a:()=>navTo('timeline')},{l:'Go to Vaults',a:()=>navTo('vaults')},{l:'Go to Health',a:()=>navTo('health')},{l:'Go to Settings',a:()=>navTo('settings')},{l:'New Memory',a:()=>{navTo('memories');setTimeout(newMemoryFile,200)}},{l:'Generate Thought',a:()=>{navTo('thoughts');setTimeout(generateThought,200)}}];
+let cmdItems=COMMANDS;
+function openPalette(){document.getElementById('cmd-overlay').classList.add('show');const inp=document.getElementById('cmd-input');inp.value='';inp.focus();renderCmdList(COMMANDS);loadCmdMemories()}
+function closePalette(){document.getElementById('cmd-overlay').classList.remove('show')}
+async function loadCmdMemories(){try{const d=(await api('/documents?limit=50')).data;cmdItems=[...COMMANDS,...d.documents.map(m=>({l:m.title||m.document_id,a:()=>{navTo('memories');setTimeout(()=>showMem(m.namespace,m.document_id),300)}}))]}catch(e){}}
+function filterPalette(){const q=document.getElementById('cmd-input').value.toLowerCase();renderCmdList(cmdItems.filter(c=>c.l.toLowerCase().includes(q)));if(q.length>2){clearTimeout(window._cs);window._cs=setTimeout(async()=>{try{const d=(await api('/search?q='+encodeURIComponent(q)+'&limit=10')).data;renderCmdList([...COMMANDS.filter(c=>c.l.toLowerCase().includes(q)),...d.results.map(m=>({l:m.title||m.document_id,a:()=>{navTo('memories');setTimeout(()=>showMem(m.namespace,m.document_id),300)}}))])}catch(e){}},300)}}
+function renderCmdList(items){document.getElementById('cmd-list').innerHTML=items.map((c,i)=>`<div class="cmd-item ${i===0?'sel':''}" onclick="closePalette();cmdItems[${i}].a()">${esc(c.l)}</div>`).join('')}
+function handleCmdKey(e){const items=document.querySelectorAll('.cmd-item');if(e.key==='ArrowDown'){e.preventDefault();cmdSelIdx=Math.min(cmdSelIdx+1,items.length-1);updateCmdSel()}else if(e.key==='ArrowUp'){e.preventDefault();cmdSelIdx=Math.max(cmdSelIdx-1,0);updateCmdSel()}else if(e.key==='Enter'){e.preventDefault();if(items[cmdSelIdx])items[cmdSelIdx].click()}else if(e.key==='Escape'){closePalette()}}
+let cmdSelIdx=0;function updateCmdSel(){document.querySelectorAll('.cmd-item').forEach((el,i)=>el.classList.toggle('sel',i===cmdSelIdx));cmdSelIdx=0}
+document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='k'){e.preventDefault();openPalette()}if(e.key==='Escape')closePalette()});
+
+// Health check
+async function checkHealth(){try{await api('/health');document.getElementById('health-dot').style.background='var(--green)';document.getElementById('health-text').textContent='Connected'}catch(e){document.getElementById('health-dot').style.background='var(--red)';document.getElementById('health-text').textContent='Offline'}}
+
+// Init
+loadVaultSwitcher();loadOverview();checkHealth();setInterval(checkHealth,30000);
+</script>
+</body>
+</html>
