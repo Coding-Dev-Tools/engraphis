@@ -45,6 +45,13 @@ class Settings:
     cors_origins: list = field(
         default_factory=lambda: _parse_origins(_env("ENGRAPHIS_CORS_ORIGINS", ""))
     )
+    # Optional server-side workspace binding — the hard multi-tenant isolation boundary
+    # (MASTER_PLAN.md §16). When non-empty, MemoryService refuses any read or write whose
+    # workspace is not in this comma-separated allow-list, so knowing or guessing a
+    # workspace name is not enough to reach it. Empty = unrestricted (single-tenant local).
+    allowed_workspaces: list = field(
+        default_factory=lambda: _parse_csv(_env("ENGRAPHIS_WORKSPACES", ""))
+    )
 
     db_path: str = field(
         default_factory=lambda: _env(
@@ -98,6 +105,11 @@ def _parse_origins(raw: str) -> list:
     if not raw.strip():
         return ["http://127.0.0.1:8700", "http://localhost:8700"]
     return [o.strip() for o in raw.split(",") if o.strip()]
+
+
+def _parse_csv(raw: str) -> list:
+    """Generic comma-separated allow-list. Empty -> [] (no restriction)."""
+    return [item.strip() for item in raw.split(",") if item.strip()]
 
 
 settings = Settings()

@@ -107,19 +107,27 @@ def _enum(value: Any, enum_cls, field: str):
 class MemoryService:
     """High-level, validated operations over a single Engraphis database."""
 
-    def __init__(self, engine: MemoryEngine) -> None:
+    def __init__(self, engine: MemoryEngine, *,
+                 allowed_workspaces: Optional[list] = None) -> None:
         self.engine = engine
         self.store = engine.store
+        # Server-side workspace binding (the hard isolation boundary). None means
+        # unrestricted (single-tenant local default); a non-empty set means every scoped
+        # read/write must target one of these workspaces — see ``_authorize_workspace``.
+        self.allowed_workspaces: Optional[frozenset] = (
+            frozenset(allowed_workspaces) if allowed_workspaces else None
+        )
 
     @classmethod
     def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
                embed_dim: int = 256, vector_backend: str = "auto",
-               rerank_model: Optional[str] = None) -> "MemoryService":
+               rerank_model: Optional[str] = None,
+               allowed_workspaces: Optional[list] = None) -> "MemoryService":
         engine = MemoryEngine.create(
             db_path, embed_model=embed_model, embed_dim=embed_dim,
             vector_backend=vector_backend, rerank_model=rerank_model,
         )
-        return cls(engine)
+        return cls(engine, allowed_workspaces=allowed_workspaces)
 
     # ── name → id resolution ───────────────────────────────────────────────────
     def _lookup_workspace(self, name: str) -> Optional[str]:
@@ -137,7 +145,7 @@ class MemoryService:
     def _require_scope(self, workspace: str, repo: Optional[str]) -> tuple[str, Optional[str]]:
         """Resolve workspace/repo names to ids for tools where "not found yet" is a
         user error, not a quiet empty result (unlike ``recall``'s gentler UX)."""
-        ws = _clean_name(workspace, field="workspace")
+        ws = self._clean_ws(workspace)
         wid = self._lookup_workspace(ws)
         if wid is None:
             raise ValidationError(f"no workspace named '{ws}' yet")
@@ -148,6 +156,24 @@ class MemoryService:
             if rid is None:
                 raise ValidationError(f"no repo named '{rp}' in workspace '{ws}' yet")
         return wid, rid
+
+    def _authorize_workspace(self, ws: str) -> str:
+        """Enforce the server-side workspace binding. When this instance is bound to a set
+        of workspaces (``ENGRAPHIS_WORKSPACES``), no caller may read or write a workspace
+        outside it — knowing or guessing the name is not enough. This is what makes
+        ``workspace`` a *hard* isolation boundary rather than an advisory label the client
+        asserts and the server trusts (MASTER_PLAN.md §16: scope is "enforced server-side on
+        every read/write — never trust client-supplied scope alone"). An empty binding — the
+        single-tenant local default — is unrestricted, so existing setups are unaffected."""
+        if self.allowed_workspaces is not None and ws not in self.allowed_workspaces:
+            raise ValidationError(f"workspace '{ws}' is not permitted on this instance")
+        return ws
+
+    def _clean_ws(self, workspace: Any) -> str:
+        """Validate a workspace name *and* enforce the binding in one step. Every entry point
+        that accepts a client-supplied workspace routes through here, so the isolation check
+        can never be skipped at an individual call site."""
+        return self._authorize_workspace(_clean_name(workspace, field="workspace"))
 
     def _check_owns(self, memory_id: str, wid: str, rid: Optional[str]) -> None:
         """Governance tools (forget/pin/correct/link) act on a bare memory_id; require the
@@ -174,7 +200,7 @@ class MemoryService:
         """
         content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
         title = _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS, required=False)
-        ws = _clean_name(workspace, field="workspace")
+        ws = self._clean_ws(workspace)
         rp = _clean_name(repo, field="repo") if repo else None
         mt = _enum(mtype, MemoryType, "mtype")
         sc = _enum(scope, Scope, "scope")
@@ -220,9 +246,13 @@ class MemoryService:
         k = max(1, min(MAX_K, k))
         mts = [_enum(m, MemoryType, "mtype") for m in mtypes] if mtypes else None
 
+        # A bound instance must never do a workspace-less (global) recall — that would read
+        # across every tenant's memories, the exact boundary the binding exists to enforce.
+        if not workspace and self.allowed_workspaces is not None:
+            raise ValidationError("workspace is required on this instance")
         wid = rid = None
         if workspace:
-            ws = _clean_name(workspace, field="workspace")
+            ws = self._clean_ws(workspace)
             wid = self._lookup_workspace(ws)
             if wid is None:
                 return {"query": query, "count": 0, "context": "", "memories": [],
@@ -250,7 +280,7 @@ class MemoryService:
         """Open a session. If this repo has a prior *ended* session, its summary and
         unresolved ``open_threads`` come back as ``bootstrap`` — the concrete fix for
         "the agent forgets everything between sessions" (MASTER_PLAN.md §10.1-10.2)."""
-        ws = _clean_name(workspace, field="workspace")
+        ws = self._clean_ws(workspace)
         rp = _clean_name(repo, field="repo") if repo else None
         agent = _clean_text(agent, field="agent", max_chars=MAX_NAME_CHARS, required=False)
         goal = _clean_text(goal, field="goal", max_chars=MAX_TITLE_CHARS, required=False)
@@ -381,7 +411,7 @@ class MemoryService:
         below which require the repo to already exist."""
         if not repo:
             raise ValidationError("repo is required to index code")
-        ws = _clean_name(workspace, field="workspace")
+        ws = self._clean_ws(workspace)
         rp = _clean_name(repo, field="repo")
         root_path = _clean_text(root_path, field="root_path", max_chars=MAX_CONTENT_CHARS)
         wid = self.store.get_or_create_workspace(ws)
@@ -404,8 +434,11 @@ class MemoryService:
         conn = self.store.conn
         params: list[Any] = []
         where = ""
+        # A bound instance must not report global (cross-tenant) aggregate counts.
+        if not workspace and self.allowed_workspaces is not None:
+            raise ValidationError("workspace is required on this instance")
         if workspace:
-            ws = _clean_name(workspace, field="workspace")
+            ws = self._clean_ws(workspace)
             wid = self._lookup_workspace(ws)
             if wid is None:
                 return {"workspace": ws, "memories": 0, "note": "workspace not found"}

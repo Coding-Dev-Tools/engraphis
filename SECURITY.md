@@ -66,15 +66,23 @@ stripped, ordinary markdown (headings, bold, links) renders unchanged.
   **TLS** and adds **rate limiting** (not built in).
 
 ### 3. Scope isolation
-Every read takes a `SearchFilter`; the MCP `recall` tool only returns memories within the
+Every read takes a `SearchFilter`; the MCP `recall`/`why`/`timeline`/`recall_proactive` tools only return memories within the
 requested `workspace`/`repo`. Every governance/write tool that targets an existing memory by id
 (`forget`/`pin`/`correct`/`link`) re-validates that the id belongs to the `workspace`/`repo` the
 caller named, not just that the id exists — so knowing an id from one workspace's output doesn't
-let you mutate another workspace's memory. Use scopes to keep one agent/tenant from reading or
-altering another's memories. Cross-tenant *authorization* (per-token scope binding, so a given
-MCP client can only ever name workspaces it's allowed to) is on the roadmap, not yet enforced —
-within a single instance any client can still name any workspace it can guess; run one instance
-per trust boundary if you need hard isolation today.
+let you mutate another workspace's memory. **Server-side workspace binding (`ENGRAPHIS_WORKSPACES`).** By default an instance is
+unrestricted: any client may name any `workspace` it can guess, and a workspace-less `recall`
+searches across all of them — fine for single-tenant local use. Set `ENGRAPHIS_WORKSPACES` to a
+comma-separated allow-list to make `workspace` a **hard** boundary: every read *and* write whose
+workspace is not on the list is refused before it touches the store, and workspace-less global
+`recall`/`stats` are refused outright. The check sits at a single choke point in `service.py`
+(`_clean_ws` -> `_authorize_workspace`), so no call site can skip it — this is what makes "run
+one instance per trust boundary" enforced by the server rather than merely advised.
+
+**Still open:** *per-token* differentiation *within* one bound instance — several mutually
+distrusting MCP clients sharing a single server, each entitled to a different subset of its
+workspaces. Every client of one instance shares that instance's binding; for distinct tenants,
+run one instance per tenant (now with `ENGRAPHIS_WORKSPACES` set as a defense-in-depth backstop).
 
 ### 4. Secrets & data at rest
 - `.env`, `*.db`, `*.db-wal`, `*.db-shm` are git-ignored; never commit or log them. The
@@ -103,7 +111,9 @@ repos you intend to index, the same way you'd scope any other local tool.
 ## Known limitations (not yet mitigated)
 - No built-in rate limiting (use a reverse proxy).
 - No encryption at rest (use disk/FS encryption).
-- No per-token scope/tenant authorization (isolate by instance).
+- Per-token scope/tenant authorization is partial: an instance can be *bound* to a workspace
+  allow-list (`ENGRAPHIS_WORKSPACES`, §3), but all clients of one instance share that binding —
+  isolate distinct tenants by running one instance each.
 - The legacy v1 REST server/dashboard is a compatibility surface; new *capability* work targets
   the v2 core and the MCP server, but concrete vulnerabilities found in v1 (like the dashboard
   XSS above) are still fixed there directly rather than deferred. v1's request models still have

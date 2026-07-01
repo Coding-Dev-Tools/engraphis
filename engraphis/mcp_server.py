@@ -51,6 +51,7 @@ def service() -> MemoryService:
         _service = MemoryService.create(
             settings.db_path,
             embed_model=settings.embed_model or None,
+            allowed_workspaces=settings.allowed_workspaces,
         )
     return _service
 

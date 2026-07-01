@@ -3,6 +3,23 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [Unreleased] — read-isolation pass
+
+### Security
+- **Cross-tenant read isolation is now enforceable server-side** (`ENGRAPHIS_WORKSPACES`).
+  `recall`/`why`/`timeline`/`recall_proactive` previously took the caller's asserted `workspace`
+  at face value, so any MCP client that knew or guessed a workspace name could read it
+  (SECURITY.md §3, handoff §4.2). `MemoryService` can now be *bound* to a comma-separated
+  workspace allow-list: every read and write whose workspace is outside the list is refused at a
+  single choke point (`_clean_ws` -> `_authorize_workspace`) before it reaches the store, and
+  workspace-less global `recall`/`stats` are refused outright. An empty binding leaves the
+  single-tenant local behavior unchanged, so existing installs are unaffected. Covered by
+  `tests/test_workspace_isolation.py` (8 tests) plus a standalone cross-tenant read repro.
+
+### Changed
+- `config.Settings` gains `allowed_workspaces` (from `ENGRAPHIS_WORKSPACES`);
+  `MemoryService`/`MemoryService.create` accept `allowed_workspaces`, wired from the MCP server.
+
 ## [Unreleased] — competitive-feature pass
 
 Closes the gap between "secure, well-tested MVP" and the differentiators MASTER_PLAN.md
