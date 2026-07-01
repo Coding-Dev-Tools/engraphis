@@ -3,6 +3,20 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [Unreleased] — v1-hardening pass
+
+### Security
+- **v1 REST input hardening** (SECURITY.md): request models now strip control characters and
+  cap length on stored/name text fields (parity with v2 `service.py`), and the file-upload path
+  caps body size — oversized or control-character-laden payloads to
+  `/memory/insert`/`/documents`/`/documents/upload` are rejected or defanged, not stored as-is.
+- **Optional in-process rate limiting** for the v1 REST API (`ENGRAPHIS_RATE_LIMIT` /
+  `ENGRAPHIS_RATE_WINDOW`): a per-client-IP sliding window returning 429 + `Retry-After`, off by
+  default. Front multi-process/distributed deployments with a reverse proxy.
+
+### Changed
+- `config.Settings` gains `rate_limit`/`rate_window`; adds `tests/test_v1_hardening.py`.
+
 ## [Unreleased] — read-isolation pass
 
 ### Security

@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
+import time
+from collections import defaultdict, deque
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -68,6 +70,29 @@ def create_app() -> FastAPI:
             if not _const_time_eq(presented, token):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
         return await call_next(request)
+
+    # Optional in-process rate limiting (per-client-IP sliding window). Disabled unless
+    # ENGRAPHIS_RATE_LIMIT > 0. In-memory/per-process — fine for one self-hosted instance;
+    # front it with a reverse proxy for multi-process or distributed limits.
+    if settings.rate_limit > 0:
+        _hits: dict[str, deque] = defaultdict(deque)
+
+        @app.middleware("http")
+        async def _rate_limit(request: Request, call_next):
+            if request.method == "OPTIONS" or request.url.path.startswith(_PUBLIC_PREFIXES):
+                return await call_next(request)
+            client = request.client.host if request.client else "unknown"
+            now = time.monotonic()
+            dq = _hits[client]
+            cutoff = now - settings.rate_window
+            while dq and dq[0] <= cutoff:
+                dq.popleft()
+            if len(dq) >= settings.rate_limit:
+                retry = int(dq[0] + settings.rate_window - now) + 1
+                return JSONResponse({"error": "rate limit exceeded"}, status_code=429,
+                                    headers={"Retry-After": str(retry)})
+            dq.append(now)
+            return await call_next(request)
 
     init_db()
     app.include_router(memory_router)

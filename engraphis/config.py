@@ -86,6 +86,11 @@ class Settings:
         default_factory=lambda: _env_float("ENGRAPHIS_DECAY_HALFLIFE_DAYS", 7.0)
     )
 
+    # Optional in-process rate limiting for the v1 REST API (per-client-IP sliding window).
+    # 0 = disabled (default), matching the loopback-first posture; set both to enable.
+    rate_limit: int = field(default_factory=lambda: _env_int("ENGRAPHIS_RATE_LIMIT", 0))
+    rate_window: int = field(default_factory=lambda: _env_int("ENGRAPHIS_RATE_WINDOW", 60))
+
     @property
     def base_url(self) -> str:
         return f"http://{self.host}:{self.port}"

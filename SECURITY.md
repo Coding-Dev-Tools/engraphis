@@ -109,17 +109,20 @@ repos you intend to index, the same way you'd scope any other local tool.
   versions and run `pip audit` in your environment.
 
 ## Known limitations (not yet mitigated)
-- No built-in rate limiting (use a reverse proxy).
+- Rate limiting: an optional in-process per-IP limiter now ships (`ENGRAPHIS_RATE_LIMIT`,
+  `ENGRAPHIS_RATE_WINDOW`), off by default; still front multi-process/distributed deployments
+  with a reverse proxy.
 - No encryption at rest (use disk/FS encryption).
 - Per-token scope/tenant authorization is partial: an instance can be *bound* to a workspace
   allow-list (`ENGRAPHIS_WORKSPACES`, §3), but all clients of one instance share that binding —
   isolate distinct tenants by running one instance each.
 - The legacy v1 REST server/dashboard is a compatibility surface; new *capability* work targets
   the v2 core and the MCP server, but concrete vulnerabilities found in v1 (like the dashboard
-  XSS above) are still fixed there directly rather than deferred. v1's request models still have
-  no size caps or control-character stripping at the API layer (unlike v2's `service.py`) — a
-  large or control-character-laden payload posted to `/memory/insert`/`/documents`/`/files/create`
-  is stored and processed as-is. Not yet hardened; use v1 for local/trusted use only until it is.
+  XSS above) are still fixed there directly rather than deferred. v1's request models now
+  strip control characters and cap length on stored/name text fields (parity with v2's
+  `service.py`), and the file-upload path caps body size — so oversized or control-character-laden
+  payloads to `/memory/insert`/`/documents`/`/documents/upload` are rejected or defanged rather
+  than stored as-is. v1 remains a compatibility surface; prefer the v2/MCP path for new work.
 - The deterministic conflict resolver and code-symbol-graph call edges are both heuristic
   (token overlap; name-based, not type-resolved) — neither is a security boundary, but don't
   treat either as ground truth without spot-checking on anything load-bearing.

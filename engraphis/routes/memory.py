@@ -505,7 +505,11 @@ async def upload_document(
 ):
     """POST /memory/documents/upload — ingest a file (multipart form data)."""
     import time as _time
-    content = file.file.read().decode("utf-8", errors="replace")
+    from engraphis.models import MAX_CONTENT_CHARS, _CONTROL_RE
+    raw = file.file.read(MAX_CONTENT_CHARS + 1)
+    if len(raw) > MAX_CONTENT_CHARS:
+        raise HTTPException(413, f"File exceeds {MAX_CONTENT_CHARS} bytes")
+    content = _CONTROL_RE.sub("", raw.decode("utf-8", errors="replace"))
     if not content.strip():
         raise HTTPException(400, "File is empty or could not be decoded as text")
     doc_title = title or file.filename or "upload"
