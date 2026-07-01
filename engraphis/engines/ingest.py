@@ -6,15 +6,13 @@ a state-transition event, and stores everything in the memory layer.
 """
 from __future__ import annotations
 
-import json
 import re
-import time
 from typing import Any, Optional
 
 import numpy as np
 
 from engraphis.engines import embedder
-from engraphis.stores import get_conn, now_ts
+from engraphis.stores import now_ts
 from engraphis.stores import graph as graph_store
 from engraphis.stores import ledger as ledger_store
 from engraphis.stores import vectors as mem_store
@@ -22,7 +20,7 @@ from engraphis.stores import vectors as mem_store
 # ── Lightweight entity extraction ────────────────────────────────────────────
 # Capitalized multi-word sequences, emails, URLs, hashtags, quoted names.
 _ENTITY_RE = re.compile(
-    r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b"
+    r"\b([A-Z][a-z]+(?:-[A-Za-z]+)*(?:\s+[A-Z][a-z]+(?:-[A-Za-z]+)*){0,3})\b"
     r"|([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
     r"|(#[a-zA-Z][a-zA-Z0-9_-]+)"
     r"|(@[a-zA-Z][a-zA-Z0-9_-]+)"
@@ -81,7 +79,7 @@ def ingest_document(
         memory_type=memory_type,
     )
 
-    entities = _extract_entities(full_text)
+    entities = _extract_entities_from_doc(title, content)
     for name, etype in entities:
         graph_store.upsert_entity(namespace, name, etype)
         ledger_store.append_event(
@@ -161,6 +159,31 @@ def _extract_entities(text: str) -> list[tuple[str, str]]:
         if key not in seen:
             seen.add(key)
             out.append((ent, etype))
+    return out
+
+
+def _extract_entities_from_doc(title: str, content: str) -> list[tuple[str, str]]:
+    """Extract entities from title and content independently, then merge.
+
+    Title and content must be processed as *separate* regex passes, never
+    concatenated first: the capitalized-word pattern in ``_ENTITY_RE`` has no notion
+    of a title/content boundary, so matching it against ``f"{title}\\n\\n{content}"``
+    lets it bridge across that boundary — e.g. title "Meeting Notes" + content
+    "Alice Johnson met..." previously produced one garbled entity "Meeting
+    Notes\\n\\nAlice Johnson" instead of two clean ones. That fragments what should
+    be a single real-world entity (e.g. "Alice Johnson") into multiple graph nodes,
+    each of which only sees the document(s) it happened to be garbled together with
+    — which is why clicking a node could open the wrong document or none at all.
+    Extracting each field on its own and merging by name avoids that entirely.
+    """
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for text in (content, title):   # content first — the more meaningful signal
+        for ent, etype in _extract_entities(text):
+            key = ent.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append((ent, etype))
     return out
 
 
