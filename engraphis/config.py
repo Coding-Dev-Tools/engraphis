@@ -38,10 +38,18 @@ class Settings:
     host: str = field(default_factory=lambda: _env("ENGRAPHIS_HOST", "127.0.0.1"))
     port: int = field(default_factory=lambda: _env_int("ENGRAPHIS_PORT", 8700))
 
+    # Optional bearer token. When non-empty, the REST API requires
+    # `Authorization: Bearer <token>` on all routes except health/docs/dashboard.
+    api_token: str = field(default_factory=lambda: _env("ENGRAPHIS_API_TOKEN", ""))
+    # Comma-separated CORS allow-list. Defaults to loopback only (local-first).
+    cors_origins: list = field(
+        default_factory=lambda: _parse_origins(_env("ENGRAPHIS_CORS_ORIGINS", ""))
+    )
+
     db_path: str = field(
         default_factory=lambda: _env(
             "ENGRAPHIS_DB_PATH",
-            str(_PROJECT_ROOT / "neocortex.db"),
+            str(_PROJECT_ROOT / "engraphis.db"),
         )
     )
 
@@ -83,6 +91,13 @@ def _parse_headers(raw: str) -> dict:
         return json.loads(raw)
     except Exception:
         return {}
+
+
+def _parse_origins(raw: str) -> list:
+    """CORS allow-list. Empty -> loopback only (safe local-first default)."""
+    if not raw.strip():
+        return ["http://127.0.0.1:8700", "http://localhost:8700"]
+    return [o.strip() for o in raw.split(",") if o.strip()]
 
 
 settings = Settings()

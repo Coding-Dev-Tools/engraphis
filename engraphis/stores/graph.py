@@ -1,7 +1,6 @@
 """Entity-relation graph store — backed by SQLite tables."""
 from __future__ import annotations
 
-import time
 from typing import Any, Optional
 
 from engraphis.stores import get_conn, now_ts

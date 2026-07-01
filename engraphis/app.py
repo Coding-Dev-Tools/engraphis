@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from engraphis.config import settings
@@ -17,6 +18,12 @@ from engraphis.routes.vault import router as vault_router
 from engraphis.stores import init_db
 
 logger = logging.getLogger("engraphis")
+
+
+def _const_time_eq(a: str, b: str) -> bool:
+    """Constant-time string comparison (avoids token-timing side channels)."""
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
 
 _background_task: asyncio.Task | None = None
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -31,19 +38,36 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title="Engraphis",
-        description="Self-hosted AI memory system — Ebbinghaus decay, interaction-aware "
-                    "recall, conscious thought synthesis. Drop-in replacement for the "
-                    "Engraphis cloud API.",
+        description="Self-hosted AI memory engine for agents — Ebbinghaus decay, "
+                    "interaction-aware recall, bi-temporal facts, and background "
+                    "consolidation. Local-first; you bring the LLM.",
         version="0.1.0",
     )
 
+    # Local-first CORS: loopback by default, override with ENGRAPHIS_CORS_ORIGINS.
+    # Credentials are only allowed when the allow-list is explicit (never with "*").
+    _wildcard = "*" in settings.cors_origins
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
+        allow_origins=settings.cors_origins,
+        allow_credentials=not _wildcard,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Optional bearer-token auth. Active only when ENGRAPHIS_API_TOKEN is set.
+    _PUBLIC_PREFIXES = ("/memory/health", "/docs", "/openapi.json", "/redoc", "/static")
+
+    @app.middleware("http")
+    async def _require_token(request: Request, call_next):
+        token = settings.api_token
+        if token and request.method != "OPTIONS" and request.url.path != "/" \
+                and not request.url.path.startswith(_PUBLIC_PREFIXES):
+            header = request.headers.get("authorization", "")
+            presented = header[7:].strip() if header.lower().startswith("bearer ") else ""
+            if not _const_time_eq(presented, token):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+        return await call_next(request)
 
     init_db()
     app.include_router(memory_router)

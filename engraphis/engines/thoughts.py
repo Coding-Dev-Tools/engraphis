@@ -13,7 +13,6 @@ from typing import Any, Optional
 from engraphis.engines import recall as recall_engine
 from engraphis.llm.client import LLMClient
 from engraphis.stores import ledger as ledger_store
-from engraphis.stores import vectors as mem_store
 
 logger = logging.getLogger("engraphis.thoughts")
 

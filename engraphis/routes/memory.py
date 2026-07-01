@@ -28,11 +28,11 @@ from engraphis.models import (
     QueryMemoryRequest,
     RecallMasterRequest,
     RecallMemoriesRequest,
+    ReinforceRequest,
     ThoughtRequest,
 )
 from engraphis.stores import graph as graph_store
 from engraphis.stores import ledger as ledger_store
-from engraphis.stores import vaults as vault_store
 from engraphis.stores import vectors as mem_store
 
 logger = logging.getLogger("engraphis.routes")
@@ -69,6 +69,7 @@ async def insert_memory(req: InsertMemoryRequest):
         metadata=item.metadata,
         created_at=item.created_at,
         updated_at=item.updated_at,
+        memory_type=req.memory_type or req.memoryType or "semantic",
     )
     status = "updated" if result.get("access_count", 0) > 0 else "inserted"
     return _ok({"status": status, "ingested": 1 if status == "inserted" else 0,
@@ -240,6 +241,21 @@ async def record_interactions(req: InteractionRequest):
 async def interact_memory(req: InteractionRequest):
     """POST /memory/interact — mirrored interaction recording."""
     return await record_interactions(req)
+
+
+@router.post("/reinforce")
+async def reinforce_memory(req: ReinforceRequest):
+    """POST /memory/reinforce — reinforce a specific memory by document ID.
+
+    Increases stability (spacing effect) and updates last_access, preventing
+    Ebbinghaus decay. Use when an agent finds a past memory useful for current work.
+    """
+    namespace = req.namespace or "hermes"
+    mem = mem_store.get_memory(namespace, req.documentId)
+    if not mem:
+        raise HTTPException(404, f"Document {req.documentId} not found in namespace {namespace}")
+    reweight.reinforce(mem["id"])
+    return _ok({"reinforced": True, "documentId": req.documentId, "namespace": namespace})
 
 
 # ── Thoughts / recall ────────────────────────────────────────────────────────
@@ -526,8 +542,6 @@ async def list_interactions(namespace: Optional[str] = None, limit: int = 100):
 @router.get("/analytics")
 async def memory_analytics():
     """GET /memory/analytics — time-series and distribution data for charts."""
-    import math
-    import json
     from collections import defaultdict
     from engraphis.stores import get_conn
     from engraphis.engines.reweight import retention_score

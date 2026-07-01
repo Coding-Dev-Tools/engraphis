@@ -14,7 +14,7 @@ import numpy as np
 from engraphis.engines import embedder, reweight
 from engraphis.stores import vectors as mem_store
 
-logger = logging.getLogger("neocortex.recall")
+logger = logging.getLogger("engraphis.recall")
 
 
 def recall(

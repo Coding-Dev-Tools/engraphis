@@ -1,362 +1,238 @@
 # Engraphis
 
-A self-hosted AI memory system that replicates the [Engraphis](https://github.com/tinyhumansai/neocortex) architecture — Ebbinghaus forgetting-curve decay, interaction-aware reinforcement, and conscious thought synthesis — running entirely on your machine with no API key, no rate limits, and no per-token cost for the memory layer.
+**The local-first memory engine for AI agents.** Give your agents memory that persists across
+sessions and repositories — Ebbinghaus forgetting-curve decay, interaction-aware reinforcement,
+bi-temporal facts, and hybrid (vector + lexical + graph) recall — running entirely on your own
+machine. No API key for the memory layer, no rate limits, no per-token cost, no data leaving
+your box.
 
-You choose the external LLM (OpenAI, Anthropic, Google, OpenRouter, or any OpenAI-compatible endpoint) for thought synthesis and chat. The memory engine itself is 100% local: SQLite + sentence-transformers embeddings.
+You bring the LLM (OpenAI, Anthropic, Google, OpenRouter, or any OpenAI-compatible endpoint)
+only for the optional chat/synthesis features. The memory engine itself is 100% local:
+SQLite + local embeddings.
 
----
+> **Why Engraphis?** Hosted memory services make you ship your agent's memory to someone else's
+> cloud and meter you per operation. Engraphis is the opposite: self-hosted, private, and free at
+> the core — with a native **MCP server** so coding agents (Claude Code, Cursor, Cline, Zed,
+> Windsurf) plug in and stop forgetting.
 
-## Quick Start
-
-### 1. Install
-
-```bash
-cd engraphis
-pip install -r requirements.txt
-```
-
-> The embedding model (`all-MiniLM-L6-v2`, ~80 MB) downloads automatically on first use.
-
-### 2. Configure
-
-```bash
-copy .env.example .env
-```
-
-Edit `.env` and set your LLM provider + API key:
-
-```ini
-ENGRAPHIS_LLM_PROVIDER=openai          # openai | anthropic | google | openrouter | custom
-ENGRAPHIS_LLM_MODEL=gpt-4o-mini
-ENGRAPHIS_LLM_API_KEY=sk-your-key-here
-
-# For OpenRouter:
-# ENGRAPHIS_LLM_PROVIDER=openrouter
-# ENGRAPHIS_LLM_MODEL=anthropic/claude-3.5-sonnet
-# ENGRAPHIS_LLM_API_KEY=sk-or-your-key
-# ENGRAPHIS_LLM_BASE_URL=https://openrouter.ai/api/v1
-
-# For Anthropic:
-# ENGRAPHIS_LLM_PROVIDER=anthropic
-# ENGRAPHIS_LLM_MODEL=claude-3-5-haiku-20241022
-# ENGRAPHIS_LLM_API_KEY=sk-ant-your-key
-
-# For a custom OpenAI-compatible endpoint:
-# ENGRAPHIS_LLM_PROVIDER=custom
-# ENGRAPHIS_LLM_MODEL=your-model
-# ENGRAPHIS_LLM_API_KEY=your-key
-# ENGRAPHIS_LLM_BASE_URL=https://your-endpoint/v1
-```
-
-### 3. Start the server
-
-```bash
-python -m scripts.start_server
-```
-
-You'll see:
-```
-Engraphis — starting on 127.0.0.1:8700
-  Database:     ./neocortex.db
-  Embed model:  sentence-transformers/all-MiniLM-L6-v2
-  LLM provider: openai / gpt-4o-mini
-  Loop interval: 60s
-  SDK base URL: http://127.0.0.1:8700
-  Docs:         http://127.0.0.1:8700/docs
-```
-
-### 4. Verify
-
-In another terminal:
-
-```bash
-python -m scripts.test_routes
-```
+- **Local-first & private** — runs offline; the core depends only on `numpy`.
+- **Agent-native** — an MCP server exposes 15 tools: remember/recall, bi-temporal why/timeline,
+  proactive recall, governance (forget/pin/correct), code search, and session handoff.
+- **Self-maintaining facts** — writes are deterministically conflict-resolved (no LLM required):
+  a near-duplicate reinforces the existing memory instead of cloning it, and a same-subject
+  update supersedes the old one instead of leaving a silent contradiction.
+- **Principled recall** — six-term score over retention, semantic, lexical, graph, importance,
+  and recency, fused with Reciprocal Rank Fusion and reranked.
+- **Truth is temporal** — contradictions invalidate (bi-temporal `valid_from/valid_to`) instead
+  of overwriting; ask `as_of` questions, or just call `engraphis_why` / `engraphis_timeline`.
+- **Code-aware** — `engraphis_index_repo` parses a repository into a function/class/call-graph
+  (AST via tree-sitter, regex fallback with zero dependencies) so `engraphis_search_code`
+  answers "what calls this" far more cheaply than grepping or dumping files.
+- **Scoped** — every memory lives in a `workspace → repo → session` hierarchy.
 
 ---
 
-## Migrating from Obsidian Vault
-
-Seed your existing Obsidian vault (or any folder of markdown files) into the memory system:
+## Install
 
 ```bash
-python -m scripts.seed_from_obsidian "C:/Users/home/OneDrive/Documents/Obsidian Vault Local"
+pip install -e .                # core library — numpy only, fully offline
+pip install -e ".[mcp]"         # + MCP server (for Claude Code / Cursor / agents)
+pip install -e ".[server]"      # + REST server & dashboard
+pip install -e ".[all]"         # everything
 ```
 
-Each `.md` file becomes a searchable memory with:
-- `document_id` = relative file path
-- `title` = first `# H1` heading or filename
-- `content` = full file text
-- `metadata` = `{file, tags, links, word_count}`
-
-Use `--namespace vault` (default) or a custom namespace. Use `--limit 50` to test with a subset first.
+> The first run with real embeddings downloads `all-MiniLM-L6-v2` (~80 MB). Without
+> sentence-transformers installed, the engine automatically falls back to a deterministic
+> offline embedder so it always runs.
 
 ---
 
-## Usage
+## Quickstart A — MCP server (the headline)
 
-### CLI
+Plug Engraphis into any MCP-capable agent. With Claude Code:
 
 ```bash
-# Store a memory
-python -m scripts.cli ingest "User prefers dark mode" -n preferences -k theme
-
-# Store a file
-python -m scripts.cli ingest-file notes.md -n vault
-
-# Recall relevant memories
-python -m scripts.cli recall "What does the user prefer?" -n preferences
-
-# Chat with memory context (uses your configured LLM)
-python -m scripts.cli chat "What do you know about Alice?"
-
-# Generate consolidated thoughts
-python -m scripts.cli thoughts -n vault
-
-# List documents
-python -m scripts.cli list -n vault
-
-# Delete a namespace
-python -m scripts.cli delete-namespace test --force
+pip install -e ".[mcp]"
+claude mcp add engraphis -- engraphis-mcp
 ```
 
-### Python (direct API)
+For Cursor / Cline / Zed / Windsurf, add to your MCP config:
+
+```json
+{
+  "mcpServers": {
+    "engraphis": { "command": "engraphis-mcp" }
+  }
+}
+```
+
+Your agent now has 15 tools:
+
+| Category | Tool | What it does |
+|---|---|---|
+| Write | `engraphis_remember` | Store a fact; deterministically resolved against similar memories (add/reinforce/supersede) |
+| Write | `engraphis_record_event` | Append a lightweight episodic log entry (lower ceremony than remember) |
+| Write | `engraphis_link` | Explicitly connect two related memories |
+| Read | `engraphis_recall` | Hybrid vector + lexical + graph recall for a query |
+| Read | `engraphis_recall_proactive` | "What should I know right now" — no query needed |
+| Read | `engraphis_why` | The current answer to a question, plus whatever it superseded |
+| Read | `engraphis_timeline` | Full bi-temporal history of a fact, oldest first |
+| Code | `engraphis_index_repo` | Parse a repo into the code symbol graph (functions/classes/calls) |
+| Code | `engraphis_search_code` | Find symbols by name, with their callers |
+| Governance | `engraphis_forget` | Retire a memory — bi-temporal close, never a hard delete |
+| Governance | `engraphis_pin` | Exempt a memory from future automatic decay/pruning |
+| Governance | `engraphis_correct` | Replace a memory's content without losing the history |
+| Session | `engraphis_start_session` / `engraphis_end_session` | Session lifecycle with cross-session handoff (open threads/summary carry forward) |
+| Ops | `engraphis_stats` | Memory counts for health/onboarding checks |
+
+Example flow an agent runs on its own:
+
+```text
+engraphis_remember(content="We use pnpm for all frontend repos.", workspace="acme", repo="web")
+engraphis_recall(query="which package manager for the frontend?", workspace="acme", repo="web")
+  → "We use pnpm for all frontend repos."   (survives across sessions and restarts)
+
+engraphis_remember(content="We switched the rate limit from 100 to 500 req/min.", ...)
+engraphis_why(query="what is the rate limit", ...)
+  → answer: 500 req/min · supersedes: the old 100 req/min memory (closed, not deleted)
+```
+
+---
+
+## Quickstart B — REST server + dashboard
+
+```bash
+pip install -e ".[server]"
+cp .env.example .env            # optional: set your LLM provider + key
+python -m scripts.start_server  # http://127.0.0.1:8700  (dashboard at /, OpenAPI at /docs)
+```
+
+Use it from Python:
 
 ```python
 import httpx
-
 with httpx.Client(base_url="http://127.0.0.1:8700", timeout=60) as c:
-    # Store
-    c.post("/memory/insert", json={
-        "key": "theme-pref",
-        "content": "User prefers dark mode",
-        "namespace": "preferences",
-    })
-
-    # Recall
-    r = c.post("/memory/query", json={
-        "namespace": "preferences",
-        "query": "What does the user prefer?",
-        "maxChunks": 5,
-    })
+    c.post("/memory/insert", json={"key": "theme", "content": "User prefers dark mode.",
+                                   "namespace": "preferences"})
+    r = c.post("/memory/query", json={"namespace": "preferences",
+                                      "query": "what theme does the user prefer?", "maxChunks": 5})
     print(r.json()["data"]["llmContextMessage"])
-
-    # Chat with memory
-    r = c.post("/memory/conversations", json={
-        "messages": [{"role": "user", "content": "What do you know about me?"}],
-    })
-    print(r.json()["data"]["answer"])
 ```
 
-### Upstream SDK Compatibility
+Run it in Docker:
 
-If you have the official `tinyhumansai` SDK installed, point it at your local server — no code changes needed:
-
-```powershell
-$env:TINYHUMANS_BASE_URL = "http://127.0.0.1:8700"
-$env:TINYHUMANS_TOKEN = "local-dev"
+```bash
+docker compose up --build       # binds 8700, persists the DB in a named volume
 ```
+
+---
+
+## Quickstart C — Python library (no server)
 
 ```python
-import tinyhumansai as api
+from engraphis.service import MemoryService
 
-client = api.TinyHumansMemoryClient(token="local-dev")
-client.insert_memory(item={
-    "key": "theme",
-    "content": "User prefers dark mode",
-    "namespace": "preferences",
-})
-ctx = client.recall_memory(namespace="preferences", prompt="user preferences")
-print(ctx.context)
+mem = MemoryService.create("engraphis.db")          # or ":memory:"
+mem.remember("Auth migrated from JWT to PASETO because key rotation was painful.",
+             workspace="acme", repo="api", mtype="episodic")
+hit = mem.recall("why did we change auth?", workspace="acme", repo="api")
+print(hit["context"])
 ```
+
+The same validated `MemoryService` backs the MCP server, so behavior is identical everywhere.
 
 ---
 
-## API Reference
+## How it works
 
-All routes are under `/memory` and return `{"data": ...}`. Full interactive docs at `http://127.0.0.1:8700/docs`.
+```
+query
+  └─ SearchFilter (scope + as_of time anchor)
+     └─ 3 retrieval arms (parallel, then fused):
+        • vector   — cosine over local embeddings
+        • lexical  — FTS5/BM25 (with a LIKE fallback)
+        • graph    — entity-expansion over the bi-temporal knowledge graph
+     └─ Reciprocal Rank Fusion + six-term weighted score
+     └─ rerank → context packing (token budget) → reinforce
+```
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/memory/insert` | Upsert a memory (key → documentId) |
-| `POST` | `/memory/query` | Recall context for a prompt |
-| `POST` | `/memory/admin/delete` | Delete an entire namespace |
-| `POST` | `/memory/documents` | Insert a single document |
-| `POST` | `/memory/documents/batch` | Insert multiple documents |
-| `GET` | `/memory/documents` | List documents |
-| `GET` | `/memory/documents/{id}` | Get a single document |
-| `DELETE` | `/memory/documents/{id}` | Delete a single document |
-| `POST` | `/memory/queries` | Query memory context (optional LLM answer) |
-| `POST` | `/memory/conversations` | Chat with memory context |
-| `POST` | `/memory/interactions` | Record interaction signals |
-| `POST` | `/memory/interact` | Mirrored interaction recording |
-| `POST` | `/memory/memories/thoughts` | Generate consolidated thoughts (LLM) |
-| `POST` | `/memory/memories/recall` | Recall from Ebbinghaus bank by retention |
-| `POST` | `/memory/memories/context` | Recall context by namespace |
-| `POST` | `/memory/recall` | Recall highest-retention memories |
-| `POST` | `/memory/chat` | Chat with memory (mirrored) |
-| `GET` | `/memory/admin/graph-snapshot` | Entity-relation graph snapshot |
-| `GET` | `/memory/ingestion/jobs/{id}` | Get ingestion job status |
-| `GET` | `/memory/health` | Health check |
+**Key algorithms**
+
+- **Ebbinghaus retention:** `R(t) = exp(−Δt / S)` — memories decay unless reinforced.
+- **Spacing-effect reinforcement:** `S_new = S·(1 + α·ln(1 + access_count)) + boost`.
+- **Interaction boosts:** view `0.05` · recall `0.15` · react `0.20` · reply `0.50` · create `1.00`.
+- **Six-term recall score:** `w_r·retention + w_s·semantic + w_l·lexical + w_g·graph + w_i·importance + w_c·recency − w_x·staleness`, per-memory-type weights.
+
+Memories are **typed** (`working` / `episodic` / `semantic` / `procedural`) and **scoped**
+(`session` / `repo` / `workspace` / `user`), each with its own lifecycle and weight profile.
 
 ---
 
-## How It Works
+## Configuration
 
-### Architecture (from the Engraphis paper)
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    MEMORY LAYER                         │
-│  ┌──────────┐  ┌──────────┐  ┌────────────────────┐    │
-│  │ Semantic │  │ Entity   │  │ State-Transition   │    │
-│  │ Vectors  │  │ Graph    │  │ Event Ledger       │    │
-│  │ (SQLite) │  │ (SQLite) │  │ (SQLite)           │    │
-│  └──────────┘  └──────────┘  └────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
-                         ▲ │
-    ┌─ Phase 1 ─────────┘ │  reweight (Phase 4)
-    │ Ingest: embed,      │  R = e^(-t/S)
-    │ extract entities    │  S grows with access
-    │ append events       │
-    │                      ▼
-┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐
-│ Phase 1 │→ │ Phase 2 │→ │ Phase 3 │→ │ Phase 4 │
-│ Ingest  │  │ Recall  │  │ Action  │  │Reweight │
-│         │  │+ Thought│  │(LLM)    │  │+ Write  │
-└─────────┘  └─────────┘  └─────────┘  └─────────┘
-```
-
-### Key Algorithms
-
-**Ebbinghaus Retention** — memories decay over time unless reinforced:
-```
-R(t) = exp(-t / S)
-S_new = S × (1 + 0.3 × log(1 + access_count))
-```
-
-**Interaction-Aware Boost** — engagement signals strengthen memories:
-```
-view → +0.05, react → +0.20, reply → +0.50, create → +1.00
-```
-
-**Conscious Recall** — retrieval scored by `retention × cosine_similarity × surprise`
-
-**Thought Synthesis** — background loop calls your LLM to produce latent-state JSON:
-```json
-{"inference": "...", "contradiction": "...", "follow_up": "...", "next_action": "..."}
-```
-
-### Background Loop
-
-Every `ENGRAPHIS_LOOP_INTERVAL` seconds (default 60), the server:
-1. Runs a **decay pass** — reduces stability for stale memories
-2. Recalls top-K memories per namespace
-3. Calls your LLM to **synthesize a thought**
-4. **Persists the thought** as a new memory artifact
-
-Set `ENGRAPHIS_LOOP_INTERVAL=0` to disable.
-
----
-
-## Configuration Reference
+All via environment (or `.env`). Common keys:
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
 | `ENGRAPHIS_HOST` | `127.0.0.1` | Server bind address |
 | `ENGRAPHIS_PORT` | `8700` | Server port |
-| `ENGRAPHIS_DB_PATH` | `./neocortex.db` | SQLite database file |
-| `ENGRAPHIS_EMBED_MODEL` | `all-MiniLM-L6-v2` | sentence-transformers model |
-| `ENGRAPHIS_LLM_PROVIDER` | `openai` | LLM provider |
+| `ENGRAPHIS_API_TOKEN` | — | If set, REST API requires `Authorization: Bearer <token>` |
+| `ENGRAPHIS_CORS_ORIGINS` | loopback | Comma-separated CORS allow-list |
+| `ENGRAPHIS_DB_PATH` | `./engraphis.db` | SQLite database file |
+| `ENGRAPHIS_EMBED_MODEL` | `all-MiniLM-L6-v2` | sentence-transformers model (empty → offline embedder) |
+| `ENGRAPHIS_LLM_PROVIDER` | `openai` | `openai \| anthropic \| google \| openrouter \| custom` |
 | `ENGRAPHIS_LLM_MODEL` | `gpt-4o-mini` | LLM model name |
-| `ENGRAPHIS_LLM_API_KEY` | — | LLM API key |
-| `ENGRAPHIS_LLM_BASE_URL` | provider default | Custom endpoint URL |
-| `ENGRAPHIS_LLM_EXTRA_HEADERS` | — | JSON string of extra headers |
-| `ENGRAPHIS_LOOP_INTERVAL` | `60` | Background loop seconds (0=off) |
-| `ENGRAPHIS_LOOP_TOP_K` | `20` | Max memories per loop cycle |
-| `ENGRAPHIS_DECAY_HALFLIFE_DAYS` | `7` | Ebbinghaus half-life |
+| `ENGRAPHIS_LLM_API_KEY` | — | LLM API key (only for chat/synthesis) |
+| `ENGRAPHIS_LOOP_INTERVAL` | `60` | Background consolidation seconds (0 = off) |
+
+See `.env.example` for the full list.
 
 ---
 
-## Project Structure
+## Project structure
 
 ```
 engraphis/
-├── neocortex/
-│   ├── config.py            # Settings (env-driven)
-│   ├── models.py            # Pydantic request/response models
-│   ├── app.py               # FastAPI app + background loop
-│   ├── stores/              # SQLite storage layer
-│   │   ├── __init__.py      # Schema, connections, vector serialization
-│   │   ├── vectors.py       # Memory CRUD + retention metadata
-│   │   ├── graph.py         # Entity-relation graph
-│   │   └── ledger.py        # Events, interactions, thoughts, jobs
-│   ├── engines/             # Core memory algorithms
-│   │   ├── embedder.py      # sentence-transformers + chunking
-│   │   ├── ingest.py        # Phase 1: embed + extract entities
-│   │   ├── recall.py        # Phase 2: conscious recall
-│   │   ├── reweight.py      # Phase 4: Ebbinghaus decay + reinforcement
-│   │   └── thoughts.py      # Phase 2: LLM thought synthesis
-│   ├── llm/
-│   │   └── client.py        # External LLM client (5 providers)
-│   └── routes/
-│       └── memory.py        # All 20 API routes
-├── scripts/
-│   ├── start_server.py      # Launch uvicorn
-│   ├── cli.py               # Interactive CLI
-│   ├── seed_from_obsidian.py# Migrate vault → memory
-│   ├── test_routes.py       # Smoke tests
-│   └── sdk_compat.py        # Upstream SDK compatibility helper
-├── pyproject.toml
-├── requirements.txt
-├── .env.example
-└── README.md
+├── engraphis/
+│   ├── core/                # v2 engine — interfaces, store, recall, scoring, resolve, schema, ids
+│   ├── backends/            # pluggable embedder / vector index / reranker / codegraph (offline fallbacks)
+│   ├── service.py           # validated MemoryService facade (no MCP dependency)
+│   ├── mcp_server.py        # MCP server — 15 tools (write/read/governance/code/session)
+│   ├── config.py            # env-driven settings
+│   ├── app.py               # REST server (FastAPI) + dashboard + auth middleware
+│   ├── routes/ stores/ engines/ llm/   # REST server surface
+│   └── static/              # dashboard
+├── eval/                    # offline retrieval eval harness + datasets (incl. conflict-resolution cases)
+├── tests/                   # pytest suite (offline, numpy-only core)
+├── scripts/                 # start_server, cli, migrate_to_v2, seed_from_obsidian
+├── Dockerfile / docker-compose.yml
+└── pyproject.toml
 ```
 
 ---
 
-## LLM Provider Examples
+## Development
 
-### OpenAI
-```ini
-ENGRAPHIS_LLM_PROVIDER=openai
-ENGRAPHIS_LLM_MODEL=gpt-4o-mini
-ENGRAPHIS_LLM_API_KEY=sk-...
+The offline quality gate (no network, no API key) — keep it green:
+
+```bash
+pip install numpy pytest ruff
+python -m pytest tests/ -q
+python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
+python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5
+python -m eval.ablation
+ruff check .
 ```
 
-### Anthropic
-```ini
-ENGRAPHIS_LLM_PROVIDER=anthropic
-ENGRAPHIS_LLM_MODEL=claude-3-5-haiku-20241022
-ENGRAPHIS_LLM_API_KEY=sk-ant-...
-```
+For the code-symbol graph with real AST parsing (optional; falls back to a regex
+indexer without it): `pip install -e ".[code]"`.
 
-### Google Gemini
-```ini
-ENGRAPHIS_LLM_PROVIDER=google
-ENGRAPHIS_LLM_MODEL=gemini-2.0-flash
-ENGRAPHIS_LLM_API_KEY=AIza...
-```
-
-### OpenRouter (access many models through one API)
-```ini
-ENGRAPHIS_LLM_PROVIDER=openrouter
-ENGRAPHIS_LLM_MODEL=anthropic/claude-3.5-sonnet
-ENGRAPHIS_LLM_API_KEY=sk-or-...
-ENGRAPHIS_LLM_BASE_URL=https://openrouter.ai/api/v1
-```
-
-### Custom OpenAI-compatible endpoint
-```ini
-ENGRAPHIS_LLM_PROVIDER=custom
-ENGRAPHIS_LLM_MODEL=your-model-name
-ENGRAPHIS_LLM_API_KEY=your-key
-ENGRAPHIS_LLM_BASE_URL=https://your-endpoint/v1
-ENGRAPHIS_LLM_EXTRA_HEADERS={"X-Title":"my-app"}
-```
+See `AGENTS.md` for architecture and conventions, `SECURITY.md` for the threat model, and
+`CHANGELOG.md` for release notes.
 
 ---
 
 ## License
 
-MIT — same as the upstream Engraphis repo.
+Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). "Engraphis" is a trademark of the
+Engraphis project; the license does not grant trademark rights.

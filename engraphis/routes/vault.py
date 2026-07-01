@@ -1,9 +1,7 @@
 """Vault management, file editing, folder import, memory health, bulk ops, and context preview routes."""
 from __future__ import annotations
 
-import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -320,7 +318,7 @@ async def upload_folder_smart(
         texts = [f"{fd['title']}\n\n{fd['content']}" for fd in file_data]
         try:
             vecs = embedder.embed_batch(texts)
-        except Exception as e:
+        except Exception:
             # Fallback: embed individually
             vecs = [embedder.embed(t) for t in texts]
 
@@ -421,7 +419,7 @@ async def auto_categorize_memories(req: AutoCategorizeReq):
                 "confidence": cat.get("confidence", 0),
                 "reason": cat.get("reason", ""),
             })
-        except Exception as e:
+        except Exception:
             results["errors"] += 1
 
     return _ok(results)
@@ -497,7 +495,6 @@ async def find_stale(namespace: Optional[str] = None, min_age_days: int = 30,
 async def health_overview(namespace: Optional[str] = None):
     """GET /memory/health/overview — aggregate health metrics."""
     all_mems = mem_store.list_documents(namespace=namespace, limit=10000)
-    now = now_ts()
     retentions = [retention_score(m) for m in all_mems]
     healthy = sum(1 for r in retentions if r > 0.5)
     decaying = sum(1 for r in retentions if 0.2 < r <= 0.5)

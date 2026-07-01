@@ -17,7 +17,7 @@ most common mistake here.
 
 | | **v2 — the target (build here)** | **v1 — legacy neocortex clone (running server)** |
 |---|---|---|
-| Status | The future, per `MASTER_PLAN.md`. Phases 0–1 done. | Working reference implementation; flat namespaces. |
+| Status | The future, per `MASTER_PLAN.md`. Phases 0–1 done; parts of 2/3/5 done (see §6). | Working reference implementation; flat namespaces. |
 | Model | Scoped + bi-temporal + typed; interface-driven. | Single flat `namespace` string per memory. |
 | Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/`, `static/` |
 | Data | new v2 schema (`SCHEMA_VERSION = 2`) | `neocortex.db` |
@@ -38,10 +38,11 @@ pip install -e ".[dev]"             # full stack: FastAPI server, ST embeddings,
 cp .env.example .env                # only needed for the v1 server / LLM features
 
 # ── Quality gate (offline, no API key — KEEP THIS GREEN; mirrors .github/workflows/ci.yml) ──
-python -m pytest tests/ -q                                         # 36 unit tests
-python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5  # retrieval eval gate
-python -m eval.ablation                                            # vector-only vs hybrid
-ruff check .                                                       # lint (line-length 100, py39)
+python -m pytest tests/ -q                                          # unit tests (offline)
+python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5   # retrieval eval gate
+python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5  # larger eval; covers conflict resolution
+python -m eval.ablation                                             # vector-only vs hybrid
+ruff check .                                                        # lint (line-length 100, py39)
 
 # ── Run the v1 server (needs the full install) ───────────────────────────────
 python -m scripts.start_server      # http://127.0.0.1:8700  (dashboard at /, OpenAPI at /docs)
@@ -78,6 +79,13 @@ query
 
 Backends are selected by `get_embedder()` / `get_vector_index()` / `get_reranker()` and
 injected through `MemoryEngine` — never imported directly inside `core/` (see §3.1).
+
+The write path (`MemoryEngine.remember_with_resolution()`) mirrors this: embed → find
+same-scope neighbors via the vector index → `core/resolve.py::resolve()` decides
+ADD / NOOP (reinforce, don't duplicate) / INVALIDATE (close old validity, insert new) from
+token-overlap on the text itself — deterministic, no LLM call on untrusted input. `remember()`
+is a thin wrapper that returns just the resulting id; use `remember_with_resolution()` when you
+need the decision detail.
 
 ---
 
@@ -142,14 +150,29 @@ These are pure, unit-tested functions — change them only with a corresponding 
 
 ## 6. Status — what's real vs planned (`MASTER_PLAN.md` §18)
 
-- **Done:** **Phase 0** (interface contracts, scoped + bi-temporal schema, v1→v2 migration,
-  eval harness + CI) and **Phase 1** (hybrid recall, six-term score, RRF, rerank;
-  SentenceTransformer embedder + `sqlite-vec` index, each with an offline fallback). 36 tests green.
-- **Planned (do not assume these exist yet):** Phase 2 — LLM fact extraction +
-  `ADD/UPDATE/NOOP/INVALIDATE` conflict resolution, full Personalized PageRank, A-MEM
-  linking. Phase 3 — tree-sitter code-symbol graph, **MCP server**, session lifecycle
-  (no MCP server exists in the tree today). Phase 4 — consolidation
-  (episodic→semantic→procedural) + scope promotion. Phase 5 — security/SDKs. Phase 6 — Rust hot path.
+- **Done — Phase 0:** interface contracts, scoped + bi-temporal schema, v1→v2 migration, eval
+  harness + CI.
+- **Done — Phase 1:** hybrid recall, six-term score, RRF, rerank; SentenceTransformer embedder +
+  `sqlite-vec` index, each with an offline fallback.
+- **Done — partial Phase 2:** deterministic (no-LLM) write-path conflict resolution
+  (`core/resolve.py`, ADD/NOOP/INVALIDATE — see §2). **Not done:** LLM-based fact extraction,
+  full Personalized PageRank (the graph arm is still 1-hop entity expansion), A-MEM-style
+  *evolution* (linking exists via `Store.add_link`/`engraphis_link`; neighbors don't get
+  auto-updated when a new note changes how they should be understood).
+- **Done — partial Phase 3:** **MCP server exists** (`engraphis/mcp_server.py`, 15 tools:
+  write/read/governance/code/session — do not assume only `remember`/`recall` exist, check the
+  tool list) and a **code-symbol graph** (`backends/codegraph.py`, tree-sitter with a
+  dependency-free regex fallback; `MemoryEngine.index_repo()` / `engraphis_search_code`).
+  Call-graph edges are name-based, not type-resolved (best-effort, documented as such in
+  `backends/codegraph.py`). **Not done:** incremental/file-watcher re-indexing (today
+  `index_repo` is a full re-scan; idempotent per file, not incremental), git-as-world-time
+  signal.
+- **Done — partial Phase 5:** input validation/sanitization, optional bearer auth, CORS
+  allow-list, governance tools (`forget`/`pin`/`correct`, audited, never a hard delete),
+  Apache-2.0 licensing/packaging. **Not done:** encryption at rest, built-in rate limiting,
+  per-token tenant authorization — see `SECURITY.md`.
+- **Not done at all:** Phase 4 — the consolidation/reflection loop (episodic→semantic→procedural
+  distillation, scope promotion). Phase 6 — Rust hot path.
 - The **v1 FastAPI server** is the legacy neocortex clone and still runs; treat it as a
   compatibility/reference surface, not the place for new capability.
 
@@ -165,10 +188,18 @@ These are pure, unit-tested functions — change them only with a corresponding 
   (`self.has_fts5`). Don't assume BM25 is available.
 - **Secrets & data are git-ignored:** `.env`, `neocortex.db`, `*.db-wal`, `*.db-shm`. Never
   commit, print, or paste their contents.
-- **No `.git` in this checkout** — don't rely on `git log`/`blame` in-session. CI
-  (`.github/workflows/ci.yml`) runs against the GitHub `main` branch.
-- **Synced-folder flakiness:** if the repo sits on OneDrive, a transient `SyntaxError` or
-  stale-attribute error immediately after an edit is mid-sync, not your code — re-run once.
+- **`.git` exists but has a single "Initial commit"** — every feature/fix pass since has been
+  made directly in the working tree and is still uncommitted (`git status` showed ~36 modified +
+  ~20 new files as of 2026-07-01). `git log`/`blame` won't tell you anything about recent work —
+  read `CHANGELOG.md` instead. Commit in logical chunks before this grows further; don't let it
+  become one giant diff.
+- **Synced-folder flakiness:** if the repo sits on OneDrive (or any host-to-sandbox mount), a
+  transient `SyntaxError`, `AttributeError` for a method you just added, or a shell command
+  reading back fewer lines than you just wrote is mid-sync, not your code. A single re-run is
+  sometimes not enough — if a file's content looks stale from the shell after an edit, the
+  reliable fix is to rewrite that file's content directly from the shell (e.g. a heredoc) and
+  re-verify with `wc -l`/`grep` before trusting a test run against it; clearing `__pycache__`
+  alone does not fix this (the staleness is in the source, not in cached bytecode).
 - **`README.md` "Project Structure" is stale** (it names a `neocortex/` package; the real
   package is `engraphis/`). Trust the tree in this file.
 

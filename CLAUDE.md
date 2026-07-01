@@ -19,6 +19,7 @@ No network or API key required; this mirrors `.github/workflows/ci.yml` and must
 ```bash
 python -m pytest tests/ -q && \
 python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5 && \
+python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5 && \
 python -m eval.ablation
 ```
 
@@ -31,7 +32,9 @@ If you changed retrieval, scoring, or ranking, add or update an eval — per AGE
 - `/review` — review a GitHub pull request (`/code-review` for the local working diff).
 - `/security-review` — review pending changes for vulnerabilities. **Run this before finishing
   any change to the write/ingest path:** ingested content is treated as untrusted and memory
-  poisoning is an explicit threat (MASTER_PLAN.md §16).
+  poisoning is an explicit threat (MASTER_PLAN.md §16). This now also covers
+  `MemoryEngine.index_repo()` (reads local files at an agent-supplied path — see
+  `SECURITY.md` §5) and the deterministic conflict resolver (`core/resolve.py`).
 
 ## Working style in this repo
 

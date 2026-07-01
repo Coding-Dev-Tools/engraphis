@@ -174,7 +174,7 @@ def run() -> None:
 
         # Delete document
         try:
-            r = c.delete(f"/memory/documents/doc-a", params={"namespace": ns})
+            r = c.delete("/memory/documents/doc-a", params={"namespace": ns})
             assert r.status_code == 200, r.text
             _ok("delete_document")
         except Exception as e:

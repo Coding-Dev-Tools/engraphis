@@ -5,26 +5,71 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "engraphis"
 version = "0.1.0"
-description = "Engraphis — self-hosted AI memory system with Ebbinghaus decay, interaction-aware recall, and conscious thought synthesis."
+description = "Local-first AI memory engine for agents — Ebbinghaus decay, interaction-aware recall, bi-temporal facts, hybrid retrieval, and an MCP server. You bring the LLM."
 readme = "README.md"
-license = {text = "MIT"}
+license = { text = "Apache-2.0" }
 requires-python = ">=3.9"
+authors = [{ name = "The Engraphis Authors" }]
+keywords = ["ai", "agents", "memory", "mcp", "rag", "vector-search", "llm", "retrieval"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries",
+]
 dependencies = [
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+# The REST server + real embeddings (the full self-hosted stack).
+server = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "httpx>=0.25",
-    "numpy>=1.24",
     "pydantic>=2.0",
     "python-dotenv>=1.0",
     "sentence-transformers>=2.7",
 ]
-
-[project.optional-dependencies]
+# The MCP server — plug Engraphis into Claude Code, Cursor, Cline, Zed, etc.
+mcp = [
+    "mcp>=1.2.0",
+    "pydantic>=2.0",
+    "sentence-transformers>=2.7",
+]
+# Code-symbol graph indexing (MASTER_PLAN.md §9). Optional: index_repo()/search_code()
+# fall back to a dependency-free regex indexer without this — see backends/codegraph.py.
+code = [
+    "tree-sitter>=0.23",
+    "tree-sitter-language-pack>=0.2",
+]
+# Everything, for a full self-hosted install.
+all = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "httpx>=0.25",
+    "pydantic>=2.0",
+    "python-dotenv>=1.0",
+    "sentence-transformers>=2.7",
+    "mcp>=1.2.0",
+    "tree-sitter>=0.23",
+    "tree-sitter-language-pack>=0.2",
+]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.4"]
+
+[project.urls]
+Homepage = "https://github.com/engraphis/engraphis"
+Repository = "https://github.com/engraphis/engraphis"
+Issues = "https://github.com/engraphis/engraphis/issues"
 
 [project.scripts]
 engraphis-server = "scripts.start_server:main"
 engraphis-cli = "scripts.cli:main"
+engraphis-mcp = "engraphis.mcp_server:main"
 
 [tool.setuptools.packages.find]
 include = ["engraphis*", "scripts*"]

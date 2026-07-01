@@ -53,7 +53,7 @@ print("Conflict check:", r.json()["data"])
 # 7. Smart import endpoint exists
 print()
 print("Checking new routes...")
-from engraphis.app import app
+from engraphis.app import app  # noqa: E402
 routes = [r.path for r in app.routes if hasattr(r, "path")]
 for name in ["/memory/vaults/upload-folder-smart", "/memory/auto-categorize", "/memory/conflict-check"]:
     print(f"  {name}: {'OK' if name in routes else 'MISSING'}")

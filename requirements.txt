@@ -1,3 +1,7 @@
+# Full self-hosted stack (REST server + MCP server + real embeddings).
+# For a minimal core (numpy only):            pip install -e .
+# For just the MCP server:                    pip install -e ".[mcp]"
+# For just the REST server:                   pip install -e ".[server]"
 fastapi>=0.110
 uvicorn[standard]>=0.29
 httpx>=0.25
@@ -5,3 +9,4 @@ numpy>=1.24
 pydantic>=2.0
 python-dotenv>=1.0
 sentence-transformers>=2.7
+mcp>=1.2.0

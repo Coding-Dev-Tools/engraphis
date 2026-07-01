@@ -13,7 +13,7 @@ import numpy as np
 
 from engraphis.config import settings
 
-logger = logging.getLogger("neocortex.embedder")
+logger = logging.getLogger("engraphis.embedder")
 
 _model = None
 _dim: Optional[int] = None

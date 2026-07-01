@@ -24,6 +24,8 @@ class InsertMemoryRequest(BaseModel):
     metadata: Optional[dict[str, Any]] = None
     created_at: Optional[float] = None
     updated_at: Optional[float] = None
+    memory_type: Optional[str] = None
+    memoryType: Optional[str] = None
 
 
 class QueryMemoryRequest(BaseModel):
@@ -95,6 +97,11 @@ class InteractionRequest(BaseModel):
     interactionLevels: Optional[list[str]] = None
     interaction_levels: Optional[list[str]] = None
     timestamp: Optional[float] = None
+
+
+class ReinforceRequest(BaseModel):
+    documentId: str
+    namespace: Optional[str] = None
 
 
 class ThoughtRequest(BaseModel):

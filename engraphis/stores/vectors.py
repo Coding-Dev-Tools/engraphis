@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import time
 from typing import Any, Optional
 
 import numpy as np
@@ -122,17 +121,25 @@ def update_memory_content(
     conn = get_conn()
     sets = []
     params = []
-    if title is not None: sets.append("title=?"); params.append(title)
-    if content is not None: sets.append("content=?"); params.append(content)
+    if title is not None:
+        sets.append("title=?")
+        params.append(title)
+    if content is not None:
+        sets.append("content=?")
+        params.append(content)
     if metadata is not None:
-        sets.append("metadata=?"); params.append(json.dumps(metadata, ensure_ascii=False))
+        sets.append("metadata=?")
+        params.append(json.dumps(metadata, ensure_ascii=False))
     if vector is not None:
-        sets.append("vector=?"); params.append(vector_to_blob(vector))
+        sets.append("vector=?")
+        params.append(vector_to_blob(vector))
     if memory_type is not None:
-        sets.append("memory_type=?"); params.append(memory_type)
+        sets.append("memory_type=?")
+        params.append(memory_type)
     if not sets:
         return get_memory(namespace, document_id)
-    sets.append("updated_at=?"); params.append(now_ts())
+    sets.append("updated_at=?")
+    params.append(now_ts())
     params.extend([namespace, document_id])
     conn.execute(
         f"UPDATE memories SET {', '.join(sets)} WHERE namespace=? AND document_id=?",

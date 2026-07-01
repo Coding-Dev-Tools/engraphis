@@ -2,6 +2,9 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+*.db
+*.db-wal
+*.db-shm
 neocortex.db
 neocortex.db-wal
 neocortex.db-shm
@@ -11,5 +14,4 @@ dist/
 build/
 *.egg-info/
 .pytest_cache/
-.ruff_cache/
-models_cache/
+.ruf

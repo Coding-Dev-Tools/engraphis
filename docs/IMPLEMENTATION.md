@@ -5,7 +5,14 @@ Phase 0 delivers the **architectural backbone**; Phase 1 delivers the **real
 retrieval core** (hybrid recall + scoring + rerank + engine facade). Everything is
 tested (36/36 passing) and dependency-light so it runs anywhere offline.
 
-> Status: Phases 0–1 complete. Phases 2–6 are specified in `MASTER_PLAN.md` §18.
+> Status: Phases 0–1 complete as described below. Since then, partial Phase 2/3/5 work has
+> shipped on top of this foundation — deterministic write-path conflict resolution
+> (`core/resolve.py`), the MCP server (`mcp_server.py`, `service.py`), governance/bi-temporal/
+> proactive tools, and a code-symbol graph (`backends/codegraph.py`). See `CHANGELOG.md` for
+> what shipped when and `RELEASE_READINESS.md` for current status; `AGENTS.md` §6 is the
+> up-to-date phase tracker. The rest of this document is a historical snapshot of the Phase 0–1
+> foundation and is still accurate for that layer. Remaining Phases 2–6 work is specified in
+> `MASTER_PLAN.md` §18.
 
 ## What's here
 

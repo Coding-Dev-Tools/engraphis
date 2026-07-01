@@ -12,8 +12,6 @@ Memory types (from cognitive science):
 """
 from __future__ import annotations
 
-import json
-import time
 from typing import Any, Optional
 
 from engraphis.stores import get_conn, now_ts
@@ -58,12 +56,22 @@ def update_vault(namespace: str, *, name: Optional[str] = None,
     conn = get_conn()
     sets = []
     params = []
-    if name is not None: sets.append("name=?"); params.append(name)
-    if description is not None: sets.append("description=?"); params.append(description)
-    if color is not None: sets.append("color=?"); params.append(color)
-    if memory_type is not None: sets.append("memory_type=?"); params.append(memory_type)
-    if not sets: return get_vault(namespace)
-    sets.append("updated_at=?"); params.append(now_ts())
+    if name is not None:
+        sets.append("name=?")
+        params.append(name)
+    if description is not None:
+        sets.append("description=?")
+        params.append(description)
+    if color is not None:
+        sets.append("color=?")
+        params.append(color)
+    if memory_type is not None:
+        sets.append("memory_type=?")
+        params.append(memory_type)
+    if not sets:
+        return get_vault(namespace)
+    sets.append("updated_at=?")
+    params.append(now_ts())
     params.append(namespace)
     conn.execute(f"UPDATE vaults SET {', '.join(sets)} WHERE namespace=?", params)
     conn.commit()
