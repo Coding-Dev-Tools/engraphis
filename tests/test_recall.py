@@ -19,7 +19,8 @@ def _add(store, emb, wid, rid, text, **kw):
 
 def test_recall_returns_relevant_first():
     store, emb, eng = _engine()
-    wid = store.get_or_create_workspace("w"); rid = store.get_or_create_repo(wid, "r")
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
     _add(store, emb, wid, rid, "We standardized on pnpm as the package manager.")
     _add(store, emb, wid, rid, "The sky over the harbor was a pale shade of blue.")
     res = eng.recall("which package manager do we use?", SearchFilter(workspace_id=wid), k=2)
@@ -30,7 +31,8 @@ def test_recall_returns_relevant_first():
 def test_recall_scope_isolation():
     store, emb, eng = _engine()
     wid = store.get_or_create_workspace("w")
-    r1 = store.get_or_create_repo(wid, "repo1"); r2 = store.get_or_create_repo(wid, "repo2")
+    r1 = store.get_or_create_repo(wid, "repo1")
+    r2 = store.get_or_create_repo(wid, "repo2")
     _add(store, emb, wid, r1, "repo1 authenticates with PASETO.")
     _add(store, emb, wid, r2, "repo2 authenticates with JWT.")
     res = eng.recall("authentication", SearchFilter(workspace_id=wid, repo_id=r1), k=5)
@@ -40,7 +42,8 @@ def test_recall_scope_isolation():
 
 def test_recall_bitemporal_excludes_invalidated_fact():
     store, emb, eng = _engine()
-    wid = store.get_or_create_workspace("w"); rid = store.get_or_create_repo(wid, "r")
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
     old = _add(store, emb, wid, rid, "We use JWT for authentication.")
     store.close_validity(old)  # contradicted by new info
     _add(store, emb, wid, rid, "We use PASETO for authentication.")
@@ -50,7 +53,8 @@ def test_recall_bitemporal_excludes_invalidated_fact():
 
 def test_recall_reinforces_returned_memories():
     store, emb, eng = _engine()
-    wid = store.get_or_create_workspace("w"); rid = store.get_or_create_repo(wid, "r")
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
     mid = _add(store, emb, wid, rid, "pnpm is our package manager.")
     before = store.get_memory(mid).access_count
     eng.recall("package manager", SearchFilter(workspace_id=wid), k=1)
@@ -60,7 +64,8 @@ def test_recall_reinforces_returned_memories():
 def test_graph_arm_pulls_related_via_entities():
     from engraphis.core.interfaces import Edge, Node
     store, emb, eng = _engine()
-    wid = store.get_or_create_workspace("w"); rid = store.get_or_create_repo(wid, "r")
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
     # Entity graph: Redis —used_by→ checkout
     store.upsert_entity(Node(id="", name="Redis", ntype="tech", workspace_id=wid, repo_id=rid))
     store.upsert_entity(Node(id="", name="checkout", ntype="module", workspace_id=wid, repo_id=rid))

@@ -1,4 +1,3 @@
-import numpy as np
 import pytest
 
 from engraphis.core.interfaces import Edge, MemoryRecord, MemoryType, Node, Scope, SearchFilter
@@ -98,3 +97,30 @@ def test_reinforce_increases_stability_and_count(store):
     after = store.get_memory(mid)
     assert after.access_count == before.access_count + 1
     assert after.stability > before.stability
+
+
+def test_symbol_roundtrip_and_search(store):
+    sid = store.upsert_symbol(repo_id="repo_x", kind="function", name="add", fqname="add",
+                              file="calc.py", span="1-2", signature="def add(a, b):",
+                              lang="python", exported=True, content_hash="abc123")
+    assert sid.startswith("sym_")
+    hits = store.search_symbols("repo_x", "add")
+    assert any(h["name"] == "add" for h in hits)
+    assert store.count_symbols("repo_x") == 1
+
+
+def test_clear_symbols_for_file_replaces_not_accumulates(store):
+    store.upsert_symbol(repo_id="repo_x", kind="function", name="old", fqname="old",
+                        file="calc.py", span="1-1")
+    store.clear_symbols_for_file("repo_x", "calc.py")
+    store.upsert_symbol(repo_id="repo_x", kind="function", name="new", fqname="new",
+                        file="calc.py", span="1-1")
+    names = {h["name"] for h in store.search_symbols("repo_x", "")}
+    assert names == {"new"}
+
+
+def test_code_edge_callers(store):
+    store.add_code_edge(repo_id="repo_x", src="Calculator", dst="add", relation="calls",
+                        file="calc.py", line=9)
+    callers = store.get_symbol_callers("repo_x", "add")
+    assert any(c["src"] == "Calculator" for c in callers)

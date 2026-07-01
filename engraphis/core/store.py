@@ -148,6 +148,25 @@ class Store:
         d["open_threads"] = _loads(d.get("open_threads"), [])
         return d
 
+    def get_last_session(self, workspace_id: str, repo_id: Optional[str],
+                         *, exclude: Optional[str] = None) -> Optional[dict]:
+        """Most recently *ended* session in this repo — the cross-session handoff
+        source (MASTER_PLAN.md §10.1-10.2): the next session bootstraps from its
+        ``summary``/``open_threads`` instead of starting from nothing."""
+        sql = ("SELECT * FROM sessions WHERE workspace_id=? AND repo_id IS ? "
+               "AND ended_at IS NOT NULL")
+        params: list[Any] = [workspace_id, repo_id]
+        if exclude:
+            sql += " AND id != ?"
+            params.append(exclude)
+        sql += " ORDER BY ended_at DESC LIMIT 1"
+        row = self.conn.execute(sql, params).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["open_threads"] = _loads(d.get("open_threads"), [])
+        return d
+
     # ── memories ──────────────────────────────────────────────────────────────
     def add_memory(self, rec: MemoryRecord) -> str:
         if not rec.id:
@@ -200,6 +219,12 @@ class Store:
         self.conn.execute("UPDATE memories SET valid_to=? WHERE id=? AND valid_to IS NULL",
                           (at, memory_id))
         self.audit(actor, "invalidate", memory_id, reason)
+        self.conn.commit()
+
+    def set_pinned(self, memory_id: str, pinned: bool) -> None:
+        """Pinned memories are exempt from automatic decay/pruning (AGENTS.md §3.2);
+        governance (explicit forget/correct) can still act on them."""
+        self.conn.execute("UPDATE memories SET pinned=? WHERE id=?", (int(pinned), memory_id))
         self.conn.commit()
 
     def reinforce(self, memory_id: str, *, alpha: float = 0.3, boost: float = 0.0) -> None:
@@ -305,6 +330,21 @@ class Store:
                           (at or now_ts(), edge_id))
         self.conn.commit()
 
+    # ── memory-to-memory links (A-MEM style; MASTER_PLAN.md §8.4) ───────────────
+    def add_link(self, a: str, b: str, relation: str = "related") -> None:
+        self.conn.execute(
+            "INSERT INTO mem_links(a, b, relation, created_at) VALUES (?,?,?,?)",
+            (a, b, relation, now_ts()),
+        )
+        self.conn.commit()
+
+    def get_links(self, memory_id: str) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT a, b, relation, created_at FROM mem_links WHERE a=? OR b=?",
+            (memory_id, memory_id),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def neighbors(self, node_ids: list[str], *, at: Optional[float] = None) -> list[Edge]:
         if not node_ids:
             return []
@@ -317,6 +357,61 @@ class Store:
             (*node_ids, *node_ids, t, t),
         ).fetchall()
         return [_row_to_edge(r) for r in rows]
+
+    # ── code symbol graph (MASTER_PLAN.md §9) ───────────────────────────────────
+    def clear_symbols_for_file(self, repo_id: str, file: str) -> None:
+        """Re-indexing a file replaces its symbols/edges — incremental indexing is
+        idempotent per file, not additive."""
+        self.conn.execute("DELETE FROM symbols WHERE repo_id=? AND file=?", (repo_id, file))
+        self.conn.execute("DELETE FROM code_edges WHERE repo_id=? AND file=?", (repo_id, file))
+        self.conn.commit()
+
+    def upsert_symbol(self, *, repo_id: str, kind: str, name: str, fqname: str, file: str,
+                      span: str, signature: str = "", lang: str = "", exported: bool = False,
+                      content_hash: str = "") -> str:
+        sid = ids.new_id("symbol")
+        self.conn.execute(
+            "INSERT INTO symbols(id, repo_id, kind, name, fqname, file, span, signature, "
+            "lang, exported, content_hash, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, repo_id, kind, name, fqname, file, span, signature, lang, int(exported),
+             content_hash, now_ts()),
+        )
+        self.conn.commit()
+        return sid
+
+    def add_code_edge(self, *, repo_id: str, src: str, dst: str, relation: str,
+                      file: str = "", line: int = 0) -> str:
+        eid = ids.new_id("edge")
+        self.conn.execute(
+            "INSERT INTO code_edges(id, repo_id, src, dst, relation, file, line) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (eid, repo_id, src, dst, relation, file, line),
+        )
+        self.conn.commit()
+        return eid
+
+    def search_symbols(self, repo_id: str, query: str, *, limit: int = 20) -> list[dict]:
+        """Substring match on name/fqname (no embedding yet — v1 is lexical)."""
+        like = f"%{query}%"
+        rows = self.conn.execute(
+            "SELECT * FROM symbols WHERE repo_id=? AND (name LIKE ? OR fqname LIKE ?) "
+            "ORDER BY name LIMIT ?",
+            (repo_id, like, like, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_symbol_callers(self, repo_id: str, name: str, *, limit: int = 50) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM code_edges WHERE repo_id=? AND dst=? AND relation='calls' LIMIT ?",
+            (repo_id, name, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_symbols(self, repo_id: str) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM symbols WHERE repo_id=?", (repo_id,)
+        ).fetchone()
+        return int(row["n"]) if row else 0
 
     # ── events & audit ──────────────────────────────────────────────────────
     def append_event(self, *, kind: str, content: str, workspace_id: str = "",
@@ -346,11 +441,14 @@ class Store:
         params: list[Any] = []
         if flt:
             if flt.workspace_id:
-                where.append(f"{p}workspace_id=?"); params.append(flt.workspace_id)
+                where.append(f"{p}workspace_id=?")
+                params.append(flt.workspace_id)
             if flt.repo_id:
-                where.append(f"{p}repo_id=?"); params.append(flt.repo_id)
+                where.append(f"{p}repo_id=?")
+                params.append(flt.repo_id)
             if flt.session_id:
-                where.append(f"{p}session_id=?"); params.append(flt.session_id)
+                where.append(f"{p}session_id=?")
+                params.append(flt.session_id)
             if flt.scopes:
                 marks = ",".join("?" for _ in flt.scopes)
                 where.append(f"{p}scope IN ({marks})")
@@ -361,8 +459,10 @@ class Store:
                 params.extend(_enum(m) for m in flt.mtypes)
         if not include_invalid:
             t = (flt.as_of if flt and flt.as_of is not None else now_ts())
-            where.append(f"({p}valid_from IS NULL OR {p}valid_from<=?)"); params.append(t)
-            where.append(f"({p}valid_to IS NULL OR ?<{p}valid_to)"); params.append(t)
+            where.append(f"({p}valid_from IS NULL OR {p}valid_from<=?)")
+            params.append(t)
+            where.append(f"({p}valid_to IS NULL OR ?<{p}valid_to)")
+            params.append(t)
             where.append(f"{p}expired_at IS NULL")
         return where, params
 

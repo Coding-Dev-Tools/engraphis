@@ -1,6 +1,8 @@
+import pytest
+
 from engraphis.backends.vector_numpy import NumpyVectorIndex
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.interfaces import MemoryType, Scope
+from engraphis.core.interfaces import MemoryType, Scope, SearchFilter
 
 
 def test_engine_remember_and_recall():
@@ -29,3 +31,233 @@ def test_engine_respects_memory_type_and_scope():
                        workspace_id=wid, repo_id=rid, mtype=MemoryType.PROCEDURAL, scope=Scope.REPO)
     rec = eng.store.get_memory(mid)
     assert rec.mtype == MemoryType.PROCEDURAL and rec.scope == Scope.REPO
+
+
+# ── conflict resolution on the write path ───────────────────────────────────────
+
+def test_remember_adds_unrelated_facts():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    out1 = eng.remember_with_resolution("We standardized on pnpm for frontend repos.",
+                                        workspace_id=wid, repo_id=rid)
+    out2 = eng.remember_with_resolution("The design team prefers Figma for mockups.",
+                                        workspace_id=wid, repo_id=rid)
+    assert out1["op"] == "add" and out2["op"] == "add"
+    assert out1["id"] != out2["id"]
+
+
+def test_remember_noops_on_near_duplicate():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    text = "We standardized on pnpm as the package manager for all frontend repositories."
+    first = eng.remember_with_resolution(text, workspace_id=wid, repo_id=rid)
+    before = eng.store.get_memory(first["id"])
+    second = eng.remember_with_resolution(text, workspace_id=wid, repo_id=rid)
+    assert second["op"] == "noop"
+    assert second["id"] == first["id"]
+    after = eng.store.get_memory(first["id"])
+    assert after.stability > before.stability        # reinforced, not duplicated
+    assert len(eng.store.list_memories(SearchFilter(workspace_id=wid, repo_id=rid))) == 1
+
+
+def test_remember_invalidates_superseded_fact():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    old = eng.remember_with_resolution(
+        "Until 2026-01 the rate limit was 100 requests per minute per API key.",
+        workspace_id=wid, repo_id=rid)
+    new = eng.remember_with_resolution(
+        "As of 2026-02 the rate limit was raised to 500 requests per minute per API key.",
+        workspace_id=wid, repo_id=rid)
+    assert new["op"] == "invalidate"
+    assert new["superseded"] == [old["id"]]
+    live_ids = [m.id for m in eng.store.list_memories(SearchFilter(workspace_id=wid, repo_id=rid))]
+    assert old["id"] not in live_ids and new["id"] in live_ids
+
+
+def test_remember_keeps_related_but_complementary_facts():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    cause = eng.remember_with_resolution(
+        "The bug in checkout was caused by a race condition in the inventory service.",
+        workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC)
+    fix = eng.remember_with_resolution(
+        "We fixed the checkout race condition by adding a Redis lock around the stock decrement.",
+        workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC)
+    assert cause["op"] == "add" and fix["op"] == "add"
+
+
+def test_remember_resolve_conflicts_false_keeps_duplicates():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    text = "Build failed again on the flaky network test."
+    out1 = eng.remember_with_resolution(text, workspace_id=wid, repo_id=rid,
+                                        mtype=MemoryType.EPISODIC, resolve_conflicts=False)
+    out2 = eng.remember_with_resolution(text, workspace_id=wid, repo_id=rid,
+                                        mtype=MemoryType.EPISODIC, resolve_conflicts=False)
+    assert out1["op"] == "add" and out2["op"] == "add"
+    assert out1["id"] != out2["id"]
+
+
+# ── governance: forget / pin / correct ──────────────────────────────────────────
+
+def test_forget_invalidates_without_deleting():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    mid = eng.remember("A fact to forget.", workspace_id=wid, repo_id=rid)
+    eng.forget(mid, reason="no longer true")
+    assert mid not in [m.id for m in eng.store.list_memories(SearchFilter(workspace_id=wid))]
+    assert eng.store.get_memory(mid) is not None      # not hard-deleted
+
+
+def test_forget_unknown_id_raises():
+    eng = MemoryEngine.create(":memory:")
+    with pytest.raises(KeyError):
+        eng.forget("mem_does_not_exist")
+
+
+def test_pin_sets_flag_and_audits():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    mid = eng.remember("Pin me.", workspace_id=wid, repo_id=rid)
+    eng.pin(mid)
+    assert eng.store.get_memory(mid).pinned is True
+    eng.pin(mid, pinned=False)
+    assert eng.store.get_memory(mid).pinned is False
+
+
+def test_correct_supersedes_without_deleting():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    mid = eng.remember("The API key header is X-Auth-Key.", workspace_id=wid, repo_id=rid)
+    out = eng.correct(mid, "The API key header is X-Api-Key.", reason="typo in the original")
+    assert out["superseded"] == [mid]
+    new_rec = eng.store.get_memory(out["id"])
+    assert "X-Api-Key" in new_rec.content
+    assert new_rec.metadata.get("corrects") == mid
+    live_ids = [m.id for m in eng.store.list_memories(SearchFilter(workspace_id=wid))]
+    assert mid not in live_ids and out["id"] in live_ids
+
+
+# ── why / timeline / recall_proactive ────────────────────────────────────────────
+
+def test_why_surfaces_live_answer_and_superseded_history():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    eng.remember("Until 2026-01 the rate limit was 100 requests per minute per API key.",
+                workspace_id=wid, repo_id=rid)
+    eng.remember("As of 2026-02 the rate limit was raised to 500 requests per minute per API key.",
+                workspace_id=wid, repo_id=rid)
+    out = eng.why("what is the rate limit", workspace_id=wid, repo_id=rid)
+    assert any("500" in r.content for r in out["answer"])
+    assert any("100" in r.content for r in out["supersedes"])
+
+
+def test_timeline_orders_history_chronologically():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    eng.remember("Until 2026-01 the rate limit was 100 requests per minute per API key.",
+                workspace_id=wid, repo_id=rid, valid_from=1_000.0)
+    eng.remember("As of 2026-02 the rate limit was raised to 500 requests per minute per API key.",
+                workspace_id=wid, repo_id=rid, valid_from=2_000.0)
+    hist = eng.timeline("rate limit", workspace_id=wid, repo_id=rid)
+    assert len(hist) == 2
+    assert hist[0].valid_from < hist[1].valid_from
+
+
+def test_recall_proactive_includes_last_session_handoff():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    eng.remember("High importance convention.", workspace_id=wid, repo_id=rid, importance=0.9)
+    sid = eng.start_session(wid, rid, goal="refactor auth")
+    eng.end_session(sid, summary="mid-refactor", open_threads=["tests 3-5 failing"])
+    out = eng.recall_proactive(workspace_id=wid, repo_id=rid)
+    assert out["memories"]
+    assert out["last_session"]["open_threads"] == ["tests 3-5 failing"]
+    assert out["last_session"]["summary"] == "mid-refactor"
+
+
+# ── linking & events ─────────────────────────────────────────────────────────────
+
+def test_link_connects_two_memories():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    a = eng.remember("Memory A.", workspace_id=wid, repo_id=rid)
+    b = eng.remember("Memory B.", workspace_id=wid, repo_id=rid)
+    eng.link(a, b, relation="related")
+    links = eng.store.get_links(a)
+    assert any(link["a"] == a and link["b"] == b for link in links)
+
+
+def test_link_unknown_id_raises():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    a = eng.remember("Memory A.", workspace_id=wid, repo_id=rid)
+    with pytest.raises(KeyError):
+        eng.link(a, "mem_nope")
+
+
+def test_record_event_persists():
+    eng = MemoryEngine.create(":memory:")
+    eid = eng.record_event("decision", "Chose PASETO over JWT.", workspace_id="ws_x")
+    assert eid.startswith("evt_")
+
+
+# ── code-symbol graph ─────────────────────────────────────────────────────────────
+
+def _write_sample_repo(tmp_path):
+    (tmp_path / "calc.py").write_text(
+        "def add(a, b):\n    return a + b\n\n"
+        "class Calculator:\n"
+        "    def add(self, x):\n        return add(x, 1)\n"
+    )
+    return tmp_path
+
+
+def test_index_repo_and_search_code(tmp_path):
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    _write_sample_repo(tmp_path)
+
+    report = eng.index_repo(rid, str(tmp_path))
+    assert report["files_indexed"] >= 1
+    assert report["symbols"] >= 1
+
+    out = eng.search_code("add", repo_id=rid)
+    names = {s["name"] for s in out["symbols"]}
+    assert "add" in names
+
+
+def test_index_repo_is_idempotent_per_file(tmp_path):
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    _write_sample_repo(tmp_path)
+
+    first = eng.index_repo(rid, str(tmp_path))
+    second = eng.index_repo(rid, str(tmp_path))
+    assert first["symbols"] == second["symbols"]   # replaced, not accumulated
+    assert eng.store.count_symbols(rid) == first["symbols"]
+
+
+def test_index_repo_skips_unsupported_files(tmp_path):
+    (tmp_path / "readme.md").write_text("not code")
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    report = eng.index_repo(rid, str(tmp_path))
+    assert report["files_indexed"] == 0

@@ -1,8 +1,16 @@
 """Eval runner: ingest fixture memories, query, score retrieval.
 
+Routes both ingestion and querying through ``MemoryEngine`` — the same hybrid
+vector+lexical+graph recall, six-term scoring, RRF fusion, and deterministic
+conflict resolution that ships in production — not a bare vector-index lookup.
+(Earlier versions of this harness called the vector index directly, which meant
+the CI gate measured plumbing but never exercised the actual recall pipeline or
+the write-path resolver; AGENTS.md §3.7 — "prove better with a number" — only
+means something if the number is about what ships.)
+
 Runs fully offline with the deterministic embedder + NumPy index, so it executes
 anywhere (including CI) with no model download. The same harness will drive the
-real backends — just swap the ``Embedder`` / ``VectorIndex`` passed in.
+real backends — just pass a different ``Embedder`` in.
 
     python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
 
@@ -12,6 +20,13 @@ Dataset format (JSONL, one object per line):
       "memories": [{"tag": "f1", "text": "..."}, ...],
       "questions": [{"q": "...", "answer": "...", "supporting": ["f1"]}]
     }
+
+A memory's tag may be absent from the retrieved set without being "wrong": if its
+text was resolved as a near-duplicate or superseded by a later memory in the same
+case (conflict resolution — see ``core.resolve``), its tag now maps to whichever
+memory *is* live, and that is what gets credited. This is intentional: the
+"temporal-update" style fixtures rely on exactly this to test that superseded
+facts stop being treated as current.
 """
 from __future__ import annotations
 
@@ -21,7 +36,9 @@ from pathlib import Path
 from typing import Optional
 
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
-from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope
+from engraphis.backends.reranker import IdentityReranker
+from engraphis.core.engine import MemoryEngine
+from engraphis.core.interfaces import MemoryType, Scope
 from engraphis.core.store import Store
 from eval import metrics
 
@@ -36,7 +53,8 @@ def load_dataset(path: str) -> list[dict]:
 
 
 def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
-        embedder: Optional[DeterministicEmbedder] = None) -> dict:
+        embedder: Optional[DeterministicEmbedder] = None,
+        resolve_conflicts: bool = True) -> dict:
     embedder = embedder or DeterministicEmbedder(dim=dim)
     per_q = []
 
@@ -45,26 +63,25 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
         wid = store.get_or_create_workspace("eval")
         rid = store.get_or_create_repo(wid, case.get("id", "case"))
         index = NumpyVectorIndex(store)
+        engine = MemoryEngine(store, embedder, index, IdentityReranker())
 
         tag_to_id: dict[str, str] = {}
-        id_to_tag: dict[str, str] = {}
+        id_to_tags: dict[str, list[str]] = {}
         id_to_text: dict[str, str] = {}
         for m in case["memories"]:
-            vec = embedder.embed([m["text"]])[0]
-            rec = MemoryRecord(
-                id="", content=m["text"], mtype=MemoryType.EPISODIC, scope=Scope.REPO,
-                workspace_id=wid, repo_id=rid, metadata={"tag": m.get("tag")}, embedding=vec,
+            mid = engine.remember(
+                m["text"], workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC,
+                scope=Scope.REPO, resolve_conflicts=resolve_conflicts,
             )
-            mid = store.add_memory(rec)
-            tag_to_id[m.get("tag")] = mid
-            id_to_tag[mid] = m.get("tag")
+            tag = m.get("tag")
+            tag_to_id[tag] = mid
+            id_to_tags.setdefault(mid, []).append(tag)
             id_to_text[mid] = m["text"]
 
         for q in case["questions"]:
-            qvec = embedder.embed([q["q"]])[0]
-            hits = index.search(qvec, k)
-            retrieved_ids = [h[0] for h in hits]
-            retrieved_tags = [id_to_tag.get(i) for i in retrieved_ids]
+            res = engine.recall(q["q"], workspace_id=wid, k=k)
+            retrieved_ids = [c["id"] for c in res.chunks]
+            retrieved_tags = [t for i in retrieved_ids for t in id_to_tags.get(i, [None])]
             retrieved_texts = [id_to_text.get(i, "") for i in retrieved_ids]
             supporting = q.get("supporting", [])
             per_q.append({

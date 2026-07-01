@@ -18,9 +18,7 @@ from engraphis.core import scoring
 from engraphis.core.interfaces import (
     Candidate,
     MemoryRecord,
-    MemoryType,
     Reranker,
-    Scope,
     SearchFilter,
 )
 from engraphis.core.store import Store, now_ts
@@ -125,9 +123,11 @@ class RecallEngine:
         sql = "SELECT DISTINCT name FROM entities"
         clauses, params = [], []
         if flt.workspace_id:
-            clauses.append("workspace_id=?"); params.append(flt.workspace_id)
+            clauses.append("workspace_id=?")
+            params.append(flt.workspace_id)
         if flt.repo_id:
-            clauses.append("repo_id=?"); params.append(flt.repo_id)
+            clauses.append("repo_id=?")
+            params.append(flt.repo_id)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         return [r["name"] for r in self.store.conn.execute(sql, params).fetchall()]

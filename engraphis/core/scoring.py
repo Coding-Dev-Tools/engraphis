@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from engraphis.core.interfaces import MemoryRecord, MemoryType
 
-# Interaction signals → stability boost (neocortex-style reinforcement).
+# Interaction signals → stability boost (interaction-aware reinforcement).
 INTERACTION_BOOST = {
     "view": 0.05, "read": 0.05, "recall": 0.15, "react": 0.20,
     "engage": 0.30, "reply": 0.50, "create": 1.00,
@@ -28,7 +28,7 @@ INTERACTION_BOOST = {
 class Weights:
     r: float = 1.0   # retention (Ebbinghaus)
     s: float = 1.0   # semantic similarity
-    l: float = 0.5   # lexical (BM25)
+    l: float = 0.5   # noqa: E741  (lexical weight w_l; single-letter to match the formula)
     g: float = 0.7   # graph proximity
     i: float = 0.6   # importance
     c: float = 0.3   # recency
