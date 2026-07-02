@@ -101,7 +101,9 @@ MASTER_PLAN.md; full detail in `CHANGELOG.md`:
 
 ## Before you charge money (prioritized)
 
-1. **Real benchmark numbers**: run LoCoMo/LongMemEval with the sentence-transformers embedder and
+1. **Real benchmark numbers** *(adapter now ships: `python -m eval.external --dataset
+   locomo10.json --format locomo --k 10` — needs torch + the dataset locally; measures
+   evidence retrieval recall@k honestly, not judge-scored QA)*: run LoCoMo/LongMemEval with the sentence-transformers embedder and
    publish. Scope decision this pass was deliberately offline-only (bigger `codemem.jsonl` fixture
    set, harness bug fix) — the offline eval validates pipeline correctness, not semantic recall
    quality against the named competitors' published numbers. Still open.

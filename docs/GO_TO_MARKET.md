@@ -78,15 +78,26 @@ model of gating a real capability (graph memory) behind a paywall.
 
 ## 7. Launch motion
 
-1. **Ship the demo** — a 60-second screencast: agent learns a convention, restarts, recalls it via
-   the MCP server. This is the whole pitch.
-2. **Developer-led distribution** — GitHub README + MCP registry listings + posts in the Claude
+1. **Ship the demo** — a 60-second screencast that **opens with the code graph, not generic
+   recall** (it's the one capability nobody else in the category has at all):
+   0:00 `engraphis_index_repo` on a real repo → 0:10 agent asks `engraphis_search_code("what
+   calls close_validity?")` and gets callers without dumping a single file → 0:25 agent hits a
+   changed fact, `engraphis_remember` supersedes the old one → 0:40 `engraphis_why` shows the
+   live answer *plus what it replaced and why* (screenshot the Inspector's supersession-chain
+   diff here) → 0:55 restart, `engraphis_recall_proactive` picks up the thread. Convention
+   recall across restart is the closer, not the opener.
+2. **The bi-temporal "why" is a selling point, not a table row** — Zep positions heavily around
+   "knowing when things changed"; Engraphis exposes it as two dedicated tools (`why`/`timeline`)
+   plus a visual supersession-chain diff in the Inspector. Give it its own line in every pitch.
+3. **Developer-led distribution** — GitHub README + MCP registry listings + posts in the Claude
    Code / Cursor / MCP communities; "Show HN: self-hosted memory for coding agents."
-3. **Docs site** — quickstarts for Claude Code and Cursor; "why self-hosted" page targeting the
+4. **Docs site** — quickstarts for Claude Code and Cursor; "why self-hosted" page targeting the
    privacy/residency ICP.
-4. **Design-partner Team tier** — 3–5 teams on the paid tier for case studies before public pricing.
-5. **Benchmark report** — publish LoCoMo/LongMemEval numbers (with the real embedder) to establish
-   credibility vs named competitors.
+5. **Design-partner Team tier** — 3–5 teams on the paid tier for case studies before public pricing.
+6. **Benchmark report** — publish LoCoMo/LongMemEval numbers (with the real embedder) to establish
+   credibility vs named competitors. The adapter ships (`python -m eval.external --dataset
+   locomo10.json --format locomo`); run it on a real machine and publish whatever comes out —
+   a mediocre real number beats a perfect fixture score.
 
 ## 8. Metrics to watch
 

@@ -69,6 +69,8 @@ promotion: [SCOPING.md](references/SCOPING.md).
 | Protect from decay | `engraphis_pin` | For identity/durable facts that must never fade. |
 | Connect two memories | `engraphis_link` | A-MEM-style; e.g. bug ↔ its fix. |
 | Log a raw event | `engraphis_record_event` | Lower ceremony than remember; repeats are a promotion signal. |
+| Store raw/undistilled text | `engraphis_ingest` | Extracts discrete facts first (when ENGRAPHIS_EXTRACTOR=llm); passthrough otherwise. |
+| Distill & tidy periodically | `engraphis_consolidate` | Sleep-time sweep: recurring episodes → semantic digest; decayed transients archived. Dry-run by default. |
 | Group/resume work | `engraphis_start_session` / `engraphis_end_session` | Handoff via summary + `open_threads`. |
 | Map a repo's code | `engraphis_index_repo` | Parse defs + call/import edges once per repo (safe to re-run). |
 | "What calls this?" | `engraphis_search_code` | Structural search — far cheaper than grepping/dumping files. |

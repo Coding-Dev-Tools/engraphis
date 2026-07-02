@@ -16,7 +16,7 @@ SQLite + local embeddings.
 > Windsurf) plug in and stop forgetting.
 
 - **Local-first & private** — runs offline; the core depends only on `numpy`.
-- **Agent-native** — an MCP server exposes 15 tools: remember/recall, bi-temporal why/timeline,
+- **Agent-native** — an MCP server exposes 17 tools: remember/recall/ingest, bi-temporal why/timeline,
   proactive recall, governance (forget/pin/correct), code search, and session handoff.
 - **Self-maintaining facts** — writes are deterministically conflict-resolved (no LLM required):
   a near-duplicate reinforces the existing memory instead of cloning it, and a same-subject
@@ -27,7 +27,22 @@ SQLite + local embeddings.
   of overwriting; ask `as_of` questions, or just call `engraphis_why` / `engraphis_timeline`.
 - **Code-aware** — `engraphis_index_repo` parses a repository into a function/class/call-graph
   (AST via tree-sitter, regex fallback with zero dependencies) so `engraphis_search_code`
-  answers "what calls this" far more cheaply than grepping or dumping files.
+  answers "what calls this" far more cheaply than grepping or dumping files. **No other memory
+  engine in the category has this.**
+- **Graph recall that walks** — the graph arm is Personalized PageRank over entities, mentions,
+  and memory links (HippoRAG-style, pure NumPy): multi-hop associations surface without an
+  explicit hop count.
+- **Self-improving network** — A-MEM-style evolution: each new memory auto-links to its closest
+  related notes and strengthens them, so the network gets better in both directions.
+- **Optional fact extraction** — feed raw transcripts/notes to `engraphis_ingest`; with
+  `ENGRAPHIS_EXTRACTOR=llm` they're distilled into discrete typed facts first (offline default:
+  passthrough — no behaviour change, no new dependency).
+- **Sleep-time consolidation** — a schedulable local job (`engraphis-consolidate`) distills
+  recurring episodes into durable semantic digests and archives fully-decayed transients —
+  audited, recoverable, pinned memories exempt. Your machine, your schedule; no cloud service.
+- **Memory Inspector** — a product UI (`engraphis-inspector`, :8710) over the same service
+  layer as the MCP tools: search, why/history, timeline, health, audit, and a supersession-chain
+  view with word-level diffs — *see exactly when a fact changed and why*.
 - **Scoped** — every memory lives in a `workspace → repo → session` hierarchy.
 
 ---
@@ -101,7 +116,7 @@ engraphis_why(query="what is the rate limit", ...)
 
 ## Quickstart A′ — install the memory-discipline skill (portable)
 
-The MCP server gives your agent the 15 tools; the **`engraphis-memory` skill** teaches it *when and
+The MCP server gives your agent the 17 tools; the **`engraphis-memory` skill** teaches it *when and
 how* to use them — what to store, how to scope it, and which tool answers which question. It follows
 the [Agent Skills](https://agentskills.io) standard, so the same skill works in Claude Code, Codex,
 and OpenCode.

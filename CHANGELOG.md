@@ -3,6 +3,53 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [Unreleased] — competitive-parity pass (memory quality + product surface)
+
+### Added
+- **Paraphrase-aware conflict resolution** (`core/resolve.py`): embedding cosine as a second
+  deterministic signal (`PARAPHRASE_EMBED_SIM=0.90`) alongside token-Jaccard — reworded
+  restatements/contradictions now supersede instead of duplicating. Op is INVALIDATE, never
+  NOOP, so no new fact can be silently discarded. Closes the known "misses paraphrased
+  conflicts" ceiling partway; the LLM judge remains an optional upgrade path.
+- **Memory evolution on write** (A-MEM-style, `MemoryEngine._evolve`): every ADD/INVALIDATE
+  auto-links the new memory to up to 3 closest live neighbors (`related`), reinforces them
+  lightly, and audits the action (`evolve`). Bounded, idempotent (`Store.add_link` now dedupes
+  per pair+relation), disable via `MemoryEngine(auto_evolve=False)`.
+- **Supersession pointers**: INVALIDATE now records `metadata.supersedes=[old_id]` on the new
+  record, making the full chain queryable (not audit-only) — powers the Inspector chain view.
+- **Fact extraction interface** (`Extractor` protocol in `core/interfaces.py`;
+  `backends/extractor.py`): `PassthroughExtractor` (offline default) and `LLMExtractor`
+  (multi-provider via the existing v1 LLM client; defensive JSON parsing; degrades to
+  passthrough — ingest never loses a write). New `MemoryEngine.ingest()`,
+  `MemoryService.ingest()`, MCP tool `engraphis_ingest`, config `ENGRAPHIS_EXTRACTOR`.
+- **Personalized PageRank graph arm** (`core/graphrank.py`, pure NumPy): HippoRAG-style
+  seeded random walk over entity↔entity edges (bi-temporal), memory↔entity mentions, and
+  memory↔memory links. Default (`RecallEngine(graph_mode="ppr")`); `"1hop"` retained.
+  `eval.ablation` now reports vector-only / hybrid-1hop / hybrid-ppr.
+- **Sleep-time consolidation** (Phase 4 first cut, `core/consolidate.py`): recurring episodic
+  clusters (token-Jaccard, union-find) → one semantic digest linked `consolidates` to sources;
+  fully-decayed unpinned transients archived via bi-temporal close (audited, recoverable).
+  Deterministic offline; optional LLM digest text. Runners: `scripts/consolidate.py`
+  (cron/Task Scheduler), MCP tool `engraphis_consolidate` (dry-run default), Inspector button.
+- **Memory Inspector** (`engraphis/inspector/` + `scripts/inspector.py`, :8710): v2 product UI
+  over `MemoryService` — search, why/history, timeline, proactive "start here", health +
+  consolidation, audit trail, and the **supersession-chain view with word-level diffs**.
+  Accessible from day one (ARIA tablist, keyboard nav, aria-live regions, text+color status),
+  single-file no-build frontend, `textContent`-only rendering (no stored-content innerHTML),
+  optional bearer auth. New console scripts `engraphis-inspector`, `engraphis-consolidate`.
+- **External benchmark adapter** (`eval/external.py`): LoCoMo + LongMemEval loaders normalized
+  into the existing harness (same engine write/recall path). Measures retrieval
+  (evidence recall@k) honestly — not judge-scored QA — and says so in the report.
+  `--offline` plumbing check; real numbers need torch + dataset on the operator's machine.
+- **MCP server: 15 → 17 tools** (`engraphis_ingest`, `engraphis_consolidate`); skill docs
+  (`skills/engraphis-memory/`) updated in the same change.
+- **stats() now reports live counts** plus `total_rows` (live + preserved history).
+
+### Fixed
+- Repaired two working-tree files truncated by the synced-drive bug (`routes/memory.py` tail,
+  `models.py` tail) — restored from HEAD + preserved the concurrent session's `/memory/prune`
+  endpoint and `PruneRequest` model.
+
 ## [Unreleased] — v1-hardening pass
 
 ### Security

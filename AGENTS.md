@@ -41,8 +41,19 @@ cp .env.example .env                # only needed for the v1 server / LLM featur
 python -m pytest tests/ -q                                          # unit tests (offline)
 python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5   # retrieval eval gate
 python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5  # larger eval; covers conflict resolution
-python -m eval.ablation                                             # vector-only vs hybrid
+python -m eval.ablation                                             # vector-only vs 1-hop vs PPR
 ruff check .                                                        # lint (line-length 100, py39)
+
+# ── External benchmarks (real numbers need torch + the dataset; see eval/external.py) ──
+python -m eval.external --dataset locomo10.json --format locomo --k 10        # LoCoMo
+python -m eval.external --dataset longmemeval_s.json --format longmemeval     # LongMemEval
+python -m eval.external --dataset locomo10.json --format locomo --offline --limit 2  # plumbing check
+
+# ── v2 Memory Inspector (product UI over MemoryService; same layer as the MCP server) ──
+python -m scripts.inspector          # http://127.0.0.1:8710 (auth: ENGRAPHIS_API_TOKEN)
+
+# ── Sleep-time consolidation (schedulable local job; also an MCP tool) ────────
+python -m scripts.consolidate --db engraphis.db --workspace acme --dry-run
 
 # ── Run the v1 server (needs the full install) ───────────────────────────────
 python -m scripts.start_server      # http://127.0.0.1:8700  (dashboard at /, OpenAPI at /docs)
@@ -71,7 +82,8 @@ query
      └─ 3 retrieval arms (run in parallel, then fused):
         • vector   — VectorIndex.search (cosine)         backends/vector_*.py
         • lexical  — Store.fts_search (FTS5/BM25 + LIKE fallback)   core/store.py
-        • graph    — 1-hop entity expansion (full PPR is Phase 2)   core/recall.py
+        • graph    — Personalized PageRank over entities+links      core/recall.py + core/graphrank.py
+                     (graph_mode="1hop" keeps the old expansion for ablation)
      └─ RRF fusion + six-term weighted score             core/scoring.py
      └─ rerank top-N                                      backends/reranker.py
      └─ context packing (token budget) + reinforce()      core/recall.py / core/store.py
@@ -83,9 +95,16 @@ injected through `MemoryEngine` — never imported directly inside `core/` (see 
 The write path (`MemoryEngine.remember_with_resolution()`) mirrors this: embed → find
 same-scope neighbors via the vector index → `core/resolve.py::resolve()` decides
 ADD / NOOP (reinforce, don't duplicate) / INVALIDATE (close old validity, insert new) from
-token-overlap on the text itself — deterministic, no LLM call on untrusted input. `remember()`
-is a thin wrapper that returns just the resulting id; use `remember_with_resolution()` when you
-need the decision detail.
+**two deterministic signals** — token-overlap on the text itself, plus the embedding cosine
+already computed at write time (catches paraphrased restatements/contradictions,
+`PARAPHRASE_EMBED_SIM`) — no LLM call on untrusted input. An INVALIDATE also records
+`metadata.supersedes` on the new record so the chain is queryable (why/timeline/Inspector).
+After the decision, **memory evolution** (`MemoryEngine._evolve`, A-MEM-style) auto-links the
+new memory to its closest live neighbors (bounded, idempotent, audited) and gives them a small
+reinforcement touch. `remember()` is a thin wrapper that returns just the resulting id; use
+`remember_with_resolution()` when you need the decision detail. `MemoryEngine.ingest()` is the
+extract-then-remember path: with an `Extractor` configured (`ENGRAPHIS_EXTRACTOR=llm`) raw text
+is distilled into discrete facts first; the offline default is passthrough.
 
 ---
 
@@ -154,11 +173,14 @@ These are pure, unit-tested functions — change them only with a corresponding 
   harness + CI.
 - **Done — Phase 1:** hybrid recall, six-term score, RRF, rerank; SentenceTransformer embedder +
   `sqlite-vec` index, each with an offline fallback.
-- **Done — partial Phase 2:** deterministic (no-LLM) write-path conflict resolution
-  (`core/resolve.py`, ADD/NOOP/INVALIDATE — see §2). **Not done:** LLM-based fact extraction,
-  full Personalized PageRank (the graph arm is still 1-hop entity expansion), A-MEM-style
-  *evolution* (linking exists via `Store.add_link`/`engraphis_link`; neighbors don't get
-  auto-updated when a new note changes how they should be understood).
+- **Done — Phase 2:** deterministic (no-LLM) write-path conflict resolution
+  (`core/resolve.py`, ADD/NOOP/INVALIDATE, two signals: token-Jaccard + embedding cosine — see
+  §2); **LLM-based fact extraction** behind the `Extractor` protocol
+  (`backends/extractor.py`, offline default = passthrough, `ENGRAPHIS_EXTRACTOR=llm` to
+  enable, `MemoryEngine.ingest()` / `engraphis_ingest`); **Personalized PageRank** graph arm
+  (`core/graphrank.py`, default; `graph_mode="1hop"` retained for ablation); **A-MEM-style
+  evolution** (`MemoryEngine._evolve`: new writes auto-link to related live neighbors and
+  reinforce them — bounded, idempotent, audited).
 - **Done — partial Phase 3:** **MCP server exists** (`engraphis/mcp_server.py`, 15 tools:
   write/read/governance/code/session — do not assume only `remember`/`recall` exist, check the
   tool list) and a **code-symbol graph** (`backends/codegraph.py`, tree-sitter with a
@@ -171,8 +193,19 @@ These are pure, unit-tested functions — change them only with a corresponding 
   allow-list, governance tools (`forget`/`pin`/`correct`, audited, never a hard delete),
   Apache-2.0 licensing/packaging. **Not done:** encryption at rest, built-in rate limiting,
   per-token tenant authorization — see `SECURITY.md`.
-- **Not done at all:** Phase 4 — the consolidation/reflection loop (episodic→semantic→procedural
-  distillation, scope promotion). Phase 6 — Rust hot path.
+- **Done — Phase 4 (first shipping cut):** the consolidation loop
+  (`core/consolidate.py` + `scripts/consolidate.py` + `engraphis_consolidate` MCP tool +
+  Inspector button): recurring episodics → semantic digests (linked `consolidates`, audited),
+  decayed transients archived bi-temporally; deterministic offline, optional LLM summarizer.
+  Framed local-first: a user-schedulable job, not a cloud service. **Not done:** scope
+  promotion; procedural distillation.
+- **New — v2 Memory Inspector** (`engraphis/inspector/`, `python -m scripts.inspector`,
+  :8710): product UI over `MemoryService` (same layer as the MCP server, so UI and tools
+  can't drift). Flagship screen: the supersession chain with word-level diffs — rendering
+  `resolve()`'s decision history. Accessible (ARIA tabs/labels, keyboard nav, text+color
+  status), no build step, content rendered via textContent only. Optional bearer auth
+  (`ENGRAPHIS_API_TOKEN`); multi-user login is the remaining Pro gate (GO_TO_MARKET.md §10).
+- **Not done at all:** Phase 6 — Rust hot path.
 - The **v1 FastAPI server** is the legacy neocortex clone and still runs; treat it as a
   compatibility/reference surface, not the place for new capability.
 

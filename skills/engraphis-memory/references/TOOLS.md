@@ -178,6 +178,30 @@ Returns `{session_id, status:"summarized", summary, open_threads}`.
 
 ---
 
+### `engraphis_ingest`
+Store raw, undistilled text (transcripts, notes, logs). With `ENGRAPHIS_EXTRACTOR=llm`
+configured server-side, the text is first distilled into discrete typed facts — each stored
+with the same conflict resolution and evolution as `remember`. Without an extractor it
+behaves exactly like `remember` (passthrough). Prefer `remember` when you already have one
+crisp fact.
+
+- `content (str, required)`; `workspace (str, required)`; `repo (str, None)`;
+  `session_id (str, None)`; `mtype (str, "semantic")` — default type for unclassified facts;
+  `scope (str, "repo")`.
+
+Returns `{workspace, repo, count, extracted, facts: [{id, op, superseded?}]}`.
+
+### `engraphis_consolidate`
+One sleep-time consolidation sweep: recurring episodic memories on the same subject become a
+single durable semantic digest (linked to sources via `consolidates` links), and fully-decayed
+transient memories are archived (bi-temporal close — audited, recoverable, pinned exempt).
+Idempotent. `dry_run=true` is the default; call it at session end or on a schedule
+(`python -m scripts.consolidate` is the cron-able equivalent).
+
+- `workspace (str, required)`; `repo (str, None)`; `dry_run (bool, true)`.
+
+Returns `{clusters_found, digests_created, archived, skipped_already_consolidated, dry_run}`.
+
 ## Ops
 
 ### `engraphis_stats`
@@ -198,3 +222,4 @@ Returns `{memories, by_type, workspaces, sessions, schema_version}`.
 - Must never fade → `pin`. Two facts belong together → `link`.
 - Working in code → `index_repo` once, then `search_code`.
 - Multi-step task → wrap in `start_session` … `end_session`.
+- Have a blob, not a fact → `ingest`. Memory getting noisy → `consolidate` (dry-run first).

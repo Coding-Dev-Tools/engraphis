@@ -92,7 +92,36 @@ run one instance per tenant (now with `ENGRAPHIS_WORKSPACES` set as a defense-in
 - You choose the LLM provider; review their data-handling terms, since prompts/snippets of
   recalled memory may be sent there during chat/thought-synthesis features.
 
-### 5. Code indexing reads local files
+### New surfaces in the competitive-parity pass (reviewed 2026-07-01)
+
+- **LLM fact extraction (`ENGRAPHIS_EXTRACTOR=llm`, off by default).** When enabled, text sent
+  to `engraphis_ingest` is transmitted to the configured LLM provider — an explicit, opt-in
+  change to the local-first data boundary; leave it `none` for air-gapped installs. The LLM's
+  *output* is treated as untrusted input (indirect prompt injection can steer it): facts are
+  re-validated (type whitelist, importance clamp), control characters are stripped
+  (`backends/extractor.py::_defang`, mirroring `service.py`), lengths capped, and any parse
+  failure degrades to storing the original text verbatim. The same defanging applies to
+  LLM-written consolidation digests (`core/consolidate.py`).
+- **Paraphrase supersede (`core/resolve.py::PARAPHRASE_EMBED_SIM`).** A writer in the same
+  workspace/repo/scope/mtype can supersede an existing fact by writing semantically-similar
+  content — as they already could via token overlap. The op is INVALIDATE (history preserved,
+  audited, recoverable), never NOOP, so new information can never be silently discarded; scope
+  boundaries are unchanged and enforced server-side.
+- **Memory evolution (`MemoryEngine._evolve`).** Auto-linking is bounded (3 links/write),
+  deduped, audited, and the reinforcement boost is the smallest tier (0.05) — repeated
+  identical writes resolve as NOOP, so stability inflation by replay is rate-limited by the
+  resolver.
+- **Memory Inspector (`engraphis/inspector/`, :8710).** Loopback-bound by default; optional
+  bearer auth (`ENGRAPHIS_API_TOKEN`, compared with `hmac.compare_digest`); CORS allow-list
+  defaults to loopback; all `/api/*` JSON POSTs are CORS-preflighted (no simple-request CSRF);
+  stored content is rendered exclusively via `textContent` (the v1 stored-XSS lesson applied
+  from day one); all reads/writes go through `MemoryService`, inheriting the workspace binding
+  (`ENGRAPHIS_WORKSPACES`) and ownership checks. Multi-user login/RBAC is not yet implemented —
+  do not expose the port beyond localhost without a reverse proxy that adds auth.
+- **PPR graph arm (`core/graphrank.py`).** Read-only; dense iteration capped (>4000 nodes
+  degrades to the 1-hop arm) to bound memory use.
+
+## 5. Code indexing reads local files
 `engraphis_index_repo` (and `MemoryEngine.index_repo`) parses source files under a path you
 give it into the code symbol graph. This is the same trust boundary as any other local tool
 the calling agent already has — nothing is uploaded — but it means the path is attacker-
