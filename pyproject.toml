@@ -84,9 +84,14 @@ Issues = "https://github.com/engraphis/engraphis/issues"
 engraphis-server = "scripts.start_server:main"
 engraphis-cli = "scripts.cli:main"
 engraphis-mcp = "engraphis.mcp_server:main"
+engraphis-inspector = "scripts.inspector:main"
+engraphis-consolidate = "scripts.consolidate:main"
 
 [tool.setuptools.packages.find]
 include = ["engraphis*", "scripts*"]
+
+[tool.setuptools.package-data]
+"engraphis.inspector" = ["index.html"]
 
 [tool.ruff]
 line-length = 100

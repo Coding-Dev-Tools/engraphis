@@ -52,6 +52,7 @@ def service() -> MemoryService:
             settings.db_path,
             embed_model=settings.embed_model or None,
             allowed_workspaces=settings.allowed_workspaces,
+            extractor=settings.extractor,
         )
     return _service
 
@@ -555,6 +556,78 @@ def engraphis_stats(
     """
     try:
         return _ok(service().stats(workspace=workspace))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_ingest",
+    annotations={"title": "Ingest raw text (extract facts first)", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+)
+def engraphis_ingest(
+    content: Annotated[str, Field(description="Raw, undistilled text: a conversation "
+                                  "excerpt, meeting notes, a log, a long update. Engraphis "
+                                  "extracts the discrete facts worth keeping (when an "
+                                  "extractor is configured via ENGRAPHIS_EXTRACTOR=llm) "
+                                  "and stores each one; otherwise stores the text as one "
+                                  "memory.", min_length=1, max_length=100_000)],
+    workspace: Annotated[str, Field(description="Top-level scope, e.g. an org or product "
+                                    "name ('acme').", min_length=1, max_length=200)],
+    repo: Annotated[Optional[str], Field(description="Repository scope within the "
+                                         "workspace.", max_length=200)] = None,
+    session_id: Annotated[Optional[str], Field(description="Session id from "
+                          "engraphis_start_session, if any.")] = None,
+    mtype: Annotated[str, Field(description="Default memory type for facts the extractor "
+                     "doesn't classify: semantic/episodic/procedural/working.")] = "semantic",
+    scope: Annotated[str, Field(description="Visibility: 'session', 'repo', 'workspace', "
+                     "or 'user'.")] = "repo",
+) -> str:
+    """Store raw text without hand-distilling it first — the extract-then-remember path.
+
+    Prefer ``engraphis_remember`` when you already have a crisp fact; use this when you
+    have a blob (transcript, notes, long status update) and want Engraphis to break it
+    into separate, individually-recallable memories. Each extracted fact goes through
+    the same conflict resolution and evolution as a normal remember.
+
+    Returns:
+        str: JSON ``{"workspace","repo","count","extracted","facts":[{"id","op",...}]}``
+        where ``extracted`` is false when no extractor is configured (passthrough).
+    """
+    try:
+        return _ok(service().ingest(
+            content, workspace=workspace, repo=repo, session_id=session_id,
+            mtype=mtype, scope=scope,
+        ))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_consolidate",
+    annotations={"title": "Consolidate memories (sleep-time sweep)", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def engraphis_consolidate(
+    workspace: Annotated[str, Field(description="Workspace to consolidate.", min_length=1,
+                                    max_length=200)],
+    repo: Annotated[Optional[str], Field(description="Restrict to this repo.",
+                                         max_length=200)] = None,
+    dry_run: Annotated[bool, Field(description="If true (default), only report what would "
+                       "happen — recommended before the first real run.")] = True,
+) -> str:
+    """Run one sleep-time consolidation sweep: recurring episodic memories on the same
+    subject are distilled into one durable semantic digest (linked to its sources), and
+    fully-decayed transient memories are archived (bi-temporally closed — never deleted,
+    always audited, pinned memories exempt). Idempotent: already-consolidated clusters
+    are skipped. Good moments to call it: session end, or on a schedule.
+
+    Returns:
+        str: JSON report ``{"clusters_found","digests_created","archived",
+        "skipped_already_consolidated","dry_run"}``.
+    """
+    try:
+        return _ok(service().consolidate(workspace=workspace, repo=repo, dry_run=dry_run))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 

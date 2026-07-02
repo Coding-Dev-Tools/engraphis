@@ -122,10 +122,12 @@ class MemoryService:
     def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
                embed_dim: int = 256, vector_backend: str = "auto",
                rerank_model: Optional[str] = None,
-               allowed_workspaces: Optional[list] = None) -> "MemoryService":
+               allowed_workspaces: Optional[list] = None,
+               extractor: str = "none") -> "MemoryService":
         engine = MemoryEngine.create(
             db_path, embed_model=embed_model, embed_dim=embed_dim,
             vector_backend=vector_backend, rerank_model=rerank_model,
+            extractor=extractor,
         )
         return cls(engine, allowed_workspaces=allowed_workspaces)
 
@@ -231,6 +233,49 @@ class MemoryService:
         if result["op"] == "invalidate":
             out["superseded"] = result["superseded"]
         return out
+
+    def ingest(self, content: str, *, workspace: str, repo: Optional[str] = None,
+               session_id: Optional[str] = None, mtype: str = "semantic",
+               scope: str = "repo", metadata: Optional[dict] = None,
+               source: str = "agent", resolve_conflicts: bool = True) -> dict:
+        """Store raw, undistilled text. With an extractor configured (ENGRAPHIS_EXTRACTOR)
+        the text is first distilled into discrete typed facts; without one this behaves
+        exactly like ``remember``. Every fact goes through the same validation,
+        resolution, and evolution as any other write."""
+        content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
+        ws = self._clean_ws(workspace)
+        rp = _clean_name(repo, field="repo") if repo else None
+        mt = _enum(mtype, MemoryType, "mtype")
+        sc = _enum(scope, Scope, "scope")
+        meta = _clean_metadata(metadata)
+        wid = self.store.get_or_create_workspace(ws)
+        rid = self.store.get_or_create_repo(wid, rp) if rp else None
+        provenance = {"source": _clean_text(source, field="source", max_chars=MAX_NAME_CHARS,
+                                            required=False) or "agent"}
+        out = self.engine.ingest(
+            content, workspace_id=wid, repo_id=rid, session_id=session_id, scope=sc,
+            default_mtype=mt, metadata={**meta, "provenance": provenance},
+            resolve_conflicts=bool(resolve_conflicts),
+        )
+        return {"workspace": ws, "repo": rp, "count": out["count"],
+                "extracted": out["extracted"],
+                "facts": [{"id": r["id"], "op": r["op"],
+                           **({"superseded": r["superseded"]} if "superseded" in r else {})}
+                          for r in out["facts"]]}
+
+    def consolidate(self, *, workspace: str, repo: Optional[str] = None,
+                    dry_run: bool = False, min_cluster: int = 3,
+                    archive_below: float = 0.05) -> dict:
+        """Sleep-time consolidation sweep (episodic→semantic distillation + decayed-
+        transient archival). ``dry_run=True`` reports without changing anything."""
+        wid, rid = self._require_scope(workspace, repo)
+        try:
+            min_cluster = max(2, min(20, int(min_cluster)))
+            archive_below = max(0.0, min(0.5, float(archive_below)))
+        except (TypeError, ValueError):
+            raise ValidationError("min_cluster must be an integer and archive_below a number")
+        return self.engine.consolidate(workspace_id=wid, repo_id=rid, dry_run=bool(dry_run),
+                                       min_cluster=min_cluster, archive_below=archive_below)
 
     # ── read ───────────────────────────────────────────────────────────────────
     def recall(self, query: str, *, workspace: Optional[str] = None,
@@ -428,6 +473,117 @@ class MemoryService:
         limit = max(1, min(MAX_K, int(limit)))
         return self.engine.search_code(query, repo_id=rid, limit=limit)
 
+    # ── inspection (powers the Memory Inspector UI) ─────────────────────────────
+    def list_workspaces(self) -> dict:
+        """Workspace/repo names with live-memory counts. On a bound instance only the
+        permitted workspaces are listed — same boundary as every other read."""
+        rows = self.store.conn.execute(
+            "SELECT w.id, w.name, COUNT(m.id) AS n FROM workspaces w "
+            "LEFT JOIN memories m ON m.workspace_id = w.id AND m.expired_at IS NULL "
+            "GROUP BY w.id, w.name ORDER BY w.name").fetchall()
+        out = []
+        for r in rows:
+            if self.allowed_workspaces is not None and r["name"] not in self.allowed_workspaces:
+                continue
+            repos = [dict(x) for x in self.store.conn.execute(
+                "SELECT name FROM repos WHERE workspace_id=? ORDER BY name", (r["id"],))]
+            out.append({"name": r["name"], "memories": int(r["n"]),
+                        "repos": [x["name"] for x in repos]})
+        return {"workspaces": out}
+
+    def inspect(self, memory_id: str, *, workspace: str, repo: Optional[str] = None) -> dict:
+        """Everything the inspector shows for one memory: the record, its links, its
+        audit trail, and the full supersession chain (oldest→newest) reconstructed from
+        the ``supersedes``/``corrects`` pointers the write path records."""
+        mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
+        wid, rid = self._require_scope(workspace, repo)
+        self._check_owns(mid, wid, rid)
+        rec = self.store.get_memory(mid)
+        links = []
+        for link in self.store.get_links(mid):
+            other_id = link["b"] if link["a"] == mid else link["a"]
+            other = self.store.get_memory(other_id)
+            links.append({"id": other_id, "relation": link["relation"],
+                          "title": (other.title or other.content[:80]) if other else "?",
+                          "live": bool(other and other.expired_at is None and
+                                       other.valid_to is None)})
+        audit = [dict(r) for r in self.store.conn.execute(
+            "SELECT ts, actor, action, detail FROM audit WHERE target=? ORDER BY ts", (mid,))]
+        chain = [self._chain_entry(r, wid) for r in self._chain_for(rec)]
+        return {"memory": _mem_to_dict(rec), "links": links, "audit": audit,
+                "chain": chain}
+
+    def _chain_entry(self, rec, wid: str) -> dict:
+        d = _mem_to_dict(rec)
+        d["stability"] = rec.stability
+        d["access_count"] = rec.access_count
+        rows = self.store.conn.execute(
+            "SELECT ts, actor, action, detail FROM audit WHERE target=? "
+            "AND action IN ('invalidate','noop','evolve') ORDER BY ts", (rec.id,)).fetchall()
+        d["events"] = [dict(r) for r in rows]
+        return d
+
+    def _chain_for(self, rec) -> list:
+        """Walk the supersession chain in both directions from ``rec``:
+        backward via this record's ``supersedes``/``corrects`` metadata, forward by
+        finding records that point back at it. Returns oldest→newest."""
+        def predecessors(r):
+            ids = list(r.metadata.get("supersedes") or [])
+            if r.metadata.get("corrects"):
+                ids.append(r.metadata["corrects"])
+            return ids
+
+        seen = {rec.id}
+        back = []
+        cur = rec
+        while True:
+            prev = None
+            for pid in predecessors(cur):
+                if pid not in seen:
+                    prev = self.store.get_memory(pid)
+                    break
+            if prev is None:
+                break
+            back.append(prev)
+            seen.add(prev.id)
+            cur = prev
+        fwd = []
+        cur = rec
+        while True:
+            nxt = self._successor_of(cur.id, seen)
+            if nxt is None:
+                break
+            fwd.append(nxt)
+            seen.add(nxt.id)
+            cur = nxt
+        return list(reversed(back)) + [rec] + fwd
+
+    def _successor_of(self, memory_id: str, seen: set):
+        rows = self.store.conn.execute(
+            "SELECT id, metadata FROM memories WHERE metadata LIKE ? AND id != ?",
+            (f"%{memory_id}%", memory_id)).fetchall()
+        import json as _json
+        for r in rows:
+            if r["id"] in seen:
+                continue
+            try:
+                meta = _json.loads(r["metadata"] or "{}")
+            except ValueError:
+                continue
+            if memory_id in (meta.get("supersedes") or []) or meta.get("corrects") == memory_id:
+                return self.store.get_memory(r["id"])
+        return None
+
+    def audit_log(self, *, workspace: str, limit: int = 100) -> dict:
+        """Recent audit entries for memories in this workspace (governance trail)."""
+        wid, _ = self._require_scope(workspace, None)
+        limit = max(1, min(500, int(limit)))
+        rows = self.store.conn.execute(
+            "SELECT a.ts, a.actor, a.action, a.target, a.detail FROM audit a "
+            "JOIN memories m ON m.id = a.target WHERE m.workspace_id=? "
+            "ORDER BY a.ts DESC LIMIT ?", (wid, limit)).fetchall()
+        return {"entries": [dict(r) for r in rows]}
+
     # ── introspection ───────────────────────────────────────────────────────────
     def stats(self, *, workspace: Optional[str] = None) -> dict:
         """Counts for quick health/onboarding checks (read-only)."""
@@ -444,16 +600,27 @@ class MemoryService:
                 return {"workspace": ws, "memories": 0, "note": "workspace not found"}
             where = " WHERE workspace_id=?"
             params.append(wid)
-        total = conn.execute(f"SELECT COUNT(*) AS n FROM memories{where}", params).fetchone()["n"]
+        import time as _time
+        now = _time.time()
+        live = ("(valid_from IS NULL OR valid_from<=?) AND (valid_to IS NULL OR ?<valid_to) "
+                "AND expired_at IS NULL")
+        live_where = f"{where} AND {live}" if where else f" WHERE {live}"
+        live_params = [*params, now, now]
+        total_rows = conn.execute(
+            f"SELECT COUNT(*) AS n FROM memories{where}", params).fetchone()["n"]
+        total = conn.execute(
+            f"SELECT COUNT(*) AS n FROM memories{live_where}", live_params).fetchone()["n"]
         by_type = {
             r["mtype"]: r["n"] for r in conn.execute(
-                f"SELECT mtype, COUNT(*) AS n FROM memories{where} GROUP BY mtype", params
+                f"SELECT mtype, COUNT(*) AS n FROM memories{live_where} GROUP BY mtype",
+                live_params
             )
         }
         workspaces = conn.execute("SELECT COUNT(*) AS n FROM workspaces").fetchone()["n"]
         sessions = conn.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()["n"]
         return {
             "workspace": workspace, "memories": int(total), "by_type": by_type,
+            "total_rows": int(total_rows),   # live + superseded history (never deleted)
             "workspaces": int(workspaces), "sessions": int(sessions),
             "schema_version": self.store.schema_version,
         }
