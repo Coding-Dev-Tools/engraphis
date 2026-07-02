@@ -3,6 +3,28 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [Unreleased] — v1 dashboard drill-down + polish pass
+
+### Fixed
+- **Knowledge-graph clicks now actually open things.** Clicking a node used to render the
+  memory into the (hidden) Memories view, so nothing visibly happened. A node now opens a
+  slide-over panel listing *every* memory behind that entity (new endpoint
+  `GET /memory/entity/{name}/memories`: event-linked first, content mentions second, with
+  previews + retention); clicking a memory opens a full reader modal in place. Edge clicks
+  open a relation panel with both endpoints one click away.
+- Command palette could fire the wrong action when the list was filtered (index mismatch).
+
+### Added
+- **Universal memory reader modal** — recall results, Overview activity, Timeline events,
+  Health stale list, palette hits, and graph memories all click through to the same reader
+  (markdown-rendered via DOMPurify, retention/stability pills, Reinforce / Open-in-Memories /
+  Mark-read / Delete actions). Timeline events without a document open the entity panel.
+- Graph controls: entity search (focus + open), physics Freeze/Unfreeze, double-click zoom.
+- Design refresh layered over the existing tokens: radial-gradient background, glass sidebar,
+  gradient brand/stat text, glow hovers, view transitions, keyboard/focus-visible states,
+  `prefers-reduced-motion` support, ARIA roles on nav/panels/modal.
+- Chat: assistant replies render as sanitized markdown instead of plain text.
+
 ## [Unreleased] — competitive-parity pass (memory quality + product surface)
 
 ### Added

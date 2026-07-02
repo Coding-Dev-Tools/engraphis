@@ -46,6 +46,61 @@ a{color:var(--accent);text-decoration:none}button{font-family:inherit;cursor:poi
 .cmd-overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:200;display:none;align-items:flex-start;justify-content:center;padding-top:100px}.cmd-overlay.show{display:flex}.cmd-box{width:460px;background:var(--surface);border:1px solid var(--border-light);border-radius:var(--radius-lg);box-shadow:0 12px 40px rgba(0,0,0,.5);overflow:hidden}.cmd-input{width:100%;padding:13px 16px;background:none;border:none;border-bottom:1px solid var(--border);color:var(--text);font-size:14px;font-family:inherit;outline:none}.cmd-list{max-height:300px;overflow-y:auto}.cmd-item{padding:9px 16px;cursor:pointer;display:flex;align-items:center;gap:10px;font-size:13px;transition:background var(--transition)}.cmd-item:hover,.cmd-item.sel{background:var(--surface2)}
 .progress-bar{width:100%;height:4px;background:var(--surface3);border-radius:2px;overflow:hidden;margin-top:8px}.progress-fill{height:100%;background:var(--accent);border-radius:2px;transition:width .3s ease}
 .import-result{padding:8px 12px;border-bottom:1px solid var(--surface2);font-size:12px;display:flex;align-items:center;gap:8px}.import-status-ok{color:var(--green)}.import-status-err{color:var(--red)}
+
+/* ══ v2 design refresh — layered over the original tokens so every existing
+      selector keeps working; new components (memory modal, entity panel) below. ══ */
+:root{--bg:#07070c;--surface:#0e0e16;--surface2:#161624;--surface3:#1e1e30;--border:#26263a;
+  --border-light:#38385222;--text:#e4e4ee;--text-muted:#8e8ea4;--accent:#a78bfa;--accent-dim:#7c5ce6;
+  --accent-bg:rgba(167,139,250,.1);--glow:0 0 24px rgba(124,92,230,.18);--radius:8px;--radius-lg:14px}
+body{background:radial-gradient(1200px 800px at 85% -10%,rgba(124,92,230,.07),transparent 60%),
+  radial-gradient(900px 600px at -10% 110%,rgba(34,211,238,.05),transparent 55%),var(--bg)}
+.sidebar{background:rgba(14,14,22,.92);backdrop-filter:blur(12px)}
+.brand-name{background:linear-gradient(120deg,#e4e4ee,#a78bfa);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.nav-item{position:relative;border-radius:7px}
+.nav-item.active{background:var(--accent-bg);color:var(--accent)}
+.nav-item.active::before{content:"";position:absolute;left:-6px;top:6px;bottom:6px;width:3px;border-radius:2px;background:linear-gradient(var(--accent),var(--accent-dim))}
+.card{border-radius:var(--radius);transition:border-color .15s,transform .15s,box-shadow .15s}
+.card:hover{border-color:#33334d}
+.stat{border-radius:var(--radius)}
+.stat:hover{transform:translateY(-1px);box-shadow:var(--glow);border-color:#33334d}
+.stat-val{background:linear-gradient(120deg,var(--text),#b8b8d8);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.btn{border-radius:7px}
+.btn-primary{background:linear-gradient(135deg,var(--accent-dim),#6d4cc6);border:none;box-shadow:0 2px 10px rgba(124,92,230,.25)}
+.btn-primary:hover{background:linear-gradient(135deg,var(--accent),var(--accent-dim));box-shadow:0 3px 16px rgba(124,92,230,.4)}
+.btn:active{transform:translateY(1px)}
+.view.active{animation:viewIn .18s ease}
+@keyframes viewIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.recall-card{cursor:pointer}
+.recall-card:hover{border-color:var(--accent-dim);box-shadow:var(--glow)}
+.tl-item.clickable,.mem-card{cursor:pointer}
+.tl-item.clickable:hover{background:var(--surface2);border-radius:6px}
+:is(button,.nav-item,.mem-card,.recall-card,[role=button],input,select,textarea):focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+@media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+/* ── memory reader modal ── */
+.mm-overlay{position:fixed;inset:0;background:rgba(4,4,8,.66);backdrop-filter:blur(3px);z-index:300;display:none;align-items:center;justify-content:center;padding:4vh 16px}
+.mm-overlay.show{display:flex;animation:viewIn .15s ease}
+.mm-box{width:min(860px,94vw);max-height:88vh;display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-lg);box-shadow:0 24px 80px rgba(0,0,0,.6),var(--glow);overflow:hidden}
+.mm-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:16px 20px 8px}
+.mm-title{font-size:17px;font-weight:600;letter-spacing:-.3px;word-break:break-word}
+.mm-meta{display:flex;gap:6px;flex-wrap:wrap;padding:0 20px 12px;border-bottom:1px solid var(--border)}
+.mm-body{flex:1;overflow-y:auto;padding:16px 20px;line-height:1.7}
+.mm-actions{display:flex;gap:8px;padding:12px 20px;border-top:1px solid var(--border);background:var(--surface2)}
+/* ── entity slide-over panel (graph drill-down) ── */
+.ep-panel{position:fixed;top:0;right:-420px;width:min(400px,92vw);height:100vh;background:var(--surface);border-left:1px solid var(--border);box-shadow:-16px 0 48px rgba(0,0,0,.5);z-index:250;display:flex;flex-direction:column;transition:right .22s cubic-bezier(.4,0,.2,1)}
+.ep-panel.show{right:0}
+.ep-head{padding:16px 18px 10px;border-bottom:1px solid var(--border)}
+.ep-name{font-size:16px;font-weight:600;display:flex;align-items:center;gap:8px;word-break:break-word}
+.ep-sub{font-size:11px;color:var(--text-dim);margin-top:3px;text-transform:uppercase;letter-spacing:.6px}
+.ep-body{flex:1;overflow-y:auto;padding:10px 12px}
+.ep-section{font-size:10px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;padding:10px 6px 4px}
+.ep-mem{padding:9px 10px;border:1px solid var(--border);border-radius:7px;margin-bottom:6px;cursor:pointer;transition:all .15s;background:var(--surface2)}
+.ep-mem:hover{border-color:var(--accent-dim);box-shadow:var(--glow)}
+.ep-mem-title{font-size:12.5px;font-weight:500;margin-bottom:3px}
+.ep-mem-preview{font-size:11.5px;color:var(--text-muted);line-height:1.5;max-height:48px;overflow:hidden}
+.ep-edge{display:flex;align-items:center;gap:6px;padding:5px 6px;font-size:12px;border-radius:5px;cursor:pointer}
+.ep-edge:hover{background:var(--surface2)}
+.ep-edge .rel{color:var(--text-dim);font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+.graph-tools{display:flex;gap:6px;margin-bottom:8px}
 </style>
 </head>
 <body>
@@ -61,7 +116,7 @@ a{color:var(--accent);text-decoration:none}button{font-family:inherit;cursor:poi
 <span class="vault-switcher-name" id="vault-name">Default</span>
 <svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
 </div>
-<div class="nav" id="nav">
+<nav class="nav" id="nav" role="navigation" aria-label="Main navigation">
 <div class="nav-section">Workspace</div>
 <div class="nav-item active" data-view="overview"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><rect x="1" y="1" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="1" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="1" y="9" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="9" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.3"/></svg>Overview</div>
 <div class="nav-item" data-view="memories"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M2 4c0-1 .5-1.5 1.5-1.5h3L8 4h4.5c1 0 1.5.5 1.5 1.5v6c0 1-.5 1.5-1.5 1.5h-9C2.5 13 2 12.5 2 11.5V4z" stroke="currentColor" stroke-width="1.3"/></svg>Memories<span class="nav-badge" id="nav-mem-count"></span></div>
@@ -76,7 +131,7 @@ a{color:var(--accent);text-decoration:none}button{font-family:inherit;cursor:poi
 <div class="nav-item" data-view="vaults"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M2 4c0-1 .5-1.5 1.5-1.5h3L8 4h4.5c1 0 1.5.5 1.5 1.5v6c0 1-.5 1.5-1.5 1.5h-9C2.5 13 2 12.5 2 11.5V4z" stroke="currentColor" stroke-width="1.3"/><path d="M2 8h12" stroke="currentColor" stroke-width="1.1"/></svg>Vaults</div>
 <div class="nav-item" data-view="health"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M8 2v6M5 5l3-3 3 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M3 9c0 3 2 5 5 5s5-2 5-5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Health</div>
 <div class="nav-item" data-view="settings"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Settings</div>
-</div>
+</nav>
 <div class="sidebar-footer"><span class="pulse-dot" id="health-dot"></span><span id="health-text">Connected</span><span style="margin-left:auto;font-family:var(--mono);font-size:10px" id="llm-badge"></span></div>
 </div>
 <!-- MAIN -->
@@ -202,7 +257,7 @@ a{color:var(--accent);text-decoration:none}button{font-family:inherit;cursor:poi
 <div class="graph-wrap">
 <div class="graph-canvas" id="graph-canvas"><div class="graph-stats" id="graph-stats"></div></div>
 <div class="graph-sidebar">
-<div class="card" style="margin:0"><div class="card-head">Controls</div><select class="select" id="graph-ns" style="margin-bottom:8px" onchange="loadGraph()"></select><button class="btn btn-ghost btn-sm" style="width:100%" onclick="loadGraph()">Refresh Graph</button></div>
+<div class="card" style="margin:0"><div class="card-head">Controls</div><select class="select" id="graph-ns" style="margin-bottom:8px" onchange="loadGraph()" aria-label="Graph namespace"></select><input class="input" id="graph-search" placeholder="Find entity..." style="margin-bottom:8px" aria-label="Find entity" oninput="graphSearch(this.value)" onkeydown="if(event.key==='Enter')graphSearchGo()"><div class="graph-tools"><button class="btn btn-ghost btn-sm" style="flex:1" onclick="loadGraph()">Refresh</button><button class="btn btn-ghost btn-sm" style="flex:1" id="physics-btn" onclick="togglePhysics()">Freeze</button></div><div class="field-hint">Click a node to see its memories. Click an edge for the relation.</div></div>
 <div class="card"><div class="card-head">Legend</div><div id="graph-legend"></div></div>
 <div class="card"><div class="card-head">Top Connected</div><div id="graph-top-nodes"></div></div>
 </div>
@@ -269,6 +324,21 @@ a{color:var(--accent);text-decoration:none}button{font-family:inherit;cursor:poi
 </div>
 </div>
 </div>
+<div class="mm-overlay" id="mm-overlay" onclick="if(event.target===this)closeMemModal()">
+<div class="mm-box" role="dialog" aria-modal="true" aria-label="Memory reader">
+<div class="mm-head"><div class="mm-title" id="mm-title"></div><button class="btn btn-ghost btn-sm" onclick="closeMemModal()" aria-label="Close reader">&#10005;</button></div>
+<div class="mm-meta" id="mm-meta"></div>
+<div class="mm-body md-reader" id="mm-body"></div>
+<div class="mm-actions" id="mm-actions"></div>
+</div>
+</div>
+<div class="ep-panel" id="ep-panel" role="complementary" aria-label="Entity details">
+<div class="ep-head" style="display:flex;justify-content:space-between;align-items:flex-start">
+<div><div class="ep-name" id="ep-name"></div><div class="ep-sub" id="ep-sub"></div></div>
+<button class="btn btn-ghost btn-sm" onclick="closeEntityPanel()" aria-label="Close entity panel">&#10005;</button>
+</div>
+<div class="ep-body" id="ep-body"></div>
+</div>
 <div class="toast" id="toast"></div>
 <div class="cmd-overlay" id="cmd-overlay" onclick="if(event.target===this)closePalette()"><div class="cmd-box"><input class="cmd-input" id="cmd-input" placeholder="Search memories, navigate, or run commands..." oninput="filterPalette()" onkeydown="handleCmdKey(event)"><div class="cmd-list" id="cmd-list"></div></div></div>
 <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
@@ -295,6 +365,8 @@ function nsColor(ns){let h=0;for(const c of ns)h=(h*31+c.charCodeAt(0))%NS_COLOR
 
 // Navigation
 document.querySelectorAll('.nav-item').forEach(item=>{
+item.setAttribute('role','button');item.setAttribute('tabindex','0');
+item.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();item.click()}});
 item.addEventListener('click',()=>{
 const v=item.dataset.view;
 document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
@@ -317,7 +389,7 @@ async function loadVaultSwitcher(){try{const d=(await api('/vaults/active')).dat
 async function loadNS(){try{const d=(await api('/namespaces')).data;const sels=['mem-ns-filter','recall-ns','graph-ns','timeline-ns','thought-ns','danger-ns','import-ns','upload-ns'];sels.forEach(id=>{const sel=document.getElementById(id);if(!sel)return;const cur=sel.value;sel.innerHTML='<option value="">All namespaces</option>'+d.map(n=>`<option value="${esc(n.namespace)}">${esc(n.namespace)} (${n.count})</option>`).join('');sel.value=cur})}catch(e){}}
 
 // Overview
-async function loadOverview(){try{const[sR,aR]=await Promise.all([api('/stats'),api('/analytics')]);const s=sR.data,a=aR.data;const stats=[{lbl:'Memories',val:s.memories,max:Math.max(s.memories,1),c:'var(--accent)'},{lbl:'Entities',val:s.entities,max:Math.max(s.entities,1),c:'var(--blue)'},{lbl:'Relations',val:s.edges,max:Math.max(s.edges,1),c:'var(--cyan)'},{lbl:'Thoughts',val:s.thoughts,max:Math.max(s.thoughts,1),c:'var(--green)'},{lbl:'Events',val:s.events,max:Math.max(s.events,1),c:'var(--amber)'},{lbl:'Interactions',val:s.interactions,max:Math.max(s.interactions,1),c:'var(--red)'}];document.getElementById('stat-grid').innerHTML=stats.map(st=>`<div class="stat"><div class="stat-val">${st.val}</div><div class="stat-lbl">${st.lbl}</div><div class="stat-bar" style="width:${st.val/st.max*100}%;background:${st.c}"></div></div>`).join('');document.getElementById('nav-mem-count').textContent=s.memories||'';document.getElementById('nav-thought-count').textContent=s.thoughts||'';lineChart(a.timeline,document.getElementById('chart-timeline'));barChart(a.retention_histogram,document.getElementById('chart-retention'));document.getElementById('ret-avg').textContent='avg '+(a.avg_retention*100).toFixed(0)+'%';donutChart(a.namespace_distribution,document.getElementById('chart-namespaces'));document.getElementById('ns-count').textContent=s.namespaces.length+' namespaces';const te=a.top_entities.slice(0,8);const teMax=Math.max(...te.map(e=>e.degree),1);document.getElementById('chart-entities').innerHTML=te.length?te.map((e,i)=>`<div style="display:flex;align-items:center;gap:6px;padding:3px 0"><div style="width:100px;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.name)}</div><div style="flex:1;height:5px;background:var(--surface2);border-radius:2px;overflow:hidden"><div style="height:100%;width:${e.degree/teMax*100}%;background:${NS_COLORS[i%NS_COLORS.length]};border-radius:2px"></div></div><div style="font-size:10px;color:var(--text-dim);width:20px;text-align:right">${e.degree}</div></div>`).join(''):'<div class="empty" style="padding:14px">No entities</div>';const items=[];s.recent_memories.forEach(m=>items.push({type:'M',text:m.title||m.document_id,ts:m.updated_at,c:'var(--accent)'}));s.recent_events.forEach(e=>items.push({type:'E',text:e.event_type+': '+e.entity_name,ts:e.timestamp,c:'var(--blue)'}));s.recent_thoughts.forEach(t=>items.push({type:'T',text:t.content.substring(0,80),ts:t.created_at,c:'var(--green)'}));items.sort((a,b)=>b.ts-a.ts);document.getElementById('recent-activity').innerHTML=items.length?items.slice(0,10).map(i=>`<div class="tl-item"><div class="tl-time">${fmtRel(i.ts)}</div><div class="tl-body"><span class="pill pill-muted" style="font-size:9px;padding:1px 4px;color:${i.c}">${i.type}</span> ${esc(i.text)}</div></div>`).join(''):'<div class="empty" style="padding:14px">No activity yet</div>'}catch(e){toast('Load failed: '+e.message,'err')}}
+async function loadOverview(){try{const[sR,aR]=await Promise.all([api('/stats'),api('/analytics')]);const s=sR.data,a=aR.data;const stats=[{lbl:'Memories',val:s.memories,max:Math.max(s.memories,1),c:'var(--accent)'},{lbl:'Entities',val:s.entities,max:Math.max(s.entities,1),c:'var(--blue)'},{lbl:'Relations',val:s.edges,max:Math.max(s.edges,1),c:'var(--cyan)'},{lbl:'Thoughts',val:s.thoughts,max:Math.max(s.thoughts,1),c:'var(--green)'},{lbl:'Events',val:s.events,max:Math.max(s.events,1),c:'var(--amber)'},{lbl:'Interactions',val:s.interactions,max:Math.max(s.interactions,1),c:'var(--red)'}];document.getElementById('stat-grid').innerHTML=stats.map(st=>`<div class="stat"><div class="stat-val">${st.val}</div><div class="stat-lbl">${st.lbl}</div><div class="stat-bar" style="width:${st.val/st.max*100}%;background:${st.c}"></div></div>`).join('');document.getElementById('nav-mem-count').textContent=s.memories||'';document.getElementById('nav-thought-count').textContent=s.thoughts||'';lineChart(a.timeline,document.getElementById('chart-timeline'));barChart(a.retention_histogram,document.getElementById('chart-retention'));document.getElementById('ret-avg').textContent='avg '+(a.avg_retention*100).toFixed(0)+'%';donutChart(a.namespace_distribution,document.getElementById('chart-namespaces'));document.getElementById('ns-count').textContent=s.namespaces.length+' namespaces';const te=a.top_entities.slice(0,8);const teMax=Math.max(...te.map(e=>e.degree),1);document.getElementById('chart-entities').innerHTML=te.length?te.map((e,i)=>`<div style="display:flex;align-items:center;gap:6px;padding:3px 0"><div style="width:100px;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.name)}</div><div style="flex:1;height:5px;background:var(--surface2);border-radius:2px;overflow:hidden"><div style="height:100%;width:${e.degree/teMax*100}%;background:${NS_COLORS[i%NS_COLORS.length]};border-radius:2px"></div></div><div style="font-size:10px;color:var(--text-dim);width:20px;text-align:right">${e.degree}</div></div>`).join(''):'<div class="empty" style="padding:14px">No entities</div>';const items=[];s.recent_memories.forEach(m=>items.push({type:'M',text:m.title||m.document_id,ts:m.updated_at,c:'var(--accent)',ns:m.namespace,doc:m.document_id}));s.recent_events.forEach(e=>items.push({type:'E',text:e.event_type+': '+e.entity_name,ts:e.timestamp,c:'var(--blue)'}));s.recent_thoughts.forEach(t=>items.push({type:'T',text:t.content.substring(0,80),ts:t.created_at,c:'var(--green)'}));items.sort((a,b)=>b.ts-a.ts);document.getElementById('recent-activity').innerHTML=items.length?items.slice(0,10).map(i=>`<div class="tl-item${i.doc?' clickable':''}"${i.doc?` role="button" tabindex="0" onclick="openMemModal('${esc(i.ns)}','${esc(i.doc)}')"`:''}><div class="tl-time">${fmtRel(i.ts)}</div><div class="tl-body"><span class="pill pill-muted" style="font-size:9px;padding:1px 4px;color:${i.c}">${i.type}</span> ${esc(i.text)}</div></div>`).join(''):'<div class="empty" style="padding:14px">No activity yet</div>'}catch(e){toast('Load failed: '+e.message,'err')}}
 
 // Memory browser
 async function loadMemList(){await loadNS();const ns=document.getElementById('mem-ns-filter').value;const q=document.getElementById('mem-search').value;const memType=document.getElementById('mem-type-filter').value;try{let mems;if(q){mems=(await api(`/search?q=${encodeURIComponent(q)}&namespace=${ns||''}&limit=200`)).data.results}else{mems=(await api(`/documents?namespace=${ns||''}&limit=200`)).data.documents}if(memType){mems=mems.filter(m=>(m.memory_type||'semantic')===memType)}renderMemCards(mems)}catch(e){toast('Load failed: '+e.message,'err')}}
@@ -402,11 +474,11 @@ const dzf=document.getElementById('dropzone-files');dzf.addEventListener('dragov
 async function uploadFiles(){if(selectedFiles.length===0)return;const ns=document.getElementById('upload-ns').value||'default';const memType=document.getElementById('upload-type').value;const btn=document.getElementById('upload-files-btn');btn.disabled=true;btn.textContent='Uploading...';try{const fd=new FormData();selectedFiles.forEach(f=>fd.append('files',f));fd.append('namespace',ns);fd.append('memory_type',memType);const d=(await api('/vaults/upload-folder',{method:'POST',body:fd})).data;toast(`Uploaded ${d.imported} files`);showImportResults(d);selectedFiles=[];document.getElementById('dropzone-files').innerHTML='<svg class="dropzone-icon" viewBox="0 0 32 32" fill="none"><path d="M16 4v18M9 12l7-8 7 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 24v3c0 1 .5 1.5 1.5 1.5h19c1 0 1.5-.5 1.5-1.5v-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><div style="font-size:13px;color:var(--text-muted)">Click to select files or drag them here</div><div class="field-hint" style="margin-top:6px">.md, .txt, .json — multiple files supported</div>';btn.disabled=true;btn.textContent='Upload Files'}catch(e){toast('Upload failed: '+e.message,'err')}btn.disabled=false;btn.textContent='Upload Files'}
 
 // Recall
-async function doRecall(){const q=document.getElementById('recall-query').value.trim();if(!q){toast('Enter a query','err');return}const ns=document.getElementById('recall-ns').value;const num=document.getElementById('recall-num').value;const ctxToggle=document.getElementById('recall-ctx-toggle').checked;const el=document.getElementById('recall-results');el.innerHTML='<div style="text-align:center;padding:30px"><div class="spinner" style="margin:0 auto"></div></div>';try{const d=(await api('/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q,namespace:ns||null,maxChunks:parseInt(num)})})).data;if(d.count===0){el.innerHTML='<div class="empty"><div>No matching memories found</div></div>';return}let html=`<div style="margin-bottom:10px;font-size:12px;color:var(--text-dim)">${d.count} memories recalled</div>`;if(ctxToggle){const pd=(await api('/context-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q,namespace:ns||null,max_chunks:parseInt(num)})})).data;html+=`<div class="card"><div class="card-head">Context Preview <span class="count">~${pd.estimated_tokens} tokens</span></div><div class="ctx-preview">${esc(pd.context_text)}</div></div>`}html+=d.chunks.map(c=>{const sPct=Math.round(Math.min(c.score,1)*100),rPct=Math.round(Math.min(c.retention,1)*100);return `<div class="recall-card"><div class="recall-head"><div class="recall-title">${esc(c.title||c.documentId)} <span class="pill pill-muted" style="font-size:10px;margin-left:4px">${esc(c.namespace)}</span></div><div class="recall-scores"><span>Score ${sPct}%</span><span>Retention ${rPct}%</span></div></div><div class="recall-body">${esc(c.content)}</div></div>`}).join('');el.innerHTML=html}catch(e){el.innerHTML='<div class="empty"><div>'+esc(e.message)+'</div></div>'}}
+async function doRecall(){const q=document.getElementById('recall-query').value.trim();if(!q){toast('Enter a query','err');return}const ns=document.getElementById('recall-ns').value;const num=document.getElementById('recall-num').value;const ctxToggle=document.getElementById('recall-ctx-toggle').checked;const el=document.getElementById('recall-results');el.innerHTML='<div style="text-align:center;padding:30px"><div class="spinner" style="margin:0 auto"></div></div>';try{const d=(await api('/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q,namespace:ns||null,maxChunks:parseInt(num)})})).data;if(d.count===0){el.innerHTML='<div class="empty"><div>No matching memories found</div></div>';return}let html=`<div style="margin-bottom:10px;font-size:12px;color:var(--text-dim)">${d.count} memories recalled</div>`;if(ctxToggle){const pd=(await api('/context-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q,namespace:ns||null,max_chunks:parseInt(num)})})).data;html+=`<div class="card"><div class="card-head">Context Preview <span class="count">~${pd.estimated_tokens} tokens</span></div><div class="ctx-preview">${esc(pd.context_text)}</div></div>`}html+=d.chunks.map(c=>{const sPct=Math.round(Math.min(c.score,1)*100),rPct=Math.round(Math.min(c.retention,1)*100);return `<div class="recall-card" role="button" tabindex="0" onclick="openMemModal('${esc(c.namespace)}','${esc(c.documentId)}')" onkeydown="if(event.key==='Enter')this.click()"><div class="recall-head"><div class="recall-title">${esc(c.title||c.documentId)} <span class="pill pill-muted" style="font-size:10px;margin-left:4px">${esc(c.namespace)}</span></div><div class="recall-scores"><span>Score ${sPct}%</span><span>Retention ${rPct}%</span></div></div><div class="recall-body">${esc(c.content)}</div></div>`}).join('');el.innerHTML=html}catch(e){el.innerHTML='<div class="empty"><div>'+esc(e.message)+'</div></div>'}}
 
 // Chat
 async function sendChat(){const inp=document.getElementById('chat-input');const msg=inp.value.trim();if(!msg)return;inp.value='';chatHistory.push({role:'user',content:msg});renderChat();const btn=document.getElementById('chat-btn');btn.disabled=true;btn.textContent='...';try{const d=(await api('/conversations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:chatHistory.map(m=>({role:m.role,content:m.content})),temperature:.3,maxTokens:1024})})).data;chatHistory.push({role:'assistant',content:d.answer,ctx:d.context_count})}catch(e){chatHistory.push({role:'assistant',content:'Error: '+e.message})}renderChat();btn.disabled=false;btn.textContent='Send'}
-function renderChat(){const el=document.getElementById('chat-msgs');if(chatHistory.length===0){el.innerHTML='<div class="empty"><div>Start a conversation. Your AI will use stored memories as context.</div></div>';return}el.innerHTML=chatHistory.map(m=>`<div class="chat-msg"><div class="chat-role ${m.role}">${m.role==='user'?'You':'AI'}</div><div class="chat-bubble ${m.role}">${esc(m.content)}</div>${m.ctx?`<div style="font-size:11px;color:var(--text-dim);margin-top:4px">Based on ${m.ctx} memories</div>`:''}</div>`).join('');el.scrollTop=el.scrollHeight}
+function renderChat(){const el=document.getElementById('chat-msgs');if(chatHistory.length===0){el.innerHTML='<div class="empty"><div>Start a conversation. Your AI will use stored memories as context.</div></div>';return}el.innerHTML=chatHistory.map(m=>`<div class="chat-msg"><div class="chat-role ${m.role}">${m.role==='user'?'You':'AI'}</div><div class="chat-bubble ${m.role}">${m.role==='assistant'?`<div class="md-reader">${renderMd(m.content)}</div>`:esc(m.content)}</div>${m.ctx?`<div style="font-size:11px;color:var(--text-dim);margin-top:4px">Based on ${m.ctx} memories</div>`:''}</div>`).join('');el.scrollTop=el.scrollHeight}
 
 // Thoughts
 async function loadThoughts(){await loadNS();try{const ns=document.getElementById('thought-ns').value;const d=(await api(`/thoughts?namespace=${ns||''}&limit=50`)).data;const el=document.getElementById('thoughts-list');if(d.count===0){el.innerHTML='<div class="empty"><div>No thoughts yet. Click "Generate Thought" to synthesize one.</div></div>';return}el.innerHTML=d.thoughts.map(t=>{const p=t.parsed||{};return `<div class="thought"><div class="thought-meta"><span class="pill pill-accent" style="font-size:10px">${esc(t.namespace)}</span><span>${fmtRel(t.created_at)}</span></div>${p.inference?`<div class="thought-field"><div class="thought-key">Inference</div><div class="thought-val">${esc(p.inference)}</div></div>`:''}${p.contradiction?`<div class="thought-field"><div class="thought-key">Contradiction</div><div class="thought-val" style="color:var(--red)">${esc(p.contradiction)}</div></div>`:''}${p.follow_up?`<div class="thought-field"><div class="thought-key">Follow-up</div><div class="thought-val" style="color:var(--amber)">${esc(p.follow_up)}</div></div>`:''}${p.next_action?`<div class="thought-field"><div class="thought-key">Next Action</div><div class="thought-val" style="color:var(--green)">${esc(p.next_action)}</div></div>`:''}${!t.parsed?`<div class="thought-val" style="white-space:pre-wrap">${esc(t.content)}</div>`:''}</div>`}).join('')}catch(e){toast('Failed: '+e.message,'err')}}
@@ -462,19 +534,17 @@ async function loadGraph(){
       physics:{stabilization:{iterations:80},barnesHut:{gravitationalConstant:-4000,centralGravity:.15,springLength:120,springStrength:.04,damping:.5}},
       interaction:{hover:true,zoomView:true}
     });
-    // Click handler — open the first memory that references this entity
+    // Click a node -> slide-over panel with every memory behind it (fetched live);
+    // click an edge -> relation panel. The old handler rendered into the hidden
+    // Memories view, which looked like the click did nothing.
+    graphEdgeData=d.edges;
     network.on('click',function(params){
-      if(params.nodes.length>0){
-        const nodeName=params.nodes[0];
-        const ent=graphEntityData[nodeName];
-        if(ent&&ent.documents&&ent.documents.length>0){
-          const entNs=ent.namespace||ns||'default';
-          showMem(entNs,ent.documents[0]);
-        }else if(ent){
-          // No documents linked — show entity info in a toast
-          toast('Entity: '+nodeName+' (type: '+(ent.entity_type||'concept')+')','ok');
-        }
-      }
+      if(params.nodes.length>0){openEntityPanel(String(params.nodes[0]));return}
+      if(params.edges.length>0){const eo=network.body.edges[params.edges[0]];if(eo)openEdgePanel(String(eo.fromId),String(eo.toId));return}
+      closeEntityPanel();
+    });
+    network.on('doubleClick',function(params){
+      if(params.nodes.length>0)network.focus(params.nodes[0],{scale:1.4,animation:true});
     });
     // Legend
     const types={};
@@ -489,17 +559,111 @@ async function loadGraph(){
   }catch(e){toast('Graph failed: '+e.message,'err')}
 }
 
-function openEntityMem(name){
-  const ent=graphEntityData[name];
-  if(ent&&ent.documents&&ent.documents.length>0){
-    const ns=ent.namespace||document.getElementById('graph-ns').value||'default';
-    navTo('memories');
-    setTimeout(()=>showMem(ns,ent.documents[0]),300);
-  }
+function openEntityMem(name){openEntityPanel(name)}
+
+// ── Entity slide-over panel (graph drill-down) ─────────────────────────────
+let graphEdgeData=[];
+async function openEntityPanel(name){
+  const panel=document.getElementById('ep-panel');
+  document.getElementById('ep-name').innerHTML='<span style="width:10px;height:10px;border-radius:50%;background:var(--accent);flex-shrink:0"></span>'+esc(name);
+  const ent=graphEntityData[name]||{};
+  document.getElementById('ep-sub').textContent=(ent.entity_type||'concept');
+  const body=document.getElementById('ep-body');
+  body.innerHTML='<div style="text-align:center;padding:26px"><div class="spinner" style="margin:0 auto"></div></div>';
+  panel.classList.add('show');
+  try{
+    const ns=document.getElementById('graph-ns')?document.getElementById('graph-ns').value:'';
+    const d=(await api('/entity/'+encodeURIComponent(name)+'/memories?namespace='+encodeURIComponent(ns||'')+'&limit=20')).data;
+    let html='';
+    if(d.edges&&d.edges.length){
+      html+='<div class="ep-section">Connections ('+d.edges.length+')</div>';
+      html+=d.edges.map(e=>{
+        const other=e.source_entity===name?e.target_entity:e.source_entity;
+        const dir=e.source_entity===name?'&rarr;':'&larr;';
+        return '<div class="ep-edge" role="button" tabindex="0" onclick="openEntityPanel(\''+esc(other).replace(/'/g,"\\'")+'\')"><span class="rel">'+esc(e.relation)+'</span> '+dir+' <strong>'+esc(other)+'</strong></div>';
+      }).join('');
+    }
+    html+='<div class="ep-section">Memories ('+d.count+')</div>';
+    if(!d.count){html+='<div class="empty" style="padding:18px;font-size:12px">No memories mention this entity yet.</div>'}
+    else{
+      html+=d.memories.map(m=>{
+        const retPct=Math.round(Math.min(m.retention||0,1)*100);
+        const mt=m.memory_type||'semantic';
+        return '<div class="ep-mem" role="button" tabindex="0" onclick="openMemModal(\''+esc(m.namespace)+'\',\''+esc(m.document_id).replace(/'/g,"\\'")+'\')" onkeydown="if(event.key===\'Enter\')this.click()">'
+          +'<div class="ep-mem-title">'+esc(m.title||m.document_id)+'</div>'
+          +'<div class="ep-mem-preview">'+esc(m.preview||'')+'</div>'
+          +'<div class="mem-card-meta" style="margin-top:5px"><span class="pill '+(MT_COLORS[mt]||'pill-muted')+'" style="font-size:9px;padding:1px 4px">'+(MT_LABELS[mt]||'S')+'</span>'
+          +'<span class="pill pill-muted" style="font-size:9px;padding:1px 5px">'+esc(m.namespace)+'</span>'
+          +'<span class="ret-bar"><span class="ret-fill '+retColor(m.retention||0)+'" style="width:'+retPct+'%"></span></span>'+retPct+'%'
+          +'<span style="margin-left:auto">'+fmtRel(m.updated_at)+'</span></div></div>';
+      }).join('');
+    }
+    body.innerHTML=html;
+  }catch(e){body.innerHTML='<div class="empty" style="padding:18px">'+esc(e.message)+'</div>'}
 }
+function openEdgePanel(from,to){
+  const panel=document.getElementById('ep-panel');
+  const edges=graphEdgeData.filter(e=>(e.source_entity===from&&e.target_entity===to)||(e.source_entity===to&&e.target_entity===from));
+  document.getElementById('ep-name').textContent=from+' ↔ '+to;
+  document.getElementById('ep-sub').textContent='relation';
+  document.getElementById('ep-body').innerHTML=
+    (edges.length?edges.map(e=>'<div class="ep-edge"><span class="rel">'+esc(e.relation)+'</span> weight '+(e.weight||1).toFixed(1)+'</div>').join(''):'')
+    +'<div class="ep-section">Endpoints</div>'
+    +[from,to].map(n=>'<div class="ep-edge" role="button" tabindex="0" onclick="openEntityPanel(\''+esc(n).replace(/'/g,"\\'")+'\')"><strong>'+esc(n)+'</strong> &rarr; open</div>').join('');
+  panel.classList.add('show');
+}
+function closeEntityPanel(){document.getElementById('ep-panel').classList.remove('show')}
+
+// ── Universal memory reader modal (works from every view) ───────────────────
+let _mmCtx={ns:null,doc:null};
+async function openMemModal(ns,docId){
+  const ov=document.getElementById('mm-overlay');
+  document.getElementById('mm-title').textContent='Loading…';
+  document.getElementById('mm-meta').innerHTML='';
+  document.getElementById('mm-body').innerHTML='<div style="text-align:center;padding:26px"><div class="spinner" style="margin:0 auto"></div></div>';
+  document.getElementById('mm-actions').innerHTML='';
+  ov.classList.add('show');
+  try{
+    const d=(await api('/documents/'+encodeURIComponent(docId)+'?namespace='+encodeURIComponent(ns))).data;
+    _mmCtx={ns:ns,doc:d.document_id};
+    const days=(Date.now()/1000-(d.last_access||d.updated_at||0))/86400;
+    const ret=Math.exp(-days/Math.max(d.stability||1,.01));const retPct=Math.round(Math.min(ret,1)*100);
+    const mt=d.memory_type||'semantic';
+    const mtFull={semantic:'Semantic (facts)',episodic:'Episodic (events)',procedural:'Procedural (how-to)',working:'Working (task)'};
+    document.getElementById('mm-title').textContent=d.title||d.document_id;
+    document.getElementById('mm-meta').innerHTML=
+      '<span class="pill '+(MT_COLORS[mt]||'pill-accent')+'">'+(mtFull[mt]||mt)+'</span>'
+      +'<span class="pill pill-muted">'+esc(d.namespace)+'</span>'
+      +'<span class="pill pill-green">Accessed '+(d.access_count||0)+'x</span>'
+      +'<span class="pill pill-amber">Stability '+(d.stability||0).toFixed(2)+'</span>'
+      +'<span class="pill" style="background:var(--surface2);color:'+retHex(ret)+'">Retention '+retPct+'%</span>'
+      +'<span style="margin-left:auto;font-size:11px;color:var(--text-dim);align-self:center">'+fmtDate(d.updated_at)+'</span>';
+    document.getElementById('mm-body').innerHTML=renderMd(d.content||'(empty)');
+    document.getElementById('mm-actions').innerHTML=
+      '<button class="btn btn-primary btn-sm" onclick="mmReinforce()">Reinforce</button>'
+      +'<button class="btn btn-ghost btn-sm" onclick="mmOpenInMemories()">Open in Memories</button>'
+      +'<button class="btn btn-ghost btn-sm" onclick="recordInteraction(\''+esc(ns)+'\',\''+esc(d.document_id).replace(/'/g,"\\'")+'\',\'read\')">Mark Read</button>'
+      +'<button class="btn btn-danger btn-sm" style="margin-left:auto" onclick="mmDelete()">Delete</button>';
+  }catch(e){document.getElementById('mm-body').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}
+}
+function closeMemModal(){document.getElementById('mm-overlay').classList.remove('show')}
+async function mmReinforce(){try{await api('/reinforce',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({documentId:_mmCtx.doc,namespace:_mmCtx.ns})});toast('Reinforced — this memory will now decay slower')}catch(e){toast('Failed: '+e.message,'err')}}
+function mmOpenInMemories(){const c=_mmCtx;closeMemModal();closeEntityPanel();navTo('memories');setTimeout(()=>showMem(c.ns,c.doc),300)}
+async function mmDelete(){if(!confirm('Delete this memory?'))return;try{await fetch(API+'/documents/'+encodeURIComponent(_mmCtx.doc)+'?namespace='+encodeURIComponent(_mmCtx.ns),{method:'DELETE'});toast('Deleted');closeMemModal();loadMemList()}catch(e){toast('Delete failed: '+e.message,'err')}}
+
+// ── Graph node search + physics toggle ──────────────────────────────────────
+let _physicsOn=true;
+function graphSearch(q){
+  if(!network||!q){return}
+  q=q.toLowerCase();
+  const match=Object.keys(graphEntityData).find(n=>n.toLowerCase().includes(q));
+  if(match){network.selectNodes([match]);network.focus(match,{scale:1.3,animation:{duration:250}})}
+}
+function graphSearchGo(){const q=document.getElementById('graph-search').value.toLowerCase();const match=Object.keys(graphEntityData).find(n=>n.toLowerCase().includes(q));if(match)openEntityPanel(match)}
+function togglePhysics(){if(!network)return;_physicsOn=!_physicsOn;network.setOptions({physics:{enabled:_physicsOn}});document.getElementById('physics-btn').textContent=_physicsOn?'Freeze':'Unfreeze'}
 
 // Timeline
-async function loadTimeline(){await loadNS();const ns=document.getElementById('timeline-ns').value;try{const d=(await api(`/timeline?namespace=${ns||''}&limit=200`)).data;const el=document.getElementById('timeline-list');if(d.count===0){el.innerHTML='<div class="empty" style="padding:24px"><div>No events yet</div></div>';return}el.innerHTML=d.events.map(e=>`<div class="tl-item"><div class="tl-time">${fmtDate(e.timestamp)}</div><div class="tl-body"><span class="pill pill-accent" style="font-size:10px">${esc(e.event_type)}</span> <strong>${esc(e.entity_name)}</strong>${e.description?' — '+esc(e.description):''}</div></div>`).join('')}catch(e){toast('Failed: '+e.message,'err')}}
+async function loadTimeline(){await loadNS();const ns=document.getElementById('timeline-ns').value;try{const d=(await api(`/timeline?namespace=${ns||''}&limit=200`)).data;const el=document.getElementById('timeline-list');if(d.count===0){el.innerHTML='<div class="empty" style="padding:24px"><div>No events yet</div></div>';return}el.innerHTML=d.events.map(e=>{const did=e.payload&&e.payload.document_id;const click=did?`onclick="openMemModal('${esc(e.namespace)}','${esc(did)}')"`:`onclick="openEntityPanel('${esc(e.entity_name).replace(/'/g,"\\'")}')"`;return `<div class="tl-item clickable" role="button" tabindex="0" ${click}><div class="tl-time">${fmtDate(e.timestamp)}</div><div class="tl-body"><span class="pill pill-accent" style="font-size:10px">${esc(e.event_type)}</span> <strong>${esc(e.entity_name)}</strong>${e.description?' — '+esc(e.description):''}</div></div>`}).join('')}catch(e){toast('Failed: '+e.message,'err')}}
 
 // Vaults management
 async function loadVaults(){try{const d=(await api('/vaults')).data;const grid=document.getElementById('vault-grid');if(d.length===0){grid.innerHTML='<div class="empty" style="grid-column:1/-1"><div>No vaults yet. Create one to get started.</div></div>';return}grid.innerHTML=d.map(v=>`<div class="vault-card ${v.is_active?'active':''}" onclick="activateVault('${esc(v.namespace)}')"><div class="vault-card-name"><span style="width:10px;height:10px;border-radius:50%;background:${v.color||'#9d7cf6'};flex-shrink:0"></span>${esc(v.name)}${v.is_active?'<span class="pill pill-green" style="font-size:9px;margin-left:4px">Active</span>':''}</div><div class="vault-card-desc">${esc(v.description||'No description')}</div><div class="vault-card-stats"><span>${v.memory_count} memories</span><span class="pill pill-muted" style="font-size:9px">${esc(v.memory_type)}</span></div><div class="vault-card-actions"><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();editVault('${esc(v.namespace)}')">Edit</button><button class="btn btn-danger btn-sm" onclick="event.stopPropagation();deleteVault('${esc(v.namespace)}')">Delete</button></div></div>`).join('')}catch(e){toast('Failed: '+e.message,'err')}}
@@ -518,7 +682,7 @@ async function activateVault(ns){try{await api(`/vaults/${encodeURIComponent(ns)
 async function deleteVault(ns){if(!confirm('Delete vault "'+ns+'" and ALL its memories?'))return;try{await fetch(API+'/vaults/'+encodeURIComponent(ns),{method:'DELETE'});toast('Vault deleted');loadVaults();loadVaultSwitcher()}catch(e){toast('Failed: '+e.message,'err')}}
 
 // Health
-async function loadHealth(){try{const[ho,dup,stale]=await Promise.all([api('/health/overview'),api('/health/duplicates'),api('/health/stale')]);const h=ho.data,d=dup.data,s=stale.data;const stats=[{lbl:'Total',val:h.total,c:'var(--accent)'},{lbl:'Healthy',val:h.healthy,c:'var(--green)'},{lbl:'Decaying',val:h.decaying,c:'var(--amber)'},{lbl:'Critical',val:h.critical,c:'var(--red)'},{lbl:'Never Accessed',val:h.never_accessed,c:'var(--blue)'},{lbl:'Health Score',val:(h.health_score*100).toFixed(0)+'%',c:'var(--accent)'}];document.getElementById('health-stats').innerHTML=stats.map(st=>`<div class="stat"><div class="stat-val">${st.val}</div><div class="stat-lbl">${st.lbl}</div><div class="stat-bar" style="width:100%;background:${st.c}"></div></div>`).join('');document.getElementById('dup-count').textContent=d.count+' found';document.getElementById('dup-list').innerHTML=d.count?d.duplicates.slice(0,10).map(dup=>`<div class="dup-card"><div style="display:flex;justify-content:space-between;margin-bottom:6px"><span class="pill pill-amber" style="font-size:10px">${(dup.similarity*100).toFixed(0)}% similar</span><span class="pill pill-muted" style="font-size:10px">${esc(dup.namespace)}</span></div><div class="dup-pair"><div class="dup-side"><div class="dup-side-title">${esc(dup.memory_a.title)}</div><div class="dup-side-content">${esc(dup.memory_a.content)}</div></div><div class="dup-side"><div class="dup-side-title">${esc(dup.memory_b.title)}</div><div class="dup-side-content">${esc(dup.memory_b.content)}</div></div></div></div>`).join(''):'<div class="empty" style="padding:20px"><div>No duplicates found</div></div>';document.getElementById('stale-count').textContent=s.count+' found';document.getElementById('stale-list').innerHTML=s.count?s.stale.slice(0,15).map(st=>`<div class="mem-card" onclick="showMem('${esc(st.namespace)}','${esc(st.document_id)}')"><div class="mem-card-title">${esc(st.title)}</div><div class="mem-card-meta"><span class="pill pill-muted" style="font-size:9px">${esc(st.namespace)}</span><span class="ret-bar"><span class="ret-fill ret-l" style="width:${Math.round(st.retention*100)}%"></span></span>${(st.retention*100).toFixed(0)}%<span>${st.age_days}d old</span><span>${st.access_count}x</span></div></div>`).join(''):'<div class="empty" style="padding:20px"><div>No stale memories</div></div>'}catch(e){toast('Health load failed: '+e.message,'err')}}
+async function loadHealth(){try{const[ho,dup,stale]=await Promise.all([api('/health/overview'),api('/health/duplicates'),api('/health/stale')]);const h=ho.data,d=dup.data,s=stale.data;const stats=[{lbl:'Total',val:h.total,c:'var(--accent)'},{lbl:'Healthy',val:h.healthy,c:'var(--green)'},{lbl:'Decaying',val:h.decaying,c:'var(--amber)'},{lbl:'Critical',val:h.critical,c:'var(--red)'},{lbl:'Never Accessed',val:h.never_accessed,c:'var(--blue)'},{lbl:'Health Score',val:(h.health_score*100).toFixed(0)+'%',c:'var(--accent)'}];document.getElementById('health-stats').innerHTML=stats.map(st=>`<div class="stat"><div class="stat-val">${st.val}</div><div class="stat-lbl">${st.lbl}</div><div class="stat-bar" style="width:100%;background:${st.c}"></div></div>`).join('');document.getElementById('dup-count').textContent=d.count+' found';document.getElementById('dup-list').innerHTML=d.count?d.duplicates.slice(0,10).map(dup=>`<div class="dup-card"><div style="display:flex;justify-content:space-between;margin-bottom:6px"><span class="pill pill-amber" style="font-size:10px">${(dup.similarity*100).toFixed(0)}% similar</span><span class="pill pill-muted" style="font-size:10px">${esc(dup.namespace)}</span></div><div class="dup-pair"><div class="dup-side"><div class="dup-side-title">${esc(dup.memory_a.title)}</div><div class="dup-side-content">${esc(dup.memory_a.content)}</div></div><div class="dup-side"><div class="dup-side-title">${esc(dup.memory_b.title)}</div><div class="dup-side-content">${esc(dup.memory_b.content)}</div></div></div></div>`).join(''):'<div class="empty" style="padding:20px"><div>No duplicates found</div></div>';document.getElementById('stale-count').textContent=s.count+' found';document.getElementById('stale-list').innerHTML=s.count?s.stale.slice(0,15).map(st=>`<div class="mem-card" role="button" tabindex="0" onclick="openMemModal('${esc(st.namespace)}','${esc(st.document_id)}')"><div class="mem-card-title">${esc(st.title)}</div><div class="mem-card-meta"><span class="pill pill-muted" style="font-size:9px">${esc(st.namespace)}</span><span class="ret-bar"><span class="ret-fill ret-l" style="width:${Math.round(st.retention*100)}%"></span></span>${(st.retention*100).toFixed(0)}%<span>${st.age_days}d old</span><span>${st.access_count}x</span></div></div>`).join(''):'<div class="empty" style="padding:20px"><div>No stale memories</div></div>'}catch(e){toast('Health load failed: '+e.message,'err')}}
 
 async function bulkDecay(){try{const d=(await api('/bulk/decay',{method:'POST'})).data;toast(`Decayed ${d.decayed} memories`);loadHealth()}catch(e){toast('Failed: '+e.message,'err')}}
 async function bulkAutoCategorize(){const ns=activeVault?activeVault.namespace:null;try{toast('Auto-categorizing with LLM...');const d=(await api('/auto-categorize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({namespace:ns})})).data;toast(`Categorized ${d.categorized} memories (${d.errors} errors)`);loadHealth()}catch(e){toast('Failed: '+e.message,'err')}}
@@ -534,12 +698,12 @@ const COMMANDS=[{l:'Go to Overview',a:()=>navTo('overview')},{l:'Go to Memories'
 let cmdItems=COMMANDS;
 function openPalette(){document.getElementById('cmd-overlay').classList.add('show');const inp=document.getElementById('cmd-input');inp.value='';inp.focus();renderCmdList(COMMANDS);loadCmdMemories()}
 function closePalette(){document.getElementById('cmd-overlay').classList.remove('show')}
-async function loadCmdMemories(){try{const d=(await api('/documents?limit=50')).data;cmdItems=[...COMMANDS,...d.documents.map(m=>({l:m.title||m.document_id,a:()=>{navTo('memories');setTimeout(()=>showMem(m.namespace,m.document_id),300)}}))]}catch(e){}}
-function filterPalette(){const q=document.getElementById('cmd-input').value.toLowerCase();renderCmdList(cmdItems.filter(c=>c.l.toLowerCase().includes(q)));if(q.length>2){clearTimeout(window._cs);window._cs=setTimeout(async()=>{try{const d=(await api('/search?q='+encodeURIComponent(q)+'&limit=10')).data;renderCmdList([...COMMANDS.filter(c=>c.l.toLowerCase().includes(q)),...d.results.map(m=>({l:m.title||m.document_id,a:()=>{navTo('memories');setTimeout(()=>showMem(m.namespace,m.document_id),300)}}))])}catch(e){}},300)}}
-function renderCmdList(items){document.getElementById('cmd-list').innerHTML=items.map((c,i)=>`<div class="cmd-item ${i===0?'sel':''}" onclick="closePalette();cmdItems[${i}].a()">${esc(c.l)}</div>`).join('')}
+async function loadCmdMemories(){try{const d=(await api('/documents?limit=50')).data;cmdItems=[...COMMANDS,...d.documents.map(m=>({l:m.title||m.document_id,a:()=>openMemModal(m.namespace,m.document_id)}))]}catch(e){}}
+function filterPalette(){const q=document.getElementById('cmd-input').value.toLowerCase();renderCmdList(cmdItems.filter(c=>c.l.toLowerCase().includes(q)));if(q.length>2){clearTimeout(window._cs);window._cs=setTimeout(async()=>{try{const d=(await api('/search?q='+encodeURIComponent(q)+'&limit=10')).data;renderCmdList([...COMMANDS.filter(c=>c.l.toLowerCase().includes(q)),...d.results.map(m=>({l:m.title||m.document_id,a:()=>openMemModal(m.namespace,m.document_id)}))])}catch(e){}},300)}}
+let _cmdShown=[];function renderCmdList(items){_cmdShown=items;document.getElementById('cmd-list').innerHTML=items.map((c,i)=>`<div class="cmd-item ${i===0?'sel':''}" onclick="closePalette();_cmdShown[${i}].a()">${esc(c.l)}</div>`).join('')}
 function handleCmdKey(e){const items=document.querySelectorAll('.cmd-item');if(e.key==='ArrowDown'){e.preventDefault();cmdSelIdx=Math.min(cmdSelIdx+1,items.length-1);updateCmdSel()}else if(e.key==='ArrowUp'){e.preventDefault();cmdSelIdx=Math.max(cmdSelIdx-1,0);updateCmdSel()}else if(e.key==='Enter'){e.preventDefault();if(items[cmdSelIdx])items[cmdSelIdx].click()}else if(e.key==='Escape'){closePalette()}}
 let cmdSelIdx=0;function updateCmdSel(){document.querySelectorAll('.cmd-item').forEach((el,i)=>el.classList.toggle('sel',i===cmdSelIdx));cmdSelIdx=0}
-document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='k'){e.preventDefault();openPalette()}if(e.key==='Escape')closePalette()});
+document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='k'){e.preventDefault();openPalette()}if(e.key==='Escape'){closePalette();closeMemModal();closeEntityPanel()}});
 
 // Health check
 async function checkHealth(){try{await api('/health');document.getElementById('health-dot').style.background='var(--green)';document.getElementById('health-text').textContent='Connected'}catch(e){document.getElementById('health-dot').style.background='var(--red)';document.getElementById('health-text').textContent='Offline'}}

@@ -367,6 +367,77 @@ async def graph_snapshot(namespace: Optional[str] = None, mode: Optional[str] = 
     return _ok(snap)
 
 
+@router.get("/entity/{entity_name}/memories")
+async def entity_memories(entity_name: str, namespace: Optional[str] = None, limit: int = 20):
+    """GET /memory/entity/{name}/memories — every memory behind a knowledge-graph node.
+
+    Powers the dashboard's graph drill-down: click an entity, see (and open) the
+    memories that mention it. Two match passes, deduped: ingest-event linkage first
+    (precise — the payload recorded which document produced the entity), then a broad
+    content-mention scan. Also returns the entity's edges for the relation panel.
+    """
+    import json as _json
+
+    from engraphis.engines.reweight import retention_score
+    from engraphis.stores import get_conn
+
+    name = (entity_name or "").strip()
+    if not name or len(name) > 200:
+        raise HTTPException(400, "invalid entity name")
+    limit = max(1, min(50, int(limit)))
+    conn = get_conn()
+
+    seen: set = set()
+    out: list = []
+
+    def _add(ns: str, did: Optional[str]) -> None:
+        if not did or (ns, did) in seen or len(out) >= limit:
+            return
+        seen.add((ns, did))
+        row = conn.execute(
+            "SELECT namespace, document_id, title, content, memory_type, stability, "
+            "last_access, updated_at, access_count FROM memories "
+            "WHERE namespace=? AND document_id=?", (ns, did)).fetchone()
+        if row:
+            m = dict(row)
+            m["retention"] = round(retention_score(m), 4)
+            m["preview"] = (m.pop("content") or "")[:240]
+            out.append(m)
+
+    # 1) precise: ingest events that recorded this entity alongside its document
+    ev_sql = "SELECT namespace, payload FROM events WHERE entity_name=?"
+    ev_params: list = [name]
+    if namespace:
+        ev_sql += " AND namespace=?"
+        ev_params.append(namespace)
+    for r in conn.execute(ev_sql + " ORDER BY timestamp DESC LIMIT 100", ev_params):
+        try:
+            _add(r["namespace"], _json.loads(r["payload"] or "{}").get("document_id"))
+        except Exception:
+            pass
+
+    # 2) broad: memories whose content mentions the entity
+    m_sql = "SELECT namespace, document_id FROM memories WHERE content LIKE ?"
+    m_params: list = [f"%{name}%"]
+    if namespace:
+        m_sql += " AND namespace=?"
+        m_params.append(namespace)
+    m_params.append(limit * 2)
+    for r in conn.execute(m_sql + " ORDER BY updated_at DESC LIMIT ?", m_params):
+        _add(r["namespace"], r["document_id"])
+
+    e_sql = ("SELECT source_entity, target_entity, relation, weight FROM edges "
+             "WHERE (source_entity=? OR target_entity=?)")
+    e_params: list = [name, name]
+    if namespace:
+        e_sql += " AND namespace=?"
+        e_params.append(namespace)
+    edges = [dict(r) for r in conn.execute(e_sql + " ORDER BY weight DESC LIMIT 20", e_params)]
+
+    return _ok({"entity": name, "namespace": namespace, "count": len(out),
+                "memories": out, "edges": edges})
+
+
 # ── Ingestion jobs ───────────────────────────────────────────────────────────
 
 @router.get("/ingestion/jobs/{job_id}")
