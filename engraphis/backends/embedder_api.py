@@ -73,8 +73,27 @@ class ApiEmbedder:
 
         Uses ``/v1/embeddings`` with batch input.
         Falls back to per-item requests if the batch fails.
+
+        Notes
+        -----
+        The ``kind`` parameter is accepted for protocol compatibility
+        (``engraphis.core.interfaces.Embedder``) but is not used by the
+        API embedder — the same endpoint handles both text and code.
         """
+        if not texts:
+            return np.empty((0, self.dim), dtype=np.float32)
+
         import httpx
+
+        if not self._api_key:
+            logger.error(
+                "No API key set — set %s env var or pass api_key",
+                _DEFAULT_API_KEY_ENV,
+            )
+            raise RuntimeError(
+                f"ApiEmbedder requires an API key via {_DEFAULT_API_KEY_ENV} "
+                "env var or the api_key parameter"
+            )
 
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -98,11 +117,25 @@ class ApiEmbedder:
             vecs = [self._embed_one(t) for t in texts]
             return np.asarray(vecs, dtype=np.float32)
 
-        # Parse response
+        # Parse response — handle missing or malformed data gracefully
         items = data.get("data", [])
+        if not items:
+            logger.warning("API returned empty data array — falling back per-item")
+            vecs = [self._embed_one(t) for t in texts]
+            return np.asarray(vecs, dtype=np.float32)
+
         # Sort by index to preserve order
         items.sort(key=lambda x: x.get("index", 0))
-        vecs = [item["embedding"] for item in items]
+        vecs = []
+        for item in items:
+            emb = item.get("embedding")
+            if emb is None:
+                logger.warning(
+                    "Item index %s missing 'embedding' key, using zero vector",
+                    item.get("index", "?"),
+                )
+                emb = [0.0] * (self._dim or 384)
+            vecs.append(emb)
 
         result = np.asarray(vecs, dtype=np.float32)
         # L2-normalize for cosine similarity
@@ -129,17 +162,27 @@ class ApiEmbedder:
             "input": [text],
         }
 
-        with httpx.Client(timeout=60.0) as client:
-            resp = client.post(
-                self._embeddings_url, headers=headers, json=payload
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        try:
+            with httpx.Client(timeout=60.0) as client:
+                resp = client.post(
+                    self._embeddings_url, headers=headers, json=payload
+                )
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception as exc:
+            logger.error("Single embedding request failed: %s", exc)
+            return [0.0] * (self._dim or 384)
 
         items = data.get("data", [])
         if items:
-            vec = items[0].get("embedding", [])
-            if self._dim is None:
-                self._dim = len(vec)
-            return vec
+            vec = items[0].get("embedding")
+            if vec is not None:
+                if self._dim is None:
+                    self._dim = len(vec)
+                return vec
+            logger.warning(
+                "Item index 0 missing 'embedding' key, using zero vector"
+            )
+        else:
+            logger.warning("API returned empty data array for single item")
         return [0.0] * (self._dim or 384)
