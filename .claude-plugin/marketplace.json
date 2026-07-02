@@ -1,0 +1,15 @@
+{
+  "name": "engraphis",
+  "owner": {
+    "name": "The Engraphis Authors",
+    "url": "https://github.com/Coding-Dev-Tools/engraphis"
+  },
+  "plugins": [
+    {
+      "name": "engraphis-memory",
+      "source": "./",
+      "description": "Discipline for giving agents durable, scoped, explainable memory across sessions and repos with the Engraphis MCP tools.",
+      "version": "0.1.0"
+    }
+  ]
+}

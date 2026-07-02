@@ -99,6 +99,34 @@ engraphis_why(query="what is the rate limit", ...)
 
 ---
 
+## Quickstart A′ — install the memory-discipline skill (portable)
+
+The MCP server gives your agent the 15 tools; the **`engraphis-memory` skill** teaches it *when and
+how* to use them — what to store, how to scope it, and which tool answers which question. It follows
+the [Agent Skills](https://agentskills.io) standard, so the same skill works in Claude Code, Codex,
+and OpenCode.
+
+Install as a Claude Code plugin:
+
+```
+/plugin marketplace add Coding-Dev-Tools/engraphis
+/plugin install engraphis-memory@engraphis
+```
+
+Or with `npx skills` (any skills-compatible agent):
+
+```
+npx skills add https://github.com/Coding-Dev-Tools/engraphis
+```
+
+Or manually — copy `skills/engraphis-memory/` into your agent's skills directory (`.claude/skills/`,
+`~/.codex/skills/`, or `~/.opencode/skills/`).
+
+The skill is plain markdown (`skills/engraphis-memory/SKILL.md` + `references/`), pairs with the MCP
+server above, and adds no dependencies.
+
+---
+
 ## Quickstart B — REST server + dashboard
 
 ```bash

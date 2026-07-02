@@ -14,4 +14,5 @@ dist/
 build/
 *.egg-info/
 .pytest_cache/
-.ruf
+.ruff_cache/
+models_cache/

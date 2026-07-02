@@ -212,5 +212,10 @@ These are pure, unit-tested functions — change them only with a corresponding 
 - **`docs/IMPLEMENTATION.md`** — Phase 0–1 status and the interface design contract.
 - **`README.md`** — v1 server usage + the REST API table (note the stale package name).
 - **`AGENTS.md`** (this file) + **`CLAUDE.md`** — how to work in the repo.
+- **`skills/engraphis-memory/`** — portable Agent Skill (SKILL.md + `references/`) that teaches any
+  MCP-capable agent the *memory discipline* (when to remember/recall, scoping, tool selection).
+  Shipped as a Claude Code plugin via `.claude-plugin/` (`marketplace.json` + `plugin.json`). It
+  documents the tool surface in `engraphis/mcp_server.py`, so keep tool names/params in sync when
+  you change that file — this is a docs-drift surface like `README.md`.
 
 > When code and docs disagree, the code wins — then fix the doc in the same change.
