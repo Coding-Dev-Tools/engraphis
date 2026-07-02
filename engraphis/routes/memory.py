@@ -24,6 +24,7 @@ from engraphis.models import (
     InsertMemoryRequest,
     InteractionRequest,
     MemoryItem,
+    PruneRequest,
     QueryContextRequest,
     QueryMemoryRequest,
     RecallMasterRequest,
@@ -256,6 +257,53 @@ async def reinforce_memory(req: ReinforceRequest):
         raise HTTPException(404, f"Document {req.documentId} not found in namespace {namespace}")
     reweight.reinforce(mem["id"])
     return _ok({"reinforced": True, "documentId": req.documentId, "namespace": namespace})
+
+
+@router.post("/prune")
+async def prune_memory(req: PruneRequest):
+    """POST /memory/prune — delete decayed memories below a retention threshold.
+
+    Ebbinghaus decay marks memories as forgotten but never removes the rows;
+    over time that degrades recall relevance and bloats the vector scan. This
+    endpoint garbage-collects them. Namespace is required (no accidental
+    cross-vault wipes); memories with metadata.pinned=true are always kept;
+    dryRun reports what would be deleted without deleting.
+    """
+    from engraphis.engines.reweight import retention_score
+
+    threshold = req.min_retention if req.min_retention is not None else (req.minRetention or 0.05)
+    dry_run = req.dry_run if req.dry_run is not None else bool(req.dryRun)
+    keep_pinned = req.keepPinned if req.keepPinned is not None else True
+    max_delete = max(1, min(req.maxDelete or 500, 10000))
+
+    candidates = []
+    for mem in mem_store.list_documents(namespace=req.namespace, limit=100000):
+        if keep_pinned and (mem.get("metadata") or {}).get("pinned"):
+            continue
+        r = retention_score(mem)
+        if r < threshold:
+            candidates.append({
+                "documentId": mem["document_id"],
+                "retention": round(r, 4),
+                "memoryType": mem.get("memory_type"),
+                "title": mem.get("title"),
+            })
+    candidates.sort(key=lambda c: c["retention"])
+    candidates = candidates[:max_delete]
+
+    deleted = 0
+    if not dry_run:
+        for c in candidates:
+            deleted += mem_store.delete_memory_document(c["documentId"], req.namespace)
+
+    return _ok({
+        "namespace": req.namespace,
+        "threshold": threshold,
+        "dryRun": dry_run,
+        "matched": len(candidates),
+        "deleted": deleted,
+        "pruned": candidates[:50],
+    })
 
 
 # ── Thoughts / recall ────────────────────────────────────────────────────────

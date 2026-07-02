@@ -136,6 +136,17 @@ class ReinforceRequest(BaseModel):
     namespace: OptName = None
 
 
+class PruneRequest(BaseModel):
+    """Prune decayed memories below a retention threshold from one namespace."""
+    namespace: Name
+    minRetention: Optional[float] = 0.05
+    min_retention: Optional[float] = None
+    dryRun: Optional[bool] = False
+    dry_run: Optional[bool] = None
+    keepPinned: Optional[bool] = True
+    maxDelete: Optional[int] = 500
+
+
 class ThoughtRequest(BaseModel):
     namespace: OptName = None
     maxChunks: Optional[int] = 10
