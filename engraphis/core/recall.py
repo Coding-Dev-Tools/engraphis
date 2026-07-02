@@ -6,8 +6,9 @@ Pipeline: scope/time filter → hybrid candidate generation (vector + lexical + 
 The arms are pluggable:
 * vector  — any ``VectorIndex`` (NumPy reference now; sqlite-vec/Qdrant later)
 * lexical — ``Store.fts_search`` (FTS5/BM25, with fallback)
-* graph   — 1-hop entity expansion over the bi-temporal graph (degenerate PPR;
-            full Personalized PageRank lands in Phase 2)
+* graph   — Personalized PageRank over the entity/link graph (``core.graphrank``),
+            seeded at the query's entities; ``graph_mode="1hop"`` keeps the older
+            1-hop entity expansion for comparison/ablation
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from engraphis.core import scoring
+from engraphis.core.graphrank import personalized_pagerank
 from engraphis.core.interfaces import (
     Candidate,
     MemoryRecord,
@@ -34,7 +36,7 @@ class RecallResult:
 class RecallEngine:
     def __init__(self, store: Store, embedder, vector_index, reranker: Optional[Reranker] = None,
                  *, weights: Optional[dict] = None, recency_tau_days: float = 30.0,
-                 token_budget: int = 1500) -> None:
+                 token_budget: int = 1500, graph_mode: str = "ppr") -> None:
         self.store = store
         self.embedder = embedder
         self.index = vector_index
@@ -42,6 +44,9 @@ class RecallEngine:
         self.weights = weights or scoring.DEFAULT_WEIGHTS
         self.recency_tau_days = recency_tau_days
         self.token_budget = token_budget
+        # "ppr" (default) = Personalized PageRank over entities+links (multi-hop);
+        # "1hop" = the Phase-1 entity expansion, kept for fallback and ablation.
+        self.graph_mode = graph_mode
 
     def recall(self, query: str, flt: Optional[SearchFilter] = None, *, k: int = 8,
                candidate_k: int = 50, reinforce: bool = True) -> RecallResult:
@@ -103,6 +108,53 @@ class RecallEngine:
 
     # ── arms / helpers ────────────────────────────────────────────────────────
     def _graph_arm(self, query: str, flt: SearchFilter, now: float) -> dict[str, float]:
+        if self.graph_mode == "1hop":
+            return self._graph_arm_1hop(query, flt, now)
+        return self._graph_arm_ppr(query, flt, now)
+
+    def _graph_arm_ppr(self, query: str, flt: SearchFilter, now: float) -> dict[str, float]:
+        """Personalized PageRank arm (MASTER_PLAN.md §13.5): build the scoped
+        entity/memory graph — entity↔entity edges (bi-temporal), memory↔entity
+        mentions, memory↔memory links — seed at the query's entities, and rank
+        memories by walk probability. Multi-hop associations surface without
+        expanding an explicit hop count; entity nodes are prefixed so names can
+        never collide with memory ids."""
+        ql = query.lower()
+        all_names = [n for n in self._entities(flt) if n]
+        seeds = [n for n in all_names if n.lower() in ql]
+        if not seeds:
+            return {}
+
+        ent = "ent::{}".format
+        adj: dict[str, list[tuple[str, float]]] = {}
+
+        def connect(a: str, b: str, w: float) -> None:
+            adj.setdefault(a, []).append((b, w))
+            adj.setdefault(b, []).append((a, w))
+
+        for e in self.store.edges_in_scope(flt, at=now):
+            connect(ent(e.src), ent(e.dst), max(float(e.weight or 1.0), 1e-6))
+
+        recs = self.store.list_memories(flt, limit=500)
+        lowered = {n: n.lower() for n in all_names}
+        for rec in recs:
+            hay = f"{rec.title} {rec.content}".lower()
+            for name, low in lowered.items():
+                if low in hay:
+                    connect(rec.id, ent(name), 1.0)
+        for link in self.store.links_among([r.id for r in recs]):
+            connect(link["a"], link["b"], 1.0)
+
+        # Dense power iteration is O(n^2) memory: past this cap (far beyond any sane
+        # local scope) degrade gracefully to the 1-hop arm instead of allocating big.
+        if len(adj) > 4000:
+            return self._graph_arm_1hop(query, flt, now)
+
+        ranked = personalized_pagerank(adj, [ent(s) for s in seeds])
+        return {nid: score for nid, score in ranked.items()
+                if not nid.startswith("ent::") and score > 0.0}
+
+    def _graph_arm_1hop(self, query: str, flt: SearchFilter, now: float) -> dict[str, float]:
         ql = query.lower()
         seeds = [name for name in self._entities(flt) if name and name.lower() in ql]
         if not seeds:

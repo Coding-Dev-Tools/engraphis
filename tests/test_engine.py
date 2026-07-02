@@ -104,6 +104,95 @@ def test_remember_resolve_conflicts_false_keeps_duplicates():
     assert out1["id"] != out2["id"]
 
 
+# ── memory evolution (A-MEM-style auto-linking on write) ────────────────────────
+
+def test_remember_auto_links_related_memories():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    cause = eng.remember_with_resolution(
+        "The bug in checkout was caused by a race condition in the inventory service.",
+        workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC)
+    fix = eng.remember_with_resolution(
+        "We fixed the checkout race condition by adding a Redis lock around the stock decrement.",
+        workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC)
+    assert fix["op"] == "add"
+    assert cause["id"] in fix.get("linked", [])
+    assert eng.store.has_link(fix["id"], cause["id"])
+
+
+def test_evolution_reinforces_linked_neighbor():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    cause = eng.remember_with_resolution(
+        "The bug in checkout was caused by a race condition in the inventory service.",
+        workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC)
+    before = eng.store.get_memory(cause["id"]).stability
+    eng.remember_with_resolution(
+        "We fixed the checkout race condition by adding a Redis lock around the stock decrement.",
+        workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC)
+    after = eng.store.get_memory(cause["id"]).stability
+    assert after > before                          # old note strengthened by new arrival
+
+
+def test_evolution_does_not_link_unrelated_memories():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    a = eng.remember_with_resolution("We deploy with GitHub Actions to AWS ECS.",
+                                     workspace_id=wid, repo_id=rid)
+    b = eng.remember_with_resolution("Lunch is usually around noon.",
+                                     workspace_id=wid, repo_id=rid)
+    assert a["id"] not in b.get("linked", [])
+    assert not eng.store.has_link(b["id"], a["id"])
+
+
+def test_evolution_links_are_idempotent():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    a = eng.remember(
+        "The bug in checkout was caused by a race condition in the inventory service.",
+        workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC)
+    b = eng.remember(
+        "We fixed the checkout race condition by adding a Redis lock around the stock decrement.",
+        workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC)
+    eng.store.add_link(a, b, "related")            # explicit re-link of the auto link
+    rows = [link for link in eng.store.get_links(a)
+            if {link["a"], link["b"]} == {a, b} and link["relation"] == "related"]
+    assert len(rows) == 1                          # deduped in either direction
+
+
+def test_evolution_can_be_disabled():
+    eng = MemoryEngine.create(":memory:")
+    eng.auto_evolve = False
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    eng.remember_with_resolution(
+        "The bug in checkout was caused by a race condition in the inventory service.",
+        workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC)
+    fix = eng.remember_with_resolution(
+        "We fixed the checkout race condition by adding a Redis lock around the stock decrement.",
+        workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC)
+    assert "linked" not in fix
+
+
+def test_invalidate_records_supersedes_metadata():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    old = eng.remember_with_resolution(
+        "Until 2026-01 the rate limit was 100 requests per minute per API key.",
+        workspace_id=wid, repo_id=rid)
+    new = eng.remember_with_resolution(
+        "As of 2026-02 the rate limit was raised to 500 requests per minute per API key.",
+        workspace_id=wid, repo_id=rid)
+    assert new["op"] == "invalidate"
+    rec = eng.store.get_memory(new["id"])
+    assert rec.metadata.get("supersedes") == [old["id"]]   # chain queryable, not audit-only
+
+
 # ── governance: forget / pin / correct ──────────────────────────────────────────
 
 def test_forget_invalidates_without_deleting():

@@ -332,16 +332,58 @@ class Store:
 
     # ── memory-to-memory links (A-MEM style; MASTER_PLAN.md §8.4) ───────────────
     def add_link(self, a: str, b: str, relation: str = "related") -> None:
+        """Idempotent per (pair, relation): re-linking the same two memories with the
+        same relation is a no-op in either direction, so auto-evolution and explicit
+        ``engraphis_link`` calls can't accrete duplicate rows."""
+        if self.has_link(a, b, relation=relation):
+            return
         self.conn.execute(
             "INSERT INTO mem_links(a, b, relation, created_at) VALUES (?,?,?,?)",
             (a, b, relation, now_ts()),
         )
         self.conn.commit()
 
+    def has_link(self, a: str, b: str, *, relation: Optional[str] = None) -> bool:
+        sql = "SELECT 1 FROM mem_links WHERE ((a=? AND b=?) OR (a=? AND b=?))"
+        params: list[Any] = [a, b, b, a]
+        if relation is not None:
+            sql += " AND relation=?"
+            params.append(relation)
+        return self.conn.execute(sql + " LIMIT 1", params).fetchone() is not None
+
     def get_links(self, memory_id: str) -> list[dict]:
         rows = self.conn.execute(
             "SELECT a, b, relation, created_at FROM mem_links WHERE a=? OR b=?",
             (memory_id, memory_id),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def edges_in_scope(self, flt: Optional[SearchFilter] = None,
+                       *, at: Optional[float] = None) -> list[Edge]:
+        """Every edge valid at ``at`` within the filter's workspace/repo — the graph
+        the PPR retrieval arm walks (edges outside their validity window are invisible,
+        same bi-temporal rule as memories)."""
+        t = at or now_ts()
+        sql = ("SELECT * FROM edges WHERE (valid_from IS NULL OR valid_from<=?) "
+               "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL")
+        params: list[Any] = [t, t]
+        if flt and flt.workspace_id:
+            sql += " AND workspace_id=?"
+            params.append(flt.workspace_id)
+        if flt and flt.repo_id:
+            sql += " AND repo_id=?"
+            params.append(flt.repo_id)
+        rows = self.conn.execute(sql, params).fetchall()
+        return [_row_to_edge(r) for r in rows]
+
+    def links_among(self, ids: list[str]) -> list[dict]:
+        """mem_links rows where *both* endpoints are in ``ids`` (for graph retrieval)."""
+        if not ids:
+            return []
+        marks = ",".join("?" for _ in ids)
+        rows = self.conn.execute(
+            f"SELECT a, b, relation FROM mem_links WHERE a IN ({marks}) AND b IN ({marks})",
+            (*ids, *ids),
         ).fetchall()
         return [dict(r) for r in rows]
 

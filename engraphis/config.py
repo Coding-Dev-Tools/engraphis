@@ -72,6 +72,10 @@ class Settings:
         )
     )
 
+    # Fact extraction on the v2 write path: "none" (default — store text as given) or
+    # "llm" (distill raw text into discrete facts via the configured LLM before storing).
+    extractor: str = field(default_factory=lambda: _env("ENGRAPHIS_EXTRACTOR", "none").lower())
+
     llm_provider: str = field(default_factory=lambda: _env("ENGRAPHIS_LLM_PROVIDER", "openai").lower())
     llm_model: str = field(default_factory=lambda: _env("ENGRAPHIS_LLM_MODEL", "gpt-4o-mini"))
     llm_api_key: str = field(default_factory=lambda: _env("ENGRAPHIS_LLM_API_KEY", ""))

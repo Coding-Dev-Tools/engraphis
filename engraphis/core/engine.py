@@ -21,28 +21,44 @@ from engraphis.backends.vector_sqlitevec import get_vector_index
 from engraphis.core import scoring
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
 from engraphis.core.recall import RecallEngine, RecallResult
-from engraphis.core.resolve import ResolutionOp, resolve
+from engraphis.core.resolve import RELATED_SIM_FLOOR, ResolutionOp, resolve
 from engraphis.core.store import Store, now_ts
 from engraphis.core.textutil import jaccard, tokenize
 
+# A-MEM-style evolution: how many related neighbors a new memory auto-links to on write.
+# Bounded so hub memories don't accrete unbounded link lists (link quality > quantity).
+EVOLVE_MAX_LINKS = 3
+
 
 class MemoryEngine:
-    def __init__(self, store: Store, embedder, vector_index, reranker=None) -> None:
+    def __init__(self, store: Store, embedder, vector_index, reranker=None,
+                 *, auto_evolve: bool = True, extractor=None) -> None:
         self.store = store
         self.embedder = embedder
         self.index = vector_index
         self.reranker = reranker or IdentityReranker()
         self.recall_engine = RecallEngine(store, embedder, vector_index, self.reranker)
+        # Memory evolution (MASTER_PLAN.md §8.4 / A-MEM): writing a new note also updates
+        # how its neighbors are connected, so the network improves bidirectionally.
+        self.auto_evolve = auto_evolve
+        # Optional fact extractor (core.interfaces.Extractor). None = raw passthrough.
+        self.extractor = extractor
 
     @classmethod
     def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
                embed_dim: int = 256, vector_backend: str = "auto",
-               rerank_model: Optional[str] = None) -> "MemoryEngine":
+               rerank_model: Optional[str] = None, extractor: str = "none",
+               auto_evolve: bool = True) -> "MemoryEngine":
+        from engraphis.backends.extractor import PassthroughExtractor, get_extractor
         store = Store(db_path)
         embedder = get_embedder(embed_model, embed_dim)
         index = get_vector_index(store, dim=embedder.dim, prefer=vector_backend)
         reranker = get_reranker(rerank_model)
-        return cls(store, embedder, index, reranker)
+        ext = get_extractor(extractor)
+        if isinstance(ext, PassthroughExtractor):
+            ext = None                       # ingest() treats None as passthrough
+        return cls(store, embedder, index, reranker, auto_evolve=auto_evolve,
+                   extractor=ext)
 
     # ── write ─────────────────────────────────────────────────────────────────
     def remember(self, content: str, *, workspace_id: str, repo_id: Optional[str] = None,
@@ -82,9 +98,9 @@ class MemoryEngine:
         text = f"{title}\n{content}" if title else content
         vec = self.embedder.embed([text])[0]
 
-        decision = None
+        decision, neighbors = None, []
         if resolve_conflicts:
-            decision = self._resolve_against_neighbors(
+            decision, neighbors = self._resolve_against_neighbors(
                 text, vec, workspace_id=workspace_id, repo_id=repo_id, scope=scope,
                 mtype=mtype, candidate_k=candidate_k,
             )
@@ -94,10 +110,16 @@ class MemoryEngine:
             self.store.audit("resolver", "noop", decision.target_id, decision.reason)
             return {"id": decision.target_id, "op": "noop", "reason": decision.reason}
 
+        meta = dict(metadata or {})
+        if decision is not None and decision.op == ResolutionOp.INVALIDATE:
+            # Persist the supersession pointer on the new record so the chain is
+            # queryable later (why/timeline/inspector), not only in the audit log.
+            meta["supersedes"] = [decision.target_id]
+
         rec = MemoryRecord(
             id="", content=content, mtype=mtype, scope=scope, workspace_id=workspace_id,
             repo_id=repo_id, session_id=session_id, title=title, importance=importance,
-            keywords=keywords or [], metadata=metadata or {}, valid_from=valid_from,
+            keywords=keywords or [], metadata=meta, valid_from=valid_from,
             embedding=vec,
         )
         mid = self.store.add_memory(rec)
@@ -113,23 +135,63 @@ class MemoryEngine:
             except Exception:
                 pass
             self.store.audit("resolver", "invalidate", decision.target_id, decision.reason)
-            return {"id": mid, "op": "invalidate", "superseded": [decision.target_id],
-                    "reason": decision.reason}
+            linked = self._evolve(mid, neighbors, exclude={decision.target_id})
+            out = {"id": mid, "op": "invalidate", "superseded": [decision.target_id],
+                   "reason": decision.reason}
+            if linked:
+                out["linked"] = linked
+            return out
 
-        return {"id": mid, "op": "add", "reason": decision.reason if decision else ""}
+        linked = self._evolve(mid, neighbors)
+        out = {"id": mid, "op": "add", "reason": decision.reason if decision else ""}
+        if linked:
+            out["linked"] = linked
+        return out
+
+    def _evolve(self, new_id: str, neighbors: list, *, exclude: Optional[set] = None) -> list[str]:
+        """A-MEM-style memory evolution on write (MASTER_PLAN.md §8.4): a new memory
+        auto-links to its closest still-live neighbors and gives them a small
+        reinforcement touch, so old notes gain connectivity (and resist decay a little
+        more) when new related knowledge arrives — the network improves in both
+        directions, not just for the incoming note. Deterministic, bounded
+        (``EVOLVE_MAX_LINKS``), audited, and never raises into the write path.
+        """
+        if not self.auto_evolve or not neighbors:
+            return []
+        exclude = exclude or set()
+        linked: list[str] = []
+        try:
+            ranked = sorted(neighbors, key=lambda t: -t[0])
+            for sim, nrec in ranked:
+                if len(linked) >= EVOLVE_MAX_LINKS:
+                    break
+                if sim < RELATED_SIM_FLOOR or nrec.id in exclude or nrec.id == new_id:
+                    continue
+                if self.store.has_link(new_id, nrec.id):
+                    continue
+                self.store.add_link(new_id, nrec.id, "related")
+                self.store.reinforce(nrec.id, boost=scoring.INTERACTION_BOOST["view"])
+                linked.append(nrec.id)
+            if linked:
+                self.store.audit("resolver", "evolve", new_id,
+                                 f"auto-linked to {len(linked)} related: {', '.join(linked)}")
+        except Exception:
+            return linked
+        return linked
 
     def _resolve_against_neighbors(self, text: str, vec: np.ndarray, *, workspace_id: str,
                                    repo_id: Optional[str], scope: Scope, mtype: MemoryType,
                                    candidate_k: int):
         """Fetch same-scope neighbors via the vector index and run the deterministic
-        resolver (``core.resolve``). Never raises — a broken/missing index degrades to
+        resolver (``core.resolve``). Returns ``(decision, neighbors)`` so the caller can
+        also evolve the neighborhood. Never raises — a broken/missing index degrades to
         "no neighbors found" (ADD), not a write failure."""
         flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id, scopes=[scope],
                            mtypes=[mtype])
         try:
             hits = self.index.search(vec, candidate_k, filter=flt)
         except Exception:
-            return None
+            return None, []
         now = now_ts()
         neighbors = []
         for nid, sim in hits:
@@ -139,7 +201,49 @@ class MemoryEngine:
                     and nrec.expired_at is None
                     and (nrec.valid_to is None or nrec.valid_to > now)):
                 neighbors.append((sim, nrec))
-        return resolve(text, neighbors)
+        return resolve(text, neighbors), neighbors
+
+    # ── ingest: extract-then-remember (MASTER_PLAN.md §8.2) ────────────────────
+    def ingest(self, text: str, *, workspace_id: str, repo_id: Optional[str] = None,
+               session_id: Optional[str] = None, scope: Scope = Scope.REPO,
+               default_mtype: MemoryType = MemoryType.SEMANTIC,
+               metadata: Optional[dict] = None, resolve_conflicts: bool = True) -> dict:
+        """Store raw, undistilled text. When an ``Extractor`` is configured, the text is
+        first distilled into discrete facts (each stored with resolution + evolution,
+        like any ``remember``); without one this is exactly ``remember`` — the offline
+        default never changes behaviour. Extraction failures degrade to passthrough:
+        ingest never loses the write."""
+        facts = None
+        extracted = False
+        if self.extractor is not None:
+            try:
+                facts = self.extractor.extract(text)
+                extracted = bool(facts)
+            except Exception:
+                facts = None
+        if not facts:
+            from engraphis.core.interfaces import ExtractedFact
+            facts = [ExtractedFact(content=text)]
+            extracted = False
+
+        results = []
+        for f in facts:
+            results.append(self.remember_with_resolution(
+                f.content, workspace_id=workspace_id, repo_id=repo_id,
+                session_id=session_id, mtype=f.mtype or default_mtype, scope=scope,
+                title=f.title, importance=f.importance, keywords=f.keywords,
+                metadata=metadata, resolve_conflicts=resolve_conflicts,
+            ))
+        return {"facts": results, "count": len(results), "extracted": extracted}
+
+    # ── consolidation: the sleep-time loop, callable on demand (Phase 4) ───────
+    def consolidate(self, *, workspace_id: str, repo_id: Optional[str] = None,
+                    dry_run: bool = False, llm=None, **kw) -> dict:
+        """One sleep-time consolidation sweep — episodic→semantic distillation plus
+        decayed-transient archival. See ``core.consolidate.consolidate`` for knobs."""
+        from engraphis.core.consolidate import consolidate as _consolidate
+        return _consolidate(self, workspace_id=workspace_id, repo_id=repo_id,
+                            dry_run=dry_run, llm=llm, **kw)
 
     # ── read ──────────────────────────────────────────────────────────────────
     def recall(self, query: str, *, workspace_id: Optional[str] = None,

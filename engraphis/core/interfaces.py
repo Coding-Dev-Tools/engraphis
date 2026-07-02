@@ -111,6 +111,20 @@ class Edge:
     provenance: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class ExtractedFact:
+    """One distilled, self-contained fact produced by an ``Extractor`` (§8.2).
+
+    ``mtype``/``importance``/``keywords`` are *hints* — the write path may override
+    them; ``content`` is the only required field.
+    """
+    content: str
+    title: str = ""
+    mtype: Optional[MemoryType] = None
+    importance: float = 0.0
+    keywords: list[str] = field(default_factory=list)
+
+
 # ── Protocols ────────────────────────────────────────────────────────────────
 
 @runtime_checkable
@@ -156,6 +170,17 @@ class LLM(Protocol):
     """External or local model for synthesis and structured extraction (§8.2)."""
     def complete(self, messages: list[dict], **kw: Any) -> str: ...
     def extract_json(self, prompt: str, schema: dict) -> dict: ...
+
+
+@runtime_checkable
+class Extractor(Protocol):
+    """Distills raw text into discrete memory-worthy facts before storage (§8.2).
+
+    The offline default is a no-op passthrough (the caller's text is stored as-is,
+    exactly today's behaviour); an LLM-backed implementation can be swapped in by
+    configuration — never a hard dependency of ``core/`` (AGENTS.md §3.8).
+    """
+    def extract(self, text: str, *, context: str = "") -> list[ExtractedFact]: ...
 
 
 # Interface contracts only; concrete implementations live in engraphis.backends.

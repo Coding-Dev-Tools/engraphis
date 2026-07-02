@@ -20,7 +20,7 @@ from eval import metrics
 from eval.harness import load_dataset
 
 
-def _score(dataset: list[dict], *, k: int, hybrid: bool) -> float:
+def _score(dataset: list[dict], *, k: int, hybrid: bool, graph_mode: str = "ppr") -> float:
     emb = DeterministicEmbedder(256)
     per = []
     for case in dataset:
@@ -28,7 +28,7 @@ def _score(dataset: list[dict], *, k: int, hybrid: bool) -> float:
         wid = store.get_or_create_workspace("eval")
         rid = store.get_or_create_repo(wid, case.get("id", "c"))
         index = NumpyVectorIndex(store)
-        engine = RecallEngine(store, emb, index, IdentityReranker())
+        engine = RecallEngine(store, emb, index, IdentityReranker(), graph_mode=graph_mode)
         tag_by_id = {}
         for m in case["memories"]:
             mid = store.add_memory(MemoryRecord(
@@ -49,8 +49,9 @@ def _score(dataset: list[dict], *, k: int, hybrid: bool) -> float:
 def main() -> None:
     ds = load_dataset(str(Path(__file__).resolve().parent / "datasets" / "sample.jsonl"))
     print("Engraphis ablation — recall@5")
-    print(f"  vector-only : {_score(ds, k=5, hybrid=False)}")
-    print(f"  hybrid      : {_score(ds, k=5, hybrid=True)}")
+    print(f"  vector-only  : {_score(ds, k=5, hybrid=False)}")
+    print(f"  hybrid-1hop  : {_score(ds, k=5, hybrid=True, graph_mode='1hop')}")
+    print(f"  hybrid-ppr   : {_score(ds, k=5, hybrid=True, graph_mode='ppr')}")
 
 
 if __name__ == "__main__":

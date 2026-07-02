@@ -70,3 +70,33 @@ def test_resolve_picks_best_overlap_among_multiple_neighbors():
     res = resolve(candidate, [(0.3, unrelated), (0.5, same_subject)])
     assert res.op == ResolutionOp.INVALIDATE
     assert res.target_id == "mem_limit"
+
+
+# ── paraphrase detection via the embedding-cosine second signal ──────────────────
+
+def test_resolve_paraphrase_invalidates_on_high_cosine_low_overlap():
+    # Reworded contradiction: token overlap is far below SUBJECT_TOKEN_JACCARD, but the
+    # embedding similarity the write path already computed says "same fact, other words".
+    neighbor = _rec("The API rate limit is one hundred requests every sixty seconds.",
+                    id="mem_old_phrasing")
+    candidate = "Calls are capped at 500 per minute for each key."
+    res = resolve(candidate, [(0.95, neighbor)])
+    assert res.op == ResolutionOp.INVALIDATE
+    assert res.target_id == "mem_old_phrasing"
+    assert "paraphrase" in res.reason
+
+
+def test_resolve_exact_restatement_still_noops_despite_high_cosine():
+    text = "We standardized on pnpm as the package manager for frontend repos."
+    res = resolve(text, [(0.97, _rec(text, id="mem_dup"))])
+    assert res.op == ResolutionOp.NOOP           # the duplicate rule fires first
+
+
+def test_resolve_moderate_cosine_low_overlap_still_adds():
+    # Related-but-complementary stays ADD when cosine is below PARAPHRASE_EMBED_SIM.
+    neighbor = _rec("The bug in checkout was caused by a race condition in the inventory "
+                    "service.", id="mem_cause")
+    candidate = ("We fixed the checkout race condition by adding a Redis lock around the "
+                 "stock decrement.")
+    res = resolve(candidate, [(0.6, neighbor)])
+    assert res.op == ResolutionOp.ADD
