@@ -32,7 +32,8 @@ EVOLVE_MAX_LINKS = 3
 
 class MemoryEngine:
     def __init__(self, store: Store, embedder, vector_index, reranker=None,
-                 *, auto_evolve: bool = True, extractor=None) -> None:
+                 *, auto_evolve: bool = True, extractor=None,
+                 graph_extractor=None) -> None:
         self.store = store
         self.embedder = embedder
         self.index = vector_index
@@ -43,13 +44,17 @@ class MemoryEngine:
         self.auto_evolve = auto_evolve
         # Optional fact extractor (core.interfaces.Extractor). None = raw passthrough.
         self.extractor = extractor
+        # Optional graph extractor (backends.graph_extractor). None = no graph population.
+        self.graph_extractor = graph_extractor
 
     @classmethod
     def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
                embed_dim: int = 256, vector_backend: str = "auto",
                rerank_model: Optional[str] = None, extractor: str = "none",
+               graph_extractor: str = "none",
                auto_evolve: bool = True) -> "MemoryEngine":
         from engraphis.backends.extractor import PassthroughExtractor, get_extractor
+        from engraphis.backends.graph_extractor import get_graph_extractor as _get_ge
         store = Store(db_path)
         embedder = get_embedder(embed_model, embed_dim)
         index = get_vector_index(store, dim=embedder.dim, prefer=vector_backend)
@@ -57,8 +62,9 @@ class MemoryEngine:
         ext = get_extractor(extractor)
         if isinstance(ext, PassthroughExtractor):
             ext = None                       # ingest() treats None as passthrough
+        ge = _get_ge(graph_extractor) if graph_extractor and graph_extractor != "none" else None
         return cls(store, embedder, index, reranker, auto_evolve=auto_evolve,
-                   extractor=ext)
+                   extractor=ext, graph_extractor=ge)
 
     # ── write ─────────────────────────────────────────────────────────────────
     def remember(self, content: str, *, workspace_id: str, repo_id: Optional[str] = None,
@@ -127,6 +133,15 @@ class MemoryEngine:
             self.index.upsert([mid], vec.reshape(1, -1))
         except Exception:
             pass
+
+        # Optional graph population (backends.graph_extractor)
+        if self.graph_extractor is not None:
+            try:
+                from engraphis.backends.graph_extractor import feed as _graph_feed
+                _graph_feed(self.store, content, workspace_id=workspace_id,
+                           repo_id=repo_id, title=title, extractor=self.graph_extractor)
+            except Exception:
+                pass
 
         if decision is not None and decision.op == ResolutionOp.INVALIDATE:
             self.store.close_validity(decision.target_id, reason=decision.reason)
