@@ -9,7 +9,6 @@ wiring on MemoryEngine.remember (regex on -> graph populated; default -> empty).
 """
 from __future__ import annotations
 
-import pytest
 
 from engraphis.backends.graph_extractor import (
     GraphExtraction, NullGraphExtractor, RegexGraphExtractor, feed, get_graph_extractor,
