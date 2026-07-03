@@ -84,6 +84,12 @@ class Settings:
         default_factory=lambda: _parse_headers(_env("ENGRAPHIS_LLM_EXTRA_HEADERS", ""))
     )
 
+    # Optional cross-encoder reranker model. Empty (default) -> IdentityReranker (offline).
+    rerank_model: str = field(default_factory=lambda: _env("ENGRAPHIS_RERANK_MODEL", ""))
+
+    # Optional graph extractor: "none" (default) or "regex" for heuristic NER.
+    graph_extractor: str = field(default_factory=lambda: _env("ENGRAPHIS_GRAPH_EXTRACTOR", "none").lower())
+
     loop_interval: int = field(default_factory=lambda: _env_int("ENGRAPHIS_LOOP_INTERVAL", 60))
     loop_top_k: int = field(default_factory=lambda: _env_int("ENGRAPHIS_LOOP_TOP_K", 20))
     decay_halflife_days: float = field(
