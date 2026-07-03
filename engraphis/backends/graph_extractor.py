@@ -79,8 +79,6 @@ def _extract_entities(text: str) -> list[tuple[str, str]]:
             continue
         if raw.startswith("#"):
             ent, etype = raw, "hashtag"
-        elif raw.startswith("@") and "." in raw:
-            ent, etype = raw, "email"
         elif raw.startswith("@"):
             ent, etype = raw, "mention"
         elif "@" in raw and "." in raw:
