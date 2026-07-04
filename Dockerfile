@@ -23,6 +23,8 @@ RUN useradd --create-home --uid 10001 engraphis && mkdir -p /data && chown -R en
 USER engraphis
 VOLUME ["/data"]
 EXPOSE 8700
+# Memory Inspector (product UI): run with `docker … engraphis-inspector` or a second service.
+EXPOSE 8710
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8700/memory/health').status==200 else 1)"

@@ -119,7 +119,7 @@ roadmap item, not a shipped, billable feature. What's actually true today:
 
 - The **free core is genuinely strong**: hybrid recall, bi-temporal history (`why`/`timeline`),
   self-maintaining facts (deterministic conflict resolution), governance (forget/pin/correct,
-  scope-checked), a code-symbol graph, and a 15-tool MCP server — all covered by 127 passing
+  scope-checked), a code-symbol graph, and a 17-tool MCP server — all covered by 127 passing
   tests. That is a real, demonstrable advantage over "just a vector store," and it's free,
   matching Letta's "self-hosted = all features" positioning from §5.
 - The **v1 dashboard** (the closest thing to a "Memory Inspector UI" that exists) had two real

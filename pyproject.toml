@@ -86,6 +86,7 @@ engraphis-cli = "scripts.cli:main"
 engraphis-mcp = "engraphis.mcp_server:main"
 engraphis-inspector = "scripts.inspector:main"
 engraphis-consolidate = "scripts.consolidate:main"
+engraphis-init = "scripts.init:main"
 
 [tool.setuptools.packages.find]
 include = ["engraphis*", "scripts*"]

@@ -3,6 +3,49 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [Unreleased] — commercial layer: license keys, Pro analytics/export, Team mode
+
+### Added
+- **Offline signed license keys** (`engraphis/licensing.py`): Ed25519-signed
+  `ENGR1.<payload>.<sig>` keys verified pure-stdlib (RFC 8032 implementation, tested against
+  the RFC's own vectors) — no phone-home, no license server, no new dependency. Vendor CLI:
+  `python -m scripts.license_admin keygen|issue|verify` (private key lives in gitignored
+  `.secrets/`). Free tier is the absence of a key, never an error; a bad/expired key degrades
+  to free with the reason surfaced in the UI.
+- **Pro: Analytics dashboard** — `/api/analytics` + an Analytics tab in the Inspector:
+  weekly growth, retention distribution, decay forecast (what the consolidation sweep will
+  archive in 7/30 days), resolver action mix, most-connected entities. Data layer is a pure
+  tested function (`engraphis/analytics.py`); charts are dependency-free inline SVG.
+- **Pro: Compliance export** — `/api/export` + an export button in the Audit tab: full
+  bi-temporal workspace dump (live + superseded memories, sessions, audit trail) as
+  downloadable JSON (`MemoryService.export_workspace`).
+- **Team mode** (`ENGRAPHIS_TEAM_MODE=1` + a Team license): multi-user Inspector with
+  PBKDF2 logins, hashed session cookies (HttpOnly, SameSite=Strict), first-run admin setup,
+  seat limits from the signed key, and server-side roles — viewer (read) < member
+  (+ governance) < admin (+ consolidate/users/license/export). Bearer token still works as a
+  service account for scripts. Single-user setups are byte-for-byte unchanged.
+- **Upgrade UX without nagging**: plan badge + license dialog (paste-to-activate via
+  `/api/license/activate`), locked-feature teasers rendered only where a locked feature was
+  explicitly opened, and a guided first-run empty state with a copyable MCP config snippet.
+- Tests: 40+ new (RFC 8032 vectors, key tamper/expiry/seats, role matrix, login throttle,
+  402 gating, analytics math) — all offline, `importorskip`-guarded like the rest.
+
+- **Per-user audit attribution**: in team mode, pin/forget/correct audit rows record the
+  signed-in user's email as the actor (service + engine already supported `actor`; the
+  Inspector now passes it) — the Team tier's audit trail answers *who*, not just what.
+- **`engraphis-init`** — one command from `pip install` to a configured, agent-connected
+  setup: writes `.env` with an **absolute** DB path (the silent default previously landed in
+  the package directory — site-packages on pip installs), optional `--token`, prints exact
+  Claude Code / Cursor / Cline / Zed MCP snippets with the DB path pinned via `env`, and
+  `--check` is a doctor (install, extras, DB writability, license state).
+- Inspector polish: relative timestamps in the audit trail (exact time on hover), `/`
+  focuses the active tab's search box, Dockerfile documents the Inspector port (8710).
+
+### Docs
+- `docs/LAUNCH_PLAN.md` — monetization architecture, tier table, payments plan (merchant of
+  record), UI/UX roadmap, launch checklist. `SECURITY.md` §6 documents the team-auth design.
+- README: corrected the MCP tool count (17), added `engraphis-init` to the quickstart.
+
 ## [Unreleased] — v1 dashboard drill-down + polish pass
 
 ### Fixed

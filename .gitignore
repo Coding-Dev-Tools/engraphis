@@ -16,3 +16,4 @@ build/
 .pytest_cache/
 .ruff_cache/
 models_cache/
+.secrets/

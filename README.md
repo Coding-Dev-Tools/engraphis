@@ -62,14 +62,37 @@ pip install -e ".[all]"         # everything
 
 ---
 
+## Free forever vs. Pro
+
+The engine — recall, bi-temporal history, governance, code graph, MCP server, single-user
+Inspector — is free and Apache-2.0, permanently. A license key (verified **offline**; no
+phone-home, in keeping with local-first) unlocks the paid layer:
+
+| | Free | Pro ($20/mo) | Team ($35/user/mo) |
+|---|---|---|---|
+| Memory engine + 17 MCP tools | ✓ | ✓ | ✓ |
+| Memory Inspector (single-user) | ✓ | ✓ | ✓ |
+| Analytics dashboard (growth, retention, decay forecast) | | ✓ | ✓ |
+| Compliance export (full bi-temporal JSON dump) | | ✓ | ✓ |
+| Multi-user Inspector: logins, roles, seat management | | | ✓ |
+| Priority support | | ✓ | ✓ |
+
+Paste your key into the Inspector's license dialog (the plan badge, top-left) or set
+`ENGRAPHIS_LICENSE_KEY`. Get a key at <https://engraphis.dev/pro>.
+
+---
+
 ## Quickstart A — MCP server (the headline)
 
 Plug Engraphis into any MCP-capable agent. With Claude Code:
 
 ```bash
 pip install -e ".[mcp]"
+engraphis-init                  # writes .env (DB location) + prints the exact snippets
 claude mcp add engraphis -- engraphis-mcp
 ```
+
+`engraphis-init --check` is the doctor: verifies the install, extras, and DB writability.
 
 For Cursor / Cline / Zed / Windsurf, add to your MCP config:
 
@@ -81,7 +104,7 @@ For Cursor / Cline / Zed / Windsurf, add to your MCP config:
 }
 ```
 
-Your agent now has 15 tools:
+Your agent now has 17 tools:
 
 | Category | Tool | What it does |
 |---|---|---|
@@ -240,7 +263,7 @@ engraphis/
 │   ├── core/                # v2 engine — interfaces, store, recall, scoring, resolve, schema, ids
 │   ├── backends/            # pluggable embedder / vector index / reranker / codegraph (offline fallbacks)
 │   ├── service.py           # validated MemoryService facade (no MCP dependency)
-│   ├── mcp_server.py        # MCP server — 15 tools (write/read/governance/code/session)
+│   ├── mcp_server.py        # MCP server — 17 tools (write/read/governance/code/session)
 │   ├── config.py            # env-driven settings
 │   ├── app.py               # REST server (FastAPI) + dashboard + auth middleware
 │   ├── routes/ stores/ engines/ llm/   # REST server surface

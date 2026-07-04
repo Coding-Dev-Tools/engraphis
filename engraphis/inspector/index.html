@@ -29,7 +29,7 @@ header h1{font-size:17px;margin:0;letter-spacing:.2px}
 header h1 .dot{color:var(--accent)}
 .scope{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-left:auto}
 label{color:var(--muted);font-size:13px}
-select,input[type=text],input[type=search],textarea{
+select,input[type=text],input[type=search],input[type=password],input[type=email],textarea{
   background:var(--panel-2);color:var(--text);border:1px solid var(--border);
   border-radius:8px;padding:7px 10px;font-size:14px;min-width:0}
 textarea{width:100%;font-family:inherit;resize:vertical}
@@ -41,12 +41,23 @@ button:hover{border-color:var(--accent)}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
 button.danger{border-color:var(--danger);color:var(--danger)}
 button[disabled]{opacity:.5;cursor:not-allowed}
+.plan-btn{border-radius:999px;padding:4px 14px;font-weight:600;font-size:12px;
+  letter-spacing:.6px;text-transform:uppercase}
+.plan-btn.free{border-color:var(--accent);color:var(--accent)}
+.plan-btn.paid{border-color:var(--accent-2);color:var(--accent-2)}
+.chip{display:inline-flex;gap:8px;align-items:center;border:1px solid var(--border);
+  border-radius:999px;padding:3px 6px 3px 12px;font-size:13px;color:var(--muted)}
+.chip .role{color:var(--accent-2);text-transform:capitalize}
+.chip button{padding:2px 10px;font-size:12px;border-radius:999px}
 nav[role=tablist]{display:flex;gap:4px;padding:10px 20px 0;flex-wrap:wrap;
   border-bottom:1px solid var(--border);background:var(--panel)}
 [role=tab]{border:1px solid transparent;border-bottom:none;background:none;
-  color:var(--muted);padding:8px 14px;border-radius:8px 8px 0 0;cursor:pointer;font-size:14px}
+  color:var(--muted);padding:8px 14px;border-radius:8px 8px 0 0;cursor:pointer;font-size:14px;
+  display:inline-flex;align-items:center;gap:7px}
 [role=tab][aria-selected=true]{color:var(--text);background:var(--bg);
   border-color:var(--border)}
+.pro-tag{font-size:10px;font-weight:700;letter-spacing:.8px;color:var(--accent-2);
+  border:1px solid var(--accent-2);border-radius:999px;padding:0 7px;line-height:1.5}
 main{padding:20px;max-width:1200px;margin:0 auto}
 section[role=tabpanel]{display:none}
 section[role=tabpanel].active{display:block}
@@ -59,6 +70,12 @@ section[role=tabpanel].active{display:block}
 .card .title{font-weight:600}
 .card .content{color:var(--text);white-space:pre-wrap;word-break:break-word;
   max-height:9em;overflow:hidden}
+.teaser{border-color:var(--accent-2);max-width:640px}
+.teaser .title{color:var(--accent-2)}
+.feature-list{list-style:none;margin:8px 0;padding:0;display:flex;
+  flex-direction:column;gap:6px;font-size:14px}
+.feature-list .ok::before{content:"✓ ";color:var(--ok)}
+.feature-list .lock::before{content:"🔒 ";font-size:12px}
 .meta{display:flex;gap:6px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
 .badge{border:1px solid var(--border);border-radius:999px;padding:1px 9px;font-size:12px}
 .badge.mtype-semantic{border-color:var(--accent);color:var(--accent)}
@@ -73,6 +90,9 @@ section[role=tabpanel].active{display:block}
 .badge.pinned{border-color:var(--accent-2);color:var(--accent-2)}
 .empty,.loading{color:var(--muted);padding:30px;text-align:center;
   border:1px dashed var(--border);border-radius:var(--radius)}
+.first-run{max-width:680px;margin:30px auto;text-align:left}
+.first-run pre{background:var(--panel-2);border:1px solid var(--border);
+  border-radius:8px;padding:12px;overflow:auto;font-family:var(--mono);font-size:13px}
 .chain{display:flex;flex-direction:column;gap:0;margin-top:10px}
 .chain-node{position:relative;border:1px solid var(--border);border-radius:var(--radius);
   background:var(--panel);padding:14px;margin-left:26px}
@@ -108,10 +128,28 @@ dialog::backdrop{background:rgba(0,0,0,.55)}
   padding:14px}
 .stat .num{font-size:26px;font-weight:700}
 .stat .lbl{color:var(--muted);font-size:13px}
+.stat .sub{color:var(--muted);font-size:12px;margin-top:2px}
 .hint{color:var(--muted);font-size:13px;margin:6px 0 14px}
 fieldset{border:1px solid var(--border);border-radius:var(--radius);padding:12px;
   display:flex;gap:10px;flex-wrap:wrap;align-items:end}
 legend{color:var(--muted);font-size:13px;padding:0 6px}
+.chart-card{background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--radius);padding:14px;margin-bottom:14px}
+.chart-card h3{margin:0 0 8px;font-size:14px}
+.hbar{display:grid;grid-template-columns:110px 1fr 44px;gap:8px;align-items:center;
+  font-size:13px;margin:4px 0}
+.hbar .track{background:var(--panel-2);border-radius:6px;height:14px;overflow:hidden}
+.hbar .fill{height:100%;border-radius:6px;background:var(--accent)}
+.hbar .n{color:var(--muted);text-align:right;font-family:var(--mono)}
+.overlay{position:fixed;inset:0;background:var(--bg);z-index:40;display:flex;
+  align-items:center;justify-content:center;padding:20px}
+.auth-card{background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--radius);padding:28px;max-width:400px;width:100%;
+  display:flex;flex-direction:column;gap:12px}
+.auth-card h2{margin:0;font-size:18px}
+.auth-card h2 .dot{color:var(--accent)}
+.auth-card form{display:flex;flex-direction:column;gap:10px}
+.auth-card input{width:100%}
 @media (max-width:720px){ header{gap:8px} main{padding:12px} .kv{grid-template-columns:1fr} }
 </style>
 </head>
@@ -119,6 +157,9 @@ legend{color:var(--muted);font-size:13px;padding:0 6px}
 <a class="skip-link" href="#main">Skip to content</a>
 <header>
   <h1>Engraphis<span class="dot">·</span>Memory Inspector</h1>
+  <button id="plan-badge" class="plan-btn free" aria-haspopup="dialog"
+    title="License &amp; plan">Free</button>
+  <span id="user-chip" class="chip" hidden></span>
   <div class="scope" role="group" aria-label="Scope selection">
     <label for="ws">Workspace</label>
     <select id="ws" aria-label="Workspace"></select>
@@ -133,8 +174,11 @@ legend{color:var(--muted);font-size:13px;padding:0 6px}
   <button role="tab" aria-selected="false" aria-controls="panel-why"       id="tab-why">Why / History</button>
   <button role="tab" aria-selected="false" aria-controls="panel-timeline"  id="tab-timeline">Timeline</button>
   <button role="tab" aria-selected="false" aria-controls="panel-proactive" id="tab-proactive">Start here</button>
+  <button role="tab" aria-selected="false" aria-controls="panel-analytics" id="tab-analytics">Analytics
+    <span class="pro-tag" id="analytics-lock" hidden>Pro</span></button>
   <button role="tab" aria-selected="false" aria-controls="panel-health"    id="tab-health">Health &amp; Consolidation</button>
   <button role="tab" aria-selected="false" aria-controls="panel-audit"     id="tab-audit">Audit</button>
+  <button role="tab" aria-selected="false" aria-controls="panel-team"      id="tab-team" hidden>Team</button>
 </nav>
 
 <main id="main">
@@ -183,6 +227,15 @@ legend{color:var(--muted);font-size:13px;padding:0 6px}
     <div id="proactive-out" aria-live="polite"></div>
   </section>
 
+  <section role="tabpanel" id="panel-analytics" aria-labelledby="tab-analytics">
+    <div class="row">
+      <button id="analytics-refresh">↻ Refresh analytics</button>
+    </div>
+    <p class="hint">Memory health at a glance: growth, retention distribution, what the decay
+      model will archive next, resolver activity, and the busiest entities.</p>
+    <div id="analytics-out" aria-live="polite"></div>
+  </section>
+
   <section role="tabpanel" id="panel-health" aria-labelledby="tab-health">
     <div class="stat-cards" id="stats-cards" aria-live="polite"></div>
     <fieldset>
@@ -201,11 +254,20 @@ legend{color:var(--muted);font-size:13px;padding:0 6px}
   </section>
 
   <section role="tabpanel" id="panel-audit" aria-labelledby="tab-audit">
-    <div class="row"><button id="audit-refresh">Refresh audit trail</button></div>
+    <div class="row">
+      <button id="audit-refresh">Refresh audit trail</button>
+      <button id="audit-export">⬇ Export workspace <span class="pro-tag">Pro</span></button>
+    </div>
     <p class="hint">Every governance and resolver action — invalidations, corrections,
       forgets, pins, evolution links — with actor and reason. Nothing is ever silently
-      deleted.</p>
+      deleted. Export produces the full bi-temporal dump (memories, history, audit) as JSON.</p>
     <div id="audit-out" aria-live="polite"></div>
+  </section>
+
+  <section role="tabpanel" id="panel-team" aria-labelledby="tab-team">
+    <p class="hint">Multi-user access to this Inspector: admins manage users and licenses,
+      members govern memories, viewers read. Roles are enforced server-side on every request.</p>
+    <div id="team-out" aria-live="polite"></div>
   </section>
 </main>
 
@@ -217,6 +279,39 @@ legend{color:var(--muted);font-size:13px;padding:0 6px}
   <div id="detail-body"></div>
 </dialog>
 
+<dialog id="license-dlg" aria-labelledby="license-title">
+  <div class="dialog-head">
+    <h2 id="license-title" style="margin:0;font-size:16px">License &amp; plan</h2>
+    <button id="license-close" aria-label="Close license dialog">✕ Close</button>
+  </div>
+  <div id="license-body"></div>
+</dialog>
+
+<div id="auth-overlay" class="overlay" hidden>
+  <div class="auth-card">
+    <h2>Engraphis<span class="dot">·</span>Memory Inspector</h2>
+    <form id="setup-form" hidden>
+      <p class="hint" style="margin:0">Team mode is on and no users exist yet. Create the
+        first <strong>admin</strong> account.</p>
+      <label for="setup-email">Email</label>
+      <input type="email" id="setup-email" autocomplete="username" required>
+      <label for="setup-name">Name</label>
+      <input type="text" id="setup-name" autocomplete="name">
+      <label for="setup-pw">Password (min 10 chars)</label>
+      <input type="password" id="setup-pw" autocomplete="new-password" minlength="10" required>
+      <button class="primary" type="submit">Create admin account</button>
+    </form>
+    <form id="login-form" hidden>
+      <label for="login-email">Email</label>
+      <input type="email" id="login-email" autocomplete="username" required>
+      <label for="login-pw">Password</label>
+      <input type="password" id="login-pw" autocomplete="current-password" required>
+      <button class="primary" type="submit">Sign in</button>
+    </form>
+    <p id="auth-msg" class="hint" role="alert" style="margin:0"></p>
+  </div>
+</div>
+
 <div id="toast" role="status" aria-live="polite"></div>
 
 <script>
@@ -227,15 +322,32 @@ const el = (tag, attrs={}, ...kids) => {
   const n = document.createElement(tag);
   for (const [k,v] of Object.entries(attrs)) {
     if (k === "text") n.textContent = v;
+    else if (k === "hidden") { if (v) n.setAttribute("hidden",""); }
     else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
     else n.setAttribute(k, v);
   }
   for (const k of kids) if (k != null) n.append(k);
   return n;
 };
+const SVG_NS = "http://www.w3.org/2000/svg";
+const svgEl = (tag, attrs={}) => { const n = document.createElementNS(SVG_NS, tag);
+  for (const [k,v] of Object.entries(attrs)) n.setAttribute(k, String(v)); return n; };
 const fmtTs = (t) => t == null ? "—" : new Date(t*1000).toLocaleString();
+const fmtRel = (t) => { if (t == null) return "—";
+  const s = Date.now()/1000 - t, a = Math.abs(s);
+  const [div, unit] = a<60?[1,"s"]:a<3600?[60,"m"]:a<86400?[3600,"h"]:[86400,"d"];
+  const n = Math.max(1, Math.round(a/div));
+  return s >= 0 ? `${n}${unit} ago` : `in ${n}${unit}`; };
 const toast = (msg) => { const t = $("#toast"); t.textContent = msg; t.classList.add("show");
   clearTimeout(toast._h); toast._h = setTimeout(()=>t.classList.remove("show"), 3200); };
+
+/* ── commercial/auth state (from /api/auth/state at boot) ── */
+let STATE = { mode:"open", user:null, setup_required:false, team_locked:false,
+              license:{plan:"free",features:[],known_features:{},purchase_url:"#"},
+              license_error:"" };
+const hasFeature = (f) => (STATE.license.features||[]).includes(f);
+const isViewer = () => STATE.user != null && STATE.user.role === "viewer";
+const isAdmin = () => STATE.user == null || STATE.user.role === "admin";
 
 let TOKEN = sessionStorage.getItem("engraphis_token") || "";
 async function api(path, opts={}) {
@@ -243,14 +355,116 @@ async function api(path, opts={}) {
   if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
   const res = await fetch(path, Object.assign({}, opts, {headers}));
   if (res.status === 401) {
+    if (STATE.mode === "team") {
+      showAuthOverlay();
+      throw new Error("sign in required");
+    }
     TOKEN = prompt("This inspector requires an API token (ENGRAPHIS_API_TOKEN):") || "";
     sessionStorage.setItem("engraphis_token", TOKEN);
     if (TOKEN) return api(path, opts);
   }
   const data = await res.json().catch(()=>({error:"bad response"}));
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  if (!res.ok) {
+    const e = new Error(data.error || res.statusText);
+    if (res.status === 402) { e.upgrade = true; e.purchase = data.purchase_url; }
+    if (res.status === 403) e.forbidden = true;
+    throw e;
+  }
   return data;
 }
+
+/* ── plan badge, user chip, feature locks ── */
+function renderIdentity() {
+  const lic = STATE.license || {};
+  const badge = $("#plan-badge");
+  badge.textContent = (lic.plan || "free") === "free" ? "Free — upgrade" : lic.plan;
+  badge.className = "plan-btn " + (lic.plan === "free" ? "free" : "paid");
+  $("#analytics-lock").hidden = hasFeature("analytics");
+  $("#tab-team").hidden = !(STATE.mode === "team" || STATE.team_locked);
+  const chip = $("#user-chip");
+  if (STATE.user) {
+    chip.hidden = false;
+    chip.replaceChildren(
+      el("span",{text:STATE.user.email}),
+      el("span",{class:"role",text:STATE.user.role}),
+      el("button",{text:"Sign out",onclick:async()=>{
+        try { await api("/api/auth/logout",{method:"POST",body:"{}"}); } catch(e){}
+        location.reload(); }}));
+  } else chip.hidden = true;
+}
+
+/* ── license dialog ── */
+function openLicenseDlg() {
+  const dlg = $("#license-dlg"), body = $("#license-body");
+  const lic = STATE.license || {};
+  const frag = document.createDocumentFragment();
+  frag.append(el("div",{class:"meta"},
+    el("span",{class:"badge "+(lic.plan==="free"?"":"pinned"),text:"plan: "+(lic.plan||"free")}),
+    lic.plan!=="free" && lic.seats ? el("span",{class:"badge",text:`seats: ${lic.seats}`}) : null,
+    lic.expires ? el("span",{class:"badge",text:"renews/expires "+fmtTs(lic.expires)}) : null,
+    lic.key_id ? el("span",{class:"badge",text:"key "+lic.key_id}) : null));
+  if (STATE.license_error)
+    frag.append(el("p",{class:"hint",style:"color:var(--danger)",
+      text:"Configured key rejected: "+STATE.license_error}));
+  const ul = el("ul",{class:"feature-list","aria-label":"Features"});
+  for (const [f,desc] of Object.entries(lic.known_features||{}))
+    ul.append(el("li",{class:hasFeature(f)?"ok":"lock",text:desc}));
+  frag.append(ul);
+  if (lic.plan === "free" || !lic.plan)
+    frag.append(el("p",{},el("a",{href:lic.purchase_url||"#",target:"_blank",
+      rel:"noopener noreferrer",text:"Get Engraphis Pro →"})));
+  frag.append(el("label",{for:"license-key-in",text:"Paste a license key to activate"}));
+  const ta = el("textarea",{id:"license-key-in",rows:"3",
+    placeholder:"ENGR1.xxxxx.yyyyy","aria-label":"License key"});
+  const msg = el("p",{class:"hint",role:"alert"});
+  frag.append(ta, el("div",{class:"row",style:"margin-top:8px"},
+    el("button",{class:"primary",text:"Activate",onclick:async()=>{
+      msg.textContent = "Verifying…";
+      try {
+        await api("/api/license/activate",{method:"POST",
+          body:JSON.stringify({key:ta.value.trim()})});
+        msg.textContent = "Activated — reloading.";
+        setTimeout(()=>location.reload(), 600);
+      } catch(err){
+        msg.textContent = err.forbidden ? "Activating a license requires the admin role."
+                                        : ("Not activated: "+err.message);
+      }}})), msg);
+  body.replaceChildren(frag);
+  dlg.showModal();
+}
+$("#plan-badge").addEventListener("click", openLicenseDlg);
+$("#license-close").addEventListener("click", ()=>$("#license-dlg").close());
+
+/* ── team-mode auth overlay ── */
+function showAuthOverlay() {
+  $("#auth-overlay").hidden = false;
+  $("#setup-form").hidden = !STATE.setup_required;
+  $("#login-form").hidden = STATE.setup_required;
+  const first = STATE.setup_required ? $("#setup-email") : $("#login-email");
+  setTimeout(()=>first.focus(), 50);
+}
+$("#setup-form").addEventListener("submit", async (e)=>{
+  e.preventDefault();
+  const msg = $("#auth-msg"); msg.textContent = "Creating admin…";
+  try {
+    await api("/api/auth/setup",{method:"POST",body:JSON.stringify({
+      email:$("#setup-email").value, name:$("#setup-name").value,
+      password:$("#setup-pw").value})});
+    location.reload();
+  } catch(err){ msg.textContent = err.message; }
+});
+$("#login-form").addEventListener("submit", async (e)=>{
+  e.preventDefault();
+  const msg = $("#auth-msg"); msg.textContent = "Signing in…";
+  try {
+    const res = await fetch("/api/auth/login",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({email:$("#login-email").value,password:$("#login-pw").value})});
+    const data = await res.json().catch(()=>({error:"bad response"}));
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    location.reload();
+  } catch(err){ msg.textContent = err.message; }
+});
 
 /* ── scope state ── */
 const scope = {
@@ -272,8 +486,21 @@ async function loadWorkspaces() {
   sel.dataset.repos = JSON.stringify(Object.fromEntries(
     out.workspaces.map(w=>[w.name, w.repos])));
   syncRepos(); refreshStats();
-  if (!out.workspaces.length)
-    toast("No workspaces yet — remember something through the MCP server first.");
+  if (!out.workspaces.length) renderFirstRun();
+}
+function renderFirstRun() {
+  const snippet = '{\n  "mcpServers": {\n    "engraphis": {\n      "command": "engraphis-mcp"\n    }\n  }\n}';
+  $("#search-out").replaceChildren(el("div",{class:"card first-run"},
+    el("div",{class:"title",text:"No memories yet — connect an agent"}),
+    el("p",{class:"hint",text:"Engraphis fills up as your agents work. Add the MCP server "+
+      "to Claude Code, Cursor, Cline, or Zed and memories will appear here:"}),
+    el("pre",{text:snippet}),
+    el("div",{class:"row"},
+      el("button",{text:"Copy config",onclick:async(e)=>{
+        try { await navigator.clipboard.writeText(snippet); toast("Copied"); }
+        catch(_){ toast("Copy failed — select it manually"); }}}),
+      el("span",{class:"hint",style:"margin:0",
+        text:"…or POST to this server's /api — see the README quickstart."}))));
 }
 function syncRepos() {
   const repos = (JSON.parse($("#ws").dataset.repos||"{}")[scope.ws]) || [];
@@ -284,7 +511,7 @@ function syncRepos() {
 $("#ws").addEventListener("change", ()=>{ syncRepos(); refreshStats(); });
 $("#refresh-scope").addEventListener("click", loadWorkspaces);
 
-/* ── tabs (accessible: arrow keys + aria-selected) ── */
+/* ── tabs (accessible: arrow keys + aria-selected); analytics/team lazy-load ── */
 const tabs = [...document.querySelectorAll("[role=tab]")];
 function selectTab(tab) {
   for (const t of tabs) {
@@ -294,6 +521,12 @@ function selectTab(tab) {
       .classList.toggle("active", sel);
   }
   tab.focus();
+  if (tab.id === "tab-analytics" && !tab.dataset.loaded) {
+    tab.dataset.loaded = "1"; loadAnalytics();
+  }
+  if (tab.id === "tab-team" && !tab.dataset.loaded) {
+    tab.dataset.loaded = "1"; loadUsers();
+  }
 }
 tabs.forEach((t,i)=>{
   t.addEventListener("click", ()=>selectTab(t));
@@ -329,6 +562,18 @@ function memCard(m, extraBadges=[]) {
 }
 const loading = (host)=>host.replaceChildren(el("div",{class:"loading",text:"Loading…",role:"status"}));
 const empty = (host,msg)=>host.replaceChildren(el("div",{class:"empty",text:msg}));
+
+/* ── Pro teaser (shown where a locked feature would render) ── */
+function renderTeaser(host, feature, title) {
+  const lic = STATE.license || {};
+  host.replaceChildren(el("div",{class:"card teaser"},
+    el("div",{class:"title",text:`${title} is an Engraphis Pro feature`}),
+    el("p",{class:"hint",style:"margin:0",text:(lic.known_features||{})[feature] || ""}),
+    el("div",{class:"row",style:"margin:8px 0 0"},
+      el("button",{class:"primary",text:"I have a license key",onclick:openLicenseDlg}),
+      el("a",{href:lic.purchase_url||"#",target:"_blank",rel:"noopener noreferrer",
+        text:"Get Engraphis Pro →"}))));
+}
 
 /* ── search ── */
 $("#search-form").addEventListener("submit", async (e)=>{
@@ -422,6 +667,98 @@ $("#proactive-run").addEventListener("click", async ()=>{
   } catch(err){ empty(host,"Error: "+err.message); }
 });
 
+/* ── analytics (Pro) — inline SVG, no chart library, textContent everywhere ── */
+function barChart(values, labels, opts={}) {
+  const W = opts.w || 560, H = opts.h || 170, pad = 26;
+  const max = Math.max(1, ...values);
+  const svg = svgEl("svg", {viewBox:`0 0 ${W} ${H}`, role:"img",
+    "aria-label": opts.label || "bar chart"});
+  svg.style.width = "100%"; svg.style.maxWidth = W+"px";
+  const bw = (W - pad*2) / values.length;
+  values.forEach((v,i)=>{
+    const h = v/max * (H - pad*2);
+    const r = svgEl("rect", {x: pad + i*bw + 2, y: H - pad - h,
+      width: Math.max(bw-4,2), height: Math.max(h, v>0?2:0.5), rx: 3});
+    r.style.fill = opts.fill || "var(--accent)";
+    const t = svgEl("title"); t.textContent = `${labels[i]}: ${v}`; r.append(t);
+    svg.append(r);
+    if (labels[i] != null && (values.length <= 8 || i % 2 === 0)) {
+      const tx = svgEl("text", {x: pad + i*bw + bw/2, y: H-8, "text-anchor":"middle"});
+      tx.style.fill = "var(--muted)"; tx.style.fontSize = "10px";
+      tx.textContent = labels[i]; svg.append(tx);
+    }
+  });
+  return svg;
+}
+function hBars(pairs, fillVar) {
+  const max = Math.max(1, ...pairs.map(p=>p[1]));
+  const box = el("div");
+  for (const [label, n] of pairs) {
+    const fill = el("div",{class:"fill"}); fill.style.width = (n/max*100)+"%";
+    if (fillVar) fill.style.background = fillVar;
+    box.append(el("div",{class:"hbar"},
+      el("span",{text:label}), el("div",{class:"track"},fill),
+      el("span",{class:"n",text:String(n)})));
+  }
+  return box;
+}
+async function loadAnalytics() {
+  const host = $("#analytics-out"); loading(host);
+  try {
+    const d = await api("/api/analytics?"+new URLSearchParams({workspace:scope.ws}));
+    const frag = document.createDocumentFragment();
+    const t = d.totals, f = d.decay_forecast;
+    const mk = (n,l,sub)=>el("div",{class:"stat"},
+      el("div",{class:"num",text:String(n)}), el("div",{class:"lbl",text:l}),
+      sub?el("div",{class:"sub",text:sub}):null);
+    frag.append(el("div",{class:"stat-cards"},
+      mk(t.live,"live memories",`${t.superseded} superseded kept in history`),
+      mk((t.avg_retention*100).toFixed(0)+"%","avg retention"),
+      mk(f.at_risk_7d,"fading in 7 days","unpinned, below "+(f.threshold*100)+"% retention"),
+      mk(f.at_risk_30d,"fading in 30 days","pin or recall them to keep them"),
+      mk(t.pinned,"pinned","exempt from decay")));
+
+    const wk = d.growth_weekly;
+    const wkLabels = wk.map((_,i)=>{ const back = wk.length-1-i;
+      return back===0 ? "now" : back+"w"; });
+    const g1 = el("div",{class:"chart-card"}); g1.append(el("h3",{text:"Memories written per week"}));
+    g1.append(barChart(wk, wkLabels, {label:"Weekly memory growth"})); frag.append(g1);
+
+    const g2 = el("div",{class:"chart-card"});
+    g2.append(el("h3",{text:"Retention distribution (live memories)"}));
+    g2.append(barChart(d.retention_histogram.counts, d.retention_histogram.buckets,
+      {label:"Retention histogram", fill:"var(--accent-2)", h:150}));
+    frag.append(g2);
+
+    const g3 = el("div",{class:"chart-card"});
+    g3.append(el("h3",{text:"Write-path resolver activity"}),
+      el("p",{class:"hint",style:"margin:0 0 8px",
+        text:"noop = duplicate reinforced instead of cloned · invalidate = contradiction "+
+             "superseded · evolve = auto-linked to related memories"}));
+    const mix = Object.entries(d.resolver_mix);
+    g3.append(mix.length ? hBars(mix) : el("div",{class:"empty",text:"No resolver events yet."}));
+    frag.append(g3);
+
+    const g4 = el("div",{class:"chart-card"});
+    g4.append(el("h3",{text:"Most connected entities"}));
+    if (d.top_entities.length) {
+      const wrap = el("div",{class:"meta"});
+      for (const e of d.top_entities)
+        wrap.append(el("span",{class:"badge op-evolve",
+          text:`${e.name}${e.etype?" · "+e.etype:""} (${e.n})`}));
+      g4.append(wrap);
+    } else g4.append(el("div",{class:"empty",
+      text:"No entities yet — they appear as the knowledge graph grows."}));
+    frag.append(g4);
+
+    host.replaceChildren(frag);
+  } catch(err){
+    if (err.upgrade) return renderTeaser(host, "analytics", "Analytics");
+    empty(host, "Error: "+err.message);
+  }
+}
+$("#analytics-refresh").addEventListener("click", loadAnalytics);
+
 /* ── health + consolidation ── */
 async function refreshStats() {
   const host = $("#stats-cards");
@@ -459,12 +796,15 @@ async function runConsolidate(dry) {
         r.archived.map(a=>`${a.id.slice(0,12)}… (retention ${a.retention})`).join(", ")}));
     host.replaceChildren(frag);
     if (!dry){ toast("Consolidation complete"); refreshStats(); }
-  } catch(err){ empty(host,"Error: "+err.message); }
+  } catch(err){
+    if (err.forbidden) return empty(host,"Consolidation requires the admin role.");
+    empty(host,"Error: "+err.message);
+  }
 }
 $("#cons-dry").addEventListener("click",()=>runConsolidate(true));
 $("#cons-run").addEventListener("click",()=>runConsolidate(false));
 
-/* ── audit ── */
+/* ── audit + compliance export (Pro) ── */
 $("#audit-refresh").addEventListener("click", loadAudit);
 async function loadAudit() {
   const host = $("#audit-out"); loading(host);
@@ -477,13 +817,99 @@ async function loadAudit() {
     const tb = el("tbody");
     for (const a of data.entries)
       tb.append(el("tr",{},
-        el("td",{text:fmtTs(a.ts)}), el("td",{text:a.actor}),
+        el("td",{text:fmtRel(a.ts),title:fmtTs(a.ts)}), el("td",{text:a.actor}),
         el("td",{},el("span",{class:`badge op-${a.action}`,text:a.action})),
         el("td",{},el("a",{href:"#",text:a.target.slice(0,18)+"…",
           onclick:(e)=>{e.preventDefault();openDetail(a.target);}})),
         el("td",{text:a.detail||""})));
     tbl.append(tb); host.replaceChildren(tbl);
   } catch(err){ empty(host,"Error: "+err.message); }
+}
+$("#audit-export").addEventListener("click", async ()=>{
+  try {
+    const headers = TOKEN ? {"Authorization":"Bearer "+TOKEN} : {};
+    const res = await fetch("/api/export?"+new URLSearchParams({workspace:scope.ws}),{headers});
+    if (res.status === 402) { renderTeaser($("#audit-out"),"export","Compliance export"); return; }
+    if (res.status === 403) { toast("Export requires the admin role"); return; }
+    if (res.status === 401) { STATE.mode==="team" ? showAuthOverlay() : toast("Unauthorized"); return; }
+    if (!res.ok) throw new Error(((await res.json().catch(()=>({}))).error)||res.statusText);
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition")||"";
+    const m = cd.match(/filename="([^"]+)"/);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = m ? m[1] : "engraphis-export.json";
+    a.click(); URL.revokeObjectURL(a.href);
+    toast("Export downloaded — full bi-temporal dump");
+  } catch(err){ toast("Export failed: "+err.message); }
+});
+
+/* ── team management (Team plan, admin) ── */
+async function loadUsers() {
+  const host = $("#team-out"); loading(host);
+  if (STATE.team_locked) return renderTeaser(host, "team", "Team mode");
+  try {
+    const d = await api("/api/auth/users");
+    const frag = document.createDocumentFragment();
+    frag.append(el("p",{class:"hint",
+      text:`${d.active} of ${d.seats} licensed seats in use.`}));
+    const form = el("form",{class:"row","aria-label":"Add user"},
+      el("input",{type:"email",id:"nu-email",placeholder:"email",required:"",
+        "aria-label":"New user email"}),
+      el("input",{type:"text",id:"nu-name",placeholder:"name","aria-label":"New user name"}),
+      el("input",{type:"password",id:"nu-pw",placeholder:"temp password (≥10 chars)",
+        minlength:"10",required:"","aria-label":"New user password"}),
+      el("select",{id:"nu-role","aria-label":"New user role"},
+        el("option",{text:"viewer"}),
+        el("option",{text:"member",selected:""}),
+        el("option",{text:"admin"})),
+      el("button",{class:"primary",type:"submit",text:"Add user"}));
+    form.addEventListener("submit", async (e)=>{
+      e.preventDefault();
+      try {
+        await api("/api/auth/users",{method:"POST",body:JSON.stringify({
+          email:$("#nu-email").value, name:$("#nu-name").value,
+          password:$("#nu-pw").value, role:$("#nu-role").value})});
+        toast("User added"); loadUsers();
+      } catch(err){ toast(err.message); }
+    });
+    frag.append(form);
+    const tbl = el("table",{"aria-label":"Users"},
+      el("thead",{},el("tr",{},...["Email","Name","Role","Status","Since",""]
+        .map(h=>el("th",{scope:"col",text:h})))));
+    const tb = el("tbody");
+    for (const u of d.users) {
+      const roleSel = el("select",{"aria-label":`Role for ${u.email}`});
+      for (const r of ["viewer","member","admin"]) {
+        const o = el("option",{text:r}); if (r===u.role) o.selected = true; roleSel.append(o);
+      }
+      roleSel.addEventListener("change", async ()=>{
+        try { await api("/api/auth/users/update",{method:"POST",
+          body:JSON.stringify({user_id:u.id,role:roleSel.value})});
+          toast("Role updated"); }
+        catch(err){ toast(err.message); loadUsers(); }
+      });
+      tb.append(el("tr",{},
+        el("td",{text:u.email}), el("td",{text:u.name||""}),
+        el("td",{},roleSel),
+        el("td",{},el("span",{class:"badge "+(u.disabled?"op-superseded":"live"),
+          text:u.disabled?"disabled":"active"})),
+        el("td",{text:fmtTs(u.created_at)}),
+        el("td",{},el("button",{class:u.disabled?"":"danger",
+          text:u.disabled?"Enable":"Disable",
+          onclick:async()=>{ try {
+            await api("/api/auth/users/update",{method:"POST",
+              body:JSON.stringify({user_id:u.id,disabled:!u.disabled})});
+            toast(u.disabled?"Enabled":"Disabled — sessions revoked"); loadUsers();
+          } catch(err){ toast(err.message); } }}))));
+    }
+    tbl.append(tb); frag.append(tbl);
+    host.replaceChildren(frag);
+  } catch(err){
+    if (err.upgrade) return renderTeaser(host, "team", "Team mode");
+    if (err.forbidden) return empty(host, "Team management requires the admin role.");
+    empty(host, "Error: "+err.message);
+  }
 }
 
 /* ── detail dialog + THE supersession chain with word diff ── */
@@ -534,30 +960,32 @@ async function openDetail(id) {
     for (const [k,v] of pairs){ kv.append(el("dt",{text:k}),el("dd",{text:v})); }
     frag.append(kv);
 
-    // governance
-    frag.append(el("div",{class:"row"},
-      el("button",{text:m.pinned?"Unpin":"Pin","aria-label":m.pinned?"Unpin memory":"Pin memory",
-        onclick:async()=>{ await api("/api/pin",{method:"POST",body:JSON.stringify(
-          {memory_id:m.id,workspace:scope.ws,repo:scope.repo,pinned:!m.pinned})});
-          toast(m.pinned?"Unpinned":"Pinned — exempt from decay"); openDetail(m.id); }}),
-      el("button",{text:"Correct…","aria-label":"Correct this memory",
-        onclick:()=>{ const ta=$("#detail-correct"); ta.hidden=!ta.hidden;
-          if(!ta.hidden) $("#correct-text").focus(); }}),
-      el("button",{class:"danger",text:"Forget","aria-label":"Forget this memory",
-        onclick:async()=>{ if(!confirm("Retire this memory? It leaves recall but stays in history."))return;
-          await api("/api/forget",{method:"POST",body:JSON.stringify(
-            {memory_id:m.id,workspace:scope.ws,repo:scope.repo,reason:"forgotten from inspector"})});
-          toast("Forgotten (bi-temporal close — recoverable)"); dlg.close(); }})));
-    const corr = el("div",{id:"detail-correct",hidden:""},
-      el("label",{for:"correct-text",text:"Corrected content"}),
-      el("textarea",{id:"correct-text",rows:"3",text:m.content}),
-      el("div",{class:"row",style:"margin-top:8px"},
-        el("button",{class:"primary",text:"Save correction",onclick:async()=>{
-          await api("/api/correct",{method:"POST",body:JSON.stringify(
-            {memory_id:m.id,new_content:$("#correct-text").value,workspace:scope.ws,
-             repo:scope.repo,reason:"corrected from inspector"})});
-          toast("Corrected — old version preserved in history"); dlg.close(); }})));
-    frag.append(corr);
+    // governance (hidden for viewers — the server refuses them anyway)
+    if (!isViewer()) {
+      frag.append(el("div",{class:"row"},
+        el("button",{text:m.pinned?"Unpin":"Pin","aria-label":m.pinned?"Unpin memory":"Pin memory",
+          onclick:async()=>{ await api("/api/pin",{method:"POST",body:JSON.stringify(
+            {memory_id:m.id,workspace:scope.ws,repo:scope.repo,pinned:!m.pinned})});
+            toast(m.pinned?"Unpinned":"Pinned — exempt from decay"); openDetail(m.id); }}),
+        el("button",{text:"Correct…","aria-label":"Correct this memory",
+          onclick:()=>{ const ta=$("#detail-correct"); ta.hidden=!ta.hidden;
+            if(!ta.hidden) $("#correct-text").focus(); }}),
+        el("button",{class:"danger",text:"Forget","aria-label":"Forget this memory",
+          onclick:async()=>{ if(!confirm("Retire this memory? It leaves recall but stays in history."))return;
+            await api("/api/forget",{method:"POST",body:JSON.stringify(
+              {memory_id:m.id,workspace:scope.ws,repo:scope.repo,reason:"forgotten from inspector"})});
+            toast("Forgotten (bi-temporal close — recoverable)"); dlg.close(); }})));
+      const corr = el("div",{id:"detail-correct",hidden:""},
+        el("label",{for:"correct-text",text:"Corrected content"}),
+        el("textarea",{id:"correct-text",rows:"3",text:m.content}),
+        el("div",{class:"row",style:"margin-top:8px"},
+          el("button",{class:"primary",text:"Save correction",onclick:async()=>{
+            await api("/api/correct",{method:"POST",body:JSON.stringify(
+              {memory_id:m.id,new_content:$("#correct-text").value,workspace:scope.ws,
+               repo:scope.repo,reason:"corrected from inspector"})});
+            toast("Corrected — old version preserved in history"); dlg.close(); }})));
+      frag.append(corr);
+    }
 
     // supersession chain
     frag.append(el("h3",{text:"Supersession chain",style:"margin:18px 0 4px;font-size:15px"}));
@@ -625,8 +1053,25 @@ async function openDetail(id) {
 }
 $("#detail-close").addEventListener("click",()=>$("#detail").close());
 
-/* ── boot ── */
-loadWorkspaces().catch(err=>toast("Cannot reach the inspector API: "+err.message));
+/* ── "/" focuses the active tab's search box (ignored while typing) ── */
+document.addEventListener("keydown", (e)=>{
+  if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = document.activeElement && document.activeElement.tagName;
+  if (t === "INPUT" || t === "TEXTAREA" || t === "SELECT") return;
+  const panel = document.querySelector("section[role=tabpanel].active");
+  const box = panel && panel.querySelector("input[type=search]");
+  if (box) { e.preventDefault(); box.focus(); }
+});
+
+/* ── boot: auth state first, then workspaces ── */
+(async function boot(){
+  try { STATE = Object.assign(STATE, await api("/api/auth/state")); }
+  catch(err){ toast("Cannot reach the inspector API: "+err.message); return; }
+  renderIdentity();
+  if (STATE.license_error) toast("License key rejected: "+STATE.license_error);
+  if (STATE.mode === "team" && !STATE.user) { showAuthOverlay(); return; }
+  loadWorkspaces().catch(err=>toast("Cannot reach the inspector API: "+err.message));
+})();
 </script>
 </body>
 </html>

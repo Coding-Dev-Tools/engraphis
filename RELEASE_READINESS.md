@@ -112,7 +112,11 @@ MASTER_PLAN.md; full detail in `CHANGELOG.md`:
 3. **Encryption-at-rest** and **built-in rate limiting** (today: rely on disk encryption + a
    reverse proxy) — required for the regulated/Enterprise ICP.
 4. **Per-token tenant authorization** if you sell multi-tenant; today, isolate by instance.
-5. **An actual Pro-tier feature to sell.** The v1 dashboard had two real bugs fixed this pass
+5. **An actual Pro-tier feature to sell.** *(RESOLVED 2026-07-03 — see
+   `docs/LAUNCH_PLAN.md` and `CHANGELOG.md`: offline signed license keys now gate three
+   shipped features — Pro analytics dashboard, compliance export, and multi-user Team mode
+   on the Inspector — with activation UX in the product. Remaining before charging: rotate
+   the dev vendor keypair, set the real purchase URL, wire a merchant of record.)* The v1 dashboard had two real bugs fixed this pass
    (Knowledge Graph fragmentation, stored XSS) and is now correct, but "correct" isn't "worth
    $20/mo" — it's still a single-user local dashboard with no hosting, login, or team sync. See
    `docs/GO_TO_MARKET.md` §10 for the specific recommendation (hosted + multi-user version of

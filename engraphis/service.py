@@ -359,35 +359,41 @@ class MemoryService:
 
     # ── governance: forget / pin / correct (audited, never a silent hard delete) ──
     def forget(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
-              reason: str = "") -> dict:
+              reason: str = "", actor: str = "user") -> dict:
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
         reason = _clean_text(reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False)
+        actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
+                            required=False) or "user"
         wid, rid = self._require_scope(workspace, repo)
         self._check_owns(mid, wid, rid)
         try:
-            return self.engine.forget(mid, reason=reason)
+            return self.engine.forget(mid, reason=reason, actor=actor)
         except KeyError as exc:
             raise ValidationError(str(exc))
 
     def pin(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
-           pinned: bool = True) -> dict:
+           pinned: bool = True, actor: str = "user") -> dict:
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
+        actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
+                            required=False) or "user"
         wid, rid = self._require_scope(workspace, repo)
         self._check_owns(mid, wid, rid)
         try:
-            return self.engine.pin(mid, pinned=bool(pinned))
+            return self.engine.pin(mid, pinned=bool(pinned), actor=actor)
         except KeyError as exc:
             raise ValidationError(str(exc))
 
     def correct(self, memory_id: str, new_content: str, *, workspace: str,
-               repo: Optional[str] = None, reason: str = "") -> dict:
+               repo: Optional[str] = None, reason: str = "", actor: str = "user") -> dict:
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
         new_content = _clean_text(new_content, field="new_content", max_chars=MAX_CONTENT_CHARS)
         reason = _clean_text(reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False)
+        actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
+                            required=False) or "user"
         wid, rid = self._require_scope(workspace, repo)
         self._check_owns(mid, wid, rid)
         try:
-            return self.engine.correct(mid, new_content, reason=reason)
+            return self.engine.correct(mid, new_content, reason=reason, actor=actor)
         except KeyError as exc:
             raise ValidationError(str(exc))
 
@@ -583,6 +589,27 @@ class MemoryService:
             "JOIN memories m ON m.id = a.target WHERE m.workspace_id=? "
             "ORDER BY a.ts DESC LIMIT ?", (wid, limit)).fetchall()
         return {"entries": [dict(r) for r in rows]}
+
+    def export_workspace(self, *, workspace: str) -> dict:
+        """Full bi-temporal dump of one workspace — memories (live *and* superseded),
+        sessions, and the audit trail. The compliance story in one artifact: nothing is
+        ever silently deleted, and the export proves it. Scope-checked like any other
+        read; the Pro license gate lives in the HTTP layer (inspector/app.py), keeping
+        the service honest for OSS callers."""
+        wid, _ = self._require_scope(workspace, None)
+        conn = self.store.conn
+        memories = [dict(r) for r in conn.execute(
+            "SELECT * FROM memories WHERE workspace_id=? ORDER BY rowid", (wid,))]
+        sessions = [dict(r) for r in conn.execute(
+            "SELECT * FROM sessions WHERE workspace_id=? ORDER BY rowid", (wid,))]
+        audit = [dict(r) for r in conn.execute(
+            "SELECT a.* FROM audit a JOIN memories m ON m.id = a.target "
+            "WHERE m.workspace_id=? ORDER BY a.ts", (wid,))]
+        import time as _time
+        return {"format": "engraphis-export/1", "exported_at": _time.time(),
+                "workspace": workspace, "counts": {"memories": len(memories),
+                "sessions": len(sessions), "audit": len(audit)},
+                "memories": memories, "sessions": sessions, "audit": audit}
 
     # ── introspection ───────────────────────────────────────────────────────────
     def stats(self, *, workspace: Optional[str] = None) -> dict:

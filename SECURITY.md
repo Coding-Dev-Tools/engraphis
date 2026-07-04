@@ -137,6 +137,29 @@ repos you intend to index, the same way you'd scope any other local tool.
   regex indexer on any import or parse failure, rather than failing the write path. Pin
   versions and run `pip audit` in your environment.
 
+## 6. Team mode & license keys (commercial layer)
+
+Team mode (`ENGRAPHIS_TEAM_MODE=1` + a `team` license) replaces the single bearer token on
+the Inspector's `/api/*` with per-user sessions:
+
+- **Passwords**: PBKDF2-HMAC-SHA256, 600k iterations, per-user salt, ≥10 chars; verification
+  is constant-time (`hmac.compare_digest`) and unknown emails still burn one PBKDF2 (no
+  user-enumeration timing oracle). Login failures share one generic message.
+- **Sessions**: 32-byte `secrets` tokens delivered as `HttpOnly; SameSite=Strict; Path=/`
+  cookies and stored **hashed** (SHA-256) with a 12h TTL — a leaked users DB yields no usable
+  cookies. Logout, user-disable, and demotion revoke server-side. CSRF posture: SameSite=Strict
+  + JSON-only bodies + loopback-only CORS; if you expose the Inspector beyond loopback, put
+  TLS in front (the cookie does not set `Secure` on plain HTTP loopback).
+- **Roles** are enforced in the HTTP layer on every request (viewer < member < admin); the UI
+  only hides what the server already refuses. The last active admin cannot be demoted or
+  disabled. A valid bearer token acts as an admin service account so automation keeps working.
+- **Login throttle**: 5 failures / 15 min → 60 s lockout (in-process, matching the Inspector's
+  single-process posture).
+- **License keys** are Ed25519-signed payloads verified offline against a pinned vendor public
+  key (`engraphis/licensing.py`); nothing phones home. Keys carry no secrets — they are
+  entitlements, and the private signing key must never live in the repo (gitignored
+  `.secrets/`, rotate before selling: `python -m scripts.license_admin keygen`).
+
 ## Known limitations (not yet mitigated)
 - Rate limiting: an optional in-process per-IP limiter now ships (`ENGRAPHIS_RATE_LIMIT`,
   `ENGRAPHIS_RATE_WINDOW`), off by default; still front multi-process/distributed deployments

@@ -52,6 +52,16 @@ python -m eval.external --dataset locomo10.json --format locomo --offline --limi
 # ── v2 Memory Inspector (product UI over MemoryService; same layer as the MCP server) ──
 python -m scripts.inspector          # http://127.0.0.1:8710 (auth: ENGRAPHIS_API_TOKEN)
 
+# ── Onboarding (writes .env with an absolute DB path; doctor mode verifies install) ──
+engraphis-init                   # or: python -m scripts.init
+engraphis-init --check
+
+# ── Commercial layer (docs/LAUNCH_PLAN.md; gates live ONLY in inspector/app.py) ──
+python -m scripts.license_admin keygen                 # vendor keypair → .secrets/ (gitignored)
+python -m scripts.license_admin issue --email a@b.co --plan team --seats 5 --days 365
+ENGRAPHIS_LICENSE_KEY=ENGR1...   # or ~/.engraphis/license.key; free tier = no key
+ENGRAPHIS_TEAM_MODE=1            # multi-user Inspector (needs a 'team' license)
+
 # ── Sleep-time consolidation (schedulable local job; also an MCP tool) ────────
 python -m scripts.consolidate --db engraphis.db --workspace acme --dry-run
 
