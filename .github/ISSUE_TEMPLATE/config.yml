@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Engraphis Documentation
+    url: https://github.com/Coding-Dev-Tools/engraphis#readme
+    about: Check the README for usage guides
+  - name: Security Issues
+    url: https://github.com/Coding-Dev-Tools/engraphis/security/policy
+    about: Report security vulnerabilities here
