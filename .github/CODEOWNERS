@@ -1,0 +1,8 @@
+# Default owners for the entire repository
+* @Coding-Dev-Tools
+
+# Core engine changes
+/engraphis/core/ @Coding-Dev-Tools
+
+# CI/CD changes
+.github/workflows/ @Coding-Dev-Tools
