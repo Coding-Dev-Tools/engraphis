@@ -1,0 +1,17 @@
+services:
+  engraphis:
+    build: .
+    image: engraphis:latest
+    ports:
+      - "8700:8700"
+    env_file:
+      - .env
+    environment:
+      ENGRAPHIS_HOST: 0.0.0.0
+      ENGRAPHIS_DB_PATH: /data/engraphis.db
+    volumes:
+      - engraphis-data:/data
+    restart: unless-stopped
+
+volumes:
+  engraphis-data:
