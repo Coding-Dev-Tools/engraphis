@@ -1,0 +1,1255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engraphis — Memory Inspector</title>
+<style>
+:root{
+  --bg:#0e1116; --panel:#161b22; --panel-2:#1c2330; --border:#2b3442;
+  --text:#e6edf3; --muted:#8b98a9; --accent:#4da3ff; --accent-2:#9a7dff;
+  --ok:#3fb950; --warn:#d29922; --danger:#f85149;
+  --add:#3fb950; --invalidate:#d29922; --noop:#8b98a9; --evolve:#9a7dff;
+  --radius:10px; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: light){
+  :root{ --bg:#f6f8fa; --panel:#ffffff; --panel-2:#eef1f5; --border:#d0d7de;
+         --text:#1f2328; --muted:#59636e; --accent:#0969da; --accent-2:#6639ba; }
+}
+*{box-sizing:border-box}
+[hidden]{display:none !important}  /* beat .overlay{display:flex} so hidden stays hidden */
+html,body{margin:0;padding:0;background:var(--bg);color:var(--text);
+  font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+a{color:var(--accent)}
+.skip-link{position:absolute;left:-999px;top:0;background:var(--accent);color:#fff;
+  padding:8px 14px;border-radius:0 0 8px 0;z-index:99}
+.skip-link:focus{left:0}
+header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:12px 20px;border-bottom:1px solid var(--border);background:var(--panel)}
+header h1{font-size:17px;margin:0;letter-spacing:.2px}
+header h1 .dot{color:var(--accent)}
+.scope{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-left:auto}
+label{color:var(--muted);font-size:13px}
+select,input[type=text],input[type=search],input[type=password],input[type=email],textarea{
+  background:var(--panel-2);color:var(--text);border:1px solid var(--border);
+  border-radius:8px;padding:7px 10px;font-size:14px;min-width:0}
+textarea{width:100%;font-family:inherit;resize:vertical}
+select:focus,input:focus,textarea:focus,button:focus-visible,[role=tab]:focus-visible{
+  outline:2px solid var(--accent);outline-offset:2px}
+button{background:var(--panel-2);color:var(--text);border:1px solid var(--border);
+  border-radius:8px;padding:7px 14px;font-size:14px;cursor:pointer}
+button:hover{border-color:var(--accent)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.danger{border-color:var(--danger);color:var(--danger)}
+button[disabled]{opacity:.5;cursor:not-allowed}
+.plan-btn{border-radius:999px;padding:4px 14px;font-weight:600;font-size:12px;
+  letter-spacing:.6px;text-transform:uppercase}
+.plan-btn.free{border-color:var(--accent);color:var(--accent)}
+.plan-btn.paid{border-color:var(--accent-2);color:var(--accent-2)}
+.chip{display:inline-flex;gap:8px;align-items:center;border:1px solid var(--border);
+  border-radius:999px;padding:3px 6px 3px 12px;font-size:13px;color:var(--muted)}
+.chip .role{color:var(--accent-2);text-transform:capitalize}
+.chip button{padding:2px 10px;font-size:12px;border-radius:999px}
+nav[role=tablist]{display:flex;gap:4px;padding:10px 20px 0;flex-wrap:wrap;
+  border-bottom:1px solid var(--border);background:var(--panel)}
+[role=tab]{border:1px solid transparent;border-bottom:none;background:none;
+  color:var(--muted);padding:8px 14px;border-radius:8px 8px 0 0;cursor:pointer;font-size:14px;
+  display:inline-flex;align-items:center;gap:7px}
+[role=tab][aria-selected=true]{color:var(--text);background:var(--bg);
+  border-color:var(--border)}
+.pro-tag{font-size:10px;font-weight:700;letter-spacing:.8px;color:var(--accent-2);
+  border:1px solid var(--accent-2);border-radius:999px;padding:0 7px;line-height:1.5}
+main{padding:20px;max-width:1200px;margin:0 auto}
+section[role=tabpanel]{display:none}
+section[role=tabpanel].active{display:block}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+.row input[type=search]{flex:1;min-width:220px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);
+  padding:14px;display:flex;flex-direction:column;gap:8px}
+.card:focus-within,.card:hover{border-color:var(--accent)}
+.card .title{font-weight:600}
+.card .content{color:var(--text);white-space:pre-wrap;word-break:break-word;
+  max-height:9em;overflow:hidden}
+.teaser{border-color:var(--accent-2);max-width:640px}
+.teaser .title{color:var(--accent-2)}
+.upgrade-banner{display:flex;gap:10px;align-items:center;flex-wrap:wrap;max-width:640px;
+  border:1px solid var(--border);border-left:3px solid var(--accent-2);
+  border-radius:var(--radius);background:var(--panel);padding:10px 14px;
+  color:var(--muted);font-size:13px}
+.upgrade-banner strong{color:var(--text);font-weight:600}
+.upgrade-banner a{white-space:nowrap}
+.upgrade-banner button{padding:3px 10px;font-size:12px;border-radius:999px}
+.feature-list{list-style:none;margin:8px 0;padding:0;display:flex;
+  flex-direction:column;gap:6px;font-size:14px}
+.feature-list .ok::before{content:"✓ ";color:var(--ok)}
+.feature-list .lock::before{content:"🔒 ";font-size:12px}
+.meta{display:flex;gap:6px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.badge{border:1px solid var(--border);border-radius:999px;padding:1px 9px;font-size:12px}
+.badge.mtype-semantic{border-color:var(--accent);color:var(--accent)}
+.badge.mtype-episodic{border-color:var(--warn);color:var(--warn)}
+.badge.mtype-procedural{border-color:var(--ok);color:var(--ok)}
+.badge.mtype-working{border-color:var(--accent-2);color:var(--accent-2)}
+.badge.op-add{border-color:var(--add);color:var(--add)}
+.badge.op-invalidate,.badge.op-superseded{border-color:var(--invalidate);color:var(--invalidate)}
+.badge.op-noop{border-color:var(--noop);color:var(--noop)}
+.badge.op-evolve{border-color:var(--evolve);color:var(--evolve)}
+.badge.live{border-color:var(--ok);color:var(--ok)}
+.badge.pinned{border-color:var(--accent-2);color:var(--accent-2)}
+.empty,.loading{color:var(--muted);padding:30px;text-align:center;
+  border:1px dashed var(--border);border-radius:var(--radius)}
+.first-run{max-width:680px;margin:30px auto;text-align:left}
+.first-run pre{background:var(--panel-2);border:1px solid var(--border);
+  border-radius:8px;padding:12px;overflow:auto;font-family:var(--mono);font-size:13px}
+.chain{display:flex;flex-direction:column;gap:0;margin-top:10px}
+.chain-node{position:relative;border:1px solid var(--border);border-radius:var(--radius);
+  background:var(--panel);padding:14px;margin-left:26px}
+.chain-node.current{border-color:var(--accent)}
+.chain-node::before{content:"";position:absolute;left:-22px;top:20px;width:12px;height:12px;
+  border-radius:50%;background:var(--invalidate);border:2px solid var(--bg)}
+.chain-node.live-node::before{background:var(--ok)}
+.chain-connector{margin-left:30px;height:26px;border-left:2px solid var(--border);
+  display:flex;align-items:center;gap:8px;padding-left:14px;color:var(--muted);font-size:12px}
+.validity{font-size:12px;color:var(--muted);font-family:var(--mono)}
+.diff ins{background:rgba(63,185,80,.18);color:var(--ok);text-decoration:none;
+  border-radius:3px;padding:0 2px}
+.diff del{background:rgba(248,81,73,.15);color:var(--danger);border-radius:3px;padding:0 2px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--border);
+  vertical-align:top;word-break:break-word}
+th{color:var(--muted);font-weight:600}
+dialog{background:var(--panel);color:var(--text);border:1px solid var(--border);
+  border-radius:var(--radius);max-width:860px;width:92vw;max-height:86vh;overflow:auto;
+  padding:20px}
+dialog::backdrop{background:rgba(0,0,0,.55)}
+.dialog-head{display:flex;align-items:start;gap:10px;justify-content:space-between}
+.kv{display:grid;grid-template-columns:130px 1fr;gap:4px 12px;font-size:13px;margin:10px 0}
+.kv dt{color:var(--muted)}
+.kv dd{margin:0;font-family:var(--mono);word-break:break-all}
+#toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);
+  background:var(--panel);border:1px solid var(--border);border-radius:10px;
+  padding:10px 18px;box-shadow:0 6px 24px rgba(0,0,0,.35);display:none;z-index:50}
+#toast.show{display:block}
+.stat-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;
+  margin-bottom:18px}
+.stat{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);
+  padding:14px}
+.stat .num{font-size:26px;font-weight:700}
+.stat .lbl{color:var(--muted);font-size:13px}
+.stat .sub{color:var(--muted);font-size:12px;margin-top:2px}
+.hint{color:var(--muted);font-size:13px;margin:6px 0 14px}
+fieldset{border:1px solid var(--border);border-radius:var(--radius);padding:12px;
+  display:flex;gap:10px;flex-wrap:wrap;align-items:end}
+legend{color:var(--muted);font-size:13px;padding:0 6px}
+.chart-card{background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--radius);padding:14px;margin-bottom:14px}
+.chart-card h3{margin:0 0 8px;font-size:14px}
+.hbar{display:grid;grid-template-columns:110px 1fr 44px;gap:8px;align-items:center;
+  font-size:13px;margin:4px 0}
+.hbar .track{background:var(--panel-2);border-radius:6px;height:14px;overflow:hidden}
+.hbar .fill{height:100%;border-radius:6px;background:var(--accent)}
+.hbar .n{color:var(--muted);text-align:right;font-family:var(--mono)}
+.graph-layout{display:flex;gap:14px;align-items:flex-start}
+.graph-canvas{flex:1;min-width:0;height:480px;background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--radius);position:relative;overflow:hidden}
+.graph-canvas .empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  border:none;margin:0}
+.graph-side{width:280px;flex-shrink:0;display:flex;flex-direction:column;gap:14px}
+.etype-row{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:13px}
+.etype-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;box-shadow:0 0 6px currentColor}
+.etype-n{margin-left:auto;color:var(--muted);font-family:var(--mono);font-size:12px}
+.gtop-row{display:flex;align-items:center;gap:7px;padding:4px 2px;cursor:pointer;border-radius:6px}
+.gtop-row:hover,.gtop-row:focus-visible{background:var(--panel-2)}
+.gtop-rank{width:16px;color:var(--muted);font-size:11px;text-align:right;flex-shrink:0}
+.gtop-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
+.gtop-name{width:92px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
+.gtop-bar{flex:1;height:5px;background:var(--panel-2);border-radius:3px;overflow:hidden}
+.gtop-bar-fill{display:block;height:100%;border-radius:3px}
+.gtop-n{width:22px;text-align:right;color:var(--muted);font-family:var(--mono);font-size:11px}
+@media (max-width:720px){ .graph-layout{flex-direction:column} .graph-side{width:100%} }
+.overlay{position:fixed;inset:0;background:var(--bg);z-index:40;display:flex;
+  align-items:center;justify-content:center;padding:20px}
+.auth-card{background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--radius);padding:28px;max-width:400px;width:100%;
+  display:flex;flex-direction:column;gap:12px}
+.auth-card h2{margin:0;font-size:18px}
+.auth-card h2 .dot{color:var(--accent)}
+.auth-card form{display:flex;flex-direction:column;gap:10px}
+.auth-card input{width:100%}
+@media (max-width:720px){ header{gap:8px} main{padding:12px} .kv{grid-template-columns:1fr} }
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header>
+  <h1>Engraphis<span class="dot">·</span>Memory Inspector</h1>
+  <button id="plan-badge" class="plan-btn free" aria-haspopup="dialog"
+    title="License &amp; plan">Free</button>
+  <span id="user-chip" class="chip" hidden></span>
+  <div class="scope" role="group" aria-label="Scope selection">
+    <label for="ws">Workspace</label>
+    <select id="ws" aria-label="Workspace"></select>
+    <label for="repo">Repo</label>
+    <select id="repo" aria-label="Repository"><option value="">(all)</option></select>
+    <button id="refresh-scope" aria-label="Reload workspaces">↻ Reload</button>
+  </div>
+</header>
+
+<nav role="tablist" aria-label="Inspector views">
+  <button role="tab" aria-selected="true"  aria-controls="panel-search"    id="tab-search">Search</button>
+  <button role="tab" aria-selected="false" aria-controls="panel-why"       id="tab-why">Why / History</button>
+  <button role="tab" aria-selected="false" aria-controls="panel-timeline"  id="tab-timeline">Timeline</button>
+  <button role="tab" aria-selected="false" aria-controls="panel-proactive" id="tab-proactive">Start here</button>
+  <button role="tab" aria-selected="false" aria-controls="panel-analytics" id="tab-analytics">Analytics
+    <span class="pro-tag" id="analytics-lock" hidden>Pro</span></button>
+  <button role="tab" aria-selected="false" aria-controls="panel-health"    id="tab-health">Health &amp; Consolidation</button>
+  <button role="tab" aria-selected="false" aria-controls="panel-audit"     id="tab-audit">Audit</button>
+  <button role="tab" aria-selected="false" aria-controls="panel-graph"     id="tab-graph">Graph</button>
+  <button role="tab" aria-selected="false" aria-controls="panel-team"      id="tab-team" hidden>Team</button>
+</nav>
+
+<main id="main">
+  <section role="tabpanel" id="panel-search" aria-labelledby="tab-search" class="active">
+    <form class="row" id="search-form">
+      <input type="search" id="q" placeholder="What do we know about…" aria-label="Search query" required>
+      <select id="mtype" aria-label="Memory type filter">
+        <option value="">all types</option>
+        <option>semantic</option><option>episodic</option>
+        <option>procedural</option><option>working</option>
+      </select>
+      <button class="primary" type="submit">Recall</button>
+    </form>
+    <p class="hint">Hybrid recall — vector + BM25 + graph (Personalized PageRank), fused and
+      scored exactly as the MCP <code>engraphis_recall</code> tool sees it. Click a result for
+      its full record and supersession chain.</p>
+    <div id="search-out" aria-live="polite"></div>
+  </section>
+
+  <section role="tabpanel" id="panel-why" aria-labelledby="tab-why">
+    <form class="row" id="why-form">
+      <input type="search" id="why-q" placeholder="Why is… / what did we used to…" aria-label="Why query" required>
+      <button class="primary" type="submit">Explain</button>
+    </form>
+    <p class="hint">The live answer <em>plus what it superseded</em> — bi-temporal history a
+      flat vector store can't answer. Superseded facts are closed, never deleted.</p>
+    <div id="why-out" aria-live="polite"></div>
+  </section>
+
+  <section role="tabpanel" id="panel-timeline" aria-labelledby="tab-timeline">
+    <form class="row" id="tl-form">
+      <input type="search" id="tl-q" placeholder="Trace a fact over time…" aria-label="Timeline query" required>
+      <button class="primary" type="submit">Trace</button>
+    </form>
+    <p class="hint">Every version of a fact in world-time order, including invalidated ones,
+      each with its validity window.</p>
+    <div id="tl-out" aria-live="polite"></div>
+  </section>
+
+  <section role="tabpanel" id="panel-proactive" aria-labelledby="tab-proactive">
+    <div class="row">
+      <button class="primary" id="proactive-run">What should I know right now?</button>
+    </div>
+    <p class="hint">Query-less recall: importance + recency + retention, plus the last
+      session's summary and open threads for the selected repo.</p>
+    <div id="proactive-out" aria-live="polite"></div>
+  </section>
+
+  <section role="tabpanel" id="panel-analytics" aria-labelledby="tab-analytics">
+    <div class="row">
+      <button id="analytics-refresh">↻ Refresh analytics</button>
+      <button id="analytics-report">⬇ HTML report <span class="pro-tag">Pro</span></button>
+    </div>
+    <p class="hint">Memory health at a glance: growth, retention distribution, what the decay
+      model will archive next, resolver activity, and the busiest entities.</p>
+    <div id="analytics-out" aria-live="polite"></div>
+  </section>
+
+  <section role="tabpanel" id="panel-health" aria-labelledby="tab-health">
+    <div class="stat-cards" id="stats-cards" aria-live="polite"></div>
+    <fieldset>
+      <legend>Sleep-time consolidation</legend>
+      <div><label for="cons-min">Min recurrences</label><br>
+        <input type="text" id="cons-min" value="3" inputmode="numeric" aria-label="Minimum cluster size"></div>
+      <div><label for="cons-floor">Archive below retention</label><br>
+        <input type="text" id="cons-floor" value="0.05" inputmode="decimal" aria-label="Archive retention floor"></div>
+      <button id="cons-dry">Dry run</button>
+      <button class="primary" id="cons-run">Consolidate now</button>
+    </fieldset>
+    <p class="hint">Distills recurring episodic memories into durable semantic digests and
+      archives fully-decayed transients (bi-temporal close — recoverable, audited). Same code
+      path as <code>python -m scripts.consolidate</code>.</p>
+    <div id="cons-out" aria-live="polite"></div>
+  </section>
+
+  <section role="tabpanel" id="panel-audit" aria-labelledby="tab-audit">
+    <div class="row">
+      <button id="audit-refresh">Refresh audit trail</button>
+      <button id="audit-export">⬇ Export workspace <span class="pro-tag">Pro</span></button>
+    </div>
+    <p class="hint">Every governance and resolver action — invalidations, corrections,
+      forgets, pins, evolution links — with actor and reason. Nothing is ever silently
+      deleted. Export produces the full bi-temporal dump (memories, history, audit) as JSON.</p>
+    <div id="audit-out" aria-live="polite"></div>
+  </section>
+
+  <section role="tabpanel" id="panel-graph" aria-labelledby="tab-graph">
+    <div class="row">
+      <button id="graph-refresh">↻ Refresh graph</button>
+    </div>
+    <p class="hint">Entities and relations extracted from your memories — the graph arm of
+      recall is Personalized PageRank over this network (HippoRAG-style). Colors match
+      entity type; click a node or a Top Connected row to focus it.</p>
+    <div class="graph-layout">
+      <div id="graph-canvas" class="graph-canvas" role="img" aria-label="Entity-relation graph"></div>
+      <div class="graph-side">
+        <div class="chart-card"><h3>Legend</h3><div id="graph-legend"></div></div>
+        <div class="chart-card"><h3>Top connected</h3><div id="graph-top"></div></div>
+        <div class="stat-cards" id="graph-stats"></div>
+      </div>
+    </div>
+  </section>
+
+  <section role="tabpanel" id="panel-team" aria-labelledby="tab-team">
+    <p class="hint">Multi-user access to this Inspector: admins manage users and licenses,
+      members govern memories, viewers read. Roles are enforced server-side on every request.</p>
+    <div id="team-out" aria-live="polite"></div>
+  </section>
+</main>
+
+<dialog id="detail" aria-labelledby="detail-title">
+  <div class="dialog-head">
+    <h2 id="detail-title" style="margin:0;font-size:16px">Memory</h2>
+    <button id="detail-close" aria-label="Close details">✕ Close</button>
+  </div>
+  <div id="detail-body"></div>
+</dialog>
+
+<dialog id="license-dlg" aria-labelledby="license-title">
+  <div class="dialog-head">
+    <h2 id="license-title" style="margin:0;font-size:16px">License &amp; plan</h2>
+    <button id="license-close" aria-label="Close license dialog">✕ Close</button>
+  </div>
+  <div id="license-body"></div>
+</dialog>
+
+<div id="auth-overlay" class="overlay" hidden>
+  <div class="auth-card">
+    <h2>Engraphis<span class="dot">·</span>Memory Inspector</h2>
+    <form id="setup-form" hidden>
+      <p class="hint" style="margin:0">Team mode is on and no users exist yet. Create the
+        first <strong>admin</strong> account.</p>
+      <label for="setup-email">Email</label>
+      <input type="email" id="setup-email" autocomplete="username" required>
+      <label for="setup-name">Name</label>
+      <input type="text" id="setup-name" autocomplete="name">
+      <label for="setup-pw">Password (min 10 chars)</label>
+      <input type="password" id="setup-pw" autocomplete="new-password" minlength="10" required>
+      <button class="primary" type="submit">Create admin account</button>
+    </form>
+    <form id="login-form" hidden>
+      <label for="login-email">Email</label>
+      <input type="email" id="login-email" autocomplete="username" required>
+      <label for="login-pw">Password</label>
+      <input type="password" id="login-pw" autocomplete="current-password" required>
+      <button class="primary" type="submit">Sign in</button>
+    </form>
+    <p id="auth-msg" class="hint" role="alert" style="margin:0"></p>
+  </div>
+</div>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script src="https://unpkg.com/force-graph"></script>
+<script>
+"use strict";
+/* ── tiny helpers — all rendering uses textContent; stored content never touches innerHTML ── */
+const $ = (s, el=document) => el.querySelector(s);
+const el = (tag, attrs={}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k,v] of Object.entries(attrs)) {
+    if (k === "text") n.textContent = v;
+    else if (k === "hidden") { if (v) n.setAttribute("hidden",""); }
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else n.setAttribute(k, v);
+  }
+  for (const k of kids) if (k != null) n.append(k);
+  return n;
+};
+const SVG_NS = "http://www.w3.org/2000/svg";
+const svgEl = (tag, attrs={}) => { const n = document.createElementNS(SVG_NS, tag);
+  for (const [k,v] of Object.entries(attrs)) n.setAttribute(k, String(v)); return n; };
+const fmtTs = (t) => t == null ? "—" : new Date(t*1000).toLocaleString();
+const fmtRel = (t) => { if (t == null) return "—";
+  const s = Date.now()/1000 - t, a = Math.abs(s);
+  const [div, unit] = a<60?[1,"s"]:a<3600?[60,"m"]:a<86400?[3600,"h"]:[86400,"d"];
+  const n = Math.max(1, Math.round(a/div));
+  return s >= 0 ? `${n}${unit} ago` : `in ${n}${unit}`; };
+const toast = (msg) => { const t = $("#toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toast._h); toast._h = setTimeout(()=>t.classList.remove("show"), 3200); };
+
+/* ── commercial/auth state (from /api/auth/state at boot) ── */
+let STATE = { mode:"open", user:null, setup_required:false, team_locked:false,
+              license:{plan:"free",features:[],known_features:{},purchase_url:"#"},
+              license_error:"" };
+const hasFeature = (f) => (STATE.license.features||[]).includes(f);
+const isViewer = () => STATE.user != null && STATE.user.role === "viewer";
+const isAdmin = () => STATE.user == null || STATE.user.role === "admin";
+
+let TOKEN = sessionStorage.getItem("engraphis_token") || "";
+async function api(path, opts={}) {
+  const headers = Object.assign({"Content-Type":"application/json"}, opts.headers||{});
+  if (TOKEN) headers["Authorization"] = "Bearer " + TOKEN;
+  const res = await fetch(path, Object.assign({}, opts, {headers}));
+  if (res.status === 401) {
+    if (STATE.mode === "team") {
+      // Don't auto-pop the login modal here — the Team tab is the entry point.
+      throw new Error("sign in required");
+    }
+    TOKEN = prompt("This inspector requires an API token (ENGRAPHIS_API_TOKEN):") || "";
+    sessionStorage.setItem("engraphis_token", TOKEN);
+    if (TOKEN) return api(path, opts);
+  }
+  const data = await res.json().catch(()=>({error:"bad response"}));
+  if (!res.ok) {
+    const e = new Error(data.error || res.statusText);
+    if (res.status === 402) { e.upgrade = true; e.feature = data.feature;
+      e.tier = data.tier_required; e.upgradeUrl = data.upgrade_url || data.purchase_url; }
+    if (res.status === 403) e.forbidden = true;
+    throw e;
+  }
+  return data;
+}
+
+/* ── plan badge, user chip, feature locks ── */
+function renderIdentity() {
+  const lic = STATE.license || {};
+  const badge = $("#plan-badge");
+  badge.textContent = (lic.plan || "free") === "free" ? "Free — upgrade" : lic.plan;
+  badge.className = "plan-btn " + (lic.plan === "free" ? "free" : "paid");
+  // unobtrusive tier + expiry: hover the badge; full detail lives in the dialog
+  badge.title = (lic.plan || "free") === "free" ? "License & plan"
+    : "Engraphis " + lic.plan +
+      (lic.expires ? " — renews/expires " + fmtTs(lic.expires) : " — perpetual");
+  $("#analytics-lock").hidden = hasFeature("analytics");
+  $("#tab-team").hidden = !(STATE.mode === "team" || STATE.team_locked);
+  const chip = $("#user-chip");
+  if (STATE.user) {
+    chip.hidden = false;
+    chip.replaceChildren(
+      el("span",{text:STATE.user.email}),
+      el("span",{class:"role",text:STATE.user.role}),
+      el("button",{text:"Sign out",onclick:async()=>{
+        try { await api("/api/auth/logout",{method:"POST",body:"{}"}); } catch(e){}
+        location.reload(); }}));
+  } else chip.hidden = true;
+}
+
+/* ── license dialog ── */
+function openLicenseDlg() {
+  const dlg = $("#license-dlg"), body = $("#license-body");
+  const lic = STATE.license || {};
+  const frag = document.createDocumentFragment();
+  frag.append(el("div",{class:"meta"},
+    el("span",{class:"badge "+(lic.plan==="free"?"":"pinned"),text:"plan: "+(lic.plan||"free")}),
+    lic.plan!=="free" && lic.seats ? el("span",{class:"badge",text:`seats: ${lic.seats}`}) : null,
+    lic.expires ? el("span",{class:"badge",text:"renews/expires "+fmtTs(lic.expires)}) : null,
+    lic.key_id ? el("span",{class:"badge",text:"key "+lic.key_id}) : null));
+  if (STATE.license_error)
+    frag.append(el("p",{class:"hint",style:"color:var(--danger)",
+      text:"Configured key rejected: "+STATE.license_error}));
+  const ul = el("ul",{class:"feature-list","aria-label":"Features"});
+  for (const [f,desc] of Object.entries(lic.known_features||{}))
+    ul.append(el("li",{class:hasFeature(f)?"ok":"lock",text:desc}));
+  frag.append(ul);
+  if (lic.plan === "free" || !lic.plan)
+    frag.append(el("p",{},el("a",{href:lic.purchase_url||"#",target:"_blank",
+      rel:"noopener noreferrer",text:"Engraphis Pro & Team — coming soon →"})));
+  frag.append(el("label",{for:"license-key-in",text:"Paste a license key to activate"}));
+  const ta = el("textarea",{id:"license-key-in",rows:"3",
+    placeholder:"ENGR1.xxxxx.yyyyy","aria-label":"License key"});
+  const msg = el("p",{class:"hint",role:"alert"});
+  frag.append(ta, el("div",{class:"row",style:"margin-top:8px"},
+    el("button",{class:"primary",text:"Activate",onclick:async()=>{
+      msg.textContent = "Verifying…";
+      try {
+        await api("/api/license/activate",{method:"POST",
+          body:JSON.stringify({key:ta.value.trim()})});
+        msg.textContent = "Activated — reloading.";
+        setTimeout(()=>location.reload(), 600);
+      } catch(err){
+        msg.textContent = err.forbidden ? "Activating a license requires the admin role."
+                                        : ("Not activated: "+err.message);
+      }}})), msg);
+  body.replaceChildren(frag);
+  dlg.showModal();
+}
+$("#plan-badge").addEventListener("click", openLicenseDlg);
+$("#license-close").addEventListener("click", ()=>$("#license-dlg").close());
+
+/* ── team-mode auth overlay ── */
+function showAuthOverlay() {
+  $("#auth-overlay").hidden = false;
+  $("#setup-form").hidden = !STATE.setup_required;
+  $("#login-form").hidden = STATE.setup_required;
+  const first = STATE.setup_required ? $("#setup-email") : $("#login-email");
+  setTimeout(()=>first.focus(), 50);
+}
+$("#setup-form").addEventListener("submit", async (e)=>{
+  e.preventDefault();
+  const msg = $("#auth-msg"); msg.textContent = "Creating admin…";
+  try {
+    await api("/api/auth/setup",{method:"POST",body:JSON.stringify({
+      email:$("#setup-email").value, name:$("#setup-name").value,
+      password:$("#setup-pw").value})});
+    location.reload();
+  } catch(err){ msg.textContent = err.message; }
+});
+$("#login-form").addEventListener("submit", async (e)=>{
+  e.preventDefault();
+  const msg = $("#auth-msg"); msg.textContent = "Signing in…";
+  try {
+    const res = await fetch("/api/auth/login",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({email:$("#login-email").value,password:$("#login-pw").value})});
+    const data = await res.json().catch(()=>({error:"bad response"}));
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    location.reload();
+  } catch(err){ msg.textContent = err.message; }
+});
+
+/* ── scope state ── */
+const scope = {
+  get ws(){ return $("#ws").value; },
+  get repo(){ return $("#repo").value || null; },
+  qs(extra={}) {
+    const p = new URLSearchParams();
+    p.set("workspace", this.ws);
+    if (this.repo) p.set("repo", this.repo);
+    for (const [k,v] of Object.entries(extra)) if (v!=null && v!=="") p.set(k, v);
+    return p.toString();
+  }
+};
+async function loadWorkspaces() {
+  const out = await api("/api/workspaces");
+  const sel = $("#ws"); sel.replaceChildren();
+  for (const w of out.workspaces)
+    sel.append(el("option", {value:w.name, text:`${w.name} (${w.memories})`}));
+  sel.dataset.repos = JSON.stringify(Object.fromEntries(
+    out.workspaces.map(w=>[w.name, w.repos])));
+  syncRepos(); refreshStats();
+  if (!out.workspaces.length) renderFirstRun();
+}
+function renderFirstRun() {
+  const snippet = '{\n  "mcpServers": {\n    "engraphis": {\n      "command": "engraphis-mcp"\n    }\n  }\n}';
+  $("#search-out").replaceChildren(el("div",{class:"card first-run"},
+    el("div",{class:"title",text:"No memories yet — connect an agent"}),
+    el("p",{class:"hint",text:"Engraphis fills up as your agents work. Add the MCP server "+
+      "to Claude Code, Cursor, Cline, or Zed and memories will appear here:"}),
+    el("pre",{text:snippet}),
+    el("div",{class:"row"},
+      el("button",{text:"Copy config",onclick:async(e)=>{
+        try { await navigator.clipboard.writeText(snippet); toast("Copied"); }
+        catch(_){ toast("Copy failed — select it manually"); }}}),
+      el("span",{class:"hint",style:"margin:0",
+        text:"…or POST to this server's /api — see the README quickstart."}))));
+}
+function syncRepos() {
+  const repos = (JSON.parse($("#ws").dataset.repos||"{}")[scope.ws]) || [];
+  const sel = $("#repo");
+  sel.replaceChildren(el("option",{value:"",text:"(all)"}));
+  for (const r of repos) sel.append(el("option",{value:r,text:r}));
+}
+$("#ws").addEventListener("change", ()=>{ syncRepos(); refreshStats();
+  if ($("#tab-graph").dataset.loaded) loadGraph(); });
+$("#refresh-scope").addEventListener("click", loadWorkspaces);
+
+/* ── tabs (accessible: arrow keys + aria-selected); analytics/team lazy-load ── */
+const tabs = [...document.querySelectorAll("[role=tab]")];
+function selectTab(tab) {
+  for (const t of tabs) {
+    const sel = t === tab;
+    t.setAttribute("aria-selected", String(sel));
+    document.getElementById(t.getAttribute("aria-controls"))
+      .classList.toggle("active", sel);
+  }
+  tab.focus();
+  if (tab.id === "tab-analytics" && !tab.dataset.loaded) {
+    tab.dataset.loaded = "1"; loadAnalytics();
+  }
+  if (tab.id === "tab-graph" && !tab.dataset.loaded) {
+    tab.dataset.loaded = "1"; loadGraph();
+  }
+  if (tab.id === "tab-team") {
+    // Team tab is the only entry point for the login modal.
+    if (STATE.mode === "team" && !STATE.user) { showAuthOverlay(); return; }
+    if (!tab.dataset.loaded) { tab.dataset.loaded = "1"; loadUsers(); }
+  }
+}
+tabs.forEach((t,i)=>{
+  t.addEventListener("click", ()=>selectTab(t));
+  t.addEventListener("keydown", (e)=>{
+    if (e.key==="ArrowRight") selectTab(tabs[(i+1)%tabs.length]);
+    if (e.key==="ArrowLeft")  selectTab(tabs[(i-1+tabs.length)%tabs.length]);
+  });
+});
+
+/* ── memory cards ── */
+function memCard(m, extraBadges=[]) {
+  const badges = [
+    el("span",{class:`badge mtype-${m.mtype}`,text:m.mtype}),
+    el("span",{class:"badge",text:m.scope}),
+    ...extraBadges,
+  ];
+  if (m.pinned) badges.push(el("span",{class:"badge pinned",text:"pinned"}));
+  const card = el("article",{class:"card",tabindex:"0",role:"button",
+      "aria-label":`Open memory ${m.title||m.id}`},
+    el("div",{class:"title",text:m.title || "(untitled)"}),
+    el("div",{class:"content",text:m.content}),
+    el("div",{class:"meta"}, ...badges),
+    el("div",{class:"meta"},
+      el("span",{text:`id ${m.id.slice(0,18)}…`}),
+      m.score!=null ? el("span",{text:`score ${m.score}`}) : null,
+      m.arm ? el("span",{text:`arm ${m.arm}`}) : null,
+      m.retention!=null ? el("span",{text:`retention ${m.retention}`}) : null),
+  );
+  const open = ()=>openDetail(m.id);
+  card.addEventListener("click", open);
+  card.addEventListener("keydown", e=>{ if(e.key==="Enter"||e.key===" "){e.preventDefault();open();} });
+  return card;
+}
+const loading = (host)=>host.replaceChildren(el("div",{class:"loading",text:"Loading…",role:"status"}));
+const empty = (host,msg)=>host.replaceChildren(el("div",{class:"empty",text:msg}));
+
+/* ── upgrade banner (shown where a locked feature would render) — small and
+   informational, never modal, never blocking the free product around it ── */
+function renderTeaser(host, feature, title, err) {
+  const lic = STATE.license || {};
+  const tier = (err && err.tier) === "team" || feature === "team" ? "Team" : "Pro";
+  const url = (err && err.upgradeUrl) || lic.upgrade_url || lic.purchase_url || "#";
+  const banner = el("div",{class:"upgrade-banner",role:"note"},
+    el("strong",{text:`${title} — ${tier} feature`}),
+    el("span",{text:(lic.known_features||{})[feature] || ""}),
+    el("a",{href:url,target:"_blank",rel:"noopener noreferrer",text:"coming soon →"}),
+    el("button",{text:"I have a key",onclick:openLicenseDlg}));
+  host.replaceChildren(banner);
+}
+
+/* ── search ── */
+$("#search-form").addEventListener("submit", async (e)=>{
+  e.preventDefault();
+  const host = $("#search-out"); loading(host);
+  try {
+    const extra = {q:$("#q").value, k:"12"};
+    const data = await api("/api/recall?"+scope.qs(extra));
+    let mems = data.memories;
+    const mt = $("#mtype").value;
+    if (mt) mems = mems.filter(m=>m.mtype===mt);
+    if (!mems.length) return empty(host, data.note || "No memories matched.");
+    const grid = el("div",{class:"grid"});
+    for (const m of mems) grid.append(memCard(m));
+    host.replaceChildren(grid);
+  } catch(err){ empty(host, "Error: "+err.message); }
+});
+
+/* ── why ── */
+$("#why-form").addEventListener("submit", async (e)=>{
+  e.preventDefault();
+  const host = $("#why-out"); loading(host);
+  try {
+    const data = await api("/api/why?"+scope.qs({q:$("#why-q").value}));
+    const frag = document.createDocumentFragment();
+    frag.append(el("h2",{text:"Current answer",style:"font-size:15px"}));
+    if (data.answer.length) {
+      const g = el("div",{class:"grid"});
+      for (const m of data.answer) g.append(memCard(m,[el("span",{class:"badge live",text:"live"})]));
+      frag.append(g);
+    } else frag.append(el("div",{class:"empty",text:"Nothing live matches."}));
+    frag.append(el("h2",{text:"What it superseded",style:"font-size:15px;margin-top:18px"}));
+    if (data.supersedes.length) {
+      const g = el("div",{class:"grid"});
+      for (const m of data.supersedes)
+        g.append(memCard(m,[el("span",{class:"badge op-superseded",
+          text:`superseded ${fmtTs(m.valid_to)}`})]));
+      frag.append(g);
+    } else frag.append(el("div",{class:"empty",text:"No superseded history for this query."}));
+    host.replaceChildren(frag);
+  } catch(err){ empty(host, "Error: "+err.message); }
+});
+
+/* ── timeline ── */
+$("#tl-form").addEventListener("submit", async (e)=>{
+  e.preventDefault();
+  const host = $("#tl-out"); loading(host);
+  try {
+    const data = await api("/api/timeline?"+scope.qs({q:$("#tl-q").value}));
+    if (!data.history.length) return empty(host,"No history for this query.");
+    const chain = el("div",{class:"chain",role:"list","aria-label":"Fact history, oldest first"});
+    data.history.forEach((m,i)=>{
+      if (i) chain.append(el("div",{class:"chain-connector",text:"then"}));
+      const live = m.valid_to == null && m.expired_at == null;
+      chain.append(el("div",{class:"chain-node"+(live?" live-node":""),role:"listitem"},
+        el("div",{class:"meta"},
+          el("span",{class:`badge ${live?"live":"op-superseded"}`,text:live?"live":"superseded"}),
+          el("span",{class:`badge mtype-${m.mtype}`,text:m.mtype})),
+        el("div",{class:"content",text:m.content,style:"margin:6px 0"}),
+        el("div",{class:"validity",
+          text:`valid ${fmtTs(m.valid_from)} → ${m.valid_to?fmtTs(m.valid_to):"now"}`}),
+        el("div",{class:"meta"},
+          el("a",{href:"#",text:"open",onclick:(e)=>{e.preventDefault();openDetail(m.id);}}))));
+    });
+    host.replaceChildren(chain);
+  } catch(err){ empty(host, "Error: "+err.message); }
+});
+
+/* ── proactive ── */
+$("#proactive-run").addEventListener("click", async ()=>{
+  const host = $("#proactive-out"); loading(host);
+  try {
+    const data = await api("/api/proactive?"+scope.qs());
+    const frag = document.createDocumentFragment();
+    const ls = data.last_session||{};
+    if (ls.summary || (ls.open_threads||[]).length) {
+      const card = el("div",{class:"card"},
+        el("div",{class:"title",text:"Last session handoff"}),
+        ls.summary?el("div",{class:"content",text:ls.summary}):null,
+        ls.outcome?el("div",{class:"meta"},el("span",{class:"badge",text:`outcome: ${ls.outcome}`})):null);
+      if ((ls.open_threads||[]).length){
+        const ul = el("ul",{"aria-label":"Open threads"});
+        for (const t of ls.open_threads) ul.append(el("li",{text:t}));
+        card.append(el("div",{},el("strong",{text:"Open threads"}),ul));
+      }
+      frag.append(card, el("div",{style:"height:14px"}));
+    }
+    if (!data.memories.length) frag.append(el("div",{class:"empty",text:"No memories yet."}));
+    else { const g = el("div",{class:"grid"}); for (const m of data.memories) g.append(memCard(m)); frag.append(g); }
+    host.replaceChildren(frag);
+  } catch(err){ empty(host,"Error: "+err.message); }
+});
+
+/* ── analytics (Pro) — inline SVG, no chart library, textContent everywhere ── */
+function barChart(values, labels, opts={}) {
+  const W = opts.w || 560, H = opts.h || 170, pad = 26;
+  const max = Math.max(1, ...values);
+  const svg = svgEl("svg", {viewBox:`0 0 ${W} ${H}`, role:"img",
+    "aria-label": opts.label || "bar chart"});
+  svg.style.width = "100%"; svg.style.maxWidth = W+"px";
+  const bw = (W - pad*2) / values.length;
+  values.forEach((v,i)=>{
+    const h = v/max * (H - pad*2);
+    const r = svgEl("rect", {x: pad + i*bw + 2, y: H - pad - h,
+      width: Math.max(bw-4,2), height: Math.max(h, v>0?2:0.5), rx: 3});
+    r.style.fill = opts.fill || "var(--accent)";
+    const t = svgEl("title"); t.textContent = `${labels[i]}: ${v}`; r.append(t);
+    svg.append(r);
+    if (labels[i] != null && (values.length <= 8 || i % 2 === 0)) {
+      const tx = svgEl("text", {x: pad + i*bw + bw/2, y: H-8, "text-anchor":"middle"});
+      tx.style.fill = "var(--muted)"; tx.style.fontSize = "10px";
+      tx.textContent = labels[i]; svg.append(tx);
+    }
+  });
+  return svg;
+}
+function hBars(pairs, fillVar) {
+  const max = Math.max(1, ...pairs.map(p=>p[1]));
+  const box = el("div");
+  for (const [label, n] of pairs) {
+    const fill = el("div",{class:"fill"}); fill.style.width = (n/max*100)+"%";
+    if (fillVar) fill.style.background = fillVar;
+    box.append(el("div",{class:"hbar"},
+      el("span",{text:label}), el("div",{class:"track"},fill),
+      el("span",{class:"n",text:String(n)})));
+  }
+  return box;
+}
+async function loadAnalytics() {
+  const host = $("#analytics-out"); loading(host);
+  try {
+    const d = await api("/api/analytics?"+new URLSearchParams({workspace:scope.ws}));
+    const frag = document.createDocumentFragment();
+    const t = d.totals, f = d.decay_forecast;
+    const mk = (n,l,sub)=>el("div",{class:"stat"},
+      el("div",{class:"num",text:String(n)}), el("div",{class:"lbl",text:l}),
+      sub?el("div",{class:"sub",text:sub}):null);
+    frag.append(el("div",{class:"stat-cards"},
+      mk(t.live,"live memories",`${t.superseded} superseded kept in history`),
+      mk((t.avg_retention*100).toFixed(0)+"%","avg retention"),
+      mk(f.at_risk_7d,"fading in 7 days","unpinned, below "+(f.threshold*100)+"% retention"),
+      mk(f.at_risk_30d,"fading in 30 days","pin or recall them to keep them"),
+      mk(t.pinned,"pinned","exempt from decay")));
+
+    const wk = d.growth_weekly;
+    const wkLabels = wk.map((_,i)=>{ const back = wk.length-1-i;
+      return back===0 ? "now" : back+"w"; });
+    const g1 = el("div",{class:"chart-card"}); g1.append(el("h3",{text:"Memories written per week"}));
+    g1.append(barChart(wk, wkLabels, {label:"Weekly memory growth"})); frag.append(g1);
+
+    const g2 = el("div",{class:"chart-card"});
+    g2.append(el("h3",{text:"Retention distribution (live memories)"}));
+    g2.append(barChart(d.retention_histogram.counts, d.retention_histogram.buckets,
+      {label:"Retention histogram", fill:"var(--accent-2)", h:150}));
+    frag.append(g2);
+
+    const g3 = el("div",{class:"chart-card"});
+    g3.append(el("h3",{text:"Write-path resolver activity"}),
+      el("p",{class:"hint",style:"margin:0 0 8px",
+        text:"noop = duplicate reinforced instead of cloned · invalidate = contradiction "+
+             "superseded · evolve = auto-linked to related memories"}));
+    const mix = Object.entries(d.resolver_mix);
+    g3.append(mix.length ? hBars(mix) : el("div",{class:"empty",text:"No resolver events yet."}));
+    frag.append(g3);
+
+    const g4 = el("div",{class:"chart-card"});
+    g4.append(el("h3",{text:"Most connected entities"}));
+    if (d.top_entities.length) {
+      const wrap = el("div",{class:"meta"});
+      for (const e of d.top_entities)
+        wrap.append(el("span",{class:"badge op-evolve",
+          text:`${e.name}${e.etype?" · "+e.etype:""} (${e.n})`}));
+      g4.append(wrap);
+    } else g4.append(el("div",{class:"empty",
+      text:"No entities yet — they appear as the knowledge graph grows."}));
+    frag.append(g4);
+
+    host.replaceChildren(frag);
+  } catch(err){
+    if (err.upgrade) return renderTeaser(host, "analytics", "Analytics", err);
+    empty(host, "Error: "+err.message);
+  }
+}
+$("#analytics-refresh").addEventListener("click", loadAnalytics);
+$("#analytics-report").addEventListener("click", async ()=>{
+  try {
+    const headers = TOKEN ? {"Authorization":"Bearer "+TOKEN} : {};
+    const res = await fetch("/api/analytics/export?"+
+      new URLSearchParams({workspace:scope.ws}),{headers});
+    if (res.status === 402) { renderTeaser($("#analytics-out"),"analytics","Analytics"); return; }
+    if (res.status === 401) { toast(STATE.mode==="team" ? "Sign in required — click Team" : "Unauthorized"); return; }
+    if (!res.ok) throw new Error(((await res.json().catch(()=>({}))).error)||res.statusText);
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition")||"";
+    const m = cd.match(/filename="([^"]+)"/);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = m ? m[1] : "engraphis-analytics.html";
+    a.click(); URL.revokeObjectURL(a.href);
+    toast("HTML report downloaded — self-contained, shareable");
+  } catch(err){ toast("Report failed: "+err.message); }
+});
+
+/* ── health + consolidation ── */
+async function refreshStats() {
+  const host = $("#stats-cards");
+  try {
+    const s = await api("/api/stats?"+new URLSearchParams({workspace:scope.ws}));
+    const mk = (n,l)=>el("div",{class:"stat"},el("div",{class:"num",text:String(n)}),
+                          el("div",{class:"lbl",text:l}));
+    host.replaceChildren(
+      mk(s.memories??0,"live memories"),
+      ...Object.entries(s.by_type||{}).map(([t,n])=>mk(n,t)),
+      mk(s.sessions??0,"sessions"), mk("v"+(s.schema_version??"?"),"schema"));
+  } catch(err){ host.replaceChildren(el("div",{class:"empty",text:err.message})); }
+}
+async function runConsolidate(dry) {
+  const host = $("#cons-out"); loading(host);
+  try {
+    const body = { workspace: scope.ws, repo: scope.repo, dry_run: dry,
+      min_cluster: parseInt($("#cons-min").value||"3",10),
+      archive_below: parseFloat($("#cons-floor").value||"0.05") };
+    const r = await api("/api/consolidate",{method:"POST",body:JSON.stringify(body)});
+    const frag = document.createDocumentFragment();
+    frag.append(el("p",{class:"hint",text:
+      `${dry?"Dry run — nothing changed. ":""}clusters: ${r.clusters_found} · digests: `+
+      `${r.digests_created.length} · archived: ${r.archived.length} · already done: `+
+      `${r.skipped_already_consolidated}`}));
+    for (const d of r.digests_created){
+      const ids = d.consolidates || d.would_consolidate || [];
+      frag.append(el("div",{class:"card"},
+        el("div",{class:"title",text:(d.id?`Digest ${d.id.slice(0,18)}…`:`Would consolidate ${ids.length} memories`)}),
+        el("div",{class:"meta",text:ids.map(i=>i.slice(0,14)+"…").join(" · ")}),
+        d.id?el("div",{},el("a",{href:"#",text:"open digest",onclick:(e)=>{e.preventDefault();openDetail(d.id);}})):null));
+    }
+    if (r.archived.length)
+      frag.append(el("p",{class:"hint",text:"Archived (recoverable, audited): "+
+        r.archived.map(a=>`${a.id.slice(0,12)}… (retention ${a.retention})`).join(", ")}));
+    host.replaceChildren(frag);
+    if (!dry){ toast("Consolidation complete"); refreshStats(); }
+  } catch(err){
+    if (err.forbidden) return empty(host,"Consolidation requires the admin role.");
+    empty(host,"Error: "+err.message);
+  }
+}
+$("#cons-dry").addEventListener("click",()=>runConsolidate(true));
+$("#cons-run").addEventListener("click",()=>runConsolidate(false));
+
+/* ── audit + compliance export (Pro) ── */
+$("#audit-refresh").addEventListener("click", loadAudit);
+async function loadAudit() {
+  const host = $("#audit-out"); loading(host);
+  try {
+    const data = await api("/api/audit?"+new URLSearchParams({workspace:scope.ws,limit:"100"}));
+    if (!data.entries.length) return empty(host,"No audit entries yet.");
+    const tbl = el("table",{"aria-label":"Audit trail"},
+      el("thead",{},el("tr",{},...["When","Actor","Action","Target","Detail"]
+        .map(h=>el("th",{scope:"col",text:h})))));
+    const tb = el("tbody");
+    for (const a of data.entries)
+      tb.append(el("tr",{},
+        el("td",{text:fmtRel(a.ts),title:fmtTs(a.ts)}), el("td",{text:a.actor}),
+        el("td",{},el("span",{class:`badge op-${a.action}`,text:a.action})),
+        el("td",{},el("a",{href:"#",text:a.target.slice(0,18)+"…",
+          onclick:(e)=>{e.preventDefault();openDetail(a.target);}})),
+        el("td",{text:a.detail||""})));
+    tbl.append(tb); host.replaceChildren(tbl);
+  } catch(err){ empty(host,"Error: "+err.message); }
+}
+$("#audit-export").addEventListener("click", async ()=>{
+  try {
+    const headers = TOKEN ? {"Authorization":"Bearer "+TOKEN} : {};
+    const res = await fetch("/api/export?"+new URLSearchParams({workspace:scope.ws}),{headers});
+    if (res.status === 402) { renderTeaser($("#audit-out"),"export","Compliance export"); return; }
+    if (res.status === 403) { toast("Export requires the admin role"); return; }
+    if (res.status === 401) { toast(STATE.mode==="team" ? "Sign in required — click Team" : "Unauthorized"); return; }
+    if (!res.ok) throw new Error(((await res.json().catch(()=>({}))).error)||res.statusText);
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition")||"";
+    const m = cd.match(/filename="([^"]+)"/);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = m ? m[1] : "engraphis-export.json";
+    a.click(); URL.revokeObjectURL(a.href);
+    toast("Export downloaded — full bi-temporal dump");
+  } catch(err){ toast("Export failed: "+err.message); }
+});
+
+/* ── knowledge graph — entities/edges from the same MemoryService.graph() the
+   v1-look dashboard's Graph tab calls (engraphis/graphdata.py); colors match
+   the entity-type palette used there so both UIs stay visually consistent ── */
+const ETYPE_COLOR = {person_or_concept:"#a78bfa", mention:"#22d3ee", hashtag:"#fbbf24",
+  email:"#60a5fa", organization:"#4ade80", location:"#f87171"};
+const etypeColor = (t) => ETYPE_COLOR[t] || "#a78bfa";
+let FG = null;
+
+async function loadGraph() {
+  try {
+    const data = await api("/api/graph?"+new URLSearchParams({workspace:scope.ws}));
+    renderGraphCanvas(data);
+    renderGraphSide(data);
+  } catch(err) {
+    $("#graph-canvas").replaceChildren(el("div",{class:"empty",text:"Error: "+err.message}));
+    $("#graph-legend").replaceChildren();
+    $("#graph-top").replaceChildren();
+    $("#graph-stats").replaceChildren();
+  }
+}
+
+function renderGraphCanvas(data) {
+  const canvas = $("#graph-canvas");
+  if (!data.nodes.length) {
+    canvas.replaceChildren(el("div",{class:"empty",
+      text:"No entities yet — they appear as agents write memories."}));
+    FG = null;
+    return;
+  }
+  if (canvas.querySelector(".empty")) canvas.replaceChildren();
+  if (!FG) {
+    FG = ForceGraph()(canvas)
+      .backgroundColor("rgba(0,0,0,0)")
+      .nodeRelSize(4)
+      .nodeColor(n => etypeColor(n.etype))
+      .nodeLabel(n => `${n.label} (${n.etype})`)
+      .linkColor(() => "rgba(139,152,169,0.35)")
+      .linkDirectionalArrowLength(3)
+      .onNodeClick(n => focusGraphNode(n.id));
+  }
+  FG.graphData({
+    nodes: data.nodes.map(n => ({id:n.id, label:n.label, etype:n.etype, degree:n.degree})),
+    links: data.edges.map(e => ({source:e.from, target:e.to, label:e.label})),
+  });
+}
+
+function focusGraphNode(name) {
+  if (!FG) return;
+  const n = (FG.graphData().nodes||[]).find(x => x.id === name);
+  if (n && n.x != null) { FG.centerAt(n.x, n.y, 600); FG.zoom(4, 600); }
+}
+
+function renderGraphSide(data) {
+  const leg = $("#graph-legend");
+  leg.replaceChildren(...((data.types||[]).length ? data.types.map(t => {
+    const c = etypeColor(t.etype);
+    return el("div",{class:"etype-row"},
+      el("span",{class:"etype-dot",style:`background:${c};color:${c}`}),
+      el("span",{text:t.etype}),
+      el("span",{class:"etype-n",text:String(t.count)}));
+  }) : [el("div",{class:"empty",text:"None yet"})]));
+
+  const nodeType = {};
+  (data.nodes||[]).forEach(n => { nodeType[n.id] = n.etype; });
+  const top = (data.top||[]);
+  const maxd = Math.max(1, ...top.map(t => t.degree));
+  $("#graph-top").replaceChildren(...(top.length ? top.map((t,i) => {
+    const c = etypeColor(nodeType[t.name]);
+    const fill = el("span",{class:"gtop-bar-fill"});
+    fill.style.width = (t.degree/maxd*100)+"%";
+    fill.style.background = c;
+    return el("div",{class:"gtop-row",tabindex:"0",role:"button",
+      "aria-label":`Focus ${t.name}, ${t.degree} connection${t.degree===1?"":"s"}`,
+      onclick:()=>focusGraphNode(t.name),
+      onkeydown:(e)=>{ if(e.key==="Enter"||e.key===" "){e.preventDefault();focusGraphNode(t.name);} }},
+      el("span",{class:"gtop-rank",text:String(i+1)}),
+      el("span",{class:"gtop-dot",style:`background:${c}`}),
+      el("span",{class:"gtop-name",text:t.name}),
+      el("span",{class:"gtop-bar"},fill),
+      el("span",{class:"gtop-n",text:String(t.degree)}));
+  }) : [el("div",{class:"empty",text:"No connections yet"})]));
+
+  const s = data.stats || {};
+  const mk = (n,l)=>el("div",{class:"stat"},
+    el("div",{class:"num",text:String(n)}), el("div",{class:"lbl",text:l}));
+  $("#graph-stats").replaceChildren(
+    mk(s.entities||0,"entities"), mk(s.edges||0,"relations"),
+    mk(s.connected||0,"connected"), mk(s.isolated||0,"isolated"));
+}
+$("#graph-refresh").addEventListener("click", loadGraph);
+
+/* ── team management (Team plan, admin) ── */
+async function loadUsers() {
+  const host = $("#team-out"); loading(host);
+  if (STATE.team_locked) return renderTeaser(host, "team", "Team mode");
+  try {
+    const d = await api("/api/auth/users");
+    const frag = document.createDocumentFragment();
+    frag.append(el("p",{class:"hint",
+      text:`${d.active} of ${d.seats} licensed seats in use.`}));
+    const form = el("form",{class:"row","aria-label":"Add user"},
+      el("input",{type:"email",id:"nu-email",placeholder:"email",required:"",
+        "aria-label":"New user email"}),
+      el("input",{type:"text",id:"nu-name",placeholder:"name","aria-label":"New user name"}),
+      el("input",{type:"password",id:"nu-pw",placeholder:"temp password (≥10 chars)",
+        minlength:"10",required:"","aria-label":"New user password"}),
+      el("select",{id:"nu-role","aria-label":"New user role"},
+        el("option",{text:"viewer"}),
+        el("option",{text:"member",selected:""}),
+        el("option",{text:"admin"})),
+      el("button",{class:"primary",type:"submit",text:"Add user"}));
+    form.addEventListener("submit", async (e)=>{
+      e.preventDefault();
+      try {
+        await api("/api/auth/users",{method:"POST",body:JSON.stringify({
+          email:$("#nu-email").value, name:$("#nu-name").value,
+          password:$("#nu-pw").value, role:$("#nu-role").value})});
+        toast("User added"); loadUsers();
+      } catch(err){ toast(err.message); }
+    });
+    frag.append(form);
+    const tbl = el("table",{"aria-label":"Users"},
+      el("thead",{},el("tr",{},...["Email","Name","Role","Status","Since",""]
+        .map(h=>el("th",{scope:"col",text:h})))));
+    const tb = el("tbody");
+    for (const u of d.users) {
+      const roleSel = el("select",{"aria-label":`Role for ${u.email}`});
+      for (const r of ["viewer","member","admin"]) {
+        const o = el("option",{text:r}); if (r===u.role) o.selected = true; roleSel.append(o);
+      }
+      roleSel.addEventListener("change", async ()=>{
+        try { await api("/api/auth/users/update",{method:"POST",
+          body:JSON.stringify({user_id:u.id,role:roleSel.value})});
+          toast("Role updated"); }
+        catch(err){ toast(err.message); loadUsers(); }
+      });
+      tb.append(el("tr",{},
+        el("td",{text:u.email}), el("td",{text:u.name||""}),
+        el("td",{},roleSel),
+        el("td",{},el("span",{class:"badge "+(u.disabled?"op-superseded":"live"),
+          text:u.disabled?"disabled":"active"})),
+        el("td",{text:fmtTs(u.created_at)}),
+        el("td",{},el("button",{class:u.disabled?"":"danger",
+          text:u.disabled?"Enable":"Disable",
+          onclick:async()=>{ try {
+            await api("/api/auth/users/update",{method:"POST",
+              body:JSON.stringify({user_id:u.id,disabled:!u.disabled})});
+            toast(u.disabled?"Enabled":"Disabled — sessions revoked"); loadUsers();
+          } catch(err){ toast(err.message); } }}))));
+    }
+    tbl.append(tb); frag.append(tbl);
+    host.replaceChildren(frag);
+  } catch(err){
+    if (err.upgrade) return renderTeaser(host, "team", "Team mode", err);
+    if (err.forbidden) return empty(host, "Team management requires the admin role.");
+    empty(host, "Error: "+err.message);
+  }
+}
+
+/* ── detail dialog + THE supersession chain with word diff ── */
+function tokenDiff(oldText, newText) {
+  // LCS-based word diff, capped for safety on huge texts.
+  const A = oldText.split(/(\s+)/).slice(0,800), B = newText.split(/(\s+)/).slice(0,800);
+  const n=A.length, m=B.length;
+  const dp = Array.from({length:n+1},()=>new Uint16Array(m+1));
+  for (let i=n-1;i>=0;i--) for (let j=m-1;j>=0;j--)
+    dp[i][j] = A[i]===B[j] ? dp[i+1][j+1]+1 : Math.max(dp[i+1][j], dp[i][j+1]);
+  const frag = document.createDocumentFragment();
+  let i=0,j=0;
+  const flush = (buf, tag)=>{ if(buf.length){ const e=document.createElement(tag);
+    e.textContent = buf.join(""); frag.append(e); buf.length=0; } };
+  const dels=[], inss=[];
+  while (i<n && j<m) {
+    if (A[i]===B[j]) { flush(dels,"del"); flush(inss,"ins");
+      frag.append(document.createTextNode(A[i])); i++; j++; }
+    else if (dp[i+1][j] >= dp[i][j+1]) dels.push(A[i++]);
+    else inss.push(B[j++]);
+  }
+  while (i<n) dels.push(A[i++]);
+  while (j<m) inss.push(B[j++]);
+  flush(dels,"del"); flush(inss,"ins");
+  return frag;
+}
+async function openDetail(id) {
+  const dlg = $("#detail"), body = $("#detail-body");
+  body.replaceChildren(el("div",{class:"loading",text:"Loading…"}));
+  dlg.showModal();
+  try {
+    const data = await api(`/api/memory/${encodeURIComponent(id)}?`+scope.qs());
+    const m = data.memory;
+    $("#detail-title").textContent = m.title || "Memory " + m.id.slice(0,18) + "…";
+    const frag = document.createDocumentFragment();
+
+    const live = m.valid_to == null && m.expired_at == null;
+    frag.append(el("div",{class:"meta"},
+      el("span",{class:`badge ${live?"live":"op-superseded"}`,text:live?"live":"not current"}),
+      el("span",{class:`badge mtype-${m.mtype}`,text:m.mtype}),
+      el("span",{class:"badge",text:m.scope}),
+      m.pinned?el("span",{class:"badge pinned",text:"pinned"}):null));
+    frag.append(el("p",{class:"content",text:m.content,style:"max-height:none"}));
+    const kv = el("dl",{class:"kv"});
+    const pairs = [["id",m.id],["valid",`${fmtTs(m.valid_from)} → ${m.valid_to?fmtTs(m.valid_to):"now"}`],
+      ["ingested",fmtTs(m.ingested_at)],["importance",String(m.importance??0)],
+      ["provenance",JSON.stringify(m.provenance||{})]];
+    for (const [k,v] of pairs){ kv.append(el("dt",{text:k}),el("dd",{text:v})); }
+    frag.append(kv);
+
+    // governance (hidden for viewers — the server refuses them anyway)
+    if (!isViewer()) {
+      frag.append(el("div",{class:"row"},
+        el("button",{text:m.pinned?"Unpin":"Pin","aria-label":m.pinned?"Unpin memory":"Pin memory",
+          onclick:async()=>{ await api("/api/pin",{method:"POST",body:JSON.stringify(
+            {memory_id:m.id,workspace:scope.ws,repo:scope.repo,pinned:!m.pinned})});
+            toast(m.pinned?"Unpinned":"Pinned — exempt from decay"); openDetail(m.id); }}),
+        el("button",{text:"Correct…","aria-label":"Correct this memory",
+          onclick:()=>{ const ta=$("#detail-correct"); ta.hidden=!ta.hidden;
+            if(!ta.hidden) $("#correct-text").focus(); }}),
+        el("button",{class:"danger",text:"Forget","aria-label":"Forget this memory",
+          onclick:async()=>{ if(!confirm("Retire this memory? It leaves recall but stays in history."))return;
+            await api("/api/forget",{method:"POST",body:JSON.stringify(
+              {memory_id:m.id,workspace:scope.ws,repo:scope.repo,reason:"forgotten from inspector"})});
+            toast("Forgotten (bi-temporal close — recoverable)"); dlg.close(); }})));
+      const corr = el("div",{id:"detail-correct",hidden:""},
+        el("label",{for:"correct-text",text:"Corrected content"}),
+        el("textarea",{id:"correct-text",rows:"3",text:m.content}),
+        el("div",{class:"row",style:"margin-top:8px"},
+          el("button",{class:"primary",text:"Save correction",onclick:async()=>{
+            await api("/api/correct",{method:"POST",body:JSON.stringify(
+              {memory_id:m.id,new_content:$("#correct-text").value,workspace:scope.ws,
+               repo:scope.repo,reason:"corrected from inspector"})});
+            toast("Corrected — old version preserved in history"); dlg.close(); }})));
+      frag.append(corr);
+    }
+
+    // supersession chain
+    frag.append(el("h3",{text:"Supersession chain",style:"margin:18px 0 4px;font-size:15px"}));
+    frag.append(el("p",{class:"hint",text:
+      "How this fact changed over time — every version preserved, with the resolver's reason. "+
+      "Word-level diff against the previous version."}));
+    if (data.chain.length <= 1)
+      frag.append(el("div",{class:"empty",text:"This memory has never been superseded or corrected."}));
+    else {
+      const chain = el("div",{class:"chain",role:"list","aria-label":"Supersession chain, oldest first"});
+      data.chain.forEach((c,idx)=>{
+        if (idx) {
+          const ev = (c.events||[]).find(e=>e.action==="invalidate");
+          const prev = data.chain[idx-1];
+          const evPrev = (prev.events||[]).find(e=>e.action==="invalidate");
+          const reason = (evPrev&&evPrev.detail) || (ev&&ev.detail) || "superseded";
+          chain.append(el("div",{class:"chain-connector"},
+            el("span",{class:"badge op-invalidate",text:"superseded by"}),
+            el("span",{text:reason})));
+        }
+        const liveN = c.valid_to == null && c.expired_at == null;
+        const node = el("div",{class:"chain-node"+(liveN?" live-node":"")+(c.id===m.id?" current":""),
+          role:"listitem","aria-label":`Version ${idx+1}${liveN?" (live)":""}`},
+          el("div",{class:"meta"},
+            el("span",{class:`badge ${liveN?"live":"op-superseded"}`,text:liveN?"live":"superseded"}),
+            el("span",{text:`v${idx+1}`}),
+            el("span",{class:"validity",text:`${fmtTs(c.valid_from)} → ${c.valid_to?fmtTs(c.valid_to):"now"}`}),
+            c.id===m.id?el("span",{class:"badge",text:"this record"}):null));
+        if (idx===0) node.append(el("div",{class:"content",text:c.content,style:"max-height:none;margin-top:6px"}));
+        else {
+          const d = el("div",{class:"content diff",style:"max-height:none;margin-top:6px"});
+          d.append(tokenDiff(data.chain[idx-1].content, c.content));
+          node.append(d);
+        }
+        if (c.id!==m.id) node.append(el("div",{class:"meta",style:"margin-top:6px"},
+          el("a",{href:"#",text:"open this version",onclick:(e)=>{e.preventDefault();openDetail(c.id);}})));
+        chain.append(node);
+      });
+      frag.append(chain);
+    }
+
+    // links
+    frag.append(el("h3",{text:"Linked memories",style:"margin:18px 0 4px;font-size:15px"}));
+    if (!data.links.length) frag.append(el("div",{class:"empty",text:"No links yet — links grow automatically as related memories arrive (evolution)."}));
+    else {
+      const ul = el("ul",{"aria-label":"Linked memories"});
+      for (const l of data.links)
+        ul.append(el("li",{},
+          el("span",{class:"badge op-evolve",text:l.relation}), " ",
+          el("a",{href:"#",text:l.title,onclick:(e)=>{e.preventDefault();openDetail(l.id);}}),
+          l.live?"":" (superseded)"));
+      frag.append(ul);
+    }
+
+    // audit
+    if (data.audit.length){
+      frag.append(el("h3",{text:"Audit",style:"margin:18px 0 4px;font-size:15px"}));
+      const ul = el("ul",{"aria-label":"Audit entries"});
+      for (const a of data.audit)
+        ul.append(el("li",{text:`${fmtTs(a.ts)} — ${a.actor}: ${a.action}${a.detail?" — "+a.detail:""}`}));
+      frag.append(ul);
+    }
+    body.replaceChildren(frag);
+  } catch(err){ body.replaceChildren(el("div",{class:"empty",text:"Error: "+err.message})); }
+}
+$("#detail-close").addEventListener("click",()=>$("#detail").close());
+
+/* ── "/" focuses the active tab's search box (ignored while typing) ── */
+document.addEventListener("keydown", (e)=>{
+  if (e.key !== "/" || e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = document.activeElement && document.activeElement.tagName;
+  if (t === "INPUT" || t === "TEXTAREA" || t === "SELECT") return;
+  const panel = document.querySelector("section[role=tabpanel].active");
+  const box = panel && panel.querySelector("input[type=search]");
+  if (box) { e.preventDefault(); box.focus(); }
+});
+
+/* ── boot: auth state first, then workspaces ── */
+(async function boot(){
+  try { STATE = Object.assign(STATE, await api("/api/auth/state?_="+Date.now())); }
+  catch(err){ toast("Cannot reach the inspector API: "+err.message); return; }
+  renderIdentity();
+  if (STATE.license_error) toast("License key rejected: "+STATE.license_error);
+  if (STATE.mode === "team" && !STATE.user) {
+    // Don't auto-open the login modal at boot. Show a quiet prompt instead;
+    // clicking the Team tab is the explicit way to sign in.
+    $("#search-out").replaceChildren(el("div",{class:"card first-run"},
+      el("div",{class:"title",text:"Sign in to view memories"}),
+      el("p",{class:"hint",text:"This Engraphis instance runs in Team mode. "+
+        "Open the Team tab to sign in."}),
+      el("div",{class:"row"},
+        el("button",{class:"primary",text:"Sign in",onclick:showAuthOverlay}))));
+    return;
+  }
+  loadWorkspaces().catch(err=>toast("Cannot reach the inspector API: "+err.message));
+})();
+</script>
+</body>
+</html>

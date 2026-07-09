@@ -1,0 +1,104 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "engraphis"
+version = "0.1.0"
+description = "Local-first AI memory engine for agents — Ebbinghaus decay, interaction-aware recall, bi-temporal facts, hybrid retrieval, and an MCP server. You bring the LLM."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.9"
+authors = [{ name = "The Engraphis Authors" }]
+keywords = ["ai", "agents", "memory", "mcp", "rag", "vector-search", "llm", "retrieval"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = [
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+# The REST server + real embeddings (the full self-hosted stack).
+server = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "httpx>=0.25",
+    "pydantic>=2.0",
+    "python-dotenv>=1.0",
+    "sentence-transformers>=2.7",
+]
+# The MCP server — plug Engraphis into Claude Code, Cursor, Cline, Zed, etc.
+mcp = [
+    "mcp>=1.2.0",
+    "pydantic>=2.0",
+    "sentence-transformers>=2.7",
+]
+# Code-symbol graph indexing. Optional: index_repo()/search_code()
+# fall back to a dependency-free regex indexer without this — see backends/codegraph.py.
+code = [
+    "tree-sitter>=0.23",
+    "tree-sitter-language-pack>=0.2",
+]
+# Everything, for a full self-hosted install.
+all = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "httpx>=0.25",
+    "pydantic>=2.0",
+    "python-dotenv>=1.0",
+    "sentence-transformers>=2.7",
+    "mcp>=1.2.0",
+    "tree-sitter>=0.23",
+    "tree-sitter-language-pack>=0.2",
+]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.4"]
+# Everything needed to run the FULL offline gate in CI (lint + all extras-gated tests)
+# WITHOUT pulling torch/sentence-transformers — no test needs the real embedder.
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "fastapi>=0.110",
+    "httpx>=0.25",
+    "mcp>=1.2.0",
+    "tree-sitter>=0.23",
+    "tree-sitter-language-pack>=0.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/Coding-Dev-Tools/engraphis"
+Repository = "https://github.com/Coding-Dev-Tools/engraphis"
+Issues = "https://github.com/Coding-Dev-Tools/engraphis/issues"
+
+[project.scripts]
+engraphis-server = "scripts.start_server:main"
+engraphis-cli = "scripts.cli:main"
+engraphis-mcp = "engraphis.mcp_server:main"
+engraphis-inspector = "scripts.inspector:main"
+engraphis-dashboard = "scripts.start_dashboard:main"
+engraphis-consolidate = "scripts.consolidate:main"
+engraphis-init = "scripts.init:main"
+
+[tool.setuptools.packages.find]
+include = ["engraphis*", "scripts*"]
+
+[tool.setuptools.package-data]
+"engraphis.inspector" = ["index.html"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
