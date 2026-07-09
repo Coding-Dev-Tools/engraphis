@@ -88,6 +88,7 @@ engraphis-inspector = "scripts.inspector:main"
 engraphis-dashboard = "scripts.start_dashboard:main"
 engraphis-consolidate = "scripts.consolidate:main"
 engraphis-init = "scripts.init:main"
+engraphis-update = "scripts.update:main"
 
 [tool.setuptools.packages.find]
 include = ["engraphis*", "scripts*"]
