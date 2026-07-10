@@ -10,8 +10,10 @@ Covers the four regressions that made live purchases silently fail:
 import base64
 import hashlib
 import hmac
+import json
 import secrets
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -226,3 +228,89 @@ def test_bad_signature_rejected(monkeypatch):
                  "webhook-timestamp": ts, "webhook-signature": "v1,not-a-real-sig"},
     )
     assert r.status_code == 403
+
+
+# ── trials: give a key at trial START that expires at trial END (no free Pro) ───
+def _iso_in_days(n):
+    return (datetime.now(timezone.utc) + timedelta(days=n)).isoformat()
+
+
+def _body(obj):
+    return json.dumps(obj).encode("utf-8")
+
+
+def test_trial_subscription_issues_short_lived_key(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
+    key = WH.handle_subscription_created({
+        "id": "sub_trial_1", "status": "trialing",
+        "customer": {"email": "trialer@example.com"},
+        "product": {"name": "Engraphis Pro"},
+        "current_period_end": _iso_in_days(3)})
+    lic = parse_key(key)
+    days_left = (lic.expires - time.time()) / 86400
+    assert lic.plan == "pro"
+    # short (covers the ~3-day trial), and nowhere near the 35-day paid key
+    assert 2 < days_left <= 5, f"trial key lasted {days_left:.1f}d"
+
+
+def test_non_trial_subscription_created_is_noop(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
+    assert WH.handle_subscription_created({
+        "id": "sub_paid", "status": "active",
+        "customer": {"email": "buyer@example.com"},
+        "product": {"name": "Engraphis Pro"}}) is None
+
+
+def test_paid_order_key_is_full_length_not_trial(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
+    key = WH.handle_order_paid({
+        "id": "order_1", "customer": {"email": "buyer@example.com"},
+        "product": {"name": "Engraphis Pro"}})
+    days_left = (parse_key(key).expires - time.time()) / 86400
+    assert days_left > 30, f"paid monthly key should be ~35d, got {days_left:.1f}d"
+
+
+def test_route_trial_then_conversion_two_distinct_keys(monkeypatch):
+    client = _inspector_client(monkeypatch)
+    trial = _body({"type": "subscription.created", "data": {
+        "id": "subX", "status": "trialing", "customer": {"email": "c@example.com"},
+        "product": {"name": "Engraphis Pro"}, "current_period_end": _iso_in_days(3)}})
+    order = _body({"type": "order.paid", "data": {
+        "id": "orderX", "subscription_id": "subX",
+        "customer": {"email": "c@example.com"}, "product": {"name": "Engraphis Pro"}}})
+    r1 = _post(client, WHSEC, "evt_trialX", trial)
+    r2 = _post(client, WHSEC, "evt_orderX", order)
+    assert r1.json() == {"status": "fulfilled", "key_issued": True}
+    assert r2.json() == {"status": "fulfilled", "key_issued": True}
+
+
+def test_route_non_trial_subscription_ignored(monkeypatch):
+    client = _inspector_client(monkeypatch)
+    body = _body({"type": "subscription.created", "data": {
+        "id": "subA", "status": "active", "customer": {"email": "c@example.com"},
+        "product": {"name": "Engraphis Pro"}}})
+    r = _post(client, WHSEC, "evt_subA", body)
+    assert r.status_code == 202 and r.json()["status"] == "ignored"
+
+
+def test_route_trial_redelivery_no_second_key(monkeypatch):
+    # Same trial via a different webhook-id must NOT mint a second key.
+    client = _inspector_client(monkeypatch)
+    body = _body({"type": "subscription.created", "data": {
+        "id": "subDup", "status": "trialing", "customer": {"email": "c@example.com"},
+        "product": {"name": "Engraphis Team"}, "current_period_end": _iso_in_days(3)}})
+    r1 = _post(client, WHSEC, "evt_td1", body)
+    r2 = _post(client, WHSEC, "evt_td2", body)
+    assert r1.json()["status"] == "fulfilled" and r1.json()["key_issued"] is True
+    assert r2.json()["status"] == "already_fulfilled"
+
+
+def test_trial_days_helper_is_short_and_bounded():
+    from engraphis.inspector import webhooks as WH
+    now = time.time()
+    assert 3 <= WH._trial_days(WH._parse_ts(_iso_in_days(3)), now=now) <= 4
+    assert WH._trial_days(None, now=now) == 4          # env default fallback
+    assert WH._trial_days(WH._parse_ts(_iso_in_days(-1)), now=now) == 4  # past -> fallback
