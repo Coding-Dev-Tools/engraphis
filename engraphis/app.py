@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from engraphis import __version__
+from engraphis.billing import router as billing_router
 from engraphis.config import settings
 from engraphis.engines import reweight, thoughts as thoughts_engine
 from engraphis.logging_setup import configure_logging
@@ -74,8 +75,12 @@ def create_app() -> FastAPI:
 
     # Optional bearer-token auth. Active only when ENGRAPHIS_API_TOKEN is set.
     # Health-type probes (liveness + readiness) stay unauthenticated by convention.
+    # /webhooks/polar is server-to-server (Polar signs it with POLAR_WEBHOOK_SECRET,
+    # verified in engraphis.billing) — it can't carry a bearer token, so it must be
+    # exempt from ENGRAPHIS_API_TOKEN auth and from rate limiting.
     _PUBLIC_PREFIXES = ("/memory/health", "/api/health", "/api/ready",
-                        "/docs", "/openapi.json", "/redoc", "/static")
+                        "/docs", "/openapi.json", "/redoc", "/static",
+                        "/webhooks/polar")
 
     @app.middleware("http")
     async def _require_token(request: Request, call_next):
@@ -148,6 +153,9 @@ def create_app() -> FastAPI:
 
     app.include_router(memory_router)
     app.include_router(vault_router)
+    # Purchase fulfillment (Polar order.paid → signed key → email). Shared with the
+    # Inspector so it works regardless of which entrypoint is deployed.
+    app.include_router(billing_router)
 
     # ── probes (unauthenticated; see _PUBLIC_PREFIXES) ──────────────────────────
     @app.get("/api/health")
