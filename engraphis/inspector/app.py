@@ -1,58 +1,36 @@
-"""Inspector HTTP layer — a thin FastAPI binding over :class:`MemoryService`.
+"""Legacy JSON Inspector for a single local Engraphis instance.
 
-Deliberately mirrors ``mcp_server.py``'s philosophy: no logic here, only transport.
-All validation/authorization lives in the service (workspace binding included), so
-the inspector inherits the same isolation guarantees as the MCP tools. Optional
-bearer-token auth via ``ENGRAPHIS_API_TOKEN`` (same knob as the v1 server); CORS is
-loopback-only by default. Responses are JSON; the single HTML page renders
-everything client-side with ``textContent`` (no innerHTML on stored content — the
-stored-XSS lesson from the v1 dashboard, applied from day one).
+The standalone Inspector UI was retired in favour of the unified dashboard.  This
+module remains as a small, local-only inspection API for compatibility and testing.
+It deliberately has no user database, sessions, roles, invitations, seats, license
+issuer, analytics implementation, or automation scheduler.  Team administration and
+paid compute are hosted Engraphis Cloud services.
 
-Commercial layer: this file is also the *only* place the
-Pro gates live — ``/api/analytics`` and ``/api/export`` call
-``licensing.require_feature`` (→ HTTP 402 with an upgrade hint), and **team mode**
-(``ENGRAPHIS_TEAM_MODE=1`` + a ``team`` license) switches ``/api/*`` from the
-optional bearer token to real per-user sessions with server-side roles:
-viewer (read) < member (+ governance) < admin (+ consolidate/users/license/export).
-Free single-user behaviour is byte-for-byte unchanged when team mode is off.
+Set ``ENGRAPHIS_API_TOKEN`` to require the same constant-time bearer check used by
+the other local HTTP surfaces.  With no token, the API is intended for loopback-only
+single-user use.
 """
 from __future__ import annotations
 
-import hmac
+import hashlib
 import logging
 import time
-from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from engraphis import __version__, licensing
-from engraphis.analytics import compute_analytics, render_analytics_html
+from engraphis import __version__, http_security
 from engraphis.config import settings
-from engraphis.inspector.auth import (
-    SESSION_TTL_SECONDS, AuthError, AuthStore, min_role as _min_role, role_at_least,
-)
-from engraphis.licensing import LicenseError
+from engraphis.local_auth import bearer_ok
 from engraphis.logging_setup import configure_logging
 from engraphis.service import MemoryService, ValidationError
 
-_INDEX = Path(__file__).parent / "index.html"
-
 logger = logging.getLogger("engraphis")
 
-COOKIE_NAME = "engraphis_session"
-
-# Reachable without any auth in every mode: the page shell, liveness/readiness, and
-# the auth bootstrap endpoints themselves (state/login/setup must work while logged out).
-_PUBLIC = {"/", "/api/health", "/api/ready", "/api/auth/state", "/api/auth/login",
-           "/api/auth/setup"}
-
-
-# _min_role is now engraphis.inspector.auth.min_role (imported above as _min_role) —
-# shared with dashboard_app.py so the policy can't drift between the two apps.
+_PUBLIC_API = {"/api/health", "/api/ready", "/api/auth/state"}
 
 
 class _CorrectBody(BaseModel):
@@ -71,6 +49,14 @@ class _GovernBody(BaseModel):
     pinned: bool = True
 
 
+class _PromoteBody(BaseModel):
+    memory_id: str = Field(min_length=1, max_length=200)
+    target_scope: str
+    workspace: str = Field(min_length=1, max_length=200)
+    repo: Optional[str] = Field(default=None, max_length=200)
+    reason: str = Field(default="", max_length=1_000)
+
+
 class _ConsolidateBody(BaseModel):
     workspace: str = Field(min_length=1, max_length=200)
     repo: Optional[str] = Field(default=None, max_length=200)
@@ -79,52 +65,39 @@ class _ConsolidateBody(BaseModel):
     archive_below: float = Field(default=0.05, ge=0.0, le=0.5)
 
 
-class _LoginBody(BaseModel):
-    email: str = Field(min_length=3, max_length=320)
-    password: str = Field(min_length=1, max_length=1_000)
+def _cloud_only(feature: str) -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": f"{feature} is available only through Engraphis Cloud",
+            "feature": feature,
+            "cloud_only": True,
+        },
+        status_code=501,
+    )
 
 
-class _SetupBody(BaseModel):
-    email: str = Field(min_length=3, max_length=320)
-    name: str = Field(default="", max_length=120)
-    password: str = Field(min_length=1, max_length=1_000)
+def create_app(
+    service: Optional[MemoryService] = None,
+    auth_store: Optional[object] = None,
+) -> FastAPI:
+    """Create the compatibility Inspector API.
 
-
-class _UserCreateBody(BaseModel):
-    email: str = Field(min_length=3, max_length=320)
-    name: str = Field(default="", max_length=120)
-    password: str = Field(min_length=1, max_length=1_000)
-    role: str = Field(default="member", max_length=20)
-
-
-class _UserUpdateBody(BaseModel):
-    user_id: str = Field(min_length=1, max_length=64)
-    role: Optional[str] = Field(default=None, max_length=20)
-    disabled: Optional[bool] = None
-
-
-class _ActivateBody(BaseModel):
-    key: str = Field(min_length=1, max_length=10_000)
-
-
-def _users_db_path(db_path: str) -> str:
-    return ":memory:" if db_path == ":memory:" else db_path + ".users.db"
-
-
-def create_app(service: Optional[MemoryService] = None,
-               auth_store: Optional[AuthStore] = None) -> FastAPI:
+    ``auth_store`` is accepted only so older embedding code fails safely during the
+    open-core transition.  It is intentionally ignored: local Team/session authority
+    no longer exists in the published package.
+    """
+    del auth_store
     configure_logging()
     app = FastAPI(title="Engraphis Memory Inspector", docs_url=None, redoc_url=None)
     app.state.service = service
-    app.state.auth_store = auth_store
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origins or ["http://127.0.0.1:8710",
-                                                "http://localhost:8710"],
+        allow_origins=settings.cors_origins
+        or ["http://127.0.0.1:8710", "http://localhost:8710"],
         allow_methods=["GET", "POST"],
         allow_headers=["Authorization", "Content-Type"],
-        allow_credentials=True,
+        allow_credentials=False,
     )
 
     def svc() -> MemoryService:
@@ -137,210 +110,109 @@ def create_app(service: Optional[MemoryService] = None,
             )
         return app.state.service
 
-    def auth() -> AuthStore:
-        if app.state.auth_store is None:
-            app.state.auth_store = AuthStore(_users_db_path(settings.db_path))
-        return app.state.auth_store
-
-    def team_active() -> bool:
-        return bool(settings.team_mode) and licensing.has_feature("team")
-
-    def _bearer_ok(request: Request) -> bool:
-        token = settings.api_token
-        if not token:
-            return False
-        supplied = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
-        return bool(supplied) and hmac.compare_digest(supplied, token)
-
     @app.middleware("http")
     async def _auth_gate(request: Request, call_next):
+        # A prior Team-enabled process may have left a context-local identity behind.
+        # The compatibility Inspector is always single-user, so clear it explicitly.
+        from engraphis.service import set_current_user
+
+        set_current_user(None)
         path = request.url.path
-        if not path.startswith("/api/") or path in _PUBLIC:
-            return await call_next(request)
-        if team_active():
-            user = auth().resolve_session(request.cookies.get(COOKIE_NAME, ""))
-            if user is None and _bearer_ok(request):
-                # Service-account escape hatch so existing scripts keep working.
-                user = {"id": "service-token", "email": "service-token", "role": "admin"}
-            if user is None:
-                return JSONResponse({"error": "authentication required", "auth": "team"},
-                                    status_code=401)
-            need = _min_role(request.method, path)
-            if not role_at_least(user["role"], need):
-                return JSONResponse({"error": "requires the %s role" % need},
-                                    status_code=403)
-            request.state.user = user
-            return await call_next(request)
-        # Single-user modes: optional bearer token, exactly as before team mode existed.
-        if settings.api_token and not _bearer_ok(request):
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        if (
+            path.startswith("/api/")
+            and path not in _PUBLIC_API
+            and settings.api_token
+            and not bearer_ok(request.headers.get("Authorization"), settings.api_token)
+        ):
+            return JSONResponse(
+                {"error": "unauthorized"},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         return await call_next(request)
 
     @app.exception_handler(ValidationError)
     async def _validation(request: Request, exc: ValidationError):
-        return JSONResponse({"error": str(exc)}, status_code=400)
-
-    @app.exception_handler(LicenseError)
-    async def _license(request: Request, exc: LicenseError):
-        """Every 402 in the product goes through here — the one place upgrade UX
-        is shaped. Feature gates (require_feature) carry the feature name, so the
-        client gets a structured payload instead of a bare error string."""
-        body = {"error": str(exc), "upgrade": True,
-                "upgrade_url": licensing.upgrade_url(),
-                # legacy alias kept for older UI builds / scripts
-                "purchase_url": licensing.upgrade_url()}
-        feature = getattr(exc, "feature", None)
-        if feature:
-            body["feature"] = feature
-            body["tier_required"] = licensing.required_plan(feature)
-        return JSONResponse(body, status_code=402)
-
-    @app.exception_handler(AuthError)
-    async def _autherr(request: Request, exc: AuthError):
+        del request
         return JSONResponse({"error": str(exc)}, status_code=400)
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception):
-        """Last-resort catch-all: without this, an unhandled exception falls through
-        to Starlette's default handler, which returns a bare text/plain "Internal
-        Server Error" body. The frontend's api() helper does res.json() on every
-        response, so that plaintext body fails to parse and surfaces as the opaque
-        "Error: bad response" -- hiding the real cause from both the user and
-        whoever's debugging it. Log the full exception server-side, return a
-        sanitized JSON message client-side (same shape every other handler here
-        uses), so at minimum the failure is visible and structured."""
-        logger.exception("unhandled exception on %s %s", request.method, request.url.path)
+        path_ref = hashlib.sha256(
+            request.url.path.encode("utf-8", "replace")
+        ).hexdigest()[:12]
+        logger.error(
+            "unhandled exception on %s path_ref=%s (%s)",
+            request.method,
+            path_ref,
+            type(exc).__name__,
+        )
         return JSONResponse({"error": "internal error -- see server logs"}, status_code=500)
 
-    def _actor(request: Request) -> str:
-        """Audit attribution: the signed-in user's email in team mode, else a stable
-        surface tag. This is what makes the Team tier's audit trail answer *who*."""
-        user = getattr(request.state, "user", None)
-        return (user or {}).get("email") or "inspector"
-
-    # ── page ────────────────────────────────────────────────────────────────
-    @app.get("/", include_in_schema=False)
-    async def index():
-        resp = FileResponse(_INDEX, media_type="text/html")
-        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        resp.headers["Pragma"] = "no-cache"
-        resp.headers["Expires"] = "0"
-        return resp
-
-    # ── auth & licensing ────────────────────────────────────────────────────
     @app.get("/api/auth/state")
-    async def auth_state(request: Request):
-        team = team_active()
-        mode = "team" if team else ("token" if settings.api_token else "open")
-        user = None
-        if team:
-            user = auth().resolve_session(request.cookies.get(COOKIE_NAME, ""))
-            if user:
-                user = {"email": user["email"], "name": user["name"],
-                        "role": user["role"]}
-        lic = licensing.current_license()
-        body = {
-            "mode": mode,
-            "setup_required": bool(team and auth().count_users() == 0),
-            "user": user,
-            "license": lic.to_public_dict(),
-            "license_error": licensing.license_error(),
-            # env asked for team mode but the license lacks it → UI shows the unlock path
-            "team_locked": bool(settings.team_mode) and not licensing.has_feature("team"),
-        }
-        # Never let a browser cache the boot-state probe — a stale "mode:team"
-        # here would make the fixed UI re-render the old login overlay.
-        return JSONResponse(body, headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-            "Pragma": "no-cache", "Expires": "0",
-        })
+    async def auth_state():
+        """Describe the only local auth mode; Team identity is cloud-owned."""
+        mode = "token" if settings.api_token else "open"
+        return JSONResponse(
+            {
+                "mode": mode,
+                "enabled": bool(settings.api_token),
+                "user": None,
+                "local_multi_user": False,
+                "team": {"available_locally": False, "mode": "hosted_cloud"},
+            },
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
 
-    def _login_response(user: dict, request: Request) -> JSONResponse:
-        resp = JSONResponse({"user": {"email": user["email"], "name": user["name"],
-                                      "role": user["role"]}})
-        resp.set_cookie(COOKIE_NAME, user["token"], max_age=SESSION_TTL_SECONDS,
-                        httponly=True, samesite="strict", path="/",
-                        secure=request.url.scheme == "https")
-        return resp
+    @app.api_route(
+        "/api/auth/{operation:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    )
+    async def hosted_team(operation: str):
+        del operation
+        return _cloud_only("team")
 
-    @app.post("/api/auth/setup")
-    async def auth_setup(body: _SetupBody, request: Request):
-        if not team_active():
-            raise LicenseError("team mode is not active on this instance")
-        if auth().count_users() > 0:
-            return JSONResponse({"error": "setup already completed"}, status_code=409)
-        auth().create_user(body.email, body.name, body.password, "admin")
-        user = auth().login(body.email, body.password)
-        return _login_response(user, request)
+    @app.api_route("/api/license", methods=["GET", "POST"])
+    @app.api_route("/api/license/{operation:path}", methods=["GET", "POST"])
+    async def hosted_license(operation: str = ""):
+        del operation
+        return _cloud_only("license")
 
-    @app.post("/api/auth/login")
-    async def auth_login(body: _LoginBody, request: Request):
-        if not team_active():
-            return JSONResponse({"error": "team mode is not active"}, status_code=400)
-        try:
-            user = auth().login(body.email, body.password)
-        except AuthError as exc:
-            status = 429 if "too many" in str(exc) else 401
-            return JSONResponse({"error": str(exc)}, status_code=status)
-        return _login_response(user, request)
+    @app.api_route("/api/analytics", methods=["GET", "POST"])
+    @app.api_route("/api/analytics/{operation:path}", methods=["GET", "POST"])
+    async def hosted_analytics(operation: str = ""):
+        del operation
+        return _cloud_only("analytics")
 
-    @app.post("/api/auth/logout")
-    async def auth_logout(request: Request):
-        token = request.cookies.get(COOKIE_NAME, "")
-        if token:
-            auth().revoke_session(token)
-        resp = JSONResponse({"ok": True})
-        resp.delete_cookie(COOKIE_NAME, path="/")
-        return resp
+    @app.api_route("/api/automation", methods=["GET", "POST"])
+    @app.api_route("/api/automation/{operation:path}", methods=["GET", "POST"])
+    async def hosted_automation(operation: str = ""):
+        del operation
+        return _cloud_only("automation")
 
-    @app.get("/api/auth/users")
-    async def users_list():
-        return {"users": auth().list_users(),
-                "seats": licensing.current_license().seats,
-                "active": auth().count_active_users()}
-
-    @app.post("/api/auth/users")
-    async def users_create(body: _UserCreateBody):
-        user = auth().create_user(body.email, body.name, body.password, body.role,
-                                  seat_limit=licensing.current_license().seats)
-        return {"user": user}
-
-    @app.post("/api/auth/users/update")
-    async def users_update(body: _UserUpdateBody):
-        return {"user": auth().update_user(body.user_id, role=body.role,
-                                           disabled=body.disabled)}
-
-    @app.get("/api/license")
-    async def license_state():
-        return {"license": licensing.current_license().to_public_dict(),
-                "license_error": licensing.license_error()}
-
-    @app.post("/api/license/activate")
-    async def license_activate(body: _ActivateBody):
-        lic = licensing.activate(body.key)   # LicenseError → 402 with the reason
-        return {"license": lic.to_public_dict(), "activated": True}
-
-    # ── read ────────────────────────────────────────────────────────────────
     @app.get("/api/health")
     async def health():
         return {"status": "ok", "service": "engraphis-inspector"}
 
     @app.get("/api/ready")
     async def ready():
-        """Readiness (health is liveness-only): the service builds — which
-        initializes the embedder backend — and the DB answers a trivial SELECT.
-        503 until both hold."""
         checks = {"db": False, "embedder": False}
         try:
-            s = svc()
-            s.store.conn.execute("SELECT 1").fetchone()
+            local_service = svc()
+            local_service.store.conn.execute("SELECT 1").fetchone()
             checks["db"] = True
-            checks["embedder"] = getattr(s.engine, "embedder", None) is not None
+            checks["embedder"] = getattr(local_service.engine, "embedder", None) is not None
         except Exception:
             pass
         is_ready = all(checks.values())
-        return JSONResponse({"ready": is_ready, "checks": checks, "version": __version__},
-                            status_code=200 if is_ready else 503)
+        return JSONResponse(
+            {"ready": is_ready, "checks": checks, "version": __version__},
+            status_code=200 if is_ready else 503,
+        )
 
     @app.get("/api/workspaces")
     async def workspaces():
@@ -359,7 +231,9 @@ def create_app(service: Optional[MemoryService] = None,
         return svc().why(q, workspace=workspace, repo=repo, k=k)
 
     @app.get("/api/timeline")
-    async def timeline(q: str, workspace: str, repo: Optional[str] = None, limit: int = 20):
+    async def timeline(
+        q: str, workspace: str, repo: Optional[str] = None, limit: int = 20
+    ):
         return svc().timeline(q, workspace=workspace, repo=repo, limit=limit)
 
     @app.get("/api/proactive")
@@ -374,63 +248,105 @@ def create_app(service: Optional[MemoryService] = None,
     async def audit_log(workspace: str, limit: int = 100):
         return svc().audit_log(workspace=workspace, limit=limit)
 
+    @app.get("/api/receipts")
+    async def receipts(workspace: str, limit: int = 100):
+        return svc().receipt_log(workspace=workspace, limit=limit)
+
+    @app.get("/api/receipts/verify")
+    async def receipts_verify(workspace: str):
+        return svc().verify_receipts(workspace=workspace)
+
     @app.get("/api/graph")
-    async def graph(workspace: str, limit: int = 2000):
-        """Entity-relation network for the Graph tab -- same
-        :meth:`MemoryService.graph` the v1-look dashboard's ``/api/graph`` calls
-        (engraphis/graphdata.py), so both UIs render identical graphs and share
-        the same workspace-binding isolation guard."""
-        return svc().graph(workspace=workspace, limit=limit)
-
-    # ── Pro: analytics & compliance export (the 402 upgrade path) ───────────
-    @app.get("/api/analytics")
-    async def analytics(workspace: str):
-        licensing.require_feature("analytics")
-        wid, _ = svc()._require_scope(workspace, None)
-        return compute_analytics(svc().store, wid)
-
-    @app.get("/api/analytics/export")
-    async def analytics_export(workspace: str):
-        """Self-contained HTML analytics report (inline CSS, no CDN) — same Pro gate
-        as the analytics dashboard it renders; a shareable artifact is the point."""
-        licensing.require_feature("analytics")
-        wid, _ = svc()._require_scope(workspace, None)
-        page = render_analytics_html(compute_analytics(svc().store, wid),
-                                     workspace=workspace, version=__version__)
-        fname = "engraphis-analytics-%s-%s.html" % (
-            workspace.replace("/", "_"), time.strftime("%Y%m%d"))
-        return HTMLResponse(page, headers={
-            "Content-Disposition": 'attachment; filename="%s"' % fname})
+    async def graph(
+        workspace: str,
+        limit: int = 2000,
+        layers: Optional[str] = None,
+        include_code: bool = False,
+        repo: Optional[str] = None,
+    ):
+        selected = (
+            None
+            if layers is None
+            else [item.strip() for item in layers.split(",") if item.strip()]
+        )
+        return svc().graph(
+            workspace=workspace,
+            limit=limit,
+            layers=selected,
+            include_code=include_code,
+            repo=repo,
+            backfill=False,
+        )
 
     @app.get("/api/export")
     async def export(workspace: str):
-        licensing.require_feature("export")
-        data = svc().export_workspace(workspace=workspace)
-        fname = "engraphis-export-%s-%s.json" % (
-            workspace.replace("/", "_"), time.strftime("%Y%m%d"))
-        return JSONResponse(data, headers={
-            "Content-Disposition": 'attachment; filename="%s"' % fname})
+        # Local data portability is not a paid algorithm.  The compatibility API has
+        # already applied its optional bearer boundary, so bypass the retired local
+        # entitlement gate and let the owner recover their complete workspace.
+        data = svc().export_workspace(workspace=workspace, recovery=True)
+        filename = "engraphis-export-%s-%s.json" % (
+            workspace.replace("/", "_"),
+            time.strftime("%Y%m%d"),
+        )
+        return JSONResponse(
+            data,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
 
-    # ── governance (audited; never a hard delete) ───────────────────────────
     @app.post("/api/pin")
-    async def pin(body: _GovernBody, request: Request):
-        return svc().pin(body.memory_id, workspace=body.workspace, repo=body.repo,
-                         pinned=body.pinned, actor=_actor(request))
+    async def pin(body: _GovernBody):
+        return svc().pin(
+            body.memory_id,
+            workspace=body.workspace,
+            repo=body.repo,
+            pinned=body.pinned,
+            actor="inspector-local",
+        )
 
     @app.post("/api/forget")
-    async def forget(body: _GovernBody, request: Request):
-        return svc().forget(body.memory_id, workspace=body.workspace, repo=body.repo,
-                            reason=body.reason, actor=_actor(request))
+    async def forget(body: _GovernBody):
+        return svc().forget(
+            body.memory_id,
+            workspace=body.workspace,
+            repo=body.repo,
+            reason=body.reason,
+            actor="inspector-local",
+        )
 
     @app.post("/api/correct")
-    async def correct(body: _CorrectBody, request: Request):
-        return svc().correct(body.memory_id, body.new_content, workspace=body.workspace,
-                             repo=body.repo, reason=body.reason, actor=_actor(request))
+    async def correct(body: _CorrectBody):
+        return svc().correct(
+            body.memory_id,
+            body.new_content,
+            workspace=body.workspace,
+            repo=body.repo,
+            reason=body.reason,
+            actor="inspector-local",
+        )
+
+    @app.post("/api/promote")
+    async def promote(body: _PromoteBody):
+        return svc().promote(
+            body.memory_id,
+            body.target_scope,
+            workspace=body.workspace,
+            repo=body.repo,
+            reason=body.reason,
+            actor="inspector-local",
+        )
 
     @app.post("/api/consolidate")
     async def consolidate(body: _ConsolidateBody):
-        return svc().consolidate(workspace=body.workspace, repo=body.repo,
-                                 dry_run=body.dry_run, min_cluster=body.min_cluster,
-                                 archive_below=body.archive_below)
+        # This is an explicit manual sweep. Scheduling, dreaming/inference, and
+        # automatic consolidation belong to the hosted automation worker.
+        return svc().consolidate(
+            workspace=body.workspace,
+            repo=body.repo,
+            dry_run=body.dry_run,
+            min_cluster=body.min_cluster,
+            archive_below=body.archive_below,
+            infer=False,
+        )
 
+    http_security.install(app)
     return app
