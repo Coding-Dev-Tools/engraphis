@@ -21,7 +21,6 @@ RUN pip install --upgrade pip && pip install ".[all]"
 # Run as non-root and persist the database on a volume.
 RUN useradd --create-home --uid 10001 engraphis && mkdir -p /data && chown -R engraphis /data /app
 USER engraphis
-VOLUME ["/data"]
 EXPOSE 8700
 # Memory Inspector (product UI): run with `docker … engraphis-inspector` or a second service.
 EXPOSE 8710
