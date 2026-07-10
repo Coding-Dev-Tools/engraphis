@@ -95,6 +95,7 @@ include = ["engraphis*", "scripts*"]
 
 [tool.setuptools.package-data]
 "engraphis.inspector" = ["index.html"]
+"engraphis.static" = ["*"]
 
 [tool.ruff]
 line-length = 100

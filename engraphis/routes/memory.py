@@ -267,7 +267,7 @@ async def reinforce_memory(req: ReinforceRequest):
     Increases stability (spacing effect) and updates last_access, preventing
     Ebbinghaus decay. Use when an agent finds a past memory useful for current work.
     """
-    namespace = req.namespace or "hermes"
+    namespace = req.namespace or "default"
     mem = mem_store.get_memory(namespace, req.documentId)
     if not mem:
         raise HTTPException(404, f"Document {req.documentId} not found in namespace {namespace}")
