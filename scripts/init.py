@@ -155,8 +155,8 @@ def main(argv=None) -> int:
     print("\nNext steps:")
     print("  engraphis-inspector      # product UI on http://127.0.0.1:8710")
     print("  engraphis-init --check   # verify the install")
-    print("  Free forever at the core — Pro/Team unlock: "
-          "https://github.com/Coding-Dev-Tools/engraphis#free-forever-vs-pro")
+    print("  Free forever at the core — 3-day free trial for Pro/Team: "
+          "https://buy.polar.sh/polar_cl_n6CR3ERqOus2VUhRrGrsRUqOB8yjDTeEU7p1r3CRrae")
     return 0
 
 
