@@ -219,29 +219,53 @@ async def polar_webhook(request: Request):
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
 
     event_type = (event.get("type") or "").strip()
-    if event_type != "order.paid":
+    data = event.get("data") or {}
+
+    # Route by event type and derive a stable per-fulfillment key so we issue exactly
+    # ONE key per order and ONE per trial, no matter which/how many events fire:
+    #   order.paid           -> paid activation, trial conversion, and each renewal
+    #                           (a fresh order.paid per cycle). Fulfillment "order:<id>".
+    #   subscription.created -> ONLY when the subscription is in a free trial, to grant
+    #                           an immediate trial-length key. Fulfillment "trial:<sub id>".
+    # A non-trial subscription.created is a no-op: its paid key comes from order.paid, so
+    # a canceled trial can never keep Pro — the short trial key just expires.
+    if event_type == "order.paid":
+        from engraphis.inspector.webhooks import handle_order_paid as _fulfill
+        fulfillment_key = "order:" + str(data.get("id") or webhook_id)
+    elif event_type == "subscription.created":
+        if str(data.get("status", "")).strip().lower() != "trialing":
+            return JSONResponse({"status": "ignored", "reason": "not a trial",
+                                 "type": event_type}, status_code=202)
+        from engraphis.inspector.webhooks import handle_subscription_created as _fulfill
+        fulfillment_key = "trial:" + str(data.get("id") or webhook_id)
+    else:
         return JSONResponse({"status": "ignored", "type": event_type}, status_code=202)
 
-    # Claim this delivery BEFORE fulfilling so a retry/crash can't mint a 2nd key.
-    if not reserve_webhook(webhook_id):
+    # Two-layer dedup: delivery-level (a retry of this exact webhook) and
+    # fulfillment-level (one key per order/trial, even across different deliveries).
+    if not reserve_webhook("dlv:" + webhook_id):
         logger.info("polar webhook: duplicate delivery %s ignored", webhook_id)
         return JSONResponse({"status": "duplicate", "key_issued": False}, status_code=202)
+    if not reserve_webhook("ful:" + fulfillment_key):
+        logger.info("polar webhook: %s already fulfilled — no second key", fulfillment_key)
+        return JSONResponse({"status": "already_fulfilled", "key_issued": False},
+                            status_code=202)
 
-    from engraphis.inspector.webhooks import handle_order_paid
     try:
-        # handle_order_paid does blocking work (Ed25519 sign + SMTP); run it off the
-        # event loop so a slow SMTP server can't stall other requests on this worker.
-        key = await asyncio.to_thread(handle_order_paid, event.get("data") or event)
+        # Blocking work (Ed25519 sign + email) runs off the event loop.
+        key = await asyncio.to_thread(_fulfill, data)
     except Exception as exc:  # noqa: BLE001 — surface a safe message, log full trace
-        release_webhook(webhook_id)  # let Polar retry this event
+        release_webhook("dlv:" + webhook_id)
+        release_webhook("ful:" + fulfillment_key)  # let Polar retry this event
         logger.exception("polar webhook: fulfillment failed")
         return JSONResponse({"error": "fulfillment failed: %s" % exc}, status_code=500)
 
     if not key:
-        # No key minted (e.g. missing customer email) — release so a corrected
-        # delivery isn't permanently suppressed; nothing was issued to duplicate.
-        release_webhook(webhook_id)
+        # Nothing issued (missing email) — release the claims so a corrected delivery
+        # isn't permanently suppressed.
+        release_webhook("dlv:" + webhook_id)
+        release_webhook("ful:" + fulfillment_key)
         return JSONResponse({"status": "fulfilled", "key_issued": False}, status_code=202)
 
-    logger.info("polar webhook: issued key for order %s", event.get("id", "?"))
+    logger.info("polar webhook: issued key for %s", fulfillment_key)
     return JSONResponse({"status": "fulfilled", "key_issued": True}, status_code=202)
