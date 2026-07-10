@@ -10,8 +10,14 @@ venv/
 dist/
 build/
 *.egg-info/
+# Extracted sdist directory (e.g. engraphis-0.1.0/) — regenerable build artifact
+/engraphis-[0-9]*/
 .pytest_cache/
 .ruff_cache/
 models_cache/
 .secrets/
 internal/
+
+# Local machine-specific dashboard launchers (absolute user paths — not portable)
+/Start-Engraphis-Dashboard.bat
+/Engraphis Dashboard.lnk

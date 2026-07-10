@@ -78,8 +78,8 @@ def engraphis_remember(
                                   "store (e.g. 'We use pnpm for all frontend repos').",
                                   min_length=1, max_length=100_000)],
     workspace: Annotated[str, Field(description="Top-level scope, e.g. an org or product "
-                                    "name ('acme'). Defaults to 'hermes' if omitted.",
-                                    min_length=1, max_length=200)] = "hermes",
+                                    "name ('acme'). Defaults to 'default' if omitted.",
+                                    min_length=1, max_length=200)] = "default",
     repo: Annotated[Optional[str], Field(description="Repository scope within the workspace "
                                          "('backend'). Omit for workspace-wide memories.",
                                          max_length=200)] = None,
@@ -449,8 +449,8 @@ def engraphis_record_event(
     content: Annotated[str, Field(description="What happened.", min_length=1,
                        max_length=100_000)],
     workspace: Annotated[str, Field(description="Workspace this event belongs to. "
-                                    "Defaults to 'hermes' if omitted.",
-                                    min_length=1, max_length=200)] = "hermes",
+                                    "Defaults to 'default' if omitted.",
+                                    min_length=1, max_length=200)] = "default",
     repo: Annotated[Optional[str], Field(description="Repo this event belongs to.",
                                          max_length=200)] = None,
     session_id: Annotated[Optional[str], Field(description="Session this event belongs to, "
