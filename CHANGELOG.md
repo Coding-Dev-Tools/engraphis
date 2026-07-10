@@ -46,9 +46,7 @@ Local-first; you bring the LLM.
 
 ### Changed
 - **Pricing copy across README, `docs/landing-page.md`, `docs/vs-competitors.md`, and both
-  dashboard UIs now says Pro/Team are "coming soon," not for sale.** The signing key shipped in
-  this repo is still the dev key (`licensing.py::is_default_vendor_key()` — anyone with the
-  source can forge a valid Pro/Team key), and there is no live checkout, so language implying a
+  dashboard UIs now says Pro/Team are "coming soon," not for sale.** There is no live checkout yet, so language implying a
   real purchase flow ("Get Engraphis Pro →", "see pricing →") was misleading. No functional
   change — the license gating and its tests are unaffected.
 

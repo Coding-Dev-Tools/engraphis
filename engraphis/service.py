@@ -16,6 +16,7 @@ MCP tools; nothing in this module imports ``mcp``.
 from __future__ import annotations
 
 import re
+import json
 from typing import Any, Optional
 
 from engraphis.core.engine import MemoryEngine
@@ -555,18 +556,134 @@ class MemoryService:
         """Workspace/repo names with live-memory counts. On a bound instance only the
         permitted workspaces are listed — same boundary as every other read."""
         rows = self.store.conn.execute(
-            "SELECT w.id, w.name, COUNT(m.id) AS n FROM workspaces w "
+            "SELECT w.id, w.name, w.settings AS settings, COUNT(m.id) AS n FROM workspaces w "
             "LEFT JOIN memories m ON m.workspace_id = w.id AND m.expired_at IS NULL "
-            "GROUP BY w.id, w.name ORDER BY w.name").fetchall()
+            "GROUP BY w.id, w.name, w.settings ORDER BY w.name").fetchall()
         out = []
         for r in rows:
             if self.allowed_workspaces is not None and r["name"] not in self.allowed_workspaces:
                 continue
             repos = [dict(x) for x in self.store.conn.execute(
                 "SELECT name FROM repos WHERE workspace_id=? ORDER BY name", (r["id"],))]
-            out.append({"name": r["name"], "memories": int(r["n"]),
+            try:
+                _s = json.loads(r["settings"]) if r["settings"] else {}
+                _desc = (_s.get("description") or "") if isinstance(_s, dict) else ""
+            except Exception:
+                _desc = ""
+            out.append({"name": r["name"], "memories": int(r["n"]), "description": _desc,
                         "repos": [x["name"] for x in repos]})
         return {"workspaces": out}
+
+    # ── workspace curation (rename / describe / delete) ──────────────────────────
+    def rename_workspace(self, workspace: str, new_name: str, *, actor: str = "user") -> dict:
+        """Rename a workspace's label. Memories key off ``workspace_id``, so this is a pure
+        relabel — all data stays attached. Same binding + uniqueness the create path enforces."""
+        old = self._clean_ws(workspace)
+        new = self._authorize_workspace(_clean_name(new_name, field="new_name"))
+        actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS, required=False) or "user"
+        wid = self._lookup_workspace(old)
+        if wid is None:
+            raise ValidationError(f"no workspace named '{old}' yet")
+        if new != old and self._lookup_workspace(new) is not None:
+            raise ValidationError(f"a workspace named '{new}' already exists")
+        self.store.conn.execute("UPDATE workspaces SET name=? WHERE id=?", (new, wid))
+        self.store.audit(actor, "workspace_rename", wid, f"{old} -> {new}")
+        self.store.conn.commit()
+        return {"old": old, "new": new, "id": wid}
+
+    def set_workspace_description(self, workspace: str, description: str,
+                                 *, actor: str = "user") -> dict:
+        """Store a human description in the workspace's ``settings`` JSON (no schema change)."""
+        ws = self._clean_ws(workspace)
+        description = _clean_text(description, field="description",
+                                  max_chars=MAX_CONTENT_CHARS, required=False)
+        actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS, required=False) or "user"
+        wid = self._lookup_workspace(ws)
+        if wid is None:
+            raise ValidationError(f"no workspace named '{ws}' yet")
+        row = self.store.conn.execute("SELECT settings FROM workspaces WHERE id=?", (wid,)).fetchone()
+        try:
+            settings = json.loads(row["settings"]) if row and row["settings"] else {}
+            if not isinstance(settings, dict):
+                settings = {}
+        except Exception:
+            settings = {}
+        settings["description"] = description
+        self.store.conn.execute("UPDATE workspaces SET settings=? WHERE id=?",
+                                (json.dumps(settings), wid))
+        self.store.audit(actor, "workspace_describe", wid, description[:200])
+        self.store.conn.commit()
+        return {"workspace": ws, "description": description}
+
+    def delete_workspace(self, workspace: str, *, actor: str = "user") -> dict:
+        """HARD-delete a workspace and everything scoped to it (memories, vectors, FTS rows,
+        entities/edges, sessions, events, repos + their code graph). Unlike ``forget`` this is
+        irreversible, so the UI gates it behind an explicit confirm. Audit rows are retained."""
+        ws = self._clean_ws(workspace)
+        actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS, required=False) or "user"
+        wid = self._lookup_workspace(ws)
+        if wid is None:
+            raise ValidationError(f"no workspace named '{ws}' yet")
+        c = self.store.conn
+        n_mem = c.execute("SELECT COUNT(*) AS n FROM memories WHERE workspace_id=?", (wid,)).fetchone()["n"]
+        msub = "(SELECT id FROM memories WHERE workspace_id=?)"
+        rsub = "(SELECT id FROM repos WHERE workspace_id=?)"
+        c.execute(f"DELETE FROM mem_fts WHERE id IN {msub}", (wid,))
+        c.execute(f"DELETE FROM mem_vectors WHERE id IN {msub}", (wid,))
+        try:
+            c.execute(f"DELETE FROM mem_vec_ann WHERE id IN {msub}", (wid,))
+        except Exception:
+            pass  # sqlite-vec ANN table only present when that backend is active
+        c.execute(f"DELETE FROM mem_links WHERE a IN {msub} OR b IN {msub}", (wid, wid))
+        c.execute("DELETE FROM memories WHERE workspace_id=?", (wid,))
+        c.execute("DELETE FROM entities WHERE workspace_id=?", (wid,))
+        c.execute("DELETE FROM edges WHERE workspace_id=?", (wid,))
+        c.execute("DELETE FROM sessions WHERE workspace_id=?", (wid,))
+        c.execute("DELETE FROM events WHERE workspace_id=?", (wid,))
+        c.execute(f"DELETE FROM code_edges WHERE repo_id IN {rsub}", (wid,))
+        c.execute(f"DELETE FROM symbols WHERE repo_id IN {rsub}", (wid,))
+        c.execute("DELETE FROM repos WHERE workspace_id=?", (wid,))
+        c.execute("DELETE FROM workspaces WHERE id=?", (wid,))
+        self.store.audit(actor, "workspace_delete", wid, f"{ws} ({int(n_mem)} memories)")
+        c.commit()
+        return {"workspace": ws, "deleted": True, "memories_removed": int(n_mem)}
+
+    def update_memory(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
+                      title: Optional[str] = None, mtype: Optional[str] = None,
+                      actor: str = "user") -> dict:
+        """In-place edit of a memory's label fields (title, type). Content edits go through
+        ``correct`` so bi-temporal history is preserved; title/type are mutable labels."""
+        mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
+        actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS, required=False) or "user"
+        wid, rid = self._require_scope(workspace, repo)
+        self._check_owns(mid, wid, rid)
+        sets, params, changes = [], [], []
+        if title is not None:
+            title = _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS, required=False)
+            sets.append("title=?")
+            params.append(title)
+            changes.append("title")
+        if mtype is not None:
+            mt = _enum(mtype, MemoryType, "memory_type").value
+            sets.append("mtype=?")
+            params.append(mt)
+            changes.append(f"type={mt}")
+        if not sets:
+            raise ValidationError("nothing to update")
+        params.append(mid)
+        self.store.conn.execute(f"UPDATE memories SET {', '.join(sets)} WHERE id=?", params)
+        if title is not None:
+            row = self.store.conn.execute(
+                "SELECT title, content, keywords FROM memories WHERE id=?", (mid,)).fetchone()
+            kw = row["keywords"] or ""
+            try:
+                kw = " ".join(json.loads(kw)) if kw.strip().startswith("[") else kw
+            except Exception:
+                pass
+            self.store._fts_upsert(mid, row["title"], row["content"], kw)
+        self.store.audit(actor, "memory_update", mid, "; ".join(changes))
+        self.store.conn.commit()
+        return {"id": mid, "updated": changes}
 
     def inspect(self, memory_id: str, *, workspace: str, repo: Optional[str] = None) -> dict:
         """Everything the inspector shows for one memory: the record, its links, its

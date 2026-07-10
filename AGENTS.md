@@ -265,7 +265,6 @@ These are pure, unit-tested functions — change them only with a corresponding 
 
 ## 8. Source-of-truth docs
 
-- **`docs/IMPLEMENTATION.md`** — Phase 0–1 status and the interface design contract.
 - **`README.md`** — v1 server usage + the REST API table.
 - **`AGENTS.md`** (this file) + **`CLAUDE.md`** — how to work in the repo.
 - **`skills/engraphis-memory/`** — portable Agent Skill (SKILL.md + `references/`) that teaches any
