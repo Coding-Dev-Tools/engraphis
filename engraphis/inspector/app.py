@@ -19,7 +19,9 @@ Free single-user behaviour is byte-for-byte unchanged when team mode is off.
 from __future__ import annotations
 
 import hmac
+import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -48,7 +50,7 @@ COOKIE_NAME = "engraphis_session"
 # Reachable without any auth in every mode: the page shell, liveness/readiness, and
 # the auth bootstrap endpoints themselves (state/login/setup must work while logged out).
 _PUBLIC = {"/", "/api/health", "/api/ready", "/api/auth/state", "/api/auth/login",
-           "/api/auth/setup"}
+           "/api/auth/setup", "/webhooks/polar"}
 
 
 # _min_role is now engraphis.inspector.auth.min_role (imported above as _min_role) —
@@ -432,5 +434,76 @@ def create_app(service: Optional[MemoryService] = None,
         return svc().consolidate(workspace=body.workspace, repo=body.repo,
                                  dry_run=body.dry_run, min_cluster=body.min_cluster,
                                  archive_below=body.archive_below)
+
+    # ── Polar webhook: auto-fulfill license keys on purchase ────────────────
+    @app.post("/webhooks/polar")
+    async def polar_webhook(request: Request):
+        """Receive Polar ``order.paid`` events, issue a signed license key, and
+        email it to the buyer. Signature is verified against the webhook secret
+        set in the Polar dashboard (POLAR_WEBHOOK_SECRET env var).
+
+        Returns 202 on success (including no-op for non-order events), 403 on
+        bad signature, 400 on unparsable payload."""
+        import base64
+        import hashlib
+        import hmac as _hmac
+
+        secret = os.environ.get("POLAR_WEBHOOK_SECRET", "").strip()
+        if not secret:
+            return JSONResponse(
+                {"error": "POLAR_WEBHOOK_SECRET not configured"}, status_code=500)
+
+        raw_body = await request.body()
+        body_str = raw_body.decode("utf-8")
+
+        # Standard Webhooks: signed content = "{webhook-id}.{webhook-timestamp}.{body}"
+        # The secret is base64-encoded; Polar uses Standard Webhooks semantics.
+        webhook_id = request.headers.get("webhook-id", "")
+        timestamp = request.headers.get("webhook-timestamp", "")
+        signature_header = request.headers.get("webhook-signature", "")
+
+        if not webhook_id or not timestamp or not signature_header:
+            return JSONResponse({"error": "missing webhook headers"}, status_code=400)
+
+        try:
+            secret_bytes = base64.b64decode(secret)
+        except Exception:
+            return JSONResponse({"error": "POLAR_WEBHOOK_SECRET is not valid base64"}, status_code=500)
+
+        signed_content = f"{webhook_id}.{timestamp}.{body_str}".encode("utf-8")
+        expected_digest = _hmac.new(secret_bytes, signed_content, hashlib.sha256).digest()
+        expected_b64 = base64.b64encode(expected_digest).decode("ascii")
+
+        # signature_header is e.g. "v1,AbCd..." — extract the base64 part
+        sig_parts = signature_header.split(",")
+        if len(sig_parts) < 2:
+            logger.warning("polar webhook: unparseable signature header")
+            return JSONResponse({"error": "invalid signature format"}, status_code=403)
+
+        sig_b64 = sig_parts[-1].strip()
+        if not _hmac.compare_digest(expected_b64, sig_b64):
+            logger.warning("polar webhook: invalid signature")
+            return JSONResponse({"error": "invalid signature"}, status_code=403)
+
+        try:
+            event = json.loads(body_str)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return JSONResponse({"error": "invalid JSON"}, status_code=400)
+
+        event_type = (event.get("type") or "").strip()
+
+        if event_type != "order.paid":
+            # Acknowledge but skip — we only act on paid orders
+            return JSONResponse({"status": "ignored", "type": event_type}, status_code=202)
+
+        from engraphis.inspector.webhooks import handle_order_paid
+        try:
+            key = handle_order_paid(event.get("data") or event)
+            if key:
+                logger.info("polar webhook: issued key for order %s", event.get("id", "?"))
+            return JSONResponse({"status": "fulfilled", "key_issued": bool(key)}, status_code=202)
+        except Exception as exc:
+            logger.exception("polar webhook: fulfillment failed")
+            return JSONResponse({"error": "fulfillment failed: %s" % exc}, status_code=500)
 
     return app
