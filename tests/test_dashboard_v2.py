@@ -93,12 +93,18 @@ def test_governance_pin_correct_forget(monkeypatch, tmp_path):
 def test_analytics_and_export_gated_by_default(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as c:
         assert c.get("/api/analytics?workspace=demo").status_code == 402
+        assert c.get("/api/analytics/portfolio").status_code == 402
         assert c.get("/api/export?workspace=demo").status_code == 402
 
 
 def test_analytics_and_export_unlocked_with_team_key(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path, key=_team_key()) as c:
         assert c.get("/api/analytics?workspace=demo").status_code == 200
+        r = c.get("/api/analytics/portfolio")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["totals"]["workspaces"] >= 1
+        assert any(w["workspace"] == "demo" for w in body["workspaces"])
         assert c.get("/api/export?workspace=demo").status_code == 200
 
 

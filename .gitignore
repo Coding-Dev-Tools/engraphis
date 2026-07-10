@@ -5,6 +5,12 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+*.db-journal
+
+# Webhook fulfillment runtime state — dedup DB + the undelivered-key fallback,
+# which can contain live license keys. Must never be committed.
+.engraphis_processed_webhooks
+undelivered_license_keys.tsv
 .venv/
 venv/
 dist/
