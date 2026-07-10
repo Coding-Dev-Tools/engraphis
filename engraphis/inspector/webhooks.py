@@ -18,13 +18,10 @@ from __future__ import annotations
 
 import email.message
 import hashlib
-import json
 import logging
 import os
 import smtplib
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -180,28 +177,29 @@ def _resend_api_key() -> str:
 def _send_via_resend_api(to: str, subject: str, text_body: str, from_addr: str,
                          api_key: str) -> None:
     """Send via Resend's HTTPS API (port 443). Works where outbound SMTP is
-    blocked (Railway, Fly, many PaaS). Raises RuntimeError on any failure."""
-    payload = json.dumps(
-        {"from": from_addr, "to": [to], "subject": subject, "text": text_body}
-    ).encode("utf-8")
-    req = urllib.request.Request(
-        _RESEND_API_URL, data=payload, method="POST",
-        headers={"Authorization": "Bearer %s" % api_key,
-                 "Content-Type": "application/json"},
-    )
+    blocked (Railway, Fly, many PaaS). Raises RuntimeError on any failure.
+
+    Uses httpx (a declared dependency) rather than urllib, and sets an explicit
+    User-Agent: ``api.resend.com`` is behind Cloudflare, which blocks the default
+    ``Python-urllib`` client signature with a 403 "error code: 1010". httpx's
+    mainstream TLS fingerprint plus a named UA passes that bot check.
+    """
+    import httpx
+
+    payload = {"from": from_addr, "to": [to], "subject": subject, "text": text_body}
+    headers = {
+        "Authorization": "Bearer %s" % api_key,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Engraphis/1.0 (+https://engraphis.com)",
+    }
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            if resp.status not in (200, 201):
-                raise RuntimeError("Resend API returned HTTP %s" % resp.status)
-    except urllib.error.HTTPError as exc:
-        body = ""
-        try:
-            body = exc.read().decode("utf-8", "replace")[:200]
-        except Exception:  # noqa: BLE001
-            pass
-        raise RuntimeError("Resend API error HTTP %s: %s" % (exc.code, body)) from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError("Resend API unreachable: %s" % (exc.reason,)) from exc
+        resp = httpx.post(_RESEND_API_URL, json=payload, headers=headers, timeout=20.0)
+    except httpx.HTTPError as exc:
+        raise RuntimeError("Resend API unreachable: %s" % exc) from exc
+    if resp.status_code not in (200, 201):
+        raise RuntimeError(
+            "Resend API error HTTP %s: %s" % (resp.status_code, resp.text[:200]))
 
 
 def send_license_email(to: str, key: str, product_name: str = "Pro") -> None:
