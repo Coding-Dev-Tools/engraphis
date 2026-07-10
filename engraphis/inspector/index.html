@@ -531,9 +531,14 @@ const scope = {
 };
 async function loadWorkspaces() {
   const out = await api("/api/workspaces");
-  const sel = $("#ws"); sel.replaceChildren();
-  for (const w of out.workspaces)
-    sel.append(el("option", {value:w.name, text:`${w.name} (${w.memories})`}));
+  const sel = $("#ws");
+  const prev = sel.value;
+  sel.replaceChildren();
+  for (const w of out.workspaces) {
+    const opt = el("option", {value:w.name, text:`${w.name} (${w.memories})`});
+    if (w.name === prev) opt.selected = true;
+    sel.append(opt);
+  }
   sel.dataset.repos = JSON.stringify(Object.fromEntries(
     out.workspaces.map(w=>[w.name, w.repos])));
   syncRepos(); refreshStats();
@@ -556,8 +561,13 @@ function renderFirstRun() {
 function syncRepos() {
   const repos = (JSON.parse($("#ws").dataset.repos||"{}")[scope.ws]) || [];
   const sel = $("#repo");
+  const prev = sel.value;
   sel.replaceChildren(el("option",{value:"",text:"(all)"}));
-  for (const r of repos) sel.append(el("option",{value:r,text:r}));
+  for (const r of repos) {
+    const opt = el("option",{value:r,text:r});
+    if (r === prev) opt.selected = true;
+    sel.append(opt);
+  }
 }
 $("#ws").addEventListener("change", ()=>{ syncRepos(); refreshStats();
   if ($("#tab-graph").dataset.loaded) loadGraph(); });
@@ -930,6 +940,14 @@ const etypeColor = (t) => ETYPE_COLOR[t] || "#a78bfa";
 let FG = null;
 
 async function loadGraph() {
+  if (!scope.ws) {
+    $("#graph-canvas").replaceChildren(el("div",{class:"empty",
+      text:"Select a workspace above to see its knowledge graph."}));
+    $("#graph-legend").replaceChildren();
+    $("#graph-top").replaceChildren();
+    $("#graph-stats").replaceChildren();
+    return;
+  }
   try {
     const data = await api("/api/graph?"+new URLSearchParams({workspace:scope.ws}));
     renderGraphCanvas(data);

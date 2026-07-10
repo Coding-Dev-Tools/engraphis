@@ -20,7 +20,7 @@ def _resolve_inspector_db(cli_db: Optional[str], *, live: bool = False) -> str:
     explicit = cli_db or os.environ.get("ENGRAPHIS_DB_PATH")
     # Live mode: use the canonical store verbatim. The Inspector is an
     # authoritative curator (forget/pin/correct/consolidate are real writes),
-    # so it must read AND write the live store that Hermes/MCP read. Lock
+    # so it must read AND write the live store that the MCP server reads. Lock
     # contention is no longer a concern now that all MCP clients go through the
     # singleton streamable-http server (:8720) — there is at most one other
     # writer, and the store layer is already WAL + busy_timeout=30.
