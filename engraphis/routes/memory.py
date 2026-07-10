@@ -682,6 +682,15 @@ async def list_interactions(namespace: Optional[str] = None, limit: int = 100):
 async def memory_analytics():
     """GET /memory/analytics — time-series and distribution data for charts."""
     _require_paid("analytics")
+    return _ok(_compute_memory_analytics())
+
+
+def _compute_memory_analytics() -> dict:
+    """Build the analytics charts payload. The Pro gate lives HERE, at the top of
+    the computation, so the data can never be assembled on the free tier even if
+    the route's ``_require_paid`` wrapper is deleted (defense in depth; mirrors
+    engraphis.analytics.compute_analytics)."""
+    licensing.require_feature("analytics")
     from collections import defaultdict
     from engraphis.stores import get_conn
     from engraphis.engines.reweight import retention_score
@@ -781,7 +790,7 @@ async def memory_analytics():
         for day in range(int((now - 30 * 86400) // 86400), int(now // 86400) + 1)
     ]
 
-    return _ok({
+    return {
         "timeline": timeline_data,
         "retention_histogram": retention_hist,
         "namespace_distribution": ns_dist,
@@ -791,7 +800,7 @@ async def memory_analytics():
         "thought_timeline": thought_data,
         "total_memories": len(all_mems),
         "avg_retention": round(sum(retentions) / len(retentions), 4) if retentions else 0,
-    })
+    }
 
 
 # ═══ LICENSING (open-core paid tier — see engraphis/licensing.py) ═══════════
@@ -823,6 +832,14 @@ async def activate_license(req: _LicenseActivateReq):
 async def compliance_export(namespace: Optional[str] = None):
     """GET /memory/export — full workspace dump (Pro: compliance export)."""
     _require_paid("export")
+    return _ok(_compute_compliance_export(namespace))
+
+
+def _compute_compliance_export(namespace: Optional[str]) -> dict:
+    """Full workspace dump. The Pro gate lives HERE so the export can never be
+    built on the free tier even if the route's ``_require_paid`` wrapper is
+    deleted (defense in depth; mirrors service.export_workspace)."""
+    licensing.require_feature("export")
     docs = mem_store.list_documents(namespace=namespace, limit=100000)
-    return _ok({"exported_at": time.time(), "namespace": namespace,
-                "count": len(docs), "memories": docs})
+    return {"exported_at": time.time(), "namespace": namespace,
+            "count": len(docs), "memories": docs}
