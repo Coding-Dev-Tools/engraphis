@@ -48,7 +48,7 @@ def _entities_by_name(namespace: str) -> dict:
 def test_entity_extraction_does_not_bridge_title_and_content():
     """The regression this test guards: title text must never fuse with the first
     entity mention in content into one garbled node."""
-    _ingest("ns1", "doc-1", "Meeting Notes", "Alice Johnson met with Bob Smith to discuss Hermes.")
+    _ingest("ns1", "doc-1", "Meeting Notes", "Alice Johnson met with Bob Smith to discuss Apollo.")
     ents = _entities_by_name("ns1")
     assert "Alice Johnson" in ents
     assert "Meeting Notes" in ents
@@ -66,12 +66,12 @@ def test_hyphenated_title_word_is_not_fragmented():
 def test_same_entity_across_two_documents_links_both():
     """The concrete, user-visible payoff: clicking the "Alice Johnson" node must reach
     every document that mentions her, not just whichever one she was extracted with first."""
-    _ingest("ns3", "doc-1", "Meeting Notes", "Alice Johnson met with Bob Smith to discuss Hermes.")
-    _ingest("ns3", "doc-2", "Follow-up", "Alice Johnson sent Bob Smith the Hermes roadmap.")
+    _ingest("ns3", "doc-1", "Meeting Notes", "Alice Johnson met with Bob Smith to discuss Apollo.")
+    _ingest("ns3", "doc-2", "Follow-up", "Alice Johnson sent Bob Smith the Apollo roadmap.")
     ents = _entities_by_name("ns3")
     assert set(ents["Alice Johnson"]["documents"]) == {"doc-1", "doc-2"}
     assert set(ents["Bob Smith"]["documents"]) == {"doc-1", "doc-2"}
-    assert set(ents["Hermes"]["documents"]) == {"doc-1", "doc-2"}
+    assert set(ents["Apollo"]["documents"]) == {"doc-1", "doc-2"}
 
 
 def test_same_entity_name_isolated_across_namespaces():

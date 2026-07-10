@@ -48,8 +48,8 @@ def main() -> None:
         _run_shortcut_install(silent=args.install_shortcuts_silent, icon=args.icon)
         return
 
-    # The data was embedded with 384-dim all-MiniLM. Some environments (e.g. the
-    # hermes runtime) export ENGRAPHIS_EMBED_MODEL="" which _env() reads as an empty
+    # The data was embedded with 384-dim all-MiniLM. Some environments (e.g. some
+    # runtimes) export ENGRAPHIS_EMBED_MODEL="" which _env() reads as an empty
     # string and silently falls back to the 256-dim deterministic embedder, breaking
     # semantic search. Restore the real model whenever it is blank.
     os.environ["ENGRAPHIS_EMBED_MODEL"] = (

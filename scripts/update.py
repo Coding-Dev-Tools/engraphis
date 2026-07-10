@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """Update Engraphis to the latest release — one command, any install method.
 
-    engraphis-update               # update to latest
-    engraphis-update --check       # only report if an update is available
-    engraphis-update v0.1.2        # pin a specific version
+    engraphis-update                # update to latest
+    engraphis-update --check        # only report if an update is available
+    engraphis-update v0.1.2         # pin a specific version
 
 Detects how you installed Engraphis and upgrades the same way:
 
-  pip from PyPI         → `pip install --upgrade engraphis`
-  pip from Git          → `pip install --upgrade git+<remote>`
-  pip -e . from clone   → `git pull && pip install -e .`
-  pipx                  → `pipx upgrade engraphis`
-  Docker                → `docker pull ghcr.io/engraphis/engraphis:latest`
+    pip from PyPI       → `pip install --upgrade engraphis`
+    pip from Git        → `pip install --upgrade git+<remote>`
+    pip -e . from clone → `git pull && pip install -e .`
+    pipx                → `pipx upgrade engraphis`
+    Docker              → `docker pull ghcr.io/engraphis/engraphis:latest`
 
 Runs offline checks first — no API key, no signup, no telemetry.
 """
 from __future__ import annotations
 
-import json
+
 import os
 import shutil
 import subprocess
@@ -57,8 +57,7 @@ def _detect_install() -> str:
         if result.returncode == 0:
             info = result.stdout
             if "Editable project location:" in info:
-                location = [l.split(":", 1)[1].strip() for l in info.split("\n")
-                            if l.startswith("Editable project location:")]
+                location = [line.split(":", 1)[1].strip() for line in info.split("\n") if line.startswith("Editable project location:")]
                 if location and (Path(location[0]) / ".git").exists():
                     return "editable"
             if "git+" in info:
@@ -81,7 +80,8 @@ def _git_update(check_only: bool = False) -> None:
         sys.exit(1)
 
     location_line = next(
-        (l for l in result.stdout.split("\n") if l.startswith("Editable project location:")), None)
+        (line for line in result.stdout.split("\n") if line.startswith("Editable project location:")),
+        None)
     if not location_line:
         print("Could not determine the editable install location.", file=sys.stderr)
         sys.exit(1)
@@ -97,8 +97,7 @@ def _git_update(check_only: bool = False) -> None:
         sys.exit(1)
 
     # Fetch and compare.
-    subprocess.run([git, "-C", str(project_dir), "fetch", "--tags", "origin"],
-                   check=False)
+    subprocess.run([git, "-C", str(project_dir), "fetch", "--tags", "origin"], check=False)
     local = subprocess.run([git, "-C", str(project_dir), "rev-parse", "HEAD"],
                            capture_output=True, text=True).stdout.strip()
     remote = subprocess.run([git, "-C", str(project_dir), "rev-parse", f"refs/tags/{LATEST_TAG}"],
@@ -113,31 +112,27 @@ def _git_update(check_only: bool = False) -> None:
         return
 
     print(f"Update available: {local[:8]} → {remote_sha[:8]} ({LATEST_TAG})")
-
     if check_only:
         return
 
     print("Pulling latest...")
     subprocess.run([git, "-C", str(project_dir), "checkout", f"tags/{LATEST_TAG}"], check=True)
-    subprocess.run([sys.executable, "-m", "pip", "install", "-e", str(project_dir)],
-                   check=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-e", str(project_dir)], check=True)
     print(f"Updated to {LATEST_TAG}.")
 
 
 def _pip_update(method: str, check_only: bool = False) -> None:
     """Update a pip install (PyPI or git)."""
     if check_only:
-        subprocess.run([sys.executable, "-m", "pip", "install", "--dry-run", "--upgrade",
-                        "engraphis"], check=False)
+        subprocess.run([sys.executable, "-m", "pip", "install", "--dry-run", "--upgrade", "engraphis"],
+                       check=False)
         return
-
     if method == "git":
         subprocess.run(
             [sys.executable, "-m", "pip", "install", "--upgrade",
              f"git+{REPO_URL}@v0.1.0#egg=engraphis"],
             check=True)
         return
-
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "--upgrade", "engraphis[server]"],
         check=True)
@@ -164,9 +159,9 @@ def _docker_update(check_only: bool = False) -> None:
 
 def main() -> None:
     import argparse
+
     ap = argparse.ArgumentParser(description="Update Engraphis to the latest release.")
-    ap.add_argument("version", nargs="?", default="",
-                    help="Pin a specific version (e.g. v0.2.0).")
+    ap.add_argument("version", nargs="?", default="", help="Pin a specific version (e.g. v0.2.0).")
     ap.add_argument("--check", action="store_true",
                     help="Only report if an update is available, don't apply it.")
     args = ap.parse_args()
@@ -188,8 +183,8 @@ def main() -> None:
         _pip_update(method, check_only=args.check)
     else:
         print("Could not determine how Engraphis was installed.", file=sys.stderr)
-        print(f"Try: pip install --upgrade engraphis[server]", file=sys.stderr)
-        print(f"  or: pipx upgrade engraphis", file=sys.stderr)
+        print("Try: pip install --upgrade engraphis[server]", file=sys.stderr)
+        print(" or: pipx upgrade engraphis", file=sys.stderr)
         sys.exit(1)
 
 
