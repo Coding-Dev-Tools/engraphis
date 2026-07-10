@@ -18,10 +18,13 @@ from __future__ import annotations
 
 import email.message
 import hashlib
+import json
 import logging
 import os
 import smtplib
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -134,29 +137,11 @@ def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
     return key
 
 
-def send_license_email(to: str, key: str, product_name: str = "Pro") -> None:
-    """Email a license key to *to* via SMTP (ENGRAPHIS_SMTP_* env vars).
+_RESEND_API_URL = "https://api.resend.com/emails"
 
-    Raises RuntimeError if any SMTP configuration is missing.
-    """
-    smtp_host = os.environ.get("ENGRAPHIS_SMTP_HOST", "").strip()
-    smtp_port = int(os.environ.get("ENGRAPHIS_SMTP_PORT", "587"))
-    smtp_user = os.environ.get("ENGRAPHIS_SMTP_USER", "").strip()
-    smtp_pass = os.environ.get("ENGRAPHIS_SMTP_PASSWORD", "").strip()
-    smtp_from = os.environ.get("ENGRAPHIS_SMTP_FROM", "keys@engraphis.com").strip()
 
-    if not smtp_host or not smtp_user or not smtp_pass:
-        raise RuntimeError(
-            "SMTP not configured — set ENGRAPHIS_SMTP_HOST, ENGRAPHIS_SMTP_USER, "
-            "and ENGRAPHIS_SMTP_PASSWORD"
-        )
-
-    msg = email.message.EmailMessage()
-    msg["From"] = smtp_from
-    msg["To"] = to
-    msg["Subject"] = f"Your Engraphis {product_name} License Key"
-    msg.set_content(
-        f"""Thank you for purchasing Engraphis {product_name}!
+def _license_email_text(key: str, product_name: str) -> str:
+    return f"""Thank you for purchasing Engraphis {product_name}!
 
 Your license key:
 
@@ -173,14 +158,93 @@ Your key is verified offline — no phone-home. Keep it safe.
 
 — The Engraphis team
 """
-    )
 
+
+def _resend_api_key() -> str:
+    """Resend API key for HTTPS delivery, or "" if none.
+
+    Prefers ENGRAPHIS_RESEND_API_KEY; otherwise reuses ENGRAPHIS_SMTP_PASSWORD
+    when it is a Resend key (``re_...``) with a Resend SMTP host — so an existing
+    Resend SMTP setup works over HTTPS with zero new config.
+    """
+    key = os.environ.get("ENGRAPHIS_RESEND_API_KEY", "").strip()
+    if key:
+        return key
+    host = os.environ.get("ENGRAPHIS_SMTP_HOST", "").strip().lower()
+    pw = os.environ.get("ENGRAPHIS_SMTP_PASSWORD", "").strip()
+    if "resend.com" in host and pw.startswith("re_"):
+        return pw
+    return ""
+
+
+def _send_via_resend_api(to: str, subject: str, text_body: str, from_addr: str,
+                         api_key: str) -> None:
+    """Send via Resend's HTTPS API (port 443). Works where outbound SMTP is
+    blocked (Railway, Fly, many PaaS). Raises RuntimeError on any failure."""
+    payload = json.dumps(
+        {"from": from_addr, "to": [to], "subject": subject, "text": text_body}
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        _RESEND_API_URL, data=payload, method="POST",
+        headers={"Authorization": "Bearer %s" % api_key,
+                 "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            if resp.status not in (200, 201):
+                raise RuntimeError("Resend API returned HTTP %s" % resp.status)
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", "replace")[:200]
+        except Exception:  # noqa: BLE001
+            pass
+        raise RuntimeError("Resend API error HTTP %s: %s" % (exc.code, body)) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError("Resend API unreachable: %s" % (exc.reason,)) from exc
+
+
+def send_license_email(to: str, key: str, product_name: str = "Pro") -> None:
+    """Deliver a license key to *to*.
+
+    Prefers the Resend HTTPS API (``ENGRAPHIS_RESEND_API_KEY`` or the Resend key
+    already in ``ENGRAPHIS_SMTP_PASSWORD``) because many hosts — Railway included —
+    block outbound SMTP ports, which makes ``smtplib`` hang until timeout. Falls
+    back to SMTP (``ENGRAPHIS_SMTP_*``). Raises RuntimeError if nothing is
+    configured, and raises on delivery failure.
+    """
+    subject = "Your Engraphis %s License Key" % product_name
+    text_body = _license_email_text(key, product_name)
+    from_addr = os.environ.get("ENGRAPHIS_SMTP_FROM", "keys@engraphis.com").strip()
+
+    api_key = _resend_api_key()
+    if api_key:
+        logger.info("sending license email to %s via Resend API", to)
+        _send_via_resend_api(to, subject, text_body, from_addr, api_key)
+        logger.info("license email delivered to %s (Resend API)", to)
+        return
+
+    smtp_host = os.environ.get("ENGRAPHIS_SMTP_HOST", "").strip()
+    smtp_port = int(os.environ.get("ENGRAPHIS_SMTP_PORT", "587"))
+    smtp_user = os.environ.get("ENGRAPHIS_SMTP_USER", "").strip()
+    smtp_pass = os.environ.get("ENGRAPHIS_SMTP_PASSWORD", "").strip()
+    if not smtp_host or not smtp_user or not smtp_pass:
+        raise RuntimeError(
+            "No email delivery configured — set ENGRAPHIS_RESEND_API_KEY (preferred) "
+            "or ENGRAPHIS_SMTP_HOST/USER/PASSWORD"
+        )
+
+    msg = email.message.EmailMessage()
+    msg["From"] = from_addr
+    msg["To"] = to
+    msg["Subject"] = subject
+    msg.set_content(text_body)
     logger.info("sending license email to %s via %s:%d", to, smtp_host, smtp_port)
     with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as smtp:
         smtp.starttls()
         smtp.login(smtp_user, smtp_pass)
         smtp.send_message(msg)
-    logger.info("license email delivered to %s", to)
+    logger.info("license email delivered to %s (SMTP)", to)
 
 
 def _fallback_dir() -> Path:
@@ -242,19 +306,20 @@ def handle_order_paid(payload: dict) -> Optional[str]:
     key = issue_key(email_addr, product_name=product_name, seats=seats)
     try:
         send_license_email(email_addr, key, product_name=product_name)
-    except RuntimeError:
-        # SMTP not configured. Do NOT log the raw key (log aggregation is less
-        # protected than a local 0600 file). Persist it for manual delivery and
-        # log only a short fingerprint the operator can match against the file.
+    except Exception as exc:  # noqa: BLE001 — any delivery failure must not lose a paid key
+        # Delivery failed (misconfig, provider error, network). Do NOT log the raw
+        # key (log aggregation is less protected than a local 0600 file). Persist
+        # it for manual delivery and log only a fingerprint + the failure reason.
+        # We still return the key so the webhook 202s (Polar won't retry-storm);
+        # the operator delivers from the fallback file.
         fp = hashlib.sha256(key.encode("ascii")).hexdigest()[:12]
         saved = _persist_fallback_key(email_addr, key, product_name)
         if saved:
             logger.warning(
-                "SMTP unavailable — key %s for %s saved to %s (deliver manually)",
-                fp, email_addr, saved)
+                "email delivery failed (%s) — key %s for %s saved to %s (deliver manually)",
+                exc, fp, email_addr, saved)
         else:
             logger.error(
-                "SMTP unavailable AND could not persist key %s for %s — manual "
-                "reissue required via `python -m scripts.license_admin issue`",
-                fp, email_addr)
+                "email delivery failed (%s) AND could not persist key %s for %s — "
+                "reissue via `python -m scripts.license_admin issue`", exc, fp, email_addr)
     return key

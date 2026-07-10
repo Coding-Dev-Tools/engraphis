@@ -167,6 +167,55 @@ def test_oversized_body_rejected(monkeypatch):
     assert r.status_code == 413
 
 
+# ── email delivery: Resend HTTPS API (hosts like Railway block outbound SMTP) ──
+def test_resend_api_key_prefers_env_then_smtp_password(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    monkeypatch.delenv("ENGRAPHIS_RESEND_API_KEY", raising=False)
+    monkeypatch.setenv("ENGRAPHIS_SMTP_HOST", "smtp.resend.com")
+    monkeypatch.setenv("ENGRAPHIS_SMTP_PASSWORD", "re_testkey_abc")
+    assert WH._resend_api_key() == "re_testkey_abc"   # reuse the SMTP Resend key
+    monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_explicit")
+    assert WH._resend_api_key() == "re_explicit"       # explicit env wins
+
+
+def test_send_license_email_uses_resend_api_not_smtp(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    captured = {}
+
+    def fake_api(to, subject, text_body, from_addr, api_key):
+        captured.update(to=to, subject=subject, from_addr=from_addr,
+                        api_key=api_key, has_key="ENGR1" in text_body)
+
+    monkeypatch.setattr(WH, "_send_via_resend_api", fake_api)
+    monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
+    monkeypatch.setenv("ENGRAPHIS_SMTP_FROM", "keys@engraphis.com")
+    # No SMTP host set — if this fell through to SMTP it would raise instead.
+    WH.send_license_email("buyer@example.com", "ENGR1.abc.def", product_name="Pro")
+    assert captured["to"] == "buyer@example.com"
+    assert captured["api_key"] == "re_test"
+    assert captured["from_addr"] == "keys@engraphis.com"
+    assert captured["has_key"] and "Pro" in captured["subject"]
+
+
+def test_delivery_failure_persists_key_and_still_202(monkeypatch, tmp_path):
+    # A provider/network failure must NOT lose a paid key: it lands in the 0600
+    # fallback file and the webhook still returns 202 (no Polar retry storm).
+    from engraphis.inspector import webhooks as WH
+
+    def boom(*a, **k):
+        raise RuntimeError("simulated Resend outage")
+
+    monkeypatch.setattr(WH, "_send_via_resend_api", boom)
+    monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
+    client = _inspector_client(monkeypatch)
+    body = (b'{"type":"order.paid","data":{"customer":{"email":"buyer@example.com"},'
+            b'"product":{"name":"Engraphis Pro"}}}')
+    r = _post(client, WHSEC, "evt_delivery_fail", body)
+    assert r.status_code == 202 and r.json()["key_issued"] is True
+    fallback = tmp_path / "undelivered_license_keys.tsv"
+    assert fallback.exists() and "buyer@example.com" in fallback.read_text()
+
+
 # ── signature must still be rejected when wrong ────────────────────────────────
 def test_bad_signature_rejected(monkeypatch):
     client = _inspector_client(monkeypatch)
