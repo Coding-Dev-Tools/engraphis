@@ -3,7 +3,7 @@ import math
 
 from engraphis.analytics import (
     FORGET_THRESHOLD, _days_until_forgotten, analytics_from_rows, compute_analytics,
-    render_analytics_html,
+    compute_portfolio, portfolio_rollup, render_analytics_html,
 )
 from engraphis.service import MemoryService
 
@@ -114,3 +114,72 @@ def test_render_analytics_html_handles_an_empty_workspace():
     assert "Engraphis analytics report" in page
     assert "no resolver events yet" in page
     assert "no entities yet" in page
+
+
+# ── cross-workspace portfolio rollup (Pro) — same pure-function-first discipline ──────
+
+def test_portfolio_rollup_sums_exactly_and_weights_retention():
+    a = analytics_from_rows(
+        [_row(stability=5.0), _row(stability=1.0, last_access=NOW - 2.5 * 86400),
+         _row(valid_to=NOW - 10)],
+        {"invalidate": 2}, [{"name": "Alice", "etype": "person", "n": 4}], now=NOW)
+    b = analytics_from_rows(
+        [_row(pinned=1, mtype="episodic"), _row(ingested_at=NOW - 3 * 7 * 86400)],
+        {"invalidate": 1, "noop": 5}, [{"name": "Bob", "etype": "person", "n": 9}], now=NOW)
+    out = portfolio_rollup({"acme": a, "beta": b})
+
+    t = out["totals"]
+    assert t["workspaces"] == 2
+    assert t["live"] == 4 and t["all_rows"] == 5 and t["superseded"] == 1
+    assert t["pinned"] == 1
+    # weighted by live counts, not a naive mean of the two averages
+    expected = (a["totals"]["avg_retention"] * 2 + b["totals"]["avg_retention"] * 2) / 4
+    assert abs(t["avg_retention"] - round(expected, 4)) <= 1e-4
+    # elementwise sums (shared `now` keeps buckets aligned)
+    assert out["growth_weekly"] == [x + y for x, y in
+                                    zip(a["growth_weekly"], b["growth_weekly"])]
+    assert sum(out["retention_histogram"]["counts"]) == 4
+    assert out["decay_forecast"]["at_risk_7d"] == (
+        a["decay_forecast"]["at_risk_7d"] + b["decay_forecast"]["at_risk_7d"])
+    assert out["by_type"] == {"semantic": 3, "episodic": 1}
+    assert out["resolver_mix"] == {"invalidate": 3, "noop": 5}
+    # entities are tagged with their workspace and ranked across the portfolio
+    assert out["top_entities"][0] == {"name": "Bob", "etype": "person", "n": 9,
+                                      "workspace": "beta"}
+    # busiest workspace leads; ties broken by name
+    assert [w["workspace"] for w in out["workspaces"]] == ["acme", "beta"]
+    assert out["workspaces"][0]["live"] == 2
+
+
+def test_portfolio_rollup_empty_portfolio_is_well_formed():
+    out = portfolio_rollup({})
+    assert out["totals"] == {"workspaces": 0, "live": 0, "all_rows": 0,
+                             "superseded": 0, "pinned": 0, "avg_retention": 0.0}
+    assert out["workspaces"] == [] and out["top_entities"] == []
+    assert len(out["growth_weekly"]) == 12
+    assert out["generated_at"] > 0
+
+
+def test_compute_portfolio_over_a_real_store(monkeypatch):
+    monkeypatch.setattr("engraphis.licensing.has_feature", lambda f: True)
+    svc = MemoryService.create(":memory:")
+    svc.remember("Deploy target is region iad.", workspace="acme", repo="infra")
+    svc.remember("Deploy target is region fra as of March.", workspace="acme", repo="infra")
+    svc.remember("Design tokens live in tokens.json.", workspace="beta", repo="web")
+    pairs = [(svc._lookup_workspace(n), n) for n in ("acme", "beta")]
+    data = compute_portfolio(svc.store, pairs)
+    assert data["totals"]["workspaces"] == 2
+    assert data["totals"]["all_rows"] == 3
+    assert data["totals"]["live"] == 2 and data["totals"]["superseded"] == 1
+    assert data["resolver_mix"].get("invalidate", 0) >= 1
+    assert {w["workspace"] for w in data["workspaces"]} == {"acme", "beta"}
+
+
+def test_compute_portfolio_is_license_gated(monkeypatch):
+    import pytest
+
+    from engraphis import licensing
+    monkeypatch.setattr("engraphis.licensing.has_feature", lambda f: False)
+    svc = MemoryService.create(":memory:")
+    with pytest.raises(licensing.LicenseError):
+        compute_portfolio(svc.store, [])
