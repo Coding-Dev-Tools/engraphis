@@ -26,21 +26,22 @@ engraphis-dashboard
 Opens `http://127.0.0.1:8700` in your browser. No cloud, no signup, no API key for memory.
 Everything lives in a single SQLite file on your machine.
 
-**You'll see the full product** — a dark-themed, sidebar-navigated dashboard with 11 tabs:
+**You'll see the full product** — a dark-themed, sidebar-navigated dashboard with 12 tabs:
 
 | Tab | What you see |
 |-----|-------------|
-| **Overview** | Live memory counts, retention distribution, weekly growth, decay forecast, resolver action mix, most-connected entities |
-| **Memories** | Browse every memory by workspace, sorted by retention — click into a full reader with retention/stability pills |
-| **Recall** | Search across the entire memory bank — each result shows its score breakdown (retention, semantic, lexical, graph, importance, recency) |
-| **Knowledge Graph** | Interactive D3 force-directed graph of entities and their relationships — click any node to see every linked memory |
-| **Timeline** | Chronological feed of every memory event — creation, invalidation, correction, consolidation |
-| **Consolidate** | Run a consolidation sweep on demand — see what got distilled and what got pruned |
+| **Overview** | Live memory counts, retention distribution, memory-type mix, and analytics (Pro) |
+| **Recall** | Hybrid search across the memory bank — each result shows its score breakdown (retention, semantic, lexical, graph, importance, recency) |
+| **Memories** | Browse and curate every memory by workspace — click into a full reader with type and retention pills |
+| **Proactive** | "What should I know right now" — importance × recency × retention, plus the last session handoff |
+| **Why** | The current answer to a question, and the facts it superseded |
+| **Timeline** | Bi-temporal history of a topic — what was believed, and when |
 | **Audit** | Full governance ledger — who did what, when, and why |
-| **Settings** | Database stats, license activation (Pro/Team), and system health |
-| **Chat** | Ask questions against your memory — the LLM answers grounded in context |
-| **Vaults** | Manage workspace vaults — create, rename, delete, bulk import |
-| **Import** | Drag & drop or paste markdown files to populate your knowledge base |
+| **Knowledge Graph** | Interactive force-directed graph of entities and their relationships — click any node to see every linked memory |
+| **Consolidate** | Run a consolidation sweep on demand — see what got distilled and what got pruned |
+| **Workspaces** | Manage workspace isolation boundaries — switch the active workspace, browse, and organize memory |
+| **Team** | Multi-user access with admin / member / viewer roles (Team) |
+| **Settings** | License activation (Pro/Team), appearance, and engine/store info |
 
 The dashboard is powered by the v2 engine — the same `MemoryService` that backs the MCP server
 and the Python library. What you see in the UI is what your agents get.
@@ -95,15 +96,15 @@ embeddings. You bring the LLM only for optional chat/synthesis.
 
 ## Why it wins
 
-| Axis | Neocortex | mem0 | Zep | Engraphis |
-|---|---|---|---|---|
-| Product WebUI (local, no cloud) | ✗ | ✗ | ✗ | **✓ (dashboard + Inspector)** |
-| Open & self-hostable engine | ✗ | ✓ | partial | **✓ fully open, local-first** |
-| Forgetting/decay | ✓ | partial | ✗ | **✓** |
-| Bi-temporal graph | ✗ | partial | ✓ | **✓** |
-| Native multi-repo model | ✗ | ✗ | ✗ | **✓ (unique)** |
-| Code-aware (AST/symbol graph) | ✗ | ✗ | ✗ | **✓ (unique)** |
-| MCP-native for coding agents | ✗ | ✓ | ✗ | **✓** |
+| Axis | mem0 | Zep | Engraphis |
+|---|---|---|---|
+| Product WebUI (local, no cloud) | ✗ | ✗ | **✓ (dashboard + Inspector)** |
+| Open & self-hostable engine | ✓ | partial | **✓ fully open, local-first** |
+| Forgetting/decay | partial | ✗ | **✓** |
+| Bi-temporal graph | partial | ✓ | **✓** |
+| Native multi-repo model | ✗ | ✗ | **✓ (unique)** |
+| Code-aware (AST/symbol graph) | ✗ | ✗ | **✓ (unique)** |
+| MCP-native for coding agents | ✓ | ✗ | **✓** |
 
 ---
 
