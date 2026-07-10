@@ -19,6 +19,7 @@ from __future__ import annotations
 import email.message
 import hashlib
 import logging
+import math
 import os
 import smtplib
 import time
@@ -87,26 +88,110 @@ def _load_signing_secret() -> bytes:
 def _map_polar_product_to_plan(product_name: str) -> str:
     """Map Polar product name to an Engraphis plan tier.
 
-    Match on substrings so "Engraphis Pro Monthly" and "Engraphis Pro Annual"
-    both resolve to ``pro``. Fall back to ``pro`` for any non-``team`` match.
+    Match on substrings so "Engraphis Pro Monthly" and "Engraphis Pro Annual" both
+    resolve to ``pro``. A paid order with an *unrecognized* product name still
+    resolves to ``pro`` (never free) and logs loudly: a customer who paid must never
+    be silently stiffed with a useless free-tier key. Correct Pro-vs-Team routing
+    depends on the Polar product name containing "pro"/"team" — keep them named so.
     """
     name = (product_name or "").lower()
     if "team" in name:
         return "team"
     if "pro" in name:
         return "pro"
-    # Unknown product → free tier with a warning; user gets a key but can
-    # still activate it (it just won't unlock features).
-    logger.warning("unknown product '%s' — issuing free-tier key", product_name)
-    return "free"
+    logger.warning(
+        "unrecognized paid product '%s' — defaulting to Pro so the buyer still gets a "
+        "working key. Name your Polar products with 'Pro'/'Team' for correct tiering.",
+        product_name)
+    return "pro"
+
+
+def _key_days(product_name: str, metadata: dict) -> int:
+    """How long an auto-issued key stays valid.
+
+    Precedence: explicit ``license_days`` metadata → annual detection (≈13 months so a
+    late renewal never locks a paying customer out) → monthly default with a 5-day
+    grace over the 30-day cycle (renewal fires a fresh ``order.paid`` each period)."""
+    try:
+        explicit = int(metadata.get("license_days") or 0)
+    except (TypeError, ValueError):
+        explicit = 0
+    if explicit > 0:
+        return explicit
+    name = (product_name or "").lower()
+    if "annual" in name or "year" in name or "yr" in name:
+        return 395
+    return 35
+
+
+def _plan_label(product_name: str) -> str:
+    """Clean tier label for customer-facing email copy ("Pro"/"Team")."""
+    return _map_polar_product_to_plan(product_name).title()
+
+
+def _extract_email(data: dict) -> Optional[str]:
+    """Pull the buyer email from an order OR subscription payload, defensively."""
+    cust = data.get("customer") or {}
+    user = data.get("user") or {}
+    return (cust.get("email") or data.get("customer_email")
+            or data.get("email") or user.get("email"))
+
+
+def _extract_product_name(data: dict) -> str:
+    product = data.get("product") or {}
+    return product.get("name") or data.get("product_name") or "Pro"
+
+
+def _extract_seats(data: dict) -> int:
+    """Seat count from an order or subscription payload (Team). Defaults to 1."""
+    product = data.get("product") or {}
+    meta = product.get("metadata") or data.get("metadata") or {}
+    for candidate in (data.get("seats"), data.get("quantity"), meta.get("seats")):
+        try:
+            n = int(candidate)
+            if n > 0:
+                return n
+        except (TypeError, ValueError):
+            continue
+    return 1
+
+
+def _parse_ts(value) -> Optional[float]:
+    """Coerce a Polar timestamp (ISO-8601 string or epoch number) to float epoch."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _trial_days(period_end, *, now: Optional[float] = None) -> int:
+    """How long a trial key stays valid: through the trial's ``current_period_end``,
+    rounded UP to whole days (so it always covers the full trial, never expiring a
+    legit trial user early) but with NO extra grace — a canceled trial should lapse
+    right at trial end so no one keeps Pro without paying. Falls back to
+    ENGRAPHIS_TRIAL_DAYS (default 4, matching a 3-day trial) if the end is missing."""
+    now = now if now is not None else time.time()
+    end = _parse_ts(period_end)
+    if end and end > now:
+        return max(1, math.ceil((end - now) / 86400))
+    try:
+        return max(1, int(os.environ.get("ENGRAPHIS_TRIAL_DAYS", "4")))
+    except ValueError:
+        return 4
 
 
 def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
-               days: int = 30) -> str:
+               days: Optional[int] = None, metadata: Optional[dict] = None) -> str:
     """Generate a signed ``ENGR1.xxx.yyy`` key for *email_addr*.
 
     Uses the pinned vendor signing key (``.secrets/vendor_signing.key`` or
-    ``ENGRAPHIS_SIGNING_KEY`` env). ``product_name`` maps to a plan tier.
+    ``ENGRAPHIS_SIGNING_KEY`` env). ``product_name`` maps to a plan tier; ``days``
+    (or product/metadata inference via :func:`_key_days`) sets validity.
     """
     secret = _load_signing_secret()
     pub = ed25519_public_key(secret).hex()
@@ -118,7 +203,9 @@ def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
 
     plan = _map_polar_product_to_plan(product_name)
     if plan not in PLAN_FEATURES:
-        plan = "free"
+        plan = "pro"
+    if days is None:
+        days = _key_days(product_name, metadata or {})
 
     now = time.time()
     payload = {
@@ -137,19 +224,22 @@ def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
 _RESEND_API_URL = "https://api.resend.com/emails"
 
 
-def _license_email_text(key: str, product_name: str) -> str:
-    return f"""Thank you for purchasing Engraphis {product_name}!
+def _license_email_text(key: str, product_name: str, is_trial: bool = False) -> str:
+    intro = (f"Your Engraphis {product_name} free trial has started!"
+             if is_trial else f"Thank you for purchasing Engraphis {product_name}!")
+    return f"""{intro}
 
 Your license key:
 
     {key}
 
 To activate:
-    1. Open the Memory Inspector (engraphis-inspector)
-    2. Click the free badge in the header
+    1. Open the Engraphis dashboard (engraphis-dashboard, http://127.0.0.1:8700)
+    2. Go to Settings -> License
     3. Paste the key and click Activate
 
-Or set the ENGRAPHIS_LICENSE_KEY environment variable.
+Or set the ENGRAPHIS_LICENSE_KEY environment variable, or save the key to
+~/.engraphis/license.key.
 
 Your key is verified offline — no phone-home. Keep it safe.
 
@@ -202,17 +292,20 @@ def _send_via_resend_api(to: str, subject: str, text_body: str, from_addr: str,
             "Resend API error HTTP %s: %s" % (resp.status_code, resp.text[:200]))
 
 
-def send_license_email(to: str, key: str, product_name: str = "Pro") -> None:
+def send_license_email(to: str, key: str, product_name: str = "Pro",
+                       is_trial: bool = False) -> None:
     """Deliver a license key to *to*.
 
     Prefers the Resend HTTPS API (``ENGRAPHIS_RESEND_API_KEY`` or the Resend key
     already in ``ENGRAPHIS_SMTP_PASSWORD``) because many hosts — Railway included —
     block outbound SMTP ports, which makes ``smtplib`` hang until timeout. Falls
     back to SMTP (``ENGRAPHIS_SMTP_*``). Raises RuntimeError if nothing is
-    configured, and raises on delivery failure.
+    configured, and raises on delivery failure. ``product_name`` should be a clean
+    tier label ("Pro"/"Team"); ``is_trial`` selects trial-vs-purchase copy.
     """
-    subject = "Your Engraphis %s License Key" % product_name
-    text_body = _license_email_text(key, product_name)
+    subject = ("Your Engraphis %s Trial License Key" if is_trial
+               else "Your Engraphis %s License Key") % product_name
+    text_body = _license_email_text(key, product_name, is_trial=is_trial)
     from_addr = os.environ.get("ENGRAPHIS_SMTP_FROM", "keys@engraphis.com").strip()
 
     api_key = _resend_api_key()
@@ -281,35 +374,16 @@ def _persist_fallback_key(email_addr: str, key: str, product_name: str) -> Optio
         return None
 
 
-def handle_order_paid(payload: dict) -> Optional[str]:
-    """Process a Polar ``order.paid`` webhook payload.
-
-    Returns the issued key on success, ``None`` if the payload is missing
-    required fields (logged as warning). Raises on signing or email failure.
-    """
-    email_addr = (
-        (payload.get("customer") or {}).get("email")
-        or payload.get("customer_email")
-        or payload.get("email")
-    )
-    if not email_addr:
-        logger.warning("order.paid missing customer email — cannot issue key")
-        return None
-
-    product = payload.get("product") or {}
-    product_name = product.get("name", "Pro")
-    # seats default to 1; could be custom metadata on the product
-    seats = int(product.get("metadata", {}).get("seats", 1) or 1)
-
-    key = issue_key(email_addr, product_name=product_name, seats=seats)
+def _issue_and_email(email_addr: str, product_name: str, seats: int,
+                     days: Optional[int], *, is_trial: bool = False) -> str:
+    """Mint a signed key and email it. On ANY delivery failure, persist the key to
+    the 0600 fallback file (never the log) and still return it, so a paid or trial
+    key is never lost and the webhook can 202 without a Polar retry-storm."""
+    key = issue_key(email_addr, product_name=product_name, seats=seats, days=days)
+    label = _plan_label(product_name)
     try:
-        send_license_email(email_addr, key, product_name=product_name)
-    except Exception as exc:  # noqa: BLE001 — any delivery failure must not lose a paid key
-        # Delivery failed (misconfig, provider error, network). Do NOT log the raw
-        # key (log aggregation is less protected than a local 0600 file). Persist
-        # it for manual delivery and log only a fingerprint + the failure reason.
-        # We still return the key so the webhook 202s (Polar won't retry-storm);
-        # the operator delivers from the fallback file.
+        send_license_email(email_addr, key, product_name=label, is_trial=is_trial)
+    except Exception as exc:  # noqa: BLE001 — a delivery failure must not lose a key
         fp = hashlib.sha256(key.encode("ascii")).hexdigest()[:12]
         saved = _persist_fallback_key(email_addr, key, product_name)
         if saved:
@@ -321,3 +395,47 @@ def handle_order_paid(payload: dict) -> Optional[str]:
                 "email delivery failed (%s) AND could not persist key %s for %s — "
                 "reissue via `python -m scripts.license_admin issue`", exc, fp, email_addr)
     return key
+
+
+def handle_order_paid(payload: dict) -> Optional[str]:
+    """Fulfill a Polar ``order.paid`` event — mint a period-bounded key and email it.
+
+    Covers direct purchases, trial conversions, and each renewal (a fresh
+    ``order.paid`` fires per cycle). Returns the key, or ``None`` if the payload has
+    no customer email (logged; the route then leaves it for a corrected retry).
+    """
+    email_addr = _extract_email(payload)
+    if not email_addr:
+        logger.warning("order.paid missing customer email — cannot issue key")
+        return None
+    product = payload.get("product") or {}
+    product_name = _extract_product_name(payload)
+    seats = _extract_seats(payload)
+    days = _key_days(product_name, product.get("metadata") or {})
+    return _issue_and_email(email_addr, product_name, seats, days)
+
+
+def handle_subscription_created(payload: dict) -> Optional[str]:
+    """Fulfill the START of a subscription that is in a free TRIAL: mint a key that
+    expires at the trial's end (+1 day grace) and email it immediately, so a trial
+    customer has Pro during the trial.
+
+    A non-trial subscription is a no-op here (returns ``None``) — its key is issued
+    by the matching ``order.paid`` when payment is actually taken. That is what makes
+    cancellation safe: a canceled trial never produces an ``order.paid``, so the only
+    key that exists is the short trial key, which simply expires. Offline keys can't
+    be revoked, so bounding their lifetime to the paid/trial period IS the revocation.
+    """
+    status = str(payload.get("status", "")).strip().lower()
+    if status != "trialing":
+        return None  # not a trial; order.paid handles paid activation & renewals
+    email_addr = _extract_email(payload)
+    if not email_addr:
+        logger.warning("subscription.created (trial) missing customer email")
+        return None
+    product_name = _extract_product_name(payload)
+    seats = _extract_seats(payload)
+    days = _trial_days(payload.get("current_period_end"))
+    logger.info("trial started for %s (%s) — issuing %d-day key",
+                email_addr, product_name, days)
+    return _issue_and_email(email_addr, product_name, seats, days, is_trial=True)
