@@ -386,9 +386,31 @@ def consolidate(req: _ConsolidateReq):
 
 
 # ── analytics (Pro) ───────────────────────────────────────────────────────────
+@router.get("/analytics/portfolio")
+def analytics_portfolio():
+    """Cross-workspace rollup. Same gate as /analytics; the workspace set comes
+    from list_workspaces(), so team-auth boundaries (allowed_workspaces) hold."""
+    _paid("analytics")
+    from engraphis.analytics import compute_portfolio
+    svc = service()
+    wss = _run(svc.list_workspaces).get("workspaces") or []
+    pairs = [(wid, w["name"]) for w in wss
+             if (wid := svc._lookup_workspace(w["name"]))]
+    return _run(compute_portfolio, svc.store, pairs)
+
+
 @router.get("/analytics")
 def analytics(workspace: Optional[str] = None):
     _paid("analytics")
+    return _analytics_summary(workspace)
+
+
+def _analytics_summary(workspace: Optional[str]) -> dict:
+    """Lightweight analytics summary (by-type + per-namespace distribution). The
+    Pro gate lives HERE, at the top of the computation, so the payload can never
+    be assembled on the free tier even if the route's ``_paid`` wrapper is deleted
+    (defense in depth; mirrors engraphis.analytics.compute_analytics)."""
+    licensing.require_feature("analytics")
     st = _run(service().stats, workspace=workspace)
     wss = _run(service().list_workspaces).get("workspaces") or []
     by_type = [{"bucket": t, "count": c} for t, c in (st.get("by_type") or {}).items()]
