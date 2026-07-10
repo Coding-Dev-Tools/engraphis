@@ -181,7 +181,7 @@ _KEY_PREFIX = "ENGR1"
 # offline/trusted machine before the first real sale.
 # ROTATE BEFORE SELLING: run `python -m scripts.license_admin keygen --force` and replace
 # this constant with the printed public key.
-_VENDOR_PUBKEY_HEX = "110c16837384675cdfdf79b63b7717d33209bcd6440c95a81370c91e4bbec81b"
+_VENDOR_PUBKEY_HEX = "d3520482d87a22f7e39e95cfa4b40bc2460f2576213868ba99ea1e4ea7719e08"
 # Frozen fingerprint of the OLD, known-compromised dev keypair. Kept as a sentinel so
 # is_default_vendor_key() / production_warnings() can flag it if anyone ever re-pins it.
 # Its private half does NOT ship in this repo (`.secrets/` is gitignored), but it was
