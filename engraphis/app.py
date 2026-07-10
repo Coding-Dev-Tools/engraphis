@@ -1,13 +1,15 @@
-"""FastAPI app assembly — mounts all routes, serves dashboard, initializes DB, starts background loop."""
+"""FastAPI app assembly — mounts all routes, serves dashboard, initializes DB,
+starts background loop."""
 from __future__ import annotations
 
 import asyncio
-import hmac
 import logging
 import time
 import uuid
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,43 +17,176 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from engraphis import __version__
+from engraphis.local_auth import bearer_ok
 from engraphis.config import settings
 from engraphis.engines import reweight, thoughts as thoughts_engine
+from engraphis.engines.embedder import warmup as _warmup_embedder
 from engraphis.logging_setup import configure_logging
+from engraphis.netutil import client_ip
 from engraphis.routes.memory import router as memory_router
-from engraphis.routes.vault import router as vault_router
+from engraphis.routes.vault import VAULT_UPLOAD_REQUEST_BYTES, router as vault_router
 from engraphis.stores import get_conn, init_db
 
 logger = logging.getLogger("engraphis")
 
 
-def _const_time_eq(a: str, b: str) -> bool:
-    """Constant-time string comparison (avoids token-timing side channels)."""
-    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
-
-
-_background_task: asyncio.Task | None = None
+_background_task: Optional[asyncio.Task] = None
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 # Readiness cache: only a *successful* embedder init is cached, so a transient
 # failure is re-checked on the next probe instead of wedging the pod NotReady.
 _embedder_ok: bool = False
+_UPLOAD_LIMIT_PATHS = frozenset({
+    "/api/workspaces/import-files",
+    "/memory/vaults/upload-folder",
+    "/memory/vaults/upload-folder-smart",
+})
+
+
+class _RequestBodyTooLarge(Exception):
+    """Internal signal used by the streaming ASGI request limiter."""
+
+
+class _VaultUploadLimitMiddleware:
+    """Reject oversized file imports before multipart parsing/spooling.
+
+    ``Content-Length`` provides an immediate fast-fail. The receive wrapper is still
+    required because clients can omit or lie about that header, including HTTP/1.1
+    chunked uploads. A fronting proxy should configure an equal or lower request-body
+    ceiling; this in-process guard remains the last line of defense for direct access.
+    """
+
+    def __init__(self, app, max_bytes: int):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if (
+            scope["type"] != "http"
+            or scope["method"] != "POST"
+            or scope["path"].rstrip("/") not in _UPLOAD_LIMIT_PATHS
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        raw_lengths = [
+            value for name, value in scope.get("headers", [])
+            if name.lower() == b"content-length"
+        ]
+        if len(raw_lengths) > 1:
+            await JSONResponse(
+                {"error": "invalid content-length"},
+                status_code=400,
+            )(scope, receive, send)
+            return
+        if raw_lengths:
+            try:
+                declared_length = int(raw_lengths[0])
+            except (TypeError, ValueError):
+                declared_length = -1
+            if declared_length < 0:
+                await JSONResponse(
+                    {"error": "invalid content-length"},
+                    status_code=400,
+                )(scope, receive, send)
+                return
+            if declared_length > self.max_bytes:
+                await self._too_large(scope, receive, send)
+                return
+
+        received = 0
+        limit_exceeded = False
+
+        async def limited_receive():
+            nonlocal limit_exceeded, received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    limit_exceeded = True
+                    raise _RequestBodyTooLarge
+            return message
+
+        async def guarded_send(message):
+            # FastAPI converts arbitrary body-parser exceptions into a generic 400.
+            # Suppress that replacement response once our receive wrapper has observed
+            # the real cause; the middleware emits the canonical 413 below.
+            if limit_exceeded:
+                return
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, guarded_send)
+        except _RequestBodyTooLarge:
+            pass
+        if limit_exceeded:
+            await self._too_large(scope, receive, send)
+
+    async def _too_large(self, scope, receive, send):
+        await JSONResponse(
+            {
+                "error": "request body too large",
+                "max_bytes": self.max_bytes,
+            },
+            status_code=413,
+        )(scope, receive, send)
 
 
 def _embedder_ready() -> bool:
     global _embedder_ok
     try:
         from engraphis.backends.embedder_st import get_embedder
-        emb = get_embedder(settings.embed_model or None, settings.embed_dim or 256)
+        emb = get_embedder(settings.embed_model or None, settings.embed_dim or 384)
         _embedder_ok = emb is not None and int(emb.dim) > 0
-    except Exception as e:  # pragma: no cover - defensive; get_embedder falls back itself
-        logger.warning("Readiness: embedder init failed: %s", e)
+    except Exception as exc:  # pragma: no cover - defensive; get_embedder falls back itself
+        # Provider/backend exceptions can contain credentialed URLs or local paths.
+        # Readiness logs need the failure class, not the exception payload.
+        logger.warning("Readiness: embedder init failed (%s)", type(exc).__name__)
         _embedder_ok = False
     return _embedder_ok
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Startup/shutdown for the app (replaces the deprecated @app.on_event hooks).
+
+    Startup: initialize the DB (deferred to here so the CLI can set ENGRAPHIS_DB_PATH
+    first), then start the background consolidation loop unless it's disabled. Shutdown:
+    cancel and await the loop."""
+    global _background_task
+    init_db()
+    # Warm the embedding model eagerly so the first recall call isn't paid
+    # under request pressure (a cold load + concurrent call used to wedge
+    # the forked PM2 worker and time out every recall).
+    await asyncio.get_running_loop().run_in_executor(None, _warmup_embedder)
+    if settings.loop_interval > 0:
+        _background_task = asyncio.create_task(_consciousness_loop())
+        logger.info("Background consciousness loop started (interval=%ds)", settings.loop_interval)
+    else:
+        logger.info("Background loop disabled (ENGRAPHIS_LOOP_INTERVAL=0)")
+    try:  # one-line "update available" notice (background, fail-silent, opt-out)
+        from engraphis import update_check
+        update_check.emit_startup_notice(logger.info)
+    except Exception:  # noqa: BLE001 - never block server startup
+        pass
+    try:
+        yield
+    finally:
+        if _background_task:
+            _background_task.cancel()
+            try:
+                await _background_task
+            except asyncio.CancelledError:
+                pass
 
 
 def create_app() -> FastAPI:
     """Build and configure the FastAPI application."""
     configure_logging()
+    # Hosted JSON logging is credential-redacting. Keep this after the legacy logging
+    # setup so it replaces that formatter, and pair it with the launcher's log_config=None
+    # so Uvicorn cannot replace it again after app construction.
+    from engraphis.observability import configure_structured_logging
+    configure_structured_logging()
 
     app = FastAPI(
         title="Engraphis",
@@ -59,6 +194,9 @@ def create_app() -> FastAPI:
                     "interaction-aware recall, bi-temporal facts, and background "
                     "consolidation. Local-first; you bring the LLM.",
         version=__version__,
+        lifespan=_lifespan,
+        docs_url=None,
+        redoc_url=None,
     )
 
     # Local-first CORS: loopback by default, override with ENGRAPHIS_CORS_ORIGINS.
@@ -71,21 +209,42 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(
+        _VaultUploadLimitMiddleware,
+        max_bytes=VAULT_UPLOAD_REQUEST_BYTES,
+    )
 
-    # Optional bearer-token auth. Active only when ENGRAPHIS_API_TOKEN is set.
+    # Bearer-token auth when ENGRAPHIS_API_TOKEN is set; loopback-only otherwise.
     # Health-type probes (liveness + readiness) stay unauthenticated by convention.
     _PUBLIC_PREFIXES = ("/memory/health", "/api/health", "/api/ready",
-                        "/docs", "/openapi.json", "/redoc", "/static")
+                        "/openapi.json", "/static")
+
+    from engraphis.netutil import is_local_request
 
     @app.middleware("http")
     async def _require_token(request: Request, call_next):
         token = settings.api_token
-        if token and request.method != "OPTIONS" and request.url.path != "/" \
-                and not request.url.path.startswith(_PUBLIC_PREFIXES):
-            header = request.headers.get("authorization", "")
-            presented = header[7:].strip() if header.lower().startswith("bearer ") else ""
-            if not _const_time_eq(presented, token):
+        if request.method == "OPTIONS" or request.url.path == "/" \
+                or request.url.path.startswith(_PUBLIC_PREFIXES):
+            return await call_next(request)
+        if token:
+            if not bearer_ok(request.headers.get("authorization"), token):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
+            return await call_next(request)
+
+        # Zero-config access is loopback-only, matching dashboard_app's gate.  Without
+        # this backstop a bind-all deployment (docker-entrypoint.sh defaults
+        # ENGRAPHIS_HOST to "::") publishes /memory/export and /memory/admin/* to every
+        # reachable peer.  scripts/graph_server.py already refuses the equivalent
+        # non-loopback start; this applies the same rule to the v1 surface.
+        if not is_local_request(request):
+            return JSONResponse(
+                {
+                    "error": "remote access is disabled until ENGRAPHIS_API_TOKEN is set",
+                    "auth": "local-token-required",
+                },
+                status_code=403,
+            )
         return await call_next(request)
 
     # Optional in-process rate limiting (per-client-IP sliding window). Disabled unless
@@ -101,7 +260,7 @@ def create_app() -> FastAPI:
             nonlocal _last_prune
             if request.method == "OPTIONS" or request.url.path.startswith(_PUBLIC_PREFIXES):
                 return await call_next(request)
-            client = request.client.host if request.client else "unknown"
+            client = client_ip(request)
             now = time.monotonic()
             # Periodically prune stale IP entries to prevent unbounded growth.
             if now - _last_prune > _PRUNE_EVERY:
@@ -141,11 +300,12 @@ def create_app() -> FastAPI:
         )
         return response
 
-    # Database initialization deferred to startup event so CLI can set ENGRAPHIS_DB_PATH first
-    @app.on_event("startup")
-    async def _startup_db():
-        init_db()
+    # Baseline security response headers, outermost of all (registered after the log
+    # middleware, so it wraps it) — see engraphis.http_security.
+    from engraphis import http_security
+    http_security.install(app)
 
+    # DB init + background loop lifecycle live in _lifespan (above); see FastAPI(lifespan=…).
     app.include_router(memory_router)
     app.include_router(vault_router)
 
@@ -163,31 +323,12 @@ def create_app() -> FastAPI:
         try:
             get_conn().execute("SELECT 1").fetchone()
             checks["db"] = True
-        except Exception as e:
-            logger.warning("Readiness: db check failed: %s", e)
+        except Exception as exc:
+            logger.warning("Readiness: db check failed (%s)", type(exc).__name__)
         checks["embedder"] = _embedder_ready()
         ready = all(checks.values())
         return JSONResponse({"ready": ready, "checks": checks, "version": __version__},
                             status_code=200 if ready else 503)
-
-    @app.on_event("startup")
-    async def _startup() -> None:
-        global _background_task
-        if settings.loop_interval > 0:
-            _background_task = asyncio.create_task(_consciousness_loop())
-            logger.info("Background consciousness loop started (interval=%ds)", settings.loop_interval)
-        else:
-            logger.info("Background loop disabled (ENGRAPHIS_LOOP_INTERVAL=0)")
-
-    @app.on_event("shutdown")
-    async def _shutdown() -> None:
-        global _background_task
-        if _background_task:
-            _background_task.cancel()
-            try:
-                await _background_task
-            except asyncio.CancelledError:
-                pass
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard():
@@ -206,6 +347,7 @@ def create_app() -> FastAPI:
 
 async def _consciousness_loop() -> None:
     """Phase 2 + Phase 4 background cycle: decay → thought synthesis → reweight."""
+    _consecutive_errors = 0
     while True:
         try:
             await asyncio.sleep(settings.loop_interval)
@@ -218,11 +360,20 @@ async def _consciousness_loop() -> None:
                 persist=True,
             )
             if result.get("persisted"):
-                logger.info("Thought synthesized: %s", result.get("thought"))
+                # A synthesized thought is memory content. Never copy it into logs.
+                logger.info(
+                    "Thought synthesized and persisted (sources=%d)",
+                    int(result.get("source_count") or 0),
+                )
+            _consecutive_errors = 0
         except asyncio.CancelledError:
             raise
-        except Exception as e:
-            logger.error("Consciousness loop error: %s", e)
+        except Exception as exc:
+            _consecutive_errors += 1
+            backoff = min(60, settings.loop_interval * (2 ** _consecutive_errors))
+            logger.error("Consciousness loop error (%s), backing off %ds",
+                         type(exc).__name__, backoff)
+            await asyncio.sleep(backoff)
 
 
 app = create_app()
