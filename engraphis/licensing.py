@@ -2,10 +2,7 @@
 
 Open-core with signed keys: the free core is complete and Apache-2.0; Pro/Team features
 activate with an ``ENGR1.<payload>.<signature>`` key whose JSON payload is Ed25519-signed
-by the vendor. Verification is **offline and pure stdlib** — no phone-home, no license
-server, no new dependency — so the numpy-only core guarantee (AGENTS.md §3) and the
-local-first promise both hold. A determined user can fork the gate out (Apache-2.0); that
-is the accepted Sidekiq-style trade — we sell convenience and support, not DRM.
+by the vendor.
 
 Ed25519 is implemented here from RFC 8032 (verify *and* sign — the vendor CLI
 ``scripts/license_admin.py`` reuses the same math; the private key itself never ships).
