@@ -248,3 +248,115 @@ def compute_analytics(store: Any, workspace_id: str, *, now: Optional[float] = N
         "WHERE e.workspace_id=? GROUP BY e.id, e.name, e.etype "
         "ORDER BY n DESC, e.created_at DESC LIMIT 8", (workspace_id,))]
     return analytics_from_rows(mem_rows, audit_counts, entity_rows, now=now)
+
+
+# ── cross-workspace portfolio view (Pro) ──────────────────────────────────────
+
+#: Cap on merged top_entities in the portfolio payload — same width as the
+#: per-workspace query's LIMIT so the rollup never widens what one page shows.
+_PORTFOLIO_TOP_ENTITIES = 8
+
+
+def portfolio_rollup(per_workspace: dict) -> dict:
+    """Pure cross-workspace aggregation over :func:`analytics_from_rows` payloads.
+
+    ``per_workspace`` maps workspace *name* → analytics payload. All payloads must
+    share the same ``now`` (see :func:`compute_portfolio`) so weekly growth buckets
+    align; sums are then exact. ``avg_retention`` is re-weighted by live counts
+    rather than naively averaged. Per-workspace summary rows are sorted by live
+    count (desc), then name, so the busiest workspace leads the view.
+    """
+    growth = [0] * _GROWTH_WEEKS
+    hist = [0] * _HIST_BUCKETS
+    live = all_rows = superseded = pinned = at_risk_7 = at_risk_30 = 0
+    ret_weighted = 0.0
+    by_type: dict = {}
+    resolver_mix: dict = {}
+    entities: list = []
+    ws_rows: list = []
+    generated = 0.0
+
+    for name in sorted(per_workspace):
+        d = per_workspace[name]
+        t = d.get("totals") or {}
+        f = d.get("decay_forecast") or {}
+        n_live = int(t.get("live", 0))
+        live += n_live
+        all_rows += int(t.get("all_rows", 0))
+        superseded += int(t.get("superseded", 0))
+        pinned += int(t.get("pinned", 0))
+        ret_weighted += float(t.get("avg_retention", 0.0)) * n_live
+        at_risk_7 += int(f.get("at_risk_7d", 0))
+        at_risk_30 += int(f.get("at_risk_30d", 0))
+        for i, n in enumerate(list(d.get("growth_weekly") or [])[-_GROWTH_WEEKS:]):
+            growth[i] += int(n)
+        counts = list((d.get("retention_histogram") or {}).get("counts") or [])
+        for i, n in enumerate(counts[:_HIST_BUCKETS]):
+            hist[i] += int(n)
+        for k, v in (d.get("by_type") or {}).items():
+            by_type[k] = by_type.get(k, 0) + int(v)
+        for k, v in (d.get("resolver_mix") or {}).items():
+            resolver_mix[k] = resolver_mix.get(k, 0) + int(v)
+        for e in d.get("top_entities") or []:
+            entities.append({"name": e.get("name", ""), "etype": e.get("etype", ""),
+                             "n": int(e.get("n") or 0), "workspace": name})
+        generated = max(generated, float(d.get("generated_at") or 0.0))
+        ws_rows.append({
+            "workspace": name, "live": n_live,
+            "all_rows": int(t.get("all_rows", 0)),
+            "superseded": int(t.get("superseded", 0)),
+            "pinned": int(t.get("pinned", 0)),
+            "avg_retention": float(t.get("avg_retention", 0.0)),
+            "at_risk_7d": int(f.get("at_risk_7d", 0)),
+            "at_risk_30d": int(f.get("at_risk_30d", 0)),
+        })
+
+    ws_rows.sort(key=lambda w: (-w["live"], w["workspace"]))
+    entities.sort(key=lambda e: (-e["n"], e["name"]))
+    return {
+        "generated_at": generated or time.time(),
+        "workspaces": ws_rows,
+        "totals": {
+            "workspaces": len(ws_rows),
+            "live": live,
+            "all_rows": all_rows,
+            "superseded": superseded,
+            "pinned": pinned,
+            "avg_retention": round(ret_weighted / live, 4) if live else 0.0,
+        },
+        "growth_weekly": growth,
+        "retention_histogram": {
+            "buckets": ["0–20%", "20–40%", "40–60%", "60–80%", "80–100%"],
+            "counts": hist,
+        },
+        "decay_forecast": {
+            "threshold": FORGET_THRESHOLD,
+            "at_risk_7d": at_risk_7,
+            "at_risk_30d": at_risk_30,
+        },
+        "by_type": by_type,
+        "resolver_mix": {k: int(v) for k, v in sorted(resolver_mix.items())},
+        "top_entities": entities[:_PORTFOLIO_TOP_ENTITIES],
+    }
+
+
+def compute_portfolio(store: Any, workspaces: Iterable, *,
+                      now: Optional[float] = None) -> dict:
+    """SQL wrapper for the cross-workspace portfolio view.
+
+    ``workspaces`` is an iterable of ``(workspace_id, name)`` pairs — the
+    *caller's permitted set* (e.g. what ``MemoryService.list_workspaces`` returns
+    under its team-auth boundary). This function never enumerates workspaces
+    itself, so it cannot widen access beyond what the caller may see.
+
+    Gate: ``require_feature("analytics")`` here, plus once per workspace inside
+    :func:`compute_analytics` — same single "analytics" feature as the
+    single-workspace dashboard, checked in the computation module per house rule.
+    A shared ``now`` keeps every workspace's weekly buckets aligned for the sum.
+    """
+    from engraphis.licensing import require_feature
+    require_feature("analytics")
+
+    now = time.time() if now is None else now
+    return portfolio_rollup({
+        name: compute_analytics(store, wid, now=now) for wid, name in workspaces})
