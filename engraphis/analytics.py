@@ -4,10 +4,10 @@ House style (AGENTS.md §3): the math is a pure, tested function over plain rows
 (:func:`analytics_from_rows`); SQL lives only in the thin :func:`compute_analytics`
 wrapper. stdlib + core only — no new dependency, no LLM, no network.
 
-Gating note: the *license check does not live here*. This module computes for whoever
-calls it; the Inspector's HTTP layer enforces ``require_feature("analytics")``. Keeping
-the gate at the edge means the core stays honestly open (Apache-2.0) and the paid
-surface is exactly one, auditable place.
+Gating: ``require_feature("analytics")`` is called inside :func:`compute_analytics`.
+Every caller — the Inspector, the v1 dashboard, the v2 dashboard — passes through
+this one gate, so a bypass-er has to find and modify the compiled licensing module
+rather than just deleting a decorator.
 """
 from __future__ import annotations
 
@@ -227,7 +227,14 @@ def render_analytics_html(data: dict, *, workspace: str, version: str = "") -> s
 
 
 def compute_analytics(store: Any, workspace_id: str, *, now: Optional[float] = None) -> dict:
-    """SQL wrapper: fetch rows for one workspace, delegate to the pure function."""
+    """SQL wrapper: fetch rows for one workspace, delegate to the pure function.
+
+    Gate lives here so every caller (Inspector, v1 dashboard, v2 dashboard)
+    passes through a single, auditable check inside the computation module
+    rather than at every HTTP endpoint."""
+    from engraphis.licensing import require_feature
+    require_feature("analytics")
+
     conn = store.conn
     mem_rows = [dict(r) for r in conn.execute(
         "SELECT mtype, stability, last_access, ingested_at, importance, pinned, "
