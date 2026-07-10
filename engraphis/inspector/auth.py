@@ -123,6 +123,8 @@ class AuthStore:
 
     def create_user(self, email: str, name: str, password: str, role: str,
                     *, seat_limit: Optional[int] = None) -> dict:
+        from engraphis.licensing import require_feature
+        require_feature("team")
         email = self._clean_email(email)
         name = (name or "").strip()[:120]
         if role not in ROLES:
