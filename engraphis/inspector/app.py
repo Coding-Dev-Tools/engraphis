@@ -19,9 +19,7 @@ Free single-user behaviour is byte-for-byte unchanged when team mode is off.
 from __future__ import annotations
 
 import hmac
-import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -33,6 +31,7 @@ from pydantic import BaseModel, Field
 
 from engraphis import __version__, licensing
 from engraphis.analytics import compute_analytics, render_analytics_html
+from engraphis.billing import router as billing_router
 from engraphis.config import settings
 from engraphis.inspector.auth import (
     SESSION_TTL_SECONDS, AuthError, AuthStore, min_role as _min_role, role_at_least,
@@ -228,6 +227,17 @@ def create_app(service: Optional[MemoryService] = None,
         resp.headers["Pragma"] = "no-cache"
         resp.headers["Expires"] = "0"
         return resp
+
+    # ── vendored assets (local-first: the graph renderer must work offline) ─
+    _VENDOR_DIR = Path(__file__).parent / "vendor"
+
+    @app.get("/vendor/force-graph.min.js", include_in_schema=False)
+    async def vendor_force_graph():
+        """force-graph (MIT, see vendor/force-graph.LICENSE), served locally so the
+        Graph tab never depends on a CDN — the page must render fully offline."""
+        return FileResponse(_VENDOR_DIR / "force-graph.min.js",
+                            media_type="text/javascript",
+                            headers={"Cache-Control": "public, max-age=604800"})
 
     # ── auth & licensing ────────────────────────────────────────────────────
     @app.get("/api/auth/state")
@@ -436,74 +446,8 @@ def create_app(service: Optional[MemoryService] = None,
                                  archive_below=body.archive_below)
 
     # ── Polar webhook: auto-fulfill license keys on purchase ────────────────
-    @app.post("/webhooks/polar")
-    async def polar_webhook(request: Request):
-        """Receive Polar ``order.paid`` events, issue a signed license key, and
-        email it to the buyer. Signature is verified against the webhook secret
-        set in the Polar dashboard (POLAR_WEBHOOK_SECRET env var).
-
-        Returns 202 on success (including no-op for non-order events), 403 on
-        bad signature, 400 on unparsable payload."""
-        import base64
-        import hashlib
-        import hmac as _hmac
-
-        secret = os.environ.get("POLAR_WEBHOOK_SECRET", "").strip()
-        if not secret:
-            return JSONResponse(
-                {"error": "POLAR_WEBHOOK_SECRET not configured"}, status_code=500)
-
-        raw_body = await request.body()
-        body_str = raw_body.decode("utf-8")
-
-        # Standard Webhooks: signed content = "{webhook-id}.{webhook-timestamp}.{body}"
-        # The secret is base64-encoded; Polar uses Standard Webhooks semantics.
-        webhook_id = request.headers.get("webhook-id", "")
-        timestamp = request.headers.get("webhook-timestamp", "")
-        signature_header = request.headers.get("webhook-signature", "")
-
-        if not webhook_id or not timestamp or not signature_header:
-            return JSONResponse({"error": "missing webhook headers"}, status_code=400)
-
-        try:
-            secret_bytes = base64.b64decode(secret)
-        except Exception:
-            return JSONResponse({"error": "POLAR_WEBHOOK_SECRET is not valid base64"}, status_code=500)
-
-        signed_content = f"{webhook_id}.{timestamp}.{body_str}".encode("utf-8")
-        expected_digest = _hmac.new(secret_bytes, signed_content, hashlib.sha256).digest()
-        expected_b64 = base64.b64encode(expected_digest).decode("ascii")
-
-        # signature_header is e.g. "v1,AbCd..." — extract the base64 part
-        sig_parts = signature_header.split(",")
-        if len(sig_parts) < 2:
-            logger.warning("polar webhook: unparseable signature header")
-            return JSONResponse({"error": "invalid signature format"}, status_code=403)
-
-        sig_b64 = sig_parts[-1].strip()
-        if not _hmac.compare_digest(expected_b64, sig_b64):
-            logger.warning("polar webhook: invalid signature")
-            return JSONResponse({"error": "invalid signature"}, status_code=403)
-
-        try:
-            event = json.loads(body_str)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return JSONResponse({"error": "invalid JSON"}, status_code=400)
-
-        event_type = (event.get("type") or "").strip()
-
-        if event_type != "order.paid":
-            # Acknowledge but skip — we only act on paid orders
-            return JSONResponse({"status": "ignored", "type": event_type}, status_code=202)
-
-        from engraphis.inspector.webhooks import handle_order_paid
-        try:
-            key = handle_order_paid(event.get("data") or event)
-            if key:
-                logger.info("polar webhook: issued key for order %s", event.get("id", "?"))
-            return JSONResponse({"status": "fulfilled", "key_issued": bool(key)}, status_code=202)
-        except Exception as exc:
-            logger.exception("polar webhook: fulfillment failed")
-            return JSONResponse({"error": "fulfillment failed: %s" % exc}, status_code=500)
+    # Route lives in engraphis.billing so the public server (engraphis/app.py) and
+    # this Inspector serve identical fulfillment logic — no drift between the two.
+    app.include_router(billing_router)
 
     return app
