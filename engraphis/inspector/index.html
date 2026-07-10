@@ -463,7 +463,7 @@ function openLicenseDlg() {
   frag.append(ul);
   if (lic.plan === "free" || !lic.plan)
     frag.append(el("p",{},el("a",{href:lic.purchase_url||"#",target:"_blank",
-      rel:"noopener noreferrer",text:"Engraphis Pro & Team — coming soon →"})));
+      rel:"noopener noreferrer",text:"Get a license key (3-day free trial) →"})));
   frag.append(el("label",{for:"license-key-in",text:"Paste a license key to activate"}));
   const ta = el("textarea",{id:"license-key-in",rows:"3",
     placeholder:"ENGR1.xxxxx.yyyyy","aria-label":"License key"});
@@ -639,7 +639,7 @@ function renderTeaser(host, feature, title, err) {
   const banner = el("div",{class:"upgrade-banner",role:"note"},
     el("strong",{text:`${title} — ${tier} feature`}),
     el("span",{text:(lic.known_features||{})[feature] || ""}),
-    el("a",{href:url,target:"_blank",rel:"noopener noreferrer",text:"coming soon →"}),
+    el("a",{href:url,target:"_blank",rel:"noopener noreferrer",text:"Get a license key (3-day free trial) →"}),
     el("button",{text:"I have a key",onclick:openLicenseDlg}));
   host.replaceChildren(banner);
 }
