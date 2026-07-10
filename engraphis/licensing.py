@@ -163,9 +163,8 @@ PLAN_FEATURES: dict = {
 
 #: Where to buy — shown by the Inspector's license dialog and error messages.
 #: ``ENGRAPHIS_UPGRADE_URL`` overrides (set it to the live checkout/pricing page);
-#: the default is the README's pricing section anchor
-#: ("Free forever vs. Pro") on the public repo, which always exists.
-DEFAULT_UPGRADE_URL = "https://github.com/Coding-Dev-Tools/engraphis#free-forever-vs-pro"
+#: the default is the Polar checkout link.
+DEFAULT_UPGRADE_URL = "https://buy.polar.sh/polar_cl_n6CR3ERqOus2VUhRrGrsRUqOB8yjDTeEU7p1r3CRrae"
 
 
 def upgrade_url() -> str:
@@ -388,7 +387,7 @@ def require_feature(feature: str) -> None:
         desc = FEATURES.get(feature, feature)
         tier = required_plan(feature)
         raise LicenseError(
-            "'%s' is an Engraphis %s feature (%s). Unlock at %s, then paste your key "
+            "'%s' is an Engraphis %s feature (%s). Start a 3-day free trial at %s, then paste your key "
             "in the Inspector's license dialog, set ENGRAPHIS_LICENSE_KEY, or save it "
             "to ~/.engraphis/license.key."
             % (feature, tier.capitalize(), desc, upgrade_url()), feature=feature)
