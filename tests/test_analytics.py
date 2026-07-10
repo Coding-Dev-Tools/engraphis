@@ -59,7 +59,8 @@ def test_growth_buckets_place_old_memories_correctly():
     assert sum(out["growth_weekly"]) == 1
 
 
-def test_compute_analytics_over_a_real_store():
+def test_compute_analytics_over_a_real_store(monkeypatch):
+    monkeypatch.setattr("engraphis.licensing.has_feature", lambda f: True)
     svc = MemoryService.create(":memory:")
     svc.remember("Deploy target is region iad.", workspace="acme", repo="infra")
     out2 = svc.remember("Deploy target is region fra as of March.",

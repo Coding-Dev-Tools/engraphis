@@ -782,8 +782,11 @@ class MemoryService:
         """Full bi-temporal dump of one workspace — memories (live *and* superseded),
         sessions, and the audit trail. The compliance story in one artifact: nothing is
         ever silently deleted, and the export proves it. Scope-checked like any other
-        read; the Pro license gate lives in the HTTP layer (inspector/app.py), keeping
-        the service honest for OSS callers."""
+        read; the Pro license gate lives here so every caller (Inspector, v1 dashboard,
+        v2 dashboard) passes through one check."""
+        from engraphis.licensing import require_feature
+        require_feature("export")
+
         wid, _ = self._require_scope(workspace, None)
         conn = self.store.conn
         memories = [dict(r) for r in conn.execute(
