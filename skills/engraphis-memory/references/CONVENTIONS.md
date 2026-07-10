@@ -103,3 +103,29 @@ engraphis_remember(
 ```
 
 Scoped, typed, self-justifying, deduped by default. That is the whole discipline.
+
+
+## Recurring operational events — deterministic type rule
+
+Fleet/cron jobs kept flipping types on identical recurring events ("Orchestrator tick",
+"Pre-PR blocked-noop") because such events fit both "a happening → episodic" and "a right-now →
+working". The rule is now deterministic:
+
+**Routine scheduled-run outcomes (ticks, no-ops, health checks, watchdog passes) are ALWAYS
+episodic** — use `engraphis_record_event` with a *stable* `kind` string (e.g. `orchestrator-tick`,
+`pre-pr-blocked-noop`) and low importance (≤0.2). Dedup/reinforcement handles repeats.
+
+- Never `working`: a run's outcome outlives the run. `working` is reserved for state meaningful
+  only inside the *current* session ("currently bisecting on branch fix/auth").
+- Never `semantic` at write time: a single occurrence is not a durable fact. Promoting a
+  recurring pattern into a `semantic` digest is the consolidation sweep's job
+  (`engraphis_consolidate`), not the writer's.
+
+Decision test — apply **in order**, first match wins:
+
+1. Steps to redo something? → `procedural`
+2. True regardless of when you look? → `semantic`
+3. Happened at a point in time (including every scheduled run)? → `episodic`
+4. Meaningful only until this session ends? → `working`
+
+Applied in order, identical recurring events land on `episodic` every time.
