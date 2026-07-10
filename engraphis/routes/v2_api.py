@@ -174,6 +174,49 @@ def workspaces():
     return _run(service().list_workspaces)
 
 
+class _RenameWsReq(BaseModel):
+    workspace: str
+    new_name: str
+
+
+@router.post("/workspaces/rename")
+def workspaces_rename(req: _RenameWsReq):
+    return _run(service().rename_workspace, req.workspace, req.new_name)
+
+
+class _DescribeWsReq(BaseModel):
+    workspace: str
+    description: str = ""
+
+
+@router.post("/workspaces/describe")
+def workspaces_describe(req: _DescribeWsReq):
+    return _run(service().set_workspace_description, req.workspace, req.description)
+
+
+class _DeleteWsReq(BaseModel):
+    workspace: str
+
+
+@router.post("/workspaces/delete")
+def workspaces_delete(req: _DeleteWsReq):
+    return _run(service().delete_workspace, req.workspace)
+
+
+class _UpdateMemReq(BaseModel):
+    id: str
+    workspace: Optional[str] = None
+    title: Optional[str] = None
+    memory_type: Optional[str] = None
+
+
+@router.post("/memory/update")
+def memory_update(req: _UpdateMemReq):
+    ws = req.workspace or _default_ws()
+    return _run(service().update_memory, req.id, workspace=ws,
+                title=req.title, mtype=req.memory_type)
+
+
 @router.get("/stats")
 def stats(workspace: Optional[str] = None):
     return _run(service().stats, workspace=workspace)
