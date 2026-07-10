@@ -166,11 +166,9 @@ The same `MemoryService` backs the dashboard, the Inspector, and the MCP server.
 The engine, dashboard, Inspector, MCP server, and governance tools are free and Apache-2.0,
 permanently. A license key (verified **offline** — no phone-home) unlocks the paid layer.
 
-> **⚠️ Pro and Team are coming soon — not available for purchase yet.** Features below
-> are built and gated but keys are not sold today. Do not pay anyone for an Engraphis license
-> right now. Prices are targets, not live.
+> **[Get a license key →](https://buy.polar.sh/polar_cl_n6CR3ERqOus2VUhRrGrsRUqOB8yjDTeEU7p1r3CRrae)** Start a 3-day free trial — unlock analytics, compliance export, and team mode. Keys are verified offline — no phone-home.
 
-| | Free (available now) | Pro — coming soon | Team — coming soon |
+| | Free (available now) | Pro | Team |
 |---|---|---|---|
 | Dashboard WebUI + Inspector | ✓ | ✓ | ✓ |
 | Memory engine + 18 MCP tools | ✓ | ✓ | ✓ |

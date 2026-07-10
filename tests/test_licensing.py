@@ -140,7 +140,7 @@ def test_bad_env_key_degrades_to_free_with_reason(monkeypatch):
 
 
 def test_require_feature_message_is_actionable():
-    with pytest.raises(LicenseError, match="github.com/Coding-Dev-Tools/engraphis"):
+    with pytest.raises(LicenseError, match="polar.sh"):
         require_feature("analytics")
 
 
@@ -168,10 +168,10 @@ def test_required_plan_maps_features_to_cheapest_tier():
     assert lic.required_plan("unknown-flag") == "team"
 
 
-def test_upgrade_url_default_is_the_readme_pricing_anchor(monkeypatch):
+def test_upgrade_url_default_is_the_polar_checkout(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_UPGRADE_URL", raising=False)
     assert lic.upgrade_url() == lic.DEFAULT_UPGRADE_URL
-    assert "#free-forever-vs-pro" in lic.upgrade_url()
+    assert "polar.sh" in lic.upgrade_url()
 
 
 def test_upgrade_url_env_override_wins_everywhere(monkeypatch):
@@ -209,7 +209,7 @@ def test_rotated_vendor_key_clears_the_dev_key_warning(monkeypatch):
 
 def test_production_warnings_flag_placeholder_checkout(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(b"\x09" * 32).hex())
-    monkeypatch.delenv("ENGRAPHIS_UPGRADE_URL", raising=False)  # default = github anchor
+    monkeypatch.setenv("ENGRAPHIS_UPGRADE_URL", "https://github.com/Coding-Dev-Tools/engraphis")
     assert any("checkout" in w for w in lic.production_warnings())
     monkeypatch.setenv("ENGRAPHIS_UPGRADE_URL", "https://buy.example.com/engraphis")
     assert not any("checkout" in w for w in lic.production_warnings())
