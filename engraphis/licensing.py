@@ -235,7 +235,7 @@ def _monotonic_now() -> float:
         try:
             _MONOTONIC_FILE.parent.mkdir(parents=True, exist_ok=True)
             tmp = _MONOTONIC_FILE.with_name(_MONOTONIC_FILE.name + ".tmp")
-            tmp.write_text("%d" % int(anchor), encoding="utf-8")
+            tmp.write_text(repr(anchor), encoding="utf-8")  # full float precision
             os.replace(tmp, _MONOTONIC_FILE)
         except OSError:
             pass
