@@ -185,16 +185,17 @@ def upgrade_url(plan: Optional[str] = None) -> str:
             or DEFAULT_PRO_UPGRADE_URL)
 
 _KEY_PREFIX = "ENGR1"
-# Pinned **production** Ed25519 verify key (32-byte public half). Rotated 2026-07-08
-# away from the dev keypair (see _DEV_VENDOR_PUBKEY_HEX below): the dev private seed had
-# been on dev boxes / in agent sessions, so it is treated as compromised and was
-# overwritten. The new private seed lives ONLY in the gitignored `.secrets/vendor_signing.key`
+# Pinned **production** Ed25519 verify key (32-byte public half). Rotated 2026-07-11
+# to a fresh CSPRNG keypair, retiring BOTH the original dev keypair (see
+# _DEV_VENDOR_PUBKEY_HEX below) and the interim 2026-07-08 key d3520482…9e08, which is
+# now treated as retired out of caution. Any license signed by an older seed no longer
+# verifies. The private seed lives ONLY in the gitignored `.secrets/vendor_signing.key`
 # on the issuance machine — it never ships in this repo, never in .env, never in any agent
 # session. Anyone with only this repo CANNOT forge a valid key. Re-generate on an
 # offline/trusted machine before the first real sale.
 # ROTATE BEFORE SELLING: run `python -m scripts.license_admin keygen --force` and replace
 # this constant with the printed public key.
-_VENDOR_PUBKEY_HEX = "d3520482d87a22f7e39e95cfa4b40bc2460f2576213868ba99ea1e4ea7719e08"
+_VENDOR_PUBKEY_HEX = "0f9ede880d65184f4615221d03e8127c38e1b7a8f8d789a050780ae50c36421d"
 # Frozen fingerprint of the OLD, known-compromised dev keypair. Kept as a sentinel so
 # is_default_vendor_key() / production_warnings() can flag it if anyone ever re-pins it.
 # Its private half does NOT ship in this repo (`.secrets/` is gitignored), but it was
