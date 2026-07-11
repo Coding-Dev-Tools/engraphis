@@ -218,6 +218,11 @@ def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
     }
     key = compose_key(payload, secret)
     logger.info("issued %s key for %s (expires in %d days)", plan, email_addr, days)
+    try:  # registry is best-effort; a write failure must never block fulfillment/email
+        from engraphis.inspector.license_registry import record_issued
+        record_issued(key)
+    except Exception as exc:
+        logger.warning("could not record issued key in registry: %s", exc)
     return key
 
 

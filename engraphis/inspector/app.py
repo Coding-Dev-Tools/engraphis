@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 from engraphis import __version__, licensing
 from engraphis.analytics import compute_analytics, render_analytics_html
 from engraphis.billing import router as billing_router
+from engraphis.inspector.sync_relay import router as sync_relay_router
 from engraphis.config import settings
 from engraphis.inspector.auth import (
     SESSION_TTL_SECONDS, AuthError, AuthStore, min_role as _min_role, role_at_least,
@@ -435,5 +436,6 @@ def create_app(service: Optional[MemoryService] = None,
     # Route lives in engraphis.billing so the public server (engraphis/app.py) and
     # this Inspector serve identical fulfillment logic — no drift between the two.
     app.include_router(billing_router)
+    app.include_router(sync_relay_router)
 
     return app
