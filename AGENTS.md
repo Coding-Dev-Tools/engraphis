@@ -224,6 +224,18 @@ These are pure, unit-tested functions — change them only with a corresponding 
   allow-list, governance tools (`forget`/`pin`/`correct`, audited, never a hard delete),
   Apache-2.0 licensing/packaging. **Not done:** encryption at rest, built-in rate limiting,
   per-token tenant authorization — see `SECURITY.md`.
+- **Done — manual merge (N→1 governance op):** `MemoryEngine.merge()` /
+  `MemoryService.merge()` combine several selected memories into one — the multi-input
+  generalization of `correct`. Sources are bi-temporally closed (retired into history,
+  never hard-deleted), the new memory records `supersedes` on every source (so the
+  supersession chain renders — `service._chain_for` now walks *all* predecessors, not a
+  single line) plus a `merges` link back to each. Safety-inherits the strictest of its
+  sources: `trusted:false` if any source is untrusted (no laundering) and the highest
+  `sensitivity`; pinned if any source was pinned. Audited on both sides with a
+  token-compaction number. Exposed on the dashboard (`POST /api/merge`, multi-select +
+  merge modal in the Memories tab) over the shared `MemoryService`; not yet an MCP tool.
+  Distinct from `consolidate`, which is automatic, episodic-only, and *non-destructive*
+  (sources stay live). Tests: `tests/test_merge.py`.
 - **Done — Phase 4 (first shipping cut):** the consolidation loop
   (`core/consolidate.py` + `scripts/consolidate.py` + `engraphis_consolidate` MCP tool +
   Inspector button): recurring episodics → semantic digests (linked `consolidates`, audited),
