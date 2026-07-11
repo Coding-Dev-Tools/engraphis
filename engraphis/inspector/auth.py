@@ -171,7 +171,8 @@ class AuthStore:
         ).fetchone()["n"])
 
     def update_user(self, user_id: str, *, role: Optional[str] = None,
-                    disabled: Optional[bool] = None) -> dict:
+                    disabled: Optional[bool] = None,
+                    seat_limit: Optional[int] = None) -> dict:
         user = self.get_user(user_id)
         if user is None:
             raise AuthError("no such user")
@@ -180,6 +181,15 @@ class AuthStore:
                         ((role is not None and role != "admin") or disabled))
         if losing_admin and self._count_active_admins() <= 1:
             raise AuthError("cannot demote or disable the last active admin")
+        # Re-enabling a disabled user consumes a seat, exactly like creating one, so it must
+        # honour the same licensed cap. Without this a team could exceed its paid seats via
+        # disable → add a replacement → re-enable the original — a path create_user's own
+        # seat check can't see.
+        reenabling = disabled is False and bool(user["disabled"])
+        if reenabling and seat_limit is not None and self.count_active_users() >= seat_limit:
+            raise AuthError(
+                "seat limit reached (%d) — upgrade your Team license for more seats"
+                % seat_limit)
         if role is not None:
             if role not in ROLES:
                 raise AuthError("role must be one of: %s" % ", ".join(ROLES))
