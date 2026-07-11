@@ -89,7 +89,12 @@ def create_app() -> FastAPI:
         if not path.startswith("/api/") or path in _PUBLIC or path.startswith("/api/docs") \
                 or path.startswith("/api/openapi"):
             return await call_next(request)
-        if team_enabled and auth_store is not None and licensing.has_feature("team"):
+        # Service-account bearer token bypass — skips team auth entirely,
+        # allowing CI/CD scripts and automation to use the same ENGRAPHIS_API_TOKEN
+        # regardless of whether team mode is enabled.
+        if settings.api_token and _bearer_ok(request):
+            return await call_next(request)
+        if team_enabled and auth_store is not None:
             from engraphis.inspector.auth import min_role, role_at_least
             from engraphis.routes.v2_team import _COOKIE
             user = auth_store.resolve_session(request.cookies.get(_COOKIE, ""))
