@@ -8,6 +8,7 @@ main point of this file — lock in that graph() enforces the same
 workspace-binding isolation boundary as every other read (service.py's
 _clean_ws), which the dashboard-only implementation it replaced did not.
 """
+from engraphis.backends.graph_extractor import get_graph_extractor
 from engraphis.service import MemoryService, ValidationError
 
 
@@ -65,3 +66,45 @@ def test_graph_allows_its_own_bound_workspace():
     _seed_entities(svc, "alpha", [("Widget", "person_or_concept")], [])
     g = svc.graph(workspace="alpha")
     assert {n["id"] for n in g["nodes"]} == {"Widget"}
+
+
+def test_create_defaults_graph_extractor_on():
+    """The config default is "regex", so a plain create() wires an extractor —
+    every front end populates the graph without opting in (the wiring gap that
+    left settings.graph_extractor orphaned)."""
+    svc = MemoryService.create(":memory:")
+    assert svc.engine.graph_extractor is not None
+
+
+def test_remember_populates_graph_when_extractor_wired():
+    """Ingest through the wired extractor writes entities, so the Graph tab has
+    nodes for freshly remembered content (new users, day one)."""
+    svc = MemoryService.create(":memory:", graph_extractor="regex")
+    svc.remember("Alice Johnson works at Acme Corp.", workspace="acme",
+                 scope="workspace")
+    ids = {n["id"] for n in svc.graph(workspace="acme")["nodes"]}
+    assert "Alice Johnson" in ids and "Acme Corp" in ids
+
+
+def test_graph_lazy_backfills_preexisting_memories():
+    """Memories written while extraction was OFF have no entities. When extraction
+    is later enabled (an update), the first Graph-tab open backfills that
+    workspace's graph from its existing memories — no manual migration."""
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    svc.remember("Alice Johnson works at Acme Corp.", workspace="acme",
+                 scope="workspace")
+    assert svc.graph(workspace="acme")["nodes"] == []      # extractor off -> no backfill
+
+    svc.engine.graph_extractor = get_graph_extractor("regex")   # simulate the update
+    ids = {n["id"] for n in svc.graph(workspace="acme")["nodes"]}
+    assert "Alice Johnson" in ids and "Acme Corp" in ids
+
+
+def test_graph_lazy_backfill_is_idempotent():
+    """Re-opening the Graph tab must not duplicate entities."""
+    svc = MemoryService.create(":memory:", graph_extractor="regex")
+    svc.remember("Alice Johnson works at Acme Corp.", workspace="acme",
+                 scope="workspace")
+    first = svc.graph(workspace="acme")["stats"]["entities"]
+    second = svc.graph(workspace="acme")["stats"]["entities"]
+    assert first == second and first >= 2
