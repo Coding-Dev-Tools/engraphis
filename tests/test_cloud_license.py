@@ -191,3 +191,47 @@ def test_monotonic_clock_never_goes_backward(monkeypatch):
     t0 = licensing._monotonic_now()
     monkeypatch.setattr(licensing.time, "time", lambda: t0 - 100000)  # roll clock back
     assert licensing._monotonic_now() >= t0
+
+
+# ── team licensing: server-gated, seat-capped, revocable, lease-backed ─────────────────
+
+def test_team_key_registers_with_team_feature():
+    c = _app()
+    r = c.post("/license/v1/register",
+               json={"key": _key(plan="team", seats=3), "machine_id": "t1"})
+    assert r.status_code == 200
+    payload = cloud_license.verify_lease(r.json()["lease"])
+    assert payload["plan"] == "team" and "team" in payload["features"]
+
+
+def test_team_seat_cap_blocks_extra_devices():
+    c = _app()
+    key = _key(plan="team", seats=2)
+    assert c.post("/license/v1/register", json={"key": key, "machine_id": "d1"}).status_code == 200
+    assert c.post("/license/v1/register", json={"key": key, "machine_id": "d2"}).status_code == 200
+    over = c.post("/license/v1/register", json={"key": key, "machine_id": "d3"})
+    assert over.status_code == 402 and "seat" in over.json()["error"].lower()
+
+
+def test_team_feature_cannot_be_bypassed_in_cloud_mode(monkeypatch):
+    """The team gate (has_feature('team')) is lease-backed in cloud mode: a revoked team
+    key with no lease loses team capability — a local patch to trial/key can't restore it."""
+    c = _app()
+    _wire_register_to(c, monkeypatch)
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    key = _key(plan="team", seats=3)
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
+    assert licensing.current_license(refresh=True).plan == "team"
+    assert licensing.has_feature("team") is True                 # registered → team active
+    reg.revoke(parse_key(key).key_id)
+    cloud_license._LEASE_FILE.unlink()
+    licensing.current_license(refresh=True)
+    assert licensing.has_feature("team") is False                # revoked → team gone
+
+
+def test_trial_never_grants_team():
+    # the local trial is Pro-only; it must never unlock team (multi-user) capability
+    licensing.start_trial()
+    lic = licensing.current_license(refresh=True)
+    assert lic.is_trial and lic.plan == "pro"
+    assert licensing.has_feature("team") is False
