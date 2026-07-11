@@ -81,12 +81,14 @@ def _require_ws() -> str:
 
 
 def _mem(m: dict) -> dict:
-    """Normalize a v2 memory dict to the fields the dashboard cards render."""
+    """Normalize to dashboard-ready fields. Keeps raw field names (mtype, scope)
+    so the Inspector UI can share the same API responses without duplication."""
     return {
         "id": m.get("id") or m.get("memory_id") or "",
         "document_id": m.get("id") or m.get("memory_id") or "",
         "title": m.get("title") or "",
         "content": m.get("content") or m.get("summary") or "",
+        "mtype": m.get("mtype") or "semantic",
         "memory_type": m.get("mtype") or "semantic",
         "scope": m.get("scope") or "",
         "namespace": m.get("workspace") or m.get("scope") or "",
@@ -336,8 +338,11 @@ def proactive(workspace: Optional[str] = None, k: int = 10):
     ws = workspace or _default_ws()
     out = _run(service().recall_proactive, workspace=ws, k=k)
     mems = out.get("memories") or out.get("results") or []
+    # Return both key names — the legacy dashboard uses "handoff",
+    # the Inspector expects "last_session".
+    handoff = out.get("handoff") or out.get("last_session")
     return {"workspace": ws, "memories": [_mem(m) for m in mems],
-            "handoff": out.get("handoff") or out.get("last_session")}
+            "handoff": handoff, "last_session": handoff}
 
 
 @router.get("/audit")
@@ -388,8 +393,7 @@ def consolidate(req: _ConsolidateReq):
 # ── analytics (Pro) ───────────────────────────────────────────────────────────
 @router.get("/analytics/portfolio")
 def analytics_portfolio():
-    """Cross-workspace rollup. Same gate as /analytics; the workspace set comes
-    from list_workspaces(), so team-auth boundaries (allowed_workspaces) hold."""
+    """Cross-workspace rollup. Same gate as /analytics."""
     _paid("analytics")
     from engraphis.analytics import compute_portfolio
     svc = service()
@@ -402,22 +406,29 @@ def analytics_portfolio():
 @router.get("/analytics")
 def analytics(workspace: Optional[str] = None):
     _paid("analytics")
-    return _analytics_summary(workspace)
+    from engraphis.analytics import compute_analytics
+    svc = service()
+    ws = workspace or _require_ws()
+    wid, _ = svc._require_scope(ws, None)
+    return _run(lambda: compute_analytics(svc.store, wid))
 
 
-def _analytics_summary(workspace: Optional[str]) -> dict:
-    """Lightweight analytics summary (by-type + per-namespace distribution). The
-    Pro gate lives HERE, at the top of the computation, so the payload can never
-    be assembled on the free tier even if the route's ``_paid`` wrapper is deleted
-    (defense in depth; mirrors engraphis.analytics.compute_analytics)."""
-    licensing.require_feature("analytics")
-    st = _run(service().stats, workspace=workspace)
-    wss = _run(service().list_workspaces).get("workspaces") or []
-    by_type = [{"bucket": t, "count": c} for t, c in (st.get("by_type") or {}).items()]
-    ws_dist = [{"namespace": w["name"], "count": w.get("memories", 0)} for w in wss]
-    return {"by_type": by_type, "namespace_distribution": ws_dist,
-            "total_memories": st.get("memories", 0), "sessions": st.get("sessions", 0),
-            "workspaces": st.get("workspaces", 0)}
+@router.get("/analytics/export")
+def analytics_export(workspace: Optional[str] = None):
+    """Self-contained HTML analytics report — same Pro gate."""
+    _paid("analytics")
+    from engraphis.analytics import compute_analytics, render_analytics_html
+    import time as _time
+    svc = service()
+    ws = workspace or _require_ws()
+    wid, _ = svc._require_scope(ws, None)
+    page = render_analytics_html(compute_analytics(svc.store, wid),
+                                 workspace=ws, version=__version__)
+    fname = "engraphis-analytics-%s-%s.html" % (
+        ws.replace("/", "_"), _time.strftime("%Y%m%d"))
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse(page, headers={
+        "Content-Disposition": 'attachment; filename="%s"' % fname})
 
 
 # ── compliance export (Pro) ───────────────────────────────────────────────────
