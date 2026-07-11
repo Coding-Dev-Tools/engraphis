@@ -3,6 +3,44 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [Unreleased]
+
+### Added
+- **Cloud sync (Pro)** — keep your memory store consistent across devices (and, on Team,
+  across a group) over any shared folder (Dropbox / iCloud / OneDrive / Syncthing / git).
+  `core/sync.py` is a convergent, offline-first **state-based CRDT** merge over memory rows
+  (union by ULID; earliest-invalidation + max-reinforcement lattice; deterministic
+  last-writer-wins with a content-hash tiebreak; scope reconciled by name), exposed via the
+  new `SyncTransport` interface + `FolderTransport` backend and the gated CLI
+  `python -m scripts.sync`. Unlike file-syncers, it *merges* facts on conflict instead of
+  dropping conflict copies. See `docs/SYNC.md`.
+- Code indexing now supports **C#, C, and C++** (regex-level: class/struct/interface/
+  method/function definitions) alongside Python/JS/TS. `languages=` names are normalised
+  (`C#`→csharp, `c++`→cpp) and an unsupported name returns an actionable error instead of
+  silently indexing nothing.
+- `.engraphisignore` (gitignore-style) at a repo root lets you exclude generated/build
+  files from `index_repo` beyond the built-in defaults.
+
+### Changed
+- `engraphis_start_session` is now **idempotent**: a repeat call for the same
+  `(workspace, repo, agent)` returns the already-active session (`reused: true`) instead
+  of opening a second concurrent one (two live sessions = two writers on the single-writer
+  store). New `force_new` flag branches a fresh session deliberately.
+- `index_repo` traversal prunes build/dependency directories *during* the walk rather than
+  after, fixing the apparent hang when pointed at large non-Python (C#/C++/JVM) repos.
+
+### Security
+- Cloud-sync apply path treats every pulled bundle as untrusted (memory-poisoning threat,
+  `SECURITY.md`): rows are validated/clamped (lengths, numeric ranges, control/ANSI-escape
+  stripping, non-finite JSON rejected), **scope-confined** so a bundle can't reach across
+  into a workspace/repo it wasn't syncing, `secret`-flagged memories are never exported, and
+  one hostile bundle can't abort the whole sync. Every synced-in memory is tagged with
+  `provenance.synced_from_device`.
+- `.engraphisignore` parsing is bounded (file size, pattern count, per-pattern length —
+  fnmatch compiles to a backtracking regex) and cannot re-expose hardcoded default
+  excludes from an untrusted repo. `index_repo` no longer follows symlinked source files
+  out of the repo root; the walk is bounded against pathological directory trees.
+
 ## [0.1.0] — 2026-07-09
 
 Initial public release. Self-hosted AI memory engine for agents — Ebbinghaus

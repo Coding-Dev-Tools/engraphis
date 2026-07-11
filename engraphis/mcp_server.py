@@ -485,13 +485,22 @@ def engraphis_index_repo(
                          "this path the same way any local tool you have would.",
                          min_length=1, max_length=4_000)],
     languages: Annotated[Optional[List[str]], Field(description="Restrict to these "
-                         "languages (e.g. ['python']). Omit to index every supported "
-                         "language found.")] = None,
+                         "languages (e.g. ['python','csharp']). Names are normalised "
+                         "('C#'->csharp, 'cpp'/'c++'->cpp). An unsupported name returns an "
+                         "error listing what's supported, instead of silently indexing "
+                         "nothing. Omit to index every supported language found.")] = None,
 ) -> str:
     """Parse a repository into the code symbol graph: function/class/method definitions
     plus best-effort calls/imports edges. Run this once when you start working in a repo
     (or after large changes) so ``engraphis_search_code`` has something to search — uses
     AST parsing (tree-sitter) when available, a dependency-free regex fallback otherwise.
+    Supported languages: Python, JavaScript, TypeScript, C#, C, and C++.
+
+    Build/dependency directories (node_modules, bin, obj, target, .venv, …) are skipped
+    while walking, so a large non-Python repo indexes quickly instead of appearing to
+    hang; add a ``.engraphisignore`` file (gitignore-style) at the repo root to skip
+    project-specific generated files.
+
     Creates the workspace/repo if you haven't named them before (like
     engraphis_remember). Re-indexing is safe to call again; each file's symbols are
     replaced, not duplicated. Reads files from ``root_path`` on the local filesystem —
@@ -540,7 +549,7 @@ def engraphis_search_code(
 @mcp.tool(
     name="engraphis_start_session",
     annotations={"title": "Start a memory session", "readOnlyHint": False,
-                 "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
 )
 def engraphis_start_session(
     workspace: Annotated[str, Field(description="Workspace the session belongs to.",
@@ -551,6 +560,11 @@ def engraphis_start_session(
                                 max_length=200)] = "",
     goal: Annotated[str, Field(description="What this session is trying to accomplish.",
                                max_length=1_000)] = "",
+    force_new: Annotated[bool, Field(description="Force a brand-new session even if one is "
+                         "already active for this workspace/repo/agent. Default false: a "
+                         "repeat call in the same scope returns the existing active session "
+                         "(reused=true) rather than opening a second one. Set true only for "
+                         "a genuinely separate task in the same repo.")] = False,
 ) -> str:
     """Open a session to group this work's memories and enable cross-session resume.
 
@@ -558,13 +572,19 @@ def engraphis_start_session(
     session in that repo was ended with a summary or open threads, they come back in
     ``bootstrap`` so you can pick up where it left off instead of starting cold.
 
+    Idempotent: calling it again in the same ``(workspace, repo, agent)`` scope returns
+    the session already in progress (``reused: true``) instead of forking a second
+    concurrent session — two live sessions on one scope means two writers contending on
+    the store. Use ``force_new=true`` when you really do want a separate session.
+
     Returns:
-        str: JSON ``{"session_id","workspace","repo","goal","status":"active",
+        str: JSON ``{"session_id","workspace","repo","goal","status":"active","reused",
         "bootstrap":{"summary","open_threads","outcome"} or {} if there is no prior
         session}``. Pass ``session_id`` to engraphis_remember and engraphis_end_session.
     """
     try:
-        return _ok(service().start_session(workspace, repo=repo, agent=agent, goal=goal))
+        return _ok(service().start_session(workspace, repo=repo, agent=agent, goal=goal,
+                                           force_new=force_new))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 

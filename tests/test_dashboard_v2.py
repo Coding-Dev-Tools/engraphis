@@ -57,14 +57,10 @@ def _team_key(seats=5):
 
 def test_dashboard_serves_and_bootstraps(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as c:
-        # / now serves the Memory Inspector
+        # / serves the unified dashboard — the standalone Inspector was retired into it
         r = c.get("/")
         assert r.status_code == 200
-        assert 'id="ws"' in r.text   # Inspector workspace selector
-        # /legacy serves the original dashboard
-        rl = c.get("/legacy")
-        assert rl.status_code == 200
-        assert 'class="sidebar"' in rl.text
+        assert 'class="sidebar"' in r.text
         b = c.get("/api/bootstrap").json()
         assert b["stats"]["memories"] >= 2
         assert any(w["name"] == "demo" for w in b["workspaces"])
