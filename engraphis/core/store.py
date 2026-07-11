@@ -292,7 +292,7 @@ class Store:
     def close_validity(self, memory_id: str, *, at: Optional[float] = None,
                        actor: str = "system", reason: str = "contradicted") -> None:
         """Bi-temporal invalidation (§8.3): close a fact's validity window without deleting."""
-        at = at or now_ts()
+        at = at if at is not None else now_ts()
         self.conn.execute("UPDATE memories SET valid_to=? WHERE id=? AND valid_to IS NULL",
                           (at, memory_id))
         self.audit(actor, "invalidate", memory_id, reason)
@@ -375,7 +375,7 @@ class Store:
     # ── graph ─────────────────────────────────────────────────────────────────
     def upsert_entity(self, node: Node) -> str:
         existing = self.conn.execute(
-            "SELECT id FROM entities WHERE workspace_id IS ? AND repo_id IS ? AND name=? AND etype IS ?",
+            "SELECT id FROM entities WHERE workspace_id=? AND repo_id IS ? AND name=? AND etype IS ?",
             (node.workspace_id, node.repo_id, node.name, node.ntype),
         ).fetchone()
         if existing:
@@ -464,7 +464,7 @@ class Store:
         """Every edge valid at ``at`` within the filter's workspace/repo — the graph
         the PPR retrieval arm walks (edges outside their validity window are invisible,
         same bi-temporal rule as memories)."""
-        t = at or now_ts()
+        t = at if at is not None else now_ts()
         sql = ("SELECT * FROM edges WHERE (valid_from IS NULL OR valid_from<=?) "
                "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL")
         params: list[Any] = [t, t]
@@ -491,7 +491,7 @@ class Store:
     def neighbors(self, node_ids: list[str], *, at: Optional[float] = None) -> list[Edge]:
         if not node_ids:
             return []
-        t = at or now_ts()
+        t = at if at is not None else now_ts()
         marks = ",".join("?" for _ in node_ids)
         rows = self.conn.execute(
             f"SELECT * FROM edges WHERE (src IN ({marks}) OR dst IN ({marks})) "
@@ -672,17 +672,3 @@ def _fts_query(q: str) -> str:
     terms = [t for t in "".join(c if c.isalnum() else " " for c in q).split() if t]
     return " OR ".join(f'{t}*' for t in terms) if terms else '""'
 
-
-def _row_to_edge(row: sqlite3.Row) -> Edge:
-    return Edge(
-        id=row["id"], src=row["src"], dst=row["dst"], relation=row["relation"],
-        weight=row["weight"], valid_from=row["valid_from"], valid_to=row["valid_to"],
-        ingested_at=row["ingested_at"], expired_at=row["expired_at"],
-        provenance=_loads(row["provenance"], {}),
-    )
-
-
-def _fts_query(q: str) -> str:
-    """Make a safe FTS5 MATCH query: OR the alphanumeric terms as prefixes."""
-    terms = [t for t in "".join(c if c.isalnum() else " " for c in q).split() if t]
-    return " OR ".join(f'{t}*' for t in terms) if terms else '""'
