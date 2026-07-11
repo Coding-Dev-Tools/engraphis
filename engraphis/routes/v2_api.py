@@ -373,6 +373,26 @@ def correct(req: _IdReq):
     return _run(service().correct, req.id, req.content, workspace=ws, reason=req.reason)
 
 
+class _MergeReq(BaseModel):
+    ids: list[str]
+    content: str
+    workspace: Optional[str] = None
+    title: Optional[str] = None
+    memory_type: Optional[str] = None
+    reason: str = "merged in dashboard"
+
+
+@router.post("/merge")
+def merge(req: _MergeReq):
+    """Merge several selected memories into one (manual N→1). The sources are retired
+    into history (bi-temporally closed, never hard-deleted) and the new memory
+    supersedes them — the multi-input sibling of /correct. Validation, workspace
+    authorization, and the safety inheritance rules all live in MemoryService.merge."""
+    ws = req.workspace or _default_ws()
+    return _run(service().merge, req.ids, req.content, workspace=ws,
+                title=req.title, mtype=req.memory_type, reason=req.reason)
+
+
 # ── consolidate ───────────────────────────────────────────────────────────────
 class _ConsolidateReq(BaseModel):
     workspace: Optional[str] = None
