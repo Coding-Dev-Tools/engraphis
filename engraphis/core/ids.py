@@ -26,6 +26,7 @@ PREFIXES = {
     "event": "evt",
     "job": "job",
     "audit": "aud",
+    "device": "dev",
 }
 
 

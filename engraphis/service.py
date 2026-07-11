@@ -396,16 +396,29 @@ class MemoryService:
 
     # ── session lifecycle ───────────────────────────────────────────────────────
     def start_session(self, workspace: str, *, repo: Optional[str] = None,
-                      agent: str = "", goal: str = "") -> dict:
+                      agent: str = "", goal: str = "", force_new: bool = False) -> dict:
         """Open a session. If this repo has a prior *ended* session, its summary and
         unresolved ``open_threads`` come back as ``bootstrap`` — the concrete fix for
-        "the agent forgets everything between sessions"."""
+        "the agent forgets everything between sessions".
+
+        Idempotent by default: if a session for the same ``(workspace, repo, agent)`` is
+        already ``active``, that one is returned (``reused: true``) instead of opening a
+        second concurrent session. Two live sessions in one scope means two writers on
+        the single-writer SQLite store — the "opens up 2 instances that trample on each
+        other" failure. Pass ``force_new=True`` to deliberately branch a fresh session
+        (e.g. a genuinely separate task in the same repo)."""
         ws = self._clean_ws(workspace)
         rp = _clean_name(repo, field="repo") if repo else None
         agent = _clean_text(agent, field="agent", max_chars=MAX_NAME_CHARS, required=False)
         goal = _clean_text(goal, field="goal", max_chars=MAX_TITLE_CHARS, required=False)
         wid = self.store.get_or_create_workspace(ws)
         rid = self.store.get_or_create_repo(wid, rp) if rp else None
+        if not force_new:
+            existing = self.store.get_active_session(wid, rid, agent=agent)
+            if existing:
+                return {"session_id": existing["id"], "workspace": ws, "repo": rp,
+                        "goal": existing.get("goal") or goal, "status": "active",
+                        "reused": True, "bootstrap": {}}
         sid = self.store.start_session(wid, rid, agent=agent, goal=goal)
         bootstrap: dict = {}
         if rid:
@@ -417,7 +430,7 @@ class MemoryService:
                     "outcome": last.get("outcome") or "",
                 }
         return {"session_id": sid, "workspace": ws, "repo": rp, "goal": goal,
-               "status": "active", "bootstrap": bootstrap}
+               "status": "active", "reused": False, "bootstrap": bootstrap}
 
     def end_session(self, session_id: str, *, summary: str = "", outcome: str = "",
                     open_threads: Optional[list] = None) -> dict:
@@ -542,8 +555,20 @@ class MemoryService:
         root_path = _clean_text(root_path, field="root_path", max_chars=MAX_CONTENT_CHARS)
         wid = self.store.get_or_create_workspace(ws)
         rid = self.store.get_or_create_repo(wid, rp)
-        langs = set(_clean_string_list(languages, field="languages", max_items=10,
-                                       max_chars=40)) if languages else None
+        langs = None
+        if languages:
+            from engraphis.backends.codegraph import normalize_language, supported_languages
+            requested = _clean_string_list(languages, field="languages", max_items=10,
+                                           max_chars=40)
+            supported = supported_languages()
+            langs = {normalize_language(x) for x in requested}
+            unknown = sorted(x for x in langs if x not in supported)
+            if unknown:
+                raise ValidationError(
+                    f"unsupported language(s): {', '.join(unknown)}. "
+                    f"Supported: {', '.join(sorted(supported))}. "
+                    "Omit 'languages' to index every supported language found."
+                )
         return self.engine.index_repo(rid, root_path, languages=langs)
 
     def search_code(self, query: str, *, workspace: str, repo: str, limit: int = 20) -> dict:
