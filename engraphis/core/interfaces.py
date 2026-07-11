@@ -183,4 +183,20 @@ class Extractor(Protocol):
     def extract(self, text: str, *, context: str = "") -> list[ExtractedFact]: ...
 
 
+@runtime_checkable
+class SyncTransport(Protocol):
+    """Moves opaque sync bundles between devices (cloud-sync layer, core/sync.py).
+
+    Deliberately dumb: it stores and retrieves named byte blobs and knows nothing
+    about memory semantics, so a shared folder (Dropbox/iCloud/Syncthing/git), an
+    object store, or a managed end-to-end-encrypted relay are interchangeable behind
+    these three calls — same interface-first swap as ``VectorIndex``/``Embedder``.
+    A transport may encrypt ``data`` in ``push`` and decrypt in ``pull``; the sync
+    engine treats every pulled bundle as untrusted regardless.
+    """
+    def push(self, name: str, data: bytes) -> None: ...
+    def pull(self) -> list[tuple[str, bytes]]: ...
+    def list_names(self) -> list[str]: ...
+
+
 # Interface contracts only; concrete implementations live in engraphis.backends.

@@ -43,7 +43,9 @@ for the coverage that now guards it.
 """
 from __future__ import annotations
 
+import fnmatch
 import hashlib
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,7 +55,39 @@ LANG_BY_EXT = {
     ".py": "python",
     ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
     ".ts": "typescript", ".tsx": "typescript",
+    ".cs": "csharp",
+    ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".c++": "cpp",
+    ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp",
+    ".c": "c", ".h": "c",
 }
+
+# Human-typed language names (from the ``languages=`` filter) → the canonical id used
+# in LANG_BY_EXT. Lets a caller pass "C#", "cpp", "py" etc. and get a useful answer
+# instead of a silent no-op. Anything not here is treated as-is (and then validated).
+_LANG_ALIASES = {
+    "py": "python", "python": "python",
+    "js": "javascript", "javascript": "javascript", "node": "javascript",
+    "ts": "typescript", "typescript": "typescript",
+    "cs": "csharp", "c#": "csharp", "csharp": "csharp",
+    "c": "c", "h": "c",
+    "c++": "cpp", "cpp": "cpp", "cplusplus": "cpp", "cxx": "cpp", "hpp": "cpp",
+}
+
+
+def normalize_language(name: str) -> str:
+    """Fold a user-typed language name to its canonical id ('C#' -> 'csharp')."""
+    key = (name or "").strip().lower()
+    return _LANG_ALIASES.get(key, key)
+
+
+def supported_languages() -> set:
+    """The set of canonical language ids ``index_repo`` can extract symbols for.
+
+    Sourced from ``LANG_BY_EXT`` so it can never drift from what actually gets indexed.
+    Used to reject an unknown ``languages=`` filter with an actionable error instead of
+    walking the whole tree and silently returning zero symbols.
+    """
+    return set(LANG_BY_EXT.values())
 
 # Per-language AST node kinds (tree-sitter grammars are consistent on these names).
 _DEF_KINDS = {
@@ -293,8 +327,45 @@ class RegexSymbolIndexer:
             (re.compile(r"^\s*(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>"),
              "function"),
         ],
+        # C#: type declarations (class/struct/interface/record/enum) and methods. The
+        # method pattern requires ≥1 modifier + ≥1 return-type token before the name so
+        # control-flow (`if (`, `while (`) and plain calls don't masquerade as definitions.
+        "csharp": [
+            (re.compile(
+                r"^\s*(?:\[[^\]]*\]\s*)*"
+                r"(?:(?:public|private|protected|internal|static|sealed|abstract|partial|"
+                r"readonly|unsafe|new)\s+)*"
+                r"(?:class|struct|interface|record|enum)\s+(\w+)"), "class"),
+            (re.compile(
+                r"^\s*(?:\[[^\]]*\]\s*)*"
+                r"(?:(?:public|private|protected|internal|static|virtual|override|abstract|"
+                r"async|sealed|extern|unsafe|new|partial)\s+){1,8}"
+                r"(?:[\w<>\[\],\.\?]+\s+){1,6}(\w+)\s*\("), "method"),
+        ],
+        # C / C++: class/struct declarations and free/member function definitions.
+        # Regex C++ is inherently best-effort (the AST backend is the real path); the
+        # stop-name guard below drops the common false positives.
+        "cpp": [
+            (re.compile(r"^\s*(?:template\s*<[^>]*>\s*)?(?:class|struct)\s+(\w+)"), "class"),
+            (re.compile(
+                r"^\s*(?:[\w:<>\*&\[\]]+\s+){1,8}(?:\w+::)*([\w~]+)\s*\([^;{]*\)\s*"
+                r"(?:const\b\s*)?(?:noexcept\b\s*)?(?:override\b\s*)?\{"), "function"),
+        ],
     }
     _PATTERNS["typescript"] = _PATTERNS["javascript"]
+    _PATTERNS["c"] = _PATTERNS["cpp"]
+
+    # Names a pattern might capture that are never real definitions (language keywords
+    # that syntactically resemble a definition head). Keeps the coarse C-family and C#
+    # patterns from emitting junk symbols.
+    _STOPNAMES = {
+        "cpp": {"if", "for", "while", "switch", "return", "sizeof", "catch", "else",
+                "do", "case", "new", "delete", "throw", "using", "namespace", "template",
+                "typedef", "struct", "class", "enum", "union", "operator", "static_assert"},
+        "csharp": {"if", "for", "while", "switch", "return", "foreach", "using", "lock",
+                   "catch", "fixed", "get", "set", "add", "remove", "yield", "when"},
+    }
+    _STOPNAMES["c"] = _STOPNAMES["cpp"]
 
     # Any single source line longer than this is skipped by the regex indexer.
     # Lines this long are pathological (crafted DoS inputs), not legitimate source
@@ -307,46 +378,205 @@ class RegexSymbolIndexer:
     def index_file(self, file_path: str, content: str, lang: str) -> FileIndex:
         out = FileIndex()
         patterns = self._PATTERNS.get(lang, [])
+        stop = self._STOPNAMES.get(lang, set())
+        seen: set = set()  # (name, lineno) — one symbol per line even if patterns overlap
         for lineno, line in enumerate(content.splitlines(), start=1):
             if len(line) > self._MAX_LINE_LEN:
                 continue
             for pattern, kind in patterns:
                 m = pattern.match(line)
-                if m:
-                    name = m.group(1)
-                    out.symbols.append(Symbol(
-                        kind=kind, name=name, fqname=name, file=file_path,
-                        span=f"{lineno}-{lineno}", signature=line.strip()[:200], lang=lang,
-                        exported=not name.startswith("_"),
-                        content_hash=_content_hash(line),
-                    ))
+                if not m:
+                    continue
+                name = m.group(1)
+                if name in stop or (name, lineno) in seen:
+                    continue
+                seen.add((name, lineno))
+                out.symbols.append(Symbol(
+                    kind=kind, name=name, fqname=name, file=file_path,
+                    span=f"{lineno}-{lineno}", signature=line.strip()[:200], lang=lang,
+                    exported=not name.startswith("_"),
+                    content_hash=_content_hash(line),
+                ))
         return out
 
 
-def get_code_indexer(prefer: str = "auto"):
-    """Return a tree-sitter indexer if available, else the regex fallback.
+class CompositeSymbolIndexer:
+    """Route each language to the best backend that supports it: AST (tree-sitter)
+    where it can, the dependency-free regex indexer otherwise.
 
-    ``prefer``: "auto" (try tree-sitter, fall back), "tree-sitter" (require it),
-    or "regex" (force the dependency-free fallback).
+    This is what lets us ship useful C#/C/C++ support today (regex-level: class/struct/
+    method/function *definitions*, which is what powers ``search_code``) without the AST
+    backend having grammar-specific node maps for them yet — and without regressing the
+    high-quality AST extraction for Python/JS/TS. When AST maps for a language are added
+    later, ``supports`` moves it to the primary automatically, no caller change needed.
+    """
+
+    def __init__(self, primary: Any, fallback: Any) -> None:
+        self._primary = primary
+        self._fallback = fallback
+
+    def supports(self, lang: str) -> bool:
+        return self._primary.supports(lang) or self._fallback.supports(lang)
+
+    def index_file(self, file_path: str, content: str, lang: str) -> FileIndex:
+        idx = self._primary if self._primary.supports(lang) else self._fallback
+        return idx.index_file(file_path, content, lang)
+
+
+def get_code_indexer(prefer: str = "auto"):
+    """Return the best available code indexer.
+
+    ``prefer``: "auto" (AST via tree-sitter where possible, regex fallback per-language),
+    "tree-sitter" (require the AST backend, no regex fallback), or "regex" (force the
+    dependency-free fallback for every language).
     """
     if prefer == "regex":
         return RegexSymbolIndexer()
     try:
-        return TreeSitterSymbolIndexer()
+        ts = TreeSitterSymbolIndexer()
     except Exception:
         if prefer == "tree-sitter":
             raise
         return RegexSymbolIndexer()
+    if prefer == "tree-sitter":
+        return ts
+    return CompositeSymbolIndexer(ts, RegexSymbolIndexer())
 
 
-def iter_source_files(root: str, *, exclude_dirs: Optional[set] = None) -> Iterable[str]:
-    """Yield source file paths under ``root`` whose extension we know how to index."""
-    exclude = exclude_dirs or {".git", "node_modules", "__pycache__", ".venv", "venv",
-                               "dist", "build", ".tox", ".mypy_cache", ".pytest_cache"}
+# Build/generated/dependency directories skipped by default. Kept broad on purpose:
+# these are exactly the big trees that made ``index_repo`` appear to *hang* on C#/C++/
+# JVM repos — the old rglob("*") descended into every one of them before filtering.
+_DEFAULT_EXCLUDE_DIRS = {
+    ".git", ".hg", ".svn",
+    "node_modules", "bower_components", "jspm_packages",
+    "__pycache__", ".venv", "venv", "env", ".env",
+    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox", ".nox",
+    "dist", "build", "_build", "out", "target", "coverage", ".cache",
+    # C# / C++ / JVM / Xcode / IDE generated output
+    "bin", "obj", "packages", "vendor", "Pods", "DerivedData",
+    ".gradle", ".idea", ".vs", ".vscode",
+    "cmake-build-debug", "cmake-build-release",
+    # JS framework build output
+    ".next", ".nuxt", ".svelte-kit", ".angular",
+}
+
+IGNORE_FILENAME = ".engraphisignore"
+_MAX_IGNORE_BYTES = 64 * 1024
+_MAX_IGNORE_PATTERNS = 1_000
+_MAX_IGNORE_PATTERN_LEN = 256  # per-line cap: fnmatch compiles to a backtracking regex,
+                               # so one giant wildcard pattern is a ReDoS vector — bound it.
+
+
+def load_ignore_patterns(root: str) -> tuple:
+    """Parse ``<root>/.engraphisignore`` into ``(names, globs, unignore)``.
+
+    gitignore-flavoured, deliberately small and DoS-bounded. The ignore file lives inside
+    a possibly-untrusted repo, so every input is bounded: file size (``_MAX_IGNORE_BYTES``),
+    total pattern count (``_MAX_IGNORE_PATTERNS``), and per-pattern length
+    (``_MAX_IGNORE_PATTERN_LEN`` — fnmatch translates each glob to a backtracking ``re``
+    pattern, so an unbounded wildcard string would be a ReDoS vector). Patterns only ever
+    *prune* a walk already confined to ``root``; they can never widen it.
+
+    * ``# comment`` and blank lines are ignored.
+    * ``!name`` re-includes a name the ignore file itself excluded (gitignore-style). It
+      can NOT re-expose a hardcoded default (``node_modules``/``.git``/build dirs …) —
+      those stay excluded no matter what an untrusted ``.engraphisignore`` says, so it
+      can't reintroduce the large-tree hang or pull vendored code into the graph.
+    * a bare token with no wildcard (``fixtures``) matches that file/dir name anywhere.
+    * a token with a wildcard or slash (``*.gen.cs``, ``src/generated/*``) is a glob
+      matched against each candidate's repo-root-relative POSIX path (and basename).
+
+    Returns empty sets/lists when there is no readable ignore file.
+    """
+    names: set = set()
+    globs: list = []
+    unignore: set = set()
+    path = Path(root) / IGNORE_FILENAME
+    try:
+        if not path.is_file() or path.stat().st_size > _MAX_IGNORE_BYTES:
+            return names, globs, unignore
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return names, globs, unignore
+    for raw in text.splitlines():
+        if len(names) + len(globs) + len(unignore) >= _MAX_IGNORE_PATTERNS:
+            break
+        line = raw.strip()
+        if not line or line.startswith("#") or len(line) > _MAX_IGNORE_PATTERN_LEN:
+            continue
+        if line.startswith("!"):
+            tok = line[1:].strip().strip("/")
+            if tok and not _has_glob(tok):
+                unignore.add(tok)
+            continue
+        line = line.rstrip("/")
+        if _has_glob(line) or "/" in line:
+            globs.append(line.strip("/"))
+        else:
+            names.add(line)
+    return names, globs, unignore
+
+
+def _has_glob(s: str) -> bool:
+    return any(c in s for c in "*?[")
+
+
+def _rel_posix(rel_dir: str, name: str) -> str:
+    if rel_dir in ("", "."):
+        return name
+    return rel_dir.replace(os.sep, "/") + "/" + name
+
+
+# Upper bound on directories visited in a single walk. Pairs with the engine's
+# ``max_files`` cap: stops a pathological tree (millions of empty dirs) from spinning
+# even when few files are ever yielded.
+_MAX_WALK_DIRS = 200_000
+
+
+def iter_source_files(root: str, *, exclude_dirs: Optional[set] = None,
+                      respect_ignore_file: bool = True) -> Iterable[str]:
+    """Yield indexable source-file paths under ``root``.
+
+    Prunes excluded directories *during* the walk (``os.walk`` with in-place ``dirnames``
+    filtering) so it never descends huge build/dependency trees — the fix for the
+    apparent hang on large non-Python repos — and never follows symlinks (``followlinks=
+    False`` for dirs; per-file ``islink`` skip for files) so it can neither loop on a
+    symlink cycle nor read a file that points *outside* ``root`` (e.g. a repo shipping
+    ``leak.py -> /etc/passwd``). ``.engraphisignore`` at the repo root adds project-
+    specific ignores; pass ``respect_ignore_file=False`` to skip reading it.
+    """
     base = Path(root)
-    for path in base.rglob("*"):
-        if not path.is_file() or detect_lang(str(path)) is None:
-            continue
-        if any(part in exclude for part in path.parts):
-            continue
-        yield str(path)
+    root_str = str(base)
+    default_excl = set(exclude_dirs) if exclude_dirs is not None else set(_DEFAULT_EXCLUDE_DIRS)
+    ig_names: set = set()
+    ig_globs: list = []
+    unignore: set = set()
+    if respect_ignore_file:
+        ig_names, ig_globs, unignore = load_ignore_patterns(root_str)
+    # Defaults are non-negotiable: `!` can only re-include a name the ignore file itself
+    # added, never a hardcoded default — an untrusted repo can't disable the hang guards.
+    excl_dir_names = default_excl | (ig_names - unignore)
+
+    def _glob_hit(rel_path: str, name: str) -> bool:
+        return any(fnmatch.fnmatch(rel_path, g) or fnmatch.fnmatch(name, g) for g in ig_globs)
+
+    dirs_seen = 0
+    for dirpath, dirnames, filenames in os.walk(root_str, followlinks=False):
+        dirs_seen += 1
+        if dirs_seen > _MAX_WALK_DIRS:
+            break
+        rel_dir = os.path.relpath(dirpath, root_str)
+        # prune in place so os.walk skips these subtrees entirely
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in excl_dir_names and not _glob_hit(_rel_posix(rel_dir, d), d)
+        ]
+        for fn in filenames:
+            if detect_lang(fn) is None or fn in ig_names:
+                continue
+            if _glob_hit(_rel_posix(rel_dir, fn), fn):
+                continue
+            full = os.path.join(dirpath, fn)
+            if os.path.islink(full):  # never read a symlink target (may escape root)
+                continue
+            yield full
