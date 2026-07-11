@@ -36,4 +36,11 @@ def main() -> None:
     # ENGRAPHIS_DB_PATH is read by engraphis.config.settings at service build
     # time (lazy, on first tool call) — same path the stdio server used.
     # FastMCP reads host/port from its settings object (not run()), so set them
-    # here. Thi
+    # here. This process is the *sole* writer to engraphis.db.
+    mcp.settings.host = HOST
+    mcp.settings.port = PORT
+    mcp.run(transport=TRANSPORT)
+
+
+if __name__ == "__main__":
+    main()
