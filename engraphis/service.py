@@ -951,9 +951,10 @@ class MemoryService:
                       key=lambda r: (r.valid_from or r.ingested_at or 0, r.id))
 
     def _successor_of(self, memory_id: str, seen: set):
+        escaped = memory_id.replace("%", "\\%").replace("_", "\\_")
         rows = self.store.conn.execute(
-            "SELECT id, metadata FROM memories WHERE metadata LIKE ? AND id != ?",
-            (f"%{memory_id}%", memory_id)).fetchall()
+            "SELECT id, metadata FROM memories WHERE metadata LIKE ? ESCAPE '\\' AND id != ?",
+            (f"%{escaped}%", memory_id)).fetchall()
         import json as _json
         for r in rows:
             if r["id"] in seen:

@@ -488,7 +488,7 @@ class MemoryEngine:
         importance = max([r.importance or 0.0 for r in sources] + [0.5])
         pinned_any = any(r.pinned for r in sources)
         sensitivity = max((r.sensitivity or "normal" for r in sources),
-                          key=lambda s: _SENSITIVITY_RANK.get(s, 0))
+                          key=lambda s: _SENSITIVITY_RANK.get(s, len(_SENSITIVITY_RANK)))
         trusted = all(bool((r.provenance or {}).get("trusted", True)) for r in sources)
         if keywords is None:
             keywords, kseen = [], set()
