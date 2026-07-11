@@ -77,7 +77,8 @@ CREATE TABLE IF NOT EXISTS memories (
     expired_at   REAL,
     pinned       INTEGER DEFAULT 0,
     sensitivity  TEXT DEFAULT 'normal',
-    provenance   TEXT DEFAULT '{}'
+    provenance   TEXT DEFAULT '{}',
+    sort_order   REAL                              -- manual drag-to-reorder position (dashboard); NULL = unordered
 );
 CREATE INDEX IF NOT EXISTS idx_mem_scope   ON memories(workspace_id, repo_id, scope, mtype);
 CREATE INDEX IF NOT EXISTS idx_mem_session ON memories(session_id);
