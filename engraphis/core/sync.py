@@ -304,7 +304,7 @@ def dict_to_record(d: dict) -> Optional[MemoryRecord]:
         keywords=kws, metadata=_safe_json_obj(d.get("metadata")),
         importance=_clamp_num(d.get("importance"), 0.0, 1.0, 0.0),
         surprise=_clamp_num(d.get("surprise"), 0.0, 100.0, 1.0),
-        stability=_clamp_num(d.get("stability"), 0.0, MAX_STABILITY, 1.0) or 1.0,
+        stability=_clamp_num(d.get("stability"), 0.0, MAX_STABILITY, 1.0),
         access_count=min(MAX_ACCESS_COUNT, max(0, _as_int(d.get("access_count"), 0))),
         last_access=_clamp_ts(d.get("last_access"), now),
         valid_from=_clamp_ts(d.get("valid_from"), now),
