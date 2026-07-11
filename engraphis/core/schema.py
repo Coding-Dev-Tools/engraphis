@@ -178,6 +178,17 @@ CREATE TABLE IF NOT EXISTS audit (
     target TEXT,
     detail TEXT
 );
+
+-- ── Sync state (device identity + per-peer cursors) ─────────────────────────
+-- Additive, local-only bookkeeping for the cloud-sync layer (core/sync.py).
+-- A tiny KV: 'device_id' (this database's stable origin id) and, later,
+-- 'peer:<remote>:cursor' high-water marks. Never part of a sync bundle's payload;
+-- device identity is metadata, not memory.
+CREATE TABLE IF NOT EXISTS sync_state (
+    key        TEXT PRIMARY KEY,
+    value      TEXT,
+    updated_at REAL
+);
 """
 
 # FTS5 if available, else a plain fallback table with the same columns.

@@ -168,6 +168,26 @@ class Store:
         d["open_threads"] = _loads(d.get("open_threads"), [])
         return d
 
+    def get_active_session(self, workspace_id: str, repo_id: Optional[str],
+                           *, agent: str = "") -> Optional[dict]:
+        """Most recent still-``active`` session for this exact scope (and ``agent`` when
+        given). Powers idempotent ``start_session``: a repeat start in the same scope
+        reuses this session instead of opening a second concurrent one, which would put
+        two writers on the single-writer SQLite store (the "trampling" symptom)."""
+        sql = ("SELECT * FROM sessions WHERE workspace_id=? AND repo_id IS ? "
+               "AND status='active'")
+        params: list[Any] = [workspace_id, repo_id]
+        if agent:
+            sql += " AND agent=?"
+            params.append(agent)
+        sql += " ORDER BY started_at DESC LIMIT 1"
+        row = self.conn.execute(sql, params).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["open_threads"] = _loads(d.get("open_threads"), [])
+        return d
+
     def get_last_session(self, workspace_id: str, repo_id: Optional[str],
                          *, exclude: Optional[str] = None) -> Optional[dict]:
         """Most recently *ended* session in this repo — the cross-session handoff
@@ -188,7 +208,7 @@ class Store:
         return d
 
     # ── memories ──────────────────────────────────────────────────────────────
-    def add_memory(self, rec: MemoryRecord) -> str:
+    def add_memory(self, rec: MemoryRecord, *, audit: bool = True) -> str:
         if not rec.id:
             rec.id = ids.new_id("memory")
         existing = self.conn.execute(
@@ -200,7 +220,10 @@ class Store:
                            f"existing workspace={existing['workspace_id']}, "
                            f"incoming workspace={rec.workspace_id}")
                 rec.id = ids.new_id("memory")
-            else:
+            elif audit:
+                # Generic provenance-change record for direct writes. The sync path
+                # passes audit=False and logs its own semantic 'sync_overwrite' instead,
+                # so a synced update yields exactly one audit row rather than a duplicate.
                 self.audit("system", "overwrite", rec.id,
                            f"existing provenance={existing['provenance']}, "
                            f"incoming provenance={_dumps(rec.provenance)}")
@@ -542,6 +565,30 @@ class Store:
             "INSERT INTO audit(id, ts, actor, action, target, detail) VALUES (?,?,?,?,?,?)",
             (ids.new_id("audit"), now_ts(), actor, action, target, detail),
         )
+
+    # ── sync state (device identity + per-peer cursors) ─────────────────────────
+    def get_sync_state(self, key: str) -> Optional[str]:
+        row = self.conn.execute("SELECT value FROM sync_state WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_sync_state(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO sync_state(key, value, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, value, now_ts()),
+        )
+        self.conn.commit()
+
+    def device_id(self) -> str:
+        """Stable per-database device id (minted once, then persistent). Attributes
+        sync bundles to their origin device so a store never re-applies its own
+        writes; it is local metadata, never memory, and only ever leaves the machine
+        inside a bundle header."""
+        did = self.get_sync_state("device_id")
+        if not did:
+            did = ids.new_id("device")
+            self.set_sync_state("device_id", did)
+        return did
 
     # ── helpers ───────────────────────────────────────────────────────────────
     def _where(self, flt: Optional[SearchFilter], include_invalid: bool,
