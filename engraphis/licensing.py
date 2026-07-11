@@ -19,6 +19,7 @@ import base64
 import hashlib
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -270,9 +271,29 @@ def _b64u_decode(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + pad)
 
 
+def _pubkey_override_allowed() -> bool:
+    """Whether the ``ENGRAPHIS_LICENSE_PUBKEY`` override may replace the pinned key.
+
+    Only ever true when the pytest harness is loaded, so the suite can verify against
+    throwaway keypairs. In a shipped process (dashboard, CLI, inspector) this is False,
+    which is the whole point: the verify key is NOT runtime-configurable. Factored into
+    its own function so tests can force it False and prove the override is dead in prod."""
+    return "pytest" in sys.modules
+
+
 def vendor_public_key() -> bytes:
-    """Pinned vendor key; ``ENGRAPHIS_LICENSE_PUBKEY`` (hex) overrides for rotation/tests."""
-    hexkey = os.environ.get("ENGRAPHIS_LICENSE_PUBKEY", "").strip() or _VENDOR_PUBKEY_HEX
+    """The pinned vendor Ed25519 verify key — the single trust anchor at runtime.
+
+    SECURITY: this is deliberately NOT overridable in a shipped process. Honoring an
+    ``ENGRAPHIS_LICENSE_PUBKEY`` env var here was a full authentication bypass — anyone
+    could generate their own keypair, sign a Pro/Team payload with their own private
+    seed, point the verifier at their own public key, and pass verification without ever
+    touching the vendor's private key. The env override now applies ONLY under the test
+    harness (see :func:`_pubkey_override_allowed`). Key rotation is a source change to
+    ``_VENDOR_PUBKEY_HEX`` plus a release, never a runtime env var."""
+    hexkey = _VENDOR_PUBKEY_HEX
+    if _pubkey_override_allowed():
+        hexkey = os.environ.get("ENGRAPHIS_LICENSE_PUBKEY", "").strip() or hexkey
     try:
         raw = bytes.fromhex(hexkey)
     except ValueError:
@@ -498,7 +519,8 @@ def is_default_vendor_key() -> bool:
     active for selling. (The private key never ships in this repo — ``.secrets/`` is
     gitignored — but off-repo exposure of the seed is the real forging risk.) Rotate with
     ``python -m scripts.license_admin keygen`` and pin the printed public key in
-    ``_VENDOR_PUBKEY_HEX`` (or set ``ENGRAPHIS_LICENSE_PUBKEY``) to flip this False."""
+    ``_VENDOR_PUBKEY_HEX`` to flip this False. (The env override no longer changes the
+    verify key in a shipped process — see :func:`vendor_public_key`.)"""
     try:
         return vendor_public_key() == bytes.fromhex(_DEV_VENDOR_PUBKEY_HEX)
     except LicenseError:

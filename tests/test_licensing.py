@@ -118,6 +118,33 @@ def test_wrong_vendor_key_rejected(monkeypatch):
         parse_key(key)
 
 
+def test_env_pubkey_override_is_dead_in_production(monkeypatch):
+    """Regression: the env-var vendor-key override must NOT work in a shipped process.
+
+    Simulates production by forcing the override gate False, then plays the exact
+    forgery: an attacker mints their own keypair, self-signs a perpetual Pro payload,
+    and points ENGRAPHIS_LICENSE_PUBKEY at their own public key. With the pinned key as
+    the sole trust anchor, verification must reject it and the process stays free-tier."""
+    monkeypatch.setattr(lic, "_pubkey_override_allowed", lambda: False)
+
+    attacker_secret = b"\x99" * 32
+    forged = compose_key(
+        {"v": 1, "plan": "pro", "email": "atlas@plainskill.net", "expires": None},
+        attacker_secret,
+    )
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY",
+                       ed25519_public_key(attacker_secret).hex())
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", forged)
+
+    # vendor_public_key ignores the env entirely and returns the pinned production key
+    assert lic.vendor_public_key() == bytes.fromhex(lic._VENDOR_PUBKEY_HEX)
+    with pytest.raises(LicenseError, match="signature"):
+        parse_key(forged)
+    # end-to-end: the forged key degrades to free, not Pro
+    assert current_license(refresh=True) == License.free()
+    assert not has_feature("sync")
+
+
 # ── process-level gates ────────────────────────────────────────────────────────────────
 
 def test_free_tier_is_default_not_error():
