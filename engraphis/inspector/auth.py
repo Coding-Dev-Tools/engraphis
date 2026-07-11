@@ -246,6 +246,13 @@ class AuthStore:
     def resolve_session(self, token: str) -> Optional[dict]:
         if not token:
             return None
+        # Prune expired sessions (rate-limited: once per minute — create_session also
+        # prunes on new logins, so this covers long-running sessions without new logins).
+        now = time.time()
+        if now - self._last_prune > 60:
+            self.conn.execute("DELETE FROM auth_sessions WHERE expires_at < ?", (now,))
+            self.conn.commit()
+            self._last_prune = now
         row = self.conn.execute(
             "SELECT s.user_id, s.expires_at, u.disabled FROM auth_sessions s "
             "JOIN users u ON u.id = s.user_id WHERE s.token_hash=?",
