@@ -215,7 +215,7 @@ async def polar_webhook(request: Request):
 
     try:
         event = json.loads(body_str)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
 
     event_type = (event.get("type") or "").strip()
