@@ -19,7 +19,6 @@ import base64
 import hashlib
 import json
 import os
-import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -271,14 +270,21 @@ def _b64u_decode(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + pad)
 
 
+#: Test-only switch, default False in EVERY shipped process. Only the test suite flips
+#: it True (from ``tests/conftest.py``) so it can verify against throwaway keypairs.
+#: Deliberately NOT keyed off ``"pytest" in sys.modules`` — a dependency that
+#: transitively imports pytest at runtime must never be able to re-open the override.
+#: Nothing on the production import path (dashboard, CLI, inspector) sets this.
+_TEST_MODE_PUBKEY_OVERRIDE = False
+
+
 def _pubkey_override_allowed() -> bool:
     """Whether the ``ENGRAPHIS_LICENSE_PUBKEY`` override may replace the pinned key.
 
-    Only ever true when the pytest harness is loaded, so the suite can verify against
-    throwaway keypairs. In a shipped process (dashboard, CLI, inspector) this is False,
-    which is the whole point: the verify key is NOT runtime-configurable. Factored into
-    its own function so tests can force it False and prove the override is dead in prod."""
-    return "pytest" in sys.modules
+    True only when the test suite has explicitly opted in via
+    :data:`_TEST_MODE_PUBKEY_OVERRIDE`. In a shipped process this is False, which is the
+    whole point: the verify key is NOT runtime-configurable."""
+    return _TEST_MODE_PUBKEY_OVERRIDE
 
 
 def vendor_public_key() -> bytes:
