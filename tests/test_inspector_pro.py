@@ -199,6 +199,30 @@ def test_team_flow_setup_login_roles_and_seats(make_client):
                      params={"q": "rate", "workspace": "acme"}).status_code == 401
 
 
+def test_seat_limit_enforced_on_reenable(make_client):
+    """A disabled seat is not a free pass around the licensed cap: disable a user, spend
+    the freed seat on a replacement, then re-enabling the original must be refused —
+    otherwise disable→add→re-enable lets a team exceed the seats it paid for."""
+    app, admin, _ = make_client(key=_key("team", seats=2), team_mode=True)
+    _setup_admin(admin)                                    # admin = seat 1 of 2
+
+    r = admin.post("/api/auth/users", json={
+        "email": "m@x.co", "name": "M", "password": PW, "role": "member"})
+    assert r.status_code == 200, r.text                    # seat 2 of 2 (at the cap)
+    member_id = next(u["id"] for u in admin.get("/api/auth/users").json()["users"]
+                     if u["email"] == "m@x.co")
+
+    assert admin.post("/api/auth/users/update",
+                      json={"user_id": member_id, "disabled": True}).status_code == 200
+    r = admin.post("/api/auth/users", json={
+        "email": "m2@x.co", "name": "M2", "password": PW, "role": "member"})
+    assert r.status_code == 200, r.text                    # freed seat spent → 2 active
+
+    r = admin.post("/api/auth/users/update",
+                   json={"user_id": member_id, "disabled": False})
+    assert r.status_code == 400 and "seat limit" in r.json()["error"]
+
+
 def test_login_throttle_locks_after_repeated_failures(make_client):
     app, admin, _ = make_client(key=_key("team"), team_mode=True)
     _setup_admin(admin)
