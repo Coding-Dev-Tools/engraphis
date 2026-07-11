@@ -112,6 +112,7 @@ def _keyword_search(ws, q, limit=20):
     Recall/Why/Timeline tabs still return results when the embedder is unavailable."""
     import json as _json
     import sqlite3 as _sql
+    ws = service()._clean_ws(ws)
     conn = _sql.connect("file:%s?mode=ro" % settings.db_path, uri=True)
     conn.row_factory = _sql.Row
     try:
@@ -275,6 +276,7 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = None, limit: in
     import json as _json
     import sqlite3 as _sql
     ws = workspace or _default_ws()
+    ws = service()._clean_ws(ws)
     conn = _sql.connect("file:%s?mode=ro" % settings.db_path, uri=True)
     conn.row_factory = _sql.Row
     try:
