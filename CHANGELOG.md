@@ -28,6 +28,23 @@ All notable changes to Engraphis are documented here. Format loosely follows
   store). New `force_new` flag branches a fresh session deliberately.
 - `index_repo` traversal prunes build/dependency directories *during* the walk rather than
   after, fixing the apparent hang when pointed at large non-Python (C#/C++/JVM) repos.
+- **Knowledge-graph extraction is now on by default** (`ENGRAPHIS_GRAPH_EXTRACTOR`
+  defaults to `regex`, the dependency-free heuristic NER — no API key, safe offline).
+  New installs populate the graph on every ingest, so the dashboard Graph tab has nodes
+  out of the box instead of showing "No entities in this workspace yet." Set
+  `ENGRAPHIS_GRAPH_EXTRACTOR=none` to opt out.
+
+### Fixed
+- **Graph tab showed "No entities in this workspace yet" despite having memories.**
+  `settings.graph_extractor` was defined but never passed to the engine by any front end
+  (MCP server, dashboards, CLI), so graph extraction never ran regardless of config —
+  entities were only ever created by one-off imports. `MemoryService.create` now wires the
+  configured graph extractor into `MemoryEngine` for every front end.
+- **Existing memories backfill lazily.** The first time a workspace's Graph tab is opened,
+  if it has memories but no entities and extraction is enabled, its graph is extracted and
+  persisted on the spot — so installs that predate extraction light up on update with no
+  manual migration. Idempotent and per-workspace. A one-shot bulk equivalent is available
+  via `python -m scripts.backfill_graph`.
 
 ### Security
 - Cloud-sync apply path treats every pulled bundle as untrusted (memory-poisoning threat,
