@@ -67,7 +67,7 @@ def test_doctor_reports_tier_and_expiry_for_a_licensed_install(
          "issued": int(_time.time()), "expires": expires}, secret))
     assert main(["--check"]) == 0
     out = capsys.readouterr().out
-    assert "pro tier (analytics, export)" in out
+    assert "pro tier (analytics, automation, export, sync)" in out
     assert "expires " + _time.strftime("%Y-%m-%d", _time.gmtime(expires)) in out
     # leave the process-wide license cache the way we found it
     monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY")
