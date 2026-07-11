@@ -57,10 +57,31 @@ _STOPWORDS = {
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _MAX_NAME = 200
 _MAX_RELATIONS = 20
+_MAX_COOCCUR_ENTITIES = 8      # cap pairwise co-occurrence per memory (<= 28 edges)
+_COOCCUR_WEIGHT = 0.5          # weaker than a specific relation so PPR prefers real edges
+# Leading determiners/articles stripped so "The Acme Corp" and "Acme Corp" collapse to one
+# node. Deliberately NOT the full stopword set (which has months/days/pronouns we must not
+# strip from real multi-word names like "May Smith").
+_LEADING_DROP = {"The", "This", "That", "These", "Those", "A", "An",
+                 "My", "Our", "Your", "Their", "His", "Her", "Its"}
 
 
 def _defang(value: str) -> str:
     return _CONTROL_RE.sub("", value or "").strip()[:_MAX_NAME]
+
+
+def _canon_concept(name: str) -> str:
+    """Light, safe canonicalization for concept/person names so trivial variants collapse
+    to one graph node: normalize whitespace, strip surrounding quotes, drop a possessive
+    's, and strip a leading article. Conservative on purpose — aggressive merging (e.g.
+    "Acme" == "Acme Corp") risks false merges and belongs in a resolution/LLM pass, not
+    the free regex tier."""
+    s = re.sub(r"\s+", " ", name or "").strip().strip("\"'`")
+    s = re.sub(r"[’']s\b", "", s).strip()
+    words = s.split()
+    while len(words) > 1 and words[0] in _LEADING_DROP:
+        words = words[1:]
+    return " ".join(words).strip()
 
 
 @dataclass
@@ -84,7 +105,9 @@ def _extract_entities(text: str) -> list[tuple[str, str]]:
         elif "@" in raw and "." in raw:
             ent, etype = raw, "email"
         else:
-            ent, etype = raw, "person_or_concept"
+            ent, etype = _canon_concept(raw), "person_or_concept"
+            if len(ent) < 2 or ent in _STOPWORDS:
+                continue
         key = ent.lower()
         if key not in seen:
             seen.add(key)
@@ -197,5 +220,25 @@ def feed(store: Any, content: str, *, workspace_id: str, repo_id: Optional[str] 
                                workspace_id=workspace_id, repo_id=repo_id,
                                provenance=prov))
         written_relations += 1
+
+    # Co-occurrence edges: join entities that share this memory but aren't already
+    # linked by a specific relation. The regex extractor finds few proximity relations,
+    # so without this the graph is a dust cloud of isolated nodes — the Graph tab hides
+    # them ("Hide unconnected") and the PPR recall arm has nothing to walk. Bounded,
+    # written in canonical id order (idempotent), weak weight so real relations dominate.
+    ids = list(name_to_id.values())[:_MAX_COOCCUR_ENTITIES]
+    if len(ids) >= 2:
+        linked = {frozenset((e.src, e.dst)) for e in store.neighbors(ids)}
+        for i in range(len(ids)):
+            for j in range(i + 1, len(ids)):
+                a, b = ids[i], ids[j]
+                if a == b or frozenset((a, b)) in linked:
+                    continue
+                lo, hi = (a, b) if a < b else (b, a)
+                store.upsert_edge(Edge(id="", src=lo, dst=hi, relation="co_occurs",
+                                       weight=_COOCCUR_WEIGHT, workspace_id=workspace_id,
+                                       repo_id=repo_id, provenance=prov))
+                linked.add(frozenset((a, b)))
+                written_relations += 1
 
     return {"entities": len(name_to_id), "relations": written_relations}
