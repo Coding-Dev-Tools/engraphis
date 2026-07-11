@@ -111,6 +111,52 @@ def test_feed_default_none_writes_nothing():
     assert _entity_names(store, "w1") == set()
 
 
+# ── free-tier connectivity: co-occurrence edges ───────────────────────────────
+
+def test_cooccurrence_connects_entities_without_a_relation():
+    """The regex extractor finds few proximity relations, so multi-entity memories
+    would otherwise be all isolated nodes. Co-occurrence edges connect them, giving
+    the Graph tab a real graph and the PPR recall arm something to walk. The number:
+    zero isolated entities in a 4-entity memory."""
+    store = Store(":memory:")
+    feed(store, "Priya Patel, Diego Alvarez and Mei Chen met in Berlin.",
+         workspace_id="w1", extractor=RegexGraphExtractor())
+    edges = store.edges_in_scope(SearchFilter(workspace_id="w1"))
+    assert edges and all(e.relation == "co_occurs" for e in edges)   # no verb -> all co_occurs
+    entity_ids = {r["id"] for r in store.conn.execute(
+        "SELECT id FROM entities WHERE workspace_id='w1'").fetchall()}
+    connected = {e.src for e in edges} | {e.dst for e in edges}
+    assert entity_ids <= connected                                   # 0 isolated nodes
+
+
+def test_cooccurrence_is_idempotent():
+    store, ex = Store(":memory:"), RegexGraphExtractor()
+    feed(store, "Priya Patel, Diego Alvarez and Mei Chen met in Berlin.",
+         workspace_id="w1", extractor=ex)
+    before = len(store.edges_in_scope(SearchFilter(workspace_id="w1")))
+    again = feed(store, "Priya Patel, Diego Alvarez and Mei Chen met in Berlin.",
+                 workspace_id="w1", extractor=ex)
+    after = len(store.edges_in_scope(SearchFilter(workspace_id="w1")))
+    assert after == before and again["relations"] == 0
+
+
+def test_cooccurrence_skips_pairs_with_a_specific_relation():
+    """A specific relation must win: a 2-entity memory joined by 'works at' gets exactly
+    that edge, not a redundant co_occurs alongside it."""
+    store = Store(":memory:")
+    feed(store, "Alice Johnson works at Acme Corporation.",
+         workspace_id="w1", extractor=RegexGraphExtractor())
+    edges = store.edges_in_scope(SearchFilter(workspace_id="w1"))
+    assert len(edges) == 1 and edges[0].relation == "works at"
+
+
+def test_entity_canonicalization_merges_leading_article_variants():
+    ex = RegexGraphExtractor().extract("The Acme Corporation shipped. Acme Corporation grew.")
+    names = [n for n, _ in ex.entities]
+    assert "Acme Corporation" in names
+    assert "The Acme Corporation" not in names       # leading article stripped -> one node
+
+
 # ── opt-in wiring on the write path ───────────────────────────────────────────
 
 def test_remember_default_off_leaves_graph_empty():
