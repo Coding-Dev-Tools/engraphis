@@ -147,26 +147,42 @@ def ed25519_verify(public: bytes, message: bytes, signature: bytes) -> bool:
 
 #: Paid features that exist today, with the one-line description the UI shows.
 FEATURES: dict = {
-    "analytics": "Analytics dashboard — growth, retention distribution, decay forecast",
-    "export": "Compliance export — full bi-temporal workspace dump (memories + audit)",
-    "team": "Team mode — multi-user Inspector with logins and roles",
+    "analytics": "Analytics — growth, retention distribution, decay forecast, entity insights, shareable HTML report",
+    "export": "Compliance export — signed, checksummed bi-temporal workspace bundle (memories + audit)",
+    "automation": "Automated maintenance — scheduled consolidation + retention policies that keep the store clean on autopilot",
+    "sync": "Cloud sync — multi-device & team sync of your memory store with deterministic conflict resolution (bi-temporal merge, no conflict copies, no lost notes)",
+    "team": "Team mode — multi-user dashboard with logins, roles, and per-seat management",
 }
 
 #: What each plan unlocks. Unknown feature names in a key are carried but inert.
+#: ``sync`` is the flagship Pro upsell (individual multi-device); Team inherits it
+#: and adds multi-user shared-workspace sync on top.
 PLAN_FEATURES: dict = {
-    "pro": frozenset({"analytics", "export"}),
-    "team": frozenset({"analytics", "export", "team"}),
+    "pro": frozenset({"analytics", "export", "automation", "sync"}),
+    "team": frozenset({"analytics", "export", "automation", "team", "sync"}),
 }
 
-#: Where to buy — shown by the Inspector's license dialog and error messages.
-#: ``ENGRAPHIS_UPGRADE_URL`` overrides (set it to the live checkout/pricing page);
-#: the default is the Polar checkout link.
+#: Where to buy — shown by the dashboard's license panel and 402 error messages.
+#: Pro and Team are distinct products so fulfillment maps cleanly to a plan; each
+#: URL is independently env-overridable. ``ENGRAPHIS_UPGRADE_URL`` remains the
+#: general/Pro default for backward compatibility.
 DEFAULT_UPGRADE_URL = "https://buy.polar.sh/polar_cl_n6CR3ERqOus2VUhRrGrsRUqOB8yjDTeEU7p1r3CRrae"
+DEFAULT_PRO_UPGRADE_URL = DEFAULT_UPGRADE_URL
+DEFAULT_TEAM_UPGRADE_URL = DEFAULT_UPGRADE_URL
 
 
-def upgrade_url() -> str:
-    """The URL a free user should visit to upgrade. Env-configurable, never empty."""
-    return os.environ.get("ENGRAPHIS_UPGRADE_URL", "").strip() or DEFAULT_UPGRADE_URL
+def upgrade_url(plan: Optional[str] = None) -> str:
+    """The URL a user should visit to buy ``plan`` (defaults to the Pro/general link).
+
+    Env-configurable and never empty: ``ENGRAPHIS_TEAM_UPGRADE_URL`` for Team,
+    ``ENGRAPHIS_PRO_UPGRADE_URL`` (or the legacy ``ENGRAPHIS_UPGRADE_URL``) for Pro."""
+    if (plan or "").lower() == "team":
+        return (os.environ.get("ENGRAPHIS_TEAM_UPGRADE_URL", "").strip()
+                or os.environ.get("ENGRAPHIS_UPGRADE_URL", "").strip()
+                or DEFAULT_TEAM_UPGRADE_URL)
+    return (os.environ.get("ENGRAPHIS_PRO_UPGRADE_URL", "").strip()
+            or os.environ.get("ENGRAPHIS_UPGRADE_URL", "").strip()
+            or DEFAULT_PRO_UPGRADE_URL)
 
 _KEY_PREFIX = "ENGR1"
 # Pinned **production** Ed25519 verify key (32-byte public half). Rotated 2026-07-08
@@ -186,6 +202,13 @@ _VENDOR_PUBKEY_HEX = "d3520482d87a22f7e39e95cfa4b40bc2460f2576213868ba99ea1e4ea7
 _DEV_VENDOR_PUBKEY_HEX = "4722dc145d7b988f6a2513e750e367beb2dd75a68a208c8546b1fbb61c862b7e"
 
 _LICENSE_FILE = Path.home() / ".engraphis" / "license.key"
+
+#: One-time local free trial. Grants the full Pro feature set for TRIAL_DAYS with no
+#: key and no phone-home, so a user can evaluate every paid surface before buying.
+#: Honest by design: it's a local grant (resettable by deleting the file), not DRM —
+#: the point is to remove friction from evaluation, not to lock anyone out.
+TRIAL_DAYS = 3
+_TRIAL_FILE = Path.home() / ".engraphis" / "trial.json"
 
 
 class LicenseError(Exception):
@@ -212,6 +235,7 @@ class License:
     expires: Optional[float] = None
     features: frozenset = field(default_factory=frozenset)
     key_id: str = ""  # short fingerprint for support/display; never the key itself
+    is_trial: bool = False  # True when this License is a time-boxed local trial grant
 
     @classmethod
     def free(cls) -> "License":
@@ -230,7 +254,9 @@ class License:
             "plan": self.plan, "email": self.email, "seats": self.seats,
             "expires": self.expires, "features": sorted(self.features),
             "key_id": self.key_id, "purchase_url": upgrade_url(),
-            "upgrade_url": upgrade_url(),
+            "upgrade_url": upgrade_url(), "pro_upgrade_url": upgrade_url("pro"),
+            "team_upgrade_url": upgrade_url("team"),
+            "is_trial": self.is_trial, "trial": trial_status(),
             "known_features": FEATURES,
         }
 
@@ -329,20 +355,91 @@ def _read_key_material() -> str:
 
 
 def current_license(*, refresh: bool = False) -> License:
-    """The verified license for this process, or ``License.free()``. Never raises —
-    a bad key degrades to the free tier and the reason is kept in :func:`license_error`."""
+    """The verified license for this process, or a trial/``License.free()``. Never
+    raises — a bad key degrades (to an active trial, else the free tier) and the reason
+    is kept in :func:`license_error`. A valid paid key always takes precedence over a
+    trial; an active local trial takes precedence over free."""
     global _cached, _cache_error
     if _cached is not None and not refresh:
         return _cached
     material = _read_key_material()
-    if not material:
-        _cached, _cache_error = License.free(), ""
-        return _cached
-    try:
-        _cached, _cache_error = parse_key(material), ""
-    except LicenseError as exc:
-        _cached, _cache_error = License.free(), str(exc)
+    if material:
+        try:
+            _cached, _cache_error = parse_key(material), ""
+            return _cached
+        except LicenseError as exc:
+            _cache_error = str(exc)  # bad key → fall through to trial/free
+    else:
+        _cache_error = ""
+    status = trial_status()
+    _cached = _trial_license(status) if status.get("active") else License.free()
     return _cached
+
+
+# ── one-time local free trial (grants Pro features, no key, no phone-home) ────────────
+
+def _read_trial() -> dict:
+    try:
+        return json.loads(_TRIAL_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def trial_status(*, now: Optional[float] = None) -> dict:
+    """Non-raising snapshot of the local free-trial state (safe for every UI/boot)."""
+    now = time.time() if now is None else now
+    t = _read_trial()
+    expires = t.get("expires")
+    active = bool(expires) and now < float(expires)
+    days_left = int((float(expires) - now) // 86400 + 1) if active else 0
+    return {"active": active, "used": bool(t.get("started")),
+            "started": t.get("started"), "expires": expires,
+            "days_left": max(0, days_left), "trial_days": TRIAL_DAYS}
+
+
+def _trial_license(status: dict) -> License:
+    """A synthetic Pro license backed by an active local trial (not a real key)."""
+    return License(plan="pro", email="trial", seats=1,
+                   issued=status.get("started"), expires=status.get("expires"),
+                   features=frozenset(PLAN_FEATURES["pro"]), key_id="trial",
+                   is_trial=True)
+
+
+def start_trial(*, now: Optional[float] = None) -> dict:
+    """Begin the one-time ``TRIAL_DAYS`` local Pro trial. Returns the license public
+    dict (its ``trial`` key holds :func:`trial_status`).
+
+    Refuses (raises :class:`LicenseError`) if a valid paid key is already active or the
+    trial was already used and has since expired. Re-calling during an active trial is a
+    no-op that just returns the current status."""
+    now = time.time() if now is None else now
+    material = _read_key_material()
+    if material:
+        try:
+            parse_key(material)
+            raise LicenseError("a paid license is already active — no trial needed")
+        except LicenseError as exc:
+            if "no trial needed" in str(exc):
+                raise
+            # otherwise the key is invalid/expired; allow the trial to proceed
+    st = trial_status(now=now)
+    if st["active"]:
+        return current_license(refresh=True).to_public_dict()
+    if st["used"]:
+        raise LicenseError(
+            "your %d-day free trial has already been used — upgrade at %s"
+            % (TRIAL_DAYS, upgrade_url("pro")))
+    _TRIAL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"started": int(now), "expires": int(now + TRIAL_DAYS * 86400),
+               "trial_days": TRIAL_DAYS}
+    tmp = _TRIAL_FILE.with_name(_TRIAL_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(tmp, _TRIAL_FILE)
+    try:
+        os.chmod(_TRIAL_FILE, 0o600)
+    except OSError:
+        pass
+    return current_license(refresh=True).to_public_dict()
 
 
 def license_error() -> str:
@@ -384,10 +481,12 @@ def require_feature(feature: str) -> None:
         desc = FEATURES.get(feature, feature)
         tier = required_plan(feature)
         raise LicenseError(
-            "'%s' is an Engraphis %s feature (%s). Start a 3-day free trial at %s, then paste your key "
-            "in the Inspector's license dialog, set ENGRAPHIS_LICENSE_KEY, or save it "
-            "to ~/.engraphis/license.key."
-            % (feature, tier.capitalize(), desc, upgrade_url()), feature=feature)
+            "'%s' is an Engraphis %s feature (%s). Start a %d-day free trial from the "
+            "dashboard's Settings → License panel (one click, no key), or buy at %s and "
+            "paste the key there, set ENGRAPHIS_LICENSE_KEY, or save it to "
+            "~/.engraphis/license.key."
+            % (feature, tier.capitalize(), desc, TRIAL_DAYS, upgrade_url(tier)),
+            feature=feature)
 
 
 # ── ship-safety guards (advisory; never raise, never touch the free tier) ─────────
