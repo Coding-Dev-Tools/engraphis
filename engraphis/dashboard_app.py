@@ -30,7 +30,7 @@ _INDEX = _STATIC / "index.html"
 # the auth bootstrap endpoints themselves (state/login/setup must work while logged
 # out) — same shape as engraphis/inspector/app.py's _PUBLIC set.
 _PUBLIC = {"/", "/api/health", "/api/ready", "/api/auth/state", "/api/auth/login",
-           "/api/auth/setup", "/webhooks/polar"}
+           "/api/auth/setup", "/api/auth/logout", "/webhooks/polar"}
 
 
 def create_app() -> FastAPI:
