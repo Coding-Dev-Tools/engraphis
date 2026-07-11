@@ -32,7 +32,10 @@ class TestPolarWebhook:
         assert r.status_code == 403
 
     def test_non_order_event_is_acknowledged(self, monkeypatch):
-        import base64, hashlib, hmac, time
+        import base64
+        import hashlib
+        import hmac
+        import time
 
         secret_b64 = "dGhpc2lzYXRlc3RzZWNyZXQ="
         monkeypatch.setenv("POLAR_WEBHOOK_SECRET", secret_b64)
@@ -64,7 +67,10 @@ class TestPolarWebhook:
         assert r.json()["type"] == "subscription.updated"
 
     def test_fulfillment_fails_when_no_signing_key(self, monkeypatch):
-        import base64, hashlib, hmac, time
+        import base64
+        import hashlib
+        import hmac
+        import time
 
         secret_b64 = "dGhpc2lzYXRlc3RzZWNyZXQ="
         monkeypatch.setenv("POLAR_WEBHOOK_SECRET", secret_b64)

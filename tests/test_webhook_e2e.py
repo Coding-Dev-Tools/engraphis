@@ -1,5 +1,7 @@
 """E2E: issue a key through the webhook pipeline and verify with parse_key."""
-import os, secrets, tempfile
+import os
+import secrets
+import tempfile
 from engraphis.inspector.webhooks import issue_key
 from engraphis.licensing import parse_key, ed25519_public_key
 
