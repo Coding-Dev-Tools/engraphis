@@ -87,7 +87,7 @@ def _clean_metadata(value: Any) -> dict:
     import json
     try:
         encoded = json.dumps(value, ensure_ascii=False)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         raise ValidationError("metadata must be JSON-serializable")
     if len(encoded.encode("utf-8")) > MAX_METADATA_BYTES:
         raise ValidationError(f"metadata exceeds {MAX_METADATA_BYTES} bytes")
@@ -119,6 +119,9 @@ class MemoryService:
         self.allowed_workspaces: Optional[frozenset] = (
             frozenset(allowed_workspaces) if allowed_workspaces else None
         )
+        # Replicate the binding on the Store itself so no caller (including a future
+        # sync path) can bypass ENGRAPHIS_WORKSPACES by calling Store methods directly.
+        self.store.allowed_workspaces = self.allowed_workspaces
 
     @classmethod
     def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
