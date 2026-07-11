@@ -1,8 +1,14 @@
-"""Engraphis Memory Inspector — the v2 product UI.
+"""Engraphis Inspector — INTERNAL / LEGACY API layer (no longer a shipped product).
 
-Served from the same ``MemoryService`` layer that backs the MCP server, so the UI and
-the AI-facing tools can never drift: every panel is a thin view over the exact API the
-agent uses. Run with ``python -m scripts.inspector`` (default http://127.0.0.1:8710).
+The standalone Inspector product (:8710) was retired 2026-07-10; its memory-inspection
+features were merged into the unified dashboard on :8700 (see engraphis/static/index.html
+and engraphis/routes/v2_api.py). This package is kept because:
+
+  * ``engraphis.inspector.auth``     — shared multi-user auth used by the dashboard/Team
+  * ``engraphis.inspector.webhooks`` — Polar key issuance used by engraphis.billing
+  * ``engraphis.inspector.app``      — a thin FastAPI binding still exercised by the tests
+
+It is a library surface, not an entrypoint. Use ``python -m scripts.start_dashboard``.
 """
 from engraphis.inspector.app import create_app
 

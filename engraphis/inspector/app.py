@@ -4,9 +4,10 @@ Deliberately mirrors ``mcp_server.py``'s philosophy: no logic here, only transpo
 All validation/authorization lives in the service (workspace binding included), so
 the inspector inherits the same isolation guarantees as the MCP tools. Optional
 bearer-token auth via ``ENGRAPHIS_API_TOKEN`` (same knob as the v1 server); CORS is
-loopback-only by default. Responses are JSON; the single HTML page renders
-everything client-side with ``textContent`` (no innerHTML on stored content — the
-stored-XSS lesson from the v1 dashboard, applied from day one).
+loopback-only by default. Responses are JSON: the standalone HTML UI was retired
+2026-07-10 (folded into the unified dashboard on :8700), so this layer no longer
+serves an HTML page — it is an internal JSON API surface, exercised by the tests and
+reused by billing/webhooks and the dashboard's shared auth.
 
 Commercial layer: this file is also the *only* place the
 Pro gates live — ``/api/analytics`` and ``/api/export`` call
@@ -21,12 +22,11 @@ from __future__ import annotations
 import hmac
 import logging
 import time
-from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from engraphis import __version__, licensing
@@ -39,8 +39,6 @@ from engraphis.inspector.auth import (
 from engraphis.licensing import LicenseError
 from engraphis.logging_setup import configure_logging
 from engraphis.service import MemoryService, ValidationError
-
-_INDEX = Path(__file__).parent / "index.html"
 
 logger = logging.getLogger("engraphis")
 
@@ -220,24 +218,12 @@ def create_app(service: Optional[MemoryService] = None,
         return (user or {}).get("email") or "inspector"
 
     # ── page ────────────────────────────────────────────────────────────────
-    @app.get("/", include_in_schema=False)
-    async def index():
-        resp = FileResponse(_INDEX, media_type="text/html")
-        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        resp.headers["Pragma"] = "no-cache"
-        resp.headers["Expires"] = "0"
-        return resp
+    # GET "/" is intentionally unrouted — the standalone HTML UI was retired 2026-07-10
+    # (folded into the :8700 dashboard). This layer serves only JSON /api/* endpoints,
+    # so no separately maintained SPA can drift or reintroduce a stored-XSS surface.
 
-    # ── vendored assets (local-first: the graph renderer must work offline) ─
-    _VENDOR_DIR = Path(__file__).parent / "vendor"
-
-    @app.get("/vendor/force-graph.min.js", include_in_schema=False)
-    async def vendor_force_graph():
-        """force-graph (MIT, see vendor/force-graph.LICENSE), served locally so the
-        Graph tab never depends on a CDN — the page must render fully offline."""
-        return FileResponse(_VENDOR_DIR / "force-graph.min.js",
-                            media_type="text/javascript",
-                            headers={"Cache-Control": "public, max-age=604800"})
+    # The /vendor/force-graph.min.js route existed only for the retired UI's Graph
+    # tab, so it is gone too. (The dashboard serves its own libs from /static/vendor/.)
 
     # ── auth & licensing ────────────────────────────────────────────────────
     @app.get("/api/auth/state")
