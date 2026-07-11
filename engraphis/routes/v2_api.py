@@ -203,6 +203,17 @@ def workspaces_delete(req: _DeleteWsReq):
     return _run(service().delete_workspace, req.workspace)
 
 
+class _MergeWsReq(BaseModel):
+    source: str
+    target: str
+
+
+@router.post("/workspaces/merge")
+def workspaces_merge(req: _MergeWsReq):
+    """Fold ``source`` workspace into ``target`` (lossless move, see MemoryService.merge_workspaces)."""
+    return _run(service().merge_workspaces, req.source, req.target)
+
+
 class _UpdateMemReq(BaseModel):
     id: str
     workspace: Optional[str] = None
@@ -215,6 +226,19 @@ def memory_update(req: _UpdateMemReq):
     ws = req.workspace or _default_ws()
     return _run(service().update_memory, req.id, workspace=ws,
                 title=req.title, mtype=req.memory_type)
+
+
+class _ReorderReq(BaseModel):
+    ids: list[str]
+    workspace: Optional[str] = None
+    repo: Optional[str] = None
+
+
+@router.post("/memories/reorder")
+def memories_reorder(req: _ReorderReq):
+    """Persist the Memories tab's drag-to-reorder position for a full id list."""
+    ws = req.workspace or _default_ws()
+    return _run(service().reorder_memories, req.ids, workspace=ws, repo=req.repo)
 
 
 @router.get("/stats")
@@ -265,7 +289,9 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = None, limit: in
             sql += " AND (title LIKE ? OR content LIKE ?)"
             like = "%" + q + "%"
             args += [like, like]
-        sql += " ORDER BY COALESCE(last_access, valid_from) DESC LIMIT ?"
+        # Manually dragged rows (sort_order set) come first, in the order they were
+        # dropped in; everything never touched by drag-to-reorder falls back to recency.
+        sql += " ORDER BY (sort_order IS NULL), sort_order ASC, COALESCE(last_access, valid_from) DESC LIMIT ?"
         args.append(max(1, min(1000, int(limit))))
         rows = conn.execute(sql, args).fetchall()
     finally:

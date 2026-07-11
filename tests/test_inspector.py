@@ -80,14 +80,17 @@ def test_graph_endpoint_serves_the_same_data_as_the_dashboard():
     conn.execute("INSERT INTO entities(id, workspace_id, repo_id, name, etype, created_at) "
                  "VALUES ('e2', ?, NULL, 'Acme Corp', 'organization', 0)", (wid,))
     conn.execute("INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation) "
-                 "VALUES ('g1', ?, NULL, 'Alice', 'Acme Corp', 'works_at')", (wid,))
+                 # src/dst are entity ids ('e1'/'e2'), never the display name — that's
+                 # what backends.graph_extractor.feed actually writes
+                 "VALUES ('g1', ?, NULL, 'e1', 'e2', 'works_at')", (wid,))
     conn.commit()
     c = TestClient(create_app(svc))
     r = c.get("/api/graph", params={"workspace": "acme"})
     assert r.status_code == 200
     g = r.json()
-    assert {n["id"] for n in g["nodes"]} == {"Alice", "Acme Corp"}
-    assert g["edges"] == [{"from": "Alice", "to": "Acme Corp", "label": "works_at"}]
+    assert {n["id"] for n in g["nodes"]} == {"e1", "e2"}
+    assert {n["label"] for n in g["nodes"]} == {"Alice", "Acme Corp"}
+    assert g["edges"] == [{"from": "e1", "to": "e2", "label": "works_at"}]
     assert g["stats"] == {"entities": 2, "edges": 1, "connected": 2, "isolated": 0}
 
 
