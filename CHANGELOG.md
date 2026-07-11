@@ -33,6 +33,15 @@ All notable changes to Engraphis are documented here. Format loosely follows
   New installs populate the graph on every ingest, so the dashboard Graph tab has nodes
   out of the box instead of showing "No entities in this workspace yet." Set
   `ENGRAPHIS_GRAPH_EXTRACTOR=none` to opt out.
+- **Regex graph is now connected, not a dust cloud.** The heuristic extractor emitted
+  entities but almost no relations, so multi-entity memories became isolated nodes the
+  Graph tab hid ("Hide unconnected") and the PPR recall arm couldn't traverse. Entities
+  sharing a memory are now joined by weak, bounded `co_occurs` edges (skipped when a
+  specific relation already links the pair, so real relations still dominate ranking),
+  and concept names get light canonicalization (whitespace/quote/possessive normalization,
+  leading-article stripping) so trivial variants collapse to one node. On a real store this
+  took per-workspace connectivity from ~0% to 90–100% of entities. No recall regression
+  (ablation + both eval datasets hold at 1.0).
 
 ### Fixed
 - **Graph tab showed "No entities in this workspace yet" despite having memories.**
