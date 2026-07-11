@@ -30,10 +30,17 @@ def build_graph_payload(workspace: str, entity_rows: Sequence[Mapping[str, Any]]
     vis-network-ready nodes/edges, per-type counts, top-connected entities, and
     connectivity stats.
 
-    ``entity_rows``: objects with ``name`` / ``etype`` (e.g. ``sqlite3.Row``).
-    ``edge_rows``: objects with ``src`` / ``dst`` / ``relation``.
+    ``entity_rows``: objects with ``id`` / ``name`` / ``etype`` (e.g. ``sqlite3.Row``).
+    ``edge_rows``: objects with ``src`` / ``dst`` / ``relation``, where ``src``/``dst``
+    are entity **ids** (that's what ``backends.graph_extractor.feed`` writes into the
+    ``edges`` table — never the entity's display name). Node identity here must key off
+    ``id`` for exactly that reason: keying off name instead (as this used to) silently
+    duplicated every connected entity into a correctly-named-but-falsely-isolated node
+    plus a correctly-connected-but-id-labeled phantom (visible as stray "ent_..."-named
+    nodes on the Graph tab).
     """
-    etype_of = {r["name"]: (r["etype"] or DEFAULT_ETYPE) for r in entity_rows}
+    label_of = {r["id"]: (r["name"] or r["id"]) for r in entity_rows}
+    etype_of = {r["id"]: (r["etype"] or DEFAULT_ETYPE) for r in entity_rows}
     deg: dict = {}
     edges = []
     for e in edge_rows:
@@ -44,15 +51,16 @@ def build_graph_payload(workspace: str, entity_rows: Sequence[Mapping[str, Any]]
         deg[dst] = deg.get(dst, 0) + 1
         edges.append({"from": src, "to": dst, "label": rel or ""})
 
-    # every node referenced by an edge must exist so the network renders cleanly
-    names = set(etype_of) | set(deg)
-    nodes = [{"id": n, "label": n, "etype": etype_of.get(n, DEFAULT_ETYPE),
-              "degree": deg.get(n, 0)} for n in names]
+    # every node referenced by an edge must exist so the network renders cleanly, even
+    # in the (should-never-happen) case an edge outlives its entity row
+    ids_ = set(label_of) | set(deg)
+    nodes = [{"id": i, "label": label_of.get(i, i), "etype": etype_of.get(i, DEFAULT_ETYPE),
+              "degree": deg.get(i, 0)} for i in ids_]
 
     types: dict = {}
     for n in nodes:
         types[n["etype"]] = types.get(n["etype"], 0) + 1
-    top = sorted(({"name": n, "degree": d} for n, d in deg.items()),
+    top = sorted(({"id": i, "name": label_of.get(i, i), "degree": d} for i, d in deg.items()),
                  key=lambda r: -r["degree"])[:12]
     connected = sum(1 for n in nodes if n["degree"] > 0)
     return {
