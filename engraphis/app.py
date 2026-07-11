@@ -7,6 +7,7 @@ import logging
 import time
 import uuid
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -50,6 +51,31 @@ def _embedder_ready() -> bool:
     return _embedder_ok
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Startup/shutdown for the app (replaces the deprecated @app.on_event hooks).
+
+    Startup: initialize the DB (deferred to here so the CLI can set ENGRAPHIS_DB_PATH
+    first), then start the background consolidation loop unless it's disabled. Shutdown:
+    cancel and await the loop."""
+    global _background_task
+    init_db()
+    if settings.loop_interval > 0:
+        _background_task = asyncio.create_task(_consciousness_loop())
+        logger.info("Background consciousness loop started (interval=%ds)", settings.loop_interval)
+    else:
+        logger.info("Background loop disabled (ENGRAPHIS_LOOP_INTERVAL=0)")
+    try:
+        yield
+    finally:
+        if _background_task:
+            _background_task.cancel()
+            try:
+                await _background_task
+            except asyncio.CancelledError:
+                pass
+
+
 def create_app() -> FastAPI:
     """Build and configure the FastAPI application."""
     configure_logging()
@@ -60,6 +86,7 @@ def create_app() -> FastAPI:
                     "interaction-aware recall, bi-temporal facts, and background "
                     "consolidation. Local-first; you bring the LLM.",
         version=__version__,
+        lifespan=_lifespan,
     )
 
     # Local-first CORS: loopback by default, override with ENGRAPHIS_CORS_ORIGINS.
@@ -146,11 +173,7 @@ def create_app() -> FastAPI:
         )
         return response
 
-    # Database initialization deferred to startup event so CLI can set ENGRAPHIS_DB_PATH first
-    @app.on_event("startup")
-    async def _startup_db():
-        init_db()
-
+    # DB init + background loop lifecycle live in _lifespan (above); see FastAPI(lifespan=…).
     app.include_router(memory_router)
     app.include_router(vault_router)
     # Purchase fulfillment (Polar order.paid → signed key → email). Shared with the
@@ -177,25 +200,6 @@ def create_app() -> FastAPI:
         ready = all(checks.values())
         return JSONResponse({"ready": ready, "checks": checks, "version": __version__},
                             status_code=200 if ready else 503)
-
-    @app.on_event("startup")
-    async def _startup() -> None:
-        global _background_task
-        if settings.loop_interval > 0:
-            _background_task = asyncio.create_task(_consciousness_loop())
-            logger.info("Background consciousness loop started (interval=%ds)", settings.loop_interval)
-        else:
-            logger.info("Background loop disabled (ENGRAPHIS_LOOP_INTERVAL=0)")
-
-    @app.on_event("shutdown")
-    async def _shutdown() -> None:
-        global _background_task
-        if _background_task:
-            _background_task.cancel()
-            try:
-                await _background_task
-            except asyncio.CancelledError:
-                pass
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard():
