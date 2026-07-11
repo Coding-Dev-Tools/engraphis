@@ -727,6 +727,96 @@ class MemoryService:
         c.commit()
         return {"workspace": ws, "deleted": True, "memories_removed": int(n_mem)}
 
+    def merge_workspaces(self, source: str, target: str, *, actor: str = "user") -> dict:
+        """Fold ``source`` into ``target``, then remove the now-empty ``source``
+        workspace. This is the workspace-level counterpart to ``merge`` — and the
+        dashboard deliberately exposes *only* this, not free-form merging of
+        hand-picked, possibly-unrelated memories (see the removed multi-select
+        "Merge selected" flow). Unlike ``merge``, this is lossless: every memory
+        keeps its own id, content and full history, it just changes workspace.
+        Repos/entities that collide by name with something already in ``target``
+        are folded together (their memories, edges and code symbols repointed at
+        the surviving row); everything else is simply relabeled onto ``target``.
+        Irreversible, so the UI gates it behind a confirm, same as delete."""
+        src = self._clean_ws(source)
+        dst = self._clean_ws(target)
+        actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS, required=False) or "user"
+        if src == dst:
+            raise ValidationError("source and target workspaces must be different")
+        wid_src = self._lookup_workspace(src)
+        wid_dst = self._lookup_workspace(dst)
+        if wid_src is None:
+            raise ValidationError(f"no workspace named '{src}' yet")
+        if wid_dst is None:
+            raise ValidationError(f"no workspace named '{dst}' yet")
+        c = self.store.conn
+        n_mem = c.execute("SELECT COUNT(*) AS n FROM memories WHERE workspace_id=?",
+                          (wid_src,)).fetchone()["n"]
+
+        # 1) Repos: fold same-named repos together (repoint their symbols/code_edges
+        #    at the surviving row and drop the duplicate), else just relabel.
+        repo_remap: dict = {}
+        src_repos = [dict(x) for x in c.execute(
+            "SELECT id, name FROM repos WHERE workspace_id=?", (wid_src,))]
+        for r in src_repos:
+            existing = c.execute(
+                "SELECT id FROM repos WHERE workspace_id=? AND name=?", (wid_dst, r["name"])
+            ).fetchone()
+            if existing:
+                repo_remap[r["id"]] = existing["id"]
+                c.execute("UPDATE symbols SET repo_id=? WHERE repo_id=?", (existing["id"], r["id"]))
+                c.execute("UPDATE code_edges SET repo_id=? WHERE repo_id=?", (existing["id"], r["id"]))
+                c.execute("DELETE FROM repos WHERE id=?", (r["id"],))
+            else:
+                c.execute("UPDATE repos SET workspace_id=? WHERE id=?", (wid_dst, r["id"]))
+
+        def _new_repo(old_repo_id):
+            return repo_remap.get(old_repo_id, old_repo_id) if old_repo_id is not None else None
+
+        # 2) Entities: fold same name+type+repo together, else relabel.
+        entity_remap: dict = {}
+        src_entities = [dict(x) for x in c.execute(
+            "SELECT id, repo_id, name, etype FROM entities WHERE workspace_id=?", (wid_src,))]
+        for e in src_entities:
+            nrid = _new_repo(e["repo_id"])
+            existing = c.execute(
+                "SELECT id FROM entities WHERE workspace_id=? AND repo_id IS ? AND name=? AND etype IS ?",
+                (wid_dst, nrid, e["name"], e["etype"])
+            ).fetchone()
+            if existing:
+                entity_remap[e["id"]] = existing["id"]
+                c.execute("DELETE FROM entities WHERE id=?", (e["id"],))
+            else:
+                c.execute("UPDATE entities SET workspace_id=?, repo_id=? WHERE id=?",
+                          (wid_dst, nrid, e["id"]))
+
+        # 3) Edges: relabel workspace/repo, remapping any entity ids folded in step 2.
+        src_edges = [dict(x) for x in c.execute(
+            "SELECT id, repo_id, src, dst FROM edges WHERE workspace_id=?", (wid_src,))]
+        for ed in src_edges:
+            c.execute(
+                "UPDATE edges SET workspace_id=?, repo_id=?, src=?, dst=? WHERE id=?",
+                (wid_dst, _new_repo(ed["repo_id"]),
+                 entity_remap.get(ed["src"], ed["src"]), entity_remap.get(ed["dst"], ed["dst"]),
+                 ed["id"]))
+
+        # 4) Memories / sessions / events: relabel workspace/repo per distinct repo_id
+        #    bucket (ids, content and history are untouched).
+        for table in ("memories", "sessions", "events"):
+            buckets = [dict(x) for x in c.execute(
+                f"SELECT DISTINCT repo_id FROM {table} WHERE workspace_id=?", (wid_src,))]
+            for b in buckets:
+                c.execute(
+                    f"UPDATE {table} SET workspace_id=?, repo_id=? "
+                    f"WHERE workspace_id=? AND repo_id IS ?",
+                    (wid_dst, _new_repo(b["repo_id"]), wid_src, b["repo_id"]))
+
+        # 5) The source workspace is now empty — drop it.
+        c.execute("DELETE FROM workspaces WHERE id=?", (wid_src,))
+        self.store.audit(actor, "workspace_merge", wid_dst, f"{src} ({int(n_mem)} memories) -> {dst}")
+        c.commit()
+        return {"source": src, "target": dst, "memories_moved": int(n_mem), "id": wid_dst}
+
     def update_memory(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
                       title: Optional[str] = None, mtype: Optional[str] = None,
                       actor: str = "user") -> dict:
@@ -763,6 +853,32 @@ class MemoryService:
         self.store.audit(actor, "memory_update", mid, "; ".join(changes))
         self.store.conn.commit()
         return {"id": mid, "updated": changes}
+
+    def reorder_memories(self, ids: list, *, workspace: str, repo: Optional[str] = None,
+                         actor: str = "user") -> dict:
+        """Persist a manual display order for the Memories tab's drag-to-reorder UI.
+        Takes the full new top-to-bottom id order and assigns each a ``sort_order``
+        (0, 1, 2, ...); ``routes.v2_api.memories`` sorts by it when present, falling
+        back to recency for memories that have never been dragged (``sort_order``
+        stays ``NULL`` until touched). Every id must already belong to this
+        workspace/repo — the same ownership check every other governance tool uses
+        (``_check_owns``), so a client can't smuggle in ids from elsewhere to reorder
+        them."""
+        wid, rid = self._require_scope(workspace, repo)
+        if not isinstance(ids, (list, tuple)) or not ids:
+            raise ValidationError("ids must be a non-empty list")
+        if len(ids) > 1000:
+            raise ValidationError("too many ids (max 1000)")
+        actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS, required=False) or "user"
+        clean_ids = [_clean_text(i, field="id", max_chars=MAX_NAME_CHARS) for i in ids]
+        for mid in clean_ids:
+            self._check_owns(mid, wid, rid)
+        c = self.store.conn
+        c.executemany("UPDATE memories SET sort_order=? WHERE id=?",
+                      [(float(i), mid) for i, mid in enumerate(clean_ids)])
+        self.store.audit(actor, "memory_reorder", wid, f"{len(clean_ids)} memories")
+        c.commit()
+        return {"workspace": workspace, "reordered": len(clean_ids)}
 
     def inspect(self, memory_id: str, *, workspace: str, repo: Optional[str] = None) -> dict:
         """Everything the inspector shows for one memory: the record, its links, its
@@ -900,7 +1016,7 @@ class MemoryService:
         limit = max(1, min(5000, int(limit)))
         conn = self.store.conn
         ents = conn.execute(
-            "SELECT name, etype FROM entities WHERE workspace_id=? LIMIT ?",
+            "SELECT id, name, etype FROM entities WHERE workspace_id=? LIMIT ?",
             (wid, limit)).fetchall()
         # Lazy backfill: a workspace whose memories predate graph extraction being
         # enabled has memories but no entities. On first Graph-tab open, extract and
@@ -909,7 +1025,7 @@ class MemoryService:
         if not ents and self.engine.graph_extractor is not None:
             self._lazy_backfill_graph(wid)
             ents = conn.execute(
-                "SELECT name, etype FROM entities WHERE workspace_id=? LIMIT ?",
+                "SELECT id, name, etype FROM entities WHERE workspace_id=? LIMIT ?",
                 (wid, limit)).fetchall()
         edgs = conn.execute(
             "SELECT src, dst, relation FROM edges WHERE workspace_id=?", (wid,)).fetchall()
