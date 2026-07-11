@@ -23,7 +23,11 @@ from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFil
 from engraphis.core.recall import RecallEngine, RecallResult
 from engraphis.core.resolve import RELATED_SIM_FLOOR, ResolutionOp, resolve
 from engraphis.core.store import Store, now_ts
-from engraphis.core.textutil import jaccard, tokenize
+from engraphis.core.textutil import estimate_tokens, jaccard, tokenize
+
+# Sensitivity lattice: a merge keeps the *most restrictive* label of its sources, so
+# secret/sensitive content can never be laundered into a lower-sensitivity merged fact.
+_SENSITIVITY_RANK = {"normal": 0, "sensitive": 1, "secret": 2}
 
 # A-MEM-style evolution: how many related neighbors a new memory auto-links to on write.
 # Bounded so hub memories don't accrete unbounded link lists (link quality > quantity).
@@ -427,6 +431,109 @@ class MemoryEngine:
             resolve_conflicts=False,   # the supersede decision was just made explicitly
         )
         return {"id": new_id, "superseded": [memory_id], "reason": reason}
+
+    def merge(self, source_ids: list, merged_content: str, *,
+              title: Optional[str] = None, mtype: Optional[MemoryType] = None,
+              scope: Optional[Scope] = None, keywords: Optional[list] = None,
+              reason: str = "", actor: str = "user") -> dict:
+        """Merge several memories into one, retiring the sources into history.
+
+        A manual N→1 governance operation — the multi-input generalization of
+        ``correct``. Unlike ``consolidate`` (automatic, episodic-only, and
+        *non-destructive*: sources stay live), ``merge`` is user-driven, works on any
+        type, and retires every source: each source's validity window is closed (never
+        a hard delete — AGENTS.md §3.2), the new memory records ``supersedes`` on every
+        source so the version chain renders in why/timeline/inspector, and a ``merges``
+        link is written back to each source.
+
+        Safety (this is a write path over possibly-untrusted memories — SECURITY.md §5):
+        the merged memory inherits the *most restrictive* ``sensitivity`` of its sources
+        and is marked ``trusted: false`` if any source is untrusted, so a merge can never
+        launder secret/untrusted content into a trusted, lower-sensitivity fact. If any
+        source is pinned the result is pinned (a merge can't silently strip protection).
+        Audited on both sides, with a token-compaction number (§3.7).
+        """
+        ids, sources, seen = [], [], set()
+        for sid in source_ids:
+            if sid in seen:
+                continue
+            seen.add(sid)
+            rec = self.store.get_memory(sid)
+            if rec is None:
+                raise KeyError(f"no memory with id '{sid}'")
+            ids.append(sid)
+            sources.append(rec)
+        if len(sources) < 2:
+            raise ValueError("merge needs at least two distinct source memories")
+        # Scope confinement (defense in depth — the service also authorizes the
+        # workspace): a merge can never cross a workspace boundary.
+        if len({r.workspace_id for r in sources}) != 1:
+            raise ValueError("cannot merge memories from different workspaces")
+
+        primary = sources[0]
+        repo_id = primary.repo_id if len({r.repo_id for r in sources}) == 1 else None
+        mt = mtype or primary.mtype
+        sc = scope or primary.scope
+        importance = max([r.importance or 0.0 for r in sources] + [0.5])
+        pinned_any = any(r.pinned for r in sources)
+        sensitivity = max((r.sensitivity or "normal" for r in sources),
+                          key=lambda s: _SENSITIVITY_RANK.get(s, 0))
+        trusted = all(bool((r.provenance or {}).get("trusted", True)) for r in sources)
+        if keywords is None:
+            keywords, kseen = [], set()
+            for r in sources:
+                for kw in (r.keywords or []):
+                    if kw not in kseen:
+                        kseen.add(kw)
+                        keywords.append(kw)
+            keywords = keywords[:32]
+
+        tokens_before = sum(estimate_tokens(f"{r.title} {r.content}") for r in sources)
+        title_final = title if title is not None else (primary.title or "")
+
+        # Close every source first (mirrors ``correct``): the supersede decision is
+        # explicit, so the new write skips the resolver, and evolution won't relink the
+        # merged memory to a source that is about to be retired.
+        for r in sources:
+            self.store.close_validity(r.id, actor=actor,
+                                      reason=reason or "merged into a combined memory")
+            try:
+                self.index.delete([r.id])
+            except Exception:
+                pass
+
+        merged_id = self.remember(
+            merged_content, workspace_id=primary.workspace_id, repo_id=repo_id,
+            session_id=primary.session_id, mtype=mt, scope=sc, title=title_final,
+            importance=importance, keywords=keywords,
+            metadata={"supersedes": list(ids),
+                      "provenance": {"source": "merge", "trusted": trusted,
+                                     "merges": list(ids)}},
+            resolve_conflicts=False,   # the supersede decision was just made explicitly
+        )
+        # Persist inherited confidentiality + protection (the write path defaults
+        # sensitivity to 'normal' and pinned to False; a merge must not downgrade either).
+        if sensitivity != "normal":
+            self.store.conn.execute("UPDATE memories SET sensitivity=? WHERE id=?",
+                                    (sensitivity, merged_id))
+            self.store.conn.commit()
+        if pinned_any:
+            self.store.set_pinned(merged_id, True)
+        for r in sources:
+            self.store.add_link(merged_id, r.id, "merges")
+            self.store.audit(actor, "merge", r.id, f"merged into {merged_id}")
+        self.store.audit(actor, "merge", merged_id,
+                         f"merged {len(ids)} memories: {', '.join(ids)}")
+
+        tokens_after = estimate_tokens(f"{title_final} {merged_content}")
+        saved = max(0, tokens_before - tokens_after)
+        return {"id": merged_id, "merged": list(ids), "count": len(ids),
+                "sensitivity": sensitivity, "trusted": trusted, "pinned": pinned_any,
+                "reason": reason,
+                "compaction": {"tokens_before": tokens_before,
+                               "tokens_after": tokens_after, "tokens_saved": saved,
+                               "reduction_pct": round(100.0 * saved / tokens_before, 1)
+                               if tokens_before else 0.0, "units": len(ids)}}
 
     # ── linking & events (A-MEM-style) ──────────────────────────────────────────
     def link(self, a: str, b: str, *, relation: str = "related") -> None:
