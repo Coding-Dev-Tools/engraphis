@@ -33,7 +33,10 @@ def now_ts() -> float:
 
 
 def _dumps(obj: Any) -> str:
-    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    try:
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    except RecursionError:
+        return "{}"
 
 
 def _loads(raw: Any, default: Any) -> Any:
@@ -41,7 +44,7 @@ def _loads(raw: Any, default: Any) -> Any:
         return default
     try:
         return json.loads(raw)
-    except (TypeError, json.JSONDecodeError):
+    except (TypeError, json.JSONDecodeError, RecursionError):
         return default
 
 
@@ -57,7 +60,8 @@ def _fts5_available(conn: sqlite3.Connection) -> bool:
 class Store:
     """A connection to one Engraphis v2 database (one file, or ``:memory:``)."""
 
-    def __init__(self, path: str = ":memory:") -> None:
+    def __init__(self, path: str = ":memory:", *,
+                 allowed_workspaces: Optional[set] = None) -> None:
         self.path = path
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -67,6 +71,9 @@ class Store:
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.has_fts5 = False
+        self.allowed_workspaces: Optional[frozenset] = (
+            frozenset(allowed_workspaces) if allowed_workspaces else None
+        )
         self.init_schema()
 
     # ── schema ──────────────────────────────────────────────────────────────
@@ -89,7 +96,18 @@ class Store:
         self.conn.close()
 
     # ── tenancy ───────────────────────────────────────────────────────────────
+    def _authorize_workspace(self, name: str) -> str:
+        """When this Store is bound to a workspace allow-list, refuse to create or
+        retrieve a workspace outside it. This is the hard isolation boundary applied
+        at the persistence layer so no caller (including a future sync path) can
+        bypass ENGRAPHIS_WORKSPACES by going directly to Store instead of through
+        MemoryService."""
+        if self.allowed_workspaces is not None and name not in self.allowed_workspaces:
+            raise ValueError(f"workspace '{name}' is not permitted on this instance")
+        return name
+
     def create_workspace(self, name: str, *, settings: Optional[dict] = None) -> str:
+        self._authorize_workspace(name)
         wid = ids.new_id("workspace")
         self.conn.execute(
             "INSERT INTO workspaces(id, name, created_at, settings) VALUES (?,?,?,?)",
@@ -100,7 +118,9 @@ class Store:
 
     def get_or_create_workspace(self, name: str) -> str:
         row = self.conn.execute("SELECT id FROM workspaces WHERE name=?", (name,)).fetchone()
-        return row["id"] if row else self.create_workspace(name)
+        if row:
+            return row["id"]
+        return self.create_workspace(name)
 
     def create_repo(self, workspace_id: str, name: str, **kw: Any) -> str:
         rid = ids.new_id("repo")
@@ -171,6 +191,19 @@ class Store:
     def add_memory(self, rec: MemoryRecord) -> str:
         if not rec.id:
             rec.id = ids.new_id("memory")
+        existing = self.conn.execute(
+            "SELECT provenance, workspace_id FROM memories WHERE id=?", (rec.id,)
+        ).fetchone()
+        if existing is not None:
+            if existing["workspace_id"] != rec.workspace_id:
+                self.audit("system", "cross_workspace_overwrite_blocked", rec.id,
+                           f"existing workspace={existing['workspace_id']}, "
+                           f"incoming workspace={rec.workspace_id}")
+                rec.id = ids.new_id("memory")
+            else:
+                self.audit("system", "overwrite", rec.id,
+                           f"existing provenance={existing['provenance']}, "
+                           f"incoming provenance={_dumps(rec.provenance)}")
         ts = now_ts()
         rec.ingested_at = rec.ingested_at or ts
         rec.valid_from = rec.valid_from if rec.valid_from is not None else ts
