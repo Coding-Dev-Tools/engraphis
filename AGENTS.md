@@ -65,6 +65,9 @@ ENGRAPHIS_TEAM_MODE=1            # multi-user Inspector (needs a 'team' license)
 # ── Sleep-time consolidation (schedulable local job; also an MCP tool) ────────
 python -m scripts.consolidate --db engraphis.db --workspace acme --dry-run
 
+# ── Cloud sync (Pro; schedulable local job over any shared folder — see docs/SYNC.md) ──
+python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/engraphis --dry-run
+
 # ── Run the v1 server (needs the full install) ───────────────────────────────
 python -m scripts.start_server      # http://127.0.0.1:8700  (dashboard at /, OpenAPI at /docs)
 python -m scripts.test_routes       # HTTP smoke test — requires a running server + httpx
@@ -206,10 +209,17 @@ These are pure, unit-tested functions — change them only with a corresponding 
   governance/code/session — do not assume only `remember`/`recall` exist, check the
   tool list) and a **code-symbol graph** (`backends/codegraph.py`, tree-sitter with a
   dependency-free regex fallback; `MemoryEngine.index_repo()` / `engraphis_search_code`).
-  Call-graph edges are name-based, not type-resolved (best-effort, documented as such in
-  `backends/codegraph.py`). **Not done:** incremental/file-watcher re-indexing (today
-  `index_repo` is a full re-scan; idempotent per file, not incremental), git-as-world-time
-  signal.
+  Languages: Python, JavaScript, TypeScript, C#, C, C++ (C#/C/C++ are regex-level today —
+  a `CompositeSymbolIndexer` routes them to the regex backend even when tree-sitter is
+  installed, so no untested AST grammar maps ship; AST maps can move them to the primary
+  later with no caller change). An unknown `languages=` filter is rejected with an
+  actionable error instead of silently indexing nothing. Traversal prunes build/dep dirs
+  *during* the walk and honours a root `.engraphisignore` (gitignore-style; hardcoded
+  default excludes are non-negotiable — an untrusted repo can't `!`-re-expose them);
+  symlinked files are not followed out of root. Call-graph edges are name-based, not
+  type-resolved (best-effort, documented as such in `backends/codegraph.py`).
+  **Not done:** incremental/file-watcher re-indexing (today `index_repo` is a full
+  re-scan; idempotent per file, not incremental), git-as-world-time signal.
 - **Done — partial Phase 5:** input validation/sanitization, optional bearer auth, CORS
   allow-list, governance tools (`forget`/`pin`/`correct`, audited, never a hard delete),
   Apache-2.0 licensing/packaging. **Not done:** encryption at rest, built-in rate limiting,
@@ -232,6 +242,18 @@ These are pure, unit-tested functions — change them only with a corresponding 
   `resolve()`'s decision history. Accessible (ARIA tabs/labels, keyboard nav, text+color
   status), no build step, content rendered via textContent only. Optional bearer auth
   (`ENGRAPHIS_API_TOKEN`); multi-user login is the remaining Pro gate.
+- **Done — Cloud sync (Pro, first cut):** convergent multi-device / team sync over any
+  shared folder. `core/sync.py::SyncEngine` is a state-based CRDT merge over memory rows
+  (bi-temporal, deterministic, idempotent) that reuses the `resolve()`/validity machinery —
+  union by ULID, earliest-invalidation + max-reinforcement lattice, deterministic LWW with
+  a content-hash tiebreak; scope reconciled *by name* on apply. `SyncTransport` interface
+  (`core/interfaces.py`) + `FolderTransport` backend (`backends/sync_folder.py`, works over
+  Dropbox/iCloud/Syncthing/git); gated CLI `python -m scripts.sync` (`require_feature("sync")`
+  lives in the script — `core/` stays license-free). The untrusted-bundle apply path is
+  validated/clamped and **scope-confined** (a bundle can't cross a workspace/repo boundary;
+  `secret` memories aren't exported; provenance is stamped). See `docs/SYNC.md`.
+  **Not done:** managed end-to-end-encrypted relay, HLC per-field clock, entity/edge graph
+  sync, `engraphis_sync` MCP tool + Inspector "Devices" panel.
 - **Not done at all:** Phase 6 — Rust hot path.
 - The **v1 FastAPI server** is the legacy reference server and still runs; treat it as a
   compatibility/reference surface, not the place for new capability.
@@ -266,6 +288,8 @@ These are pure, unit-tested functions — change them only with a corresponding 
 ## 8. Source-of-truth docs
 
 - **`README.md`** — v1 server usage + the REST API table.
+- **`docs/SYNC.md`** — cloud sync (Pro): architecture, the convergent merge, CLI usage, the
+  untrusted-bundle security model, and positioning vs. file-syncers like Obsidian Sync.
 - **`AGENTS.md`** (this file) + **`CLAUDE.md`** — how to work in the repo.
 - **`skills/engraphis-memory/`** — portable Agent Skill (SKILL.md + `references/`) that teaches any
   MCP-capable agent the *memory discipline* (when to remember/recall, scoping, tool selection).
