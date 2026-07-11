@@ -102,6 +102,17 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("ascii")).hexdigest()
 
 
+def _validate_password(password: str) -> None:
+    """Enforce a reasonable password policy — NIST SP 800-63B-aligned: length is
+    the primary factor, with mixed character classes to resist dictionary attacks."""
+    if not isinstance(password, str) or len(password) < MIN_PASSWORD_LEN:
+        raise AuthError("password must be at least %d characters" % MIN_PASSWORD_LEN)
+    if not any(c.isupper() for c in password) and not any(c.isdigit() for c in password) \
+            and not any(not c.isalnum() for c in password):
+        raise AuthError("password must include at least one uppercase letter, digit, "
+                        "or special character")
+
+
 class AuthStore:
     """Users + sessions for team mode. One instance per Inspector process."""
 
@@ -129,8 +140,7 @@ class AuthStore:
         name = (name or "").strip()[:120]
         if role not in ROLES:
             raise AuthError("role must be one of: %s" % ", ".join(ROLES))
-        if not isinstance(password, str) or len(password) < MIN_PASSWORD_LEN:
-            raise AuthError("password must be at least %d characters" % MIN_PASSWORD_LEN)
+        _validate_password(password)
         if seat_limit is not None and self.count_active_users() >= seat_limit:
             raise AuthError(
                 "seat limit reached (%d) — upgrade your Team license for more seats"
