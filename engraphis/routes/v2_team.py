@@ -57,11 +57,10 @@ def _users_db_path(db_path: str) -> str:
 
 
 def _set_cookie(response: Response, token: str, *, secure: bool = False) -> None:
-    # max_age tracks the server-side session TTL (auth.SESSION_TTL_SECONDS) so the browser
-    # drops the cookie exactly when the server stops honouring it — a 7-day cookie over a
-    # 12-hour session just leaves a dead token lying around. Secure is set whenever the
-    # request arrived over HTTPS (mirrors inspector/app.py) so the session token is never
-    # sent in cleartext.
+    """Set the dashboard session cookie. Secure flag mirrors the Inspector pattern:
+    True when the request arrived over HTTPS, so the cookie is never sent cleartext.
+    TTL matches the server-side session expiry (SESSION_TTL_SECONDS) — the browser
+    drops the cookie exactly when the server stops honouring it."""
     response.set_cookie(_COOKIE, token, httponly=True, samesite="strict",
                         max_age=SESSION_TTL_SECONDS, path="/", secure=secure)
 
