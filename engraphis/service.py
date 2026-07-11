@@ -122,17 +122,28 @@ class MemoryService:
         # Replicate the binding on the Store itself so no caller (including a future
         # sync path) can bypass ENGRAPHIS_WORKSPACES by calling Store methods directly.
         self.store.allowed_workspaces = self.allowed_workspaces
+        # Workspaces whose graph has been lazily backfilled this process — see
+        # ``graph()``. Guards against rescanning a workspace whose memories genuinely
+        # yield no entities on every Graph-tab open.
+        self._graph_backfilled: set = set()
 
     @classmethod
     def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
                embed_dim: int = 256, vector_backend: str = "auto",
                rerank_model: Optional[str] = None,
                allowed_workspaces: Optional[list] = None,
-               extractor: str = "none") -> "MemoryService":
+               extractor: str = "none",
+               graph_extractor: Optional[str] = None) -> "MemoryService":
+        # graph_extractor defaults to the configured backend (ENGRAPHIS_GRAPH_EXTRACTOR,
+        # "regex" by default) so every front end — MCP server, dashboards, CLI — populates
+        # the knowledge graph without each call site having to opt in.
+        if graph_extractor is None:
+            from engraphis.config import settings
+            graph_extractor = settings.graph_extractor
         engine = MemoryEngine.create(
             db_path, embed_model=embed_model, embed_dim=embed_dim,
             vector_backend=vector_backend, rerank_model=rerank_model,
-            extractor=extractor,
+            extractor=extractor, graph_extractor=graph_extractor,
         )
         return cls(engine, allowed_workspaces=allowed_workspaces)
 
@@ -485,6 +496,46 @@ class MemoryService:
         except KeyError as exc:
             raise ValidationError(str(exc))
 
+    def merge(self, source_ids: list, merged_content: str, *, workspace: str,
+              repo: Optional[str] = None, title: Optional[str] = None,
+              mtype: Optional[str] = None, reason: str = "", actor: str = "user") -> dict:
+        """Merge several memories into one (manual N→1), retiring the sources into
+        history. Validated and authorized like every other governance op: the caller
+        must name the workspace that owns the sources, and **every** source is
+        ownership-checked, so a merge can neither read nor retire a memory outside the
+        caller's workspace. Ownership is checked at workspace level (not repo), so
+        near-duplicates spread across repos of the same workspace can still be merged;
+        the workspace itself stays a hard isolation boundary (``_check_owns``)."""
+        ids = _clean_string_list(source_ids, field="source_ids", max_items=MAX_K,
+                                 max_chars=MAX_NAME_CHARS)
+        seen, uniq = set(), []
+        for i in ids:
+            if i not in seen:
+                seen.add(i)
+                uniq.append(i)
+        if len(uniq) < 2:
+            raise ValidationError("merge needs at least two distinct source memories")
+        merged_content = _clean_text(merged_content, field="content",
+                                     max_chars=MAX_CONTENT_CHARS)
+        reason = _clean_text(reason, field="reason", max_chars=MAX_TITLE_CHARS,
+                             required=False)
+        actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
+                            required=False) or "user"
+        title_clean = (None if title is None
+                       else _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS,
+                                        required=False))
+        mt = _enum(mtype, MemoryType, "memory_type") if mtype else None
+        wid, _ = self._require_scope(workspace, repo)
+        for sid in uniq:
+            self._check_owns(sid, wid, None)
+        try:
+            out = self.engine.merge(uniq, merged_content, title=title_clean, mtype=mt,
+                                    reason=reason, actor=actor)
+        except (KeyError, ValueError) as exc:
+            raise ValidationError(str(exc))
+        out["workspace"] = self._clean_ws(workspace)
+        return out
+
     # ── bi-temporal: why / timeline ──────────────────────────────────────────────
     def why(self, query: str, *, workspace: str, repo: Optional[str] = None, k: int = 5) -> dict:
         """Rationale + history for a decision/fact: the live answer plus whatever it
@@ -746,9 +797,12 @@ class MemoryService:
         return d
 
     def _chain_for(self, rec) -> list:
-        """Walk the supersession chain in both directions from ``rec``:
-        backward via this record's ``supersedes``/``corrects`` metadata, forward by
-        finding records that point back at it. Returns oldest→newest."""
+        """Collect the full supersession component around ``rec`` and return it
+        oldest→newest by valid_from. Backward via this record's ``supersedes``/
+        ``corrects`` metadata, forward by finding records that point back at it —
+        following **all** predecessors, not a single line, so an N→1 ``merge`` shows
+        every source it combined (a linear ``correct`` chain is just the one-predecessor
+        special case)."""
         def predecessors(r):
             ids = list(r.metadata.get("supersedes") or [])
             if r.metadata.get("corrects"):
@@ -756,29 +810,29 @@ class MemoryService:
             return ids
 
         seen = {rec.id}
-        back = []
-        cur = rec
-        while True:
-            prev = None
+        members = {rec.id: rec}
+        frontier = [rec]
+        while frontier:
+            cur = frontier.pop()
             for pid in predecessors(cur):
-                if pid not in seen:
-                    prev = self.store.get_memory(pid)
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                prev = self.store.get_memory(pid)
+                if prev is not None:
+                    members[pid] = prev
+                    frontier.append(prev)
+            while True:
+                nxt = self._successor_of(cur.id, seen)
+                if nxt is None:
                     break
-            if prev is None:
-                break
-            back.append(prev)
-            seen.add(prev.id)
-            cur = prev
-        fwd = []
-        cur = rec
-        while True:
-            nxt = self._successor_of(cur.id, seen)
-            if nxt is None:
-                break
-            fwd.append(nxt)
-            seen.add(nxt.id)
-            cur = nxt
-        return list(reversed(back)) + [rec] + fwd
+                seen.add(nxt.id)
+                members[nxt.id] = nxt
+                frontier.append(nxt)
+        if len(members) == 1:
+            return [rec]
+        return sorted(members.values(),
+                      key=lambda r: (r.valid_from or r.ingested_at or 0, r.id))
 
     def _successor_of(self, memory_id: str, seen: set):
         rows = self.store.conn.execute(
@@ -848,9 +902,43 @@ class MemoryService:
         ents = conn.execute(
             "SELECT name, etype FROM entities WHERE workspace_id=? LIMIT ?",
             (wid, limit)).fetchall()
+        # Lazy backfill: a workspace whose memories predate graph extraction being
+        # enabled has memories but no entities. On first Graph-tab open, extract and
+        # persist its graph so existing installs light up on update without a manual
+        # migration. Idempotent (feed() de-dupes) and only runs when extraction is on.
+        if not ents and self.engine.graph_extractor is not None:
+            self._lazy_backfill_graph(wid)
+            ents = conn.execute(
+                "SELECT name, etype FROM entities WHERE workspace_id=? LIMIT ?",
+                (wid, limit)).fetchall()
         edgs = conn.execute(
             "SELECT src, dst, relation FROM edges WHERE workspace_id=?", (wid,)).fetchall()
         return build_graph_payload(ws, ents, edgs)
+
+    def _lazy_backfill_graph(self, wid: str) -> None:
+        """One-time, on-demand knowledge-graph population for a workspace whose
+        memories were written before graph extraction was enabled. Feeds every live
+        memory through the configured graph extractor, scoped to the memory's own
+        workspace/repo. Idempotent — ``feed()`` de-dupes entities and skips existing
+        edges — and instance-guarded so a workspace whose content yields no entities
+        isn't rescanned on every open within a process. Content is untrusted here, as
+        on the normal ingest path; it flows only through the (regex) extractor, which
+        does no eval/exec/network."""
+        if wid in self._graph_backfilled:
+            return
+        self._graph_backfilled.add(wid)
+        from engraphis.backends.graph_extractor import feed as _graph_feed
+        rows = self.store.conn.execute(
+            "SELECT repo_id, title, content FROM memories "
+            "WHERE workspace_id=? AND expired_at IS NULL", (wid,)).fetchall()
+        for r in rows:
+            try:
+                _graph_feed(self.store, r["content"] or "", workspace_id=wid,
+                            repo_id=r["repo_id"], title=r["title"] or "",
+                            extractor=self.engine.graph_extractor,
+                            provenance={"source": "lazy_backfill"})
+            except Exception:
+                continue
 
     # ── introspection ───────────────────────────────────────────────────────────
     def stats(self, *, workspace: Optional[str] = None) -> dict:

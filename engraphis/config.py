@@ -94,8 +94,10 @@ class Settings:
     # Optional cross-encoder reranker model. Empty (default) -> IdentityReranker (offline).
     rerank_model: str = field(default_factory=lambda: _env("ENGRAPHIS_RERANK_MODEL", ""))
 
-    # Optional graph extractor: "none" (default) or "regex" for heuristic NER.
-    graph_extractor: str = field(default_factory=lambda: _env("ENGRAPHIS_GRAPH_EXTRACTOR", "none").lower())
+    # Graph extractor for the knowledge-graph tab: "regex" (default) = dependency-free
+    # heuristic NER, no API key, populated on every ingest; "none" disables graph
+    # population. Defaults on so the Graph tab works out of the box for every install.
+    graph_extractor: str = field(default_factory=lambda: _env("ENGRAPHIS_GRAPH_EXTRACTOR", "regex").lower())
 
     loop_interval: int = field(default_factory=lambda: _env_int("ENGRAPHIS_LOOP_INTERVAL", 60))
     loop_top_k: int = field(default_factory=lambda: _env_int("ENGRAPHIS_LOOP_TOP_K", 20))

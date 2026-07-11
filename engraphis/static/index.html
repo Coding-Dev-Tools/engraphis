@@ -28,6 +28,7 @@ a{color:var(--accent);text-decoration:none}button{font-family:inherit;cursor:poi
 .search-row{display:flex;gap:8px;margin-bottom:14px}.search-row .input{flex:1}
 .browser{display:flex;height:calc(100vh - 84px)}.browser-list{width:320px;border-right:1px solid var(--border);overflow-y:auto;flex-shrink:0}.browser-reader{flex:1;overflow-y:auto;padding:24px 28px}
 .mem-card{padding:10px 12px;border-bottom:1px solid var(--surface2);cursor:pointer;transition:background var(--transition)}.mem-card:hover{background:var(--surface2)}.mem-card.active{background:var(--accent-bg);border-left:2px solid var(--accent)}.mem-card-title{font-size:13px;font-weight:500;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.mem-card-meta{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-dim)}.ret-bar{display:inline-block;width:36px;height:3px;background:var(--surface3);border-radius:1.5px;overflow:hidden;vertical-align:middle}.ret-fill{height:100%;border-radius:1.5px}.ret-h{background:var(--green)}.ret-m{background:var(--amber)}.ret-l{background:var(--red)}
+.mem-card.sel{background:var(--accent-bg);box-shadow:inset 3px 0 0 var(--accent)}.mem-chk{width:15px;height:15px;accent-color:var(--accent);cursor:pointer}.mem-selbar{display:flex;align-items:center;gap:10px;margin-bottom:12px;padding:8px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm)}
 .md-reader h1{font-size:22px;font-weight:600;margin-bottom:6px;letter-spacing:-.3px}.md-reader h2{font-size:17px;font-weight:600;margin:20px 0 8px}.md-reader h3{font-size:14px;font-weight:600;margin:16px 0 6px}.md-reader p{margin-bottom:10px;line-height:1.7}.md-reader ul,.md-reader ol{margin:0 0 10px 20px;line-height:1.7}.md-reader li{margin-bottom:3px}.md-reader code{font-family:var(--mono);font-size:12px;background:var(--surface2);padding:2px 5px;border-radius:3px;color:var(--cyan)}.md-reader pre{background:var(--surface2);padding:12px;border-radius:var(--radius-sm);overflow-x:auto;margin-bottom:10px;border:1px solid var(--border)}.md-reader pre code{background:none;padding:0;color:var(--text)}.md-reader blockquote{border-left:2px solid var(--accent-dim);padding-left:14px;color:var(--text-muted);margin-bottom:10px}.md-reader table{width:100%;border-collapse:collapse;margin-bottom:10px;font-size:13px}.md-reader th,.md-reader td{padding:6px 8px;border:1px solid var(--border)}.md-reader th{background:var(--surface2);font-weight:600}.md-reader hr{border:none;border-top:1px solid var(--border);margin:16px 0}.md-meta{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--border)}
 .editor-wrap{display:flex;flex-direction:column;height:calc(100vh - 84px)}.editor-toolbar{display:flex;gap:6px;padding:8px 12px;border-bottom:1px solid var(--border);background:var(--surface);align-items:center}.editor-body{flex:1;display:flex;overflow:hidden}.editor-edit{flex:1;border:none;background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13px;line-height:1.7;padding:20px 24px;resize:none;outline:none}.editor-preview{flex:1;overflow-y:auto;padding:20px 24px;border-left:1px solid var(--border)}
 .dropzone{border:1px dashed var(--border-light);border-radius:var(--radius);padding:32px;text-align:center;cursor:pointer;transition:all var(--transition)}.dropzone:hover,.dropzone.drag{border-color:var(--accent);background:var(--accent-bg)}.dropzone-icon{width:28px;height:28px;margin:0 auto 8px;color:var(--text-dim)}
@@ -173,6 +174,7 @@ body{background:radial-gradient(1200px 800px at 85% -10%,rgba(124,92,230,.07),tr
 <div class="view" id="view-memories">
 <div class="view-head"><div class="view-title">Memories</div><div class="view-desc">Browse and curate the memories in this workspace.</div></div>
 <div style="display:flex;gap:8px;margin-bottom:12px"><input class="input" id="mem-q" placeholder="Filter by keyword…" style="flex:1" onkeydown="if(event.key==='Enter')loadMemories()"><button class="btn btn-ghost" onclick="loadMemories()">Search</button></div>
+<div id="mem-selbar" class="mem-selbar" style="display:none"></div>
 <div id="mem-cards"><div class="empty" style="padding:30px">Loading…</div></div>
 </div>
 
@@ -280,6 +282,15 @@ body{background:radial-gradient(1200px 800px at 85% -10%,rgba(124,92,230,.07),tr
 <div class="mm-meta" id="mm-meta"></div>
 <div class="mm-body md-reader" id="mm-body"></div>
 <div class="mm-actions" id="mm-actions"></div>
+</div>
+</div>
+
+<!-- MERGE MEMORIES MODAL -->
+<div class="mm-overlay" id="merge-overlay" onclick="if(event.target===this)closeMerge()">
+<div class="mm-box" role="dialog" aria-modal="true" aria-label="Merge memories" style="max-width:720px">
+<div class="mm-head"><div class="mm-title">Merge memories</div><button class="btn btn-ghost btn-sm" onclick="closeMerge()" aria-label="Close">&#10005;</button></div>
+<div class="mm-body" id="merge-body"></div>
+<div class="mm-actions" id="merge-actions"></div>
 </div>
 </div>
 
