@@ -296,6 +296,11 @@ class RegexSymbolIndexer:
     }
     _PATTERNS["typescript"] = _PATTERNS["javascript"]
 
+    # Any single source line longer than this is skipped by the regex indexer.
+    # Lines this long are pathological (crafted DoS inputs), not legitimate source
+    # code. Also bounds the worst-case match-time for each compiled pattern.
+    _MAX_LINE_LEN = 4096
+
     def supports(self, lang: str) -> bool:
         return lang in self._PATTERNS
 
@@ -303,6 +308,8 @@ class RegexSymbolIndexer:
         out = FileIndex()
         patterns = self._PATTERNS.get(lang, [])
         for lineno, line in enumerate(content.splitlines(), start=1):
+            if len(line) > self._MAX_LINE_LEN:
+                continue
             for pattern, kind in patterns:
                 m = pattern.match(line)
                 if m:
