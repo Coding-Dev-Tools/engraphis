@@ -30,7 +30,8 @@ Everything lives in a single SQLite file on your machine.
 
 | Tab | What you see |
 |-----|-------------|
-| **Overview** | Live memory counts, retention distribution, memory-type mix, and analytics (Pro) |
+| **Overview** | Live memory counts, memory-type mix, and a health summary at a glance |
+| **Analytics** *(Pro)* | Growth, retention distribution, decay forecast, resolver mix, and top entities — plus a one-click shareable HTML report and a cross-workspace portfolio view |
 | **Recall** | Hybrid search across the memory bank — each result shows its score breakdown (retention, semantic, lexical, graph, importance, recency) |
 | **Memories** | Browse and curate every memory by workspace — click into a full reader with type and retention pills |
 | **Proactive** | "What should I know right now" — importance × recency × retention, plus the last session handoff |
@@ -39,6 +40,7 @@ Everything lives in a single SQLite file on your machine.
 | **Audit** | Full governance ledger — who did what, when, and why |
 | **Knowledge Graph** | Interactive force-directed graph of entities and their relationships — click any node to see every linked memory |
 | **Consolidate** | Run a consolidation sweep on demand — see what got distilled and what got pruned |
+| **Automation** *(Pro)* | Scheduled consolidation + retention policies that keep the store clean on autopilot (dashboard config, plus `scripts/auto_maintain` for cron / Task Scheduler) |
 | **Workspaces** | Manage workspace isolation boundaries — switch the active workspace, browse, and organize memory |
 | **Team** | Multi-user access with admin / member / viewer roles (Team) |
 | **Settings** | License activation (Pro/Team), appearance, and engine/store info |
@@ -55,19 +57,16 @@ and the Python library. What you see in the UI is what your agents get.
 | **Linux** | Desktop entry in Applications → Development (GNOME/KDE/etc.) |
 | **Any** | `engraphis-dashboard` in a terminal |
 
-### Also ships with the Memory Inspector
+### Accessibility-first inspection, built in
 
-For a focused, accessibility-first view of individual memories and their history:
+The dashboard has the focused memory-inspection view built in — no separate app or port:
 
-```bash
-engraphis-inspector
-```
+- Open any memory to see its **supersession chain with word-level diffs** — exactly when a fact changed and why
+- **Offline knowledge graph** (vendored renderer — no CDN, works air-gapped)
+- Score breakdowns on every recall, Why/Timeline/link browsing, proactive recall, consolidation, audit trail
+- Keyboard-navigable, ARIA-annotated, light/dark mode
 
-Opens `http://127.0.0.1:8710` with:
-- Search by query with score breakdown
-- **Supersession-chain view with word-level diffs** — see exactly when a fact changed and why
-- Why/timeline/link browsing, proactive recall, consolidation, audit trail
-- Keyboard-navigable, ARIA-annotated, light/dark mode via `prefers-color-scheme`
+> The standalone Inspector (`:8710`) was retired 2026-07-10 and folded into the one dashboard on `:8700`.
 
 ---
 
@@ -98,7 +97,7 @@ embeddings. You bring the LLM only for optional chat/synthesis.
 
 | Axis | mem0 | Zep | Engraphis |
 |---|---|---|---|
-| Product WebUI (local, no cloud) | ✗ | ✗ | **✓ (dashboard + Inspector)** |
+| Product WebUI (local, no cloud) | ✗ | ✗ | **✓ (dashboard with built-in inspector)** |
 | Open & self-hostable engine | ✓ | partial | **✓ fully open, local-first** |
 | Forgetting/decay | partial | ✗ | **✓** |
 | Bi-temporal graph | partial | ✓ | **✓** |
@@ -157,26 +156,30 @@ hit = mem.recall("why did we change auth?", workspace="acme", repo="api")
 print(hit["context"])
 ```
 
-The same `MemoryService` backs the dashboard, the Inspector, and the MCP server.
+The same `MemoryService` backs the dashboard and the MCP server.
 
 ---
 
 ## Free forever vs. Pro
 
-The engine, dashboard, Inspector, MCP server, and governance tools are free and Apache-2.0,
+The engine, dashboard, MCP server, and governance tools are free and Apache-2.0,
 permanently. A license key (verified **offline** — no phone-home) unlocks the paid layer.
+**Pro is $10/mo, Team is $20/seat/mo** — and you can unlock every Pro feature with a
+**3-day free trial right in the dashboard** (Settings → License), no key and no card.
 
-> **[Get a license key →](https://buy.polar.sh/polar_cl_n6CR3ERqOus2VUhRrGrsRUqOB8yjDTeEU7p1r3CRrae)** Start a 3-day free trial — unlock analytics, compliance export, and team mode. Keys are verified offline — no phone-home.
+> **[Buy a license key →](https://buy.polar.sh/polar_cl_n6CR3ERqOus2VUhRrGrsRUqOB8yjDTeEU7p1r3CRrae)** Or start the 3-day free trial in-app. Keys are verified offline — no phone-home.
 
-| | Free (available now) | Pro | Team |
+| | Free (available now) | Pro — $10/mo | Team — $20/seat/mo |
 |---|---|---|---|
-| Dashboard WebUI + Inspector | ✓ | ✓ | ✓ |
+| Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
 | Memory engine + 18 MCP tools | ✓ | ✓ | ✓ |
-| Analytics dashboard (growth, retention, decay forecast) | | ✓ | ✓ |
-| Compliance export (full bi-temporal JSON dump) | | ✓ | ✓ |
-| Multi-user Inspector: logins, roles, seat management | | | ✓ |
-| Analytics HTML report export (self-contained, shareable) | | | ✓ |
+| Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
+| Analytics: growth, retention, decay forecast + entities | | ✓ | ✓ |
+| Analytics HTML report (self-contained, shareable) | | ✓ | ✓ |
+| Automated maintenance: scheduled consolidation + retention policies | | ✓ | ✓ |
+| Signed compliance export (checksummed bi-temporal bundle) | | ✓ | ✓ |
 | Priority support | | ✓ | ✓ |
+| Multi-user dashboard: logins, roles, seat management | | | ✓ |
 
 ---
 
