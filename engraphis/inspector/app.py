@@ -33,6 +33,7 @@ from engraphis import __version__, licensing
 from engraphis.analytics import compute_analytics, render_analytics_html
 from engraphis.billing import router as billing_router
 from engraphis.inspector.sync_relay import router as sync_relay_router
+from engraphis.inspector.license_cloud import router as license_cloud_router
 from engraphis.config import settings
 from engraphis.inspector.auth import (
     SESSION_TTL_SECONDS, AuthError, AuthStore, min_role as _min_role, role_at_least,
@@ -437,5 +438,6 @@ def create_app(service: Optional[MemoryService] = None,
     # this Inspector serve identical fulfillment logic — no drift between the two.
     app.include_router(billing_router)
     app.include_router(sync_relay_router)
+    app.include_router(license_cloud_router)
 
     return app

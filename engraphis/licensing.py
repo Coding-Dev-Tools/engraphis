@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import os
 import time
@@ -211,6 +212,54 @@ _LICENSE_FILE = Path.home() / ".engraphis" / "license.key"
 TRIAL_DAYS = 3
 _TRIAL_FILE = Path.home() / ".engraphis" / "trial.json"
 
+#: Monotonic wall-clock anchor. Persists the highest wall-clock time ever observed so a
+#: user cannot roll the system clock backward to resurrect an expired key/lease or stretch
+#: a trial. Advisory (the file is local and deletable) — it just closes the trivial
+#: "set the date back" bypass; real expiry enforcement is the cloud lease.
+_MONOTONIC_FILE = Path.home() / ".engraphis" / ".clock_anchor"
+
+
+def _monotonic_now() -> float:
+    """``max(system clock, highest time ever seen)`` — never moves backward across calls.
+
+    Reads the anchor, returns the greater of it and ``time.time()``, and advances the
+    anchor to that value. A clock rolled into the past therefore cannot reduce measured
+    elapsed time for expiry checks."""
+    now = time.time()
+    anchor = now
+    try:
+        anchor = max(now, float(_MONOTONIC_FILE.read_text(encoding="utf-8").strip()))
+    except (OSError, ValueError):
+        pass
+    if anchor >= now:  # persist the high-water mark (best-effort)
+        try:
+            _MONOTONIC_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _MONOTONIC_FILE.with_name(_MONOTONIC_FILE.name + ".tmp")
+            tmp.write_text("%d" % int(anchor), encoding="utf-8")
+            os.replace(tmp, _MONOTONIC_FILE)
+        except OSError:
+            pass
+    return anchor
+
+
+def _trial_hmac_key() -> bytes:
+    """Machine-tied key for signing trial state, so ``trial.json`` can't be hand-edited
+    to extend a trial or transplanted to another machine. Derived from the pinned vendor
+    public key + this device's machine id (both stable, neither secret) — this raises the
+    bar against casual tampering; it is not unforgeable in an open-source client."""
+    key = _VENDOR_PUBKEY_HEX.encode("ascii")
+    try:
+        from engraphis.cloud_license import machine_id
+        key += machine_id().encode("ascii")
+    except Exception:
+        pass
+    return hashlib.sha256(key).digest()
+
+
+def _sign_trial(payload: dict) -> str:
+    body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hmac.new(_trial_hmac_key(), body, "sha256").hexdigest()
+
 
 class LicenseError(Exception):
     """Invalid, tampered, or expired license key. Message is safe to surface.
@@ -382,6 +431,21 @@ def _read_key_material() -> str:
         return ""
 
 
+def _cloud_gate(lic: "License", material: str) -> tuple:
+    """Apply cloud enforcement to an already signature-valid key. Returns (allowed, reason).
+
+    Offline-only (no ``ENGRAPHIS_CLOUD_URL``): always allow — the local signature is the
+    gate, preserving the self-hosted story. Cloud mode: delegate to the lease check, which
+    requires the device to have registered and hold a valid lease (fails closed otherwise)."""
+    if not os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip():
+        return True, ""
+    try:
+        from engraphis import cloud_license
+        return cloud_license.gate(lic, material)
+    except Exception as exc:  # cloud mode is on but the check errored → fail closed
+        return False, "cloud verification error: %s" % exc
+
+
 def current_license(*, refresh: bool = False) -> License:
     """The verified license for this process, or a trial/``License.free()``. Never
     raises — a bad key degrades (to an active trial, else the free tier) and the reason
@@ -393,10 +457,15 @@ def current_license(*, refresh: bool = False) -> License:
     material = _read_key_material()
     if material:
         try:
-            _cached, _cache_error = parse_key(material), ""
-            return _cached
+            lic = parse_key(material)
         except LicenseError as exc:
             _cache_error = str(exc)  # bad key → fall through to trial/free
+        else:
+            allowed, reason = _cloud_gate(lic, material)
+            if allowed:
+                _cached, _cache_error = lic, ""
+                return _cached
+            _cache_error = reason    # cloud denied (revoked/unregistered) → trial/free
     else:
         _cache_error = ""
     status = trial_status()
@@ -407,15 +476,25 @@ def current_license(*, refresh: bool = False) -> License:
 # ── one-time local free trial (grants Pro features, no key, no phone-home) ────────────
 
 def _read_trial() -> dict:
+    """Read + HMAC-verify the trial file. Unsigned or tampered files are ignored (return
+    ``{}``), so hand-editing ``trial.json`` to extend a trial no longer works."""
     try:
-        return json.loads(_TRIAL_FILE.read_text(encoding="utf-8"))
+        raw = json.loads(_TRIAL_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    if not isinstance(raw, dict):
+        return {}
+    data, sig = raw.get("data"), raw.get("sig")
+    if not isinstance(data, dict) or not isinstance(sig, str):
+        return {}  # legacy/unsigned or hand-crafted file — not trusted
+    if not hmac.compare_digest(sig, _sign_trial(data)):
+        return {}  # tampered payload
+    return data
 
 
 def trial_status(*, now: Optional[float] = None) -> dict:
     """Non-raising snapshot of the local free-trial state (safe for every UI/boot)."""
-    now = time.time() if now is None else now
+    now = _monotonic_now() if now is None else now
     t = _read_trial()
     expires = t.get("expires")
     active = bool(expires) and now < float(expires)
@@ -460,9 +539,11 @@ def start_trial(*, now: Optional[float] = None) -> dict:
     _TRIAL_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload = {"started": int(now), "expires": int(now + TRIAL_DAYS * 86400),
                "trial_days": TRIAL_DAYS}
+    envelope = {"data": payload, "sig": _sign_trial(payload)}  # HMAC-bound to this machine
     tmp = _TRIAL_FILE.with_name(_TRIAL_FILE.name + ".tmp")
-    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    tmp.write_text(json.dumps(envelope), encoding="utf-8")
     os.replace(tmp, _TRIAL_FILE)
+    _monotonic_now()  # advance the clock anchor so trial expiry can't be rolled back
     try:
         os.chmod(_TRIAL_FILE, 0o600)
     except OSError:
