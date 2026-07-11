@@ -81,14 +81,12 @@ def _require_ws() -> str:
 
 
 def _mem(m: dict) -> dict:
-    """Normalize to dashboard-ready fields. Keeps raw field names (mtype, scope)
-    so the Inspector UI can share the same API responses without duplication."""
+    """Normalize a v2 memory dict to the fields the dashboard cards render."""
     return {
         "id": m.get("id") or m.get("memory_id") or "",
         "document_id": m.get("id") or m.get("memory_id") or "",
         "title": m.get("title") or "",
         "content": m.get("content") or m.get("summary") or "",
-        "mtype": m.get("mtype") or "semantic",
         "memory_type": m.get("mtype") or "semantic",
         "scope": m.get("scope") or "",
         "namespace": m.get("workspace") or m.get("scope") or "",
@@ -338,11 +336,8 @@ def proactive(workspace: Optional[str] = None, k: int = 10):
     ws = workspace or _default_ws()
     out = _run(service().recall_proactive, workspace=ws, k=k)
     mems = out.get("memories") or out.get("results") or []
-    # Return both key names — the legacy dashboard uses "handoff",
-    # the Inspector expects "last_session".
-    handoff = out.get("handoff") or out.get("last_session")
     return {"workspace": ws, "memories": [_mem(m) for m in mems],
-            "handoff": handoff, "last_session": handoff}
+            "handoff": out.get("handoff") or out.get("last_session")}
 
 
 @router.get("/audit")
@@ -393,7 +388,8 @@ def consolidate(req: _ConsolidateReq):
 # ── analytics (Pro) ───────────────────────────────────────────────────────────
 @router.get("/analytics/portfolio")
 def analytics_portfolio():
-    """Cross-workspace rollup. Same gate as /analytics."""
+    """Cross-workspace rollup. Same gate as /analytics; the workspace set comes
+    from list_workspaces(), so team-auth boundaries (allowed_workspaces) hold."""
     _paid("analytics")
     from engraphis.analytics import compute_portfolio
     svc = service()
@@ -405,38 +401,163 @@ def analytics_portfolio():
 
 @router.get("/analytics")
 def analytics(workspace: Optional[str] = None):
+    """Rich per-workspace analytics (growth, retention histogram, decay forecast,
+    resolver mix, top entities) — the full engine analytics the Inspector used to own,
+    now served here. Falls back to the lightweight summary only when no workspace can be
+    resolved (e.g. a brand-new store). Pro-gated inside ``compute_analytics`` too."""
     _paid("analytics")
-    from engraphis.analytics import compute_analytics
     svc = service()
-    ws = workspace or _require_ws()
-    wid, _ = svc._require_scope(ws, None)
-    return _run(lambda: compute_analytics(svc.store, wid))
+    ws = workspace or _default_ws()
+    wid = svc._lookup_workspace(ws) if ws else None
+    if not wid:
+        return _analytics_summary(workspace)
+    from engraphis.analytics import compute_analytics
+    return _run(compute_analytics, svc.store, wid)
 
 
 @router.get("/analytics/export")
 def analytics_export(workspace: Optional[str] = None):
-    """Self-contained HTML analytics report — same Pro gate."""
+    """Self-contained HTML analytics report (inline CSS, zero CDN) — a shareable,
+    archivable artifact. Same Pro gate as the analytics view it renders."""
     _paid("analytics")
+    from engraphis import __version__
     from engraphis.analytics import compute_analytics, render_analytics_html
-    import time as _time
+    from fastapi.responses import HTMLResponse
     svc = service()
     ws = workspace or _require_ws()
-    wid, _ = svc._require_scope(ws, None)
-    page = render_analytics_html(compute_analytics(svc.store, wid),
+    wid = svc._lookup_workspace(ws)
+    if not wid:
+        raise HTTPException(status_code=400, detail={"error": "Unknown workspace '%s'." % ws})
+    page = render_analytics_html(_run(compute_analytics, svc.store, wid),
                                  workspace=ws, version=__version__)
     fname = "engraphis-analytics-%s-%s.html" % (
-        ws.replace("/", "_"), _time.strftime("%Y%m%d"))
-    from fastapi.responses import HTMLResponse
+        ws.replace("/", "_"), __import__("time").strftime("%Y%m%d"))
     return HTMLResponse(page, headers={
         "Content-Disposition": 'attachment; filename="%s"' % fname})
 
 
+@router.get("/ready")
+def ready():
+    """Readiness (vs. /health liveness): the service builds — initializing the embedder
+    backend — and the DB answers a trivial SELECT. 503 until both hold. Public probe."""
+    from engraphis import __version__
+    checks = {"db": False, "embedder": False}
+    try:
+        s = service()
+        s.store.conn.execute("SELECT 1").fetchone()
+        checks["db"] = True
+        checks["embedder"] = getattr(s.engine, "embedder", None) is not None
+    except Exception:  # noqa: BLE001
+        pass
+    is_ready = all(checks.values())
+    from fastapi.responses import JSONResponse
+    return JSONResponse({"ready": is_ready, "checks": checks, "version": __version__},
+                        status_code=200 if is_ready else 503)
+
+
+def _analytics_summary(workspace: Optional[str]) -> dict:
+    """Lightweight analytics summary (by-type + per-namespace distribution). The
+    Pro gate lives HERE, at the top of the computation, so the payload can never
+    be assembled on the free tier even if the route's ``_paid`` wrapper is deleted
+    (defense in depth; mirrors engraphis.analytics.compute_analytics)."""
+    licensing.require_feature("analytics")
+    st = _run(service().stats, workspace=workspace)
+    wss = _run(service().list_workspaces).get("workspaces") or []
+    by_type = [{"bucket": t, "count": c} for t, c in (st.get("by_type") or {}).items()]
+    ws_dist = [{"namespace": w["name"], "count": w.get("memories", 0)} for w in wss]
+    return {"by_type": by_type, "namespace_distribution": ws_dist,
+            "total_memories": st.get("memories", 0), "sessions": st.get("sessions", 0),
+            "workspaces": st.get("workspaces", 0)}
+
+
 # ── compliance export (Pro) ───────────────────────────────────────────────────
+def _sign_export(data: dict, workspace: str) -> dict:
+    """Wrap a raw workspace dump in a tamper-evident compliance manifest.
+
+    The manifest records the engine version, generation time, per-table record
+    counts, the active license fingerprint, and a SHA-256 over the canonical JSON of
+    the payload — so an archived export can be verified byte-for-byte years later
+    without any Engraphis install. This is what turns a ``SELECT *`` dump into an
+    audit-grade artifact."""
+    import hashlib
+    import json as _json
+    import time as _time
+    from engraphis import __version__
+    canonical = _json.dumps(data, sort_keys=True, separators=(",", ":"),
+                            default=str).encode("utf-8")
+    lic = licensing.current_license()
+
+    def _count(v):
+        return len(v) if isinstance(v, (list, dict)) else None
+    counts = {k: _count(v) for k, v in data.items() if _count(v) is not None}
+    return {
+        "manifest": {
+            "format": "engraphis-compliance-export/v1",
+            "engraphis_version": __version__,
+            "workspace": workspace,
+            "generated_at": int(_time.time()),
+            "record_counts": counts,
+            "sha256": hashlib.sha256(canonical).hexdigest(),
+            "licensed_to": lic.email or None,
+            "license_plan": lic.plan,
+            "license_key_id": lic.key_id or None,
+        },
+        "data": data,
+    }
+
+
 @router.get("/export")
-def export(workspace: Optional[str] = None):
+def export(workspace: Optional[str] = None, signed: bool = False):
+    """Full bi-temporal workspace dump (memories + sessions + audit). Pro-gated.
+
+    ``signed=true`` wraps the dump in a SHA-256 compliance manifest (see
+    :func:`_sign_export`) — a tamper-evident, self-verifying audit bundle."""
     _paid("export")
     ws = workspace or _default_ws()
-    return _run(service().export_workspace, workspace=ws)
+    data = _run(service().export_workspace, workspace=ws)
+    return _sign_export(data, ws or "") if signed else data
+
+
+# ── automated maintenance (Pro) ───────────────────────────────────────────────
+class _AutomationReq(BaseModel):
+    enabled: Optional[bool] = None
+    cadence_hours: Optional[int] = None
+    consolidate: Optional[bool] = None
+    min_cluster: Optional[int] = None
+    archive_below: Optional[float] = None
+    workspaces: Optional[list] = None
+
+
+@router.get("/automation")
+def automation_get():
+    """Current maintenance policy + last-run telemetry. Pro-gated (``automation``)."""
+    _paid("automation")
+    from engraphis import automation
+    return automation.load_policy()
+
+
+@router.post("/automation")
+def automation_set(req: _AutomationReq):
+    """Persist the maintenance policy. Pro-gated (``automation``)."""
+    _paid("automation")
+    from engraphis import automation
+    current = automation.load_policy()
+    merged = {k: (getattr(req, k) if getattr(req, k) is not None else current.get(k))
+              for k in ("enabled", "cadence_hours", "consolidate", "min_cluster",
+                        "archive_below", "workspaces")}
+    return _run(automation.save_policy, merged)
+
+
+class _MaintenanceReq(BaseModel):
+    dry_run: bool = True
+
+
+@router.post("/maintenance/run")
+def maintenance_run(req: _MaintenanceReq):
+    """Run the maintenance sweep now (dry-run by default). Pro-gated (``automation``)."""
+    _paid("automation")
+    from engraphis import automation
+    return _run(automation.run_maintenance, service(), dry_run=req.dry_run)
 
 
 # ── knowledge graph (entities + relations, scoped to a workspace) ──────────────
@@ -475,3 +596,13 @@ def activate_license(req: _KeyReq):
     except licensing.LicenseError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
     return lic.to_public_dict()
+
+
+@router.post("/license/trial")
+def start_trial():
+    """Begin the one-time local free trial (unlocks every Pro feature for the trial
+    window, no key required). 400 if a paid license is active or the trial is spent."""
+    try:
+        return licensing.start_trial()
+    except licensing.LicenseError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
