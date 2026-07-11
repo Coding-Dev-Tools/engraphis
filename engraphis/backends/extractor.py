@@ -119,13 +119,13 @@ def _loads_lenient(raw: str) -> dict:
     raw = (raw or "").strip()
     try:
         return json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         pass
     m = re.search(r"\{.*\}", raw, flags=re.DOTALL)
     if m:
         try:
             return json.loads(m.group(0))
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             pass
     return {}
 
