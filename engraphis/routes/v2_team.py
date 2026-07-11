@@ -14,7 +14,8 @@ from pydantic import BaseModel
 
 from engraphis import licensing
 from engraphis.config import settings
-from engraphis.inspector.auth import AuthError, AuthStore, role_at_least
+from engraphis.inspector.auth import (
+    SESSION_TTL_SECONDS, AuthError, AuthStore, role_at_least)
 
 _COOKIE = "engr_dash_session"
 
@@ -55,9 +56,14 @@ def _users_db_path(db_path: str) -> str:
     return ":memory:" if db_path == ":memory:" else db_path + ".users.db"
 
 
-def _set_cookie(response: Response, token: str, secure: bool = False) -> None:
+def _set_cookie(response: Response, token: str, *, secure: bool = False) -> None:
+    # max_age tracks the server-side session TTL (auth.SESSION_TTL_SECONDS) so the browser
+    # drops the cookie exactly when the server stops honouring it — a 7-day cookie over a
+    # 12-hour session just leaves a dead token lying around. Secure is set whenever the
+    # request arrived over HTTPS (mirrors inspector/app.py) so the session token is never
+    # sent in cleartext.
     response.set_cookie(_COOKIE, token, httponly=True, samesite="strict",
-                        max_age=7 * 86400, path="/", secure=secure)
+                        max_age=SESSION_TTL_SECONDS, path="/", secure=secure)
 
 
 def attach(app: FastAPI, service):
@@ -95,7 +101,7 @@ def attach(app: FastAPI, service):
                 "user": _user(request)}
 
     @router.post("/setup")
-    def setup(body: SetupReq, response: Response):
+    def setup(body: SetupReq, request: Request, response: Response):
         if store.count_users() > 0:
             raise HTTPException(status_code=400, detail={"error": "team already set up"})
         try:
@@ -103,16 +109,16 @@ def attach(app: FastAPI, service):
             u = store.login(body.email, body.password)
         except AuthError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)})
-        _set_cookie(response, u.pop("token"))
+        _set_cookie(response, u.pop("token"), secure=request.url.scheme == "https")
         return {"user": u}
 
     @router.post("/login")
-    def login(body: LoginReq, response: Response):
+    def login(body: LoginReq, request: Request, response: Response):
         try:
             u = store.login(body.email, body.password)
         except AuthError as exc:
             raise HTTPException(status_code=401, detail={"error": str(exc)})
-        _set_cookie(response, u.pop("token"))
+        _set_cookie(response, u.pop("token"), secure=request.url.scheme == "https")
         return {"user": u}
 
     @router.post("/logout")
@@ -143,7 +149,8 @@ def attach(app: FastAPI, service):
     def upd_user(body: UpdUserReq, request: Request):
         _require(request, "admin")
         try:
-            u = store.update_user(body.user_id, role=body.role, disabled=body.disabled)
+            u = store.update_user(body.user_id, role=body.role, disabled=body.disabled,
+                                  seat_limit=licensing.current_license().seats)
         except AuthError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)})
         return {"user": u}

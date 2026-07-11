@@ -308,7 +308,8 @@ def create_app(service: Optional[MemoryService] = None,
     @app.post("/api/auth/users/update")
     async def users_update(body: _UserUpdateBody):
         return {"user": auth().update_user(body.user_id, role=body.role,
-                                           disabled=body.disabled)}
+                                           disabled=body.disabled,
+                                           seat_limit=licensing.current_license().seats)}
 
     @app.get("/api/license")
     async def license_state():
