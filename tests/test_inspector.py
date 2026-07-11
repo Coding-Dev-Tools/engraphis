@@ -21,12 +21,11 @@ def client(monkeypatch):
     return TestClient(create_app(svc)), out
 
 
-def test_index_serves_the_ui(client):
+def test_index_ui_is_retired(client):
+    # The standalone Inspector HTML UI was retired (folded into the :8700 dashboard);
+    # the page route is intentionally gone, so GET "/" now 404s. The JSON API remains.
     c, _ = client
-    r = c.get("/")
-    assert r.status_code == 200
-    assert "Memory Inspector" in r.text
-    assert 'role="tablist"' in r.text            # accessible tab navigation shipped
+    assert c.get("/").status_code == 404
 
 
 def test_ready_probe_reports_db_and_embedder(client):
@@ -154,7 +153,7 @@ def test_bearer_auth_gates_api_but_not_page(monkeypatch):
     monkeypatch.setattr(settings, "api_token", "sekrit")
     svc = MemoryService.create(":memory:")
     c = TestClient(create_app(svc))
-    assert c.get("/").status_code == 200                      # page loads
+    assert c.get("/").status_code == 404                      # page retired (unrouted → 404, not a 401 auth gate)
     assert c.get("/api/workspaces").status_code == 401        # api gated
     ok = c.get("/api/workspaces", headers={"Authorization": "Bearer sekrit"})
     assert ok.status_code == 200
