@@ -10,7 +10,7 @@ import os
 from typing import Optional
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from engraphis import licensing
 from engraphis.config import settings
@@ -21,26 +21,26 @@ _COOKIE = "engr_dash_session"
 
 
 class SetupReq(BaseModel):
-    email: str
-    name: str = ""
-    password: str
+    email: str = Field(..., min_length=5, max_length=254)
+    name: str = Field(default="", max_length=120)
+    password: str = Field(..., min_length=10, max_length=128)
 
 
 class LoginReq(BaseModel):
-    email: str
-    password: str
+    email: str = Field(..., min_length=5, max_length=254)
+    password: str = Field(..., min_length=1, max_length=128)
 
 
 class NewUserReq(BaseModel):
-    email: str
-    name: str = ""
-    password: str
-    role: str = "member"
+    email: str = Field(..., min_length=5, max_length=254)
+    name: str = Field(default="", max_length=120)
+    password: str = Field(..., min_length=10, max_length=128)
+    role: str = Field(default="member", pattern=r'^(viewer|member|admin)$')
 
 
 class UpdUserReq(BaseModel):
     user_id: str
-    role: Optional[str] = None
+    role: Optional[str] = Field(default=None, pattern=r'^(viewer|member|admin)$')
     disabled: Optional[bool] = None
 
 
