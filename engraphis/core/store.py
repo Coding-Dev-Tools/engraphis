@@ -81,6 +81,16 @@ class Store:
         self.conn.executescript(SCHEMA_SQL)
         self.has_fts5 = _fts5_available(self.conn)
         self.conn.execute(FTS_SQL_FTS5 if self.has_fts5 else FTS_SQL_FALLBACK)
+        # Additive columns for DBs created before they existed — CREATE TABLE IF NOT
+        # EXISTS above is a no-op on an already-existing table, so new columns need an
+        # explicit, idempotent ALTER TABLE here (SQLite has no "ADD COLUMN IF NOT EXISTS").
+        for stmt in (
+            "ALTER TABLE memories ADD COLUMN sort_order REAL",
+        ):
+            try:
+                self.conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass  # column already exists
         self.conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?,?)",
             (SCHEMA_VERSION, now_ts()),

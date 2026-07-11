@@ -13,28 +13,37 @@ from engraphis.service import MemoryService, ValidationError
 
 
 def _seed_entities(svc, workspace, rows, edges):
+    """``rows``: [(name, etype), ...]; ``edges``: [(src_name, dst_name, relation), ...]
+    — authored by name for readability, but written to the DB the way the real
+    extractor does (backends.graph_extractor.feed): edges.src/dst are entity **ids**
+    (``ent0``, ``ent1``, ...), never the display name."""
     wid = svc.store.get_or_create_workspace(workspace)
     conn = svc.store.conn
+    id_of = {}
     for i, (name, etype) in enumerate(rows):
+        eid = f"ent{i}"
+        id_of[name] = eid
         conn.execute(
             "INSERT INTO entities(id, workspace_id, repo_id, name, etype, created_at) "
-            "VALUES (?,?,?,?,?,0)", (f"ent{i}", wid, None, name, etype))
+            "VALUES (?,?,?,?,?,0)", (eid, wid, None, name, etype))
     for i, (src, dst, rel) in enumerate(edges):
         conn.execute(
             "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation) "
-            "VALUES (?,?,?,?,?,?)", (f"edge{i}", wid, None, src, dst, rel))
+            "VALUES (?,?,?,?,?,?)", (f"edge{i}", wid, None, id_of[src], id_of[dst], rel))
     conn.commit()
-    return wid
+    return wid, id_of
 
 
 def test_graph_returns_seeded_nodes_and_edges():
     svc = MemoryService.create(":memory:")
-    _seed_entities(svc, "acme",
-                    [("Alice", "person_or_concept"), ("Acme Corp", "organization")],
-                    [("Alice", "Acme Corp", "works_at")])
+    _wid, id_of = _seed_entities(
+        svc, "acme",
+        [("Alice", "person_or_concept"), ("Acme Corp", "organization")],
+        [("Alice", "Acme Corp", "works_at")])
     g = svc.graph(workspace="acme")
-    assert {n["id"] for n in g["nodes"]} == {"Alice", "Acme Corp"}
-    assert g["edges"] == [{"from": "Alice", "to": "Acme Corp", "label": "works_at"}]
+    assert {n["id"] for n in g["nodes"]} == {id_of["Alice"], id_of["Acme Corp"]}
+    assert {n["label"] for n in g["nodes"]} == {"Alice", "Acme Corp"}
+    assert g["edges"] == [{"from": id_of["Alice"], "to": id_of["Acme Corp"], "label": "works_at"}]
     assert g["stats"] == {"entities": 2, "edges": 1, "connected": 2, "isolated": 0}
 
 
@@ -65,7 +74,7 @@ def test_graph_allows_its_own_bound_workspace():
     svc = MemoryService.create(":memory:", allowed_workspaces=["alpha"])
     _seed_entities(svc, "alpha", [("Widget", "person_or_concept")], [])
     g = svc.graph(workspace="alpha")
-    assert {n["id"] for n in g["nodes"]} == {"Widget"}
+    assert {n["label"] for n in g["nodes"]} == {"Widget"}
 
 
 def test_create_defaults_graph_extractor_on():
@@ -82,8 +91,12 @@ def test_remember_populates_graph_when_extractor_wired():
     svc = MemoryService.create(":memory:", graph_extractor="regex")
     svc.remember("Alice Johnson works at Acme Corp.", workspace="acme",
                  scope="workspace")
-    ids = {n["id"] for n in svc.graph(workspace="acme")["nodes"]}
-    assert "Alice Johnson" in ids and "Acme Corp" in ids
+    nodes = svc.graph(workspace="acme")["nodes"]
+    labels = {n["label"] for n in nodes}
+    assert "Alice Johnson" in labels and "Acme Corp" in labels
+    # node identity is the entity id (ent_<ulid>), not the extracted name —
+    # regression guard for the 2026-07-11 id/name mixup bug
+    assert all(n["id"] != n["label"] for n in nodes)
 
 
 def test_graph_lazy_backfills_preexisting_memories():
@@ -96,8 +109,8 @@ def test_graph_lazy_backfills_preexisting_memories():
     assert svc.graph(workspace="acme")["nodes"] == []      # extractor off -> no backfill
 
     svc.engine.graph_extractor = get_graph_extractor("regex")   # simulate the update
-    ids = {n["id"] for n in svc.graph(workspace="acme")["nodes"]}
-    assert "Alice Johnson" in ids and "Acme Corp" in ids
+    labels = {n["label"] for n in svc.graph(workspace="acme")["nodes"]}
+    assert "Alice Johnson" in labels and "Acme Corp" in labels
 
 
 def test_graph_lazy_backfill_is_idempotent():

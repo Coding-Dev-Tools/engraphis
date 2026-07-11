@@ -424,12 +424,23 @@ class MemoryEngine:
             pass
         metadata = dict(old.metadata)
         metadata["corrects"] = memory_id
+        if old.provenance:
+            metadata["provenance"] = dict(old.provenance)
         new_id = self.remember(
             new_content, workspace_id=old.workspace_id, repo_id=old.repo_id,
             session_id=old.session_id, mtype=old.mtype, scope=old.scope, title=old.title,
             importance=old.importance, keywords=old.keywords, metadata=metadata,
             resolve_conflicts=False,   # the supersede decision was just made explicitly
         )
+        # Persist inherited protection + confidentiality (the write path defaults
+        # pinned to False and sensitivity to 'normal' — a correction must not silently
+        # unpin a protected memory or downgrade a sensitive one; mirrors ``merge``).
+        if old.sensitivity and old.sensitivity != "normal":
+            self.store.conn.execute("UPDATE memories SET sensitivity=? WHERE id=?",
+                                    (old.sensitivity, new_id))
+            self.store.conn.commit()
+        if old.pinned:
+            self.store.set_pinned(new_id, True)
         return {"id": new_id, "superseded": [memory_id], "reason": reason}
 
     def merge(self, source_ids: list, merged_content: str, *,
