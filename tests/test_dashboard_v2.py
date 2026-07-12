@@ -267,6 +267,65 @@ def test_team_last_admin_cannot_be_demoted(monkeypatch, tmp_path):
         assert "last active admin" in r2.text.lower()
 
 
+def test_team_user_delete_frees_seat_and_email(monkeypatch, tmp_path):
+    """Removing a member frees both their seat and their email — unlike disable, the
+    same address can be re-invited afterwards (e.g. a typo'd/bounced invite)."""
+    with _client(monkeypatch, tmp_path, team=True, key=_team_key(seats=2)) as c:
+        assert c.post("/api/auth/setup", json={"email": "w@x.co", "name": "W",
+                      "password": "supersecret1"}).status_code == 200
+        assert c.post("/api/auth/users", json={"email": "m@x.co", "name": "M",
+                      "password": "anotherpass1", "role": "member"}).status_code == 200
+        # At the 2-seat cap: a third user is rejected.
+        r = c.post("/api/auth/users", json={"email": "v@x.co", "name": "V",
+                   "password": "thirduserpass1", "role": "viewer"})
+        assert r.status_code == 400
+        users = c.get("/api/auth/users").json()["users"]
+        mid = [u["id"] for u in users if u["email"] == "m@x.co"][0]
+        # Remove the member.
+        assert c.post("/api/auth/users/delete", json={"user_id": mid}).status_code == 200
+        assert [u["email"] for u in c.get("/api/auth/users").json()["users"]] == ["w@x.co"]
+        # Their sessions are dead.
+        fresh = TestClient(c.app)
+        assert fresh.post("/api/auth/login", json={"email": "m@x.co",
+                          "password": "anotherpass1"}).status_code == 401
+        # The freed seat AND the freed email both work: the same address can be
+        # re-invited (e.g. after the first invite email bounced) without a DB edit.
+        r2 = c.post("/api/auth/users", json={"email": "m@x.co", "name": "M2",
+                    "password": "freshpassword1", "role": "member"})
+        assert r2.status_code == 200, r2.text
+        assert fresh.post("/api/auth/login", json={"email": "m@x.co",
+                          "password": "freshpassword1"}).status_code == 200
+
+
+def test_team_last_admin_cannot_be_deleted(monkeypatch, tmp_path):
+    """Deleting the last active admin must be rejected, same as demote/disable."""
+    with _client(monkeypatch, tmp_path, team=True, key=_team_key()) as c:
+        assert c.post("/api/auth/setup", json={"email": "w@x.co", "name": "W",
+                      "password": "supersecret1"}).status_code == 200
+        u = c.get("/api/auth/users").json()["users"][0]
+        r = c.post("/api/auth/users/delete", json={"user_id": u["id"]})
+        assert r.status_code == 400, f"expected 400, got {r.status_code}: {r.text}"
+        assert "last active admin" in r.text.lower()
+        assert len(c.get("/api/auth/users").json()["users"]) == 1
+
+
+def test_team_delete_requires_admin(monkeypatch, tmp_path):
+    """Only admins may remove team members."""
+    with _client(monkeypatch, tmp_path, team=True, key=_team_key()) as c:
+        assert c.post("/api/auth/setup", json={"email": "w@x.co", "name": "W",
+                      "password": "supersecret1"}).status_code == 200
+        c.post("/api/auth/users", json={"email": "m@x.co", "name": "M",
+               "password": "anotherpass1", "role": "member"})
+        users = c.get("/api/auth/users").json()["users"]
+        wid = [u["id"] for u in users if u["email"] == "w@x.co"][0]
+        member = TestClient(c.app)
+        assert member.post("/api/auth/login", json={"email": "m@x.co",
+                           "password": "anotherpass1"}).status_code == 200
+        r = member.post("/api/auth/users/delete", json={"user_id": wid})
+        assert r.status_code == 403, f"expected 403, got {r.status_code}: {r.text}"
+        assert len(c.get("/api/auth/users").json()["users"]) == 2
+
+
 def test_team_role_change_takes_effect(monkeypatch, tmp_path):
     """Demoting a member to viewer must immediately restrict their privileges."""
     with _client(monkeypatch, tmp_path, team=True, key=_team_key()) as c:
