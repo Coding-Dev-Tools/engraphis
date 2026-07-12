@@ -23,6 +23,7 @@ key verifies locally as before — preserving the self-hosted, no-phone-home sto
 from __future__ import annotations
 
 import json
+import logging
 import os
 import urllib.error
 import urllib.request
@@ -31,10 +32,26 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 _LEASE_PREFIX = "ENGRLS1"
-_DIR = Path.home() / ".engraphis"
+def _state_dir() -> Path:
+    """Base dir for machine-id + lease state; ``ENGRAPHIS_STATE_DIR`` relocates it onto a
+    persistent writable volume (Docker) so device binding survives redeploys."""
+    base = os.environ.get("ENGRAPHIS_STATE_DIR", "").strip()
+    return Path(base) if base else (Path.home() / ".engraphis")
+
+
+_DIR = _state_dir()
 _LEASE_FILE = _DIR / "lease.sig"
 _MACHINE_ID_FILE = _DIR / "machine_id"
 _REGISTER_TIMEOUT = 6.0
+
+logger = logging.getLogger("engraphis")
+#: Process-stable device-id cache, keyed by the resolved machine-id file path
+#: (so tests that repoint _MACHINE_ID_FILE still get isolated ids). This is the
+#: real fix for the silent-trial-death bug: even if the id can NEVER be persisted
+#: (read-only/ephemeral container home, full disk, locked-down account), every
+#: call within a run returns the SAME id — so the trial HMAC verifies and leases
+#: bind consistently instead of churning a fresh uuid on every call.
+_machine_id_cache: dict = {}
 
 
 def cloud_url() -> str:
@@ -42,20 +59,39 @@ def cloud_url() -> str:
 
 
 def machine_id() -> str:
-    """Stable per-device id (random, created once). Binds a lease to this machine."""
+    """Stable per-device id (random, created once). Binds a lease to this machine.
+
+    Guarantees process-stability even when the id cannot be persisted: the value is
+    cached in-memory (keyed by the machine-id file path) so it never changes within a
+    run. Without this, an unwritable home made every call return a fresh uuid, which
+    silently broke the local free trial (its HMAC is machine-bound) and churned cloud
+    leases/seat counts. A persistence failure is logged once, not swallowed silently."""
+    key = str(_MACHINE_ID_FILE)
+    cached = _machine_id_cache.get(key)
+    if cached:
+        return cached
     try:
         mid = _MACHINE_ID_FILE.read_text(encoding="utf-8").strip()
         if mid:
+            _machine_id_cache[key] = mid
             return mid
     except OSError:
         pass
     mid = uuid.uuid4().hex
     try:
-        _DIR.mkdir(parents=True, exist_ok=True)
+        _MACHINE_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
         _MACHINE_ID_FILE.write_text(mid, encoding="utf-8")
-        os.chmod(_MACHINE_ID_FILE, 0o600)
-    except OSError:
-        pass
+        try:
+            os.chmod(_MACHINE_ID_FILE, 0o600)
+        except OSError:
+            pass
+    except OSError as exc:
+        logger.warning(
+            "machine_id: could not persist device id to %s (%s); using an in-process id "
+            "for this run. Trial and cloud-lease binding need a writable home directory "
+            "— mount a persistent volume for %s (or set HOME to a writable path).",
+            _MACHINE_ID_FILE, exc, _MACHINE_ID_FILE.parent)
+    _machine_id_cache[key] = mid   # stable for the rest of the process regardless
     return mid
 
 

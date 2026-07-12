@@ -203,20 +203,31 @@ _VENDOR_PUBKEY_HEX = "0f9ede880d65184f4615221d03e8127c38e1b7a8f8d789a050780ae50c
 # exposed in dev boxes / agent sessions and must never be the active key for selling.
 _DEV_VENDOR_PUBKEY_HEX = "4722dc145d7b988f6a2513e750e367beb2dd75a68a208c8546b1fbb61c862b7e"
 
-_LICENSE_FILE = Path.home() / ".engraphis" / "license.key"
+def _state_dir() -> Path:
+    """Base dir for local license / trial / clock-anchor state.
+
+    ``ENGRAPHIS_STATE_DIR`` relocates it onto a persistent, writable volume (e.g.
+    ``/data/.engraphis`` in Docker) so an activated key and the one-time trial survive
+    container recreation; defaults to ``~/.engraphis`` for local/desktop use."""
+    base = os.environ.get("ENGRAPHIS_STATE_DIR", "").strip()
+    return Path(base) if base else (Path.home() / ".engraphis")
+
+
+_STATE_DIR = _state_dir()
+_LICENSE_FILE = _STATE_DIR / "license.key"
 
 #: One-time local free trial. Grants the full Pro feature set for TRIAL_DAYS with no
 #: key and no phone-home, so a user can evaluate every paid surface before buying.
 #: Honest by design: it's a local grant (resettable by deleting the file), not DRM —
 #: the point is to remove friction from evaluation, not to lock anyone out.
 TRIAL_DAYS = 3
-_TRIAL_FILE = Path.home() / ".engraphis" / "trial.json"
+_TRIAL_FILE = _STATE_DIR / "trial.json"
 
 #: Monotonic wall-clock anchor. Persists the highest wall-clock time ever observed so a
 #: user cannot roll the system clock backward to resurrect an expired key/lease or stretch
 #: a trial. Advisory (the file is local and deletable) — it just closes the trivial
 #: "set the date back" bypass; real expiry enforcement is the cloud lease.
-_MONOTONIC_FILE = Path.home() / ".engraphis" / ".clock_anchor"
+_MONOTONIC_FILE = _STATE_DIR / ".clock_anchor"
 
 
 def _monotonic_now() -> float:

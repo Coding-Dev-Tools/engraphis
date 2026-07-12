@@ -49,6 +49,11 @@ code = [
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.2",
 ]
+# Encryption at rest for the memory database (SQLCipher / AES-256). Opt-in: set
+# ENGRAPHIS_DB_KEY (or ENGRAPHIS_DB_KEY_FILE). Without this the DB is plaintext.
+encryption = [
+    "sqlcipher3-binary>=0.5.0",
+]
 # Everything, for a full self-hosted install.
 all = [
     "fastapi>=0.110",
@@ -60,6 +65,7 @@ all = [
     "mcp>=1.2.0",
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.2",
+    "sqlcipher3-binary>=0.5.0",
 ]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.4"]
 # Everything needed to run the FULL offline gate in CI (lint + all extras-gated tests)
@@ -73,6 +79,7 @@ test = [
     "mcp>=1.2.0",
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.2",
+    "sqlcipher3-binary>=0.5.0",
 ]
 
 [project.urls]

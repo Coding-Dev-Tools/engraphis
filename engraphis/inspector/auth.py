@@ -55,6 +55,18 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
     expires_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sess_user ON auth_sessions(user_id);
+CREATE TABLE IF NOT EXISTS audit_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          REAL NOT NULL,
+    actor_id    TEXT,
+    actor_email TEXT,
+    action      TEXT NOT NULL,
+    target      TEXT,
+    detail      TEXT,
+    ip          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);
+CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_events(actor_id);
 """
 
 
@@ -71,7 +83,8 @@ def min_role(method: str, path: str) -> str:
     truth — the UI merely hides what this table already refuses. Shared by every app
     that mounts team-mode auth (``inspector/app.py``, ``dashboard_app.py``) so the
     policy can't drift between them."""
-    if path.startswith("/api/auth/users") or path in (
+    if path.startswith("/api/auth/users") or path.startswith("/api/auth/audit") \
+            or path == "/api/auth/overview" or path in (
             "/api/license/activate", "/api/export", "/api/consolidate"):
         return "admin"
     if method == "POST":            # pin / forget / correct — audited governance
@@ -221,12 +234,13 @@ class AuthStore:
             return fails[-1] + LOCKOUT_SECONDS
         return 0.0
 
-    def login(self, email: str, password: str) -> dict:
+    def login(self, email: str, password: str, *, ip: Optional[str] = None) -> dict:
         """Verify credentials → new session. Raises :class:`AuthError` (generic message —
         never reveals which of email/password was wrong) or the lockout notice."""
         email = self._clean_email(email)
         until = self._locked_until(email)
         if until > time.time():
+            self.record_event("login.locked", actor_email=email, ip=ip)
             raise AuthError("too many failed attempts — try again in a minute")
         row = self.conn.execute(
             "SELECT id, pw_hash, disabled FROM users WHERE email=?", (email,)).fetchone()
@@ -235,10 +249,14 @@ class AuthStore:
         ok = _verify_password(password or "", encoded)
         if not ok or row is None or row["disabled"]:
             self._failures.setdefault(email, []).append(time.time())
+            self.record_event("login.failed", actor_email=email, ip=ip,
+                              detail=("account_disabled" if row and row["disabled"]
+                                      else "bad_credentials"))
             raise AuthError("invalid email or password")
         self._failures.pop(email, None)
         token = self.create_session(row["id"])
         user = self.get_user(row["id"])
+        self.record_event("login.success", actor_id=row["id"], actor_email=email, ip=ip)
         user["token"] = token
         return user
 
@@ -279,3 +297,63 @@ class AuthStore:
     def revoke_user_sessions(self, user_id: str) -> None:
         self.conn.execute("DELETE FROM auth_sessions WHERE user_id=?", (user_id,))
         self.conn.commit()
+
+    # ── team audit log ─────────────────────────────────────────────────────────
+    def record_event(self, action: str, *, actor_id: Optional[str] = None,
+                     actor_email: Optional[str] = None, target: Optional[str] = None,
+                     detail: Optional[str] = None, ip: Optional[str] = None) -> None:
+        """Append one team audit event (login, user CRUD, role change, ...). Best-effort:
+        auditing must never break the action it records, so storage errors are swallowed —
+        the event is lost, not the request. Admin-only to read (see routes.v2_team)."""
+        try:
+            self.conn.execute(
+                "INSERT INTO audit_events (ts, actor_id, actor_email, action, target, detail, ip) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (time.time(), actor_id, actor_email, str(action)[:64],
+                 (target or None), (detail or None), (ip or None)))
+            self.conn.commit()
+        except sqlite3.Error:
+            pass
+
+    def list_events(self, *, limit: int = 100, action: Optional[str] = None,
+                    actor_id: Optional[str] = None, since: Optional[float] = None) -> list:
+        """Most-recent-first audit events, with optional filters. ``limit`` is clamped to
+        [1, 1000] so a client can't ask for an unbounded scan."""
+        limit = max(1, min(int(limit or 100), 1000))
+        sql = ("SELECT id, ts, actor_id, actor_email, action, target, detail, ip "
+               "FROM audit_events")
+        clauses, params = [], []
+        if action:
+            clauses.append("action=?")
+            params.append(str(action)[:64])
+        if actor_id:
+            clauses.append("actor_id=?")
+            params.append(actor_id)
+        if since is not None:
+            clauses.append("ts>=?")
+            params.append(float(since))
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY ts DESC, id DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in self.conn.execute(sql, params)]
+
+    def count_events(self) -> int:
+        return int(self.conn.execute(
+            "SELECT COUNT(*) AS n FROM audit_events").fetchone()["n"])
+
+    def action_counts(self, *, since: Optional[float] = None) -> dict:
+        sql = "SELECT action, COUNT(*) AS n FROM audit_events"
+        params: list = []
+        if since is not None:
+            sql += " WHERE ts>=?"
+            params.append(float(since))
+        sql += " GROUP BY action ORDER BY n DESC"
+        return {r["action"]: r["n"] for r in self.conn.execute(sql, params)}
+
+    def last_active(self) -> dict:
+        """Map user_id -> last successful-login timestamp (for the admin seat overview)."""
+        rows = self.conn.execute(
+            "SELECT actor_id, MAX(ts) AS ts FROM audit_events "
+            "WHERE action='login.success' AND actor_id IS NOT NULL GROUP BY actor_id")
+        return {r["actor_id"]: r["ts"] for r in rows}

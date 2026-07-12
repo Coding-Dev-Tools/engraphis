@@ -1,7 +1,14 @@
+# Default `docker compose up` runs the TEAM-capable dashboard (multi-user auth, roles,
+# seats, license revocation, Pro sync) — the thing teams actually deploy. The raw
+# single-user v1 API server is available under the "api" profile:
+#     docker compose --profile api up engraphis-api
 services:
   engraphis:
     build: .
     image: engraphis:latest
+    # Team dashboard on the v2 engine. --no-open: never try to launch a browser in a
+    # container. Binds 0.0.0.0 via ENGRAPHIS_HOST (set in the image).
+    command: ["engraphis-dashboard", "--no-open"]
     ports:
       - "8700:8700"
     env_file:
@@ -9,6 +16,29 @@ services:
     environment:
       ENGRAPHIS_HOST: 0.0.0.0
       ENGRAPHIS_DB_PATH: /data/engraphis.db
+      # Persist license/trial/machine-id/lease + the revocation registry on the volume.
+      ENGRAPHIS_STATE_DIR: /data/.engraphis
+      # Relay/registry DB (issued keys + revocations) — on the persistent volume so a
+      # revoked key STAYS revoked across redeploys.
+      ENGRAPHIS_RELAY_DB: /data/.engraphis/relay.db
+    volumes:
+      - engraphis-data:/data
+    restart: unless-stopped
+
+  # Raw v1 API server (single-user). Opt in with:  docker compose --profile api up
+  engraphis-api:
+    build: .
+    image: engraphis:latest
+    command: ["engraphis-server"]
+    profiles: ["api"]
+    ports:
+      - "8701:8700"
+    env_file:
+      - .env
+    environment:
+      ENGRAPHIS_HOST: 0.0.0.0
+      ENGRAPHIS_DB_PATH: /data/engraphis.db
+      ENGRAPHIS_STATE_DIR: /data/.engraphis
     volumes:
       - engraphis-data:/data
     restart: unless-stopped
