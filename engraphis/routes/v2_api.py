@@ -176,6 +176,20 @@ def workspaces():
     return _run(service().list_workspaces)
 
 
+class _CreateWsReq(BaseModel):
+    workspace: str
+    description: str = ""
+
+
+@router.post("/workspaces/create")
+def workspaces_create(req: _CreateWsReq):
+    """Create an empty workspace/folder up front (see MemoryService.create_workspace).
+    In team mode this is a POST, so the dashboard's auth gate requires the member role or
+    above — viewers can't create folders, members and admins can, and every folder is
+    shared with the whole team."""
+    return _run(service().create_workspace, req.workspace, req.description)
+
+
 class _RenameWsReq(BaseModel):
     workspace: str
     new_name: str

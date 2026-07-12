@@ -173,10 +173,20 @@ the Inspector's `/api/*` with per-user sessions:
   disabled. A valid bearer token acts as an admin service account so automation keeps working.
 - **Login throttle**: 5 failures / 15 min → 60 s lockout (in-process, matching the Inspector's
   single-process posture).
-- **License keys** are Ed25519-signed payloads verified offline against a pinned vendor public
-  key (`engraphis/licensing.py`); nothing phones home. Keys carry no secrets — they are
-  entitlements, and the private signing key must never live in the repo (gitignored
-  `.secrets/`, rotate before selling: `python -m scripts.license_admin keygen`).
+- **License keys** are Ed25519-signed payloads verified against a pinned vendor public key
+  (`engraphis/licensing.py`). Enforcement is **online-only**: a signature-valid key alone does
+  NOT unlock paid features — the device must register with the vendor license server
+  (`/license/v1/register`) and hold a short-lived (24 h) Ed25519-signed **lease** bound to its
+  machine id. This makes revocation real (a refunded/leaked key stops working within the lease
+  window), caps seats server-side, and closes the two offline bypasses a signature-only,
+  self-verifying client had: (a) a **forgeable local trial** — the old free trial was a purely
+  local grant whose HMAC key was derivable from public data, so a user could mint permanent Pro
+  by hand-writing a file; the trial is now a real, server-issued, short-lived key (one per
+  device, tracked server-side), exactly like a purchase; and (b) **offline-only keys** — every
+  paid key now needs a live lease, so a shared/leaked key can no longer run unlimited devices
+  forever with no revocation. Fails closed: no reachable server ⇒ no paid features (24 h grace
+  via the lease TTL). Keys carry no secrets; the private signing key must never live in the repo
+  (gitignored `.secrets/`, rotate before selling: `python -m scripts.license_admin keygen`).
 
 ## Known limitations (not yet mitigated)
 - Rate limiting: an optional in-process per-IP limiter now ships (`ENGRAPHIS_RATE_LIMIT`,
@@ -194,6 +204,14 @@ the Inspector's `/api/*` with per-user sessions:
   `service.py`), and the file-upload path caps body size — so oversized or control-character-laden
   payloads to `/memory/insert`/`/documents`/`/documents/upload` are rejected or defanged rather
   than stored as-is. v1 remains a compatibility surface; prefer the v2/MCP path for new work.
+- **Open-core enforcement ceiling**: the client is source-available Python running on the user's
+  machine, so a determined user can still patch it locally (e.g. force `has_feature` to return
+  `True`) to unlock *locally-computed* paid surfaces (analytics / export / automation). Online-only
+  enforcement makes this the *only* remaining bypass — it defeats casual key-sharing, forged
+  trials, and revoked keys — and features whose value executes on the vendor server (cloud
+  **sync**, the **team** invite relay) stay genuinely non-bypassable regardless of client patching,
+  because the server refuses to act without a valid lease. Treat purely-local paid features as
+  "raised bar", not "unbreakable".
 - The deterministic conflict resolver and code-symbol-graph call edges are both heuristic
   (token overlap; name-based, not type-resolved) — neither is a security boundary, but don't
   treat either as ground truth without spot-checking on anything load-bearing.

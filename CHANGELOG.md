@@ -3,6 +3,29 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [0.8.4] - 2026-07-12
+
+### Security
+- **License bypass closed — Pro/Team enforcement is now online-only.** Previously a
+  signature-valid key (or the local free trial) unlocked paid features offline, self-verified by
+  the client. Two practical bypasses followed: (1) the local Pro trial was a forgeable, permanent,
+  no-purchase grant — its HMAC key was derivable from the public vendor key + local machine id, so
+  a user (or an AI handed the repo) could mint permanent Pro by writing a file; and (2) any key ran
+  on unlimited devices forever with no revocation or seat enforcement. Now **every paid feature
+  requires a live, machine-bound, 24 h Ed25519 lease** from the vendor license server
+  (`/license/v1/register`); the client fails closed when no server is reachable (24 h grace via the
+  lease TTL).
+  - Removed the offline/local trial grant. `licensing.start_trial()` now fetches a **real,
+    server-issued, short-lived Pro trial key** (one per device, tracked server-side), mirroring the
+    existing Team trial. `/license/v1/start-trial` accepts a `plan` and mints a signed `trial: 1` key.
+  - `licensing._cloud_gate` resolves a server for every paid key (`ENGRAPHIS_CLOUD_URL` → the key's
+    signed `cloud_url` → the built-in vendor relay) and denies if none resolves.
+  - Issued keys are **cloud-enforced by default** (`issue_key` / `license_admin issue` bake in the
+    signed `enforce: "cloud"` + server URL unless `--offline` is passed for vendor testing).
+  - Lease TTL / offline grace tightened 72 h → 24 h.
+  - Regression tests: `tests/test_online_only_enforcement.py`; `tests/test_licensing.py` and
+    `tests/test_cloud_license.py` updated to the new model.
+
 ## [0.8.3] - 2026-07-12
 
 ### Fixed
@@ -755,76 +778,4 @@ code-aware symbol graph. All additions are local-first (no LLM or network depend
 ### Fixed
 - **Knowledge Graph: clicking a node could open the wrong document, or none** (v1 dashboard,
   `engraphis/static/index.html` + `engines/ingest.py`). Root cause: entity extraction built its
-  regex input as `f"{title}\n\n{content}"`, and the capitalized-word pattern matched *across*
-  that boundary — e.g. title "Meeting Notes" + content "Alice Johnson met..." produced one
-  garbled entity "Meeting Notes\n\nAlice Johnson" instead of two clean ones. The same real
-  person mentioned cleanly in a second document became a *different*, separately-named node, so
-  each fragment's `documents` list only ever held part of the truth — the dashboard's click
-  handler (`network.on('click', ...)` → `showMem`) was reading correct data, but the graph
-  handed it fragmented entities to click on. Fixed by extracting entities from `title` and
-  `content` as independent regex passes and merging by name (`_extract_entities_from_doc`), plus
-  tightening the capitalized-word pattern to keep hyphenated words intact (`Follow-up` no longer
-  sheds an orphan `Follow` node). Regression-tested end-to-end in `test_ingest_entities.py`
-  (title/content no longer bridge, hyphenated titles stay whole, the same entity across two
-  documents resolves to one node listing both, cross-namespace entities stay isolated).
-
-### Changed
-- **`eval/harness.py` now exercises the real pipeline**: it previously called the vector index
-  directly, bypassing `RecallEngine`'s scoring/RRF/rerank *and* the write-path resolver — so the
-  CI gate measured plumbing, not the shipped recall quality. It now ingests and queries through
-  `MemoryEngine`, same as production.
-- MCP tool count: 5 → 15. `engraphis_remember` gained an optional `dedupe` parameter (default
-  on) to opt out of conflict resolution for cases where repeats are meaningful (e.g. recurring
-  episodic log entries). `engraphis_end_session` gained `open_threads`.
-- Docs: `AGENTS.md` §6 rewritten (previously said "no MCP server exists in the tree today",
-  which the prior pass had already made false); `docs/IMPLEMENTATION.md`, `README.md`,
-  `SECURITY.md`, `CLAUDE.md` updated to match.
-
-### Security
-- See `SECURITY.md` §5 (new): `index_repo` reads local files at an agent-supplied path — same
-  trust boundary as any other local tool, documented explicitly. Governance tools give users an
-  audited way to correct the memory-poisoning blast radius after the fact, not just reduce it
-  on write.
-- **Stored XSS in the v1 dashboard**: memory content rendered as markdown via `marked` (v12,
-  which does not sanitize embedded HTML) was inserted into `innerHTML` unsanitized at
-  three sites — viewing a memory and both live editor previews. A memory containing e.g.
-  `<img src=x onerror="...">` would run arbitrary JavaScript the moment a human viewed it in the
-  dashboard, independent of and in addition to the memory-poisoning threat model above (that
-  content is explicitly untrusted — MASTER_PLAN.md §16 — is exactly why this mattered). Fixed by
-  piping every markdown render through `DOMPurify.sanitize()` (new `renderMd()` helper); verified
-  the `onerror` attribute is stripped while ordinary markdown renders unchanged. See
-  `SECURITY.md` §1.
-
-## [Unreleased] — release-readiness pass
-
-### Added
-- **MCP server** (`engraphis-mcp`, `engraphis.mcp_server`) exposing `engraphis_remember`,
-  `engraphis_recall`, `engraphis_start_session`, `engraphis_end_session`, and `engraphis_stats`
-  so Claude Code, Cursor, Cline, Zed, and Windsurf can use Engraphis as agent memory.
-- **`MemoryService`** (`engraphis.service`) — a transport-agnostic, fully validated facade over
-  the v2 engine, usable as a plain Python library (no MCP dependency, offline-capable).
-- **Input validation & sanitization** on the write path (size caps, control-character stripping,
-  strict enums, metadata limits, provenance) as a memory-poisoning defense.
-- **Optional bearer-token auth** (`ENGRAPHIS_API_TOKEN`) on the REST API with constant-time
-  comparison, plus a configurable CORS allow-list (`ENGRAPHIS_CORS_ORIGINS`).
-- `LICENSE` (Apache-2.0), `NOTICE`, `SECURITY.md` (threat model), and this `CHANGELOG.md`.
-- `Dockerfile`, `docker-compose.yml`, `.dockerignore` for one-command self-hosting.
-- Larger offline eval suite (`eval/datasets/codemem.jsonl`, 24 questions) for the coding-agent
-  memory wedge.
-- New tests: `test_service.py`, `test_mcp_server.py`, `test_app_auth.py` (55 tests total).
-
-### Changed
-- **Rebranded to a clean, independent Engraphis identity**: removed third-party SDK-compat
-  framing, renamed the default database to `engraphis.db`, and updated docs/positioning.
-- License moved to **Apache-2.0** (from MIT) for clearer patent/trademark posture.
-- `pyproject.toml` restructured for **open-core**: dependency-light core (`numpy` only) with
-  `server` / `mcp` / `all` extras and an `engraphis-mcp` entry point.
-- Tightened CORS defaults to loopback (no wildcard-with-credentials).
-- README rewritten around the MCP wedge and self-hosted install paths.
-
-### Fixed
-- Resolved all `ruff` lint findings; the offline gate (pytest + eval + ablation + ruff) is green.
-
-### Security
-- See `SECURITY.md`. Not yet mitigated: encryption-at-rest, built-in rate limiting, and
-  per-token tenant authorization (run one instance per trust boundary for hard isolation).
+  regex input as `f"{titl

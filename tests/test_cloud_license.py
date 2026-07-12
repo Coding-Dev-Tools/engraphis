@@ -22,6 +22,9 @@ from engraphis.licensing import LicenseError, ed25519_public_key, parse_key
 
 SECRET = bytes(range(32))
 
+# Exercises the real server-side license gate — opt out of conftest's approve stub.
+pytestmark = pytest.mark.real_license_gate
+
 
 @pytest.fixture(autouse=True)
 def _cloud_env(monkeypatch, tmp_path):
@@ -144,11 +147,12 @@ def _wire_register_to(client, monkeypatch):
     monkeypatch.setattr(cloud_license, "register", fake_register)
 
 
-def test_offline_mode_gate_always_allows(monkeypatch):
-    # no ENGRAPHIS_CLOUD_URL → local signature is the gate
+def test_gate_fails_closed_without_server(monkeypatch):
+    # online-only: with no server to verify against, the gate DENIES (was inert-allow).
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
     lic = parse_key(_key())
-    allowed, _ = cloud_license.gate(lic, _key())
-    assert allowed is True
+    allowed, reason = cloud_license.gate(lic, _key())
+    assert allowed is False and "server" in reason.lower()
 
 
 def test_cloud_gate_allows_then_fails_closed_after_revoke(monkeypatch, tmp_path):
@@ -178,16 +182,23 @@ def test_current_license_enforces_cloud_mode(monkeypatch):
     assert licensing.current_license(refresh=True) == licensing.License.free()  # revoked → free
 
 
-# ── salvaged local hardening: HMAC trial + monotonic clock ──────────────────────────────
+# ── server-issued trial + monotonic clock (lease anti-rollback) ─────────────────────────
 
-def test_trial_tamper_is_rejected():
-    licensing.start_trial()
-    assert licensing.trial_status()["active"] is True
-    # hand-edit the trial file to extend it → HMAC no longer matches → ignored
-    raw = json.loads(licensing._TRIAL_FILE.read_text())
-    raw["data"]["expires"] = int(time.time() + 9999 * 86400)
-    licensing._TRIAL_FILE.write_text(json.dumps(raw))
-    assert licensing.trial_status()["active"] is False
+def test_start_trial_activates_server_issued_pro_key(monkeypatch):
+    """The Pro trial is now a REAL server-issued key (no local/offline grant to forge or
+    tamper with). start_trial fetches it and activates it; online-only, it needs a lease."""
+    now = time.time()
+    pro_trial = licensing.compose_key(
+        {"v": 1, "plan": "pro", "email": "trial@engraphis.local", "seats": 1,
+         "issued": int(now), "expires": int(now + 3 * 86400), "trial": 1}, SECRET)
+    monkeypatch.setattr(cloud_license, "request_trial_key",
+                        lambda base, mid, plan="team", email="": (pro_trial, ""))
+    c = _app(); _wire_register_to(c, monkeypatch)
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    out = licensing.start_trial()
+    assert out["plan"] == "pro" and out["is_trial"] is True
+    assert licensing.current_license(refresh=True).plan == "pro"
+    assert licensing.has_feature("analytics") is True
 
 
 def test_monotonic_clock_never_goes_backward(monkeypatch):
@@ -232,8 +243,16 @@ def test_team_feature_cannot_be_bypassed_in_cloud_mode(monkeypatch):
     assert licensing.has_feature("team") is False                # revoked → team gone
 
 
-def test_trial_never_grants_team():
-    # the local trial is Pro-only; it must never unlock team (multi-user) capability
+def test_pro_trial_never_grants_team(monkeypatch):
+    # the Pro trial is Pro-only; it must never unlock team (multi-user) capability
+    now = time.time()
+    pro_trial = licensing.compose_key(
+        {"v": 1, "plan": "pro", "email": "trial@engraphis.local", "seats": 1,
+         "issued": int(now), "expires": int(now + 3 * 86400), "trial": 1}, SECRET)
+    monkeypatch.setattr(cloud_license, "request_trial_key",
+                        lambda base, mid, plan="team", email="": (pro_trial, ""))
+    c = _app(); _wire_register_to(c, monkeypatch)
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
     licensing.start_trial()
     lic = licensing.current_license(refresh=True)
     assert lic.is_trial and lic.plan == "pro"
@@ -399,10 +418,11 @@ def test_cloud_enforced_key_fails_closed_without_server(monkeypatch):
     """A key carrying ``enforce: "cloud"`` must be useless offline: with no env URL and
     no URL baked into the key, verification DENIES (free tier) rather than falling back
     to offline mode — so unsetting ENGRAPHIS_CLOUD_URL can't dodge revocation/leases."""
+    monkeypatch.setattr(cloud_license, "register", lambda *a, **k: None)
     monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _enforced_key(cloud_url=""))
     got = licensing.current_license(refresh=True)
     assert got.plan == "free"
-    assert "server-side verification" in licensing.license_error()
+    assert licensing.license_error()
 
 
 def test_cloud_enforced_key_uses_baked_in_url(monkeypatch):
@@ -427,11 +447,23 @@ def test_cloud_enforced_key_uses_baked_in_url(monkeypatch):
     assert got.plan == "pro" and got.has("sync")
 
 
-def test_offline_keys_stay_offline(monkeypatch):
-    """Back-compat: a key WITHOUT the enforce claim still verifies fully offline."""
-    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _key())
+def test_all_paid_keys_require_server_even_without_enforce_claim(monkeypatch):
+    """Online-only (closes the offline-key bypass): even a key WITHOUT the enforce claim
+    (old "offline" style) must obtain a live lease. Server unreachable → fail closed;
+    a valid lease → unlocked. There is no offline pass-through anymore."""
+    key = _key()                                             # no enforce / cloud_url
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
+    monkeypatch.setattr(cloud_license, "register", lambda *a, **k: None)   # unreachable
+    assert licensing.current_license(refresh=True).plan == "free"
+    lic_parsed = parse_key(key)                              # now the server issues a lease
+    def ok_register(base, k, mid, **kw):
+        payload = {"v": 1, "key_id": lic_parsed.key_id, "plan": lic_parsed.plan,
+                   "features": sorted(lic_parsed.features), "machine_id": mid,
+                   "issued": int(time.time()), "expires": int(time.time() + 3600)}
+        return cloud_license.compose_lease(payload, SECRET)
+    monkeypatch.setattr(cloud_license, "register", ok_register)
     got = licensing.current_license(refresh=True)
-    assert got.plan == "pro" and got.enforce == "" and licensing.license_error() == ""
+    assert got.plan == "pro" and got.has("sync")
 
 
 # ── team-invite relay: self-hosted dashboards with no mail account of their own ────────
@@ -649,6 +681,8 @@ def test_licensing_start_team_trial_activates_returned_key(monkeypatch):
     monkeypatch.setattr(
         cloud_license, "request_team_trial_key",
         lambda base, mid, email="": (trial_key, ""))
+    c = _app(); _wire_register_to(c, monkeypatch)            # online-only: lease the key
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
     got = licensing.start_team_trial()
     assert got["plan"] == "team"
     assert licensing.current_license(refresh=True).plan == "team"

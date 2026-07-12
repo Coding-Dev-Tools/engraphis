@@ -117,6 +117,10 @@ def test_run_once_runs_records_and_updates_button_state(tmp_path, monkeypatch):
     monkeypatch.setattr(lic, "_LICENSE_FILE", tmp_path / "license.key")
     monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _key())
     monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(_SECRET).hex())
+    # online-only enforcement now requires a live vendor lease for paid features; this test
+    # exercises autosync mechanics, so grant the sync entitlement directly (as test_analytics
+    # does) rather than standing up a fake relay.
+    monkeypatch.setattr("engraphis.licensing.has_feature", lambda f: True)
     lic.current_license(refresh=True)
 
     db = str(tmp_path / "auto.db")
