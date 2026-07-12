@@ -14,6 +14,7 @@ def mock_licensing_files(tmp_path):
     # to avoid reading or writing to the host user's actual ~/.engraphis directory.
     licensing._LICENSE_FILE = tmp_path / "license.key"
     licensing._TRIAL_FILE = tmp_path / "trial.json"
+    licensing._TRIAL_STAMP = tmp_path / "trial_used.json"  # advisory "trial used" UI stamp
     # Trial-used tombstones must never touch (or read!) the host's real home/appdata —
     # a developer machine that once used a trial would otherwise fail every trial test.
     licensing._TOMBSTONE_DIRS_OVERRIDE = [tmp_path]
