@@ -290,7 +290,14 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = None, limit: in
     import json as _json
     import sqlite3 as _sql
     ws = workspace or _default_ws()
-    ws = service()._clean_ws(ws)
+    if not ws:
+        # No workspace exists yet (fresh install) — nothing to list. Return an empty
+        # result instead of letting _clean_ws(None) raise a 500.
+        return {"workspace": "", "count": 0, "memories": []}
+    try:
+        ws = service()._clean_ws(ws)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
     conn = _sql.connect("file:%s?mode=ro" % settings.db_path, uri=True)
     conn.row_factory = _sql.Row
     try:
