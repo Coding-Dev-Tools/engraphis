@@ -67,7 +67,11 @@ def main() -> None:
             pass
 
     import uvicorn
-    uvicorn.run("engraphis.dashboard_app:app", host=args.host, port=args.port)
+    # Trust the fronting TLS proxy's forwarded headers so the session cookie's Secure
+    # flag is set correctly behind Railway/Fly/nginx (see start_server.py).
+    uvicorn.run("engraphis.dashboard_app:app", host=args.host, port=args.port,
+                proxy_headers=True,
+                forwarded_allow_ips=os.environ.get("ENGRAPHIS_FORWARDED_ALLOW_IPS", "127.0.0.1"))
 
 
 if __name__ == "__main__":
