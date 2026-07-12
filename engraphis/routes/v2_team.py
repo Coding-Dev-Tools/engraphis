@@ -35,6 +35,38 @@ def _csv_cell(value) -> str:
     return s
 
 
+def _send_invite(u: dict, admin: dict) -> tuple:
+    """Best-effort invite notification for a newly added member. Returns
+    ``(invited, reason)`` — never raises, so a delivery hiccup can never fail the
+    account-creation request that already succeeded.
+
+    Prefers THIS instance's own email delivery (``ENGRAPHIS_RESEND_API_KEY`` /
+    ``ENGRAPHIS_SMTP_*`` in its own env) when configured — the invite then comes
+    from the operator's own address/domain. Without local delivery configured,
+    falls back to the vendor relay (``/license/v1/team-invite``), gated by this
+    instance's own currently-active license key actually carrying the ``team``
+    feature server-side — so self-hosters get a working "Add member" out of the
+    box without setting up their own mail account, at no cost to the vendor beyond
+    what a legitimately licensed Team customer already pays for."""
+    from engraphis.inspector import webhooks
+    if webhooks.email_configured():
+        try:
+            webhooks.send_team_invite_email(u["email"], u["name"], u["role"],
+                                            invited_by=admin["email"])
+            return True, ""
+        except Exception as exc:  # noqa: BLE001 — caller logs/audits, never raises further
+            return False, str(exc)
+
+    from engraphis import cloud_license
+    from engraphis.licensing import _read_key_material
+    key = _read_key_material()
+    if not key:
+        return False, ("no local email delivery configured (ENGRAPHIS_RESEND_API_KEY / "
+                       "ENGRAPHIS_SMTP_*) and no active license key to relay through")
+    return cloud_license.send_team_invite(
+        settings.relay_url, key, u["email"], u["name"], u["role"], admin["email"])
+
+
 class SetupReq(BaseModel):
     email: str = Field(..., min_length=5, max_length=254)
     name: str = Field(default="", max_length=120)
@@ -215,20 +247,12 @@ def attach(app: FastAPI, service):
         ip = request.client.host if request.client else None
         store.record_event("user.created", actor_id=admin["id"], actor_email=admin["email"],
                            target=u["email"], detail="role=%s" % body.role, ip=ip)
-        # Best-effort invite notification — must never block account creation, and
-        # never carries the password (see send_team_invite_email's docstring). If
-        # email delivery isn't configured or fails, the admin still has to share
-        # the password out-of-band, so the account remains fully usable either way.
-        invited = True
-        try:
-            from engraphis.inspector.webhooks import send_team_invite_email
-            send_team_invite_email(u["email"], u["name"], u["role"])
-        except Exception as exc:  # noqa: BLE001 — delivery failure must not fail the request
-            invited = False
-            logger.warning("team invite email to %s failed: %s", u["email"], exc)
+        invited, fail_reason = _send_invite(u, admin)
+        if not invited:
+            logger.warning("team invite email to %s failed: %s", u["email"], fail_reason)
             store.record_event("user.invite_email_failed", actor_id=admin["id"],
                                actor_email=admin["email"], target=u["email"],
-                               detail=str(exc)[:200], ip=ip)
+                               detail=fail_reason[:200], ip=ip)
         return {"user": u, "invited": invited}
 
     @router.post("/users/update")

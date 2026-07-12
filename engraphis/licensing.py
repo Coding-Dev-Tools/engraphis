@@ -673,6 +673,40 @@ def start_trial(*, now: Optional[float] = None) -> dict:
     return current_license(refresh=True).to_public_dict()
 
 
+def start_team_trial(*, now: Optional[float] = None) -> dict:
+    """Begin the one-time self-serve Team trial: unlike :func:`start_trial` (Pro,
+    fully local/offline), this fetches a REAL signed ``team`` key from the vendor
+    relay and activates it exactly like a purchased key. The extra network
+    round-trip is required, not incidental: the resulting key is later presented to
+    OTHER server-side gates (the team-invite relay, ``/register``) that only accept
+    a genuinely vendor-signed credential, and an offline client-only claim (like the
+    Pro trial's) can never satisfy those — see ``inspector.license_cloud.
+    start_team_trial`` for the full reasoning. Without this, a trialing user could
+    open Team mode locally but could never actually send a team invite, which
+    defeats the point of letting them trial Team at all.
+
+    Refuses (raises :class:`LicenseError`) if a valid paid key is already active,
+    if this device already claimed its one-time Team trial (relay 409), or if the
+    relay is unreachable. ``now`` is accepted (unused) only for signature parity
+    with :func:`start_trial`."""
+    material = _read_key_material()
+    if material:
+        try:
+            parse_key(material)
+            raise LicenseError("a paid license is already active — no trial needed")
+        except LicenseError as exc:
+            if "no trial needed" in str(exc):
+                raise
+            # otherwise the key is invalid/expired; allow the trial to proceed
+    from engraphis import cloud_license
+    from engraphis.config import settings
+    base = os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip() or settings.relay_url
+    key, reason = cloud_license.request_team_trial_key(base, cloud_license.machine_id())
+    if not key:
+        raise LicenseError(reason or "could not start the Team trial — try again shortly")
+    return activate(key).to_public_dict()
+
+
 def license_error() -> str:
     """Why the configured key (if any) was rejected — '' when none/valid."""
     current_license()

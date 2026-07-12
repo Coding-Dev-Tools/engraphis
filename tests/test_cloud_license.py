@@ -3,8 +3,11 @@ expired/seat-limited keys are refused; forged leases are rejected; the client ga
 closed in cloud mode. Also covers the salvaged local hardening (HMAC trial + monotonic
 clock). Runs on the numpy-only gate (stdlib + fastapi TestClient).
 """
+import io
 import json
 import time
+import urllib.error
+import urllib.parse
 
 import pytest
 from fastapi import FastAPI
@@ -429,3 +432,238 @@ def test_offline_keys_stay_offline(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _key())
     got = licensing.current_license(refresh=True)
     assert got.plan == "pro" and got.enforce == "" and licensing.license_error() == ""
+
+
+# ── team-invite relay: self-hosted dashboards with no mail account of their own ────────
+# borrow the vendor's, gated by a real 'team' key (same trust boundary as every other
+# licensed feature) and rate-limited per key so it can't become an open relay.
+
+def test_team_invite_relay_sends_with_valid_team_key(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    captured = {}
+    monkeypatch.setattr(
+        WH, "send_team_invite_email",
+        lambda to, name, role, invited_by="": captured.update(
+            to=to, name=name, role=role, invited_by=invited_by))
+    c = _app()
+    r = c.post("/license/v1/team-invite",
+               json={"key": _key(plan="team", seats=3), "to": "new@corp.com",
+                     "name": "Mo", "role": "member", "invited_by": "admin@corp.com"})
+    assert r.status_code == 200 and r.json()["sent"] is True
+    assert captured == {"to": "new@corp.com", "name": "Mo", "role": "member",
+                        "invited_by": "admin@corp.com"}
+
+
+def test_team_invite_relay_rejects_non_team_key():
+    c = _app()
+    r = c.post("/license/v1/team-invite",
+               json={"key": _key(plan="pro"), "to": "new@corp.com"})
+    assert r.status_code == 402 and "team" in r.json()["error"].lower()
+
+
+def test_team_invite_relay_rejects_revoked_key(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    monkeypatch.setattr(WH, "send_team_invite_email", lambda *a, **k: None)
+    c = _app()
+    key = _key(plan="team")
+    reg.record_issued(key)                      # must be a known row for revoke to apply
+    reg.revoke(parse_key(key).key_id)
+    r = c.post("/license/v1/team-invite", json={"key": key, "to": "new@corp.com"})
+    assert r.status_code == 402
+
+
+def test_team_invite_relay_rejects_invalid_recipient_email():
+    c = _app()
+    r = c.post("/license/v1/team-invite",
+               json={"key": _key(plan="team"), "to": "not-an-email"})
+    assert r.status_code == 400
+
+
+def test_team_invite_relay_ignores_malformed_invited_by(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    captured = {}
+    monkeypatch.setattr(
+        WH, "send_team_invite_email",
+        lambda to, name, role, invited_by="": captured.update(invited_by=invited_by))
+    c = _app()
+    r = c.post("/license/v1/team-invite",
+               json={"key": _key(plan="team"), "to": "new@corp.com",
+                     "invited_by": "garbage"})
+    assert r.status_code == 200 and captured["invited_by"] == ""
+
+
+def test_team_invite_relay_enforces_daily_cap_per_key(monkeypatch):
+    from engraphis.inspector import license_cloud
+    from engraphis.inspector import webhooks as WH
+    monkeypatch.setattr(WH, "send_team_invite_email", lambda *a, **k: None)
+    monkeypatch.setattr(license_cloud, "_invite_daily_cap", lambda: 2)
+    c = _app()
+    key = _key(plan="team")
+    for _ in range(2):
+        r = c.post("/license/v1/team-invite", json={"key": key, "to": "new@corp.com"})
+        assert r.status_code == 200
+    over = c.post("/license/v1/team-invite", json={"key": key, "to": "new@corp.com"})
+    assert over.status_code == 429 and "limit" in over.json()["error"].lower()
+    # a DIFFERENT key is unaffected by another key's cap
+    other = c.post("/license/v1/team-invite",
+                   json={"key": _key(plan="team", email="other@corp.com"),
+                         "to": "new@corp.com"})
+    assert other.status_code == 200
+
+
+def test_team_invite_relay_surfaces_delivery_failure_as_502(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+
+    def boom(*a, **k):
+        raise RuntimeError("simulated Resend outage")
+
+    monkeypatch.setattr(WH, "send_team_invite_email", boom)
+    c = _app()
+    r = c.post("/license/v1/team-invite",
+               json={"key": _key(plan="team"), "to": "new@corp.com"})
+    assert r.status_code == 502
+
+
+# ── team-invite relay: client function, end-to-end against the real endpoint ───────────
+
+def _wire_urlopen_to(client, monkeypatch):
+    """Route the client function's urllib POST into the in-process TestClient — proves
+    the request cloud_license.send_team_invite actually builds is one the real endpoint
+    accepts, not just what a mock expects."""
+    class _Resp:
+        def __init__(self, data): self._d = data
+        def read(self): return self._d
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=None):
+        path = urllib.parse.urlsplit(req.full_url).path
+        resp = client.post(path, content=req.data or b"", headers=dict(req.headers))
+        if resp.status_code >= 400:
+            raise urllib.error.HTTPError(req.full_url, resp.status_code, resp.text,
+                                         None, io.BytesIO(resp.content))
+        return _Resp(resp.content)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+
+def test_send_team_invite_client_roundtrip(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    captured = {}
+    monkeypatch.setattr(
+        WH, "send_team_invite_email",
+        lambda to, name, role, invited_by="": captured.update(to=to))
+    c = _app()
+    _wire_urlopen_to(c, monkeypatch)
+    sent, reason = cloud_license.send_team_invite(
+        "http://relay.test", _key(plan="team"), "new@corp.com", "Mo", "member",
+        "admin@corp.com")
+    assert sent is True and reason == ""
+    assert captured["to"] == "new@corp.com"
+
+
+def test_send_team_invite_client_reports_reason_on_402(monkeypatch):
+    c = _app()
+    _wire_urlopen_to(c, monkeypatch)
+    sent, reason = cloud_license.send_team_invite(
+        "http://relay.test", _key(plan="pro"), "new@corp.com", "Mo", "member", "a@b.com")
+    assert sent is False and "team" in reason.lower()
+
+
+def test_send_team_invite_client_fails_closed_on_network_error(monkeypatch):
+    def boom(req, timeout=None):
+        raise urllib.error.URLError("no route to host")
+
+    monkeypatch.setattr("urllib.request.urlopen", boom)
+    sent, reason = cloud_license.send_team_invite(
+        "http://relay.test", _key(plan="team"), "new@corp.com", "Mo", "member", "a@b.com")
+    assert sent is False and "unreachable" in reason.lower()
+
+
+# ── self-serve Team trial: real signed key, one-per-device, must work with the ─────────
+# team-invite relay above (that's the whole point — a trial user needs the "click
+# button, send invite" experience to actually work, or they never see the value).
+
+def test_start_team_trial_issues_signed_team_key():
+    c = _app()
+    r = c.post("/license/v1/start-trial", json={"machine_id": "dev-1"})
+    assert r.status_code == 200
+    key = r.json()["key"]
+    lic = parse_key(key)
+    assert lic.plan == "team" and lic.has("team") and lic.seats == 1
+    assert lic.expires and lic.expires > time.time()
+
+
+def test_start_team_trial_requires_machine_id():
+    c = _app()
+    assert c.post("/license/v1/start-trial", json={}).status_code == 400
+
+
+def test_start_team_trial_rejects_second_grant_same_device():
+    c = _app()
+    first = c.post("/license/v1/start-trial", json={"machine_id": "dev-1"})
+    assert first.status_code == 200
+    second = c.post("/license/v1/start-trial", json={"machine_id": "dev-1"})
+    assert second.status_code == 409
+    # a DIFFERENT device is unaffected
+    third = c.post("/license/v1/start-trial", json={"machine_id": "dev-2"})
+    assert third.status_code == 200
+
+
+def test_start_team_trial_key_actually_works_with_team_invite_relay(monkeypatch):
+    """The regression this whole feature exists for: a trial key must be usable
+    everywhere a purchased key is, specifically including the invite relay — an
+    offline/local-only trial claim never could be."""
+    from engraphis.inspector import webhooks as WH
+    captured = {}
+    monkeypatch.setattr(
+        WH, "send_team_invite_email",
+        lambda to, name, role, invited_by="": captured.update(to=to))
+    c = _app()
+    key = c.post("/license/v1/start-trial", json={"machine_id": "dev-1"}).json()["key"]
+    r = c.post("/license/v1/team-invite", json={"key": key, "to": "teammate@corp.com"})
+    assert r.status_code == 200 and r.json()["sent"] is True
+    assert captured["to"] == "teammate@corp.com"
+
+
+def test_request_team_trial_key_client_roundtrip(monkeypatch):
+    c = _app()
+    _wire_urlopen_to(c, monkeypatch)
+    key, reason = cloud_license.request_team_trial_key("http://relay.test", "dev-1")
+    assert key and reason == ""
+    assert parse_key(key).plan == "team"
+
+
+def test_request_team_trial_key_client_reports_already_used(monkeypatch):
+    c = _app()
+    _wire_urlopen_to(c, monkeypatch)
+    cloud_license.request_team_trial_key("http://relay.test", "dev-1")
+    key, reason = cloud_license.request_team_trial_key("http://relay.test", "dev-1")
+    assert key is None and "already been used" in reason
+
+
+# ── licensing.start_team_trial: the client-facing entry point ──────────────────────────
+
+def test_licensing_start_team_trial_activates_returned_key(monkeypatch):
+    trial_key = _key(plan="team", email="trial@engraphis.local")
+    monkeypatch.setattr(
+        cloud_license, "request_team_trial_key",
+        lambda base, mid, email="": (trial_key, ""))
+    got = licensing.start_team_trial()
+    assert got["plan"] == "team"
+    assert licensing.current_license(refresh=True).plan == "team"
+    assert licensing.has_feature("team") is True
+
+
+def test_licensing_start_team_trial_refuses_if_paid_key_already_active(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _key(plan="pro"))
+    with pytest.raises(LicenseError, match="no trial needed"):
+        licensing.start_team_trial()
+
+
+def test_licensing_start_team_trial_surfaces_relay_denial(monkeypatch):
+    monkeypatch.setattr(
+        cloud_license, "request_team_trial_key",
+        lambda base, mid, email="": (None, "the free Team trial has already been used"))
+    with pytest.raises(LicenseError, match="already been used"):
+        licensing.start_team_trial()

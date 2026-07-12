@@ -307,7 +307,7 @@ def _resend_api_key() -> str:
 
 
 def _send_via_resend_api(to: str, subject: str, text_body: str, from_addr: str,
-                         api_key: str) -> None:
+                         api_key: str, *, reply_to: Optional[str] = None) -> None:
     """Send via Resend's HTTPS API (port 443). Works where outbound SMTP is
     blocked (Railway, Fly, many PaaS). Raises RuntimeError on any failure.
 
@@ -319,6 +319,8 @@ def _send_via_resend_api(to: str, subject: str, text_body: str, from_addr: str,
     import httpx
 
     payload = {"from": from_addr, "to": [to], "subject": subject, "text": text_body}
+    if reply_to:
+        payload["reply_to"] = reply_to
     headers = {
         "Authorization": "Bearer %s" % api_key,
         "Content-Type": "application/json",
@@ -334,7 +336,21 @@ def _send_via_resend_api(to: str, subject: str, text_body: str, from_addr: str,
             "Resend API error HTTP %s: %s" % (resp.status_code, resp.text[:200]))
 
 
-def _send_text_email(to: str, subject: str, text_body: str) -> None:
+def email_configured() -> bool:
+    """True if THIS process has its own outbound email delivery set up (Resend or
+    SMTP). Callers use this to decide *before* attempting a send whether to use
+    local delivery or fall back to something else (e.g. the vendor relay's
+    ``/license/v1/team-invite`` for a self-hosted dashboard with no mail account
+    of its own) — cheaper and clearer than attempting-and-catching."""
+    if _resend_api_key():
+        return True
+    return bool(os.environ.get("ENGRAPHIS_SMTP_HOST", "").strip()
+                and os.environ.get("ENGRAPHIS_SMTP_USER", "").strip()
+                and os.environ.get("ENGRAPHIS_SMTP_PASSWORD", "").strip())
+
+
+def _send_text_email(to: str, subject: str, text_body: str, *,
+                     reply_to: Optional[str] = None) -> None:
     """Deliver a plain-text email to *to*. Shared transport for every outbound
     email this module sends (license keys, team invites, ...).
 
@@ -345,13 +361,15 @@ def _send_text_email(to: str, subject: str, text_body: str) -> None:
     configured, and raises on delivery failure — callers decide how to log/fall
     back (see :func:`_issue_and_email`'s 0600 fallback file for the license-key
     case; a team invite has no secret to lose, so it just logs and moves on).
+    ``reply_to``, when given, routes replies to a human (e.g. the admin who sent
+    a team invite) instead of the shared sending address.
     """
     from_addr = os.environ.get("ENGRAPHIS_SMTP_FROM", "keys@engraphis.com").strip()
 
     api_key = _resend_api_key()
     if api_key:
         logger.info("sending email to %s via Resend API", to)
-        _send_via_resend_api(to, subject, text_body, from_addr, api_key)
+        _send_via_resend_api(to, subject, text_body, from_addr, api_key, reply_to=reply_to)
         logger.info("email delivered to %s (Resend API)", to)
         return
 
@@ -369,6 +387,8 @@ def _send_text_email(to: str, subject: str, text_body: str) -> None:
     msg["From"] = from_addr
     msg["To"] = to
     msg["Subject"] = subject
+    if reply_to:
+        msg["Reply-To"] = reply_to
     msg.set_content(text_body)
     logger.info("sending email to %s via %s:%d", to, smtp_host, smtp_port)
     with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as smtp:
@@ -392,19 +412,23 @@ def send_license_email(to: str, key: str, product_name: str = "Pro",
     _send_text_email(to, subject, text_body)
 
 
-def _team_invite_email_text(name: str, role: str, dashboard_url: str) -> str:
+def _team_invite_email_text(name: str, role: str, dashboard_url: str,
+                            invited_by: str = "") -> str:
     greeting = "Hi %s," % name if name else "Hi,"
+    who = "%s has added you" % invited_by if invited_by else "You've been added"
     where = ("    %s\n\n" % dashboard_url if dashboard_url else
              "    Ask your admin for your dashboard's web address.\n\n")
+    reply_note = ("\nQuestions? Just reply to this email — it goes straight to %s.\n"
+                  % invited_by if invited_by else "")
     return f"""{greeting}
 
-You've been added to an Engraphis team dashboard as a {role}.
+{who} to an Engraphis team dashboard as a {role}.
 
 Sign in here:
 
 {where}Use this email address to log in. Your admin sets your password directly
 and will share it with you separately — this email does not contain it.
-
+{reply_note}
 — The Engraphis team
 """
 
@@ -440,7 +464,7 @@ def send_password_reset_email(to: str, name: str, reset_url: str) -> None:
     _send_text_email(to, subject, text_body)
 
 
-def send_team_invite_email(to: str, name: str, role: str) -> None:
+def send_team_invite_email(to: str, name: str, role: str, *, invited_by: str = "") -> None:
     """Notify a newly added dashboard team member (``/api/auth/users``) that
     their account exists.
 
@@ -448,14 +472,21 @@ def send_team_invite_email(to: str, name: str, role: str) -> None:
     directly in the dashboard's "Add member" form, so it is already known
     only to the admin — emailing it too would put a live credential in the
     mail provider's systems/inbox for no real benefit, since the admin still
-    has to get the new member set up somehow. Raises on delivery failure (see
-    :func:`_send_text_email`); the caller (``routes.v2_team.add_user``) treats
-    this as best-effort and must not let it block account creation.
+    has to get the new member set up somehow. ``invited_by`` (the admin's own
+    email) is named in the body and set as Reply-To — important when this is
+    sent through the shared vendor relay (see
+    ``inspector.license_cloud.team_invite``), where the visible From address
+    is the vendor's, not the actual team's; without this the recipient has no
+    way to tell who is inviting them or to reply to a human. Raises on
+    delivery failure (see :func:`_send_text_email`); the caller treats this as
+    best-effort and must not let it block account creation.
     """
+    from engraphis.inspector.auth import _EMAIL_RE
     subject = "You've been added to an Engraphis team"
     dashboard_url = os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
-    text_body = _team_invite_email_text(name, role, dashboard_url)
-    _send_text_email(to, subject, text_body)
+    text_body = _team_invite_email_text(name, role, dashboard_url, invited_by=invited_by)
+    reply_to = invited_by if invited_by and _EMAIL_RE.match(invited_by) else None
+    _send_text_email(to, subject, text_body, reply_to=reply_to)
 
 
 def _fallback_dir() -> Path:
