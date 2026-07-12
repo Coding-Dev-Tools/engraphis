@@ -35,3 +35,6 @@ internal/
 # mount layer, not real content. Safe to ignore; delete host-side once the
 # holding process releases the handle (rm from the sandbox gets EPERM).
 .fuse_hidden*
+
+# Local curl/testing cookie jar — may contain live session cookies. Never commit.
+cookies.txt
