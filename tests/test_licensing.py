@@ -257,3 +257,78 @@ def test_activate_persists_key(monkeypatch, tmp_path):
     with pytest.raises(LicenseError):
         lic.activate("ENGR1.bad.key")            # invalid key: not persisted…
     assert target.read_text().strip() == key     # …previous key untouched
+
+
+# ── one-time trial: reset resistance + cache expiry (revenue-protection regressions) ──
+
+def test_trial_survives_state_dir_wipe(tmp_path, monkeypatch):
+    """Regression: deleting the state dir (trial.json, machine id, anchor) must NOT
+    resurrect the one-time trial — consumption is also recorded in independent
+    tombstone locations, so the old `rm -rf ~/.engraphis` infinite-Pro loop is dead."""
+    import shutil
+
+    state = tmp_path / "state"
+    external = tmp_path / "external"          # stands in for LOCALAPPDATA/XDG/.cache
+    monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY", raising=False)
+    monkeypatch.setattr(lic, "_TRIAL_FILE", state / "trial.json")
+    monkeypatch.setattr(lic, "_MONOTONIC_FILE", state / ".clock_anchor")
+    monkeypatch.setattr(lic, "_TOMBSTONE_DIRS_OVERRIDE", [str(external)])
+
+    lic.start_trial()
+    assert lic.trial_status()["active"] is True
+    assert (external / "trial.stamp").exists()
+
+    shutil.rmtree(state)                      # the old reset move
+    st = lic.trial_status()
+    assert st["active"] is False and st["used"] is True
+    with pytest.raises(LicenseError):
+        lic.start_trial()
+    assert current_license(refresh=True).plan == "free"
+
+
+def test_cached_license_expires_without_restart(monkeypatch):
+    """Regression: the process-wide license cache must drop paid features once the
+    key's expiry passes — it was immortal, so any process that outlived its key (or
+    trial) kept Pro until restart."""
+    now = time.time()
+    key = compose_key({"v": 1, "plan": "pro", "email": "t@x.co",
+                       "expires": int(now + 60)}, SECRET)
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(SECRET).hex())
+    assert current_license(refresh=True).plan == "pro"
+    assert has_feature("analytics")
+    monkeypatch.setattr(lic.time, "time", lambda: now + 120)  # expiry passes, NO refresh
+    assert current_license().plan == "free"
+    assert not has_feature("analytics")
+
+
+def test_recheck_bound_follows_cloud_gate_resolution(monkeypatch):
+    """Regression: the rolling cloud re-check bound must be scheduled whenever
+    :func:`_cloud_gate` would consult a server — including keys that carry the server
+    URL signed into the payload (``cloud_url``/``enforce``), not just when the env
+    override is set. Otherwise a cloud-enforced key distributed with its URL baked in
+    was gated once, then cached until expiry, so revocation never propagated."""
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
+    now = 1_000_000.0
+    far = now + 10 * 365 * 86400  # expiry far past any recheck window
+
+    # Plain offline paid key: no cloud markers, no env → recheck only at expiry.
+    offline = License(plan="pro", expires=far)
+    assert lic._license_recheck_at(offline, now=now) == far
+
+    # Key with the server URL baked into the signed payload → 900s revocation cadence,
+    # even though ENGRAPHIS_CLOUD_URL is unset (this is the bug being locked down).
+    baked = License(plan="pro", expires=far, cloud_url="https://lic.example")
+    assert lic._license_recheck_at(baked, now=now) == now + lic._CLOUD_RECHECK_SECONDS
+
+    # enforce:"cloud" alone is enough to demand the rolling re-check too.
+    enforced = License(plan="pro", expires=far, enforce="cloud")
+    assert lic._license_recheck_at(enforced, now=now) == now + lic._CLOUD_RECHECK_SECONDS
+
+    # A local trial is excluded regardless of any cloud fields (it never phones home).
+    trial = License(plan="pro", expires=far, cloud_url="https://lic.example", is_trial=True)
+    assert lic._license_recheck_at(trial, now=now) == far
+
+    # Env override still works on its own for offline-issued keys.
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "https://lic.example")
+    assert lic._license_recheck_at(offline, now=now) == now + lic._CLOUD_RECHECK_SECONDS

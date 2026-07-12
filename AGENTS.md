@@ -65,8 +65,9 @@ ENGRAPHIS_TEAM_MODE=1            # multi-user Inspector (needs a 'team' license)
 # ── Sleep-time consolidation (schedulable local job; also an MCP tool) ────────
 python -m scripts.consolidate --db engraphis.db --workspace acme --dry-run
 
-# ── Cloud sync (Pro; schedulable local job over any shared folder — see docs/SYNC.md) ──
+# ── Cloud sync (Pro; schedulable job over a shared folder OR the managed relay — see docs/SYNC.md) ──
 python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/engraphis --dry-run
+python -m scripts.sync --db engraphis.db --workspace acme --relay https://sync.engraphis.app  # or bare --relay + ENGRAPHIS_RELAY_URL
 
 # ── Run the v1 server (needs the full install) ───────────────────────────────
 python -m scripts.start_server      # http://127.0.0.1:8700  (dashboard at /, OpenAPI at /docs)
@@ -259,13 +260,19 @@ These are pure, unit-tested functions — change them only with a corresponding 
   (bi-temporal, deterministic, idempotent) that reuses the `resolve()`/validity machinery —
   union by ULID, earliest-invalidation + max-reinforcement lattice, deterministic LWW with
   a content-hash tiebreak; scope reconciled *by name* on apply. `SyncTransport` interface
-  (`core/interfaces.py`) + `FolderTransport` backend (`backends/sync_folder.py`, works over
-  Dropbox/iCloud/Syncthing/git); gated CLI `python -m scripts.sync` (`require_feature("sync")`
-  lives in the script — `core/` stays license-free). The untrusted-bundle apply path is
-  validated/clamped and **scope-confined** (a bundle can't cross a workspace/repo boundary;
-  `secret` memories aren't exported; provenance is stamped). See `docs/SYNC.md`.
-  **Not done:** managed end-to-end-encrypted relay, HLC per-field clock, entity/edge graph
-  sync, `engraphis_sync` MCP tool + Inspector "Devices" panel.
+  (`core/interfaces.py`) + two backends: `FolderTransport` (`backends/sync_folder.py`, works
+  over Dropbox/iCloud/Syncthing/git) and the managed `RelayTransport`
+  (`backends/sync_relay.py`) against the license-gated server (`inspector/sync_relay.py`,
+  mounted by `inspector/cloud_mount.py` on both `app.py` and `dashboard_app.py`; Team seat
+  enforcement is server-side). `get_transport("folder"|"relay", …)` selects between them;
+  gated CLI `python -m scripts.sync --remote <dir>` **or** `--relay [<url>]`
+  (`require_feature("sync")` lives in the script — `core/` stays license-free). The
+  untrusted-bundle apply path is validated/clamped and **scope-confined** (a bundle can't
+  cross a workspace/repo boundary; `secret` memories aren't exported; provenance is stamped).
+  See `docs/SYNC.md`.
+  **Not done:** end-to-end encryption of relay bundles (client-side encrypt/decrypt; the
+  relay already stores opaque bytes), HLC per-field clock, entity/edge graph sync,
+  `engraphis_sync` MCP tool + Inspector "Devices" panel.
 - **Not done at all:** Phase 6 — Rust hot path.
 - The **v1 FastAPI server** is the legacy reference server and still runs; treat it as a
   compatibility/reference surface, not the place for new capability.

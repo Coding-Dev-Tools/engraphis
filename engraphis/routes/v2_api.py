@@ -7,13 +7,14 @@ engraphis/routes/v2_team.py and is included by the dashboard app.
 """
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from engraphis import licensing
-from engraphis.config import settings
+from engraphis.config import DEFAULT_RELAY_URL, settings
 from engraphis.service import MemoryService, ValidationError
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
@@ -654,3 +655,102 @@ def start_trial():
         return licensing.start_trial()
     except licensing.LicenseError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
+# ── Cloud sync (Pro) — the dashboard's one-click "Sync now" button ────────────────────
+# The heavy lifting is in core/sync.py + the RelayTransport client; these two routes just
+# expose it to the dashboard so a user never touches a terminal. Sync is namespaced by
+# workspace NAME (every device on the account shares a namespace); identity is the license
+# key, verified server-side by the relay. See docs/SYNC.md.
+
+#: Last-sync summary, per process, so the button can show "last synced …" without a store.
+_SYNC_STATE: dict = {}
+
+
+def _relay_url() -> str:
+    # Falls back to the vendor default only if the operator blanked ENGRAPHIS_RELAY_URL;
+    # DEFAULT_RELAY_URL lives in config so the literal is defined in exactly one place.
+    return (settings.relay_url or DEFAULT_RELAY_URL).rstrip("/")
+
+
+@router.get("/sync/status")
+def sync_status():
+    """Whether one-click cloud sync is ready, plus the last-sync summary for the button."""
+    has_key = bool(licensing._read_key_material())
+    lic = licensing.current_license(refresh=False)
+    return {
+        # Ready only when the plan includes sync AND a key is configured (the relay needs
+        # a real key; a local trial alone can't reach it — it stays folder-sync only).
+        "available": bool(licensing.has_feature("sync") and has_key),
+        "has_key": has_key,
+        "plan": lic.plan,
+        "relay_url": _relay_url(),
+        "tier_required": licensing.required_plan("sync"),
+        "upgrade_url": licensing.upgrade_url(),
+        "last": _SYNC_STATE.get("last"),
+    }
+
+
+@router.post("/sync/run")
+def sync_run():
+    """Push this device's memories to the relay and pull every other device's — for every
+    workspace. Backs the dashboard 'Sync now' button. Pro/Team; needs a license key."""
+    _paid("sync")   # 402 if the plan doesn't include sync
+    if not licensing._read_key_material():
+        raise HTTPException(status_code=402, detail={
+            "error": "Cloud sync needs your license key. Sign in with it above, then Sync.",
+            "upgrade_url": licensing.upgrade_url()})
+
+    svc = service()
+    wss = svc.list_workspaces().get("workspaces") or []
+    if not wss:
+        raise HTTPException(status_code=400,
+                            detail={"error": "Nothing to sync yet — add a memory first."})
+
+    from engraphis.backends.sync_folder import get_transport
+    from engraphis.backends.sync_relay import RelayError
+    from engraphis.core.sync import SyncEngine
+
+    engine = svc.engine
+    syncer = SyncEngine(engine.store, embedder=engine.embedder, vector_index=engine.index,
+                        allowed_workspaces=settings.allowed_workspaces or None)
+    totals = {"added": 0, "updated": 0, "unchanged": 0, "links_added": 0}
+    # Distinct OTHER devices we pulled from, deduped across workspaces: the same peer
+    # pushes a bundle per workspace, so summing per-workspace counts would multiply one
+    # device by its workspace count. Counting unique device ids gives the true peer total.
+    peer_devices: set = set()
+    exported, errors = 0, []
+    for w in wss:
+        name = w.get("name")
+        if not name:
+            continue
+        row = svc.store.conn.execute(
+            "SELECT id FROM workspaces WHERE name=?", (name,)).fetchone()
+        if not row:
+            continue
+        try:
+            transport = get_transport("relay", base_url=_relay_url(), workspace_id=name)
+            rep = syncer.sync(transport, row["id"])
+        except RelayError as exc:
+            if exc.status == 402:          # relay rejected the key server-side
+                raise HTTPException(status_code=402, detail={
+                    "error": str(exc), "upgrade_url": licensing.upgrade_url()})
+            errors.append({"workspace": name, "error": str(exc)})
+            continue
+        except Exception as exc:  # noqa: BLE001 — one bad workspace must not abort the rest
+            errors.append({"workspace": name, "error": str(exc)})
+            continue
+        exported += int(rep.get("exported_memories", 0) or 0)
+        for a in rep.get("applied") or []:
+            dev = a.get("from_device")
+            if dev and dev != "?" and "error" not in a:
+                peer_devices.add(dev)
+        for k in totals:
+            totals[k] += int((rep.get("totals") or {}).get(k, 0) or 0)
+
+    summary = {"at": time.time(), "workspaces": len(wss), "exported": exported,
+               "peers": len(peer_devices), "added": totals["added"],
+               "updated": totals["updated"], "unchanged": totals["unchanged"],
+               "errors": errors}
+    _SYNC_STATE["last"] = summary
+    return {"ok": True, "summary": summary}

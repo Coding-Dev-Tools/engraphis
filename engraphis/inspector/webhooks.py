@@ -143,10 +143,33 @@ def _extract_product_name(data: dict) -> str:
 
 
 def _extract_seats(data: dict) -> int:
-    """Seat count from an order or subscription payload (Team). Defaults to 1."""
+    """Seat count from an order or subscription payload (Team). Defaults to 1.
+
+    Polar's native seat-based pricing (what "Engraphis Team" actually uses — see
+    the dashboard's "Seat Pricing" price type) puts the seat count buyers chose at
+    checkout in a ``seats`` field, but WHERE that field lives depends on the
+    payload shape:
+      - ``subscription.created``/``subscription.updated`` payloads ARE a
+        Subscription object, so ``seats`` is top-level.
+      - ``order.paid``/``order.created`` payloads are an Order object. Order's
+        own top-level ``seats`` is populated ONLY for seat-based *one-time*
+        orders (per Polar's schema) — for our recurring Team subscription it is
+        null, and the real count lives nested at ``order.subscription.seats``.
+    Checking only the top-level field (the old behavior) meant every recurring
+    Team order.paid fell through to product metadata (unset) and silently
+    defaulted every buyer to 1 seat regardless of how many they paid for.
+    ``quantity`` and ``metadata.seats`` are kept as defensive fallbacks for
+    payload shapes Polar doesn't currently send for this product.
+    """
     product = data.get("product") or {}
     meta = product.get("metadata") or data.get("metadata") or {}
-    for candidate in (data.get("seats"), data.get("quantity"), meta.get("seats")):
+    subscription = data.get("subscription") or {}
+    for candidate in (
+        data.get("seats"),
+        subscription.get("seats"),
+        data.get("quantity"),
+        meta.get("seats"),
+    ):
         try:
             n = int(candidate)
             if n > 0:
@@ -216,6 +239,16 @@ def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
         "issued": int(now),
         "expires": int(now + days * 86400),
     }
+    # Server-side enforcement (opt-in at issuance): with ENGRAPHIS_KEY_CLOUD_URL set,
+    # every minted key carries a signed ``enforce: "cloud"`` claim plus the license
+    # server URL — the client then requires a live lease (register/renew against that
+    # URL) and the key is useless offline or after revocation. Unset = classic
+    # offline-verified keys, unchanged. The claim rides inside the Ed25519-signed
+    # payload, so customers cannot strip it.
+    enforce_url = os.environ.get("ENGRAPHIS_KEY_CLOUD_URL", "").strip().rstrip("/")
+    if enforce_url:
+        payload["enforce"] = "cloud"
+        payload["cloud_url"] = enforce_url
     key = compose_key(payload, secret)
     logger.info("issued %s key for %s (expires in %d days)", plan, email_addr, days)
     try:  # registry is best-effort; a write failure must never block fulfillment/email
@@ -232,6 +265,10 @@ _RESEND_API_URL = "https://api.resend.com/emails"
 def _license_email_text(key: str, product_name: str, is_trial: bool = False) -> str:
     intro = (f"Your Engraphis {product_name} free trial has started!"
              if is_trial else f"Thank you for purchasing Engraphis {product_name}!")
+    verification_note = (
+        "Your key activates against our license server automatically on first use."
+        if os.environ.get("ENGRAPHIS_KEY_CLOUD_URL", "").strip()
+        else "Your key is verified offline — no phone-home.")
     return f"""{intro}
 
 Your license key:
@@ -246,7 +283,7 @@ To activate:
 Or set the ENGRAPHIS_LICENSE_KEY environment variable, or save the key to
 ~/.engraphis/license.key.
 
-Your key is verified offline — no phone-home. Keep it safe.
+{verification_note} Keep it safe.
 
 — The Engraphis team
 """
@@ -297,27 +334,25 @@ def _send_via_resend_api(to: str, subject: str, text_body: str, from_addr: str,
             "Resend API error HTTP %s: %s" % (resp.status_code, resp.text[:200]))
 
 
-def send_license_email(to: str, key: str, product_name: str = "Pro",
-                       is_trial: bool = False) -> None:
-    """Deliver a license key to *to*.
+def _send_text_email(to: str, subject: str, text_body: str) -> None:
+    """Deliver a plain-text email to *to*. Shared transport for every outbound
+    email this module sends (license keys, team invites, ...).
 
     Prefers the Resend HTTPS API (``ENGRAPHIS_RESEND_API_KEY`` or the Resend key
     already in ``ENGRAPHIS_SMTP_PASSWORD``) because many hosts — Railway included —
     block outbound SMTP ports, which makes ``smtplib`` hang until timeout. Falls
     back to SMTP (``ENGRAPHIS_SMTP_*``). Raises RuntimeError if nothing is
-    configured, and raises on delivery failure. ``product_name`` should be a clean
-    tier label ("Pro"/"Team"); ``is_trial`` selects trial-vs-purchase copy.
+    configured, and raises on delivery failure — callers decide how to log/fall
+    back (see :func:`_issue_and_email`'s 0600 fallback file for the license-key
+    case; a team invite has no secret to lose, so it just logs and moves on).
     """
-    subject = ("Your Engraphis %s Trial License Key" if is_trial
-               else "Your Engraphis %s License Key") % product_name
-    text_body = _license_email_text(key, product_name, is_trial=is_trial)
     from_addr = os.environ.get("ENGRAPHIS_SMTP_FROM", "keys@engraphis.com").strip()
 
     api_key = _resend_api_key()
     if api_key:
-        logger.info("sending license email to %s via Resend API", to)
+        logger.info("sending email to %s via Resend API", to)
         _send_via_resend_api(to, subject, text_body, from_addr, api_key)
-        logger.info("license email delivered to %s (Resend API)", to)
+        logger.info("email delivered to %s (Resend API)", to)
         return
 
     smtp_host = os.environ.get("ENGRAPHIS_SMTP_HOST", "").strip()
@@ -335,12 +370,61 @@ def send_license_email(to: str, key: str, product_name: str = "Pro",
     msg["To"] = to
     msg["Subject"] = subject
     msg.set_content(text_body)
-    logger.info("sending license email to %s via %s:%d", to, smtp_host, smtp_port)
+    logger.info("sending email to %s via %s:%d", to, smtp_host, smtp_port)
     with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as smtp:
         smtp.starttls()
         smtp.login(smtp_user, smtp_pass)
         smtp.send_message(msg)
-    logger.info("license email delivered to %s (SMTP)", to)
+    logger.info("email delivered to %s (SMTP)", to)
+
+
+def send_license_email(to: str, key: str, product_name: str = "Pro",
+                       is_trial: bool = False) -> None:
+    """Deliver a license key to *to*.
+
+    Raises RuntimeError if nothing is configured, and raises on delivery
+    failure — see :func:`_send_text_email`. ``product_name`` should be a clean
+    tier label ("Pro"/"Team"); ``is_trial`` selects trial-vs-purchase copy.
+    """
+    subject = ("Your Engraphis %s Trial License Key" if is_trial
+               else "Your Engraphis %s License Key") % product_name
+    text_body = _license_email_text(key, product_name, is_trial=is_trial)
+    _send_text_email(to, subject, text_body)
+
+
+def _team_invite_email_text(name: str, role: str, dashboard_url: str) -> str:
+    greeting = "Hi %s," % name if name else "Hi,"
+    where = ("    %s\n\n" % dashboard_url if dashboard_url else
+             "    Ask your admin for your dashboard's web address.\n\n")
+    return f"""{greeting}
+
+You've been added to an Engraphis team dashboard as a {role}.
+
+Sign in here:
+
+{where}Use this email address to log in. Your admin sets your password directly
+and will share it with you separately — this email does not contain it.
+
+— The Engraphis team
+"""
+
+
+def send_team_invite_email(to: str, name: str, role: str) -> None:
+    """Notify a newly added dashboard team member (``/api/auth/users``) that
+    their account exists.
+
+    Deliberately carries NO password: the admin sets the initial password
+    directly in the dashboard's "Add member" form, so it is already known
+    only to the admin — emailing it too would put a live credential in the
+    mail provider's systems/inbox for no real benefit, since the admin still
+    has to get the new member set up somehow. Raises on delivery failure (see
+    :func:`_send_text_email`); the caller (``routes.v2_team.add_user``) treats
+    this as best-effort and must not let it block account creation.
+    """
+    subject = "You've been added to an Engraphis team"
+    dashboard_url = os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
+    text_body = _team_invite_email_text(name, role, dashboard_url)
+    _send_text_email(to, subject, text_body)
 
 
 def _fallback_dir() -> Path:
@@ -417,6 +501,32 @@ def handle_order_paid(payload: dict) -> Optional[str]:
     product_name = _extract_product_name(payload)
     seats = _extract_seats(payload)
     days = _key_days(product_name, product.get("metadata") or {})
+    return _issue_and_email(email_addr, product_name, seats, days)
+
+
+def handle_subscription_updated(payload: dict) -> Optional[str]:
+    """Re-issue a key when a Team buyer changes seat count mid-cycle (adds or
+    removes seats via the Customer Portal or API).
+
+    Polar's ``subscription.updated`` is a catch-all also fired for cancel /
+    uncancel / past-due / revoked transitions, so the caller (``engraphis.billing``)
+    must already have filtered to ``status in (active, trialing)`` AND confirmed
+    the seat count actually changed since the last sighting (tracked durably by
+    subscription id) before invoking this — that guard is what stops this from
+    re-issuing (and re-emailing) a key on every unrelated update, and from ever
+    double-issuing on the update that immediately follows a fresh subscription. This
+    function itself always (re)issues a fresh key reflecting the current seat count.
+    """
+    email_addr = _extract_email(payload)
+    if not email_addr:
+        logger.warning("subscription.updated missing customer email — cannot re-issue key")
+        return None
+    product = payload.get("product") or {}
+    product_name = _extract_product_name(payload)
+    seats = _extract_seats(payload)
+    days = _key_days(product_name, product.get("metadata") or {})
+    logger.info("seat count changed for %s (%s) -> %d seats, re-issuing key",
+                email_addr, product_name, seats)
     return _issue_and_email(email_addr, product_name, seats, days)
 
 

@@ -236,7 +236,20 @@ class AuthStore:
 
     def login(self, email: str, password: str, *, ip: Optional[str] = None) -> dict:
         """Verify credentials → new session. Raises :class:`AuthError` (generic message —
-        never reveals which of email/password was wrong) or the lockout notice."""
+        never reveals which of email/password was wrong), the lockout notice, or
+        :class:`~engraphis.licensing.LicenseError` when no live Team license is active.
+
+        The license gate lives HERE (same choke point as :meth:`create_user`) so every
+        entrypoint that mounts team auth inherits it: without it, accounts created while
+        a Team license was valid would keep multi-user access forever after the license
+        expires or is revoked. Existing sessions cap the tail at ``SESSION_TTL_SECONDS``."""
+        from engraphis.licensing import LicenseError, require_feature
+        try:
+            require_feature("team")
+        except LicenseError:
+            self.record_event("login.license_refused",
+                              actor_email=(email or "").strip().lower()[:254], ip=ip)
+            raise
         email = self._clean_email(email)
         until = self._locked_until(email)
         if until > time.time():

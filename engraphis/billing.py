@@ -98,6 +98,9 @@ def _dedup_conn() -> Optional[sqlite3.Connection]:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS processed (webhook_id TEXT PRIMARY KEY, ts REAL)")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS subscription_seats ("
+            "subscription_id TEXT PRIMARY KEY, seats INTEGER NOT NULL, updated_at REAL)")
         try:
             os.chmod(path, 0o600)
         except OSError:
@@ -144,6 +147,48 @@ def release_webhook(webhook_id: str) -> None:
     try:
         with conn:
             conn.execute("DELETE FROM processed WHERE webhook_id = ?", (webhook_id,))
+    except sqlite3.Error:
+        pass
+    finally:
+        conn.close()
+
+
+# ── seat-count baseline tracking (mid-cycle Team seat changes) ─────────────────
+# ``subscription.updated`` fires for MANY unrelated transitions (cancel, uncancel,
+# past_due, revoked...) as well as genuine seat-count changes, and it would also
+# fire on the update immediately following a subscription's own creation. Without
+# a durable "what did we last see" baseline per subscription, naively re-issuing a
+# key on every subscription.updated would spam duplicate keys/emails. Requires a
+# durable dedup path (ENGRAPHIS_WEBHOOK_STATE / ENGRAPHIS_DB_PATH); with no durable
+# store configured this fails CLOSED (never re-issues) rather than open.
+def get_known_seats(subscription_id: str) -> Optional[int]:
+    """Last seat count recorded for *subscription_id*, or ``None`` if never seen."""
+    conn = _dedup_conn()
+    if conn is None:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT seats FROM subscription_seats WHERE subscription_id = ?",
+            (subscription_id,)).fetchone()
+        return int(row[0]) if row else None
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+def record_known_seats(subscription_id: str, seats: int) -> None:
+    """Persist *seats* as the new baseline for *subscription_id*."""
+    conn = _dedup_conn()
+    if conn is None:
+        return
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO subscription_seats(subscription_id, seats, updated_at) "
+                "VALUES (?, ?, ?) ON CONFLICT(subscription_id) DO UPDATE SET "
+                "seats=excluded.seats, updated_at=excluded.updated_at",
+                (subscription_id, seats, time.time()))
     except sqlite3.Error:
         pass
     finally:
@@ -227,8 +272,15 @@ async def polar_webhook(request: Request):
     #                           (a fresh order.paid per cycle). Fulfillment "order:<id>".
     #   subscription.created -> ONLY when the subscription is in a free trial, to grant
     #                           an immediate trial-length key. Fulfillment "trial:<sub id>".
+    #   subscription.updated -> Team seat count changed mid-cycle (add/remove seats via
+    #                           the Customer Portal). Only when status is active/trialing
+    #                           AND the seat count actually differs from the last known
+    #                           baseline for this subscription (see get_known_seats /
+    #                           record_known_seats) — otherwise this event also fires for
+    #                           cancel/uncancel/past_due/revoked and would spam a re-issue.
     # A non-trial subscription.created is a no-op: its paid key comes from order.paid, so
     # a canceled trial can never keep Pro — the short trial key just expires.
+    pending_seat_baseline = None  # (sub_id, seats) to persist ONLY after a successful re-issue
     if event_type == "order.paid":
         from engraphis.inspector.webhooks import handle_order_paid as _fulfill
         fulfillment_key = "order:" + str(data.get("id") or webhook_id)
@@ -238,6 +290,32 @@ async def polar_webhook(request: Request):
                                  "type": event_type}, status_code=202)
         from engraphis.inspector.webhooks import handle_subscription_created as _fulfill
         fulfillment_key = "trial:" + str(data.get("id") or webhook_id)
+    elif event_type == "subscription.updated":
+        status = str(data.get("status", "")).strip().lower()
+        sub_id = str(data.get("id") or "")
+        if status not in ("active", "trialing") or not sub_id:
+            return JSONResponse({"status": "ignored", "reason": "not an active/trialing "
+                                 "subscription", "type": event_type}, status_code=202)
+        from engraphis.inspector.webhooks import _extract_seats
+        new_seats = _extract_seats(data)
+        prior_seats = get_known_seats(sub_id)
+        if prior_seats is None:
+            # First sighting of this subscription: seed the baseline so the NEXT update can
+            # detect a real change. Nothing to (re-)fulfill — the initial key came from
+            # order.paid. Safe to persist immediately (no fulfillment depends on it).
+            record_known_seats(sub_id, new_seats)
+            return JSONResponse({"status": "ignored", "reason": "baseline recorded",
+                                 "type": event_type}, status_code=202)
+        if prior_seats == new_seats:
+            return JSONResponse({"status": "ignored", "reason": "no seat-count change",
+                                 "type": event_type}, status_code=202)
+        # Real seat change. DEFER advancing the baseline until the re-issue actually
+        # succeeds: recording it up-front meant a crash (or a failed/retried fulfillment)
+        # left the baseline advanced while no new key went out, and Polar's retry then saw
+        # prior == new and skipped the re-issue permanently. Persisted at the success path.
+        pending_seat_baseline = (sub_id, new_seats)
+        from engraphis.inspector.webhooks import handle_subscription_updated as _fulfill
+        fulfillment_key = "seatsync:" + sub_id + ":" + str(new_seats)
     else:
         return JSONResponse({"status": "ignored", "type": event_type}, status_code=202)
 
@@ -267,5 +345,9 @@ async def polar_webhook(request: Request):
         release_webhook("ful:" + fulfillment_key)
         return JSONResponse({"status": "fulfilled", "key_issued": False}, status_code=202)
 
+    if pending_seat_baseline is not None:
+        # Key is out — now it's safe to advance the seat baseline. A crash before this
+        # point simply leaves the old baseline, so Polar's retry re-detects the change.
+        record_known_seats(*pending_seat_baseline)
     logger.info("polar webhook: issued key for %s", fulfillment_key)
     return JSONResponse({"status": "fulfilled", "key_issued": True}, status_code=202)

@@ -3,9 +3,183 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
-## [Unreleased]
+## [0.5.5] - 2026-07-12
+
+### Security
+- **Per-key server-side license enforcement (opt-in at issuance).** Keys can now carry a
+  signed `enforce: "cloud"` claim plus a `cloud_url` — such a key is ONLY valid while the
+  device holds a live Ed25519-signed lease from that server (register/renew, fail-closed),
+  so it is useless offline, after revocation, or with `ENGRAPHIS_CLOUD_URL` unset. The
+  claim lives inside the signed payload and cannot be stripped. Enable by setting
+  `ENGRAPHIS_KEY_CLOUD_URL` on the fulfillment server; keys without the claim keep the
+  classic offline, no-phone-home behavior. License emails state which mode the key uses.
+- **One-time trial can no longer be reset by wiping the state dir.** Trial consumption is
+  now also recorded in independent tombstone locations (LOCALAPPDATA/APPDATA, XDG state/
+  cache, `~/.cache/engraphis`), and the trial counts as used if ANY marker exists — the
+  `rm -rf ~/.engraphis` → fresh-3-day-Pro loop is closed. (Open-core honesty: source-level
+  bypass remains possible; vendor-hosted relay/cloud checks are the hard gates.)
+- **License cache re-checks expiry.** The process-wide cache was immortal, so a process
+  that outlived its key or trial kept paid features until restart. `current_license()
+  now re-validates once the cached expiry passes, and cloud-mode caches are bounded to
+  15 minutes so revocation propagates into long-running processes on lease cadence.
+- **Team-mode logins now require a live Team license.** `AuthStore.create_user` was gated
+  on the `team` feature, but `AuthStore.login` was not — so accounts created while a Team
+  license was valid kept full multi-user access (logins, roles, audit) indefinitely after
+  the license expired or was revoked. The gate now lives in `AuthStore.login` (the same
+  choke point as `create_user`), so the dashboard and the Inspector both inherit it; a
+  refused login returns the structured 402 and records a `login.license_refused` audit
+  event. Existing sessions age out within `SESSION_TTL_SECONDS` (12h). Regression test:
+  `tests/test_dashboard_v2.py::test_login_requires_live_team_license`.
+
+### Fixed
+- **Team dashboard "Add member" never emailed the new member — silent no-op.** `POST
+  /api/auth/users` created the account (with whatever password the admin typed) and
+  recorded the audit event, but no notification of any kind went out, so an invited
+  teammate had no way to know an account existed unless the admin remembered to tell them
+  separately. `inspector/webhooks.py` already had working Resend/SMTP email delivery for
+  license keys; it's now generalized (`_send_text_email`) and reused by a new
+  `send_team_invite_email`, wired into `add_user`. The invite deliberately carries no
+  password — the admin still shares that out-of-band — and delivery is best-effort: a
+  failure is logged, recorded as a `user.invite_email_failed` audit event, and surfaced in
+  the dashboard toast, but never blocks account creation. New `ENGRAPHIS_DASHBOARD_URL`
+  (optional) puts a real sign-in link in the email.
+- **Persistent-volume startup crash on managed hosts (Railway/Fly).** A volume mounted at
+  `/data` is owned by root, but the container runs as the non-root `engraphis` user, so the
+  app crashed at boot with `sqlite3.OperationalError: unable to open database file` — taking
+  the sync relay's durable storage (bundles + license registry) down with it. New
+  `docker-entrypoint.sh` starts as root, chowns `/data` to `engraphis`, then drops
+  privileges via `gosu` (added to the image) before running the server. Dockerfile now runs
+  the entrypoint; DEPLOY.md documents the required `/data` volume. Without a persistent
+  volume, every redeploy still wipes synced data — attaching one is mandatory for cloud sync.
 
 ### Added
+- **Managed sync relay is now reachable from the CLI.** The relay client
+  (`backends/sync_relay.py`) and its license-gated server were built and tested, but no
+  shipped entry point could drive them — `get_transport` refused `"relay"` and
+  `scripts/sync.py` only took `--remote <folder>`. `get_transport` now builds either
+  transport (`"folder"` / `"relay"`), and `scripts/sync.py` accepts `--relay [<url>]`
+  (falling back to `ENGRAPHIS_RELAY_URL`) and `--relay-key`, requiring exactly one of
+  `--remote` / `--relay`. The relay is namespaced by workspace **name** so all of an
+  account's devices share one bucket. New `ENGRAPHIS_RELAY_URL` setting. See `docs/SYNC.md`.
+- **Cloud sync (Pro)** — keep your memory store consistent across devices (and, on Team,
+  across a group) over any shared folder (Dropbox / iCloud / OneDrive / Syncthing / git).
+  `core/sync.py` is a convergent, offline-first **state-based CRDT** merge over memory rows
+  (union by ULID; earliest-invalidation + max-reinforcement lattice; deterministic
+  last-writer-wins with a content-hash tiebreak; scope reconciled by name), exposed via the
+  new `SyncTransport` interface + `FolderTransport` backend and the gated CLI
+  `python -m scripts.sync`. Unlike file-syncers, it *merges* facts on conflict instead of
+  dropping conflict copies. See `docs/SYNC.md`.
+- Code indexing now supports **C#, C, and C++** (regex-level: class/struct/interface/
+  method/function definitions) alongside Python/JS/TS. `languages=` names are normalised
+  (`C#`→csharp, `c++`→cpp) and an unsupported name returns an actionable error instead of
+  silently indexing nothing.
+- `.engraphisignore` (gitignore-style) at a repo root lets you exclude generated/build
+  files from `index_repo` beyond the built-in defaults.
+
+### Changed
+- `engraphis_start_session` is now **idempotent**: a repeat call for the same
+  `(workspace, repo, agent)` returns the already-active session (`reused: true`) instead
+  of opening a second concurrent one (two live sessions = two writers on the single-writer
+  store). New `force_new` flag branches a fresh session deliberately.
+- `index_repo` traversal prunes build/dependency directories *during* the walk rather than
+  after, fixing the apparent hang when pointed at large non-Python (C#/C++/JVM) repos.
+- **Knowledge-graph extraction is now on by default** (`ENGRAPHIS_GRAPH_EXTRACTOR`
+  defaults to `regex`, the dependency-free heuristic NER — no API key, safe offline).
+  New installs populate the graph on every ingest, so the dashboard Graph tab has nodes
+  out of the box instead of showing "No entities in this workspace yet." Set
+  `ENGRAPHIS_GRAPH_EXTRACTOR=none` to opt out.
+- **Regex graph is now connected, not a dust cloud.** The heuristic extractor emitted
+  entities but almost no relations, so multi-entity memories became isolated nodes the
+  Graph tab hid ("Hide unconnected") and the PPR recall arm couldn't traverse. Entities
+  sharing a memory are now joined by weak, bounded `co_occurs` edges (skipped when a
+  specific relation already links the pair, so real relations still dominate ranking),
+  and concept names get light canonicalization (whitespace/quote/possessive normalization,
+  leading-article stripping) so trivial variants collapse to one node. On a real store this
+  took per-workspace connectivity from ~0% to 90–100% of entities. No recall regression
+  (ablation + both eval datasets hold at 1.0).
+
+### Fixed
+- **Graph tab showed "No entities in this workspace yet" despite having memories.**
+  `settings.graph_extractor` was defined but never passed to the engine by any front end
+  (MCP server, dashboards, CLI), so graph extraction never ran regardless of config —
+  entities were only ever created by one-off imports. `MemoryService.create` now wires the
+  configured graph extractor into `MemoryEngine` for every front end.
+- **Existing memories backfill lazily.** The first time a workspace's Graph tab is opened,
+  if it has memories but no entities and extraction is enabled, its graph is extracted and
+  persisted on the spot — so installs that predate extraction light up on update with no
+  manual migration. Idempotent and per-workspace. A one-shot bulk equivalent is available
+  via `python -m scripts.backfill_graph`.
+
+### Security
+- Cloud-sync apply path treats every pulled bundle as untrusted (memory-poisoning threat,
+  `SECURITY.md`): rows are validated/clamped (lengths, numeric ranges, control/ANSI-escape
+  stripping, non-finite JSON rejected), **scope-confined** so a bundle can't reach across
+  into a workspace/repo it wasn't syncing, `secret`-flagged memories are never exported, and
+  one hostile bundle can't abort the whole sync. Every synced-in memory is tagged with
+  `provenance.synced_from_device`.
+- `.engraphisignore` parsing is bounded (file size, pattern count, per-pattern length —
+  fnmatch compiles to a backtracking regex) and cannot re-expose hardcoded default
+  excludes from an untrusted repo. `index_repo` no longer follows symlinked source files
+  out of the repo root; the walk is bounded against pathological directory trees.
+
+## [Unreleased]
+
+### Security
+- **Per-key server-side license enforcement (opt-in at issuance).** Keys can now carry a
+  signed `enforce: "cloud"` claim plus a `cloud_url` — such a key is ONLY valid while the
+  device holds a live Ed25519-signed lease from that server (register/renew, fail-closed),
+  so it is useless offline, after revocation, or with `ENGRAPHIS_CLOUD_URL` unset. The
+  claim lives inside the signed payload and cannot be stripped. Enable by setting
+  `ENGRAPHIS_KEY_CLOUD_URL` on the fulfillment server; keys without the claim keep the
+  classic offline, no-phone-home behavior. License emails state which mode the key uses.
+- **One-time trial can no longer be reset by wiping the state dir.** Trial consumption is
+  now also recorded in independent tombstone locations (LOCALAPPDATA/APPDATA, XDG state/
+  cache, `~/.cache/engraphis`), and the trial counts as used if ANY marker exists — the
+  `rm -rf ~/.engraphis` → fresh-3-day-Pro loop is closed. (Open-core honesty: source-level
+  bypass remains possible; vendor-hosted relay/cloud checks are the hard gates.)
+- **License cache re-checks expiry.** The process-wide cache was immortal, so a process
+  that outlived its key or trial kept paid features until restart. `current_license()`
+  now re-validates once the cached expiry passes, and cloud-mode caches are bounded to
+  15 minutes so revocation propagates into long-running processes on lease cadence.
+- **Team-mode logins now require a live Team license.** `AuthStore.create_user` was gated
+  on the `team` feature, but `AuthStore.login` was not — so accounts created while a Team
+  license was valid kept full multi-user access (logins, roles, audit) indefinitely after
+  the license expired or was revoked. The gate now lives in `AuthStore.login` (the same
+  choke point as `create_user`), so the dashboard and the Inspector both inherit it; a
+  refused login returns the structured 402 and records a `login.license_refused` audit
+  event. Existing sessions age out within `SESSION_TTL_SECONDS` (12h). Regression test:
+  `tests/test_dashboard_v2.py::test_login_requires_live_team_license`.
+
+### Fixed
+- **Team dashboard "Add member" never emailed the new member — silent no-op.** `POST
+  /api/auth/users` created the account (with whatever password the admin typed) and
+  recorded the audit event, but no notification of any kind went out, so an invited
+  teammate had no way to know an account existed unless the admin remembered to tell them
+  separately. `inspector/webhooks.py` already had working Resend/SMTP email delivery for
+  license keys; it's now generalized (`_send_text_email`) and reused by a new
+  `send_team_invite_email`, wired into `add_user`. The invite deliberately carries no
+  password — the admin still shares that out-of-band — and delivery is best-effort: a
+  failure is logged, recorded as a `user.invite_email_failed` audit event, and surfaced in
+  the dashboard toast, but never blocks account creation. New `ENGRAPHIS_DASHBOARD_URL`
+  (optional) puts a real sign-in link in the email.
+- **Persistent-volume startup crash on managed hosts (Railway/Fly).** A volume mounted at
+  `/data` is owned by root, but the container runs as the non-root `engraphis` user, so the
+  app crashed at boot with `sqlite3.OperationalError: unable to open database file` — taking
+  the sync relay's durable storage (bundles + license registry) down with it. New
+  `docker-entrypoint.sh` starts as root, chowns `/data` to `engraphis`, then drops
+  privileges via `gosu` (added to the image) before running the server. Dockerfile now runs
+  the entrypoint; DEPLOY.md documents the required `/data` volume. Without a persistent
+  volume, every redeploy still wipes synced data — attaching one is mandatory for cloud sync.
+
+### Added
+- **Managed sync relay is now reachable from the CLI.** The relay client
+  (`backends/sync_relay.py`) and its license-gated server were built and tested, but no
+  shipped entry point could drive them — `get_transport` refused `"relay"` and
+  `scripts/sync.py` only took `--remote <folder>`. `get_transport` now builds either
+  transport (`"folder"` / `"relay"`), and `scripts/sync.py` accepts `--relay [<url>]`
+  (falling back to `ENGRAPHIS_RELAY_URL`) and `--relay-key`, requiring exactly one of
+  `--remote` / `--relay`. The relay is namespaced by workspace **name** so all of an
+  account's devices share one bucket. New `ENGRAPHIS_RELAY_URL` setting. See `docs/SYNC.md`.
 - **Cloud sync (Pro)** — keep your memory store consistent across devices (and, on Team,
   across a group) over any shared folder (Dropbox / iCloud / OneDrive / Syncthing / git).
   `core/sync.py` is a convergent, offline-first **state-based CRDT** merge over memory rows

@@ -199,6 +199,42 @@ def test_send_license_email_uses_resend_api_not_smtp(monkeypatch):
     assert captured["has_key"] and "Pro" in captured["subject"]
 
 
+def test_team_invite_email_uses_resend_api_and_never_contains_a_password(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    captured = {}
+
+    def fake_api(to, subject, text_body, from_addr, api_key):
+        captured.update(to=to, subject=subject, text_body=text_body,
+                        from_addr=from_addr, api_key=api_key)
+
+    monkeypatch.setattr(WH, "_send_via_resend_api", fake_api)
+    monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
+    monkeypatch.setenv("ENGRAPHIS_SMTP_FROM", "keys@engraphis.com")
+    monkeypatch.delenv("ENGRAPHIS_DASHBOARD_URL", raising=False)
+    # No SMTP host set — if this fell through to SMTP it would raise instead.
+    WH.send_team_invite_email("newmember@example.com", "Mo", "member")
+    assert captured["to"] == "newmember@example.com"
+    assert captured["api_key"] == "re_test"
+    assert "member" in captured["text_body"]
+    assert "Mo" in captured["text_body"]
+    # the whole point: an invite never carries a live credential
+    assert "password" not in captured["text_body"].lower() or \
+        "does not contain it" in captured["text_body"]
+
+
+def test_team_invite_email_includes_dashboard_url_when_configured(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    captured = {}
+    monkeypatch.setattr(
+        WH, "_send_via_resend_api",
+        lambda to, subject, text_body, from_addr, api_key: captured.update(
+            text_body=text_body))
+    monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
+    monkeypatch.setenv("ENGRAPHIS_DASHBOARD_URL", "https://dash.example.com")
+    WH.send_team_invite_email("newmember@example.com", "", "admin")
+    assert "https://dash.example.com" in captured["text_body"]
+
+
 def test_delivery_failure_persists_key_and_still_202(monkeypatch, tmp_path):
     # A provider/network failure must NOT lose a paid key: it lands in the 0600
     # fallback file and the webhook still returns 202 (no Polar retry storm).
@@ -314,3 +350,185 @@ def test_trial_days_helper_is_short_and_bounded():
     assert 3 <= WH._trial_days(WH._parse_ts(_iso_in_days(3)), now=now) <= 4
     assert WH._trial_days(None, now=now) == 4          # env default fallback
     assert WH._trial_days(WH._parse_ts(_iso_in_days(-1)), now=now) == 4  # past -> fallback
+
+
+# ── seats: "Engraphis Team" uses Polar's native seat-based pricing, NOT a flat
+# price + quantity/metadata scheme. Polar's Order schema documents its top-level
+# ``seats`` field as populated "for seat-based one-time orders" only; for our
+# recurring Team subscription the real count lives nested at
+# ``order.subscription.seats``. A regression here silently caps every real Team
+# buyer's key at 1 seat regardless of how many they paid for. ───────────────────
+def test_extract_seats_from_top_level_field():
+    from engraphis.inspector.webhooks import _extract_seats
+    # subscription.created / subscription.updated payloads ARE a Subscription
+    # object, so Polar puts `seats` at the top level.
+    assert _extract_seats({"seats": 5, "customer": {}}) == 5
+
+
+def test_extract_seats_from_nested_order_subscription():
+    from engraphis.inspector.webhooks import _extract_seats
+    # order.paid for a RECURRING seat-based product: top-level `seats` is null
+    # per Polar's schema (that field is one-time-order-only); the real count is
+    # nested under `subscription.seats`.
+    payload = {
+        "id": "order_1", "seats": None,
+        "customer": {"email": "buyer@example.com"},
+        "product": {"name": "Engraphis Team"},
+        "subscription": {"id": "sub_1", "seats": 3},
+    }
+    assert _extract_seats(payload) == 3
+
+
+def test_extract_seats_falls_back_to_metadata_when_absent():
+    from engraphis.inspector.webhooks import _extract_seats
+    payload = {"product": {"name": "Engraphis Team", "metadata": {"seats": 2}}}
+    assert _extract_seats(payload) == 2
+
+
+def test_extract_seats_defaults_to_one_when_nothing_present():
+    from engraphis.inspector.webhooks import _extract_seats
+    assert _extract_seats({"product": {"name": "Engraphis Team"}}) == 1
+
+
+def test_extract_seats_prefers_real_fields_over_metadata():
+    from engraphis.inspector.webhooks import _extract_seats
+    # A stale/wrong metadata default must never override the actual purchase.
+    payload = {
+        "subscription": {"seats": 7},
+        "product": {"name": "Engraphis Team", "metadata": {"seats": 1}},
+    }
+    assert _extract_seats(payload) == 7
+
+
+def test_order_paid_recurring_team_order_issues_correct_seat_count(monkeypatch):
+    # End-to-end regression for the bug: before the fix, this issued a 1-seat key.
+    from engraphis.inspector import webhooks as WH
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
+    key = WH.handle_order_paid({
+        "id": "order_team_1", "seats": None,
+        "customer": {"email": "lead@example.com"},
+        "product": {"name": "Engraphis Team"},
+        "subscription": {"id": "sub_team_1", "seats": 5},
+    })
+    lic = parse_key(key)
+    assert lic.plan == "team" and lic.seats == 5
+
+
+def test_subscription_created_trial_team_uses_top_level_seats(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
+    key = WH.handle_subscription_created({
+        "id": "sub_team_trial", "status": "trialing", "seats": 4,
+        "customer": {"email": "lead@example.com"},
+        "product": {"name": "Engraphis Team"},
+        "current_period_end": _iso_in_days(3)})
+    lic = parse_key(key)
+    assert lic.plan == "team" and lic.seats == 4
+
+
+# ── mid-cycle seat sync: subscription.updated fires for MANY unrelated status
+# transitions AND for genuine seat-count changes. Must reissue ONLY on a real
+# seat-count change for an active/trialing subscription, never on first sighting
+# (that would double-issue alongside the order.paid/trial key already minted at
+# purchase) and never on unrelated status churn. ──────────────────────────────
+def _sub_updated_body(sub_id, status, seats, product="Engraphis Team"):
+    return _body({"type": "subscription.updated", "data": {
+        "id": sub_id, "status": status, "seats": seats,
+        "customer": {"email": "lead@example.com"}, "product": {"name": product}}})
+
+
+def test_first_sighting_of_subscription_updated_only_records_baseline(monkeypatch):
+    # The update that immediately follows creation must NOT mint a second key —
+    # order.paid/trial already issued the correct one.
+    client = _inspector_client(monkeypatch)
+    body = _sub_updated_body("sub_new", "active", 3)
+    r = _post(client, WHSEC, "evt_su_first", body)
+    assert r.status_code == 202
+    assert r.json() == {"status": "ignored", "reason": "baseline recorded",
+                        "type": "subscription.updated"}
+
+
+def test_seat_increase_reissues_key_with_new_count(monkeypatch):
+    client = _inspector_client(monkeypatch)
+    baseline = _sub_updated_body("sub_grow", "active", 3)
+    _post(client, WHSEC, "evt_su_baseline", baseline)
+    grown = _sub_updated_body("sub_grow", "active", 7)
+    r = _post(client, WHSEC, "evt_su_grown", grown)
+    assert r.json() == {"status": "fulfilled", "key_issued": True}
+
+
+def test_seat_decrease_reissues_key_with_new_count(monkeypatch):
+    client = _inspector_client(monkeypatch)
+    baseline = _sub_updated_body("sub_shrink", "active", 5)
+    _post(client, WHSEC, "evt_su_shrink_base", baseline)
+    shrunk = _sub_updated_body("sub_shrink", "active", 2)
+    r = _post(client, WHSEC, "evt_su_shrunk", shrunk)
+    assert r.json() == {"status": "fulfilled", "key_issued": True}
+    from engraphis.inspector.webhooks import issue_key  # noqa: F401 (import sanity)
+
+
+def test_unrelated_status_update_does_not_reissue(monkeypatch):
+    # e.g. subscription.updated fired for a cancel-at-period-end flag flip; seats
+    # unchanged, so this must be a no-op even though status is still "active".
+    client = _inspector_client(monkeypatch)
+    baseline = _sub_updated_body("sub_cancel_flag", "active", 4)
+    _post(client, WHSEC, "evt_su_cf_base", baseline)
+    same_seats = _sub_updated_body("sub_cancel_flag", "active", 4)
+    r = _post(client, WHSEC, "evt_su_cf_same", same_seats)
+    assert r.json()["status"] == "ignored"
+
+
+def test_revoked_subscription_update_never_reissues(monkeypatch):
+    client = _inspector_client(monkeypatch)
+    baseline = _sub_updated_body("sub_revoke", "active", 3)
+    _post(client, WHSEC, "evt_su_rv_base", baseline)
+    revoked = _sub_updated_body("sub_revoke", "canceled", 3)
+    r = _post(client, WHSEC, "evt_su_rv", revoked)
+    assert r.json()["status"] == "ignored"
+    assert r.json()["reason"] == "not an active/trialing subscription"
+
+
+def test_seat_sync_key_reflects_correct_new_count(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
+    key = WH.handle_subscription_updated({
+        "id": "sub_direct", "status": "active",
+        "customer": {"email": "lead@example.com"},
+        "product": {"name": "Engraphis Team"}, "seats": 9})
+    lic = parse_key(key)
+    assert lic.plan == "team" and lic.seats == 9
+
+
+def test_get_record_known_seats_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_WEBHOOK_STATE", str(tmp_path / "wh.db"))
+    assert B.get_known_seats("sub_xyz") is None
+    B.record_known_seats("sub_xyz", 3)
+    assert B.get_known_seats("sub_xyz") == 3
+    B.record_known_seats("sub_xyz", 6)  # upsert overwrites
+    assert B.get_known_seats("sub_xyz") == 6
+
+
+def test_failed_seatsync_fulfillment_does_not_advance_baseline(monkeypatch):
+    """Crash-window guard: if the re-issue on a real seat change fails, the seat baseline
+    must NOT advance — otherwise Polar's retry would see prior == new and skip the
+    re-issue forever. The baseline is persisted only after a key actually goes out."""
+    from engraphis.inspector import webhooks as WH
+    client = _inspector_client(monkeypatch)
+    orig = WH.handle_subscription_updated
+
+    # First sighting seeds the baseline at 3 (no fulfillment).
+    _post(client, WHSEC, "evt_cw_base", _sub_updated_body("sub_cw", "active", 3))
+    assert B.get_known_seats("sub_cw") == 3
+
+    # Real change 3 -> 8, but fulfillment blows up (e.g. email provider down).
+    monkeypatch.setattr(WH, "handle_subscription_updated",
+                        lambda _p: (_ for _ in ()).throw(RuntimeError("provider down")))
+    r = _post(client, WHSEC, "evt_cw_fail", _sub_updated_body("sub_cw", "active", 8))
+    assert r.status_code == 500
+    assert B.get_known_seats("sub_cw") == 3          # baseline UNCHANGED — retry can re-detect
+
+    # Polar retries the same change; fulfillment now succeeds and advances the baseline.
+    monkeypatch.setattr(WH, "handle_subscription_updated", orig)
+    r2 = _post(client, WHSEC, "evt_cw_retry", _sub_updated_body("sub_cw", "active", 8))
+    assert r2.json() == {"status": "fulfilled", "key_issued": True}
+    assert B.get_known_seats("sub_cw") == 8
