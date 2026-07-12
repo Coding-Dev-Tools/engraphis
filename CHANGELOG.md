@@ -3,6 +3,12 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [0.8.5] - 2026-07-12
+
+### Fixed
+- **Dashboard 500 on empty workspaces**: `/api/memories` returns `[]` instead of crashing.
+- **Static assets in wheel**: `engraphis/static/__init__.py` + recursive glob ensures vendor bundles ship.
+
 ## [0.8.4] - 2026-07-12
 
 ### Security
