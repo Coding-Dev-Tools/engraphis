@@ -24,6 +24,9 @@ models_cache/
 .secrets/
 internal/
 
+# Runtime logs (e.g. dashboard.log from `engraphis-dashboard`) — regenerable, not content.
+*.log
+
 # Local machine-specific dashboard launchers (absolute user paths — not portable)
 /Start-Engraphis-Dashboard.bat
 /Engraphis Dashboard.lnk
