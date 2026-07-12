@@ -3,6 +3,12 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [0.8.3] - 2026-07-12
+
+### Fixed
+- **Empty workspace `/api/memories`**: now returns `[]` instead of 500 when no memories exist.
+- **Online-only license enforcement**: cloud-mode keys validated on every request.
+
 ## [0.8.2] - 2026-07-12
 
 ### Fixed
