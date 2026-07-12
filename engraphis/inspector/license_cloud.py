@@ -22,9 +22,9 @@ from engraphis.config import settings
 from engraphis.inspector import license_registry as reg
 from engraphis.inspector.auth import _EMAIL_RE
 from engraphis.inspector.webhooks import _load_signing_secret
-from engraphis.licensing import LicenseError, parse_key
+from engraphis.licensing import LicenseError, PLAN_FEATURES, parse_key
 
-LEASE_TTL_HOURS_DEFAULT = 72
+LEASE_TTL_HOURS_DEFAULT = 24
 
 _REG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS registrations (
@@ -350,29 +350,50 @@ _TRIAL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS trial_grants (
     machine_id TEXT PRIMARY KEY,
     email      TEXT,
+    plan       TEXT,
     issued_at  REAL NOT NULL
 );
 """
 
 
+def _ensure_trial_plan_column(conn) -> None:
+    """Add trial_grants.plan to a pre-existing DB (older schema had none). Idempotent."""
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(trial_grants)").fetchall()}
+        if "plan" not in cols:
+            conn.execute("ALTER TABLE trial_grants ADD COLUMN plan TEXT")
+            conn.commit()
+    except Exception:
+        pass
+
+
 @router.post("/start-trial")
 async def start_team_trial(request: Request):
-    """Issue a one-time, self-serve, real signed Team-plan trial key for *machine_id*.
-    409 if this device's trial was already claimed; 400 if machine_id is missing."""
+    """Issue a one-time, self-serve, real signed trial key for *machine_id*.
+
+    ``plan`` selects the tier ("pro" or "team", default "team"). The key is a genuine
+    short-lived vendor-signed key carrying ``trial: 1``, so every downstream server-side
+    gate (/register, team_invite) treats it exactly like a purchase. One trial per device
+    ever, any plan: 409 if this device already claimed one; 400 for a missing machine_id
+    or an unknown plan."""
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "invalid JSON body"}, status_code=400)
     mid = (body.get("machine_id") or "").strip()[:128]
     email = (body.get("email") or "").strip().lower()
+    plan = (body.get("plan") or "team").strip().lower()
     if not mid:
         return JSONResponse({"error": "machine_id required"}, status_code=400)
+    if plan not in PLAN_FEATURES:
+        return JSONResponse({"error": "unknown plan '%s'" % plan}, status_code=400)
     if email and not _EMAIL_RE.match(email):
         email = ""
 
     conn = reg.connect()
     try:
         conn.executescript(_TRIAL_SCHEMA)
+        _ensure_trial_plan_column(conn)
         prev_iso = conn.isolation_level
         conn.isolation_level = None
         try:
@@ -382,11 +403,11 @@ async def start_team_trial(request: Request):
             if existing:
                 conn.execute("COMMIT")
                 return JSONResponse(
-                    {"error": "the free Team trial has already been used on this device"},
+                    {"error": "the free trial has already been used on this device"},
                     status_code=409)
             conn.execute(
-                "INSERT INTO trial_grants(machine_id, email, issued_at) VALUES (?,?,?)",
-                (mid, email or None, time.time()))
+                "INSERT INTO trial_grants(machine_id, email, plan, issued_at) "
+                "VALUES (?,?,?,?)", (mid, email or None, plan, time.time()))
             conn.execute("COMMIT")
         except BaseException:
             try:
@@ -401,6 +422,6 @@ async def start_team_trial(request: Request):
 
     from engraphis.inspector.webhooks import issue_key
     from engraphis.licensing import TRIAL_DAYS
-    key = issue_key(email or "trial@engraphis.local", product_name="Team", seats=1,
-                    days=TRIAL_DAYS)
-    return {"key": key, "days": TRIAL_DAYS}
+    key = issue_key(email or "trial@engraphis.local", product_name=plan, seats=1,
+                    days=TRIAL_DAYS, trial=True)
+    return {"key": key, "days": TRIAL_DAYS, "plan": plan}

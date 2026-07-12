@@ -17,8 +17,10 @@ Honest limit: this raises the bar and makes revocation real, but a determined us
 still patch this open-source client on their own machine. Only features that *execute*
 on the vendor server (e.g. the sync relay) are truly non-bypassable.
 
-Offline-only mode: with no ``ENGRAPHIS_CLOUD_URL`` set, this module is inert and a signed
-key verifies locally as before — preserving the self-hosted, no-phone-home story.
+Online-only enforcement (product policy): paid features ALWAYS require a live lease. The
+client resolves a server URL from ``ENGRAPHIS_CLOUD_URL`` -> the key's signed ``cloud_url``
+-> the built-in vendor relay (``settings.relay_url``), and fails closed if none resolves.
+There is deliberately no offline unlock path for Pro/Team.
 """
 from __future__ import annotations
 
@@ -224,19 +226,18 @@ def send_team_invite(base_url: str, key: str, to: str, name: str, role: str,
         return False, "relay unreachable: %s" % exc
 
 
-def request_team_trial_key(base_url: str, mid: str, email: str = "", *,
-                           timeout: float = _INVITE_TIMEOUT) -> Tuple[Optional[str], str]:
+def request_trial_key(base_url: str, mid: str, plan: str = "team", email: str = "", *,
+                      timeout: float = _INVITE_TIMEOUT) -> Tuple[Optional[str], str]:
     """POST to the vendor relay's self-serve ``/license/v1/start-trial`` and return
-    ``(signed_key, reason)``. *key* is ``None`` on any failure — already used on this
-    device, network error, bad response — with *reason* explaining why. Used by
-    :func:`engraphis.licensing.start_team_trial`; see that endpoint's docstring in
-    ``inspector.license_cloud.start_team_trial`` for why this needs one network
-    round-trip (unlike the fully-offline Pro trial): the resulting key must be a real,
-    independently verifiable credential, since it is later presented to OTHER
-    server-side gates (team_invite, /register) that a client-only claim can't satisfy.
-    """
+    ``(signed_key, reason)`` for a one-time trial of ``plan`` ("pro" or "team"). *key* is
+    ``None`` on any failure — already used on this device (409), network error, bad
+    response — with *reason* explaining why. Used by :func:`engraphis.licensing.
+    start_trial` (pro) and :func:`~engraphis.licensing.start_team_trial` (team): the trial
+    is a REAL, independently verifiable vendor-signed key (never a client-only claim), so
+    it satisfies the same server-side gates (/register, team_invite) every paid feature
+    uses."""
     url = base_url.rstrip("/") + "/license/v1/start-trial"
-    data = json.dumps({"machine_id": mid, "email": email}).encode("utf-8")
+    data = json.dumps({"machine_id": mid, "email": email, "plan": plan}).encode("utf-8")
     req = urllib.request.Request(
         url, data=data, method="POST", headers={"Content-Type": "application/json"})
     try:
@@ -254,6 +255,12 @@ def request_team_trial_key(base_url: str, mid: str, email: str = "", *,
         return None, "relay unreachable: %s" % exc
 
 
+def request_team_trial_key(base_url: str, mid: str, email: str = "", *,
+                           timeout: float = _INVITE_TIMEOUT) -> Tuple[Optional[str], str]:
+    """Backward-compat wrapper for :func:`request_trial_key` with ``plan="team"``."""
+    return request_trial_key(base_url, mid, plan="team", email=email, timeout=timeout)
+
+
 def gate(lic, key_material: str, *, base_url: Optional[str] = None) -> Tuple[bool, str]:
     """Decide whether a validly-signed paid key may unlock features on this device.
 
@@ -265,7 +272,11 @@ def gate(lic, key_material: str, *, base_url: Optional[str] = None) -> Tuple[boo
     closed if it can't."""
     base = (base_url or "").strip().rstrip("/") or cloud_url()
     if not base:
-        return True, ""                              # no server anywhere: inert
+        # Online-only: no server to verify against ⇒ no offline path to paid features.
+        # (The caller, licensing._cloud_gate, already resolves a default relay URL, so
+        # this only bites a deliberately blanked config — defense in depth. Fail closed.)
+        return False, ("server-side license verification is required but no license "
+                       "server is configured")
     mid = machine_id()
     if _valid_lease_for(lic.key_id, mid) is not None:
         return True, ""                              # within an unexpired lease window

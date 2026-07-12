@@ -1,5 +1,6 @@
 """Licensing tests — RFC 8032 vectors, issue/verify roundtrip, gates. Runs on the
 numpy-only CI gate (pure stdlib, like the module under test)."""
+import json
 import time
 
 import pytest
@@ -53,9 +54,39 @@ SECRET = bytes(range(32))  # deterministic test vendor keypair
 def _test_vendor_key(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(SECRET).hex())
     monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY", raising=False)
-    lic.current_license(refresh=True)
+    lic._cached = None
     yield
-    lic.current_license(refresh=True)
+    # Reset the cache directly rather than re-running the gate at teardown — under
+    # online-only that would try to reach the vendor server after the lease-granting
+    # fixture has already been torn down.
+    lic._cached = None
+    lic._cache_error = ""
+    lic._cache_recheck_at = float("inf")
+
+
+@pytest.fixture(autouse=True)
+def _grant_cloud_lease(monkeypatch, tmp_path):
+    """Online-only enforcement requires a live vendor lease for every paid key. These unit
+    tests exercise the LOCAL signature/gate logic, so stub the server to APPROVE (return a
+    lease signed with the test vendor seed) and reroute client lease/device state to tmp.
+    Denial / fail-closed paths live in tests/test_online_only_enforcement.py."""
+    from engraphis import cloud_license as _cl
+    monkeypatch.setattr(_cl, "_DIR", tmp_path)
+    monkeypatch.setattr(_cl, "_LEASE_FILE", tmp_path / "lease.sig")
+    monkeypatch.setattr(_cl, "_MACHINE_ID_FILE", tmp_path / "machine_id")
+    _cl._machine_id_cache.clear()
+
+    def _register(base, key, mid, **kw):
+        try:
+            parsed = parse_key(key)
+        except Exception:
+            return None
+        now = int(time.time())
+        return _cl.compose_lease(
+            {"v": 1, "key_id": parsed.key_id, "plan": parsed.plan,
+             "features": sorted(parsed.features), "machine_id": mid,
+             "issued": now, "expires": now + 3600}, SECRET)
+    monkeypatch.setattr(_cl, "register", _register)
 
 
 def _issue(plan="pro", days=365, **kw):
@@ -261,29 +292,20 @@ def test_activate_persists_key(monkeypatch, tmp_path):
 
 # ── one-time trial: reset resistance + cache expiry (revenue-protection regressions) ──
 
-def test_trial_survives_state_dir_wipe(tmp_path, monkeypatch):
-    """Regression: deleting the state dir (trial.json, machine id, anchor) must NOT
-    resurrect the one-time trial — consumption is also recorded in independent
-    tombstone locations, so the old `rm -rf ~/.engraphis` infinite-Pro loop is dead."""
-    import shutil
-
-    state = tmp_path / "state"
-    external = tmp_path / "external"          # stands in for LOCALAPPDATA/XDG/.cache
+def test_local_trial_file_no_longer_grants_pro(monkeypatch):
+    """Bypass A regression: the retired offline trial used an HMAC derivable from public
+    data (vendor public key + local machine id), so a user could forge ``trial.json`` for
+    permanent Pro with no purchase and no server. Entitlement no longer reads any local
+    trial file — a present/forged (even correctly-HMAC'd, far-future) trial file grants
+    nothing, and ``trial_status`` is advisory only (never 'active' off a local file)."""
     monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY", raising=False)
-    monkeypatch.setattr(lic, "_TRIAL_FILE", state / "trial.json")
-    monkeypatch.setattr(lic, "_MONOTONIC_FILE", state / ".clock_anchor")
-    monkeypatch.setattr(lic, "_TOMBSTONE_DIRS_OVERRIDE", [str(external)])
-
-    lic.start_trial()
-    assert lic.trial_status()["active"] is True
-    assert (external / "trial.stamp").exists()
-
-    shutil.rmtree(state)                      # the old reset move
-    st = lic.trial_status()
-    assert st["active"] is False and st["used"] is True
-    with pytest.raises(LicenseError):
-        lic.start_trial()
-    assert current_license(refresh=True).plan == "free"
+    payload = {"started": 1, "expires": int(time.time() + 9_000_000), "trial_days": 9999}
+    lic._TRIAL_FILE.write_text(
+        json.dumps({"data": payload, "sig": lic._sign_trial(payload)}))
+    assert current_license(refresh=True) == License.free()
+    assert not has_feature("analytics")
+    assert not has_feature("sync")
+    assert lic.trial_status()["active"] is False
 
 
 def test_cached_license_expires_without_restart(monkeypatch):
@@ -302,33 +324,26 @@ def test_cached_license_expires_without_restart(monkeypatch):
     assert not has_feature("analytics")
 
 
-def test_recheck_bound_follows_cloud_gate_resolution(monkeypatch):
-    """Regression: the rolling cloud re-check bound must be scheduled whenever
-    :func:`_cloud_gate` would consult a server — including keys that carry the server
-    URL signed into the payload (``cloud_url``/``enforce``), not just when the env
-    override is set. Otherwise a cloud-enforced key distributed with its URL baked in
-    was gated once, then cached until expiry, so revocation never propagated."""
+def test_recheck_bound_is_scheduled_for_every_paid_license(monkeypatch):
+    """Online-only: EVERY paid license (purchased OR a server-issued trial key, with or
+    without cloud markers) re-validates against the vendor server on the rolling cadence,
+    so a revoked key / lapsed lease propagates within the window instead of surviving in a
+    long-running process until restart. Only the free tier waits (it never phones home)."""
     monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
     now = 1_000_000.0
-    far = now + 10 * 365 * 86400  # expiry far past any recheck window
+    far = now + 10 * 365 * 86400
+    cadence = now + lic._CLOUD_RECHECK_SECONDS
 
-    # Plain offline paid key: no cloud markers, no env → recheck only at expiry.
-    offline = License(plan="pro", expires=far)
-    assert lic._license_recheck_at(offline, now=now) == far
+    # Free tier never contacts the server → bounded only by expiry (none here → infinite).
+    assert lic._license_recheck_at(License.free(), now=now) == float("inf")
 
-    # Key with the server URL baked into the signed payload → 900s revocation cadence,
-    # even though ENGRAPHIS_CLOUD_URL is unset (this is the bug being locked down).
-    baked = License(plan="pro", expires=far, cloud_url="https://lic.example")
-    assert lic._license_recheck_at(baked, now=now) == now + lic._CLOUD_RECHECK_SECONDS
+    # Plain paid key, key with the server URL baked in, enforce:"cloud", and a trial key
+    # all get the rolling re-check now.
+    for kw in ({}, {"cloud_url": "https://lic.example"}, {"enforce": "cloud"},
+               {"is_trial": True}):
+        L = License(plan="pro", expires=far, **kw)
+        assert lic._license_recheck_at(L, now=now) == cadence
 
-    # enforce:"cloud" alone is enough to demand the rolling re-check too.
-    enforced = License(plan="pro", expires=far, enforce="cloud")
-    assert lic._license_recheck_at(enforced, now=now) == now + lic._CLOUD_RECHECK_SECONDS
-
-    # A local trial is excluded regardless of any cloud fields (it never phones home).
-    trial = License(plan="pro", expires=far, cloud_url="https://lic.example", is_trial=True)
-    assert lic._license_recheck_at(trial, now=now) == far
-
-    # Env override still works on its own for offline-issued keys.
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "https://lic.example")
-    assert lic._license_recheck_at(offline, now=now) == now + lic._CLOUD_RECHECK_SECONDS
+    # A nearer key expiry still wins over the cadence.
+    soon = License(plan="pro", expires=now + 100)
+    assert lic._license_recheck_at(soon, now=now) == now + 100
