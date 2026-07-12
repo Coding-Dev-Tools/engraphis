@@ -1,173 +1,129 @@
 # Cloud Sync
 
-Engraphis is local-first: your memory store is a SQLite file on your machine, and
-everything works with no account and no network. **Cloud sync** is the Pro feature that
-keeps that store consistent across *all* your machines — and, on the Team tier, across a
-group — without giving up local-first ownership.
+Engraphis remains local-first: the free engine stores memories in local SQLite and works
+without an account or network. **Cloud Sync** is a hosted Pro/Team service that connects
+authorized installations through Engraphis-managed relay storage.
 
+The public repository contains the customer-side protocol, deterministic merge engine, and
+relay client required to participate in that service. It does **not** contain the hosted relay,
+organization authorization, entitlement registry, storage credentials, automatic scheduler, or
+operations tooling. An environment variable cannot turn the public image into the official relay.
 
+## Product boundary
 
----
-
-## Why this belongs in Engraphis specifically
-
-Sync is usually the hard part of a local-first product — reconciling concurrent edits
-without a central arbiter is a genuine distributed-systems problem. Engraphis was already
-90% of the way there, because the v2 data model was built for exactly this:
-
-- **Globally unique identity.** Every memory id is a ULID (`core/ids.py`) with 80 bits of
-  CSPRNG randomness, minted locally. Two offline devices generate ids that never collide,
-  so "write now, merge later" needs no coordinating server.
-- **Bi-temporal truth.** A "delete" is a `valid_to` timestamp, not a destructive row
-  removal (`AGENTS.md` §3.2/§3.3). That means an invalidation is *state you can merge*,
-  not an event you can lose.
-- **Idempotent writes.** `Store.add_memory` is an `INSERT ... ON CONFLICT(id) DO UPDATE`
-  that only fills timestamps when they're null — so re-applying a remote write verbatim is
-  safe and repeatable.
-- **A deterministic resolver.** `core/resolve.py` already decides ADD / NOOP / INVALIDATE
-  from pure signals, no LLM, no network.
-
-Because of this, sync is a thin, **state-based CRDT** over memory rows — not a bespoke
-replication log.
-
----
-
-## Architecture
-
-Two pieces, split along the open-core line:
-
-```
-your memory store (SQLite)                        another device's store
-        │                                                   │
-        ▼                                                   ▼
-  SyncEngine.export_bundle ─► full-state JSON snapshot ◄─ SyncEngine.export_bundle
-        │                          (per workspace)          │
-        │                                                   │
-        └────────► SyncTransport (shared folder / relay) ◄──┘
-                            │
-                            ▼
-                  SyncEngine.apply_bundle  ── deterministic merge into local store
-```
-
-- **`engraphis/core/sync.py` — `SyncEngine`** (open, Apache-2.0, `numpy`-only, no license
-  code). Exports a workspace as a full-state bundle, and applies a remote bundle with a
-  convergent merge. This is the reusable engine; it contains **no** gate.
-- **`engraphis/core/interfaces.py` — `SyncTransport`** Protocol. Three calls
-  (`push`/`pull`/`list_names`) over opaque named byte blobs. Same interface-first swap as
-  `VectorIndex`/`Embedder`: the engine doesn't care whether bytes land in a folder or a
-  managed relay.
-- **`engraphis/backends/sync_folder.py` — `FolderTransport`.** The shipping transport:
-  any directory both devices can see — a Dropbox / iCloud / OneDrive folder, a Syncthing
-  share, a mounted drive, even a git repo. Each device writes one full-state bundle
-  (`bundle-<device_id>.json`) and overwrites it each sync, so the folder stays small.
-- **`scripts/sync.py` — the CLI** and the place the **Pro gate** lives
-  (`require_feature("sync")`), exactly like `scripts/consolidate.py` gates `--report`.
-
-### How the merge converges
-
-For each memory id, both devices compute the same merged record because every field is
-resolved by a commutative, associative, idempotent rule:
-
-| Field(s) | Rule | Why |
+| Layer | Public Apache package | Private hosted service |
 |---|---|---|
-| `valid_to`, `expired_at` | earliest non-null wins | an invalidation on any device sticks everywhere; never resurrected |
-| `stability`, `access_count`, `last_access` | `max` | reinforcement is monotone (the spacing effect only grows stability) |
-| `pinned` | logical OR | pin on any device = pinned |
-| `content`, `title`, `keywords`, … | last-writer-wins by `(last_access, ingested_at, content-hash)` | a deterministic *total order* — the winner depends on the data, never on who synced first |
+| Local memory database and free engine | Yes | No requirement |
+| Deterministic bundle/merge protocol | Yes | Uses the same contract |
+| Customer relay client | Yes | Authenticates it |
+| Relay storage and tenant isolation | No | Yes |
+| Device registration and credential rotation | Client only | Authority |
+| Organization membership and named seats | No | Yes |
+| Automated cloud cadence and operations | No | Yes |
 
-The content-hash tiebreak is what makes the merge order-independent even when two devices
-edited at the same clock instant: `merge(a, b) == merge(b, a)`, and re-applying a bundle
-is a no-op. Scope pointers (`workspace_id`/`repo_id`) are **not** merged — they're
-per-device ULIDs, so every incoming row is re-homed into the local workspace *by name*
-(the same technique `scripts/migrate_to_v2.py` uses), while the globally-stable memory id
-carries identity across devices.
+The split is deliberate. Local checks in Apache-licensed code are not DRM and can be changed by
+a fork. The paid boundary is authorization to use the official private service and its operated
+infrastructure.
 
-### The one honest limitation
+## Trial and grace
 
-Without a per-field logical clock (an HLC), a *simultaneous in-place relabel of the same
-field on two devices* resolves by the deterministic order above rather than by true
-causality. It always converges — no divergence, no lost row — it may just pick a
-well-defined winner a human wouldn't have. In practice this is rare: corrections go
-through `MemoryEngine.correct` (a new bi-temporal row, not an edit), so it only touches
-raw `title`/`mtype` relabels. A follow-up increment adds an HLC to close this.
+The no-card Pro or Team trial begins after email confirmation and lasts **exactly 3 active
+days**.
 
----
+`workspace_write_grace` is separate and private-service enforced. It may preserve bounded
+hosted-account continuity operations for at most **24 hours** following an authoritative
+entitlement denial. It never extends the trial or subscription, and it never grants Cloud Sync,
+Analytics, Automation, Auto Dreaming, Auto Consolidation, Team access, seats, or credentials.
+Cloud access may stop immediately. The free local sync-folder primitive and local core are not
+gated by this hosted lifecycle state.
 
-## Usage
+## Configure a customer installation
 
-Point two or more devices at one shared folder and sync a workspace:
+Hosted onboarding creates an owner-only cloud session under `~/.engraphis` (or
+`ENGRAPHIS_STATE_DIR`). For non-interactive clients, inject credentials through a secrets manager:
+
+```dotenv
+ENGRAPHIS_CLOUD_CONTROL_URL=https://api.engraphis.com
+ENGRAPHIS_CLOUD_COMPUTE_URL=https://compute.engraphis.com
+ENGRAPHIS_CLOUD_ORGANIZATION_ID=org_replace_me
+ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL=<secret>
+```
+
+The refresh credential rotates. Refresh is serialized across threads and cooperating processes,
+and the client stores only the replacement needed for the next session in an owner-only file.
+After the first rotation, that saved replacement takes precedence over a still-present bootstrap
+environment credential. Do not place either value in source, documentation, container images,
+shell history, or support logs.
+
+The one-shot customer client remains available for explicit sync operations:
 
 ```bash
-# Preview what a sync would change — writes nothing, locally or to the folder
-python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/engraphis --dry-run
-
-# Sync for real: publish this device's snapshot, pull + merge every other device's
-python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/engraphis
-
-# Restrict to a single repo
-python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/engraphis --repo frontend
+python -m scripts.sync \
+  --db engraphis.db \
+  --workspace acme \
+  --relay https://relay.engraphis.com
 ```
 
-Schedule it like any other local job:
+The dashboard's **Sync now** action invokes the same customer protocol. The public package does
+not run a local auto-sync loop or ship a cron/Task Scheduler wrapper. Hosted automation belongs
+to the private service. If the relay denies every attempted shared workspace because the session
+is expired, revoked, or no longer entitled, the dashboard returns to the hosted Pro/Team recovery
+CTA instead of reporting a successful empty sync. A successful empty or read-only workspace keeps
+the result partial so another workspace's denial is not misreported as a total authorization loss.
 
+### Local folder transport
+
+The public protocol also retains a manual folder transport for development, backup interchange,
+and offline testing:
+
+```bash
+python -m scripts.sync \
+  --db engraphis.db \
+  --workspace acme \
+  --remote /path/to/shared-folder \
+  --dry-run
 ```
-# cron — every 15 minutes
-*/15 * * * *  cd /path/to/repo && python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/engraphis
-```
 
-Sync is full-state and idempotent, so running it on any cadence — or interrupting it — is
-safe. It's a **Pro** feature; the 3-day local trial (Settings → License, one click, no
-key) unlocks it for evaluation.
+This is a customer-controlled file exchange primitive, not the official Cloud Sync service. It
+has no hosted identity, seat, availability, support, or managed-storage guarantees.
 
----
+## Merge semantics
 
-## Security model
+Sync exchanges bounded workspace snapshots and merges them deterministically. Existing
+bi-temporal history is preserved: conflicts close validity windows or create explicit successor
+records rather than destructively overwriting facts. The public merge code is necessary so a
+customer can verify how their local database changes.
 
-A pulled bundle is **untrusted input** — `SECURITY.md` treats memory poisoning as an
-explicit threat — so `SyncEngine.apply_bundle` is the trust boundary and treats every
-bundle as hostile:
+Session scope is strictly device-local. Every exported workspace or repo bundle excludes both
+live and invalidated session-scoped rows, as well as `secret` rows, and includes a memory link only
+when both endpoints remain in the export. Inbound legacy or untrusted bundles cannot create,
+relabel, or overwrite session-scoped state because the sync format carries no authenticated
+session owner or lifecycle contract.
 
-- **Scope confinement.** Incoming rows are re-homed into the workspace you're syncing, and
-  a row is only ever merged into an existing memory that *already lives in that
-  workspace*. A bundle cannot reach across into a workspace (or another repo, with
-  `--repo`) the peer wasn't syncing — matching the confinement guarantee every other write
-  tool in the codebase enforces.
-- **Validation & clamping.** Every field is type-checked and bounded: content/title/
-  keyword lengths, metadata size, numeric ranges (`importance`, `stability`, `surprise`,
-  `access_count`), and timestamps (clamped to a small clock-skew window so a forged
-  `last_access` can't permanently pin poisoned content). Control/ANSI-escape bytes are
-  stripped exactly as the rest of the ingest surface does.
-- **Fail-safe parsing.** Non-finite JSON (`Infinity`/`NaN`) is rejected, and one malformed
-  or hostile bundle is recorded and skipped — it never aborts the whole sync.
-- **No secrets on the wire.** Embeddings are never serialized (rebuilt locally);
-  `secret`-flagged memories are excluded from export by default; the auth/license database
-  is a separate file that is never part of a bundle.
-- **Provenance.** Every synced-in memory is tagged `provenance.synced_from_device`, so
-  "why is this known?" stays answerable.
+Bundle input is untrusted. The client validates schema and size limits before applying records,
+rechecks workspace scope, and retains provenance/audit evidence. A relay cannot inject a record
+outside the authorized workspace merely by changing bundle fields.
 
-**Trust boundary, stated plainly:** within a workspace you *choose* to sync, any peer can
-add, relabel, or invalidate memories — that's what sharing a replica means (like any
-collaborator in a shared doc), and it's bi-temporal and audited, never a hard delete.
-Sync only ever moves data within the scope you pointed it at.
+## Security and privacy
 
----
+- Use HTTPS for every hosted endpoint. The public client rejects redirects, embedded URL
+  credentials, and unsafe remote targets.
+- Treat cloud session and refresh files as credentials; keep their directory owner-only.
+- `secret` memories are excluded from managed uploads. Managed compute also rejects secret rows
+  server-side.
+- Relay transport is TLS-protected, but Engraphis does not claim end-to-end encryption until a
+  client-side encrypted bundle format ships.
+- Device credentials are not seats. Team seats are named organization members managed by the
+  hosted control plane.
+- Revocation and expiry are authoritative server decisions. A locally modified client does not
+  acquire service access without a valid hosted credential.
 
-## Roadmap
+## What Apache forks can do
 
-This first increment ships the engine + the self-hostable folder transport — real
-multi-device sync today, fully offline-testable, zero infrastructure. Planned next:
+Apache-2.0 rights in code already published here are perpetual under that license and cannot be
+clawed back. A fork may alter or reuse the public client and merge protocol. That does not grant
+access to Engraphis-operated infrastructure, private service code, signing keys, customer data,
+support, or trademarks.
 
-1. **Managed end-to-end-encrypted relay** — the headline hosted upsell: a "dumb",
-   zero-knowledge blob store so users don't have to bring their own folder. It's a new
-   `SyncTransport` implementation; nothing in `core/sync.py` changes.
-2. **HLC per-field clock** — precise causal resolution for concurrent in-place edits.
-3. **Entity/edge graph sync** — v1 syncs memories + their links; the knowledge graph
-   (with cross-device entity reconciliation) comes next.
-4. **`engraphis_sync` MCP tool + Inspector "Devices" panel** — sync from inside the agent
-   and the UI (each must call `require_feature("sync")` itself — `core/sync.py` has no
-   gate by design).
-5. **Incremental deltas** — cursor-based "changed since" bundles for very large stores
-   (today's full-state snapshot is fine well into tens of thousands of memories).
-
----
-
+This is why future defensible value lives in the private hosted relay, compute, identity,
+automation, security operations, and customer experience rather than in a local feature flag.
