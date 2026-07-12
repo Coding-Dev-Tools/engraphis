@@ -209,7 +209,8 @@ def _trial_days(period_end, *, now: Optional[float] = None) -> int:
 
 
 def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
-               days: Optional[int] = None, metadata: Optional[dict] = None) -> str:
+               days: Optional[int] = None, metadata: Optional[dict] = None,
+               *, trial: bool = False) -> str:
     """Generate a signed ``ENGR1.xxx.yyy`` key for *email_addr*.
 
     Uses the pinned vendor signing key (``.secrets/vendor_signing.key`` or
@@ -239,13 +240,17 @@ def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
         "issued": int(now),
         "expires": int(now + days * 86400),
     }
-    # Server-side enforcement (opt-in at issuance): with ENGRAPHIS_KEY_CLOUD_URL set,
-    # every minted key carries a signed ``enforce: "cloud"`` claim plus the license
-    # server URL — the client then requires a live lease (register/renew against that
-    # URL) and the key is useless offline or after revocation. Unset = classic
-    # offline-verified keys, unchanged. The claim rides inside the Ed25519-signed
-    # payload, so customers cannot strip it.
-    enforce_url = os.environ.get("ENGRAPHIS_KEY_CLOUD_URL", "").strip().rstrip("/")
+    if trial:
+        payload["trial"] = 1               # signed trial marker -> License.is_trial (UI)
+    # Server-side enforcement (online-only): every minted key carries a signed
+    # ``enforce: "cloud"`` claim plus the license-server URL, so the client requires a live
+    # lease (register/renew against that URL) and the key is useless offline or after
+    # revocation. The URL is ENGRAPHIS_KEY_CLOUD_URL if set, else the built-in vendor relay
+    # (settings.relay_url) — so keys are cloud-enforced by DEFAULT now, not opt-in. The
+    # claim rides inside the Ed25519-signed payload, so customers cannot strip it.
+    from engraphis.config import settings
+    enforce_url = (os.environ.get("ENGRAPHIS_KEY_CLOUD_URL", "").strip().rstrip("/")
+                   or (settings.relay_url or "").strip().rstrip("/"))
     if enforce_url:
         payload["enforce"] = "cloud"
         payload["cloud_url"] = enforce_url
@@ -266,9 +271,8 @@ def _license_email_text(key: str, product_name: str, is_trial: bool = False) -> 
     intro = (f"Your Engraphis {product_name} free trial has started!"
              if is_trial else f"Thank you for purchasing Engraphis {product_name}!")
     verification_note = (
-        "Your key activates against our license server automatically on first use."
-        if os.environ.get("ENGRAPHIS_KEY_CLOUD_URL", "").strip()
-        else "Your key is verified offline — no phone-home.")
+        "Your key activates against our license server automatically on first use and "
+        "re-checks periodically — keep this device online to use paid features.")
     return f"""{intro}
 
 Your license key:

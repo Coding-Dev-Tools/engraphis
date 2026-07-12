@@ -216,11 +216,35 @@ def _state_dir() -> Path:
 _STATE_DIR = _state_dir()
 _LICENSE_FILE = _STATE_DIR / "license.key"
 
-#: One-time local free trial. Grants the full Pro feature set for TRIAL_DAYS with no
-#: key and no phone-home, so a user can evaluate every paid surface before buying.
-#: Local and offline by design, but NOT casually resettable: consumption is also
-#: recorded in the independent tombstone locations below, so wiping the state dir no
-#: longer re-arms it. (Source-level bypass remains possible — this is open core.)
+#: Advisory, NON-granting marker that this device already consumed its one-time free
+#: trial. Purely a UI hint so the dashboard can stop offering the "start trial" button;
+#: it confers no entitlement. The trial is a real server-issued key and the server is the
+#: authoritative one-trial-per-device gate, so deleting this file cannot re-arm a trial.
+_TRIAL_STAMP = _STATE_DIR / "trial_used.json"
+
+
+def _trial_used_locally() -> bool:
+    try:
+        return bool(json.loads(_TRIAL_STAMP.read_text(encoding="utf-8")).get("used"))
+    except (OSError, ValueError):
+        return False
+
+
+def _mark_trial_used(*, now: Optional[float] = None) -> None:
+    """Best-effort advisory stamp (see :data:`_TRIAL_STAMP`). Never raises."""
+    try:
+        _TRIAL_STAMP.parent.mkdir(parents=True, exist_ok=True)
+        _TRIAL_STAMP.write_text(
+            json.dumps({"used": True, "at": int(time.time() if now is None else now)}),
+            encoding="utf-8")
+    except OSError:
+        pass
+
+#: One-time self-serve free trial length (days). The trial is now a REAL, short-lived,
+#: vendor-signed key fetched from the license server (see :func:`start_trial` /
+#: :func:`start_team_trial`), NOT a local grant — so it is verified by the same
+#: server-side gate as a purchase and cannot be forged offline. One trial per device,
+#: enforced server-side (``inspector/license_cloud.py``).
 TRIAL_DAYS = 3
 _TRIAL_FILE = _STATE_DIR / "trial.json"
 
@@ -378,13 +402,19 @@ class License:
 
     def to_public_dict(self) -> dict:
         """JSON-able summary for UIs. Contains no key material."""
+        t = dict(trial_status())
+        if self.is_trial:                       # a real, server-issued trial key
+            t["active"] = True
+            if self.expires is not None:
+                secs = float(self.expires) - time.time()
+                t["days_left"] = max(0, int(secs // 86400) + (1 if secs > 0 else 0))
         return {
             "plan": self.plan, "email": self.email, "seats": self.seats,
             "expires": self.expires, "features": sorted(self.features),
             "key_id": self.key_id, "purchase_url": upgrade_url(),
             "upgrade_url": upgrade_url(), "pro_upgrade_url": upgrade_url("pro"),
             "team_upgrade_url": upgrade_url("team"),
-            "is_trial": self.is_trial, "trial": trial_status(),
+            "is_trial": self.is_trial, "trial": t,
             "known_features": FEATURES,
         }
 
@@ -490,6 +520,7 @@ def parse_key(key: str, *, now: Optional[float] = None) -> License:
         plan=plan, email=str(payload.get("email", "")), seats=seats,
         issued=payload.get("issued"), expires=expires, features=features,
         key_id=hashlib.sha256(key.encode("ascii")).hexdigest()[:12],
+        is_trial=bool(payload.get("trial")),
         enforce=str(payload.get("enforce", "") or "").strip().lower(),
         cloud_url=str(payload.get("cloud_url", "") or "").strip().rstrip("/"),
     )
@@ -516,17 +547,11 @@ def _license_recheck_at(lic: License, *, now: Optional[float] = None) -> float:
     revocation propagates into long-running processes on lease cadence."""
     now = time.time() if now is None else now
     deadline = float("inf") if lic.expires is None else float(lic.expires)
-    # Cloud mode is active whenever :func:`_cloud_gate` would consult a server — i.e. the
-    # env override is set OR the key itself carries a baked-in ``cloud_url``/``enforce``
-    # claim. Mirror that exact resolution here: keys distributed with the server URL signed
-    # in (what ``issue_key`` mints) must get the same revocation-propagation cadence as
-    # env-configured ones, not stay cached until expiry.
-    cloud_active = bool(
-        os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip()
-        or lic.cloud_url
-        or lic.enforce == "cloud"
-    )
-    if lic.is_paid and not lic.is_trial and cloud_active:
+    # Online-only: every paid license (a purchased key OR a server-issued trial key) is
+    # verified against the vendor server, so bound the in-process cache. A revoked key or
+    # lapsed lease then propagates within _CLOUD_RECHECK_SECONDS instead of surviving in a
+    # long-running process until restart.
+    if lic.is_paid:
         deadline = min(deadline, now + _CLOUD_RECHECK_SECONDS)
     return deadline
 
@@ -542,26 +567,31 @@ def _read_key_material() -> str:
 
 
 def _cloud_gate(lic: "License", material: str) -> tuple:
-    """Apply cloud enforcement to an already signature-valid key. Returns (allowed, reason).
+    """Server-authoritative gate — EVERY paid key must present a live vendor lease.
 
-    The verification server is ``ENGRAPHIS_CLOUD_URL`` if set, else the URL baked into
-    the signed key at issuance (``lic.cloud_url`` — unforgeable, it is inside the signed
-    payload). A key carrying ``enforce: "cloud"`` is ONLY valid with a live server-side
-    lease: no server to verify against means DENY, not allow, so unsetting the env var
-    or running air-gapped cannot turn a cloud-enforced key into an offline one. Keys
-    without the claim keep the offline, self-hosted story exactly as before."""
-    base = os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip() or lic.cloud_url
+    Online-only by product policy (no offline mode): the verification server is
+    ``ENGRAPHIS_CLOUD_URL`` if set, else the URL signed into the key at issuance
+    (``lic.cloud_url`` — unforgeable, inside the signed payload), else the built-in
+    vendor relay (``settings.relay_url``). Unlike the previous opt-in design, a paid key
+    is NEVER unlocked by local signature alone: it must register with the server and hold
+    an unexpired lease. If no server URL resolves at all (someone blanked the relay URL),
+    we DENY — there is deliberately no offline path to paid features. Revoked / expired /
+    seat-exceeded keys, and clients offline past their lease window, all fail closed.
+
+    The free tier never reaches here (it has no key), so offline free-tier use is
+    unaffected — only Pro/Team features require the server."""
+    from engraphis.config import settings
+    base = (os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip()
+            or lic.cloud_url
+            or (settings.relay_url or "").strip())
     if not base:
-        if lic.enforce == "cloud":
-            return False, ("this license requires server-side verification and no "
-                           "license server is configured — connect this device to the "
-                           "internet (the key carries no server URL and "
-                           "ENGRAPHIS_CLOUD_URL is unset)")
-        return True, ""
+        return False, ("server-side license verification is required for paid features "
+                       "but no license server is configured (ENGRAPHIS_CLOUD_URL and the "
+                       "vendor relay URL are both empty)")
     try:
         from engraphis import cloud_license
         return cloud_license.gate(lic, material, base_url=base)
-    except Exception as exc:  # cloud mode is on but the check errored → fail closed
+    except Exception as exc:  # any error verifying with the server → fail closed
         return False, "cloud verification error: %s" % exc
 
 
@@ -588,8 +618,11 @@ def current_license(*, refresh: bool = False) -> License:
             _cache_error = reason    # cloud denied (revoked/unregistered) → trial/free
     else:
         _cache_error = ""
-    status = trial_status()
-    _cached = _trial_license(status) if status.get("active") else License.free()
+    # Online-only: entitlement comes ONLY from a signature-valid key that ALSO passes the
+    # server-side cloud gate above. There is no local/offline trial grant anymore — the
+    # free trial is a real, short-lived, server-issued key (see start_trial) that flows
+    # through the exact same gate. No key, or a server-denied key ⇒ the free tier.
+    _cached = License.free()
     _cache_recheck_at = _license_recheck_at(_cached)
     return _cached
 
@@ -614,19 +647,25 @@ def _read_trial() -> dict:
 
 
 def trial_status(*, now: Optional[float] = None) -> dict:
-    """Non-raising snapshot of the local free-trial state (safe for every UI/boot)."""
-    now = _monotonic_now() if now is None else now
-    t = _read_trial()
-    expires = t.get("expires")
-    active = bool(expires) and now < float(expires)
-    days_left = int((float(expires) - now) // 86400 + 1) if active else 0
-    return {"active": active, "used": bool(t.get("started")) or _trial_used_elsewhere(),
-            "started": t.get("started"), "expires": expires,
-            "days_left": max(0, days_left), "trial_days": TRIAL_DAYS}
+    """Advisory, NON-granting snapshot of trial state for the UI.
+
+    The trial is now a real server-issued key, so entitlement NEVER comes from local
+    files. This only reports whether this device already consumed its one-time trial (so
+    the UI can stop offering the button). ``used`` is presence-only across the advisory
+    stamp plus any legacy markers and grants nothing — deleting it cannot re-arm a trial;
+    the server is the authoritative one-trial-per-device gate. ``active``/``days_left``
+    for an active trial are filled in by :meth:`License.to_public_dict` from the signed
+    key's expiry."""
+    used = _trial_used_locally() or _trial_used_elsewhere()
+    return {"active": False, "used": bool(used), "days_left": 0,
+            "trial_days": TRIAL_DAYS}
 
 
 def _trial_license(status: dict) -> License:
-    """A synthetic Pro license backed by an active local trial (not a real key)."""
+    """RETIRED — no longer called. The offline/local trial grant it used to synthesize was
+    a bypass (any local file could mint Pro without the server). Trials are now real
+    server-issued keys. Kept only so stray references don't break; do NOT reintroduce it
+    into :func:`current_license`."""
     return License(plan="pro", email="trial", seats=1,
                    issued=status.get("started"), expires=status.get("expires"),
                    features=frozenset(PLAN_FEATURES["pro"]), key_id="trial",
@@ -634,13 +673,15 @@ def _trial_license(status: dict) -> License:
 
 
 def start_trial(*, now: Optional[float] = None) -> dict:
-    """Begin the one-time ``TRIAL_DAYS`` local Pro trial. Returns the license public
-    dict (its ``trial`` key holds :func:`trial_status`).
+    """Begin the one-time self-serve Pro trial by fetching a REAL, short-lived,
+    vendor-signed Pro key from the license server and activating it — exactly like
+    :func:`start_team_trial`, and exactly like a purchase (just Pro-tier, short-lived).
 
-    Refuses (raises :class:`LicenseError`) if a valid paid key is already active or the
-    trial was already used and has since expired. Re-calling during an active trial is a
-    no-op that just returns the current status."""
-    now = time.time() if now is None else now
+    There is no offline/local trial grant anymore: a trial is a genuine server-issued
+    credential, verified by the same server-side gate every paid feature uses, so it
+    cannot be forged by editing local files. Refuses (raises :class:`LicenseError`) if a
+    valid paid key is already active, if this device already claimed its one-time trial
+    (server 409), or if the license server is unreachable."""
     material = _read_key_material()
     if material:
         try:
@@ -650,27 +691,15 @@ def start_trial(*, now: Optional[float] = None) -> dict:
             if "no trial needed" in str(exc):
                 raise
             # otherwise the key is invalid/expired; allow the trial to proceed
-    st = trial_status(now=now)
-    if st["active"]:
-        return current_license(refresh=True).to_public_dict()
-    if st["used"]:
-        raise LicenseError(
-            "your %d-day free trial has already been used — upgrade at %s"
-            % (TRIAL_DAYS, upgrade_url("pro")))
-    _TRIAL_FILE.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"started": int(now), "expires": int(now + TRIAL_DAYS * 86400),
-               "trial_days": TRIAL_DAYS}
-    envelope = {"data": payload, "sig": _sign_trial(payload)}  # HMAC-bound to this machine
-    tmp = _TRIAL_FILE.with_name(_TRIAL_FILE.name + ".tmp")
-    tmp.write_text(json.dumps(envelope), encoding="utf-8")
-    os.replace(tmp, _TRIAL_FILE)
-    _write_trial_tombstones(payload)  # consumed-markers survive a state-dir wipe
-    _monotonic_now()  # advance the clock anchor so trial expiry can't be rolled back
-    try:
-        os.chmod(_TRIAL_FILE, 0o600)
-    except OSError:
-        pass
-    return current_license(refresh=True).to_public_dict()
+    from engraphis import cloud_license
+    from engraphis.config import settings
+    base = os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip() or settings.relay_url
+    key, reason = cloud_license.request_trial_key(
+        base, cloud_license.machine_id(), plan="pro")
+    if not key:
+        raise LicenseError(reason or "could not start the free trial — try again shortly")
+    _mark_trial_used()   # advisory-only UI hint; the server is the real one-per-device gate
+    return activate(key).to_public_dict()
 
 
 def start_team_trial(*, now: Optional[float] = None) -> dict:
@@ -704,6 +733,7 @@ def start_team_trial(*, now: Optional[float] = None) -> dict:
     key, reason = cloud_license.request_team_trial_key(base, cloud_license.machine_id())
     if not key:
         raise LicenseError(reason or "could not start the Team trial — try again shortly")
+    _mark_trial_used()   # advisory-only UI hint; the server is the real one-per-device gate
     return activate(key).to_public_dict()
 
 
