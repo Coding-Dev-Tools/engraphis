@@ -3,6 +3,19 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [0.8.1] - 2026-07-12
+
+### Fixed
+- **Dashboard 500 on a fresh install — `GET /api/memories` crashed when no workspace
+  existed yet.** On a brand-new database the memories list route resolved the workspace
+  via `_default_ws()`, which returns `None` when there are zero workspaces, then passed
+  that straight into `_clean_ws()` — raising `ValidationError("workspace must not be
+  empty")` uncaught, so the dashboard's initial load returned HTTP 500. (`GET /api/stats`
+  was unaffected because `MemoryService.stats` handles an empty workspace itself.) The
+  route now returns an empty result in the no-workspace case and wraps `_clean_ws` so a
+  genuinely malformed workspace name returns a 400 rather than a 500, matching the sibling
+  routes. Read-path change only. (`engraphis/routes/v2_api.py`)
+
 ## [0.5.5] - 2026-07-12
 
 ### Security
