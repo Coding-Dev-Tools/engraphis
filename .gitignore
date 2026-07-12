@@ -27,3 +27,8 @@ internal/
 # Local machine-specific dashboard launchers (absolute user paths — not portable)
 /Start-Engraphis-Dashboard.bat
 /Engraphis Dashboard.lnk
+
+# FUSE mount artifacts: orphaned unlink-while-open handles from the Cowork
+# mount layer, not real content. Safe to ignore; delete host-side once the
+# holding process releases the handle (rm from the sandbox gets EPERM).
+.fuse_hidden*
