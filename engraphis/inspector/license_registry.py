@@ -186,13 +186,16 @@ def verify_for_feature(key: str, feature: str, *, db_path: Optional[str] = None,
 # seats. This is the single source of truth for seat logic — the register endpoint and the
 # sync relay both call it, so they can never drift.
 
-LEASE_TTL_HOURS_DEFAULT = 72
+LEASE_TTL_HOURS_DEFAULT = 24
 
 
 def lease_ttl_seconds() -> int:
-    """Lease validity window in seconds (``ENGRAPHIS_LEASE_TTL_HOURS``, default 72h).
+    """Lease validity window in seconds (``ENGRAPHIS_LEASE_TTL_HOURS``, default 24h).
 
-    Floored at 5 minutes so a misconfiguration can never mint 0-second leases."""
+    This IS the offline-grace window: online-only enforcement means a paying device keeps
+    working without the server for at most one lease TTL, after which it must re-register
+    (so a revoked key stops within ~24h). Floored at 5 minutes so a misconfiguration can
+    never mint 0-second leases."""
     try:
         hours = float(os.environ.get("ENGRAPHIS_LEASE_TTL_HOURS", "").strip()
                       or LEASE_TTL_HOURS_DEFAULT)

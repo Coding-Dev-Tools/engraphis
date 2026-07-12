@@ -74,6 +74,19 @@ def cmd_issue(args) -> None:
     }
     if args.feature:
         payload["features"] = sorted(set(args.feature))
+    if args.trial:
+        payload["trial"] = 1
+    # Online-only by default: bake in the signed cloud-enforcement claim so the key needs a
+    # live server lease (and is remotely revocable). --cloud-url overrides the server;
+    # --offline omits the claim (VENDOR TESTING ONLY — such a key verifies by signature
+    # alone, works offline, and can NOT be revoked; never sell one).
+    if not args.offline:
+        from engraphis.config import settings
+        cloud = ((args.cloud_url or "").strip().rstrip("/")
+                 or (settings.relay_url or "").strip().rstrip("/"))
+        if cloud:
+            payload["enforce"] = "cloud"
+            payload["cloud_url"] = cloud
     key = compose_key(payload, secret)
     print(key)
     if args.json:
@@ -106,6 +119,14 @@ def main(argv=None) -> None:
     iss.add_argument("--feature", action="append",
                      help="extra feature flag (repeatable)")
     iss.add_argument("--key-file", default=str(_DEFAULT_KEY_PATH))
+    iss.add_argument("--cloud-url", default="",
+                     help="license-server URL to bake into the key "
+                          "(default: built-in vendor relay); ignored with --offline")
+    iss.add_argument("--offline", action="store_true",
+                     help="omit cloud enforcement (VENDOR TESTING ONLY — the key verifies "
+                          "by signature alone and is NOT server-revocable)")
+    iss.add_argument("--trial", action="store_true",
+                     help="mark as a trial key (sets the signed trial flag)")
     iss.add_argument("--json", action="store_true", help="echo payload to stderr")
     iss.set_defaults(fn=cmd_issue)
 
