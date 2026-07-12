@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "engraphis"
-version = "0.5.2"
+version = "0.7.0"
 description = "Local-first AI memory engine for agents — Ebbinghaus decay, interaction-aware recall, bi-temporal facts, hybrid retrieval, and an MCP server. You bring the LLM."
 readme = "README.md"
 license = { text = "Apache-2.0" }
