@@ -235,3 +235,148 @@ def test_trial_never_grants_team():
     lic = licensing.current_license(refresh=True)
     assert lic.is_trial and lic.plan == "pro"
     assert licensing.has_feature("team") is False
+
+
+# ── admin operations: revoke-by-email, key lookup, device visibility, deactivate ───────
+
+def _admin(monkeypatch):
+    monkeypatch.setattr(settings, "api_token", "adm1n")
+    return {"Authorization": "Bearer adm1n"}
+
+
+def test_revoke_by_email_kills_all_customer_keys(monkeypatch):
+    c = _app()
+    h = _admin(monkeypatch)
+    k1, k2 = _key(email="team@corp.com", plan="team", seats=3), _key(email="team@corp.com")
+    reg.record_issued(k1)
+    reg.record_issued(k2)
+    assert c.post("/license/v1/revoke-by-email").status_code == 401       # needs admin
+    r = c.post("/license/v1/revoke-by-email", json={"email": "team@corp.com"}, headers=h)
+    assert r.status_code == 200 and r.json()["count"] == 2
+    assert reg.is_revoked(parse_key(k1).key_id) and reg.is_revoked(parse_key(k2).key_id)
+
+
+def test_keys_lookup_by_email_shows_seat_usage(monkeypatch):
+    c = _app()
+    h = _admin(monkeypatch)
+    key = _key(email="admin@corp.com", plan="team", seats=3)
+    c.post("/license/v1/register", json={"key": key, "machine_id": "d1"})
+    c.post("/license/v1/register", json={"key": key, "machine_id": "d2"})
+    r = c.get("/license/v1/keys", params={"email": "admin@corp.com"}, headers=h)
+    assert r.status_code == 200
+    ks = r.json()["keys"]
+    assert ks and ks[0]["plan"] == "team" and ks[0]["devices_used"] == 2 and ks[0]["seats"] == 3
+
+
+def test_deactivate_frees_a_seat(monkeypatch):
+    c = _app()
+    h = _admin(monkeypatch)
+    key = _key(plan="team", seats=2)
+    kid = parse_key(key).key_id
+    for m in ("d1", "d2"):
+        assert c.post("/license/v1/register", json={"key": key, "machine_id": m}).status_code == 200
+    assert c.post("/license/v1/register", json={"key": key, "machine_id": "d3"}).status_code == 402
+    # free d1's seat, then d3 fits
+    assert c.get("/license/v1/keys/%s/devices" % kid, headers=h).json()["devices"].__len__() == 2
+    d = c.post("/license/v1/deactivate", json={"key_id": kid, "machine_id": "d1"}, headers=h)
+    assert d.status_code == 200 and d.json()["deactivated"] is True
+    assert c.post("/license/v1/register", json={"key": key, "machine_id": "d3"}).status_code == 200
+
+
+def test_admin_endpoints_require_token():
+    c = _app()  # no admin token set → all admin ops rejected
+    assert c.get("/license/v1/keys", params={"email": "x@y.com"}).status_code == 401
+    assert c.get("/license/v1/keys/abc/devices").status_code == 401
+    assert c.post("/license/v1/deactivate", json={"key_id": "a", "machine_id": "b"}).status_code == 401
+
+
+# ── seat reclamation: idle seats free automatically so the cap self-heals ───────────────
+
+def test_register_reclaims_idle_seat(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_LEASE_TTL_HOURS", "1")   # ttl=1h → reclaim window 2h
+    c = _app()
+    key = _key(plan="team", seats=1)
+    kid = parse_key(key).key_id
+    assert c.post("/license/v1/register", json={"key": key, "machine_id": "old"}).status_code == 200
+    # a 2nd device is blocked while 'old' holds the only seat
+    assert c.post("/license/v1/register", json={"key": key, "machine_id": "new"}).status_code == 402
+    # age 'old' past the reclaim window → its seat is auto-reclaimed on the next claim
+    conn = reg.connect()
+    conn.execute("UPDATE registrations SET last_seen=? WHERE key_id=? AND machine_id=?",
+                 (time.time() - 10 * 3600, kid, "old"))
+    conn.commit()
+    conn.close()
+    assert c.post("/license/v1/register", json={"key": key, "machine_id": "new"}).status_code == 200
+    conn = reg.connect()
+    assert reg.active_seat_count(conn, kid) == 1        # 'old' gone, only 'new' holds a seat
+    conn.close()
+
+
+def test_claim_seat_caps_reclaims_and_is_idempotent():
+    conn = reg.connect()
+    lic = parse_key(_key(plan="team", seats=2))
+    t0 = 1_000_000.0
+    reg.claim_seat(conn, lic, "d1", now=t0)
+    reg.claim_seat(conn, lic, "d1", now=t0 + 5)          # idempotent refresh, still 1 seat
+    reg.claim_seat(conn, lic, "d2", now=t0 + 5)
+    assert reg.active_seat_count(conn, lic.key_id) == 2
+    with pytest.raises(LicenseError, match="seat"):
+        reg.claim_seat(conn, lic, "d3", now=t0 + 5)      # cap full of live devices
+    # refresh d2 mid-window; let d1 go idle past the reclaim window
+    mid = t0 + reg.seat_reclaim_seconds() / 2
+    reg.claim_seat(conn, lic, "d2", now=mid)
+    later = t0 + reg.seat_reclaim_seconds() + 100
+    reg.claim_seat(conn, lic, "d3", now=later)           # d1 reclaimed (idle), d3 fits
+    assert reg.active_seat_count(conn, lic.key_id) == 2  # d2 (live) + d3
+    with pytest.raises(LicenseError, match="seat"):
+        reg.claim_seat(conn, lic, "d4", now=later)       # cap still enforced after reclaim
+    conn.close()
+
+
+def test_release_seat_frees_slot():
+    conn = reg.connect()
+    lic = parse_key(_key(plan="team", seats=1))
+    reg.claim_seat(conn, lic, "d1")
+    assert reg.release_seat(conn, lic.key_id, "d1") is True
+    assert reg.release_seat(conn, lic.key_id, "d1") is False   # already gone
+    reg.claim_seat(conn, lic, "d2")                            # slot free again
+    assert reg.active_seat_count(conn, lic.key_id) == 1
+    conn.close()
+
+
+def test_seat_cap_holds_under_concurrent_claims():
+    """Regression for the check-then-insert race: many devices claim at once against a
+    file-backed DB; the atomic BEGIN IMMEDIATE path must grant exactly `seats`, never more,
+    and never surface a 'database is locked' error (busy_timeout serializes writers)."""
+    import threading
+    lic = parse_key(_key(plan="team", seats=3))
+    n = 12
+    barrier = threading.Barrier(n)
+    results = [None] * n
+
+    def worker(i):
+        conn = reg.connect()                       # each thread its own connection
+        try:
+            barrier.wait()                         # release all claimants simultaneously
+            reg.claim_seat(conn, lic, "dev-%d" % i)
+            results[i] = "ok"
+        except LicenseError:
+            results[i] = "denied"
+        except Exception as exc:                   # e.g. sqlite 'database is locked'
+            results[i] = "err:%r" % exc
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    assert not any(str(r).startswith("err:") for r in results), results
+    assert results.count("ok") == 3, results       # exactly the cap, never overshoot
+    conn = reg.connect()
+    try:
+        assert reg.active_seat_count(conn, lic.key_id) == 3
+    finally:
+        conn.close()

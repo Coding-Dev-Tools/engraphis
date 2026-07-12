@@ -33,6 +33,16 @@ def _current_key() -> str:
     return licensing._read_key_material()
 
 
+def _current_machine_id() -> str:
+    """This device's stable id, best-effort. Sent to the relay so Team seat enforcement
+    can bind the caller to a seat; harmless for Pro (the relay ignores it there)."""
+    try:
+        from engraphis import cloud_license
+        return cloud_license.machine_id()
+    except Exception:
+        return ""
+
+
 class RelayTransport:
     """A ``SyncTransport`` backed by the vendor relay.
 
@@ -46,6 +56,7 @@ class RelayTransport:
         self.base = base_url.rstrip("/")
         self.workspace_id = workspace_id
         self.key = (license_key if license_key is not None else _current_key()) or ""
+        self.machine_id = _current_machine_id()
         self.timeout = timeout
 
     # ── HTTP plumbing ────────────────────────────────────────────────────────────────
@@ -54,6 +65,8 @@ class RelayTransport:
 
     def _request(self, url: str, *, method: str, data: Optional[bytes] = None) -> bytes:
         headers = {"Authorization": "Bearer %s" % self.key}
+        if self.machine_id:
+            headers["X-Engraphis-Machine-Id"] = self.machine_id
         if data is not None:
             headers["Content-Type"] = "application/octet-stream"
         req = urllib.request.Request(url, data=data, method=method, headers=headers)

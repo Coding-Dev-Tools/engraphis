@@ -18,7 +18,6 @@ import base64
 import os
 import sqlite3
 import time
-from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Request
@@ -57,12 +56,42 @@ def _bearer_key(request: Request) -> str:
     return (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
 
 
+#: Header the client uses to identify its device so the relay can hold it to a seat.
+MACHINE_ID_HEADER = "X-Engraphis-Machine-Id"
+
+
+def _machine_id(request: Request) -> str:
+    return (request.headers.get(MACHINE_ID_HEADER) or "").strip()
+
+
 def _authorize(request: Request):
     """Verify the caller's license server-side. Returns (license, account_id).
 
     Raises :class:`LicenseError` (rendered as 402 by the app's exception handler) if the
-    key is missing, malformed, expired, wrong-plan, or revoked."""
+    key is missing, malformed, expired, wrong-plan, or revoked.
+
+    Team seat enforcement lives HERE, on vendor hardware — this is the only truly
+    non-bypassable gate. A Team license is paid per seat and must not be shareable beyond
+    its ``seats`` count, so every Team sync call must present the device's machine id and
+    hold a live seat: the relay reclaims idle seats, then claims/refreshes this device's
+    seat, refusing (402) once ``seats`` distinct devices are active at once. An idle device
+    frees its seat automatically, so seats float without ever exceeding the cap. Pro (the
+    individual multi-device tier) is intentionally not device-capped at the relay: its
+    value is one person syncing their own machines, and ``account_id`` already isolates it
+    from other customers."""
     lic = reg.verify_for_feature(_bearer_key(request), SYNC_FEATURE)
+    if lic.plan == "team":
+        mid = _machine_id(request)
+        if not mid:
+            raise LicenseError(
+                "team sync requires a device id — this client must send the "
+                "%s header (register a seat before syncing)" % MACHINE_ID_HEADER,
+                feature=SYNC_FEATURE)
+        conn = _conn()
+        try:
+            reg.claim_seat(conn, lic, mid)     # raises LicenseError (→ 402) if seat cap full
+        finally:
+            conn.close()
     return lic, reg.account_id_for(lic)
 
 
