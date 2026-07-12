@@ -188,15 +188,18 @@ def register(base_url: str, key: str, mid: str, *, timeout: float = _REGISTER_TI
         return None
 
 
-def gate(lic, key_material: str) -> Tuple[bool, str]:
+def gate(lic, key_material: str, *, base_url: Optional[str] = None) -> Tuple[bool, str]:
     """Decide whether a validly-signed paid key may unlock features on this device.
 
-    Returns ``(allowed, reason)``. In offline-only mode (no ``ENGRAPHIS_CLOUD_URL``) always
-    allows — the local signature is the gate. In cloud mode, requires a valid lease,
-    fetching/renewing one by registering; fails closed if it can't."""
-    base = cloud_url()
+    Returns ``(allowed, reason)``. ``base_url`` (the caller usually passes the env
+    override or the URL signed into the key) takes precedence over ``ENGRAPHIS_CLOUD_URL``.
+    With no server at all this is inert (allow) — the caller (``licensing._cloud_gate``)
+    is responsible for denying ``enforce: "cloud"`` keys before ever reaching that case.
+    In cloud mode, requires a valid lease, fetching/renewing one by registering; fails
+    closed if it can't."""
+    base = (base_url or "").strip().rstrip("/") or cloud_url()
     if not base:
-        return True, ""                              # offline-only mode: inert
+        return True, ""                              # no server anywhere: inert
     mid = machine_id()
     if _valid_lease_for(lic.key_id, mid) is not None:
         return True, ""                              # within an unexpired lease window

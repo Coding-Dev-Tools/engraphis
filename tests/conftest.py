@@ -14,13 +14,22 @@ def mock_licensing_files(tmp_path):
     # to avoid reading or writing to the host user's actual ~/.engraphis directory.
     licensing._LICENSE_FILE = tmp_path / "license.key"
     licensing._TRIAL_FILE = tmp_path / "trial.json"
-    
+    # Trial-used tombstones must never touch (or read!) the host's real home/appdata —
+    # a developer machine that once used a trial would otherwise fail every trial test.
+    licensing._TOMBSTONE_DIRS_OVERRIDE = [tmp_path]
+    # And the clock anchor: tests that warp time must not poison the host's real
+    # high-water mark (a future-dated anchor would eat real trial/lease time).
+    licensing._MONOTONIC_FILE = tmp_path / ".clock_anchor"
+
     # Reset cached license state to prevent cross-test pollution
     licensing._cached = None
     licensing._cache_error = ""
-    
+    licensing._cache_recheck_at = float("inf")
+
     yield
-    
+
     # Reset again after the test runs
     licensing._cached = None
     licensing._cache_error = ""
+    licensing._cache_recheck_at = float("inf")
+    licensing._TOMBSTONE_DIRS_OVERRIDE = None

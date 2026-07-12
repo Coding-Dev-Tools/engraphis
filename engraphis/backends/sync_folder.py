@@ -68,15 +68,33 @@ class FolderTransport:
         return [p.name for p in sorted(self.root.glob("*.json"))]
 
 
-def get_transport(kind: str = "folder", **kw) -> FolderTransport:
+def get_transport(kind: str = "folder", **kw):
     """Factory mirroring ``get_embedder``/``get_vector_index`` — select a transport by
-    name so swapping the folder backend for a managed relay is a config change.
+    name so swapping the folder backend for the managed relay is a config change.
 
-    Today only ``folder`` exists (``kw['root']`` is required); ``relay`` is reserved
-    for the managed end-to-end-encrypted transport."""
+    - ``folder`` (default): shared-directory sync. Requires ``root=<shared directory>``.
+    - ``relay``: the managed Pro relay transport (``RelayTransport``). Requires
+      ``base_url=<relay root>`` and ``workspace_id=<namespace>`` (use the workspace
+      *name*, so every device on the account shares one namespace); ``license_key`` and
+      ``timeout`` are optional (the key defaults to this device's configured license).
+
+    Both implement the ``SyncTransport`` protocol (``core/interfaces.py``) and plug into
+    ``SyncEngine.sync`` unchanged. ``relay`` is imported lazily so a folder-only install
+    never pays for it and ``core`` stays dependency-light (the client is stdlib-only)."""
     if kind in ("folder", "auto"):
         root = kw.get("root")
         if not root:
             raise ValueError("folder transport requires root=<shared directory>")
         return FolderTransport(root)
-    raise ValueError("unknown sync transport %r (have: folder)" % kind)
+    if kind == "relay":
+        base_url = kw.get("base_url")
+        workspace_id = kw.get("workspace_id")
+        if not base_url:
+            raise ValueError("relay transport requires base_url=<relay root>")
+        if not workspace_id:
+            raise ValueError("relay transport requires workspace_id=<namespace>")
+        from engraphis.backends.sync_relay import RelayTransport
+        return RelayTransport(base_url, workspace_id,
+                              license_key=kw.get("license_key"),
+                              timeout=kw.get("timeout", 30.0))
+    raise ValueError("unknown sync transport %r (have: folder, relay)" % kind)

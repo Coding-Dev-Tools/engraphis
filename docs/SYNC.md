@@ -60,12 +60,23 @@ your memory store (SQLite)                        another device's store
   (`push`/`pull`/`list_names`) over opaque named byte blobs. Same interface-first swap as
   `VectorIndex`/`Embedder`: the engine doesn't care whether bytes land in a folder or a
   managed relay.
-- **`engraphis/backends/sync_folder.py` — `FolderTransport`.** The shipping transport:
-  any directory both devices can see — a Dropbox / iCloud / OneDrive folder, a Syncthing
-  share, a mounted drive, even a git repo. Each device writes one full-state bundle
-  (`bundle-<device_id>.json`) and overwrites it each sync, so the folder stays small.
-- **`scripts/sync.py` — the CLI** and the place the **Pro gate** lives
-  (`require_feature("sync")`), exactly like `scripts/consolidate.py` gates `--report`.
+- **`engraphis/backends/sync_folder.py` — `FolderTransport`.** The zero-infrastructure
+  transport: any directory both devices can see — a Dropbox / iCloud / OneDrive folder, a
+  Syncthing share, a mounted drive, even a git repo. Each device writes one full-state
+  bundle (`bundle-<device_id>.json`) and overwrites it each sync, so the folder stays small.
+- **`engraphis/backends/sync_relay.py` — `RelayTransport`.** The managed transport: the
+  same three `SyncTransport` calls over HTTPS against the vendor relay
+  (`engraphis/inspector/sync_relay.py`), carrying the device's license key as a bearer
+  token. The relay verifies that key **server-side** and (on Team) holds each device to a
+  seat, so patching the local feature check can't unlock sync. Bundles are namespaced by an
+  account id derived from the license, so customers never see each other's data.
+- **`get_transport(kind, **kw)`** (in `sync_folder.py`) selects between them by name —
+  `"folder"` (needs `root=`) or `"relay"` (needs `base_url=` + `workspace_id=`) — the same
+  factory pattern as `get_embedder`/`get_vector_index`; `relay` is imported lazily so a
+  folder-only install stays dependency-light.
+- **`scripts/sync.py` — the CLI** (`--remote <folder>` or `--relay [<url>]`) and the place
+  the **Pro gate** lives (`require_feature("sync")`), exactly like `scripts/consolidate.py`
+  gates `--report`.
 
 ### How the merge converges
 
@@ -112,16 +123,32 @@ python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/eng
 python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/engraphis --repo frontend
 ```
 
+Or use the **managed relay** instead of a shared folder — same command, `--relay` in place
+of `--remote`. The relay authenticates with your license key server-side, so no folder to
+set up and no way to bypass the gate by patching the client:
+
+```bash
+# Point at a relay host explicitly …
+python -m scripts.sync --db engraphis.db --workspace acme --relay https://sync.engraphis.app
+
+# … or set ENGRAPHIS_RELAY_URL once and pass a bare --relay
+python -m scripts.sync --db engraphis.db --workspace acme --relay
+```
+
+The relay is namespaced by workspace **name**, so every device on the account that syncs
+workspace `acme` shares one bucket; the license key isolates your account from every other
+customer's. `--relay-key` overrides the device's configured license key if needed.
+
 Schedule it like any other local job:
 
 ```
-# cron — every 15 minutes
+# cron — every 15 minutes (folder or --relay, same idea)
 */15 * * * *  cd /path/to/repo && python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/engraphis
 ```
 
-Sync is full-state and idempotent, so running it on any cadence — or interrupting it — is
-safe. It's a **Pro** feature; the 3-day local trial (Settings → License, one click, no
-key) unlocks it for evaluation.
+Exactly one of `--remote` / `--relay` is required. Sync is full-state and idempotent, so
+running it on any cadence — or interrupting it — is safe. It's a **Pro** feature; the 3-day
+local trial (Settings → License, one click, no key) unlocks it for evaluation.
 
 ---
 
@@ -158,12 +185,15 @@ Sync only ever moves data within the scope you pointed it at.
 
 ## Roadmap
 
-This first increment ships the engine + the self-hostable folder transport — real
-multi-device sync today, fully offline-testable, zero infrastructure. Planned next:
+This ships the engine, the self-hostable folder transport, **and** the managed relay
+transport (`RelayTransport` + the license-gated server) — real multi-device sync today over
+either, fully offline-testable, both reachable from `scripts/sync.py`. Planned next:
 
-1. **Managed end-to-end-encrypted relay** — the headline hosted upsell: a "dumb",
-   zero-knowledge blob store so users don't have to bring their own folder. It's a new
-   `SyncTransport` implementation; nothing in `core/sync.py` changes.
+1. **End-to-end encryption for the relay** — the relay is already a "dumb" blob store that
+   never parses bundle contents, so a client that encrypts in `push` / decrypts in `pull`
+   makes it zero-knowledge with **no** server change (the `SyncTransport` contract already
+   allows a transport to encrypt). Today's `RelayTransport` sends plaintext-over-TLS; this
+   closes the gap so the relay operator can't read bundle contents either.
 2. **HLC per-field clock** — precise causal resolution for concurrent in-place edits.
 3. **Entity/edge graph sync** — v1 syncs memories + their links; the knowledge graph
    (with cross-device entity reconciliation) comes next.

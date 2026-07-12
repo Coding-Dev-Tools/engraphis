@@ -14,6 +14,11 @@ except Exception:
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+#: Vendor-hosted managed sync relay — the default target when ``ENGRAPHIS_RELAY_URL``
+#: isn't overridden. Single source of truth: the dashboard's one-click sync
+#: (``routes/v2_api.py``) imports this rather than re-declaring the literal.
+DEFAULT_RELAY_URL = "https://engraphis-production.up.railway.app"
+
 
 def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default).strip()
@@ -59,6 +64,14 @@ class Settings:
         default_factory=lambda: _env("ENGRAPHIS_TEAM_MODE", "").lower()
         in ("1", "true", "yes", "on")
     )
+
+    # Managed cloud-sync relay base URL (client side). When set, `python -m scripts.sync
+    # --relay` (or `--relay-url` omitted) targets this host instead of a shared folder.
+    # The relay is the headline Pro sync transport; the server half is mounted by
+    # `inspector/cloud_mount.py`. Empty = no default relay (use --remote folder sync or
+    # pass --relay-url explicitly). See docs/SYNC.md.
+    relay_url: str = field(default_factory=lambda: _env(
+        "ENGRAPHIS_RELAY_URL", DEFAULT_RELAY_URL))
 
     db_path: str = field(
         default_factory=lambda: _env(

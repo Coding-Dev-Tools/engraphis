@@ -6,6 +6,7 @@ HttpOnly, SameSite=Strict cookie; roles (viewer/member/admin) are enforced serve
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import Optional
 
@@ -16,6 +17,8 @@ from engraphis import licensing
 from engraphis.config import settings
 from engraphis.inspector.auth import (
     SESSION_TTL_SECONDS, AuthError, AuthStore, role_at_least)
+
+logger = logging.getLogger("engraphis.team")
 
 _COOKIE = "engr_dash_session"
 
@@ -158,10 +161,24 @@ def attach(app: FastAPI, service):
                                   seat_limit=seats)
         except AuthError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)})
+        ip = request.client.host if request.client else None
         store.record_event("user.created", actor_id=admin["id"], actor_email=admin["email"],
-                           target=u["email"], detail="role=%s" % body.role,
-                           ip=request.client.host if request.client else None)
-        return {"user": u}
+                           target=u["email"], detail="role=%s" % body.role, ip=ip)
+        # Best-effort invite notification — must never block account creation, and
+        # never carries the password (see send_team_invite_email's docstring). If
+        # email delivery isn't configured or fails, the admin still has to share
+        # the password out-of-band, so the account remains fully usable either way.
+        invited = True
+        try:
+            from engraphis.inspector.webhooks import send_team_invite_email
+            send_team_invite_email(u["email"], u["name"], u["role"])
+        except Exception as exc:  # noqa: BLE001 — delivery failure must not fail the request
+            invited = False
+            logger.warning("team invite email to %s failed: %s", u["email"], exc)
+            store.record_event("user.invite_email_failed", actor_id=admin["id"],
+                               actor_email=admin["email"], target=u["email"],
+                               detail=str(exc)[:200], ip=ip)
+        return {"user": u, "invited": invited}
 
     @router.post("/users/update")
     def upd_user(body: UpdUserReq, request: Request):

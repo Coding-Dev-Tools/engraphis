@@ -68,6 +68,43 @@ def test_login_and_user_events_are_recorded(monkeypatch, tmp_path):
     assert created["actor_email"] == "admin@x.co" and created["target"] == "m@x.co"
 
 
+def test_add_user_sends_invite_email_and_reports_invited_true(monkeypatch, tmp_path):
+    from engraphis.inspector import webhooks as WH
+    captured = {}
+    monkeypatch.setattr(
+        WH, "send_team_invite_email",
+        lambda to, name, role: captured.update(to=to, name=name, role=role))
+
+    c = _client(monkeypatch, tmp_path)
+    _admin(c)
+    r = c.post("/api/auth/users", json={"email": "m@x.co", "name": "Mo",
+              "password": "anotherpass1", "role": "member"})
+    assert r.status_code == 200 and r.json()["invited"] is True
+    assert captured == {"to": "m@x.co", "name": "Mo", "role": "member"}
+    actions = [e["action"] for e in c.get("/api/auth/audit").json()["events"]]
+    assert "user.invite_email_failed" not in actions
+
+
+def test_add_user_invite_email_failure_does_not_block_account_creation(monkeypatch, tmp_path):
+    from engraphis.inspector import webhooks as WH
+
+    def boom(to, name, role):
+        raise RuntimeError("simulated Resend outage")
+
+    monkeypatch.setattr(WH, "send_team_invite_email", boom)
+
+    c = _client(monkeypatch, tmp_path)
+    _admin(c)
+    r = c.post("/api/auth/users", json={"email": "m@x.co", "name": "Mo",
+              "password": "anotherpass1", "role": "member"})
+    # the account still gets created — a delivery failure must never lose the user
+    assert r.status_code == 200 and r.json()["invited"] is False
+    assert any(u["email"] == "m@x.co" for u in c.get("/api/auth/users").json()["users"])
+    events = c.get("/api/auth/audit").json()["events"]
+    failed = next(e for e in events if e["action"] == "user.invite_email_failed")
+    assert failed["actor_email"] == "admin@x.co" and failed["target"] == "m@x.co"
+
+
 def test_role_change_and_disable_are_recorded(monkeypatch, tmp_path):
     c = _client(monkeypatch, tmp_path)
     _admin(c)

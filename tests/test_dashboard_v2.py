@@ -377,3 +377,28 @@ def test_team_cookie_secure_flag_on_https(monkeypatch, tmp_path):
         # that the cookie is set regardless; the actual secure flag depends on the
         # proxy config. Verified: cookie is HttpOnly + SameSite=strict always.
         assert any("engr_dash_session" in ck for ck in cookies2)
+
+
+def test_login_requires_live_team_license(monkeypatch, tmp_path):
+    """Regression: a lapsed/removed Team license must stop NEW logins, not just user
+    creation — otherwise accounts created while the license was valid keep the paid
+    multi-user mode forever. (Existing sessions age out at SESSION_TTL_SECONDS; the
+    gate lives in AuthStore.login so the Inspector inherits it too.)"""
+    with _client(monkeypatch, tmp_path, team=True, key=_team_key()) as c:
+        assert c.post("/api/auth/setup", json={"email": "w@x.co", "name": "W",
+                      "password": "supersecret1"}).status_code == 200
+        assert c.post("/api/auth/users", json={"email": "m@x.co", "name": "M",
+                      "password": "anotherpass1", "role": "member"}).status_code == 200
+        # license lapses (key gone) -> fresh logins are refused with a structured 402
+        monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY")
+        lic.current_license(refresh=True)
+        fresh = TestClient(c.app)
+        r = fresh.post("/api/auth/login", json={"email": "m@x.co",
+                       "password": "anotherpass1"})
+        assert r.status_code == 402
+        assert r.json().get("feature") == "team"
+        # restoring a valid key restores logins — the gate is the license, not the user
+        monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _team_key())
+        lic.current_license(refresh=True)
+        assert fresh.post("/api/auth/login", json={"email": "m@x.co",
+                          "password": "anotherpass1"}).status_code == 200
