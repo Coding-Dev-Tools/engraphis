@@ -169,8 +169,6 @@ permanently. A license key (verified **offline** — no phone-home) unlocks the 
 Pro feature with a **3-day free trial right in the dashboard** (Settings → License), no key
 and no card.
 
-> **[Buy a license key →](https://buy.polar.sh/polar_cl_n6CR3ERqOus2VUhRrGrsRUqOB8yjDTeEU7p1r3CRrae)** Monthly or annual — switch on the checkout page. Or start the 3-day free trial in-app. Keys are verified offline — no phone-home.
-
 | | Free (available now) | Pro — $10/mo or $100/yr | Team — $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
 | Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
