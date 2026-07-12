@@ -1,9 +1,9 @@
-"""Backend tests for merge_workspaces() and reorder_memories() — two auth-reachable,
-multi-table SQL operations that shipped (commit 7e0795f) without any coverage.
-
-merge_workspaces does direct repo/entity/edge/memory remapping across workspaces;
-reorder_memories writes a per-memory sort_order. Both are reachable from the
-authenticated dashboard API, so a silent regression here corrupts or leaks data.
+"""Backend tests for merge_workspaces(), copy_workspace() and reorder_memories() —
+auth-reachable, multi-table SQL operations. merge_workspaces does direct repo/entity/
+edge/memory remapping across workspaces; copy_workspace clones the same tables under
+fresh ids into a new workspace; reorder_memories writes a per-memory sort_order. All
+three are reachable from the authenticated dashboard API, so a silent regression here
+corrupts or leaks data.
 """
 import pytest
 
@@ -70,6 +70,89 @@ def test_merge_rejects_same_and_missing_workspaces():
         svc.merge_workspaces("a", "nope")        # missing target
     with pytest.raises(ValidationError):
         svc.merge_workspaces("ghost", "a")       # missing source
+
+
+# ── copy_workspace ───────────────────────────────────────────────────────────
+def test_copy_auto_names_and_leaves_source_untouched():
+    svc = _svc()
+    a1 = svc.remember("Alpha one fact.", workspace="a", scope="workspace")["id"]
+    a2 = svc.remember("Alpha two fact.", workspace="a", scope="workspace")["id"]
+
+    out = svc.copy_workspace("a")
+    assert out["workspace"] == "a copy"
+    assert out["memories_copied"] == 2
+    # source is untouched — same ids, same content, workspace still exists
+    assert _wsid(svc, "a") is not None
+    assert _mem_ids(svc, "a") == {a1, a2}
+    assert svc.store.get_memory(a1).content == "Alpha one fact."
+    # the copy has its own ids — nothing shared with the source
+    copy_ids = _mem_ids(svc, "a copy")
+    assert len(copy_ids) == 2
+    assert copy_ids.isdisjoint({a1, a2})
+    contents = {svc.store.get_memory(i).content for i in copy_ids}
+    assert contents == {"Alpha one fact.", "Alpha two fact."}
+
+    # copying again auto-increments past the first copy
+    out2 = svc.copy_workspace("a")
+    assert out2["workspace"] == "a copy 2"
+
+
+def test_copy_clones_vectors_fts_links_entities_and_edges():
+    svc = _svc()
+    m1 = svc.remember("Postgres 16 is the primary database.", workspace="a",
+                      repo="infra", scope="repo")["id"]
+    m2 = svc.remember("Deploys run Fridays at noon.", workspace="a",
+                      repo="infra", scope="repo")["id"]
+    svc.link(m1, m2, workspace="a", relation="related")
+
+    svc.copy_workspace("a", new_name="a2")
+    wid_dst = _wsid(svc, "a2")
+    c = svc.store.conn
+
+    new_mem = [dict(r) for r in c.execute(
+        "SELECT id, content FROM memories WHERE workspace_id=?", (wid_dst,))]
+    assert len(new_mem) == 2
+    new_ids = {r["id"] for r in new_mem}
+    assert new_ids.isdisjoint({m1, m2})
+
+    # full-text mirror copied under the new ids
+    for r in new_mem:
+        fts = c.execute("SELECT content FROM mem_fts WHERE id=?", (r["id"],)).fetchone()
+        assert fts is not None and fts["content"] == r["content"]
+
+    # vector mirror copied under the new ids (embedder is on by default)
+    for nid in new_ids:
+        assert c.execute("SELECT 1 FROM mem_vectors WHERE id=?", (nid,)).fetchone() is not None
+
+    # the repo was cloned (fresh id, same name) rather than shared with the source
+    repos = [dict(r) for r in c.execute(
+        "SELECT id, name FROM repos WHERE workspace_id=?", (wid_dst,))]
+    assert [r["name"] for r in repos] == ["infra"]
+    src_repo_id = c.execute(
+        "SELECT id FROM repos WHERE workspace_id=?", (_wsid(svc, "a"),)).fetchone()["id"]
+    assert repos[0]["id"] != src_repo_id
+    # every copied memory points at the cloned repo, not the source repo
+    repo_ids = {c.execute("SELECT repo_id FROM memories WHERE id=?", (r["id"],)).fetchone()["repo_id"]
+                for r in new_mem}
+    assert repo_ids == {repos[0]["id"]}
+
+    # the mem_links row was cloned onto the two new memory ids
+    id_map = {r["content"]: r["id"] for r in new_mem}
+    new_a, new_b = id_map["Postgres 16 is the primary database."], id_map["Deploys run Fridays at noon."]
+    linked = c.execute(
+        "SELECT 1 FROM mem_links WHERE (a=? AND b=?) OR (a=? AND b=?)",
+        (new_a, new_b, new_b, new_a)).fetchone()
+    assert linked is not None
+
+
+def test_copy_rejects_missing_source_and_colliding_new_name():
+    svc = _svc()
+    svc.remember("x", workspace="a", scope="workspace")
+    svc.remember("y", workspace="b", scope="workspace")
+    with pytest.raises(ValidationError):
+        svc.copy_workspace("ghost")                       # missing source
+    with pytest.raises(ValidationError):
+        svc.copy_workspace("a", new_name="b")              # explicit name collides
 
 
 # ── reorder_memories ────────────────────────────────────────────────────────

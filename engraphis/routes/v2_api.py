@@ -196,6 +196,19 @@ def workspaces_describe(req: _DescribeWsReq):
     return _run(service().set_workspace_description, req.workspace, req.description)
 
 
+class _CopyWsReq(BaseModel):
+    workspace: str
+    new_name: Optional[str] = None
+
+
+@router.post("/workspaces/copy")
+def workspaces_copy(req: _CopyWsReq):
+    """Duplicate ``workspace`` into a new one (see MemoryService.copy_workspace). When
+    ``new_name`` is omitted the name is auto-generated so the dashboard's Copy button
+    is a single click."""
+    return _run(service().copy_workspace, req.workspace, req.new_name)
+
+
 class _DeleteWsReq(BaseModel):
     workspace: str
 
@@ -691,26 +704,19 @@ def sync_status():
     }
 
 
-@router.post("/sync/run")
-def sync_run():
-    """Push this device's memories to the relay and pull every other device's — for every
-    workspace. Backs the dashboard 'Sync now' button. Pro/Team; needs a license key."""
-    _paid("sync")   # 402 if the plan doesn't include sync
-    if not licensing._read_key_material():
-        raise HTTPException(status_code=402, detail={
-            "error": "Cloud sync needs your license key. Sign in with it above, then Sync.",
-            "upgrade_url": licensing.upgrade_url()})
+def _sync_all(svc) -> dict:
+    """Push every workspace's memories to the relay and pull every peer's — the shared
+    core behind both the dashboard 'Sync now' button and the background auto-sync loop.
 
-    svc = service()
-    wss = svc.list_workspaces().get("workspaces") or []
-    if not wss:
-        raise HTTPException(status_code=400,
-                            detail={"error": "Nothing to sync yet — add a memory first."})
-
+    Never raises: a relay/transport failure on one workspace is captured in ``errors``
+    (with the HTTP ``status`` when known) so a single bad workspace never aborts the rest,
+    and the background loop can keep ticking. Returns the last-sync summary; the caller
+    decides whether to surface an error to a human (the button) or just log it (auto)."""
     from engraphis.backends.sync_folder import get_transport
     from engraphis.backends.sync_relay import RelayError
     from engraphis.core.sync import SyncEngine
 
+    wss = svc.list_workspaces().get("workspaces") or []
     engine = svc.engine
     syncer = SyncEngine(engine.store, embedder=engine.embedder, vector_index=engine.index,
                         allowed_workspaces=settings.allowed_workspaces or None)
@@ -732,10 +738,9 @@ def sync_run():
             transport = get_transport("relay", base_url=_relay_url(), workspace_id=name)
             rep = syncer.sync(transport, row["id"])
         except RelayError as exc:
-            if exc.status == 402:          # relay rejected the key server-side
-                raise HTTPException(status_code=402, detail={
-                    "error": str(exc), "upgrade_url": licensing.upgrade_url()})
-            errors.append({"workspace": name, "error": str(exc)})
+            # Record the HTTP status (402 == relay rejected the key) instead of raising, so
+            # one workspace can't abort the sweep; sync_run() promotes a 402 to the button.
+            errors.append({"workspace": name, "error": str(exc), "status": exc.status})
             continue
         except Exception as exc:  # noqa: BLE001 — one bad workspace must not abort the rest
             errors.append({"workspace": name, "error": str(exc)})
@@ -748,9 +753,63 @@ def sync_run():
         for k in totals:
             totals[k] += int((rep.get("totals") or {}).get(k, 0) or 0)
 
-    summary = {"at": time.time(), "workspaces": len(wss), "exported": exported,
-               "peers": len(peer_devices), "added": totals["added"],
-               "updated": totals["updated"], "unchanged": totals["unchanged"],
-               "errors": errors}
+    return {"at": time.time(), "workspaces": len(wss), "exported": exported,
+            "peers": len(peer_devices), "added": totals["added"],
+            "updated": totals["updated"], "unchanged": totals["unchanged"],
+            "errors": errors}
+
+
+@router.post("/sync/run")
+def sync_run():
+    """Push this device's memories to the relay and pull every other device's — for every
+    workspace. Backs the dashboard 'Sync now' button. Pro/Team; needs a license key."""
+    _paid("sync")   # 402 if the plan doesn't include sync
+    if not licensing._read_key_material():
+        raise HTTPException(status_code=402, detail={
+            "error": "Cloud sync needs your license key. Sign in with it above, then Sync.",
+            "upgrade_url": licensing.upgrade_url()})
+
+    svc = service()
+    if not (svc.list_workspaces().get("workspaces") or []):
+        raise HTTPException(status_code=400,
+                            detail={"error": "Nothing to sync yet — add a memory first."})
+
+    summary = _sync_all(svc)
     _SYNC_STATE["last"] = summary
+    # If the relay rejected the key for every workspace (nothing exported, a 402 seen),
+    # surface it as the button's upgrade/renew prompt rather than a silent partial success.
+    if summary["exported"] == 0 and any(e.get("status") == 402 for e in summary["errors"]):
+        first = next(e for e in summary["errors"] if e.get("status") == 402)
+        raise HTTPException(status_code=402, detail={
+            "error": first["error"], "upgrade_url": licensing.upgrade_url()})
     return {"ok": True, "summary": summary}
+
+
+class _AutoSyncReq(BaseModel):
+    enabled: Optional[bool] = None            # cadence (timer) sync
+    cadence_minutes: Optional[int] = None
+
+
+@router.get("/sync/auto")
+def sync_auto_get():
+    """The background auto-sync policy for the dashboard toggle (cadence + last run).
+    License-ungated read (it only reports a local preference and defaults to off); in team
+    mode the dashboard's role gate still limits it to signed-in users, and only admins can
+    POST changes (the toggle renders read-only for members/viewers)."""
+    from engraphis import autosync
+    return autosync.load_policy()
+
+
+@router.post("/sync/auto")
+def sync_auto_set(req: _AutoSyncReq):
+    """Enable/disable background cadence auto-sync and set its interval (minutes, floored at
+    5). Pro/Team — the same ``sync`` feature the button needs. In team mode this route is
+    **admin-only** (``inspector/auth.min_role``): auto-sync is an account-wide control.
+    The loop itself is licensed-gated too, so a stale toggle can never reach the relay
+    after a plan lapses."""
+    _paid("sync")
+    from engraphis import autosync
+    cur = autosync.load_policy()
+    merged = {k: (getattr(req, k) if getattr(req, k) is not None else cur.get(k))
+              for k in ("enabled", "cadence_minutes")}
+    return autosync.save_policy(merged)
