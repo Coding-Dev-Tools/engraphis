@@ -1,36 +1,40 @@
-import pytest
-from engraphis import licensing
+"""Suite-wide isolation for local runtime configuration and private client state."""
+from __future__ import annotations
 
-# Opt the licensing module into honoring ENGRAPHIS_LICENSE_PUBKEY, which is otherwise
-# dead in a shipped process. Set at import time so it covers both collection and
-# execution. This is the ONLY place that flips the switch — production never imports
-# this conftest, so the vendor-key override stays non-overridable in the field.
-licensing._TEST_MODE_PUBKEY_OVERRIDE = True
+import socket
+
+import pytest
+
+from engraphis.config import settings
 
 
 @pytest.fixture(autouse=True)
-def mock_licensing_files(tmp_path):
-    # Re-route the licensing keys and trial JSON files to a temporary path
-    # to avoid reading or writing to the host user's actual ~/.engraphis directory.
-    licensing._LICENSE_FILE = tmp_path / "license.key"
-    licensing._TRIAL_FILE = tmp_path / "trial.json"
-    licensing._TRIAL_STAMP = tmp_path / "trial_used.json"  # advisory "trial used" UI stamp
-    # Trial-used tombstones must never touch (or read!) the host's real home/appdata —
-    # a developer machine that once used a trial would otherwise fail every trial test.
-    licensing._TOMBSTONE_DIRS_OVERRIDE = [tmp_path]
-    # And the clock anchor: tests that warp time must not poison the host's real
-    # high-water mark (a future-dated anchor would eat real trial/lease time).
-    licensing._MONOTONIC_FILE = tmp_path / ".clock_anchor"
+def _offline_dns_isolation(monkeypatch):
+    """Keep the documented offline gate genuinely offline.
 
-    # Reset cached license state to prevent cross-test pollution
-    licensing._cached = None
-    licensing._cache_error = ""
-    licensing._cache_recheck_at = float("inf")
+    AGENTS.md requires ``python -m pytest tests/ -q`` to pass with no network. Relay and
+    cloud URL validation resolve their destination to reject private/reserved targets, so
+    without this stub the suite silently depends on working DNS and fails on an air-gapped
+    machine. Tests that need a specific resolution result still override it themselves.
+    """
 
-    yield
+    def _resolve(host, port, *args, **kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port or 0))]
 
-    # Reset again after the test runs
-    licensing._cached = None
-    licensing._cache_error = ""
-    licensing._cache_recheck_at = float("inf")
-    licensing._TOMBSTONE_DIRS_OVERRIDE = None
+    monkeypatch.setattr(socket, "getaddrinfo", _resolve)
+
+
+@pytest.fixture(autouse=True)
+def _deployment_settings_isolation(monkeypatch, tmp_path):
+    """Keep developer deployment bindings and cloud credentials out of tests."""
+
+    state_dir = tmp_path / ".engraphis"
+    database = tmp_path / "engraphis.db"
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("ENGRAPHIS_DB_PATH", str(database))
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_SYNC_TOKEN", raising=False)
+    monkeypatch.setattr(settings, "allowed_workspaces", [])
+    monkeypatch.setattr(settings, "service_mode", "customer")
+    monkeypatch.setattr(settings, "db_path", str(database))
