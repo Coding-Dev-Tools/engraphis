@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from engraphis import __version__
 from engraphis.billing import router as billing_router
+from engraphis.inspector.cloud_mount import CLOUD_PREFIXES, mount_cloud_endpoints
 from engraphis.config import settings
 from engraphis.engines import reweight, thoughts as thoughts_engine
 from engraphis.logging_setup import configure_logging
@@ -113,7 +114,8 @@ def create_app() -> FastAPI:
     async def _require_token(request: Request, call_next):
         token = settings.api_token
         if token and request.method != "OPTIONS" and request.url.path != "/" \
-                and not request.url.path.startswith(_PUBLIC_PREFIXES):
+                and not request.url.path.startswith(_PUBLIC_PREFIXES) \
+                and not request.url.path.startswith(CLOUD_PREFIXES):
             header = request.headers.get("authorization", "")
             presented = header[7:].strip() if header.lower().startswith("bearer ") else ""
             if not _const_time_eq(presented, token):
@@ -179,6 +181,10 @@ def create_app() -> FastAPI:
     # Purchase fulfillment (Polar order.paid → signed key → email). Shared with the
     # Inspector so it works regardless of which entrypoint is deployed.
     app.include_router(billing_router)
+    # Cloud license (register/verify/REVOKE) + gated Pro sync relay. Previously
+    # mounted only on the retired Inspector, which made revocation inoperable in
+    # production; now served by every shipped entrypoint. See inspector.cloud_mount.
+    mount_cloud_endpoints(app)
 
     # ── probes (unauthenticated; see _PUBLIC_PREFIXES) ──────────────────────────
     @app.get("/api/health")

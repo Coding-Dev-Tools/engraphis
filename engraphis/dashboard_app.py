@@ -63,6 +63,13 @@ def create_app() -> FastAPI:
     except Exception:  # noqa: BLE001 - billing stays optional (e.g. minimal installs)
         pass
 
+    # Cloud license (register/verify/REVOKE) + gated Pro sync relay — mounted on the
+    # dashboard binary too, so a single-container team deployment can enforce
+    # revocation and serve Pro sync. Endpoints live outside /api (license-key auth),
+    # so the _auth_gate below (which only guards /api/*) leaves them alone.
+    from engraphis.inspector.cloud_mount import mount_cloud_endpoints
+    mount_cloud_endpoints(app)
+
     # Team mode (multi-user auth) — optional; attached only when the module is present
     # and a valid Team license is active, so single-user setups are unaffected.
     # ``attach`` mounts /api/auth/* AND tells us whether real per-user sessions are

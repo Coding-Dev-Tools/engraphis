@@ -87,7 +87,11 @@ run one instance per tenant (now with `ENGRAPHIS_WORKSPACES` set as a defense-in
 ### 4. Secrets & data at rest
 - `.env`, `*.db`, `*.db-wal`, `*.db-shm` are git-ignored; never commit or log them. The
   server does not log API keys.
-- The SQLite database is **not encrypted at rest** yet (planned, Phase 5). Protect it with
+- **Encryption at rest is available** (optional, opt-in): set `ENGRAPHIS_DB_KEY` (or
+  `ENGRAPHIS_DB_KEY_FILE`) and install `pip install "engraphis[encryption]"` to encrypt the
+  entire memory database with AES-256 via SQLCipher. Whole-file, so search/graph/queries are
+  unaffected. Off by default; lose the key = lose the data (inject it from a secrets manager).
+  When NOT using it, the SQLite database is **not encrypted at rest** — protect it with
   filesystem permissions and full-disk encryption. Restrict the DB file to the service user.
 - You choose the LLM provider; review their data-handling terms, since prompts/snippets of
   recalled memory may be sent there during chat/thought-synthesis features.
@@ -178,7 +182,8 @@ the Inspector's `/api/*` with per-user sessions:
 - Rate limiting: an optional in-process per-IP limiter now ships (`ENGRAPHIS_RATE_LIMIT`,
   `ENGRAPHIS_RATE_WINDOW`), off by default; still front multi-process/distributed deployments
   with a reverse proxy.
-- No encryption at rest (use disk/FS encryption).
+- Encryption at rest is opt-in (SQLCipher via `ENGRAPHIS_DB_KEY`); without it, use disk/FS
+  encryption. The separate users/sessions DB and the relay DB are not yet SQLCipher-encrypted.
 - Per-token scope/tenant authorization is partial: an instance can be *bound* to a workspace
   allow-list (`ENGRAPHIS_WORKSPACES`, §3), but all clients of one instance share that binding —
   isolate distinct tenants by running one instance each.

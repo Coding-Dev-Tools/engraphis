@@ -27,7 +27,25 @@ from typing import Optional
 
 from engraphis.licensing import License, LicenseError, parse_key
 
-_DEFAULT_DB = str(Path.home() / ".engraphis" / "relay.db")
+def _state_dir() -> Path:
+    base = os.environ.get("ENGRAPHIS_STATE_DIR", "").strip()
+    return Path(base) if base else (Path.home() / ".engraphis")
+
+
+# Registry/relay DB default lives under the state dir so revocations persist on the same
+# volume as the rest of the license state (ENGRAPHIS_RELAY_DB still overrides explicitly).
+_DEFAULT_DB = str(_state_dir() / "relay.db")
+
+_REG_SCHEMA = """
+CREATE TABLE IF NOT EXISTS registrations (
+    key_id     TEXT NOT NULL,
+    machine_id TEXT NOT NULL,
+    first_seen REAL NOT NULL,
+    last_seen  REAL NOT NULL,
+    PRIMARY KEY (key_id, machine_id)
+);
+"""
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS issued_licenses (
@@ -55,7 +73,11 @@ def connect(db_path: Optional[str] = None) -> sqlite3.Connection:
         Path(path).expanduser().parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    # Wait (up to 5s) for a competing writer's lock rather than failing with
+    # "database is locked"; seat claims take a short IMMEDIATE write lock (see claim_seat).
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(_SCHEMA)
+    conn.executescript(_REG_SCHEMA)
     return conn
 
 
@@ -143,3 +165,139 @@ def verify_for_feature(key: str, feature: str, *, db_path: Optional[str] = None,
     if is_revoked(lic.key_id, db_path=db_path):
         raise LicenseError("this license has been revoked", feature=feature)
     return lic
+
+
+# ── device registrations & seat accounting ─────────────────────────────────────────────
+# A "seat" is one concurrently-active device. The per-license cap (``License.seats``) is
+# enforced here, on vendor hardware, so it holds regardless of what a patched client does.
+# Seats FLOAT: a device that stops checking in has its lease lapse, and its seat is then
+# reclaimed automatically so the cap self-heals (no permanent lockout on a dead/retired
+# machine). The concurrency guarantee ("no more than N live at once") is never weakened by
+# reclamation because it is enforced at claim time; reclamation only frees provably-idle
+# seats. This is the single source of truth for seat logic — the register endpoint and the
+# sync relay both call it, so they can never drift.
+
+LEASE_TTL_HOURS_DEFAULT = 72
+
+
+def lease_ttl_seconds() -> int:
+    """Lease validity window in seconds (``ENGRAPHIS_LEASE_TTL_HOURS``, default 72h).
+
+    Floored at 5 minutes so a misconfiguration can never mint 0-second leases."""
+    try:
+        hours = float(os.environ.get("ENGRAPHIS_LEASE_TTL_HOURS", "").strip()
+                      or LEASE_TTL_HOURS_DEFAULT)
+    except ValueError:
+        hours = LEASE_TTL_HOURS_DEFAULT
+    return max(300, int(hours * 3600))
+
+
+def seat_reclaim_seconds() -> int:
+    """Idle window after which a device's seat is auto-reclaimed.
+
+    A live device refreshes its registration at least once per lease TTL (the client only
+    renews when its lease has lapsed, and the relay refreshes ``last_seen`` on every sync),
+    so anything silent for *two* full TTLs has certainly lost its lease. The 2x multiplier
+    is deliberately conservative: the concurrency cap is enforced instantly at claim time,
+    so a longer reclaim window never permits over-subscription — it only guarantees we
+    never reclaim a live, about-to-renew device. Tunable via ``ENGRAPHIS_SEAT_RECLAIM_MULT``
+    (>= 1.0)."""
+    try:
+        mult = max(1.0, float(os.environ.get("ENGRAPHIS_SEAT_RECLAIM_MULT", "").strip() or 2.0))
+    except ValueError:
+        mult = 2.0
+    return int(lease_ttl_seconds() * mult)
+
+
+def _clean_machine_id(machine_id: str) -> str:
+    """Normalize an untrusted, client-supplied machine id (bound length; strip).
+
+    Honest limit (open-core): the id is a soft identifier, not an unforgeable
+    attestation. Colluders who deliberately share ONE machine id occupy a single
+    seat between them; this raises the bar against casual key-sharing (N distinct
+    devices = N seats) without claiming to defeat a determined insider. The
+    non-bypassable guarantee is the count: no more than ``seats`` distinct live
+    ids can hold seats at once (enforced atomically in claim_seat)."""
+    return (machine_id or "").strip()[:128]
+
+
+def reclaim_stale_seats(conn: sqlite3.Connection, key_id: str, *,
+                        older_than: Optional[float] = None,
+                        now: Optional[float] = None) -> int:
+    """Delete registrations whose lease has certainly lapsed (idle > ``older_than`` s).
+
+    Returns the number of seats freed. Frees seats held by dead/retired devices so the
+    per-key cap self-heals; a live device is never affected because it refreshes
+    ``last_seen`` well within the window."""
+    now = time.time() if now is None else now
+    older_than = seat_reclaim_seconds() if older_than is None else older_than
+    cur = conn.execute("DELETE FROM registrations WHERE key_id=? AND last_seen < ?",
+                       (key_id, now - older_than))
+    return cur.rowcount
+
+
+def active_seat_count(conn: sqlite3.Connection, key_id: str) -> int:
+    """Number of registered (seat-holding) devices for a key."""
+    return int(conn.execute("SELECT COUNT(*) AS n FROM registrations WHERE key_id=?",
+                            (key_id,)).fetchone()["n"])
+
+
+def claim_seat(conn: sqlite3.Connection, lic: License, machine_id: str, *,
+               now: Optional[float] = None, reclaim: bool = True) -> None:
+    """Ensure ``machine_id`` holds a live seat under ``lic``, or raise ``LicenseError``.
+
+    Idempotent for an already-registered device: it just refreshes ``last_seen`` — which is
+    also the keep-alive that holds the seat while the device is active. Reclaims idle seats
+    first so a dead device never permanently blocks a new one. Raises (rendered as a 402)
+    when the license's seat cap is already full of *live* devices."""
+    now = time.time() if now is None else now
+    machine_id = _clean_machine_id(machine_id)
+    if not machine_id:
+        raise LicenseError("machine_id required")
+    conn.executescript(_REG_SCHEMA)                      # DDL (own txn) before we take the lock
+    seats = max(1, int(getattr(lic, "seats", 1) or 1))
+    # The cap check and the insert MUST be atomic: without a held write lock, two concurrent
+    # claims for two new devices could both read count < seats and both insert, overshooting
+    # the cap (a TOCTOU race that would make a shared key exceed its paid seats). BEGIN
+    # IMMEDIATE grabs the RESERVED write lock up front, so a competing claim blocks (up to
+    # busy_timeout) until we commit and then observes our row. We drive transactions manually
+    # here (isolation_level=None) and restore the connection's prior mode afterwards.
+    prev_iso = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if reclaim:
+                reclaim_stale_seats(conn, lic.key_id, now=now)
+            seen = conn.execute(
+                "SELECT 1 FROM registrations WHERE key_id=? AND machine_id=?",
+                (lic.key_id, machine_id)).fetchone()
+            if seen is None:
+                if active_seat_count(conn, lic.key_id) >= seats:
+                    raise LicenseError(
+                        "seat limit reached for this license (%d seat(s) in use). An idle "
+                        "device frees its seat automatically; or deactivate one now." % seats)
+                conn.execute(
+                    "INSERT INTO registrations (key_id, machine_id, first_seen, last_seen) "
+                    "VALUES (?,?,?,?)", (lic.key_id, machine_id, now, now))
+            else:
+                conn.execute(
+                    "UPDATE registrations SET last_seen=? WHERE key_id=? AND machine_id=?",
+                    (now, lic.key_id, machine_id))
+            conn.execute("COMMIT")
+        except BaseException:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+    finally:
+        conn.isolation_level = prev_iso
+
+
+def release_seat(conn: sqlite3.Connection, key_id: str, machine_id: str) -> bool:
+    """Free a seat by removing a device registration. Returns True if a row was removed."""
+    cur = conn.execute("DELETE FROM registrations WHERE key_id=? AND machine_id=?",
+                       (key_id, _clean_machine_id(machine_id)))
+    conn.commit()
+    return cur.rowcount > 0

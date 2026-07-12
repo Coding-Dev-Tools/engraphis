@@ -10,7 +10,6 @@ Revocation requires the vendor admin token (``ENGRAPHIS_API_TOKEN``).
 from __future__ import annotations
 
 import hmac
-import os
 import time
 
 from fastapi import APIRouter, Request
@@ -42,12 +41,9 @@ def _conn():
 
 
 def _lease_ttl_seconds() -> int:
-    try:
-        hours = float(os.environ.get("ENGRAPHIS_LEASE_TTL_HOURS", "").strip()
-                      or LEASE_TTL_HOURS_DEFAULT)
-    except ValueError:
-        hours = LEASE_TTL_HOURS_DEFAULT
-    return max(300, int(hours * 3600))   # floor 5 min so a misconfig can't mint 0s leases
+    """Deprecated shim — the lease TTL now lives in license_registry (single source of
+    truth shared with seat reclamation). Kept so any external caller keeps working."""
+    return reg.lease_ttl_seconds()   # floor 5 min so a misconfig can't mint 0s leases
 
 
 router = APIRouter(prefix="/license/v1", tags=["license-cloud"])
@@ -73,25 +69,9 @@ async def register(request: Request):
     now = time.time()
     conn = _conn()
     try:
-        seen = conn.execute(
-            "SELECT 1 FROM registrations WHERE key_id=? AND machine_id=?",
-            (lic.key_id, machine_id)).fetchone()
-        if seen is None:
-            count = conn.execute(
-                "SELECT COUNT(*) AS n FROM registrations WHERE key_id=?",
-                (lic.key_id,)).fetchone()["n"]
-            if count >= lic.seats:
-                raise LicenseError(
-                    "seat limit reached for this license (%d device(s)) — deactivate "
-                    "another device first" % lic.seats)
-            conn.execute(
-                "INSERT INTO registrations (key_id, machine_id, first_seen, last_seen) "
-                "VALUES (?,?,?,?)", (lic.key_id, machine_id, now, now))
-        else:
-            conn.execute(
-                "UPDATE registrations SET last_seen=? WHERE key_id=? AND machine_id=?",
-                (now, lic.key_id, machine_id))
-        conn.commit()
+        # Claim (or refresh) this device's seat. Reclaims seats whose lease has lapsed
+        # first, then enforces the per-license cap; raises LicenseError (→ 402) if full.
+        reg.claim_seat(conn, lic, machine_id, now=now)
     finally:
         conn.close()
 
@@ -100,7 +80,7 @@ async def register(request: Request):
     except Exception:
         pass
 
-    ttl = _lease_ttl_seconds()
+    ttl = reg.lease_ttl_seconds()
     payload = {"v": 1, "key_id": lic.key_id, "plan": lic.plan,
                "features": sorted(lic.features), "machine_id": machine_id,
                "issued": int(now), "expires": int(now + ttl)}
@@ -139,3 +119,93 @@ async def revoke(key_id: str, request: Request):
         return JSONResponse({"error": "vendor admin token required"}, status_code=401)
     changed = reg.revoke(key_id)
     return {"key_id": key_id, "revoked": True, "changed": changed}
+
+
+@router.get("/keys")
+async def keys_by_email(request: Request, email: str = ""):
+    """Vendor-only: look up a customer's keys by email, with plan/status/seat usage.
+
+    Bridges the support flow: you know the buyer's email, not their key_id fingerprint."""
+    if not _admin_ok(request):
+        return JSONResponse({"error": "vendor admin token required"}, status_code=401)
+    email = (email or "").strip().lower()
+    if not email:
+        return JSONResponse({"error": "email query param required"}, status_code=400)
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT key_id, plan, seats, status, expires FROM issued_licenses "
+            "WHERE lower(email)=? ORDER BY created_at DESC", (email,)).fetchall()
+        out = []
+        for r in rows:
+            used = conn.execute("SELECT COUNT(*) AS n FROM registrations WHERE key_id=?",
+                                (r["key_id"],)).fetchone()["n"]
+            out.append({"key_id": r["key_id"], "plan": r["plan"], "seats": r["seats"],
+                        "status": r["status"], "devices_used": used, "expires": r["expires"]})
+    finally:
+        conn.close()
+    return {"email": email, "keys": out}
+
+
+@router.post("/revoke-by-email")
+async def revoke_by_email(request: Request):
+    """Vendor-only: revoke every key issued to an email (refund / chargeback / abuse)."""
+    if not _admin_ok(request):
+        return JSONResponse({"error": "vendor admin token required"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    email = (body.get("email") or "").strip().lower()
+    if not email:
+        return JSONResponse({"error": "email required"}, status_code=400)
+    conn = reg.connect()
+    try:
+        rows = conn.execute(
+            "SELECT key_id FROM issued_licenses WHERE lower(email)=?", (email,)).fetchall()
+    finally:
+        conn.close()
+    revoked = [r["key_id"] for r in rows if reg.revoke(r["key_id"])]
+    return {"email": email, "revoked": revoked, "count": len(revoked)}
+
+
+@router.get("/keys/{key_id}/devices")
+async def key_devices(key_id: str, request: Request):
+    """Vendor-only: list a key's registered devices (spot seat-sharing / abuse)."""
+    if not _admin_ok(request):
+        return JSONResponse({"error": "vendor admin token required"}, status_code=401)
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT machine_id, first_seen, last_seen FROM registrations WHERE key_id=? "
+            "ORDER BY last_seen DESC", (key_id,)).fetchall()
+    finally:
+        conn.close()
+    return {"key_id": key_id, "devices": [
+        {"machine_id": r["machine_id"], "first_seen": r["first_seen"],
+         "last_seen": r["last_seen"]} for r in rows]}
+
+
+@router.post("/deactivate")
+async def deactivate_device(request: Request):
+    """Vendor-only: free a seat by removing a device registration.
+
+    Without this, a legit device swap (new laptop) permanently burns a seat, because
+    registrations only grow and the cap is by distinct machine. Frees the slot so the
+    replacement can register."""
+    if not _admin_ok(request):
+        return JSONResponse({"error": "vendor admin token required"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    key_id = (body.get("key_id") or "").strip()
+    machine_id = (body.get("machine_id") or "").strip()
+    if not key_id or not machine_id:
+        return JSONResponse({"error": "key_id and machine_id required"}, status_code=400)
+    conn = _conn()
+    try:
+        freed = reg.release_seat(conn, key_id, machine_id)
+    finally:
+        conn.close()
+    return {"key_id": key_id, "machine_id": machine_id, "deactivated": freed}

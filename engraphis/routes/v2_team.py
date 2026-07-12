@@ -20,6 +20,18 @@ from engraphis.inspector.auth import (
 _COOKIE = "engr_dash_session"
 
 
+def _csv_cell(value) -> str:
+    """Neutralize spreadsheet formula injection (CWE-1236) in exported CSV. A cell that
+    begins with =, +, -, @ (or a control char) is executed as a formula by Excel/Sheets;
+    an unauthenticated failed-login attempt can seed such a value into actor_email, so we
+    defuse it by prefixing a single quote. Applied to every free-text/attacker-influenced
+    field in the export."""
+    s = "" if value is None else str(value)
+    if s and s[0] in ("=", "+", "-", "@", "\t", "\r", "\n"):
+        s = "'" + s
+    return s
+
+
 class SetupReq(BaseModel):
     email: str = Field(..., min_length=5, max_length=254)
     name: str = Field(default="", max_length=120)
@@ -104,8 +116,11 @@ def attach(app: FastAPI, service):
         if store.count_users() > 0:
             raise HTTPException(status_code=400, detail={"error": "team already set up"})
         try:
-            store.create_user(body.email, body.name, body.password, "admin")
-            u = store.login(body.email, body.password)
+            admin = store.create_user(body.email, body.name, body.password, "admin")
+            store.record_event("team.setup", actor_id=admin["id"], actor_email=admin["email"],
+                               detail="initial admin created")
+            u = store.login(body.email, body.password,
+                            ip=request.client.host if request.client else None)
         except AuthError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)})
         _set_cookie(response, u.pop("token"), secure=request.url.scheme == "https")
@@ -113,8 +128,9 @@ def attach(app: FastAPI, service):
 
     @router.post("/login")
     def login(body: LoginReq, request: Request, response: Response):
+        ip = request.client.host if request.client else None
         try:
-            u = store.login(body.email, body.password)
+            u = store.login(body.email, body.password, ip=ip)
         except AuthError as exc:
             raise HTTPException(status_code=401, detail={"error": str(exc)})
         _set_cookie(response, u.pop("token"), secure=request.url.scheme == "https")
@@ -135,24 +151,85 @@ def attach(app: FastAPI, service):
 
     @router.post("/users")
     def add_user(body: NewUserReq, request: Request):
-        _require(request, "admin")
+        admin = _require(request, "admin")
         seats = licensing.current_license().seats
         try:
             u = store.create_user(body.email, body.name, body.password, body.role,
                                   seat_limit=seats)
         except AuthError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)})
+        store.record_event("user.created", actor_id=admin["id"], actor_email=admin["email"],
+                           target=u["email"], detail="role=%s" % body.role,
+                           ip=request.client.host if request.client else None)
         return {"user": u}
 
     @router.post("/users/update")
     def upd_user(body: UpdUserReq, request: Request):
-        _require(request, "admin")
+        admin = _require(request, "admin")
+        before = store.get_user(body.user_id)
         try:
             u = store.update_user(body.user_id, role=body.role, disabled=body.disabled,
                                   seat_limit=licensing.current_license().seats)
         except AuthError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)})
+        ip = request.client.host if request.client else None
+        tgt = u["email"] if u else body.user_id
+        if body.role is not None and (not before or before["role"] != body.role):
+            store.record_event("user.role_changed", actor_id=admin["id"],
+                               actor_email=admin["email"], target=tgt,
+                               detail="role=%s" % body.role, ip=ip)
+        if body.disabled is not None and (not before or bool(before["disabled"]) != bool(body.disabled)):
+            store.record_event("user.disabled" if body.disabled else "user.enabled",
+                               actor_id=admin["id"], actor_email=admin["email"],
+                               target=tgt, ip=ip)
         return {"user": u}
+
+    @router.get("/audit")
+    def audit(request: Request, limit: int = 100, action: Optional[str] = None,
+              actor_id: Optional[str] = None, since: Optional[float] = None):
+        """Admin-only team audit log: logins, user CRUD, role changes, seat events."""
+        _require(request, "admin")
+        return {"events": store.list_events(limit=limit, action=action,
+                                            actor_id=actor_id, since=since),
+                "total": store.count_events()}
+
+    @router.get("/audit/export")
+    def audit_export(request: Request, limit: int = 1000, since: Optional[float] = None):
+        """Admin-only CSV export of the audit log for compliance/retention."""
+        _require(request, "admin")
+        import csv
+        import datetime as _dt
+        import io
+        rows = store.list_events(limit=limit, since=since)
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["ts", "iso_utc", "actor_id", "actor_email", "action",
+                    "target", "detail", "ip"])
+        for e in rows:
+            iso = _dt.datetime.utcfromtimestamp(e["ts"]).replace(
+                tzinfo=_dt.timezone.utc).isoformat()
+            w.writerow([e["ts"], iso, _csv_cell(e.get("actor_id")),
+                        _csv_cell(e.get("actor_email")), _csv_cell(e["action"]),
+                        _csv_cell(e.get("target")), _csv_cell(e.get("detail")),
+                        _csv_cell(e.get("ip"))])
+        return Response(content=buf.getvalue(), media_type="text/csv",
+                        headers={"Content-Disposition":
+                                 "attachment; filename=engraphis_team_audit.csv"})
+
+    @router.get("/overview")
+    def overview(request: Request):
+        """Admin-only team overview: seat usage, members with last-active, activity mix."""
+        _require(request, "admin")
+        seats = int(licensing.current_license().seats)
+        users = store.list_users()
+        active = sum(1 for u in users if not u["disabled"])
+        la = store.last_active()
+        members = [{**u, "last_active": la.get(u["id"])} for u in users]
+        return {"seats": {"used": active, "limit": seats,
+                          "available": max(0, seats - active)},
+                "members": members,
+                "activity": store.action_counts(),
+                "events_total": store.count_events()}
 
     app.include_router(router)
     return True, store

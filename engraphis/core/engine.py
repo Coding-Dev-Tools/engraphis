@@ -56,10 +56,10 @@ class MemoryEngine:
                embed_dim: int = 256, vector_backend: str = "auto",
                rerank_model: Optional[str] = None, extractor: str = "none",
                graph_extractor: str = "none",
-               auto_evolve: bool = True) -> "MemoryEngine":
+               auto_evolve: bool = True, connect=None) -> "MemoryEngine":
         from engraphis.backends.extractor import PassthroughExtractor, get_extractor
         from engraphis.backends.graph_extractor import get_graph_extractor as _get_ge
-        store = Store(db_path)
+        store = Store(db_path, connect=connect)
         embedder = get_embedder(embed_model, embed_dim)
         index = get_vector_index(store, dim=embedder.dim, prefer=vector_backend)
         reranker = get_reranker(rerank_model)

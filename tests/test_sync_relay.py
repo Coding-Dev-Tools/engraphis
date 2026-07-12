@@ -172,3 +172,60 @@ def test_relay_transport_surfaces_license_rejection(monkeypatch):
     with pytest.raises(RelayError) as ei:
         t.pull()
     assert ei.value.status == 402
+
+
+# ── Team seat enforcement at the relay: non-shareable beyond `seats`, seats float ───────
+
+def _tkey(seats=2, email="team@corp.com"):
+    now = time.time()
+    return licensing.compose_key(
+        {"v": 1, "plan": "team", "email": email, "seats": seats,
+         "issued": int(now), "expires": int(now + 30 * 86400)}, SECRET)
+
+
+def _dev(key, mid):
+    return {"Authorization": "Bearer %s" % key, "X-Engraphis-Machine-Id": mid}
+
+
+def test_team_relay_requires_machine_id():
+    c = _app()
+    r = c.get("/relay/v1/ws1/bundles", headers=_auth(_tkey()))   # no device id header
+    assert r.status_code == 402 and "device id" in r.json()["error"].lower()
+
+
+def test_team_relay_enforces_seat_cap():
+    c = _app()
+    k = _tkey(seats=2)
+    for m in ("d1", "d2"):
+        assert c.get("/relay/v1/ws1/bundles", headers=_dev(k, m)).status_code == 200
+    over = c.get("/relay/v1/ws1/bundles", headers=_dev(k, "d3"))
+    assert over.status_code == 402 and "seat" in over.json()["error"].lower()
+    # an already-seated device keeps working (refresh, not a new claim)
+    assert c.get("/relay/v1/ws1/bundles", headers=_dev(k, "d1")).status_code == 200
+    # pushing is gated too, not just pulling
+    assert c.post("/relay/v1/ws1/bundles/x.json", content=b"{}",
+                  headers=_dev(k, "d3")).status_code == 402
+
+
+def test_team_relay_reclaims_idle_seat(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_LEASE_TTL_HOURS", "1")        # small reclaim window
+    c = _app()
+    k = _tkey(seats=1)
+    kid = licensing.parse_key(k).key_id
+    assert c.get("/relay/v1/ws1/bundles", headers=_dev(k, "d1")).status_code == 200
+    assert c.get("/relay/v1/ws1/bundles", headers=_dev(k, "d2")).status_code == 402
+    conn = reg.connect()                                        # age d1 past the window
+    conn.execute("UPDATE registrations SET last_seen=? WHERE key_id=? AND machine_id=?",
+                 (time.time() - 10 * 3600, kid, "d1"))
+    conn.commit()
+    conn.close()
+    assert c.get("/relay/v1/ws1/bundles", headers=_dev(k, "d2")).status_code == 200
+
+
+def test_pro_relay_is_not_device_capped():
+    # Pro is the individual multi-device tier (seats=1): many of ONE person's devices sync
+    # under the same account, so the relay must NOT seat-cap Pro even with a device header.
+    c = _app()
+    k = _key(plan="pro")                                        # seats=1
+    for m in ("p1", "p2", "p3"):
+        assert c.get("/relay/v1/ws1/bundles", headers=_dev(k, m)).status_code == 200
