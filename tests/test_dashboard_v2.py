@@ -205,9 +205,25 @@ def test_viewer_role_denied_on_governance_and_admin_routes(monkeypatch, tmp_path
         assert viewer.get("/api/export?workspace=demo").status_code == 403
         assert viewer.post("/api/license/activate",
                            json={"key": _team_key()}).status_code == 403
+        # a viewer can't create a folder either — creating a workspace is a member+ action
+        assert viewer.post("/api/workspaces/create",
+                           json={"workspace": "viewer-folder"}).status_code == 403
         # the same routes work for the admin who created the viewer
         assert admin.post("/api/pin", json={"id": mid, "workspace": "demo",
                           "pinned": True}).status_code == 200
+        # both members and admins may create their own shared folders
+        assert admin.post("/api/auth/users", json={"email": "m@x.co", "name": "M",
+                          "password": "anotherpass1", "role": "member"}).status_code == 200
+        member = TestClient(c.app)
+        assert member.post("/api/auth/login", json={"email": "m@x.co",
+                           "password": "anotherpass1"}).status_code == 200
+        assert member.post("/api/workspaces/create",
+                           json={"workspace": "member-folder"}).status_code == 200
+        assert admin.post("/api/workspaces/create",
+                          json={"workspace": "admin-folder"}).status_code == 200
+        # and the folders they made are visible to the whole team (shared, not per-user)
+        names = {w["name"] for w in viewer.get("/api/workspaces").json()["workspaces"]}
+        assert {"member-folder", "admin-folder"} <= names
 
 
 def test_graph_endpoint_shape(monkeypatch, tmp_path):

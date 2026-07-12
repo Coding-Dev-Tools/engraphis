@@ -26,6 +26,42 @@ def _mem_ids(svc, name):
         "SELECT id FROM memories WHERE workspace_id=?", (wid,))}
 
 
+# ── create_workspace ─────────────────────────────────────────────────────────
+def test_create_makes_empty_shared_workspace():
+    svc = _svc()
+    out = svc.create_workspace("team-alpha", "shared research notes")
+    assert out["created"] and out["workspace"] == "team-alpha"
+    # it exists, is empty, and is listed for everyone (shared, not per-user)
+    assert _wsid(svc, "team-alpha") is not None
+    assert _mem_ids(svc, "team-alpha") == set()
+    listed = {w["name"]: w for w in svc.list_workspaces()["workspaces"]}
+    assert listed["team-alpha"]["memories"] == 0
+    assert listed["team-alpha"]["description"] == "shared research notes"
+    # and a subsequent write lands in the pre-created folder (same id, not a new one)
+    mid = svc.remember("Alpha fact.", workspace="team-alpha", scope="workspace")["id"]
+    assert mid in _mem_ids(svc, "team-alpha")
+
+
+def test_create_rejects_duplicate_name():
+    svc = _svc()
+    svc.create_workspace("dupe")
+    with pytest.raises(ValidationError):
+        svc.create_workspace("dupe")
+    # a folder minted lazily by a write is just as much a duplicate
+    svc.remember("x", workspace="lazy", scope="workspace")
+    with pytest.raises(ValidationError):
+        svc.create_workspace("lazy")
+
+
+def test_create_respects_workspace_binding():
+    """A bound instance (ENGRAPHIS_WORKSPACES) must refuse folders outside its allow-list —
+    the create path can't become a hole in the isolation boundary every read/write honors."""
+    svc = MemoryService.create(":memory:", allowed_workspaces=["allowed"])
+    assert svc.create_workspace("allowed")["created"]
+    with pytest.raises(ValidationError):
+        svc.create_workspace("intruder")
+
+
 # ── merge_workspaces ────────────────────────────────────────────────────────
 def test_merge_folds_memories_and_removes_source():
     svc = _svc()

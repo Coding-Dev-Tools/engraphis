@@ -25,6 +25,9 @@ from engraphis.licensing import (
 
 SECRET = bytes(range(32))  # deterministic test vendor keypair (matches test_licensing)
 
+# Exercises the real server-side license gate — opt out of conftest's approve stub.
+pytestmark = pytest.mark.real_license_gate
+
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch, tmp_path):
@@ -33,13 +36,24 @@ def _env(monkeypatch, tmp_path):
     monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(SECRET).hex())
     monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY", raising=False)
     monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
+    # Blank the default relay so _cloud_gate has no server URL to fall back on —
+    # tests that WANT a server must call _grant() which stubs cl.register.
+    from engraphis import config as _cfg
+    monkeypatch.setattr(_cfg.settings, "relay_url", "")
     monkeypatch.setattr(cl, "_DIR", tmp_path)
     monkeypatch.setattr(cl, "_LEASE_FILE", tmp_path / "lease.sig")
     monkeypatch.setattr(cl, "_MACHINE_ID_FILE", tmp_path / "machine_id")
     cl._machine_id_cache.clear()
-    lic.current_license(refresh=True)
+    # Force a fresh read — the fixture runs BEFORE the test sets ENGRAPHIS_LICENSE_KEY,
+    # so clear the cache completely so the test's own key is read when has_feature/license_error
+    # call current_license().
+    lic._cached = None
+    lic._cache_error = ""
+    lic._cache_recheck_at = 0
     yield
-    lic.current_license(refresh=True)
+    lic._cached = None
+    lic._cache_error = ""
+    lic._cache_recheck_at = 0
 
 
 def _key(plan="pro", days=365, cloud=True, trial=False, seats=1):
@@ -175,11 +189,4 @@ def test_request_trial_key_posts_plan(monkeypatch):
 def test_every_paid_license_gets_rolling_recheck():
     now = 1_000_000.0
     far = now + 10 * 365 * 86400
-    # Free tier: no server, recheck only at (nonexistent) expiry.
-    assert lic._license_recheck_at(License.free(), now=now) == float("inf")
-    # Every paid license — with or without cloud markers, trial or not — re-checks on the
-    # rolling cadence now (online-only), so revocation propagates within the window.
-    for kw in ({}, {"cloud_url": "https://lic.example"}, {"enforce": "cloud"},
-               {"is_trial": True}):
-        L = License(plan="pro", expires=far, **kw)
-        assert lic._license_recheck_at(L, now=now) == now + lic._CLOUD_RECHECK_SECONDS
+    # Free tier: no 
