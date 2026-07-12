@@ -169,6 +169,19 @@ All notable changes to Engraphis are documented here. Format loosely follows
   excludes from an untrusted repo. `index_repo` no longer follows symlinked source files
   out of the repo root; the walk is bounded against pathological directory trees.
 
+## [0.8.0] - 2026-07-12
+
+### Added
+- **License cloud enforcement**: per-key server-side lease validation for cloud-mode keys.
+- **Webhook hardening**: Polar webhook signature verification, idempotent fulfillment.
+- **Dashboard team fixes**: role badges, member management UI, session cleanup.
+
+### Security
+- **Cloud-mode license keys**: signed `enforce: "cloud"` claim requires live lease from `ENGRAPHIS_CLOUD_URL`. Keys without the claim keep offline behavior.
+- **Trial tombstoning**: trial consumption recorded in multiple locations to prevent reset via state-dir wipe.
+- **License cache expiry**: process-wide cache re-validates after expiry; cloud-mode caches bounded to 15 minutes.
+- **Team login license gate**: `AuthStore.login` now requires a live Team license (was only gated on `create_user`).
+
 ## [0.7.0] - 2026-07-12
 
 ### Added
