@@ -3,9 +3,24 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [0.8.2] - 2026-07-12
+
+### Fixed
+- **Static package discovery**: added `engraphis/static/__init__.py` so `find_packages()` discovers the directory.
+- **Vendor glob**: changed package-data from `["*"]` to `["**/*"]` so `static/vendor/` bundles ship in the wheel.
+
 ## [0.8.1] - 2026-07-12
 
 ### Fixed
+- **Dashboard 500 on `GET /` — `static/index.html` was missing from the built wheel
+  (packaging bug).** `engraphis/static/` had no `__init__.py`, so setuptools'
+  `packages.find` never discovered it as a package and the `[tool.setuptools.package-data]`
+  rule `"engraphis.static" = ["*"]` matched nothing — the dashboard HTML, icons, and
+  vendored JS (d3, force-graph, marked, purify) were all silently dropped from the wheel.
+  Source checkouts were unaffected (the files exist on disk), which is why it only
+  surfaced on pip installs. Added `engraphis/static/__init__.py` and switched the glob to
+  `["**/*"]` so the `vendor/` subdirectory ships too. (`pyproject.toml`,
+  `engraphis/static/__init__.py`)
 - **Dashboard 500 on a fresh install — `GET /api/memories` crashed when no workspace
   existed yet.** On a brand-new database the memories list route resolved the workspace
   via `_default_ws()`, which returns `None` when there are zero workspaces, then passed
