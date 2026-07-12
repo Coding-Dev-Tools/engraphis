@@ -34,12 +34,26 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Sync an Engraphis workspace across devices.")
     ap.add_argument("--db", required=True, help="Path to the v2 database file.")
     ap.add_argument("--workspace", required=True, help="Workspace name to sync.")
-    ap.add_argument("--remote", required=True, metavar="DIR",
+    # Pick exactly one transport: a shared folder (self-hosted, free) or the managed relay.
+    ap.add_argument("--remote", metavar="DIR",
                     help="Shared folder both devices can see (Dropbox/iCloud/Syncthing/…).")
+    ap.add_argument("--relay", "--relay-url", dest="relay", nargs="?", const="",
+                    metavar="URL",
+                    help="Managed cloud relay root (e.g. https://sync.engraphis.app). "
+                         "Bare --relay uses ENGRAPHIS_RELAY_URL. Mutually exclusive with --remote.")
+    ap.add_argument("--relay-key", default=None, metavar="KEY",
+                    help="License key for the relay (defaults to this device's configured key).")
     ap.add_argument("--repo", default=None, help="Restrict the sync to one repo name.")
     ap.add_argument("--dry-run", action="store_true",
-                    help="Report what would change; write nothing (locally or to the folder).")
+                    help="Report what would change; write nothing (locally or to the remote).")
     args = ap.parse_args(argv)
+
+    # Exactly one transport must be selected.
+    use_relay = args.relay is not None
+    if bool(args.remote) == use_relay:
+        print("error: choose exactly one of --remote <folder> or --relay [<url>]",
+              file=sys.stderr)
+        return 2
 
     # ── Pro gate (checked up front, before touching the DB or the folder) ──────
     from engraphis.licensing import LicenseError, require_feature
@@ -66,14 +80,32 @@ def main(argv=None) -> int:
             return 2
         rid = rid_row["id"]
 
-    try:
-        from engraphis.backends.sync_folder import get_transport
-        transport = get_transport("folder", root=args.remote)
-    except (ValueError, OSError) as exc:
-        print(f"error: could not open sync folder '{args.remote}': {exc}", file=sys.stderr)
-        return 2
-
     from engraphis.config import settings
+    from engraphis.backends.sync_folder import get_transport
+
+    if use_relay:
+        # Namespace the relay by workspace NAME (not the per-device local id) so every
+        # device on the account lands in one bucket; account isolation is enforced
+        # server-side by the license key. See engraphis/inspector/sync_relay.py.
+        relay_url = args.relay or settings.relay_url
+        if not relay_url:
+            print("error: --relay needs a URL — pass --relay <url> or set ENGRAPHIS_RELAY_URL",
+                  file=sys.stderr)
+            return 2
+        try:
+            transport = get_transport("relay", base_url=relay_url,
+                                      workspace_id=args.workspace,
+                                      license_key=args.relay_key)
+        except ValueError as exc:
+            print(f"error: could not open relay '{relay_url}': {exc}", file=sys.stderr)
+            return 2
+    else:
+        try:
+            transport = get_transport("folder", root=args.remote)
+        except (ValueError, OSError) as exc:
+            print(f"error: could not open sync folder '{args.remote}': {exc}", file=sys.stderr)
+            return 2
+
     engine_sync = SyncEngine(engine.store, embedder=engine.embedder,
                              vector_index=engine.index,
                              allowed_workspaces=settings.allowed_workspaces or None)

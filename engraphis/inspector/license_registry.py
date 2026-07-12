@@ -76,6 +76,15 @@ def connect(db_path: Optional[str] = None) -> sqlite3.Connection:
     # Wait (up to 5s) for a competing writer's lock rather than failing with
     # "database is locked"; seat claims take a short IMMEDIATE write lock (see claim_seat).
     conn.execute("PRAGMA busy_timeout=5000")
+    if path != ":memory:":
+        # WAL: readers never block the writer (and vice-versa), so many team devices
+        # hitting the relay at once — bundle push/pull plus seat claim/refresh — don't
+        # serialize on a single database lock the way rollback-journal mode forces. It's a
+        # persistent per-DB setting (harmless to re-assert each connect) and requires a
+        # local filesystem, which Railway/Fly volumes are. NORMAL sync is the right
+        # durability/throughput trade for a single-instance relay behind a volume.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(_SCHEMA)
     conn.executescript(_REG_SCHEMA)
     return conn

@@ -43,6 +43,24 @@ under a profile: `docker compose --profile api up engraphis-api`.
 | `ENGRAPHIS_PRO_UPGRADE_URL`, `ENGRAPHIS_TEAM_UPGRADE_URL` | Checkout links behind 402/upgrade banners. |
 | `ENGRAPHIS_FORWARDED_ALLOW_IPS` | Default `127.0.0.1` (trust nothing). **Behind a TLS proxy set this to the proxy IP/CIDR** (or `*` if reachable only via that proxy) so `request.url.scheme` is https and the session cookie's Secure flag is set. Don't use `*` on a directly-published port — clients could spoof `X-Forwarded-For`. |
 
+## Persistent storage — REQUIRED (Railway / Fly volumes)
+
+**Sync bundles, the license/revocation registry, and the memory DB all live under `/data`
+(`ENGRAPHIS_DB_PATH`, `ENGRAPHIS_STATE_DIR`, `ENGRAPHIS_RELAY_DB`). If `/data` is not a
+persistent volume, every redeploy wipes all synced data and un-revokes every revoked key.**
+
+- **Railway:** attach a Volume to the service with mount path **`/data`** (Service → `+ Add`
+  → Volume → mount path `/data`). One volume per service; it must be in the service's region.
+- **Fly:** `fly volumes create engraphis_data --size 1` and mount it at `/data` in `fly.toml`.
+- **Docker Compose:** already correct — the named volume `engraphis-data:/data`.
+
+Managed hosts mount the volume **owned by root**, but the app runs as the non-root
+`engraphis` user. `docker-entrypoint.sh` handles this: the container starts as root, chowns
+`/data` to `engraphis`, then drops privileges via `gosu` before running the server — so a
+freshly-attached volume is writable with no manual step. (Symptom if this is ever bypassed:
+the container crashes at startup with `sqlite3.OperationalError: unable to open database
+file`.)
+
 ## Client env (end-user machines)
 
 | Variable | Purpose |

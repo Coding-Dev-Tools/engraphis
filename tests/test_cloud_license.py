@@ -380,3 +380,52 @@ def test_seat_cap_holds_under_concurrent_claims():
         assert reg.active_seat_count(conn, lic.key_id) == 3
     finally:
         conn.close()
+
+
+# ── per-key server-side enforcement (enforce: "cloud" in the signed payload) ───────────
+
+def _enforced_key(cloud_url="", plan="pro"):
+    now = time.time()
+    return licensing.compose_key(
+        {"v": 1, "plan": plan, "email": "b@x.co", "seats": 1, "issued": int(now),
+         "expires": int(now + 30 * 86400), "enforce": "cloud", "cloud_url": cloud_url},
+        SECRET)
+
+
+def test_cloud_enforced_key_fails_closed_without_server(monkeypatch):
+    """A key carrying ``enforce: "cloud"`` must be useless offline: with no env URL and
+    no URL baked into the key, verification DENIES (free tier) rather than falling back
+    to offline mode — so unsetting ENGRAPHIS_CLOUD_URL can't dodge revocation/leases."""
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _enforced_key(cloud_url=""))
+    got = licensing.current_license(refresh=True)
+    assert got.plan == "free"
+    assert "server-side verification" in licensing.license_error()
+
+
+def test_cloud_enforced_key_uses_baked_in_url(monkeypatch):
+    """The signed-in cloud_url drives lease registration with no env var set; a valid
+    lease from that server unlocks the plan. The URL is inside the Ed25519-signed
+    payload, so pointing the client elsewhere means re-signing — i.e. it's vendor-only."""
+    key = _enforced_key(cloud_url="https://lic.example")
+    lic_parsed = parse_key(key)
+    calls = {}
+
+    def fake_register(base, k, mid, **kw):
+        calls["base"] = base
+        payload = {"v": 1, "key_id": lic_parsed.key_id, "plan": lic_parsed.plan,
+                   "features": sorted(lic_parsed.features), "machine_id": mid,
+                   "issued": int(time.time()), "expires": int(time.time() + 3600)}
+        return cloud_license.compose_lease(payload, SECRET)
+
+    monkeypatch.setattr(cloud_license, "register", fake_register)
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
+    got = licensing.current_license(refresh=True)
+    assert calls["base"] == "https://lic.example"
+    assert got.plan == "pro" and got.has("sync")
+
+
+def test_offline_keys_stay_offline(monkeypatch):
+    """Back-compat: a key WITHOUT the enforce claim still verifies fully offline."""
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _key())
+    got = licensing.current_license(refresh=True)
+    assert got.plan == "pro" and got.enforce == "" and licensing.license_error() == ""

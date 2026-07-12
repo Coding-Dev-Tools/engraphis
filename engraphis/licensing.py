@@ -218,10 +218,71 @@ _LICENSE_FILE = _STATE_DIR / "license.key"
 
 #: One-time local free trial. Grants the full Pro feature set for TRIAL_DAYS with no
 #: key and no phone-home, so a user can evaluate every paid surface before buying.
-#: Honest by design: it's a local grant (resettable by deleting the file), not DRM —
-#: the point is to remove friction from evaluation, not to lock anyone out.
+#: Local and offline by design, but NOT casually resettable: consumption is also
+#: recorded in the independent tombstone locations below, so wiping the state dir no
+#: longer re-arms it. (Source-level bypass remains possible — this is open core.)
 TRIAL_DAYS = 3
 _TRIAL_FILE = _STATE_DIR / "trial.json"
+
+#: Trial-used tombstones. ``trial.json`` above is the *grant* (the active window) and
+#: lives in the single state dir — but when that dir alone also recorded that the trial
+#: was consumed, one ``rm -rf ~/.engraphis`` was an infinite-Pro reset loop. Starting a
+#: trial therefore also drops a marker in each independent location below, and the trial
+#: counts as USED when ANY of them exists (presence alone counts: we are the only writer,
+#: so an emptied/corrupted marker still blocks a re-grant rather than enabling one).
+#: Honest limit (open-core): someone who hunts down every marker — or edits this source —
+#: can still reset; these close the casual one-command reset. The truly non-bypassable
+#: gates remain the vendor-hosted cloud/relay checks.
+_TOMBSTONE_DIRS_OVERRIDE: Optional[list] = None   # tests re-route; None = real locations
+
+
+def _trial_tombstone_files() -> list:
+    """Every location that may carry the trial-used marker (first entry is preferred)."""
+    if _TOMBSTONE_DIRS_OVERRIDE is not None:
+        return [Path(d) / "trial.stamp" for d in _TOMBSTONE_DIRS_OVERRIDE]
+    dirs = []
+    for env in ("LOCALAPPDATA", "APPDATA", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+        base = os.environ.get(env, "").strip()
+        if base:
+            dirs.append(Path(base) / "engraphis")
+    home = Path.home()
+    dirs.append(home / ".cache" / "engraphis")
+    if _STATE_DIR != home / ".engraphis":  # relocated state dir: stamp the default too
+        dirs.append(home / ".engraphis")
+    seen, out = set(), []
+    for d in dirs:
+        if str(d) not in seen:
+            seen.add(str(d))
+            out.append(d / "trial.stamp")
+    return out
+
+
+def _trial_used_elsewhere() -> bool:
+    """True if any tombstone marks the one-time trial as already consumed."""
+    for path in _trial_tombstone_files():
+        try:
+            if path.exists():
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _write_trial_tombstones(payload: dict) -> None:
+    """Best-effort: record trial consumption in every independent location. Content is
+    informational (signed for forensics); presence is what :func:`_trial_used_elsewhere`
+    checks. A location that can't be written is skipped — the others still hold."""
+    body = json.dumps({"data": payload, "sig": _sign_trial(payload)})
+    for path in _trial_tombstone_files():
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body, encoding="utf-8")
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+        except OSError:
+            continue
 
 #: Monotonic wall-clock anchor. Persists the highest wall-clock time ever observed so a
 #: user cannot roll the system clock backward to resurrect an expired key/lease or stretch
@@ -297,6 +358,12 @@ class License:
     features: frozenset = field(default_factory=frozenset)
     key_id: str = ""  # short fingerprint for support/display; never the key itself
     is_trial: bool = False  # True when this License is a time-boxed local trial grant
+    #: ``"cloud"`` = this key is ONLY valid with a live server-side lease (see
+    #: :func:`_cloud_gate`); "" = classic offline verification. Part of the signed
+    #: payload, so a customer cannot strip it without breaking the signature.
+    enforce: str = ""
+    #: License-server URL baked into the key at issuance — also signed/unforgeable.
+    cloud_url: str = ""
 
     @classmethod
     def free(cls) -> "License":
@@ -423,6 +490,8 @@ def parse_key(key: str, *, now: Optional[float] = None) -> License:
         plan=plan, email=str(payload.get("email", "")), seats=seats,
         issued=payload.get("issued"), expires=expires, features=features,
         key_id=hashlib.sha256(key.encode("ascii")).hexdigest()[:12],
+        enforce=str(payload.get("enforce", "") or "").strip().lower(),
+        cloud_url=str(payload.get("cloud_url", "") or "").strip().rstrip("/"),
     )
 
 
@@ -430,6 +499,36 @@ def parse_key(key: str, *, now: Optional[float] = None) -> License:
 
 _cached: Optional[License] = None
 _cache_error: str = ""
+_cache_recheck_at: float = float("inf")  # wall-clock time after which the cache is stale
+
+#: Cloud-mode cache lifetime. Bounded so a REVOKED key degrades in a long-running
+#: process within minutes of its lease lapsing instead of at the next restart. The
+#: re-check is cheap: the stored lease verifies locally, so no network round-trip
+#: happens until the lease itself needs renewing.
+_CLOUD_RECHECK_SECONDS = 900
+
+
+def _license_recheck_at(lic: License, *, now: Optional[float] = None) -> float:
+    """Deadline after which :func:`current_license` must re-validate even uncalled with
+    ``refresh``. Expiry (key or trial) is a hard deadline — without it, a process that
+    outlived its key/trial kept paid features until restart, because the cache was
+    immortal. Cloud mode adds the rolling :data:`_CLOUD_RECHECK_SECONDS` bound so
+    revocation propagates into long-running processes on lease cadence."""
+    now = time.time() if now is None else now
+    deadline = float("inf") if lic.expires is None else float(lic.expires)
+    # Cloud mode is active whenever :func:`_cloud_gate` would consult a server — i.e. the
+    # env override is set OR the key itself carries a baked-in ``cloud_url``/``enforce``
+    # claim. Mirror that exact resolution here: keys distributed with the server URL signed
+    # in (what ``issue_key`` mints) must get the same revocation-propagation cadence as
+    # env-configured ones, not stay cached until expiry.
+    cloud_active = bool(
+        os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip()
+        or lic.cloud_url
+        or lic.enforce == "cloud"
+    )
+    if lic.is_paid and not lic.is_trial and cloud_active:
+        deadline = min(deadline, now + _CLOUD_RECHECK_SECONDS)
+    return deadline
 
 
 def _read_key_material() -> str:
@@ -445,14 +544,23 @@ def _read_key_material() -> str:
 def _cloud_gate(lic: "License", material: str) -> tuple:
     """Apply cloud enforcement to an already signature-valid key. Returns (allowed, reason).
 
-    Offline-only (no ``ENGRAPHIS_CLOUD_URL``): always allow — the local signature is the
-    gate, preserving the self-hosted story. Cloud mode: delegate to the lease check, which
-    requires the device to have registered and hold a valid lease (fails closed otherwise)."""
-    if not os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip():
+    The verification server is ``ENGRAPHIS_CLOUD_URL`` if set, else the URL baked into
+    the signed key at issuance (``lic.cloud_url`` — unforgeable, it is inside the signed
+    payload). A key carrying ``enforce: "cloud"`` is ONLY valid with a live server-side
+    lease: no server to verify against means DENY, not allow, so unsetting the env var
+    or running air-gapped cannot turn a cloud-enforced key into an offline one. Keys
+    without the claim keep the offline, self-hosted story exactly as before."""
+    base = os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip() or lic.cloud_url
+    if not base:
+        if lic.enforce == "cloud":
+            return False, ("this license requires server-side verification and no "
+                           "license server is configured — connect this device to the "
+                           "internet (the key carries no server URL and "
+                           "ENGRAPHIS_CLOUD_URL is unset)")
         return True, ""
     try:
         from engraphis import cloud_license
-        return cloud_license.gate(lic, material)
+        return cloud_license.gate(lic, material, base_url=base)
     except Exception as exc:  # cloud mode is on but the check errored → fail closed
         return False, "cloud verification error: %s" % exc
 
@@ -462,8 +570,8 @@ def current_license(*, refresh: bool = False) -> License:
     raises — a bad key degrades (to an active trial, else the free tier) and the reason
     is kept in :func:`license_error`. A valid paid key always takes precedence over a
     trial; an active local trial takes precedence over free."""
-    global _cached, _cache_error
-    if _cached is not None and not refresh:
+    global _cached, _cache_error, _cache_recheck_at
+    if _cached is not None and not refresh and time.time() < _cache_recheck_at:
         return _cached
     material = _read_key_material()
     if material:
@@ -475,12 +583,14 @@ def current_license(*, refresh: bool = False) -> License:
             allowed, reason = _cloud_gate(lic, material)
             if allowed:
                 _cached, _cache_error = lic, ""
+                _cache_recheck_at = _license_recheck_at(lic)
                 return _cached
             _cache_error = reason    # cloud denied (revoked/unregistered) → trial/free
     else:
         _cache_error = ""
     status = trial_status()
     _cached = _trial_license(status) if status.get("active") else License.free()
+    _cache_recheck_at = _license_recheck_at(_cached)
     return _cached
 
 
@@ -510,7 +620,7 @@ def trial_status(*, now: Optional[float] = None) -> dict:
     expires = t.get("expires")
     active = bool(expires) and now < float(expires)
     days_left = int((float(expires) - now) // 86400 + 1) if active else 0
-    return {"active": active, "used": bool(t.get("started")),
+    return {"active": active, "used": bool(t.get("started")) or _trial_used_elsewhere(),
             "started": t.get("started"), "expires": expires,
             "days_left": max(0, days_left), "trial_days": TRIAL_DAYS}
 
@@ -554,6 +664,7 @@ def start_trial(*, now: Optional[float] = None) -> dict:
     tmp = _TRIAL_FILE.with_name(_TRIAL_FILE.name + ".tmp")
     tmp.write_text(json.dumps(envelope), encoding="utf-8")
     os.replace(tmp, _TRIAL_FILE)
+    _write_trial_tombstones(payload)  # consumed-markers survive a state-dir wipe
     _monotonic_now()  # advance the clock anchor so trial expiry can't be rolled back
     try:
         os.chmod(_TRIAL_FILE, 0o600)
