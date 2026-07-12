@@ -14,7 +14,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 import numpy as np
 
@@ -61,12 +61,18 @@ class Store:
     """A connection to one Engraphis v2 database (one file, or ``:memory:``)."""
 
     def __init__(self, path: str = ":memory:", *,
-                 allowed_workspaces: Optional[set] = None) -> None:
+                 allowed_workspaces: Optional[set] = None,
+                 connect: Optional[Callable[[str], Any]] = None) -> None:
         self.path = path
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
+        if connect is not None:
+            # Injected connection factory (e.g. the SQLCipher encrypted backend). It owns
+            # opening + keying + row_factory; the core never imports the concrete driver.
+            self.conn = connect(path)
+        else:
+            self.conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
+            self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.execute("PRAGMA synchronous=NORMAL")
