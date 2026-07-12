@@ -140,10 +140,14 @@ class MemoryService:
         if graph_extractor is None:
             from engraphis.config import settings
             graph_extractor = settings.graph_extractor
+        # Optional encryption at rest: if ENGRAPHIS_DB_KEY[_FILE] is set, memories are
+        # stored in a SQLCipher-encrypted database. Off by default (returns None).
+        from engraphis.backends.encrypted_db import connector_from_env
+        connect = connector_from_env()
         engine = MemoryEngine.create(
             db_path, embed_model=embed_model, embed_dim=embed_dim,
             vector_backend=vector_backend, rerank_model=rerank_model,
-            extractor=extractor, graph_extractor=graph_extractor,
+            extractor=extractor, graph_extractor=graph_extractor, connect=connect,
         )
         return cls(engine, allowed_workspaces=allowed_workspaces)
 
