@@ -150,6 +150,44 @@ Exactly one of `--remote` / `--relay` is required. Sync is full-state and idempo
 running it on any cadence — or interrupting it — is safe. It's a **Pro** feature; the 3-day
 local trial (Settings → License, one click, no key) unlocks it for evaluation.
 
+### Automatic sync (no button, no cron)
+
+Team memory should stay converged without anyone remembering to click — but on a
+**predictable cadence**, not on every keystroke:
+
+- **Dashboard background sync (recommended).** Settings → Cloud Sync → **"Sync
+  automatically every N min"**. Flipping it on persists an auto-sync policy
+  (`autosync.json`, next to the DB) and a fault-isolated background loop in the dashboard
+  process runs the same relay sync on that interval. Cadence is **floored at 5 minutes** so
+  neither a slip of the finger nor a crafted request can drive the relay faster — this caps
+  relay traffic (and, on a metered host, cost) to a known ceiling regardless of how much
+  the team edits. It is **opt-in** (off by default) and Pro/Team-gated
+  (`engraphis.autosync.run_once` re-checks the license + key each tick and no-ops if the
+  plan lapsed).
+- **CLI + cron/Task Scheduler** (headless, dashboard not running): the `python -m
+  scripts.sync … --relay` line above, on whatever cadence you like.
+
+Sync deliberately stays cadence-based rather than firing on each memory write: every sync
+is a full-state bundle per workspace (export + upload + pull peers), so a fixed interval is
+cheaper and far more predictable than syncing per edit. The loop is fault-isolated (a relay
+hiccup is recorded and retried next tick, never crashes the dashboard), the "Sync now"
+button + its "last synced …" line keep working and also reflect auto runs, and you can kill
+the in-process loop entirely with `ENGRAPHIS_AUTOSYNC_LOOP=0` to drive sync only from cron.
+
+**Who can change it.** Auto-sync is an account-wide control, so in team mode **only an
+admin** can flip these toggles (`/api/sync/auto` POST is admin-gated in
+`inspector/auth.min_role`); members and viewers see the current setting read-only. This
+is orthogonal to who can *write* memories: a **member** keeps "store + view" (create,
+edit, correct, pin, forget, and read), a **viewer** stays read-only, and an **admin** gets
+those plus team management and the auto-sync switches. A member's writes still trigger
+on-change sync when an admin has enabled it — the sync follows the *write*, not the
+writer's role.
+
+The relay is namespaced by an account id derived from the license **email**, so every
+device that syncs with the *same* Team key lands in one shared bucket — that is what makes
+"team memory" a single converged store. The relay holds each Team device to a live seat
+(idle seats are reclaimed), so auto-sync never lets a Team key exceed its seat count.
+
 ---
 
 ## Security model

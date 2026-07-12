@@ -30,7 +30,8 @@ _INDEX = _STATIC / "index.html"
 # the auth bootstrap endpoints themselves (state/login/setup must work while logged
 # out) — same shape as engraphis/inspector/app.py's _PUBLIC set.
 _PUBLIC = {"/", "/api/health", "/api/ready", "/api/auth/state", "/api/auth/login",
-           "/api/auth/setup", "/api/auth/logout", "/webhooks/polar"}
+           "/api/auth/setup", "/api/auth/logout", "/api/auth/forgot", "/api/auth/reset",
+           "/webhooks/polar"}
 
 
 def create_app() -> FastAPI:
@@ -132,7 +133,50 @@ def create_app() -> FastAPI:
         import sys
         print("[engraphis] ship-safety: %s" % warning, file=sys.stderr)
 
+    _maybe_start_autosync()
     return app
+
+
+#: Guard so repeated ``create_app()`` calls (or a re-import) never spawn a second loop.
+_AUTOSYNC_STARTED = False
+
+
+def _maybe_start_autosync() -> None:
+    """Launch the background auto-sync loop once — unless disabled or under pytest.
+
+    A single daemon thread polls the persisted auto-sync policy (:mod:`engraphis.autosync`)
+    and runs a sync pass whenever the cadence is due. It is **opt-in** (the policy defaults
+    to disabled, so nothing happens until the user flips the Settings toggle), it is
+    licensed-gated inside :func:`autosync.run_once` (a lapsed plan / missing key just
+    no-ops), and it is fully fault-isolated: every error is swallowed and retried next tick
+    so the loop can never take the dashboard down. Skipped under pytest so the test suite
+    never opens a network loop, and switch-offable with ``ENGRAPHIS_AUTOSYNC_LOOP=0``."""
+    global _AUTOSYNC_STARTED
+    if _AUTOSYNC_STARTED:
+        return
+    import sys
+    if "pytest" in sys.modules or _os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    if _os.environ.get("ENGRAPHIS_AUTOSYNC_LOOP", "1").strip().lower() in (
+            "0", "false", "no", "off"):
+        return
+    import threading
+    import time
+
+    def _loop() -> None:
+        from engraphis import autosync
+        from engraphis.routes import v2_api
+        time.sleep(10)   # let startup settle before the first poll
+        while True:
+            try:
+                if autosync.due(autosync.load_policy()):
+                    autosync.run_once(v2_api.service())
+            except Exception:  # noqa: BLE001 — the loop must outlive any single failure
+                pass
+            time.sleep(60)
+
+    threading.Thread(target=_loop, name="engraphis-autosync", daemon=True).start()
+    _AUTOSYNC_STARTED = True
 
 
 app = create_app()
