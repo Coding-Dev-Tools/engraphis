@@ -670,6 +670,19 @@ def start_trial():
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 
 
+@router.post("/license/team-trial")
+def start_team_trial():
+    """Begin the one-time self-serve Team trial (unlocks Team mode, seats, and the
+    invite-email relay — a real signed key from the vendor, no purchase). One
+    network round-trip to the relay, unlike the fully-offline Pro trial above; see
+    ``licensing.start_team_trial``. 400 if a paid license is active, this device's
+    trial was already claimed, or the relay is unreachable."""
+    try:
+        return licensing.start_team_trial()
+    except licensing.LicenseError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+
+
 # ── Cloud sync (Pro) — the dashboard's one-click "Sync now" button ────────────────────
 # The heavy lifting is in core/sync.py + the RelayTransport client; these two routes just
 # expose it to the dashboard so a user never touches a terminal. Sync is namespaced by
