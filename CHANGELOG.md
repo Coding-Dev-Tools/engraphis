@@ -53,6 +53,23 @@ All notable changes to Engraphis are documented here. Format loosely follows
   volume, every redeploy still wipes synced data — attaching one is mandatory for cloud sync.
 
 ### Added
+- **Automatic cloud sync (Pro/Team) — "sync automatically or at the press of a button."**
+  Cloud sync already had the one-click dashboard button and the CLI; it now also runs
+  itself. Settings → Cloud Sync has an opt-in (default off) **"Sync automatically every N
+  min"** toggle: a fault-isolated background loop in the dashboard process runs the same
+  audited relay sync on that cadence — no terminal, no cron. Cadence is **floored at 5
+  minutes** so it can't be driven faster, capping relay traffic (and metered-host cost) to a
+  known ceiling regardless of edit volume; sync stays cadence-based rather than firing on
+  every memory write, since each sync is a full-state bundle per workspace. For a Team,
+  every device on the license shares one relay namespace, so this keeps team memory
+  converged for everyone. The loop re-checks the license + key each tick and no-ops if the
+  plan lapsed; kill switch `ENGRAPHIS_AUTOSYNC_LOOP=0`. **Changing auto-sync is admin-only**
+  in team mode (`/api/sync/auto` POST is gated in `inspector/auth.min_role`; members/viewers
+  see it read-only) — orthogonal to memory writes, where members keep "store + view" and
+  viewers stay read-only. New module `engraphis/autosync.py`, `GET/POST /api/sync/auto`, and
+  a reusable `v2_api._sync_all` shared by the button and the loop (a single per-workspace 402
+  no longer aborts the sweep; the button still surfaces a rejected key). See `docs/SYNC.md`
+  → *Automatic sync*.
 - **Managed sync relay is now reachable from the CLI.** The relay client
   (`backends/sync_relay.py`) and its license-gated server were built and tested, but no
   shipped entry point could drive them — `get_transport` refused `"relay"` and
@@ -172,6 +189,23 @@ All notable changes to Engraphis are documented here. Format loosely follows
   volume, every redeploy still wipes synced data — attaching one is mandatory for cloud sync.
 
 ### Added
+- **Automatic cloud sync (Pro/Team) — "sync automatically or at the press of a button."**
+  Cloud sync already had the one-click dashboard button and the CLI; it now also runs
+  itself. Settings → Cloud Sync has an opt-in (default off) **"Sync automatically every N
+  min"** toggle: a fault-isolated background loop in the dashboard process runs the same
+  audited relay sync on that cadence — no terminal, no cron. Cadence is **floored at 5
+  minutes** so it can't be driven faster, capping relay traffic (and metered-host cost) to a
+  known ceiling regardless of edit volume; sync stays cadence-based rather than firing on
+  every memory write, since each sync is a full-state bundle per workspace. For a Team,
+  every device on the license shares one relay namespace, so this keeps team memory
+  converged for everyone. The loop re-checks the license + key each tick and no-ops if the
+  plan lapsed; kill switch `ENGRAPHIS_AUTOSYNC_LOOP=0`. **Changing auto-sync is admin-only**
+  in team mode (`/api/sync/auto` POST is gated in `inspector/auth.min_role`; members/viewers
+  see it read-only) — orthogonal to memory writes, where members keep "store + view" and
+  viewers stay read-only. New module `engraphis/autosync.py`, `GET/POST /api/sync/auto`, and
+  a reusable `v2_api._sync_all` shared by the button and the loop (a single per-workspace 402
+  no longer aborts the sweep; the button still surfaces a rejected key). See `docs/SYNC.md`
+  → *Automatic sync*.
 - **Managed sync relay is now reachable from the CLI.** The relay client
   (`backends/sync_relay.py`) and its license-gated server were built and tested, but no
   shipped entry point could drive them — `get_transport` refused `"relay"` and

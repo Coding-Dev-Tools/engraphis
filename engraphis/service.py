@@ -821,6 +821,193 @@ class MemoryService:
         c.commit()
         return {"source": src, "target": dst, "memories_moved": int(n_mem), "id": wid_dst}
 
+    def _next_copy_name(self, base: str) -> str:
+        """Auto-name a workspace copy: ``"foo" -> "foo copy" -> "foo copy 2" -> ...``.
+        Only letters/digits/space/``._-/`` are ever emitted, so the result always
+        satisfies ``_NAME_RE`` without needing to run back through ``_clean_name``."""
+        n = 1
+        while True:
+            suffix = " copy" if n == 1 else f" copy {n}"
+            candidate = base + suffix
+            if len(candidate) > MAX_NAME_CHARS:
+                candidate = base[: MAX_NAME_CHARS - len(suffix)] + suffix
+            if self._lookup_workspace(candidate) is None:
+                return candidate
+            n += 1
+
+    def copy_workspace(self, source: str, new_name: Optional[str] = None, *,
+                       actor: str = "user") -> dict:
+        """Duplicate ``source`` into a brand-new workspace: repos (+ their code graph),
+        entities, edges, memories (with vectors, full-text and cross-memory links) and
+        sessions/events are all cloned under fresh ids, leaving ``source`` untouched.
+        This is the copy counterpart to ``merge_workspaces`` — merge moves rows in place
+        (ids survive), copy inserts parallel rows with new ids so the two workspaces are
+        fully independent afterwards (editing the copy never touches the original).
+        When ``new_name`` is omitted — the dashboard's one-click "Copy" button never
+        prompts — the name is auto-generated off ``source`` (``_next_copy_name``) so the
+        copy never collides with an existing workspace."""
+        src = self._clean_ws(source)
+        wid_src = self._lookup_workspace(src)
+        if wid_src is None:
+            raise ValidationError(f"no workspace named '{src}' yet")
+        if new_name:
+            dst = _clean_name(new_name, field="new_name")
+            if self._lookup_workspace(dst) is not None:
+                raise ValidationError(f"a workspace named '{dst}' already exists")
+        else:
+            dst = self._next_copy_name(src)
+        dst = self._authorize_workspace(dst)
+        actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS, required=False) or "user"
+
+        from engraphis.core import ids
+        import time as _time
+        ts = _time.time()
+        c = self.store.conn
+        wid_dst = ids.new_id("workspace")
+        src_row = c.execute("SELECT settings FROM workspaces WHERE id=?", (wid_src,)).fetchone()
+        c.execute("INSERT INTO workspaces(id, name, created_at, settings) VALUES (?,?,?,?)",
+                 (wid_dst, dst, ts, src_row["settings"] if src_row else "{}"))
+
+        # 1) Repos, cloned with fresh ids — plus their code graph (symbols/code_edges),
+        #    which (unlike merge's non-colliding case) must be remapped since the repo
+        #    id itself changes.
+        repo_remap: dict = {}
+        for r in [dict(x) for x in c.execute(
+                "SELECT * FROM repos WHERE workspace_id=?", (wid_src,))]:
+            nrid = ids.new_id("repo")
+            repo_remap[r["id"]] = nrid
+            c.execute(
+                "INSERT INTO repos(id, workspace_id, name, root_path, vcs_remote, primary_lang, "
+                "created_at, indexed_at, settings) VALUES (?,?,?,?,?,?,?,?,?)",
+                (nrid, wid_dst, r["name"], r["root_path"], r["vcs_remote"], r["primary_lang"],
+                 ts, r["indexed_at"], r["settings"]))
+            symbol_remap: dict = {}
+            for s in [dict(x) for x in c.execute(
+                    "SELECT * FROM symbols WHERE repo_id=?", (r["id"],))]:
+                nsid = ids.new_id("symbol")
+                symbol_remap[s["id"]] = nsid
+                c.execute(
+                    "INSERT INTO symbols(id, repo_id, kind, name, fqname, file, span, signature, "
+                    "lang, exported, content_hash, embedding_ref, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (nsid, nrid, s["kind"], s["name"], s["fqname"], s["file"], s["span"],
+                     s["signature"], s["lang"], s["exported"], s["content_hash"],
+                     s["embedding_ref"], s["updated_at"]))
+            for ce in [dict(x) for x in c.execute(
+                    "SELECT * FROM code_edges WHERE repo_id=?", (r["id"],))]:
+                c.execute(
+                    "INSERT INTO code_edges(id, repo_id, src, dst, relation, file, line) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (ids.new_id("edge"), nrid, symbol_remap.get(ce["src"], ce["src"]),
+                     symbol_remap.get(ce["dst"], ce["dst"]), ce["relation"], ce["file"], ce["line"]))
+
+        def _new_repo(old_repo_id):
+            return repo_remap.get(old_repo_id, old_repo_id) if old_repo_id is not None else None
+
+        # 2) Entities, cloned with fresh ids.
+        entity_remap: dict = {}
+        for e in [dict(x) for x in c.execute(
+                "SELECT * FROM entities WHERE workspace_id=?", (wid_src,))]:
+            neid = ids.new_id("entity")
+            entity_remap[e["id"]] = neid
+            c.execute(
+                "INSERT INTO entities(id, workspace_id, repo_id, name, etype, canonical_id, "
+                "created_at) VALUES (?,?,?,?,?,?,?)",
+                (neid, wid_dst, _new_repo(e["repo_id"]), e["name"], e["etype"],
+                 e["canonical_id"], ts))
+
+        # 3) Entity-graph edges, remapped onto the cloned entities/repos.
+        for ed in [dict(x) for x in c.execute(
+                "SELECT * FROM edges WHERE workspace_id=?", (wid_src,))]:
+            c.execute(
+                "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation, weight, "
+                "valid_from, valid_to, ingested_at, expired_at, provenance) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (ids.new_id("edge"), wid_dst, _new_repo(ed["repo_id"]),
+                 entity_remap.get(ed["src"], ed["src"]), entity_remap.get(ed["dst"], ed["dst"]),
+                 ed["relation"], ed["weight"], ed["valid_from"], ed["valid_to"],
+                 ed["ingested_at"], ed["expired_at"], ed["provenance"]))
+
+        # 4) Sessions, cloned with fresh ids (memories/events below repoint at these).
+        session_remap: dict = {}
+        for s in [dict(x) for x in c.execute(
+                "SELECT * FROM sessions WHERE workspace_id=?", (wid_src,))]:
+            nsid = ids.new_id("session")
+            session_remap[s["id"]] = nsid
+            c.execute(
+                "INSERT INTO sessions(id, workspace_id, repo_id, agent, user_id, goal, status, "
+                "started_at, ended_at, summary, open_threads, outcome) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (nsid, wid_dst, _new_repo(s["repo_id"]), s["agent"], s["user_id"], s["goal"],
+                 s["status"], s["started_at"], s["ended_at"], s["summary"], s["open_threads"],
+                 s["outcome"]))
+
+        # 5) Memories, cloned with fresh ids — plus their full-text and vector mirrors,
+        #    which key off the memory id and so need the same new id.
+        memory_remap: dict = {}
+        for m in [dict(x) for x in c.execute(
+                "SELECT * FROM memories WHERE workspace_id=?", (wid_src,))]:
+            nmid = ids.new_id("memory")
+            memory_remap[m["id"]] = nmid
+            c.execute(
+                "INSERT INTO memories (id, workspace_id, repo_id, session_id, scope, mtype, "
+                "title, content, summary, keywords, metadata, importance, surprise, stability, "
+                "access_count, last_access, valid_from, valid_to, ingested_at, expired_at, "
+                "pinned, sensitivity, provenance, sort_order) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (nmid, wid_dst, _new_repo(m["repo_id"]), session_remap.get(m["session_id"]),
+                 m["scope"], m["mtype"], m["title"], m["content"], m["summary"], m["keywords"],
+                 m["metadata"], m["importance"], m["surprise"], m["stability"],
+                 m["access_count"], m["last_access"], m["valid_from"], m["valid_to"],
+                 m["ingested_at"], m["expired_at"], m["pinned"], m["sensitivity"],
+                 m["provenance"], m["sort_order"]))
+            fts_row = c.execute(
+                "SELECT title, content, keywords FROM mem_fts WHERE id=?", (m["id"],)).fetchone()
+            if fts_row:
+                c.execute("INSERT INTO mem_fts(id, title, content, keywords) VALUES (?,?,?,?)",
+                         (nmid, fts_row["title"], fts_row["content"], fts_row["keywords"]))
+            vec_row = c.execute(
+                "SELECT dim, vector, model FROM mem_vectors WHERE id=?", (m["id"],)).fetchone()
+            if vec_row:
+                c.execute("INSERT INTO mem_vectors(id, dim, vector, model) VALUES (?,?,?,?)",
+                         (nmid, vec_row["dim"], vec_row["vector"], vec_row["model"]))
+            try:
+                ann_row = c.execute(
+                    "SELECT embedding FROM mem_vec_ann WHERE id=?", (m["id"],)).fetchone()
+                if ann_row:
+                    c.execute("INSERT INTO mem_vec_ann(id, embedding) VALUES (?,?)",
+                             (nmid, ann_row["embedding"]))
+            except Exception:
+                pass  # sqlite-vec ANN table only present when that backend is active
+
+        # 6) Cross-memory links where *both* endpoints were copied — a link to a memory
+        #    outside this workspace can't be meaningfully cloned, so those are dropped.
+        if memory_remap:
+            old_ids = list(memory_remap.keys())
+            marks = ",".join("?" for _ in old_ids)
+            for ln in [dict(x) for x in c.execute(
+                    f"SELECT a, b, relation, created_at FROM mem_links "
+                    f"WHERE a IN ({marks}) AND b IN ({marks})", old_ids + old_ids)]:
+                c.execute("INSERT INTO mem_links(a, b, relation, created_at) VALUES (?,?,?,?)",
+                         (memory_remap[ln["a"]], memory_remap[ln["b"]], ln["relation"],
+                          ln["created_at"]))
+
+        # 7) Events, cloned with fresh ids.
+        for ev in [dict(x) for x in c.execute(
+                "SELECT * FROM events WHERE workspace_id=?", (wid_src,))]:
+            c.execute(
+                "INSERT INTO events(id, workspace_id, repo_id, session_id, kind, content, refs, "
+                "interaction_level, ts) VALUES (?,?,?,?,?,?,?,?,?)",
+                (ids.new_id("event"), wid_dst, _new_repo(ev["repo_id"]),
+                 session_remap.get(ev["session_id"]), ev["kind"], ev["content"], ev["refs"],
+                 ev["interaction_level"], ev["ts"]))
+
+        self.store.audit(actor, "workspace_copy", wid_dst,
+                         f"{src} -> {dst} ({len(memory_remap)} memories)")
+        c.commit()
+        return {"source": src, "workspace": dst, "id": wid_dst,
+               "memories_copied": len(memory_remap)}
+
     def update_memory(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
                       title: Optional[str] = None, mtype: Optional[str] = None,
                       actor: str = "user") -> dict:

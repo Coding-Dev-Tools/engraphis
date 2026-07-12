@@ -32,6 +32,9 @@ SESSION_TTL_SECONDS = 12 * 3600
 LOCKOUT_FAILS = 5           # failures within LOCKOUT_WINDOW …
 LOCKOUT_WINDOW = 900        # … lock the account for LOCKOUT_SECONDS
 LOCKOUT_SECONDS = 60
+RESET_TOKEN_TTL_SECONDS = 1800   # a "forgot password" link is single-use, 30 min
+RESET_REQUEST_MAX = 3            # … and throttled per-email so it can't mail-bomb
+RESET_REQUEST_WINDOW = 3600      # an inbox (independent of the login lockout above)
 
 ROLES = ("viewer", "member", "admin")
 _ROLE_RANK = {r: i for i, r in enumerate(ROLES)}
@@ -55,6 +58,14 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
     expires_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sess_user ON auth_sessions(user_id);
+CREATE TABLE IF NOT EXISTS password_resets (
+    token_hash TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(id),
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    used       INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_reset_user ON password_resets(user_id);
 CREATE TABLE IF NOT EXISTS audit_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts          REAL NOT NULL,
@@ -83,11 +94,16 @@ def min_role(method: str, path: str) -> str:
     truth — the UI merely hides what this table already refuses. Shared by every app
     that mounts team-mode auth (``inspector/app.py``, ``dashboard_app.py``) so the
     policy can't drift between them."""
+    if path == "/api/sync/auto":
+        # Team auto-sync is an account-wide control, so CHANGING it is admin-only ("admins
+        # get more options"); anyone signed in may READ the current state (the dashboard
+        # renders the toggle disabled for non-admins). GET stays viewer, writes are admin.
+        return "admin" if method != "GET" else "viewer"
     if path.startswith("/api/auth/users") or path.startswith("/api/auth/audit") \
             or path == "/api/auth/overview" or path in (
             "/api/license/activate", "/api/export", "/api/consolidate"):
         return "admin"
-    if method == "POST":            # pin / forget / correct — audited governance
+    if method == "POST":            # pin / forget / correct — audited governance (member+)
         return "member"
     return "viewer"
 
@@ -135,6 +151,7 @@ class AuthStore:
         self.conn.executescript(_SCHEMA)
         self.iterations = int(iterations)
         self._failures: dict = {}   # email -> list[fail_ts] (in-memory throttle)
+        self._reset_requests: dict = {}   # email -> list[req_ts] (forgot-password throttle)
         self._last_prune: float = 0.0
 
     # ── users ──────────────────────────────────────────────────────────────────
@@ -225,6 +242,27 @@ class AuthStore:
         self.conn.commit()
         return self.get_user(user_id)
 
+    def delete_user(self, user_id: str) -> dict:
+        """Permanently remove a team member. Unlike ``disable`` (which flips a flag but
+        leaves the row — and its UNIQUE ``email`` — in place), this frees both the
+        license seat (``count_active_users()`` recomputes live from the table) *and*
+        the email address, so an admin can re-invite the same address after a
+        typo'd/bounced invite without a DB edit. Hard delete is intentional: this
+        codebase has no soft-delete convention, and ``audit_events`` (recorded by the
+        caller with the email captured beforehand) already preserves the history.
+        Returns the deleted user's row (pre-delete snapshot) for the caller's audit log."""
+        user = self.get_user(user_id)
+        if user is None:
+            raise AuthError("no such user")
+        # Same guard as update_user's demote/disable path — deletion is a strictly
+        # stronger version of disable, so it must never be able to lock everyone out.
+        if user["role"] == "admin" and not user["disabled"] and self._count_active_admins() <= 1:
+            raise AuthError("cannot delete the last active admin")
+        self.revoke_user_sessions(user_id)
+        self.conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+        self.conn.commit()
+        return user
+
     # ── login throttle (in-memory, per-process) ────────────────────────────────
     def _locked_until(self, email: str) -> float:
         now = time.time()
@@ -272,6 +310,79 @@ class AuthStore:
         self.record_event("login.success", actor_id=row["id"], actor_email=email, ip=ip)
         user["token"] = token
         return user
+
+    # ── password reset ("forgot password") ─────────────────────────────────────
+    def request_password_reset(self, email: str) -> Optional[dict]:
+        """Issue a single-use password-reset token for *email*, or return ``None``.
+
+        Returns ``None`` both when the address doesn't match an (enabled) account
+        AND when the per-email throttle is exceeded — callers MUST treat every
+        ``None`` identically (always respond as if the email might have been sent)
+        so a client can't enumerate registered users, or fingerprint the throttle,
+        by watching for a different HTTP response. Raises :class:`AuthError` only
+        for a malformed email string (also caller-swallowable for the same reason).
+
+        Any previously issued, still-unused token for this user is invalidated —
+        only the most recent reset link works, so an old email lying around in an
+        inbox can't be replayed after a newer one was requested.
+        """
+        email = self._clean_email(email)
+        now = time.time()
+        hits = [t for t in self._reset_requests.get(email, []) if now - t < RESET_REQUEST_WINDOW]
+        throttled = len(hits) >= RESET_REQUEST_MAX
+        hits.append(now)
+        self._reset_requests[email] = hits
+        if throttled:
+            self.record_event("password_reset.throttled", actor_email=email)
+            return None
+        row = self.conn.execute(
+            "SELECT id, email, name, disabled FROM users WHERE email=?", (email,)).fetchone()
+        if row is None or row["disabled"]:
+            return None
+        self.conn.execute("DELETE FROM password_resets WHERE user_id=? AND used=0", (row["id"],))
+        token = secrets.token_urlsafe(32)
+        self.conn.execute(
+            "INSERT INTO password_resets (token_hash, user_id, created_at, expires_at, used) "
+            "VALUES (?,?,?,?,0)",
+            (_hash_token(token), row["id"], now, now + RESET_TOKEN_TTL_SECONDS))
+        self.conn.commit()
+        self.record_event("password_reset.requested", actor_id=row["id"], actor_email=email)
+        return {"token": token, "email": row["email"], "name": row["name"]}
+
+    def reset_password(self, token: str, new_password: str) -> dict:
+        """Consume a password-reset token and set *new_password*.
+
+        Raises :class:`AuthError` on an invalid, expired, or already-used token, or
+        when the password fails :func:`_validate_password`. On success: every
+        existing session for the user is revoked (a token that leaked alongside a
+        stolen session, or a session left open on a shared machine, must not
+        survive the reset), the login lockout is cleared, and a fresh session is
+        created — same shape as :meth:`login`'s return (``user["token"]``) — so the
+        caller can sign the user straight back in.
+        """
+        _validate_password(new_password)
+        row = self.conn.execute(
+            "SELECT user_id, expires_at, used FROM password_resets WHERE token_hash=?",
+            (_hash_token(token),)).fetchone()
+        if row is None or row["used"] or row["expires_at"] < time.time():
+            raise AuthError("invalid or expired reset link")
+        user = self.get_user(row["user_id"])
+        if user is None or user["disabled"]:
+            raise AuthError("invalid or expired reset link")
+        self.conn.execute(
+            "UPDATE users SET pw_hash=? WHERE id=?",
+            (_hash_password(new_password, iterations=self.iterations), user["id"]))
+        self.conn.execute("UPDATE password_resets SET used=1 WHERE token_hash=?",
+                          (_hash_token(token),))
+        self.conn.commit()
+        self.revoke_user_sessions(user["id"])
+        self._failures.pop(user["email"], None)
+        self.record_event("password_reset.completed", actor_id=user["id"],
+                          actor_email=user["email"])
+        new_token = self.create_session(user["id"])
+        result = self.get_user(user["id"])
+        result["token"] = new_token
+        return result
 
     # ── sessions (raw token to the client, hash in the DB) ─────────────────────
     def create_session(self, user_id: str, *, ttl: int = SESSION_TTL_SECONDS) -> str:
