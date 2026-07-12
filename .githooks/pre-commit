@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Warn-only design-slop check for the Engraphis dashboard.
+#
+# Runs ONLY when engraphis/static/index.html is staged, and NEVER blocks the
+# commit — it prints a summary and always exits 0. Warn-only is deliberate: the
+# autonomous _cowork_ops fleet auto-commits, and a blocking hook would break
+# those unattended commits. For a hard gate on your own manual commits, run
+# `bash scripts/design-lint.sh --strict` yourself before committing.
+#
+# Enable once, from the repo root (survives on Windows / Git Bash too):
+#   git config core.hooksPath .githooks
+set -uo pipefail
+
+staged="$(git diff --cached --name-only 2>/dev/null || true)"
+printf '%s\n' "$staged" | grep -q 'engraphis/static/index\.html' || exit 0
+
+if [ -f scripts/design-lint.sh ]; then
+  bash scripts/design-lint.sh engraphis/static/index.html || true
+fi
+exit 0

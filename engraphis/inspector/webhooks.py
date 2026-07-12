@@ -409,6 +409,37 @@ and will share it with you separately — this email does not contain it.
 """
 
 
+def _password_reset_email_text(name: str, reset_url: str) -> str:
+    greeting = "Hi %s," % name if name else "Hi,"
+    return f"""{greeting}
+
+Someone requested a password reset for your Engraphis dashboard account. If this
+was you, choose a new password here — this link works once and expires in 30
+minutes:
+
+    {reset_url}
+
+If you didn't request this, you can safely ignore this email: your password has
+not been changed.
+
+— The Engraphis team
+"""
+
+
+def send_password_reset_email(to: str, name: str, reset_url: str) -> None:
+    """Deliver a one-time password-reset link to *to* (``/api/auth/forgot``).
+
+    Raises on delivery failure (see :func:`_send_text_email`); the caller
+    (``routes.v2_team.forgot``) treats this as best-effort and must never let a
+    delivery failure change the HTTP response — the "forgot password" endpoint
+    always answers identically regardless of outcome, so a failed send can't be
+    used to fingerprint which addresses have accounts.
+    """
+    subject = "Reset your Engraphis dashboard password"
+    text_body = _password_reset_email_text(name, reset_url)
+    _send_text_email(to, subject, text_body)
+
+
 def send_team_invite_email(to: str, name: str, role: str) -> None:
     """Notify a newly added dashboard team member (``/api/auth/users``) that
     their account exists.

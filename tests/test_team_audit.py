@@ -123,6 +123,21 @@ def test_role_change_and_disable_are_recorded(monkeypatch, tmp_path):
     assert only and all(e["action"] == "user.disabled" for e in only)
 
 
+def test_delete_is_recorded_and_target_survives_the_row(monkeypatch, tmp_path):
+    """The audit trail must still show who was removed even though the row itself
+    (and its email) is gone — the row's email is captured into `target` beforehand."""
+    c = _client(monkeypatch, tmp_path)
+    _admin(c)
+    c.post("/api/auth/users", json={"email": "m@x.co", "name": "Mo",
+           "password": "anotherpass1", "role": "member"})
+    mid = [u["id"] for u in c.get("/api/auth/users").json()["users"]
+           if u["email"] == "m@x.co"][0]
+    assert c.post("/api/auth/users/delete", json={"user_id": mid}).status_code == 200
+    events = c.get("/api/auth/audit").json()["events"]
+    deleted = next(e for e in events if e["action"] == "user.deleted")
+    assert deleted["actor_email"] == "admin@x.co" and deleted["target"] == "m@x.co"
+
+
 def test_audit_and_overview_are_admin_only(monkeypatch, tmp_path):
     c = _client(monkeypatch, tmp_path)
     _admin(c)

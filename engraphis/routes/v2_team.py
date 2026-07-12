@@ -46,6 +46,15 @@ class LoginReq(BaseModel):
     password: str = Field(..., min_length=1, max_length=128)
 
 
+class ForgotReq(BaseModel):
+    email: str = Field(..., min_length=1, max_length=254)
+
+
+class ResetReq(BaseModel):
+    token: str = Field(..., min_length=10, max_length=256)
+    password: str = Field(..., min_length=10, max_length=128)
+
+
 class NewUserReq(BaseModel):
     email: str = Field(..., min_length=5, max_length=254)
     name: str = Field(default="", max_length=120)
@@ -57,6 +66,10 @@ class UpdUserReq(BaseModel):
     user_id: str
     role: Optional[str] = Field(default=None, pattern=r'^(viewer|member|admin)$')
     disabled: Optional[bool] = None
+
+
+class DelUserReq(BaseModel):
+    user_id: str
 
 
 def _enabled() -> bool:
@@ -139,6 +152,44 @@ def attach(app: FastAPI, service):
         _set_cookie(response, u.pop("token"), secure=request.url.scheme == "https")
         return {"user": u}
 
+    @router.post("/forgot")
+    def forgot(body: ForgotReq, request: Request):
+        """Request a password-reset link. Always answers ``{"ok": true}`` — the
+        response is identical whether or not the email matches an account, the
+        account is disabled, or the per-email throttle kicked in, so a client
+        can't enumerate registered users by watching for a different reply.
+
+        If (and only if) a matching, enabled account exists and the throttle
+        allows it, a single-use reset link is emailed. Delivery is best-effort:
+        a failure is logged server-side and never surfaced to the caller, for the
+        same anti-enumeration reason (see send_password_reset_email's docstring).
+        """
+        try:
+            info = store.request_password_reset(body.email)
+        except AuthError:
+            info = None
+        if info:
+            base = os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip().rstrip("/")
+            reset_url = base + "/?reset_token=" + info["token"]
+            try:
+                from engraphis.inspector.webhooks import send_password_reset_email
+                send_password_reset_email(info["email"], info["name"], reset_url)
+            except Exception as exc:  # noqa: BLE001 — must never change the response
+                logger.warning("password reset email to %s failed: %s", info["email"], exc)
+        return {"ok": True}
+
+    @router.post("/reset")
+    def reset(body: ResetReq, request: Request, response: Response):
+        """Consume a password-reset token issued by ``/forgot`` and sign the user
+        back in with a fresh session (old sessions are revoked — see
+        AuthStore.reset_password)."""
+        try:
+            u = store.reset_password(body.token, body.password)
+        except AuthError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)})
+        _set_cookie(response, u.pop("token"), secure=request.url.scheme == "https")
+        return {"user": u}
+
     @router.post("/logout")
     def logout(request: Request, response: Response):
         tok = request.cookies.get(_COOKIE)
@@ -200,6 +251,21 @@ def attach(app: FastAPI, service):
                                actor_id=admin["id"], actor_email=admin["email"],
                                target=tgt, ip=ip)
         return {"user": u}
+
+    @router.post("/users/delete")
+    def del_user(body: DelUserReq, request: Request):
+        """Permanently remove a member — frees their seat and their email address so
+        the same address can be re-invited (e.g. after a typo'd/bounced invite email).
+        See AuthStore.delete_user for why this is a hard delete rather than disable."""
+        admin = _require(request, "admin")
+        try:
+            deleted = store.delete_user(body.user_id)
+        except AuthError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)})
+        ip = request.client.host if request.client else None
+        store.record_event("user.deleted", actor_id=admin["id"], actor_email=admin["email"],
+                           target=deleted["email"], ip=ip)
+        return {"ok": True}
 
     @router.get("/audit")
     def audit(request: Request, limit: int = 100, action: Optional[str] = None,
