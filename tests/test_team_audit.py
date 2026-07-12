@@ -188,4 +188,59 @@ def test_delete_is_recorded_and_target_survives_the_row(monkeypatch, tmp_path):
     assert c.post("/api/auth/users/delete", json={"user_id": mid}).status_code == 200
     events = c.get("/api/auth/audit").json()["events"]
     deleted = next(e for e in events if e["action"] == "user.deleted")
- 
+    assert deleted["actor_email"] == "admin@x.co" and deleted["target"] == "m@x.co"
+
+
+def test_audit_and_overview_are_admin_only(monkeypatch, tmp_path):
+    c = _client(monkeypatch, tmp_path)
+    _admin(c)
+    c.post("/api/auth/users", json={"email": "v@x.co", "name": "Vi",
+           "password": "viewerpass12", "role": "viewer"})
+    viewer = TestClient(c.app)
+    assert viewer.post("/api/auth/login", json={"email": "v@x.co",
+                       "password": "viewerpass12"}).status_code == 200
+    # a viewer cannot read the audit log or the overview
+    assert viewer.get("/api/auth/audit").status_code == 403
+    assert viewer.get("/api/auth/overview").status_code == 403
+
+
+def test_overview_reports_seat_usage(monkeypatch, tmp_path):
+    c = _client(monkeypatch, tmp_path, seats=3)
+    _admin(c)
+    c.post("/api/auth/users", json={"email": "m@x.co", "name": "Mo",
+           "password": "anotherpass1", "role": "member"})
+    ov = c.get("/api/auth/overview").json()
+    assert ov["seats"]["limit"] == 3
+    assert ov["seats"]["used"] == 2          # admin + member
+    assert ov["seats"]["available"] == 1
+    assert {m["email"] for m in ov["members"]} == {"admin@x.co", "m@x.co"}
+    # admin has a last_active (they logged in at setup); activity mix is populated
+    admin_row = next(m for m in ov["members"] if m["email"] == "admin@x.co")
+    assert admin_row["last_active"] is not None
+    assert ov["activity"].get("login.success", 0) >= 1
+
+
+def test_audit_csv_export(monkeypatch, tmp_path):
+    c = _client(monkeypatch, tmp_path)
+    _admin(c)
+    r = c.get("/api/auth/audit/export")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/csv")
+    body = r.text.splitlines()
+    assert body[0] == "ts,iso_utc,actor_id,actor_email,action,target,detail,ip"
+    assert any("team.setup" in line for line in body[1:])
+
+
+def test_audit_export_neutralizes_csv_formula_injection(monkeypatch, tmp_path):
+    """An UNauthenticated failed-login attempt seeds actor_email into the audit log; the
+    CSV export must defuse spreadsheet-formula injection (CWE-1236)."""
+    c = _client(monkeypatch, tmp_path)
+    _admin(c)
+    evil = "=1+cmd@evil.co"   # space-free so it passes the email regex; a formula in Excel
+    anon = TestClient(c.app)
+    r = anon.post("/api/auth/login", json={"email": evil, "password": "whatever12"})
+    assert r.status_code == 401   # recorded as login.failed with actor_email=evil
+    csv_text = c.get("/api/auth/audit/export").text
+    # the cell must be quote-prefixed; no bare cell may start with the formula
+    assert "'" + evil in csv_text
+    assert ("," + evil) not in csv_text and not csv_text.startswith(evil)
