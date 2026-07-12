@@ -5,6 +5,42 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Security
+- **Per-key server-side license enforcement (opt-in at issuance).** Keys can now carry a
+  signed `enforce: "cloud"` claim plus a `cloud_url` — such a key is ONLY valid while the
+  device holds a live Ed25519-signed lease from that server (register/renew, fail-closed),
+  so it is useless offline, after revocation, or with `ENGRAPHIS_CLOUD_URL` unset. The
+  claim lives inside the signed payload and cannot be stripped. Enable by setting
+  `ENGRAPHIS_KEY_CLOUD_URL` on the fulfillment server; keys without the claim keep the
+  classic offline, no-phone-home behavior. License emails state which mode the key uses.
+- **One-time trial can no longer be reset by wiping the state dir.** Trial consumption is
+  now also recorded in independent tombstone locations (LOCALAPPDATA/APPDATA, XDG state/
+  cache, `~/.cache/engraphis`), and the trial counts as used if ANY marker exists — the
+  `rm -rf ~/.engraphis` → fresh-3-day-Pro loop is closed. (Open-core honesty: source-level
+  bypass remains possible; vendor-hosted relay/cloud checks are the hard gates.)
+- **License cache re-checks expiry.** The process-wide cache was immortal, so a process
+  that outlived its key or trial kept paid features until restart. `current_license()`
+  now re-validates once the cached expiry passes, and cloud-mode caches are bounded to
+  15 minutes so revocation propagates into long-running processes on lease cadence.
+- **Team-mode logins now require a live Team license.** `AuthStore.create_user` was gated
+  on the `team` feature, but `AuthStore.login` was not — so accounts created while a Team
+  license was valid kept full multi-user access (logins, roles, audit) indefinitely after
+  the license expired or was revoked. The gate now lives in `AuthStore.login` (the same
+  choke point as `create_user`), so the dashboard and the Inspector both inherit it; a
+  refused login returns the structured 402 and records a `login.license_refused` audit
+  event. Existing sessions age out within `SESSION_TTL_SECONDS` (12h). Regression test:
+  `tests/test_dashboard_v2.py::test_login_requires_live_team_license`.
+
+### Fixed
+- **Persistent-volume startup crash on managed hosts (Railway/Fly).** A volume mounted at
+  `/data` is owned by root, but the container runs as the non-root `engraphis` user, so the
+  app crashed at boot with `sqlite3.OperationalError: unable to open database file` — taking
+  the sync relay's durable storage (bundles + license registry) down with it. New
+  `docker-entrypoint.sh` starts as root, chowns `/data` to `engraphis`, then drops
+  privileges via `gosu` (added to the image) before running the server. Dockerfile now runs
+  the entrypoint; DEPLOY.md documents the required `/data` volume. Without a persistent
+  volume, every redeploy still wipes synced data — attaching one is mandatory for cloud sync.
+
 ### Added
 - **Cloud sync (Pro)** — keep your memory store consistent across devices (and, on Team,
   across a group) over any shared folder (Dropbox / iCloud / OneDrive / Syncthing / git).
