@@ -404,6 +404,39 @@ def test_trial_start_and_rejection(monkeypatch, tmp_path):
         assert r2.status_code == 200  # no-op: already on trial
 
 
+def test_team_trial_route_activates_relay_issued_key(monkeypatch, tmp_path):
+    """POST /api/license/team-trial delegates to licensing.start_team_trial(), which
+    needs the vendor relay (unlike the local-only Pro trial) — mock the relay client
+    call so this stays on the offline gate."""
+    from engraphis import cloud_license
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path / "state"))  # isolate machine_id
+    # the relay-minted key is signed with the test keypair, so verification against
+    # the real key needs the same pubkey override _client(key=...) would normally set
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(_SECRET).hex())
+    trial_key = compose_key(
+        {"v": 1, "plan": "team", "email": "trial@engraphis.local", "seats": 1,
+         "issued": int(time.time()), "expires": int(time.time() + 3 * 86400)}, _SECRET)
+    monkeypatch.setattr(
+        cloud_license, "request_team_trial_key",
+        lambda base, mid, email="": (trial_key, ""))
+    with _client(monkeypatch, tmp_path) as c:
+        r = c.post("/api/license/team-trial", json={})
+        assert r.status_code == 200 and r.json()["plan"] == "team"
+        assert c.get("/api/license").json()["plan"] == "team"
+
+
+def test_team_trial_route_surfaces_relay_denial_as_400(monkeypatch, tmp_path):
+    from engraphis import cloud_license
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        cloud_license, "request_team_trial_key",
+        lambda base, mid, email="": (None, "the free Team trial has already been used"))
+    with _client(monkeypatch, tmp_path) as c:
+        r = c.post("/api/license/team-trial", json={})
+        assert r.status_code == 400
+        assert "already been used" in r.json()["detail"]["error"]
+
+
 def test_license_activate_valid_and_invalid(monkeypatch, tmp_path):
     """Valid key activates when no license is already active; invalid key is rejected."""
     monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(_SECRET).hex())

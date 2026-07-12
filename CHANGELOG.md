@@ -42,7 +42,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
   password — the admin still shares that out-of-band — and delivery is best-effort: a
   failure is logged, recorded as a `user.invite_email_failed` audit event, and surfaced in
   the dashboard toast, but never blocks account creation. New `ENGRAPHIS_DASHBOARD_URL`
-  (optional) puts a real sign-in link in the email.
+  (optional) puts a real sign-in link in the email. Note: this alone only fixed the code
+  path — a self-hosted instance with no `ENGRAPHIS_RESEND_API_KEY`/`SMTP_*` of its own
+  still couldn't actually send anything, which is what the vendor-relay fallback below
+  addresses.
 - **Persistent-volume startup crash on managed hosts (Railway/Fly).** A volume mounted at
   `/data` is owned by root, but the container runs as the non-root `engraphis` user, so the
   app crashed at boot with `sqlite3.OperationalError: unable to open database file` — taking
@@ -53,6 +56,33 @@ All notable changes to Engraphis are documented here. Format loosely follows
   volume, every redeploy still wipes synced data — attaching one is mandatory for cloud sync.
 
 ### Added
+- **Team invite emails now work out of the box with zero email setup — vendor-relay
+  fallback.** A self-hosted Team dashboard with no `ENGRAPHIS_RESEND_API_KEY`/`SMTP_*` of
+  its own previously left "Add member" invites undelivered (correctly reported as failed,
+  but still failed). New `POST /license/v1/team-invite` on the vendor relay lets any
+  instance holding a currently-valid, `team`-feature license key have the VENDOR's own
+  mail provider send the notification instead — the license key is the authentication
+  (same server-side gate as every other licensed feature,
+  `license_registry.verify_for_feature`), and a per-key daily send cap
+  (`ENGRAPHIS_TEAM_INVITE_DAILY_CAP`, default **10**) bounds cost/abuse. `add_user` now
+  tries local delivery first and only falls back to the relay when nothing local is
+  configured, so operators who want their own sending address/domain still get it by
+  setting `ENGRAPHIS_RESEND_API_KEY`/`SMTP_*` as before. The email names the inviting
+  admin and sets `Reply-To` to them, since the visible From address is the vendor's when
+  relayed. **Follow-up:** the relay's gate — a real, currently-valid `team`-feature key —
+  previously meant a Team *trial* couldn't use it: the existing local one-click Pro trial
+  (`licensing.start_trial`) is a fully offline, client-only construct with no signed key
+  at all, so it could never satisfy a server-side check that a paid key can. New
+  self-serve `POST /license/v1/start-trial` mints a REAL signed `team` key (via the same
+  signer/registry as a purchase) for a one-time, no-card, no-checkout trial — one grant
+  per device (`machine_id`) ever — so trial users get the actual "click button, send
+  invite" experience, not just a locked-out preview, which is what makes them convert.
+  Client entry point `licensing.start_team_trial()` (mirrors `start_trial()`, but needs
+  one relay round-trip since the key must be independently verifiable) and dashboard
+  route `POST /api/license/team-trial`; wired into the dashboard's Team-mode teaser,
+  the generic feature-lock screen, and the Settings → License panel as a "Start free
+  Team trial" button alongside the existing Pro trial button. The existing offline Pro
+  trial is unchanged.
 - **Automatic cloud sync (Pro/Team) — "sync automatically or at the press of a button."**
   Cloud sync already had the one-click dashboard button and the CLI; it now also runs
   itself. Settings → Cloud Sync has an opt-in (default off) **"Sync automatically every N
@@ -192,7 +222,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
   password — the admin still shares that out-of-band — and delivery is best-effort: a
   failure is logged, recorded as a `user.invite_email_failed` audit event, and surfaced in
   the dashboard toast, but never blocks account creation. New `ENGRAPHIS_DASHBOARD_URL`
-  (optional) puts a real sign-in link in the email.
+  (optional) puts a real sign-in link in the email. Note: this alone only fixed the code
+  path — a self-hosted instance with no `ENGRAPHIS_RESEND_API_KEY`/`SMTP_*` of its own
+  still couldn't actually send anything, which is what the vendor-relay fallback below
+  addresses.
 - **Persistent-volume startup crash on managed hosts (Railway/Fly).** A volume mounted at
   `/data` is owned by root, but the container runs as the non-root `engraphis` user, so the
   app crashed at boot with `sqlite3.OperationalError: unable to open database file` — taking
@@ -203,6 +236,33 @@ All notable changes to Engraphis are documented here. Format loosely follows
   volume, every redeploy still wipes synced data — attaching one is mandatory for cloud sync.
 
 ### Added
+- **Team invite emails now work out of the box with zero email setup — vendor-relay
+  fallback.** A self-hosted Team dashboard with no `ENGRAPHIS_RESEND_API_KEY`/`SMTP_*` of
+  its own previously left "Add member" invites undelivered (correctly reported as failed,
+  but still failed). New `POST /license/v1/team-invite` on the vendor relay lets any
+  instance holding a currently-valid, `team`-feature license key have the VENDOR's own
+  mail provider send the notification instead — the license key is the authentication
+  (same server-side gate as every other licensed feature,
+  `license_registry.verify_for_feature`), and a per-key daily send cap
+  (`ENGRAPHIS_TEAM_INVITE_DAILY_CAP`, default **10**) bounds cost/abuse. `add_user` now
+  tries local delivery first and only falls back to the relay when nothing local is
+  configured, so operators who want their own sending address/domain still get it by
+  setting `ENGRAPHIS_RESEND_API_KEY`/`SMTP_*` as before. The email names the inviting
+  admin and sets `Reply-To` to them, since the visible From address is the vendor's when
+  relayed. **Follow-up:** the relay's gate — a real, currently-valid `team`-feature key —
+  previously meant a Team *trial* couldn't use it: the existing local one-click Pro trial
+  (`licensing.start_trial`) is a fully offline, client-only construct with no signed key
+  at all, so it could never satisfy a server-side check that a paid key can. New
+  self-serve `POST /license/v1/start-trial` mints a REAL signed `team` key (via the same
+  signer/registry as a purchase) for a one-time, no-card, no-checkout trial — one grant
+  per device (`machine_id`) ever — so trial users get the actual "click button, send
+  invite" experience, not just a locked-out preview, which is what makes them convert.
+  Client entry point `licensing.start_team_trial()` (mirrors `start_trial()`, but needs
+  one relay round-trip since the key must be independently verifiable) and dashboard
+  route `POST /api/license/team-trial`; wired into the dashboard's Team-mode teaser,
+  the generic feature-lock screen, and the Settings → License panel as a "Start free
+  Team trial" button alongside the existing Pro trial button. The existing offline Pro
+  trial is unchanged.
 - **Automatic cloud sync (Pro/Team) — "sync automatically or at the press of a button."**
   Cloud sync already had the one-click dashboard button and the CLI; it now also runs
   itself. Settings → Cloud Sync has an opt-in (default off) **"Sync automatically every N
@@ -684,40 +744,4 @@ code-aware symbol graph. All additions are local-first (no LLM or network depend
   `<img src=x onerror="...">` would run arbitrary JavaScript the moment a human viewed it in the
   dashboard, independent of and in addition to the memory-poisoning threat model above (that
   content is explicitly untrusted — MASTER_PLAN.md §16 — is exactly why this mattered). Fixed by
-  piping every markdown render through `DOMPurify.sanitize()` (new `renderMd()` helper); verified
-  the `onerror` attribute is stripped while ordinary markdown renders unchanged. See
-  `SECURITY.md` §1.
-
-## [Unreleased] — release-readiness pass
-
-### Added
-- **MCP server** (`engraphis-mcp`, `engraphis.mcp_server`) exposing `engraphis_remember`,
-  `engraphis_recall`, `engraphis_start_session`, `engraphis_end_session`, and `engraphis_stats`
-  so Claude Code, Cursor, Cline, Zed, and Windsurf can use Engraphis as agent memory.
-- **`MemoryService`** (`engraphis.service`) — a transport-agnostic, fully validated facade over
-  the v2 engine, usable as a plain Python library (no MCP dependency, offline-capable).
-- **Input validation & sanitization** on the write path (size caps, control-character stripping,
-  strict enums, metadata limits, provenance) as a memory-poisoning defense.
-- **Optional bearer-token auth** (`ENGRAPHIS_API_TOKEN`) on the REST API with constant-time
-  comparison, plus a configurable CORS allow-list (`ENGRAPHIS_CORS_ORIGINS`).
-- `LICENSE` (Apache-2.0), `NOTICE`, `SECURITY.md` (threat model), and this `CHANGELOG.md`.
-- `Dockerfile`, `docker-compose.yml`, `.dockerignore` for one-command self-hosting.
-- Larger offline eval suite (`eval/datasets/codemem.jsonl`, 24 questions) for the coding-agent
-  memory wedge.
-- New tests: `test_service.py`, `test_mcp_server.py`, `test_app_auth.py` (55 tests total).
-
-### Changed
-- **Rebranded to a clean, independent Engraphis identity**: removed third-party SDK-compat
-  framing, renamed the default database to `engraphis.db`, and updated docs/positioning.
-- License moved to **Apache-2.0** (from MIT) for clearer patent/trademark posture.
-- `pyproject.toml` restructured for **open-core**: dependency-light core (`numpy` only) with
-  `server` / `mcp` / `all` extras and an `engraphis-mcp` entry point.
-- Tightened CORS defaults to loopback (no wildcard-with-credentials).
-- README rewritten around the MCP wedge and self-hosted install paths.
-
-### Fixed
-- Resolved all `ruff` lint findings; the offline gate (pytest + eval + ablation + ruff) is green.
-
-### Security
-- See `SECURITY.md`. Not yet mitigated: encryption-at-rest, built-in rate limiting, and
-  per-token tenant authorization (run one instance per trust boundary for hard isolation).
+  pipin

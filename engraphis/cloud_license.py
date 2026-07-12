@@ -188,6 +188,72 @@ def register(base_url: str, key: str, mid: str, *, timeout: float = _REGISTER_TI
         return None
 
 
+_INVITE_TIMEOUT = 10.0
+
+
+def send_team_invite(base_url: str, key: str, to: str, name: str, role: str,
+                     invited_by: str, *, timeout: float = _INVITE_TIMEOUT) -> Tuple[bool, str]:
+    """POST a team-invite request to the vendor relay's ``/license/v1/team-invite``.
+
+    Used by a self-hosted Team dashboard (``routes.v2_team.add_user``) that has no
+    email delivery of its own configured — the vendor relay sends the notification
+    through ITS configured mail provider instead, gated server-side by *key*
+    actually carrying the ``team`` feature (see
+    ``inspector.license_cloud.team_invite``). Returns ``(sent, reason)``: on any
+    failure (network, 4xx/5xx, bad JSON) returns ``(False, <reason>)`` and never
+    raises — the caller already has a working, created account regardless of
+    whether the notification goes out, so a relay hiccup must never look like a
+    bigger failure than it is.
+    """
+    url = base_url.rstrip("/") + "/license/v1/team-invite"
+    data = json.dumps({"key": key, "to": to, "name": name, "role": role,
+                       "invited_by": invited_by}).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data, method="POST", headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        return bool(body.get("sent")), ""
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.loads(exc.read().decode("utf-8")).get("error", "")
+        except Exception:
+            detail = ""
+        return False, (detail or "relay returned HTTP %d" % exc.code)
+    except (urllib.error.URLError, ValueError, TimeoutError, OSError) as exc:
+        return False, "relay unreachable: %s" % exc
+
+
+def request_team_trial_key(base_url: str, mid: str, email: str = "", *,
+                           timeout: float = _INVITE_TIMEOUT) -> Tuple[Optional[str], str]:
+    """POST to the vendor relay's self-serve ``/license/v1/start-trial`` and return
+    ``(signed_key, reason)``. *key* is ``None`` on any failure — already used on this
+    device, network error, bad response — with *reason* explaining why. Used by
+    :func:`engraphis.licensing.start_team_trial`; see that endpoint's docstring in
+    ``inspector.license_cloud.start_team_trial`` for why this needs one network
+    round-trip (unlike the fully-offline Pro trial): the resulting key must be a real,
+    independently verifiable credential, since it is later presented to OTHER
+    server-side gates (team_invite, /register) that a client-only claim can't satisfy.
+    """
+    url = base_url.rstrip("/") + "/license/v1/start-trial"
+    data = json.dumps({"machine_id": mid, "email": email}).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data, method="POST", headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        key = body.get("key")
+        return (key, "") if key else (None, "relay returned no key")
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.loads(exc.read().decode("utf-8")).get("error", "")
+        except Exception:
+            detail = ""
+        return None, (detail or "relay returned HTTP %d" % exc.code)
+    except (urllib.error.URLError, ValueError, TimeoutError, OSError) as exc:
+        return None, "relay unreachable: %s" % exc
+
+
 def gate(lic, key_material: str, *, base_url: Optional[str] = None) -> Tuple[bool, str]:
     """Decide whether a validly-signed paid key may unlock features on this device.
 

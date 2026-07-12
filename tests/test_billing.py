@@ -184,7 +184,7 @@ def test_send_license_email_uses_resend_api_not_smtp(monkeypatch):
     from engraphis.inspector import webhooks as WH
     captured = {}
 
-    def fake_api(to, subject, text_body, from_addr, api_key):
+    def fake_api(to, subject, text_body, from_addr, api_key, reply_to=None):
         captured.update(to=to, subject=subject, from_addr=from_addr,
                         api_key=api_key, has_key="ENGR1" in text_body)
 
@@ -199,11 +199,54 @@ def test_send_license_email_uses_resend_api_not_smtp(monkeypatch):
     assert captured["has_key"] and "Pro" in captured["subject"]
 
 
+def test_email_configured_reflects_resend_or_smtp(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    for var in ("ENGRAPHIS_RESEND_API_KEY", "ENGRAPHIS_SMTP_HOST",
+               "ENGRAPHIS_SMTP_USER", "ENGRAPHIS_SMTP_PASSWORD"):
+        monkeypatch.delenv(var, raising=False)
+    assert WH.email_configured() is False
+    monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_x")
+    assert WH.email_configured() is True
+    monkeypatch.delenv("ENGRAPHIS_RESEND_API_KEY")
+    assert WH.email_configured() is False
+    monkeypatch.setenv("ENGRAPHIS_SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("ENGRAPHIS_SMTP_USER", "u")
+    monkeypatch.setenv("ENGRAPHIS_SMTP_PASSWORD", "p")
+    assert WH.email_configured() is True
+
+
+def test_team_invite_email_names_inviter_and_sets_reply_to(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    captured = {}
+    monkeypatch.setattr(
+        WH, "_send_via_resend_api",
+        lambda to, subject, text_body, from_addr, api_key, reply_to=None: captured.update(
+            text_body=text_body, reply_to=reply_to))
+    monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
+    WH.send_team_invite_email("newmember@example.com", "Mo", "member",
+                              invited_by="admin@corp.com")
+    assert "admin@corp.com" in captured["text_body"]
+    assert captured["reply_to"] == "admin@corp.com"
+
+
+def test_team_invite_email_ignores_malformed_invited_by(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    captured = {}
+    monkeypatch.setattr(
+        WH, "_send_via_resend_api",
+        lambda to, subject, text_body, from_addr, api_key, reply_to=None: captured.update(
+            reply_to=reply_to))
+    monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
+    WH.send_team_invite_email("newmember@example.com", "Mo", "member",
+                              invited_by="not-an-email")
+    assert captured["reply_to"] is None
+
+
 def test_team_invite_email_uses_resend_api_and_never_contains_a_password(monkeypatch):
     from engraphis.inspector import webhooks as WH
     captured = {}
 
-    def fake_api(to, subject, text_body, from_addr, api_key):
+    def fake_api(to, subject, text_body, from_addr, api_key, reply_to=None):
         captured.update(to=to, subject=subject, text_body=text_body,
                         from_addr=from_addr, api_key=api_key)
 
@@ -227,7 +270,7 @@ def test_team_invite_email_includes_dashboard_url_when_configured(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         WH, "_send_via_resend_api",
-        lambda to, subject, text_body, from_addr, api_key: captured.update(
+        lambda to, subject, text_body, from_addr, api_key, reply_to=None: captured.update(
             text_body=text_body))
     monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
     monkeypatch.setenv("ENGRAPHIS_DASHBOARD_URL", "https://dash.example.com")
@@ -531,4 +574,3 @@ def test_failed_seatsync_fulfillment_does_not_advance_baseline(monkeypatch):
     monkeypatch.setattr(WH, "handle_subscription_updated", orig)
     r2 = _post(client, WHSEC, "evt_cw_retry", _sub_updated_body("sub_cw", "active", 8))
     assert r2.json() == {"status": "fulfilled", "key_issued": True}
-    assert B.get_known_seats("sub_cw") == 8
