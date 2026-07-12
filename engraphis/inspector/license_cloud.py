@@ -9,7 +9,9 @@ Revocation requires the vendor admin token (``ENGRAPHIS_API_TOKEN``).
 """
 from __future__ import annotations
 
+import asyncio
 import hmac
+import os
 import time
 
 from fastapi import APIRouter, Request
@@ -18,6 +20,7 @@ from fastapi.responses import JSONResponse
 from engraphis import cloud_license
 from engraphis.config import settings
 from engraphis.inspector import license_registry as reg
+from engraphis.inspector.auth import _EMAIL_RE
 from engraphis.inspector.webhooks import _load_signing_secret
 from engraphis.licensing import LicenseError, parse_key
 
@@ -209,3 +212,195 @@ async def deactivate_device(request: Request):
     finally:
         conn.close()
     return {"key_id": key_id, "machine_id": machine_id, "deactivated": freed}
+
+
+# ── team-invite relay ───────────────────────────────────────────────────────────
+# Lets a self-hosted Team dashboard with NO email delivery of its own (no local
+# ENGRAPHIS_RESEND_API_KEY/SMTP_*) still get a working "Add member" invite email,
+# by sending it through the VENDOR's mail provider instead — the same account that
+# already emails every license key. The license key IS the authentication here
+# (there is no admin token / customer identity to check, same as /register): a
+# caller must present a signed key that verifies AND currently carries the "team"
+# feature. Paid keys AND self-serve trial keys (see /license/v1/start-trial below —
+# trial users need this to actually work, or they never see enough value to
+# subscribe) both qualify, so the per-key daily cap is kept tight (default 10) to
+# bound cost/abuse from a trial key, which costs nothing to obtain.
+
+_INVITE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS team_invite_sends (
+    key_id TEXT NOT NULL,
+    day    TEXT NOT NULL,
+    count  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (key_id, day)
+);
+"""
+
+
+def _invite_daily_cap() -> int:
+    try:
+        return max(1, int(os.environ.get("ENGRAPHIS_TEAM_INVITE_DAILY_CAP", "10")))
+    except ValueError:
+        return 10
+
+
+def _today() -> str:
+    import datetime as _dt
+    return _dt.datetime.utcnow().strftime("%Y-%m-%d")
+
+
+def _bump_invite_count(key_id: str) -> bool:
+    """Atomically bump today's send count for *key_id*. Returns True if the send is
+    allowed (was under the cap before this call), False if already at/over it.
+
+    Uses the same BEGIN IMMEDIATE pattern as :func:`license_registry.claim_seat` —
+    the check-then-write must be one atomic step so two concurrent invites from the
+    same key can't both slip through one under the cap."""
+    conn = reg.connect()
+    try:
+        conn.executescript(_INVITE_SCHEMA)
+        day = _today()
+        cap = _invite_daily_cap()
+        prev_iso = conn.isolation_level
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT count FROM team_invite_sends WHERE key_id=? AND day=?",
+                (key_id, day)).fetchone()
+            count = int(row["count"]) if row else 0
+            if count >= cap:
+                conn.execute("COMMIT")
+                return False
+            conn.execute(
+                "INSERT INTO team_invite_sends(key_id, day, count) VALUES (?,?,1) "
+                "ON CONFLICT(key_id, day) DO UPDATE SET count = count + 1",
+                (key_id, day))
+            conn.execute("COMMIT")
+            return True
+        except BaseException:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.isolation_level = prev_iso
+    finally:
+        conn.close()
+
+
+@router.post("/team-invite")
+async def team_invite(request: Request):
+    """Send a team-invite notification through the vendor's own mail provider, on
+    behalf of a self-hosted Team dashboard that has none configured. 402 if *key*
+    doesn't verify or lacks the ``team`` feature (:func:`license_registry.
+    verify_for_feature` — the same server-side gate every other licensed feature
+    uses); 400 for a malformed recipient; 429 past the per-key daily cap; 502 if
+    the vendor's own mail provider rejects the send."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    key = (body.get("key") or "").strip()
+    to = (body.get("to") or "").strip().lower()
+    name = (body.get("name") or "").strip()[:120]
+    role = (body.get("role") or "member").strip()[:32]
+    invited_by = (body.get("invited_by") or "").strip().lower()
+
+    lic = reg.verify_for_feature(key, "team")          # bad/expired/wrong-plan/revoked → 402
+    if not _EMAIL_RE.match(to):
+        return JSONResponse({"error": "invalid recipient email"}, status_code=400)
+    if invited_by and not _EMAIL_RE.match(invited_by):
+        invited_by = ""                                 # ignore a malformed value, don't fail
+
+    if not _bump_invite_count(lic.key_id):
+        return JSONResponse(
+            {"error": "daily invite-email limit reached for this license — try again "
+                      "tomorrow, or configure your own ENGRAPHIS_RESEND_API_KEY/SMTP "
+                      "to send directly instead of relaying"},
+            status_code=429)
+
+    from engraphis.inspector.webhooks import send_team_invite_email
+    try:
+        await asyncio.to_thread(send_team_invite_email, to, name, role, invited_by=invited_by)
+    except Exception as exc:  # noqa: BLE001 — surface a safe message, don't leak internals
+        return JSONResponse({"error": "delivery failed: %s" % exc}, status_code=502)
+    return {"sent": True}
+
+
+# ── self-serve Team trial: a REAL signed key, no purchase, no Polar checkout ───────────
+# The local, fully-offline free trial (``licensing.start_trial``) only ever grants Pro —
+# it is a client-only construct (HMAC-signed against the local machine, no server-issued
+# key), which is exactly why it can never be used against ``team_invite`` above: that
+# endpoint's whole security model is "only a genuinely vendor-signed key gets through",
+# and an offline client-only claim can't prove that to a server that never saw it.
+# Trial users still need team-invite (and the rest of Team mode) to actually work during
+# the trial, or the trial doesn't demonstrate the product's value and they never convert
+# to a paid seat. This endpoint reconciles both: it mints a REAL signed ``team`` key
+# (reusing the exact same signer as a purchase) for a device's one-time trial, so
+# everything downstream — team_invite, /license/v1/register, team-mode dashboard
+# login — treats it exactly like a paid key would, just short-lived. One grant per
+# machine_id ever (soft identifier — see ``_clean_machine_id``'s docstring in
+# license_registry.py for the same honesty-about-limits as seat accounting: this raises
+# the bar against casual reset-by-wipe, it does not claim to defeat a scripted attacker
+# minting fresh machine ids). The resulting key's own short expiry plus the tight
+# per-key invite cap above bound the cost of that residual gap.
+
+_TRIAL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS trial_grants (
+    machine_id TEXT PRIMARY KEY,
+    email      TEXT,
+    issued_at  REAL NOT NULL
+);
+"""
+
+
+@router.post("/start-trial")
+async def start_team_trial(request: Request):
+    """Issue a one-time, self-serve, real signed Team-plan trial key for *machine_id*.
+    409 if this device's trial was already claimed; 400 if machine_id is missing."""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    mid = (body.get("machine_id") or "").strip()[:128]
+    email = (body.get("email") or "").strip().lower()
+    if not mid:
+        return JSONResponse({"error": "machine_id required"}, status_code=400)
+    if email and not _EMAIL_RE.match(email):
+        email = ""
+
+    conn = reg.connect()
+    try:
+        conn.executescript(_TRIAL_SCHEMA)
+        prev_iso = conn.isolation_level
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT 1 FROM trial_grants WHERE machine_id=?", (mid,)).fetchone()
+            if existing:
+                conn.execute("COMMIT")
+                return JSONResponse(
+                    {"error": "the free Team trial has already been used on this device"},
+                    status_code=409)
+            conn.execute(
+                "INSERT INTO trial_grants(machine_id, email, issued_at) VALUES (?,?,?)",
+                (mid, email or None, time.time()))
+            conn.execute("COMMIT")
+        except BaseException:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.isolation_level = prev_iso
+    finally:
+        conn.close()
+
+    from engraphis.inspector.webhooks import issue_key
+    from engraphis.licensing import TRIAL_DAYS
+    key = issue_key(email or "trial@engraphis.local", product_name="Team", seats=1,
+                    days=TRIAL_DAYS)
+    return {"key": key, "days": TRIAL_DAYS}
