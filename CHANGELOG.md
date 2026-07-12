@@ -67,6 +67,36 @@ All notable changes to Engraphis are documented here. Format loosely follows
   excludes from an untrusted repo. `index_repo` no longer follows symlinked source files
   out of the repo root; the walk is bounded against pathological directory trees.
 
+
+## [0.2.0] - 2026-07-11
+
+### Added
+- **Encrypted database backend (SQLCipher / AES-256)** — `engraphis/backends/encrypted_db.py`
+  with transparent encryption at rest. Optional `pip install "engraphis[encryption]"`.
+- **Cloud license enforcement & registry** — server-side key tracking, verification endpoint,
+  revocation support (`engraphis/inspector/license_cloud.py`, `engraphis/inspector/license_registry.py`).
+- **Team dashboard with seat management** — per-user logins, roles (admin/member/viewer),
+  team audit log (`engraphis/dashboard_app.py`, `engraphis/routes/v2_team.py`).
+- **Cloud mount inspector** — browse and manage team workspaces from the dashboard
+  (`engraphis/inspector/cloud_mount.py`).
+- **Cloud sync relay** — encrypted relay for cross-device sync with registration tracking
+  (`engraphis/backends/sync_relay.py`, `engraphis/inspector/sync_relay.py`).
+- **Multi-hop graph evaluation dataset** — `eval/datasets/graph_multihop.jsonl` for benchmarking.
+
+### Changed
+- **License hardening** — disabled public key env override in production, HMAC-signed trial
+  files, monotonic clock anchor (`engraphis/licensing.py`, `engraphis/cloud_license.py`).
+- **Docker & deploy updates** — `Dockerfile`, `docker-compose.yml`, `DEPLOY.md`, `SECURITY.md`
+  updated for production hardening and encrypted DB support.
+
+### Security
+- Server-side key verification prevents client-side bypass
+- Revocable leases with machine binding
+- Encrypted database at rest with SQLCipher
+
+### Tests
+- New test suites: cloud endpoints mounted, encrypted store, team audit, workspace ops, sync relay
+
 ## [0.1.0] — 2026-07-09
 
 Initial public release. Self-hosted AI memory engine for agents — Ebbinghaus
