@@ -574,3 +574,4 @@ def test_failed_seatsync_fulfillment_does_not_advance_baseline(monkeypatch):
     monkeypatch.setattr(WH, "handle_subscription_updated", orig)
     r2 = _post(client, WHSEC, "evt_cw_retry", _sub_updated_body("sub_cw", "active", 8))
     assert r2.json() == {"status": "fulfilled", "key_issued": True}
+    assert B.get_known_seats("sub_cw") == 8

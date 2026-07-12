@@ -744,4 +744,40 @@ code-aware symbol graph. All additions are local-first (no LLM or network depend
   `<img src=x onerror="...">` would run arbitrary JavaScript the moment a human viewed it in the
   dashboard, independent of and in addition to the memory-poisoning threat model above (that
   content is explicitly untrusted — MASTER_PLAN.md §16 — is exactly why this mattered). Fixed by
-  pipin
+  piping every markdown render through `DOMPurify.sanitize()` (new `renderMd()` helper); verified
+  the `onerror` attribute is stripped while ordinary markdown renders unchanged. See
+  `SECURITY.md` §1.
+
+## [Unreleased] — release-readiness pass
+
+### Added
+- **MCP server** (`engraphis-mcp`, `engraphis.mcp_server`) exposing `engraphis_remember`,
+  `engraphis_recall`, `engraphis_start_session`, `engraphis_end_session`, and `engraphis_stats`
+  so Claude Code, Cursor, Cline, Zed, and Windsurf can use Engraphis as agent memory.
+- **`MemoryService`** (`engraphis.service`) — a transport-agnostic, fully validated facade over
+  the v2 engine, usable as a plain Python library (no MCP dependency, offline-capable).
+- **Input validation & sanitization** on the write path (size caps, control-character stripping,
+  strict enums, metadata limits, provenance) as a memory-poisoning defense.
+- **Optional bearer-token auth** (`ENGRAPHIS_API_TOKEN`) on the REST API with constant-time
+  comparison, plus a configurable CORS allow-list (`ENGRAPHIS_CORS_ORIGINS`).
+- `LICENSE` (Apache-2.0), `NOTICE`, `SECURITY.md` (threat model), and this `CHANGELOG.md`.
+- `Dockerfile`, `docker-compose.yml`, `.dockerignore` for one-command self-hosting.
+- Larger offline eval suite (`eval/datasets/codemem.jsonl`, 24 questions) for the coding-agent
+  memory wedge.
+- New tests: `test_service.py`, `test_mcp_server.py`, `test_app_auth.py` (55 tests total).
+
+### Changed
+- **Rebranded to a clean, independent Engraphis identity**: removed third-party SDK-compat
+  framing, renamed the default database to `engraphis.db`, and updated docs/positioning.
+- License moved to **Apache-2.0** (from MIT) for clearer patent/trademark posture.
+- `pyproject.toml` restructured for **open-core**: dependency-light core (`numpy` only) with
+  `server` / `mcp` / `all` extras and an `engraphis-mcp` entry point.
+- Tightened CORS defaults to loopback (no wildcard-with-credentials).
+- README rewritten around the MCP wedge and self-hosted install paths.
+
+### Fixed
+- Resolved all `ruff` lint findings; the offline gate (pytest + eval + ablation + ruff) is green.
+
+### Security
+- See `SECURITY.md`. Not yet mitigated: encryption-at-rest, built-in rate limiting, and
+  per-token tenant authorization (run one instance per trust boundary for hard isolation).
