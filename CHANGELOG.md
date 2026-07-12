@@ -9,7 +9,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - **Static package discovery**: added `engraphis/static/__init__.py` so `find_packages()` discovers the directory.
 - **Vendor glob**: changed package-data from `["*"]` to `["**/*"]` so `static/vendor/` bundles ship in the wheel.
 
-## [0.8.1] - 2026-07-12
+## [0.8.2] - 2026-07-12
 
 ### Fixed
 - **Dashboard 500 on `GET /` — `static/index.html` was missing from the built wheel
