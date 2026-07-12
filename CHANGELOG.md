@@ -139,7 +139,21 @@ All notable changes to Engraphis are documented here. Format loosely follows
   excludes from an untrusted repo. `index_repo` no longer follows symlinked source files
   out of the repo root; the walk is bounded against pathological directory trees.
 
-## [Unreleased]
+## [0.7.0] - 2026-07-12
+
+### Added
+- **AutoSync**: background file-watching sync engine with debounce, retry, and conflict detection.
+- **Password reset flow**: admin-initiated and self-service password reset with secure tokens.
+- **Design lint hook**: pre-commit HTML/JSX accessibility and structure checker.
+- **License hardening**: scattered license gates into computation modules (analytics, service, auth).
+- **Session idempotency**: duplicate active sessions prevented, `force_new` option for branching.
+- **Workspace merge**: fold one workspace into another with full entity/memory relabeling.
+- **Memory reorder**: drag-to-reorder persistence for the Memories tab.
+- **Lazy graph backfill**: existing workspaces auto-populate the knowledge graph on first open.
+- **Audit events**: login success/failure, lockout, license refusal tracked in `audit_events` table.
+- **Password validation**: NIST SP 800-63B-aligned policy (length + mixed characters).
+- **Seat enforcement on re-enable**: disabling then re-enforcing a user respects the seat cap.
+- **Test coverage**: autosync, password reset, dashboard v2, team audit, workspace ops.
 
 ### Security
 - **Per-key server-side license enforcement (opt-in at issuance).** Keys can now carry a
