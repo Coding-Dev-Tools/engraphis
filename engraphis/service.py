@@ -657,7 +657,30 @@ class MemoryService:
                         "repos": [x["name"] for x in repos]})
         return {"workspaces": out}
 
-    # ── workspace curation (rename / describe / delete) ──────────────────────────
+    # ── workspace curation (create / rename / describe / delete) ─────────────────
+    def create_workspace(self, name: str, description: str = "",
+                         *, actor: str = "user") -> dict:
+        """Create an empty workspace (a "folder") so a team can set one up *before* any
+        memory is written to it — the dashboard's Workspaces tab and the agent write path
+        both otherwise only mint a workspace lazily (``get_or_create_workspace``), which
+        left no way to pre-create the folders users then choose to submit to. Enforces the
+        same binding and name validation every other entry point does, so a bound instance
+        (``ENGRAPHIS_WORKSPACES``) still refuses names outside its allow-list, and rejects a
+        name that already exists (mirrors ``rename``'s uniqueness check). Shared, not
+        per-user: any member+ who creates it, the whole team can then see and use it."""
+        ws = self._clean_ws(name)
+        description = _clean_text(description, field="description",
+                                  max_chars=MAX_CONTENT_CHARS, required=False)
+        actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
+                            required=False) or "user"
+        if self._lookup_workspace(ws) is not None:
+            raise ValidationError(f"a workspace named '{ws}' already exists")
+        wid = self.store.create_workspace(
+            ws, settings={"description": description} if description else None)
+        self.store.audit(actor, "workspace_create", wid, ws)
+        self.store.conn.commit()
+        return {"workspace": ws, "id": wid, "description": description, "created": True}
+
     def rename_workspace(self, workspace: str, new_name: str, *, actor: str = "user") -> dict:
         """Rename a workspace's label. Memories key off ``workspace_id``, so this is a pure
         relabel — all data stays attached. Same binding + uniqueness the create path enforces."""
