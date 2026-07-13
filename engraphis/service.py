@@ -174,6 +174,75 @@ def _title_from_content(content: str, fallback: str) -> str:
     return match.group(1).strip() if match else fallback
 
 
+def _auto_migrate_v1_if_needed(db_path: str) -> None:
+    """If *db_path* is an existing v1-shaped SQLite file, migrate it to the v2 schema
+    in place before :class:`~engraphis.core.engine.MemoryEngine` (via ``Store``) ever
+    touches it.
+
+    v1 (``engraphis/stores/__init__.py``) and v2 (``engraphis/core/schema.py``) both
+    happen to name a table ``memories``, but the column sets are unrelated — v1 has no
+    ``workspace_id``. ``Store.init_schema()`` runs ``CREATE INDEX ... ON
+    memories(workspace_id, ...)`` unconditionally, which is a no-op-safe ``CREATE TABLE
+    IF NOT EXISTS`` for a *fresh* db, but crashes with ``sqlite3.OperationalError: no
+    such column: workspace_id`` the instant it runs against a pre-existing v1 file —
+    e.g. any self-host that ran ``engraphis-server`` (v1) against ``ENGRAPHIS_DB_PATH``
+    before ever running ``engraphis-dashboard`` (v2) against that same path. This bit a
+    real production deployment on 2026-07-13: switching the default entrypoint to the
+    v2 dashboard crash-looped the container against its own pre-existing v1 data.
+
+    Detection: read-only sniff of ``PRAGMA table_info(memories)`` — no ``workspace_id``
+    column means v1-shaped (or a table from some other, unrelated database entirely, in
+    which case there's nothing safe to do and we leave it for ``Store`` to error on
+    normally). A missing file or an unreadable one (encrypted via
+    ``ENGRAPHIS_DB_KEY``, corrupt, no ``memories`` table at all) is left alone — the
+    normal ``Store()`` path handles a fresh install or surfaces the real error.
+
+    Migration is non-destructive: the original file is copied aside to
+    ``<name>.v1-backup-<unix-ts><ext>`` *before* anything else happens, the actual
+    migration (:func:`scripts.migrate_to_v2.migrate`) reads the untouched original and
+    writes a brand-new file, and only a fully-successful migration is atomically
+    swapped into ``db_path`` (:func:`os.replace`). Any failure along the way leaves the
+    original file exactly as it was; ``Store`` then raises its normal (now unmasked)
+    error instead of silently losing data."""
+    p = Path(db_path)
+    if not p.exists() or not p.is_file():
+        return  # fresh install, ":memory:", or nothing there yet — Store() creates v2 cleanly
+    import sqlite3
+    try:
+        probe = sqlite3.connect(str(p))
+        try:
+            cols = {r[1] for r in probe.execute("PRAGMA table_info(memories)").fetchall()}
+        finally:
+            probe.close()
+    except sqlite3.Error:
+        return  # not a plain-sqlite file we can safely inspect (e.g. SQLCipher-encrypted)
+    if not cols or "workspace_id" in cols:
+        return  # no memories table yet, or already v2-shaped — nothing to migrate
+
+    import shutil
+    import sys
+    import time
+    ts = int(time.time())
+    backup = p.with_name(p.stem + (".v1-backup-%d" % ts) + p.suffix)
+    tmp_new = p.with_name(p.stem + (".v2-migrating-%d" % ts) + p.suffix)
+    print("[engraphis] detected a v1-shaped database at %s — auto-migrating to the v2 "
+          "schema (original preserved at %s)" % (p, backup), file=sys.stderr)
+    try:
+        shutil.copy2(str(p), str(backup))          # preserve the untouched original first
+        from scripts.migrate_to_v2 import migrate
+        counts = migrate(str(p), str(tmp_new))      # reads p (untouched), writes tmp_new
+        os.replace(str(tmp_new), str(p))            # atomic swap only on full success
+        print("[engraphis] v1->v2 auto-migration complete: %s" % counts, file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 — must never brick startup worse than before
+        print("[engraphis] v1->v2 auto-migration failed (%s) — leaving %s untouched; "
+              "the original v1 data is safe at %s. Store() will now raise its normal "
+              "schema error." % (exc, p, backup), file=sys.stderr)
+        try:
+            tmp_new.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 class MemoryService:
     """High-level, validated operations over a single Engraphis database."""
 
@@ -208,6 +277,11 @@ class MemoryService:
         if graph_extractor is None:
             from engraphis.config import settings
             graph_extractor = settings.graph_extractor
+        # One-time, safe upgrade path for a self-host whose ENGRAPHIS_DB_PATH already
+        # holds a v1-shaped database (see docstring) — must run before Store() ever
+        # touches the file. No-ops instantly for a fresh install or an already-v2 db.
+        if db_path != ":memory:":
+            _auto_migrate_v1_if_needed(db_path)
         # Optional encryption at rest: if ENGRAPHIS_DB_KEY[_FILE] is set, memories are
         # stored in a SQLCipher-encrypted database. Off by default (returns None).
         from engraphis.backends.encrypted_db import connector_from_env
