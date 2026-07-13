@@ -613,7 +613,8 @@ def test_import_folder_route_rejects_path_outside_roots(monkeypatch, tmp_path):
     outside the allowed import roots (HOME directory or ENGRAPHIS_IMPORT_ROOTS).
     This guards against path-traversal / symlink escapes.
     """
-    import tempfile, os
+    import os
+    import tempfile
     with tempfile.TemporaryDirectory(dir="C:\\") as td:
         outside = td
         os.makedirs(outside, exist_ok=True)
