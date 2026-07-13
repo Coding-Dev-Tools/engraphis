@@ -5,6 +5,27 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+- **Personal vs. shared folders + a redesigned Team dashboard.** A folder can now be
+  created `visibility='personal'` (owned by, and visible/usable only to, the creating
+  dashboard user) or `shared` (the whole team — the previous, still-default behaviour).
+  Enforcement lives at MemoryService's single workspace-authorization chokepoint
+  (`_authorize_workspace` via `_clean_ws`), so *every* scoped read/write inherits it; a
+  non-owner (even an admin) cannot list, read, write, rename, or delete another user's
+  personal folder. The current dashboard user is threaded to the service via a
+  request-scoped `contextvars` value set by the team auth gate — no per-user restriction
+  exists outside team mode (MCP/CLI/sync/tests are unchanged). `list_workspaces` now
+  returns `visibility`/`owner` and omits other users' personal folders; personal folders
+  are also excluded from the shared-account relay sync so "personal" never leaves the
+  device. The **Team dashboard** gains a team overview (seat usage + activity, surfacing
+  `/api/auth/overview`), a Folders panel that creates and manages shared/personal folders
+  (folder creation now lives here — the Workspaces tab is selection-only in team mode),
+  members with last-active, and a team audit log with CSV export (surfacing
+  `/api/auth/audit` + `/audit/export`). New/updated: `service.py`,
+  `routes/v2_api.py`, `dashboard_app.py`, `static/index.html`;
+  tests in `tests/test_personal_folders.py`, `tests/test_dashboard_v2.py`,
+  `tests/test_sync_dashboard.py`.
+
 ## [0.9.0] - 2026-07-13
 
 ### Added
