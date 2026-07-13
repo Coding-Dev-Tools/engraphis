@@ -111,6 +111,13 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def _auth_gate(request: Request, call_next):
+        from engraphis.service import set_current_user
+        # Clear any user bound to this context before we decide who (if anyone) is calling,
+        # so a personal-folder check can never inherit a stale identity from a prior request
+        # served on the same worker context. The team branch below rebinds the real user;
+        # public paths, the bearer bypass, and single-user mode all leave it cleared, which
+        # is exactly "no per-user restriction".
+        set_current_user(None)
         path = request.url.path
         if not path.startswith("/api/") or path in _PUBLIC or path.startswith("/api/docs") \
                 or path.startswith("/api/openapi"):
@@ -132,6 +139,9 @@ def create_app() -> FastAPI:
                 return JSONResponse({"error": "requires the %s role" % need},
                                     status_code=403)
             request.state.user = user
+            # Bind the identity the service reads to enforce personal-folder ownership on
+            # every workspace-scoped read/write (see MemoryService._authorize_workspace).
+            set_current_user(user)
             return await call_next(request)
         # Single-user modes: optional bearer token, exactly as before team mode existed.
         if settings.api_token and not _bearer_ok(request):
