@@ -672,6 +672,24 @@ def _trial_license(status: dict) -> License:
                    is_trial=True)
 
 
+def _local_material_license() -> Optional[License]:
+    """Parse this device's locally-stored key material (env var or license file), if
+    any. Returns ``None`` when there is none, or it fails to parse — expired included,
+    since :func:`parse_key` itself raises past ``expires`` — in which case a trial
+    should be free to proceed. Used by :func:`start_trial` / :func:`start_team_trial`
+    to distinguish "no key", "an active trial" (idempotent no-op), and "a genuinely
+    paid key" (refuse) WITHOUT a network round-trip — the key's own signed expiry is
+    what bounds a trial (see ``inspector.webhooks._trial_days``), so a purely local
+    check is enough to answer "is a trial already running", no cloud gate needed."""
+    material = _read_key_material()
+    if not material:
+        return None
+    try:
+        return parse_key(material)
+    except LicenseError:
+        return None
+
+
 def start_trial(*, now: Optional[float] = None) -> dict:
     """Begin the one-time self-serve Pro trial by fetching a REAL, short-lived,
     vendor-signed Pro key from the license server and activating it — exactly like
@@ -679,18 +697,19 @@ def start_trial(*, now: Optional[float] = None) -> dict:
 
     There is no offline/local trial grant anymore: a trial is a genuine server-issued
     credential, verified by the same server-side gate every paid feature uses, so it
-    cannot be forged by editing local files. Refuses (raises :class:`LicenseError`) if a
-    valid paid key is already active, if this device already claimed its one-time trial
-    (server 409), or if the license server is unreachable."""
-    material = _read_key_material()
-    if material:
-        try:
-            parse_key(material)
-            raise LicenseError("a paid license is already active — no trial needed")
-        except LicenseError as exc:
-            if "no trial needed" in str(exc):
-                raise
-            # otherwise the key is invalid/expired; allow the trial to proceed
+    cannot be forged by editing local files. If this device already holds an ACTIVE
+    trial key (any plan — the server only ever grants one, see ``_local_material_
+    license``), this is an idempotent no-op that returns the current status rather
+    than erroring, so a UI that calls this on every "Start trial" click doesn't have
+    to special-case "already trialing". Refuses (raises :class:`LicenseError`) if a
+    genuinely PAID key is already active, if this device already claimed its
+    one-time trial and it has since expired (server 409 on re-request), or if the
+    license server is unreachable."""
+    lic = _local_material_license()
+    if lic is not None:
+        if lic.is_trial:
+            return lic.to_public_dict()
+        raise LicenseError("a paid license is already active — no trial needed")
     from engraphis import cloud_license
     from engraphis.config import settings
     base = os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip() or settings.relay_url
@@ -714,19 +733,17 @@ def start_team_trial(*, now: Optional[float] = None) -> dict:
     open Team mode locally but could never actually send a team invite, which
     defeats the point of letting them trial Team at all.
 
-    Refuses (raises :class:`LicenseError`) if a valid paid key is already active,
-    if this device already claimed its one-time Team trial (relay 409), or if the
-    relay is unreachable. ``now`` is accepted (unused) only for signature parity
-    with :func:`start_trial`."""
-    material = _read_key_material()
-    if material:
-        try:
-            parse_key(material)
-            raise LicenseError("a paid license is already active — no trial needed")
-        except LicenseError as exc:
-            if "no trial needed" in str(exc):
-                raise
-            # otherwise the key is invalid/expired; allow the trial to proceed
+    If this device already holds an ACTIVE trial key (any plan), this is an
+    idempotent no-op that returns the current status — same reasoning as
+    :func:`start_trial`. Refuses (raises :class:`LicenseError`) if a genuinely PAID
+    key is already active, if this device's one-time trial is already spent (relay
+    409), or if the relay is unreachable. ``now`` is accepted (unused) only for
+    signature parity with :func:`start_trial`."""
+    lic = _local_material_license()
+    if lic is not None:
+        if lic.is_trial:
+            return lic.to_public_dict()
+        raise LicenseError("a paid license is already active — no trial needed")
     from engraphis import cloud_license
     from engraphis.config import settings
     base = os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip() or settings.relay_url

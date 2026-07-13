@@ -201,6 +201,38 @@ def test_start_trial_activates_server_issued_pro_key(monkeypatch):
     assert licensing.has_feature("analytics") is True
 
 
+def test_start_trial_is_idempotent_while_already_on_trial(monkeypatch):
+    """Re-calling start_trial() while an active trial key is already installed must be
+    a no-op that returns the current status — NOT the 'a paid license is already
+    active' refusal (that's for genuinely PAID keys only). Regression test: before the
+    fix, any locally-parseable key — trial or paid — hit that refusal, so re-opening
+    the dashboard mid-trial (which calls this on every 'start trial' click) 400'd."""
+    now = time.time()
+    pro_trial = licensing.compose_key(
+        {"v": 1, "plan": "pro", "email": "trial@engraphis.local", "seats": 1,
+         "issued": int(now), "expires": int(now + 3 * 86400), "trial": 1}, SECRET)
+    calls = []
+
+    def _request(base, mid, plan="team", email=""):
+        calls.append(1)
+        return pro_trial, ""
+
+    monkeypatch.setattr(cloud_license, "request_trial_key", _request)
+    c = _app(); _wire_register_to(c, monkeypatch)
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    licensing.start_trial()
+    assert len(calls) == 1
+    out = licensing.start_trial()   # re-call: must not error, must not hit the relay again
+    assert out["plan"] == "pro" and out["is_trial"] is True
+    assert len(calls) == 1          # no second relay round-trip
+
+
+def test_start_trial_refuses_if_paid_key_already_active(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _key(plan="pro"))
+    with pytest.raises(LicenseError, match="no trial needed"):
+        licensing.start_trial()
+
+
 def test_monotonic_clock_never_goes_backward(monkeypatch):
     t0 = licensing._monotonic_now()
     monkeypatch.setattr(licensing.time, "time", lambda: t0 - 100000)  # roll clock back
@@ -622,8 +654,39 @@ def test_start_team_trial_issues_signed_team_key():
     assert r.status_code == 200
     key = r.json()["key"]
     lic = parse_key(key)
-    assert lic.plan == "team" and lic.has("team") and lic.seats == 1
+    # Free Team trial is always 5 seats for TRIAL_DAYS (3) — see TEAM_TRIAL_SEATS.
+    assert lic.plan == "team" and lic.has("team") and lic.seats == 5
+    assert lic.is_trial is True
     assert lic.expires and lic.expires > time.time()
+    days_left = (lic.expires - time.time()) / 86400
+    assert 2.9 < days_left <= 3.0
+
+
+def test_start_team_trial_grants_five_seats_regardless_of_request_body():
+    """5 seats, unconditionally — a caller cannot request a different seat count.
+    The endpoint doesn't even read a ``seats`` field, so spoofing one in the body
+    must have zero effect on what gets issued."""
+    c = _app()
+    r = c.post("/license/v1/start-trial",
+               json={"machine_id": "dev-spoof", "seats": 1, "plan": "team"})
+    assert r.status_code == 200
+    lic = parse_key(r.json()["key"])
+    assert lic.seats == 5
+
+    r2 = c.post("/license/v1/start-trial",
+                json={"machine_id": "dev-spoof-2", "seats": 999, "plan": "team"})
+    assert r2.status_code == 200
+    assert parse_key(r2.json()["key"]).seats == 5
+
+
+def test_start_pro_trial_stays_single_seat():
+    """The 5-seat grant is Team-specific; a Pro trial via this same relay endpoint
+    is unaffected."""
+    c = _app()
+    r = c.post("/license/v1/start-trial", json={"machine_id": "dev-pro", "plan": "pro"})
+    assert r.status_code == 200
+    lic = parse_key(r.json()["key"])
+    assert lic.plan == "pro" and lic.seats == 1
 
 
 def test_start_team_trial_requires_machine_id():
@@ -693,6 +756,29 @@ def test_licensing_start_team_trial_refuses_if_paid_key_already_active(monkeypat
     monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _key(plan="pro"))
     with pytest.raises(LicenseError, match="no trial needed"):
         licensing.start_team_trial()
+
+
+def test_licensing_start_team_trial_is_idempotent_while_already_on_trial(monkeypatch):
+    """Same regression as the Pro trial: re-calling while already on an active Team
+    trial must no-op (200/current status), not 400 with 'no trial needed'."""
+    now = time.time()
+    team_trial = licensing.compose_key(
+        {"v": 1, "plan": "team", "email": "trial@engraphis.local", "seats": 5,
+         "issued": int(now), "expires": int(now + 3 * 86400), "trial": 1}, SECRET)
+    calls = []
+
+    def _request(base, mid, email=""):
+        calls.append(1)
+        return team_trial, ""
+
+    monkeypatch.setattr(cloud_license, "request_team_trial_key", _request)
+    c = _app(); _wire_register_to(c, monkeypatch)
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    licensing.start_team_trial()
+    assert len(calls) == 1
+    out = licensing.start_team_trial()
+    assert out["plan"] == "team" and out["is_trial"] is True
+    assert len(calls) == 1          # no second relay round-trip
 
 
 def test_licensing_start_team_trial_surfaces_relay_denial(monkeypatch):
