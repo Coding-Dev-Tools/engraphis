@@ -5,17 +5,30 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-13
+
+### Added
+- **Team invite emails now carry the shared Team license key + dashboard URL** so a
+  newly added member can activate Pro features (analytics, export, automation, cloud
+  sync) on their own machine and take one server-enforced seat. Updates
+  `cloud_license`, `inspector.license_cloud`, `inspector.webhooks`, and
+  `routes.v2_team`; the add-user response now reports `pro_activation_sent` and
+  `dashboard_url_configured`.
+- **Automatic v1→v2 database migration on startup**: a pre-existing v1-shaped
+  `engraphis.db` (no `workspace_id` column) is backed up and migrated to the v2
+  schema, so existing installs upgrade cleanly without manual SQL.
+
 ### Fixed
-- **Dockerfile default entrypoint** was the v1 single-user API server
-  (`engraphis-server`), which serves the same `static/index.html` as the v2 team
-  dashboard but has no `/api/auth/*`, `/api/license/*`, or `/api/bootstrap` routes —
-  every such call 401s with a bare `{"error":"unauthorized"}` regardless of actual
-  login/license state. Any host that runs the image without an explicit start-command
-  override (e.g. a fresh Railway service, or one that lost a custom command) got a
-  dashboard UI that looked complete but was permanently "signed out, no features, no
-  trial" no matter what the user did. Default is now `engraphis-dashboard --no-open`,
-  matching `docker-compose.yml`'s existing default. `engraphis-server` is still
-  available as an explicit override for single-user deployments.
+- **Dockerfile default entrypoint** is now `engraphis-dashboard --no-open` (was the v1
+  single-user `engraphis-server`), so a fresh container serves a working team dashboard
+  with auth/license/trial routes instead of a permanently signed-out UI.
+  `engraphis-server` remains available as an explicit override for single-user
+  deployments.
+- **CI**: ruff lint errors and core-floor (numpy-only) test collection —
+  fastapi-dependent tests now skip cleanly on the minimal core floor. `loads_strict`
+  now rejects pathologically deep JSON on every Python version (3.12's JSON scanner
+  no longer raises RecursionError for ~1000-deep input, which had broken the
+  deep-nesting DoS guard and its test on 3.12).
 
 ## [0.8.8] - 2026-07-13
 
