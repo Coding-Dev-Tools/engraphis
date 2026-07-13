@@ -29,8 +29,26 @@ _INDEX = _STATIC / "index.html"
 # Reachable without any session/token in every mode: the page shell, liveness, and
 # the auth bootstrap endpoints themselves (state/login/setup must work while logged
 # out) — same shape as engraphis/inspector/app.py's _PUBLIC set.
+#
+# The /api/license and /api/license/*-trial entries close a real deadlock: create_user()
+# (called by /api/auth/setup) requires require_feature("team"), so a brand-new team-mode
+# instance with zero users can't create its first admin without an active license — but
+# before this fix, obtaining that license (reading /api/license, or starting a Pro/Team
+# trial) itself required an authenticated team session, which is impossible with zero users.
+# Every visitor hit a 401 the instant they touched Settings → License or clicked "Start
+# trial," logged in or not. These three are safe to expose pre-login: GET /api/license is
+# instance-level plan info (already fully public in single-user mode), and the trial
+# endpoints are self-limited server-side regardless of who calls them (one trial per device
+# via cloud_license, refused if a paid key is already active). Deliberately NOT adding
+# /api/license/activate here: unlike the _PUBLIC entries below (whole path skips the auth
+# gate, role check included), pasting an arbitrary key is a whole-team-affecting action and
+# stays behind min_role()'s existing admin check — a fresh self-host bootstraps a purchased
+# key via ENGRAPHIS_LICENSE_KEY/~/.engraphis/license.key (server-side config), not this
+# endpoint, so making it public isn't needed to fix the deadlock and would let ANY visitor
+# (any role, or no session) change the whole team's license.
 _PUBLIC = {"/", "/api/health", "/api/ready", "/api/auth/state", "/api/auth/login",
            "/api/auth/setup", "/api/auth/logout", "/api/auth/forgot", "/api/auth/reset",
+           "/api/license", "/api/license/trial", "/api/license/team-trial",
            "/webhooks/polar"}
 
 

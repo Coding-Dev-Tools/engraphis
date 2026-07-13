@@ -26,6 +26,14 @@ from engraphis.licensing import LicenseError, PLAN_FEATURES, parse_key
 
 LEASE_TTL_HOURS_DEFAULT = 24
 
+#: Seats granted by the self-serve free Team trial (:func:`start_team_trial` below).
+#: Fixed at 5 UNCONDITIONALLY — the trial request carries no seat count (see the
+#: endpoint's docstring: only machine_id/email/plan are accepted), so there is
+#: nothing a caller could pass to change this. A Team trial exists to show a whole
+#: team the product, so it is always 5 seats for the full TRIAL_DAYS window, same
+#: for every device/email, no plan-based or env-based override.
+TEAM_TRIAL_SEATS = 5
+
 _REG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS registrations (
     key_id     TEXT NOT NULL,
@@ -422,6 +430,10 @@ async def start_team_trial(request: Request):
 
     from engraphis.inspector.webhooks import issue_key
     from engraphis.licensing import TRIAL_DAYS
-    key = issue_key(email or "trial@engraphis.local", product_name=plan, seats=1,
+    # Team trials are always TEAM_TRIAL_SEATS (5) for TRIAL_DAYS (3) — unconditionally,
+    # not derived from any request input (there is none to derive from; see the
+    # constant's docstring above). Pro trials stay single-seat.
+    seats = TEAM_TRIAL_SEATS if plan == "team" else 1
+    key = issue_key(email or "trial@engraphis.local", product_name=plan, seats=seats,
                     days=TRIAL_DAYS, trial=True)
     return {"key": key, "days": TRIAL_DAYS, "plan": plan}
