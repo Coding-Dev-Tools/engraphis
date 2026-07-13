@@ -614,8 +614,12 @@ def test_import_folder_route_rejects_path_outside_roots(monkeypatch, tmp_path):
     This guards against path-traversal / symlink escapes.
     """
     import os
+    import sys
     import tempfile
-    with tempfile.TemporaryDirectory(dir="C:\\") as td:
+    # A directory genuinely OUTSIDE the import roots (HOME): C:\ is outside
+    # %USERPROFILE% on Windows; /tmp is outside /home on POSIX CI runners.
+    base = "C:\\" if sys.platform == "win32" else "/tmp"
+    with tempfile.TemporaryDirectory(dir=base) as td:
         outside = td
         os.makedirs(outside, exist_ok=True)
         test_file = os.path.join(outside, "test.md")
