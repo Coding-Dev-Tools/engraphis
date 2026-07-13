@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import re
 import json
+import contextvars
 from pathlib import Path
 from typing import Any, Optional
 
@@ -46,6 +47,32 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9._\-/ ]{1,%d}$" % MAX_NAME_CHARS)
 
 class ValidationError(ValueError):
     """Raised when untrusted input fails a guard. Message is safe to surface."""
+
+
+# ── current dashboard user (request-scoped, team mode only) ────────────────────
+# Set by the dashboard's team auth gate (engraphis/dashboard_app.py::_auth_gate) for the
+# duration of a request, and read at the workspace-authorization chokepoint below so a
+# *personal* folder is visible and usable only by its owner. Every other entry point —
+# the MCP server, the CLI, the sync loop, and the offline test/eval harnesses — leaves
+# this at its ``None`` default, so per-user enforcement is a no-op outside the multi-user
+# dashboard and single-tenant behaviour is completely unchanged. It lives here (not in a
+# route module) so the service stays the single place workspace access is decided.
+_CURRENT_USER: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
+    "engraphis_dashboard_user", default=None)
+
+
+def set_current_user(user: Optional[dict]) -> None:
+    """Bind (or clear, with ``None``) the current dashboard user for this request context.
+
+    ``user`` is the auth-store session dict — only ``email`` and ``role`` are read here.
+    Called exactly once per request by the team auth gate; contextvars are per-context so
+    concurrent requests never see each other's user."""
+    _CURRENT_USER.set(user)
+
+
+def current_user() -> Optional[dict]:
+    """The dashboard user bound to this request, or ``None`` outside team mode."""
+    return _CURRENT_USER.get()
 
 
 def _clean_text(value: Any, *, field: str, max_chars: int, required: bool = True) -> str:
@@ -328,10 +355,55 @@ class MemoryService:
         ``workspace`` a *hard* isolation boundary rather than an advisory label the client
         asserts and the server trusts (scope is enforced server-side on
         every read/write — never trust client-supplied scope alone). An empty binding — the
-        single-tenant local default — is unrestricted, so existing setups are unaffected."""
+        single-tenant local default — is unrestricted, so existing setups are unaffected.
+
+        In team mode it *also* enforces per-user ownership of **personal** folders: a
+        folder created ``visibility='personal'`` is readable and writable only by the user
+        who owns it, even by an admin. Because every workspace-scoped read/write routes
+        through ``_clean_ws`` → here, that ownership check can never be skipped at an
+        individual call site (same reasoning the binding check relies on). Outside team
+        mode there is no current user, so this is a no-op and shared/single-tenant
+        behaviour is unchanged."""
         if self.allowed_workspaces is not None and ws not in self.allowed_workspaces:
             raise ValidationError(f"workspace '{ws}' is not permitted on this instance")
+        self._enforce_personal_access(ws)
         return ws
+
+    def _workspace_visibility(self, ws: str) -> tuple[str, str]:
+        """Return ``(visibility, owner)`` for an existing workspace, read from its
+        ``settings`` JSON. Defaults to ``("shared", "")`` for any workspace that has no
+        visibility recorded (every folder created before this feature, and every folder a
+        team creates as shared) — so the ownership check below only ever restricts folders
+        explicitly marked personal. Never raises: a missing row or malformed settings is
+        treated as shared, so authorization can't be broken by bad data."""
+        try:
+            row = self.store.conn.execute(
+                "SELECT settings FROM workspaces WHERE name=?", (ws,)).fetchone()
+        except Exception:  # noqa: BLE001 — treat any lookup failure as unrestricted-shared
+            return ("shared", "")
+        if row is None or not row["settings"]:
+            return ("shared", "")
+        try:
+            s = json.loads(row["settings"])
+        except Exception:  # noqa: BLE001
+            return ("shared", "")
+        if not isinstance(s, dict):
+            return ("shared", "")
+        vis = s.get("visibility") or "shared"
+        return (vis if vis == "personal" else "shared", s.get("owner") or "")
+
+    def _enforce_personal_access(self, ws: str) -> None:
+        """Block access to another user's personal folder. No current user (single-tenant,
+        MCP, CLI, sync, tests) → no restriction. A shared folder, or a personal folder the
+        current user owns → allowed. A personal folder owned by someone else → refused,
+        with a message that neither confirms nor denies the folder's contents beyond the
+        fact that it's private (the name is already known to the caller who supplied it)."""
+        user = current_user()
+        if not user:
+            return
+        vis, owner = self._workspace_visibility(ws)
+        if vis == "personal" and owner and owner != (user.get("email") or ""):
+            raise ValidationError(f"workspace '{ws}' is a personal folder of another user")
 
     def _clean_ws(self, workspace: Any) -> str:
         """Validate a workspace name *and* enforce the binding in one step. Every entry point
@@ -895,49 +967,88 @@ class MemoryService:
     # ── inspection (powers the Memory Inspector UI) ─────────────────────────────
     def list_workspaces(self) -> dict:
         """Workspace/repo names with live-memory counts. On a bound instance only the
-        permitted workspaces are listed — same boundary as every other read."""
+        permitted workspaces are listed — same boundary as every other read.
+
+        Each entry carries ``visibility`` (``'shared'``/``'personal'``) and, for personal
+        folders, ``owner``. In team mode a **personal** folder owned by someone other than
+        the current user is omitted entirely — you can't see, count, or select a folder
+        that isn't yours — mirroring the access check in ``_authorize_workspace``. Outside
+        team mode there is no current user, so every folder is listed as before."""
         rows = self.store.conn.execute(
             "SELECT w.id, w.name, w.settings AS settings, COUNT(m.id) AS n FROM workspaces w "
             "LEFT JOIN memories m ON m.workspace_id = w.id AND m.expired_at IS NULL "
             "GROUP BY w.id, w.name, w.settings ORDER BY w.name").fetchall()
+        user = current_user()
+        my_email = (user or {}).get("email") or ""
         out = []
         for r in rows:
             if self.allowed_workspaces is not None and r["name"] not in self.allowed_workspaces:
                 continue
-            repos = [dict(x) for x in self.store.conn.execute(
-                "SELECT name FROM repos WHERE workspace_id=? ORDER BY name", (r["id"],))]
             try:
                 _s = json.loads(r["settings"]) if r["settings"] else {}
-                _desc = (_s.get("description") or "") if isinstance(_s, dict) else ""
+                if not isinstance(_s, dict):
+                    _s = {}
             except Exception:
-                _desc = ""
-            out.append({"name": r["name"], "memories": int(r["n"]), "description": _desc,
-                        "repos": [x["name"] for x in repos]})
+                _s = {}
+            _desc = _s.get("description") or ""
+            _vis = "personal" if _s.get("visibility") == "personal" else "shared"
+            _owner = _s.get("owner") or ""
+            # Hide other users' personal folders from the listing (team mode only).
+            if user and _vis == "personal" and _owner and _owner != my_email:
+                continue
+            repos = [dict(x) for x in self.store.conn.execute(
+                "SELECT name FROM repos WHERE workspace_id=? ORDER BY name", (r["id"],))]
+            entry = {"name": r["name"], "memories": int(r["n"]), "description": _desc,
+                     "visibility": _vis, "repos": [x["name"] for x in repos]}
+            if _vis == "personal":
+                entry["owner"] = _owner
+                entry["mine"] = bool(my_email and _owner == my_email)
+            out.append(entry)
         return {"workspaces": out}
 
     # ── workspace curation (create / rename / describe / delete) ─────────────────
     def create_workspace(self, name: str, description: str = "",
-                         *, actor: str = "user") -> dict:
+                         *, visibility: str = "shared", actor: str = "user") -> dict:
         """Create an empty workspace (a "folder") so a team can set one up *before* any
         memory is written to it — the dashboard's Workspaces tab and the agent write path
         both otherwise only mint a workspace lazily (``get_or_create_workspace``), which
         left no way to pre-create the folders users then choose to submit to. Enforces the
         same binding and name validation every other entry point does, so a bound instance
         (``ENGRAPHIS_WORKSPACES``) still refuses names outside its allow-list, and rejects a
-        name that already exists (mirrors ``rename``'s uniqueness check). Shared, not
-        per-user: any member+ who creates it, the whole team can then see and use it."""
+        name that already exists (mirrors ``rename``'s uniqueness check).
+
+        ``visibility`` is ``'shared'`` (default — the whole team can see and use it) or
+        ``'personal'`` (visible and usable only by the creating user, enforced by
+        ``_authorize_workspace``). Personal requires a signed-in dashboard user to own it;
+        if there is no current user (single-tenant / MCP / CLI) a ``personal`` request
+        degrades to ``shared`` rather than minting an owner-less folder nobody could ever
+        reach."""
         ws = self._clean_ws(name)
         description = _clean_text(description, field="description",
                                   max_chars=MAX_CONTENT_CHARS, required=False)
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
                             required=False) or "user"
+        visibility = "personal" if str(visibility or "").lower() == "personal" else "shared"
+        owner = ""
+        if visibility == "personal":
+            u = current_user()
+            owner = (u or {}).get("email") or ""
+            if not owner:
+                visibility = "shared"  # no identity to own it — don't orphan the folder
         if self._lookup_workspace(ws) is not None:
             raise ValidationError(f"a workspace named '{ws}' already exists")
-        wid = self.store.create_workspace(
-            ws, settings={"description": description} if description else None)
-        self.store.audit(actor, "workspace_create", wid, ws)
+        ws_settings: dict = {}
+        if description:
+            ws_settings["description"] = description
+        if visibility == "personal":
+            ws_settings["visibility"] = "personal"
+            ws_settings["owner"] = owner
+        wid = self.store.create_workspace(ws, settings=ws_settings or None)
+        self.store.audit(actor, "workspace_create", wid,
+                         "%s (%s%s)" % (ws, visibility, ("; owner=" + owner) if owner else ""))
         self.store.conn.commit()
-        return {"workspace": ws, "id": wid, "description": description, "created": True}
+        return {"workspace": ws, "id": wid, "description": description,
+                "visibility": visibility, "owner": owner, "created": True}
 
     def rename_workspace(self, workspace: str, new_name: str, *, actor: str = "user") -> dict:
         """Rename a workspace's label. Memories key off ``workspace_id``, so this is a pure
