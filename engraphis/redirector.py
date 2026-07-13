@@ -5,7 +5,6 @@ server ensures old bookmarks and short-cuts pointing at :8710 still work.
 """
 from __future__ import annotations
 import os
-import sys
 
 from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse
