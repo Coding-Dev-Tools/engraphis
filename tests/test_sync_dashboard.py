@@ -111,3 +111,31 @@ def test_sync_run_pushes_and_records_summary(monkeypatch, tmp_path):
         # the button's status now reflects the last sync
         st = c.get("/api/sync/status").json()
         assert st["last"] and st["last"]["exported"] >= 1
+
+
+def test_sync_never_pushes_personal_folders(monkeypatch, tmp_path):
+    """A personal folder is private to its owner and must never leave the device over the
+    shared-account relay (teammates share the license key). _sync_all skips it; only shared
+    folders are namespaced onto the relay."""
+    synced = []
+
+    def fake_get_transport(kind="folder", **kw):
+        synced.append(kw.get("workspace_id"))
+        return _FakeTransport()
+
+    monkeypatch.setattr("engraphis.backends.sync_folder.get_transport", fake_get_transport)
+    with _client(monkeypatch, tmp_path, key=_key()) as c:
+        # seed a shared and a personal folder directly on the service the app uses
+        from engraphis.routes import v2_api
+        from engraphis.service import set_current_user
+        svc = v2_api.service()
+        svc.create_workspace("team-shared", visibility="shared")
+        set_current_user({"email": "owner@x.co", "role": "admin", "id": "o1"})
+        try:
+            svc.create_workspace("my-personal", visibility="personal")
+        finally:
+            set_current_user(None)
+        assert c.post("/api/sync/run", json={}).status_code == 200
+        assert "team-shared" in synced           # shared folders sync
+        assert "demo" in synced                   # the seeded shared folder too
+        assert "my-personal" not in synced        # ...personal folders never do
