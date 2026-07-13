@@ -36,35 +36,52 @@ def _csv_cell(value) -> str:
 
 
 def _send_invite(u: dict, admin: dict) -> tuple:
-    """Best-effort invite notification for a newly added member. Returns
-    ``(invited, reason)`` — never raises, so a delivery hiccup can never fail the
-    account-creation request that already succeeded.
+    """Best-effort onboarding notification for a newly added member. Returns
+    ``(invited, reason, pro_included)`` — never raises, so a delivery hiccup can
+    never fail the account-creation request that already succeeded.
+
+    The email always points the member at the team dashboard to sign in. When this
+    instance is genuinely Team-licensed it ALSO carries the shared Team license key
+    (``pro_included``) so the member can activate their own local Engraphis and get
+    Pro features + cloud sync, taking one server-enforced seat — that is what turns
+    "you have a dashboard login" into "you are a licensed member of the team".
 
     Prefers THIS instance's own email delivery (``ENGRAPHIS_RESEND_API_KEY`` /
     ``ENGRAPHIS_SMTP_*`` in its own env) when configured — the invite then comes
     from the operator's own address/domain. Without local delivery configured,
     falls back to the vendor relay (``/license/v1/team-invite``), gated by this
     instance's own currently-active license key actually carrying the ``team``
-    feature server-side — so self-hosters get a working "Add member" out of the
-    box without setting up their own mail account, at no cost to the vendor beyond
-    what a legitimately licensed Team customer already pays for."""
+    feature server-side; the relay echoes that same verified key into the email —
+    so self-hosters get a working, license-bearing "Add member" out of the box
+    without setting up their own mail account."""
     from engraphis.inspector import webhooks
+    from engraphis.licensing import _read_key_material
+
+    # Only embed a key when this instance really has the ``team`` feature, so we never
+    # email a member a free/absent or non-Team "key" that would not unlock anything.
+    team_key = _read_key_material() if licensing.has_feature("team") else ""
+    dashboard_url = os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
+
     if webhooks.email_configured():
         try:
             webhooks.send_team_invite_email(u["email"], u["name"], u["role"],
-                                            invited_by=admin["email"])
-            return True, ""
+                                            invited_by=admin["email"], key=team_key,
+                                            dashboard_url=dashboard_url)
+            return True, "", bool(team_key)
         except Exception as exc:  # noqa: BLE001 — caller logs/audits, never raises further
-            return False, str(exc)
+            return False, str(exc), False
 
     from engraphis import cloud_license
-    from engraphis.licensing import _read_key_material
     key = _read_key_material()
     if not key:
         return False, ("no local email delivery configured (ENGRAPHIS_RESEND_API_KEY / "
-                       "ENGRAPHIS_SMTP_*) and no active license key to relay through")
-    return cloud_license.send_team_invite(
-        settings.relay_url, key, u["email"], u["name"], u["role"], admin["email"])
+                       "ENGRAPHIS_SMTP_*) and no active license key to relay through"), False
+    # The relay accepts (and now echoes into the email) only a key that verifies as
+    # Team server-side, so a successful relay send means the member got the activation key.
+    sent, reason = cloud_license.send_team_invite(
+        settings.relay_url, key, u["email"], u["name"], u["role"], admin["email"],
+        dashboard_url=dashboard_url)
+    return sent, reason, bool(sent)
 
 
 class SetupReq(BaseModel):
@@ -247,13 +264,26 @@ def attach(app: FastAPI, service):
         ip = request.client.host if request.client else None
         store.record_event("user.created", actor_id=admin["id"], actor_email=admin["email"],
                            target=u["email"], detail="role=%s" % body.role, ip=ip)
-        invited, fail_reason = _send_invite(u, admin)
+        invited, fail_reason, pro_included = _send_invite(u, admin)
+        dashboard_configured = bool(os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip())
         if not invited:
             logger.warning("team invite email to %s failed: %s", u["email"], fail_reason)
             store.record_event("user.invite_email_failed", actor_id=admin["id"],
                                actor_email=admin["email"], target=u["email"],
                                detail=fail_reason[:200], ip=ip)
-        return {"user": u, "invited": invited}
+        elif not pro_included:
+            # Delivered, but the member got a dashboard-only invite with no Pro/team key,
+            # because this instance is not Team-licensed. Tell the admin plainly rather
+            # than letting the invite look like it silently did nothing.
+            logger.warning("team invite to %s carried no Pro activation key: this instance "
+                           "is not Team-licensed", u["email"])
+            store.record_event("user.invite_no_license", actor_id=admin["id"],
+                               actor_email=admin["email"], target=u["email"],
+                               detail="dashboard access emailed, but no team license key "
+                                      "(instance not Team-licensed)", ip=ip)
+        return {"user": u, "invited": invited,
+                "pro_activation_sent": bool(pro_included),
+                "dashboard_url_configured": dashboard_configured}
 
     @router.post("/users/update")
     def upd_user(body: UpdUserReq, request: Request):

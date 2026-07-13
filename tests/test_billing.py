@@ -278,6 +278,74 @@ def test_team_invite_email_includes_dashboard_url_when_configured(monkeypatch):
     assert "https://dash.example.com" in captured["text_body"]
 
 
+def test_team_invite_email_includes_license_key_when_provided(monkeypatch):
+    # A Team-licensed instance hands the member the shared team key so they can turn on
+    # Pro features on their own machine — this is what makes them a licensed member, not
+    # just a dashboard login.
+    from engraphis.inspector import webhooks as WH
+    captured = {}
+    monkeypatch.setattr(
+        WH, "_send_via_resend_api",
+        lambda to, subject, text_body, from_addr, api_key, reply_to=None: captured.update(
+            text_body=text_body))
+    monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
+    monkeypatch.delenv("ENGRAPHIS_DASHBOARD_URL", raising=False)
+    WH.send_team_invite_email("newmember@example.com", "Mo", "member",
+                              key="ENGR-TEAM-ABC123")
+    body = captured["text_body"]
+    assert "ENGR-TEAM-ABC123" in body           # the actual activation key
+    assert "Settings -> License" in body        # how to activate it
+    assert "Pro features" in body
+
+
+def test_team_invite_email_omits_activation_when_no_key(monkeypatch):
+    # Without a key (instance not Team-licensed), the invite is dashboard-only and must
+    # not advertise a Pro-activation section it can't back up.
+    from engraphis.inspector import webhooks as WH
+    captured = {}
+    monkeypatch.setattr(
+        WH, "_send_via_resend_api",
+        lambda to, subject, text_body, from_addr, api_key, reply_to=None: captured.update(
+            text_body=text_body))
+    monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
+    monkeypatch.delenv("ENGRAPHIS_DASHBOARD_URL", raising=False)
+    WH.send_team_invite_email("newmember@example.com", "Mo", "member")
+    body = captured["text_body"]
+    assert "Settings -> License" not in body
+    assert "license key" not in body.lower()
+
+
+def test_team_invite_relay_forwards_key_and_dashboard_url(monkeypatch):
+    # cloud_license.send_team_invite must POST the key AND dashboard_url to the relay so a
+    # relay-delivered invite can carry both activation and the admin's own dashboard link.
+    import json
+    from engraphis import cloud_license as CL
+
+    seen = {}
+
+    class _Resp:
+        def read(self):
+            return json.dumps({"sent": True}).encode("utf-8")
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["payload"] = json.loads(req.data.decode("utf-8"))
+        return _Resp()
+
+    monkeypatch.setattr(CL.urllib.request, "urlopen", fake_urlopen)
+    sent, reason = CL.send_team_invite(
+        "https://relay.example", "ENGR-TEAM-XYZ", "m@e.com", "Mo", "member",
+        "admin@corp.com", dashboard_url="https://dash.corp.com")
+    assert sent is True
+    assert seen["url"].endswith("/license/v1/team-invite")
+    assert seen["payload"]["key"] == "ENGR-TEAM-XYZ"
+    assert seen["payload"]["dashboard_url"] == "https://dash.corp.com"
+
+
 def test_delivery_failure_persists_key_and_still_202(monkeypatch, tmp_path):
     # A provider/network failure must NOT lose a paid key: it lands in the 0600
     # fallback file and the webhook still returns 202 (no Polar retry storm).
