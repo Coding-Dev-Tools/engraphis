@@ -179,15 +179,19 @@ def workspaces():
 class _CreateWsReq(BaseModel):
     workspace: str
     description: str = ""
+    visibility: str = "shared"
 
 
 @router.post("/workspaces/create")
 def workspaces_create(req: _CreateWsReq):
     """Create an empty workspace/folder up front (see MemoryService.create_workspace).
     In team mode this is a POST, so the dashboard's auth gate requires the member role or
-    above — viewers can't create folders, members and admins can, and every folder is
-    shared with the whole team."""
-    return _run(service().create_workspace, req.workspace, req.description)
+    above — viewers can't create folders, members and admins can. ``visibility`` is
+    ``'shared'`` (the whole team can see and use it) or ``'personal'`` (only the creating
+    user — the current session — can, enforced server-side by the service's workspace
+    authorization); the owner is taken from the session, never from the request body."""
+    return _run(service().create_workspace, req.workspace, req.description,
+                visibility=req.visibility)
 
 
 class _RenameWsReq(BaseModel):
@@ -799,6 +803,16 @@ def _sync_all(svc) -> dict:
     for w in wss:
         name = w.get("name")
         if not name:
+            continue
+        if w.get("visibility") == "personal":
+            # Personal folders are private to their owner and must never leave this device
+            # over the shared-account relay: a team shares one license key, so the relay is
+            # namespaced per workspace but not partitioned per user — pushing a personal
+            # folder there would let any teammate pull it. Keep them local. (Both callers are
+            # covered: the "Sync now" button runs in the owner-admin's request context, where
+            # list_workspaces already hides *other* users' personal folders but still returns
+            # the caller's own; the background loop runs with no user context and sees them
+            # all. This skip is the single point that keeps either from syncing.)
             continue
         row = svc.store.conn.execute(
             "SELECT id FROM workspaces WHERE name=?", (name,)).fetchone()
