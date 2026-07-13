@@ -228,9 +228,50 @@ def test_start_trial_is_idempotent_while_already_on_trial(monkeypatch):
 
 
 def test_start_trial_refuses_if_paid_key_already_active(monkeypatch):
+    """Refusal is only correct for a key the cloud gate ACTUALLY approves right now — see
+    the 2026-07-13 fix below. Wire the gate to approve so this covers the genuine "this
+    key really is active" case, not just "a key that merely parses"."""
+    c = _app(); _wire_register_to(c, monkeypatch)
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
     monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _key(plan="pro"))
     with pytest.raises(LicenseError, match="no trial needed"):
         licensing.start_trial()
+
+
+def test_start_trial_proceeds_when_local_key_is_cloud_denied(monkeypatch):
+    """2026-07-13 incident: a signature-valid, non-trial key is configured locally, but
+    the cloud gate denies it (revoked / never registered / relay unreachable / seat cap).
+    current_license() correctly falls back to the free tier — no paid features — but
+    start_trial() used to refuse anyway with "a paid license is already active," because
+    it only checked LOCAL signature validity (_local_material_license), never the cloud
+    gate. That stranded the user with neither working features nor any way to get a
+    trial. Fixed: start_trial() now re-verifies against current_license() before
+    refusing, so a key that is cloud-denied no longer blocks a fresh trial."""
+    stale_key = _key(plan="pro")
+    c = _app()
+
+    def fake_register(base, key, mid, timeout=6.0):
+        if key == stale_key:
+            return None                      # the existing key can no longer be verified
+        r = c.post("/license/v1/register", json={"key": key, "machine_id": mid})
+        return r.json().get("lease") if r.status_code == 200 else None
+
+    monkeypatch.setattr(cloud_license, "register", fake_register)
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    licensing.activate(stale_key)            # persists (signature-only check, like a real
+                                              # customer pasting an old key)
+    assert licensing.current_license(refresh=True).plan == "free"   # cloud gate denies it
+    assert licensing.has_feature("analytics") is False              # -> no paid features
+
+    now = time.time()
+    pro_trial = licensing.compose_key(
+        {"v": 1, "plan": "pro", "email": "trial@engraphis.local", "seats": 1,
+         "issued": int(now), "expires": int(now + 3 * 86400), "trial": 1}, SECRET)
+    monkeypatch.setattr(cloud_license, "request_trial_key",
+                        lambda base, mid, plan="pro", email="": (pro_trial, ""))
+    out = licensing.start_trial()            # must NOT raise "already active"
+    assert out["plan"] == "pro" and out["is_trial"] is True
+    assert licensing.has_feature("analytics") is True
 
 
 def test_monotonic_clock_never_goes_backward(monkeypatch):
@@ -753,9 +794,40 @@ def test_licensing_start_team_trial_activates_returned_key(monkeypatch):
 
 
 def test_licensing_start_team_trial_refuses_if_paid_key_already_active(monkeypatch):
+    """Same reasoning as test_start_trial_refuses_if_paid_key_already_active: only
+    refuse when the cloud gate actually approves the existing key."""
+    c = _app(); _wire_register_to(c, monkeypatch)
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
     monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _key(plan="pro"))
     with pytest.raises(LicenseError, match="no trial needed"):
         licensing.start_team_trial()
+
+
+def test_licensing_start_team_trial_proceeds_when_local_key_is_cloud_denied(monkeypatch):
+    """Team-trial counterpart of test_start_trial_proceeds_when_local_key_is_cloud_denied
+    — same 2026-07-13 incident, same fix, in start_team_trial()."""
+    stale_key = _key(plan="pro")
+    c = _app()
+
+    def fake_register(base, key, mid, timeout=6.0):
+        if key == stale_key:
+            return None
+        r = c.post("/license/v1/register", json={"key": key, "machine_id": mid})
+        return r.json().get("lease") if r.status_code == 200 else None
+
+    monkeypatch.setattr(cloud_license, "register", fake_register)
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    licensing.activate(stale_key)
+    assert licensing.current_license(refresh=True).plan == "free"
+    assert licensing.has_feature("team") is False
+
+    trial_key = _key(plan="team", email="trial@engraphis.local")
+    monkeypatch.setattr(
+        cloud_license, "request_team_trial_key",
+        lambda base, mid, email="": (trial_key, ""))
+    out = licensing.start_team_trial()       # must NOT raise "already active"
+    assert out["plan"] == "team"
+    assert licensing.has_feature("team") is True
 
 
 def test_licensing_start_team_trial_is_idempotent_while_already_on_trial(monkeypatch):

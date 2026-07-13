@@ -3,6 +3,20 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [Unreleased]
+
+### Fixed
+- **Dockerfile default entrypoint** was the v1 single-user API server
+  (`engraphis-server`), which serves the same `static/index.html` as the v2 team
+  dashboard but has no `/api/auth/*`, `/api/license/*`, or `/api/bootstrap` routes —
+  every such call 401s with a bare `{"error":"unauthorized"}` regardless of actual
+  login/license state. Any host that runs the image without an explicit start-command
+  override (e.g. a fresh Railway service, or one that lost a custom command) got a
+  dashboard UI that looked complete but was permanently "signed out, no features, no
+  trial" no matter what the user did. Default is now `engraphis-dashboard --no-open`,
+  matching `docker-compose.yml`'s existing default. `engraphis-server` is still
+  available as an explicit override for single-user deployments.
+
 ## [0.8.8] - 2026-07-13
 
 ### Security
