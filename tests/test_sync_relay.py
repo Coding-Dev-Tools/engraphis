@@ -11,6 +11,8 @@ import urllib.error
 import urllib.parse
 
 import pytest
+
+pytest.importorskip("fastapi")
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
