@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
 from engraphis import licensing
@@ -241,6 +241,42 @@ class _MergeWsReq(BaseModel):
 def workspaces_merge(req: _MergeWsReq):
     """Fold ``source`` workspace into ``target`` (lossless move, see MemoryService.merge_workspaces)."""
     return _run(service().merge_workspaces, req.source, req.target)
+
+
+class _ImportFolderReq(BaseModel):
+    workspace: str
+    path: str
+    file_pattern: str = "*.md"
+    memory_type: str = "semantic"
+
+
+@router.post("/workspaces/import-folder")
+def workspaces_import_folder(req: _ImportFolderReq):
+    """Import files from a directory on the machine running Engraphis into ``workspace``,
+    one memory per file (see MemoryService.import_folder, SECURITY.md §5). POST defaults
+    to the member role in min_role() — same as workspaces/create — so a viewer can't
+    trigger a disk read; the traversal guard itself lives in the service layer."""
+    return _run(service().import_folder, workspace=req.workspace, path=req.path,
+                file_pattern=req.file_pattern, memory_type=req.memory_type)
+
+
+@router.post("/workspaces/import-files")
+async def workspaces_import_files(workspace: str = Form(...),
+                                  memory_type: str = Form("semantic"),
+                                  files: list[UploadFile] = File(...)):
+    """Drag-and-drop / picked-file upload counterpart to import-folder (see
+    MemoryService.import_files). Each upload is read bounded by
+    ``MemoryService.MAX_IMPORT_FILE_BYTES`` before decoding — a resource bound, not a
+    security boundary (see that constant's docstring); the rest of validation is
+    transport-agnostic and lives in the service layer, same as every other write."""
+    from engraphis.service import MAX_IMPORT_FILE_BYTES
+    payload = []
+    for f in files:
+        raw = await f.read(MAX_IMPORT_FILE_BYTES)
+        payload.append({"name": f.filename or "untitled",
+                        "content": raw.decode("utf-8", errors="replace")})
+    return _run(service().import_files, workspace=workspace, files=payload,
+                memory_type=memory_type)
 
 
 class _UpdateMemReq(BaseModel):

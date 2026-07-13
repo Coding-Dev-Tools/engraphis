@@ -302,3 +302,139 @@ def test_search_code_requires_repo():
     s.remember("x", workspace="acme")
     with pytest.raises(ValidationError):
         s.search_code("add", workspace="acme", repo="")
+
+
+# ── folder / file import (dashboard "Import files & folders" section, SECURITY.md §5) ─
+
+def test_import_folder_success(tmp_path, monkeypatch):
+    (tmp_path / "notes.md").write_text("# DB choice\nWe use Postgres 16.\n")
+    (tmp_path / "empty.md").write_text("   \n")
+    (tmp_path / "skip.txt").write_text("wrong pattern, not imported")
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(tmp_path))
+    s = _svc()
+    report = s.import_folder(workspace="acme", path=str(tmp_path))
+    assert report["scanned"] == 2          # only *.md matched skip.txt is excluded
+    assert report["imported"] == 1
+    assert report["skipped"] == 1          # empty.md
+    r = s.recall("Postgres", workspace="acme")
+    assert any("Postgres" in m["content"] for m in r["memories"])
+
+
+def test_import_folder_marks_untrusted(tmp_path, monkeypatch):
+    (tmp_path / "a.md").write_text("An imported fact about narwhals.")
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(tmp_path))
+    s = _svc()
+    s.import_folder(workspace="acme", path=str(tmp_path))
+    r = s.recall("narwhals", workspace="acme")
+    assert r["memories"], "expected the imported memory to be recallable"
+    prov = r["memories"][0]["provenance"]
+    assert prov["source"] == "import" and prov["trusted"] is False
+    assert prov["kind"] == "file_import"
+
+
+def test_import_folder_respects_file_pattern(tmp_path, monkeypatch):
+    (tmp_path / "a.md").write_text("markdown note")
+    (tmp_path / "b.txt").write_text("text note")
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(tmp_path))
+    s = _svc()
+    report = s.import_folder(workspace="acme", path=str(tmp_path), file_pattern="*.txt")
+    assert report["scanned"] == 1 and report["imported"] == 1
+    r = s.recall("text note", workspace="acme")
+    assert any("text note" in m["content"] for m in r["memories"])
+
+
+def test_import_folder_missing_path_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(tmp_path))
+    s = _svc()
+    with pytest.raises(ValidationError):
+        s.import_folder(workspace="acme", path=str(tmp_path / "does-not-exist"))
+
+
+def test_import_folder_path_traversal_blocked(tmp_path, monkeypatch):
+    """A path outside the allowed roots (home dir / ENGRAPHIS_IMPORT_ROOTS) must be
+    refused before anything under it is read — SECURITY.md §5's threat model treats the
+    path as attacker-controlled (any team member who can reach the dashboard, or a
+    prompt-injected agent calling through it)."""
+    import pathlib
+    decoy_home = tmp_path / "decoy-home"
+    decoy_home.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("do not import me")
+    monkeypatch.delenv("ENGRAPHIS_IMPORT_ROOTS", raising=False)
+    monkeypatch.setattr(pathlib.Path, "home", lambda: decoy_home)
+    s = _svc()
+    with pytest.raises(ValidationError):
+        s.import_folder(workspace="acme", path=str(outside))
+
+
+def test_import_folder_allows_home_directory(tmp_path, monkeypatch):
+    """A path *under* the (possibly faked) home directory is allowed without needing
+    ENGRAPHIS_IMPORT_ROOTS — the default, no-config case."""
+    import pathlib
+    home = tmp_path / "home"
+    sub = home / "notes"
+    sub.mkdir(parents=True)
+    (sub / "a.md").write_text("fact under home")
+    monkeypatch.delenv("ENGRAPHIS_IMPORT_ROOTS", raising=False)
+    monkeypatch.setattr(pathlib.Path, "home", lambda: home)
+    s = _svc()
+    report = s.import_folder(workspace="acme", path=str(sub))
+    assert report["imported"] == 1
+
+
+def test_import_folder_symlink_escape_blocked(tmp_path, monkeypatch):
+    """A symlink *inside* an allowed root that points *outside* it must not let
+    ``import_folder`` read the target — ``rglob`` follows symlinked directories, so
+    ``_resolve_import_root``'s containment check on the root alone isn't enough; each
+    candidate file is re-resolved and re-contained in ``_iter_import_files``."""
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside-secret"
+    outside.mkdir()
+    (outside / "secret.md").write_text("classified narwhal launch codes")
+    try:
+        (allowed / "escape").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported in this environment")
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(allowed))
+    s = _svc()
+    report = s.import_folder(workspace="acme", path=str(allowed))
+    assert report["imported"] == 0 and report["scanned"] == 0
+    r = s.recall("narwhal launch codes", workspace="acme")
+    assert not any("launch codes" in m["content"] for m in r["memories"])
+
+
+def test_import_files_success():
+    s = _svc()
+    report = s.import_files(workspace="acme", files=[
+        {"name": "one.md", "content": "# Title\nA fact about pangolins."},
+        {"name": "two.md", "content": ""},
+    ])
+    assert report["imported"] == 1
+    assert report["skipped"] == 1
+    r = s.recall("pangolins", workspace="acme")
+    assert any("pangolins" in m["content"] for m in r["memories"])
+
+
+def test_import_files_marks_untrusted_with_upload_kind():
+    s = _svc()
+    s.import_files(workspace="acme", files=[
+        {"name": "x.md", "content": "A fact about uploaded quokkas."}])
+    r = s.recall("quokkas", workspace="acme")
+    prov = r["memories"][0]["provenance"]
+    assert prov["source"] == "import" and prov["trusted"] is False
+    assert prov["kind"] == "file_upload"
+
+
+def test_import_files_caps_count():
+    s = _svc()
+    too_many = [{"name": f"f{i}.md", "content": "x"} for i in range(600)]
+    with pytest.raises(ValidationError):
+        s.import_files(workspace="acme", files=too_many)
+
+
+def test_import_files_rejects_non_list():
+    s = _svc()
+    with pytest.raises(ValidationError):
+        s.import_files(workspace="acme", files={"name": "a.md", "content": "x"})
