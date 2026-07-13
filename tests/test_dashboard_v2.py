@@ -664,3 +664,64 @@ def test_import_files_route_multipart_upload(monkeypatch, tmp_path):
 
         found = c.get("/api/recall?q=okapis&workspace=demo").json()
         assert any("okapis" in m["content"] for m in found["memories"])
+
+
+def test_personal_folders_are_isolated_per_user(monkeypatch, tmp_path):
+    """A personal folder is visible and usable only by its owner — even an admin cannot
+    see or read another member's personal folder — while shared folders stay visible to the
+    whole team. Exercises the full HTTP path end to end: the team auth gate binds the
+    session user for the request and MemoryService enforces ownership at its single
+    workspace-authorization chokepoint, so every scoped route inherits the check.
+
+    One TestClient, one lifespan (two sequential lifespans deadlock here — see the note on
+    test_analytics_and_export_*): the two identities are driven by swapping the session
+    cookie explicitly after each user has logged in once.
+    """
+    cookie = "engr_dash_session"
+    with _client(monkeypatch, tmp_path, team=True, key=_team_key()) as c:
+        # admin (alice) sets herself up, then makes one personal and one shared folder
+        assert c.post("/api/auth/setup", json={"email": "alice@x.co", "name": "Alice",
+                      "password": "supersecret1"}).status_code == 200
+        alice = c.cookies.get(cookie)
+        assert c.post("/api/workspaces/create",
+                      json={"workspace": "alice-secret", "visibility": "personal"}
+                      ).status_code == 200
+        assert c.post("/api/workspaces/create",
+                      json={"workspace": "team-proj", "visibility": "shared"}
+                      ).status_code == 200
+        # add a member (bob) and log him in to capture his session
+        assert c.post("/api/auth/users", json={"email": "bob@x.co", "name": "Bob",
+                      "password": "anotherpass1", "role": "member"}).status_code == 200
+        assert c.post("/api/auth/login", json={"email": "bob@x.co",
+                      "password": "anotherpass1"}).status_code == 200
+        bob = c.cookies.get(cookie)
+        c.cookies.clear()  # from here on every request names its user via an explicit header
+
+        # Identity is set with an explicit Cookie header (not per-request cookies=, which
+        # httpx deprecates) so swapping between the two users is unambiguous and jar-free.
+        def hdr(tok):
+            return {"Cookie": "%s=%s" % (cookie, tok)}
+
+        def names(tok):
+            r = c.get("/api/workspaces", headers=hdr(tok))
+            return sorted(w["name"] for w in r.json()["workspaces"])
+
+        # bob sees the shared folder but never alice's personal one
+        assert "team-proj" in names(bob)
+        assert "alice-secret" not in names(bob)
+        # and he is refused read access to it on every scoped route he might try
+        assert c.get("/api/memories?workspace=alice-secret",
+                     headers=hdr(bob)).status_code == 400
+        assert c.get("/api/recall?q=x&workspace=alice-secret",
+                     headers=hdr(bob)).status_code == 400
+        # bob makes his own personal folder; alice (an admin) can't see it either
+        assert c.post("/api/workspaces/create",
+                      json={"workspace": "bob-notes", "visibility": "personal"},
+                      headers=hdr(bob)).status_code == 200
+        assert "bob-notes" not in names(alice)
+        assert "alice-secret" in names(alice)
+        # visibility is surfaced on the listing so the dashboard can badge folders
+        vis = {w["name"]: w.get("visibility") for w in
+               c.get("/api/workspaces", headers=hdr(alice)).json()["workspaces"]}
+        assert vis["alice-secret"] == "personal"
+        assert vis["team-proj"] == "shared"
