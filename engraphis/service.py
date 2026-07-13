@@ -15,8 +15,10 @@ MCP tools; nothing in this module imports ``mcp``.
 """
 from __future__ import annotations
 
+import os
 import re
 import json
+from pathlib import Path
 from typing import Any, Optional
 
 from engraphis.core.engine import MemoryEngine
@@ -31,6 +33,11 @@ MAX_KEYWORDS = 64
 MAX_KEYWORD_CHARS = 128
 MAX_METADATA_BYTES = 16_384
 MAX_K = 50
+# import_folder/import_files (SECURITY.md §5 — reads/accepts local-content by path or
+# upload; these bound resource use, not access scope, same framing as index_repo's
+# max_files/max_file_bytes).
+MAX_IMPORT_FILES = 500
+MAX_IMPORT_FILE_BYTES = 2_000_000
 
 # control characters except tab/newline/carriage-return
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -104,6 +111,67 @@ def _enum(value: Any, enum_cls, field: str):
     except ValueError:
         allowed = ", ".join(e.value for e in enum_cls)
         raise ValidationError(f"{field} must be one of: {allowed}")
+
+
+def _resolve_import_root(raw_path: str) -> Path:
+    """Path-traversal guard for ``import_folder`` (SECURITY.md §5): the path is
+    attacker-controlled if whatever calls this endpoint is (e.g. a prompt-injected
+    agent, or any team member who can reach the dashboard), so it must resolve inside
+    an allowlisted root before anything under it is read. Mirrors the retired v1 vault
+    ``/memory/vaults/import-folder`` endpoint's convention — home directory by default,
+    widened via ``ENGRAPHIS_IMPORT_ROOTS`` (``os.pathsep``-separated) for server
+    deployments that keep content outside ``$HOME``."""
+    folder = Path(raw_path).expanduser().resolve()
+    if not folder.exists():
+        raise ValidationError(f"path not found: {raw_path}")
+    if not folder.is_dir():
+        raise ValidationError(f"not a directory: {raw_path}")
+    home = Path.home().resolve()
+    allowed_roots = [home]
+    env_roots = os.environ.get("ENGRAPHIS_IMPORT_ROOTS", "")
+    if env_roots:
+        allowed_roots.extend(Path(r).expanduser().resolve() for r in env_roots.split(os.pathsep) if r)
+    if not any(folder == r or folder.is_relative_to(r) for r in allowed_roots):
+        raise ValidationError(
+            "import path must be under an allowed root (your home directory, or "
+            "ENGRAPHIS_IMPORT_ROOTS)")
+    return folder
+
+
+def _iter_import_files(folder: Path, pattern: str, max_files: int) -> list:
+    """Files under ``folder`` matching the glob ``pattern`` (default ``*.md``), skipping
+    VCS/dependency directories and capped at ``max_files`` — a resource bound, not a
+    security boundary (the boundary is ``_resolve_import_root``).
+
+    Symlink escape guard: ``rglob`` follows symlinked directories, so a symlink placed
+    somewhere under an allowed root (by anything that ever had write access there) could
+    point outside the allowed root entirely and defeat ``_resolve_import_root`` — every
+    candidate is re-resolved and re-contained here, the same check the root itself got."""
+    import fnmatch
+    files: list = []
+    for f in sorted(folder.rglob("*")):
+        if len(files) >= max_files:
+            break
+        if not f.is_file() or not fnmatch.fnmatch(f.name, pattern):
+            continue
+        parts = f.relative_to(folder).parts
+        if any(p == "node_modules" or p == ".git" or p.startswith(".") for p in parts[:-1]):
+            continue
+        try:
+            real = f.resolve()
+        except OSError:
+            continue
+        if not (real == folder or real.is_relative_to(folder)):
+            continue
+        files.append(f)
+    return files
+
+
+def _title_from_content(content: str, fallback: str) -> str:
+    """First Markdown H1 if present, else the caller-supplied fallback (usually the
+    filename stem) — matches the retired v1 import-folder endpoint's title heuristic."""
+    match = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
+    return match.group(1).strip() if match else fallback
 
 
 class MemoryService:
@@ -290,6 +358,122 @@ class MemoryService:
                 "facts": [{"id": r["id"], "op": r["op"],
                            **({"superseded": r["superseded"]} if "superseded" in r else {})}
                           for r in out["facts"]]}
+
+    # ── folder / file import (dashboard "Import" section) ────────────────────────
+    def _import_one(self, name: str, content: str, *, ws: str, mt: MemoryType,
+                     kind: str, extra_provenance: Optional[dict] = None) -> dict:
+        """Shared per-file ingest for ``import_folder``/``import_files``: one memory per
+        file, workspace-scoped, always marked untrusted (SECURITY.md §5/§1 — imported
+        content did not originate from an already-trusted agent write, so it must not be
+        able to launder itself into a trusted fact at merge time; see
+        ``core/engine.py``'s merge trust rule)."""
+        if not content.strip():
+            return {"file": name, "skipped": True}
+        title = _title_from_content(content, fallback=Path(name).stem or name)
+        try:
+            r = self.remember(
+                content, workspace=ws, mtype=mt.value, scope="workspace",
+                title=title[:MAX_TITLE_CHARS], source="import", trusted=False, kind=kind,
+                metadata={**(extra_provenance or {}), "import_file": name},
+            )
+            return {"file": name, "id": r["id"], "op": r["op"]}
+        except ValidationError as exc:
+            return {"file": name, "error": str(exc)}
+
+    def import_folder(self, *, workspace: str, path: str, file_pattern: str = "*.md",
+                      memory_type: str = "semantic", actor: str = "user") -> dict:
+        """Import files from a directory on the machine running Engraphis into
+        ``workspace``, one memory per file. Restores the retired v1 vault
+        ``/memory/vaults/import-folder`` capability as a first-class v2 feature (the old
+        endpoint wrote to the v1 namespace store, invisible to this — the v2 — dashboard).
+        The path is resolved and checked by ``_resolve_import_root`` before anything
+        under it is touched (SECURITY.md §5); every imported memory is marked
+        ``trusted: false`` (SECURITY.md §1) since the content is disk-local text this
+        instance did not author."""
+        ws = self._clean_ws(workspace)
+        mt = _enum(memory_type, MemoryType, "memory_type")
+        pattern = _clean_text(file_pattern, field="file_pattern", max_chars=MAX_NAME_CHARS,
+                              required=False) or "*.md"
+        raw_path = _clean_text(path, field="path", max_chars=MAX_CONTENT_CHARS)
+        actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
+                            required=False) or "user"
+
+        folder = _resolve_import_root(raw_path)
+        wid = self.store.get_or_create_workspace(ws)
+        files = _iter_import_files(folder, pattern, MAX_IMPORT_FILES)
+
+        imported, skipped, errors, details = 0, 0, 0, []
+        for f in files:
+            try:
+                if f.stat().st_size > MAX_IMPORT_FILE_BYTES:
+                    errors += 1
+                    details.append({"file": f.name, "error": "file too large"})
+                    continue
+                content = f.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                errors += 1
+                details.append({"file": f.name, "error": str(exc)})
+                continue
+            rel = f.relative_to(folder).as_posix()
+            result = self._import_one(rel, content, ws=ws, mt=mt, kind="file_import",
+                                      extra_provenance={"import_path": rel})
+            if result.get("skipped"):
+                skipped += 1
+            elif result.get("error"):
+                errors += 1
+                details.append(result)
+            else:
+                imported += 1
+
+        self.store.audit(actor, "import_folder", wid,
+                         f"{raw_path} ({imported} imported)")
+        self.store.conn.commit()
+        return {"workspace": ws, "path": str(folder), "scanned": len(files),
+                "imported": imported, "skipped": skipped, "errors": errors,
+                "details": details[:50]}
+
+    def import_files(self, *, workspace: str, files: list, memory_type: str = "semantic",
+                     actor: str = "user") -> dict:
+        """Drag-and-drop / picked-file counterpart to ``import_folder``: ingest
+        browser-uploaded file contents (already decoded to text by the caller — this
+        method has no transport dependency, matching the rest of this facade) as one
+        memory per file. Same untrusted-by-default marking as ``import_folder``."""
+        ws = self._clean_ws(workspace)
+        mt = _enum(memory_type, MemoryType, "memory_type")
+        actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
+                            required=False) or "user"
+        if not isinstance(files, (list, tuple)):
+            raise ValidationError("files must be a list")
+        if len(files) > MAX_IMPORT_FILES:
+            raise ValidationError(f"too many files (max {MAX_IMPORT_FILES})")
+
+        wid = self.store.get_or_create_workspace(ws)
+        imported, skipped, errors, details = 0, 0, 0, []
+        for item in files:
+            if not isinstance(item, dict):
+                errors += 1
+                continue
+            name = _clean_text(item.get("name"), field="name", max_chars=MAX_NAME_CHARS,
+                               required=False) or "untitled"
+            content = item.get("content") or ""
+            if not isinstance(content, str):
+                errors += 1
+                details.append({"file": name, "error": "content must be a string"})
+                continue
+            content = content[:MAX_IMPORT_FILE_BYTES]
+            result = self._import_one(name, content, ws=ws, mt=mt, kind="file_upload")
+            if result.get("skipped"):
+                skipped += 1
+            elif result.get("error"):
+                errors += 1
+                details.append(result)
+            else:
+                imported += 1
+
+        self.store.audit(actor, "import_files", wid, f"{imported} imported")
+        self.store.conn.commit()
+        return {"workspace": ws, "scanned": len(files), "imported": imported,
+                "skipped": skipped, "errors": errors, "details": details[:50]}
 
     def consolidate(self, *, workspace: str, repo: Optional[str] = None,
                     dry_run: bool = False, min_cluster: int = 3,

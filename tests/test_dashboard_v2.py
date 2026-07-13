@@ -208,6 +208,12 @@ def test_viewer_role_denied_on_governance_and_admin_routes(monkeypatch, tmp_path
         # a viewer can't create a folder either — creating a workspace is a member+ action
         assert viewer.post("/api/workspaces/create",
                            json={"workspace": "viewer-folder"}).status_code == 403
+        # nor import into one — same member+ gate, both the path and upload routes
+        assert viewer.post("/api/workspaces/import-folder",
+                           json={"workspace": "demo", "path": "/tmp"}).status_code == 403
+        assert viewer.post("/api/workspaces/import-files", data={"workspace": "demo"},
+                           files=[("files", ("x.md", b"x", "text/markdown"))]
+                           ).status_code == 403
         # the same routes work for the admin who created the viewer
         assert admin.post("/api/pin", json={"id": mid, "workspace": "demo",
                           "pinned": True}).status_code == 200
@@ -410,7 +416,23 @@ def test_team_login_lockout(monkeypatch, tmp_path):
 
 
 def test_trial_start_and_rejection(monkeypatch, tmp_path):
-    """Trial starts. Re-calling during active trial is a no-op (returns current status)."""
+    """Trial starts. Re-calling during active trial is a no-op (returns current status).
+
+    Since 0.8.4 the Pro trial is a REAL server-issued key (``licensing.start_trial`` ->
+    ``cloud_license.request_trial_key``), not a local grant — mock the relay client call
+    so this stays on the offline gate, same as the Team-trial test below. The re-call
+    must NOT hit the relay a second time (there is only one ``request_trial_key`` stub
+    below, good for exactly one call) — ``start_trial`` recognizes the already-active
+    trial key locally and short-circuits before ever reaching the relay client."""
+    from engraphis import cloud_license
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(_SECRET).hex())
+    trial_key = compose_key(
+        {"v": 1, "plan": "pro", "email": "trial@engraphis.local", "seats": 1,
+         "issued": int(time.time()), "expires": int(time.time() + 3 * 86400),
+         "trial": 1}, _SECRET)
+    monkeypatch.setattr(
+        cloud_license, "request_trial_key",
+        lambda base, mid, plan="pro", email="": (trial_key, ""))
     with _client(monkeypatch, tmp_path) as c:
         r = c.post("/api/license/trial", json={})
         assert r.status_code == 200
@@ -418,6 +440,7 @@ def test_trial_start_and_rejection(monkeypatch, tmp_path):
         assert lic["is_trial"] is True
         r2 = c.post("/api/license/trial", json={})
         assert r2.status_code == 200  # no-op: already on trial
+        assert r2.json()["is_trial"] is True
 
 
 def test_team_trial_route_activates_relay_issued_key(monkeypatch, tmp_path):
@@ -439,6 +462,61 @@ def test_team_trial_route_activates_relay_issued_key(monkeypatch, tmp_path):
         r = c.post("/api/license/team-trial", json={})
         assert r.status_code == 200 and r.json()["plan"] == "team"
         assert c.get("/api/license").json()["plan"] == "team"
+
+
+def test_team_trial_reachable_with_zero_users_and_no_session(monkeypatch, tmp_path):
+    """Regression: a brand-new team-mode instance (ENGRAPHIS_TEAM_MODE=1, zero users, no
+    license) was a hard deadlock. create_user() (called by /api/auth/setup) requires
+    require_feature("team"), so you can't create the first admin without a license — but
+    /api/license, /api/license/trial and /api/license/team-trial all required an
+    authenticated team session, which is impossible before any admin exists. Every visitor
+    got a 401 the instant they touched Settings -> License or clicked "Start trial," with
+    no way to ever bootstrap. These three routes are now in dashboard_app.py's _PUBLIC set;
+    this test drives the exact recovery path end to end: read license (no session) -> start
+    Team trial (no session) -> the resulting license unblocks /api/auth/setup -> the new
+    admin can log in normally afterward."""
+    from engraphis import cloud_license
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(_SECRET).hex())
+    trial_key = compose_key(
+        {"v": 1, "plan": "team", "email": "trial@engraphis.local", "seats": 5,
+         "issued": int(time.time()), "expires": int(time.time() + 3 * 86400)}, _SECRET)
+    monkeypatch.setattr(
+        cloud_license, "request_team_trial_key",
+        lambda base, mid, email="": (trial_key, ""))
+    # team=True, key=None: team mode is on but there is no license and no user yet.
+    with _client(monkeypatch, tmp_path, team=True) as c:
+        # reading license state pre-login must not 401
+        r0 = c.get("/api/license")
+        assert r0.status_code == 200 and r0.json()["plan"] == "free"
+        # starting the Team trial pre-login must not 401 either
+        r1 = c.post("/api/license/team-trial", json={})
+        assert r1.status_code == 200 and r1.json()["plan"] == "team"
+        # the trial key is now active -> the first admin can be created and signed in
+        r2 = c.post("/api/auth/setup", json={"email": "w@x.co", "name": "W",
+                    "password": "supersecret1"})
+        assert r2.status_code == 200
+        fresh = TestClient(c.app)
+        assert fresh.post("/api/auth/login", json={"email": "w@x.co",
+                          "password": "supersecret1"}).status_code == 200
+
+
+def test_license_activate_still_requires_admin_session(monkeypatch, tmp_path):
+    """/api/license/activate is deliberately NOT in _PUBLIC (unlike /api/license and the
+    trial routes) — pasting an arbitrary key changes the whole team's plan, so it stays
+    behind the normal session + min_role('admin') gate."""
+    with _client(monkeypatch, tmp_path, team=True, key=_team_key()) as c:
+        assert c.post("/api/auth/setup", json={"email": "w@x.co", "name": "W",
+                      "password": "supersecret1"}).status_code == 200
+        c.post("/api/auth/users", json={"email": "m@x.co", "name": "M",
+              "password": "anotherpass1", "role": "member"})
+        anon = TestClient(c.app)
+        assert anon.post("/api/license/activate",
+                         json={"key": "not-a-key"}).status_code == 401
+        member = TestClient(c.app)
+        member.post("/api/auth/login", json={"email": "m@x.co", "password": "anotherpass1"})
+        r = member.post("/api/license/activate", json={"key": "not-a-key"})
+        assert r.status_code == 403
 
 
 def test_team_trial_route_surfaces_relay_denial_as_400(monkeypatch, tmp_path):
@@ -487,26 +565,86 @@ def test_team_cookie_secure_flag_on_https(monkeypatch, tmp_path):
         assert any("engr_dash_session" in ck for ck in cookies2)
 
 
-def test_login_requires_live_team_license(monkeypatch, tmp_path):
-    """Regression: a lapsed/removed Team license must stop NEW logins, not just user
-    creation — otherwise accounts created while the license was valid keep the paid
-    multi-user mode forever. (Existing sessions age out at SESSION_TTL_SECONDS; the
-    gate lives in AuthStore.login so the Inspector inherits it too.)"""
+def test_login_survives_a_lapsed_team_license_but_new_seats_still_need_one(
+        monkeypatch, tmp_path):
+    """2026-07-12 incident: a lapsed/expired Team license blocked EVERY login, including
+    the admin's own, with no recovery path short of hand-minting a new key from the
+    vendor's private signing key. AuthStore.login() no longer gates on a live license —
+    an already-provisioned account can always sign back in on correct credentials, license
+    or no license. What a lapsed license still blocks: adding NEW seats (create_user's own
+    require_feature("team") gate is untouched), and the paid features gated at their own
+    routes (analytics/export/automation/sync) — see test_analytics_and_export_gated_by_default.
+    So the product's actual monetized value (seat growth + Pro/Team features) stays behind
+    the paywall; only "can I get back into my own account" no longer does."""
     with _client(monkeypatch, tmp_path, team=True, key=_team_key()) as c:
         assert c.post("/api/auth/setup", json={"email": "w@x.co", "name": "W",
                       "password": "supersecret1"}).status_code == 200
         assert c.post("/api/auth/users", json={"email": "m@x.co", "name": "M",
                       "password": "anotherpass1", "role": "member"}).status_code == 200
-        # license lapses (key gone) -> fresh logins are refused with a structured 402
+        # license lapses (key gone)
         monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY")
         lic.current_license(refresh=True)
         fresh = TestClient(c.app)
+        # an existing account can still log in — no more license-induced lockout
         r = fresh.post("/api/auth/login", json={"email": "m@x.co",
                        "password": "anotherpass1"})
-        assert r.status_code == 402
-        assert r.json().get("feature") == "team"
-        # restoring a valid key restores logins — the gate is the license, not the user
+        assert r.status_code == 200
+        # wrong password still fails normally (401) — this isn't an open door
+        assert fresh.post("/api/auth/login", json={"email": "m@x.co",
+                          "password": "wrongwrong1"}).status_code == 401
+        # ...but adding a brand-new seat still requires a live Team license
+        r2 = c.post("/api/auth/users", json={"email": "n@x.co", "name": "N",
+                    "password": "yetanotherpw1", "role": "member"})
+        assert r2.status_code == 402
+        assert r2.json().get("feature") == "team"
+        # restoring a valid key restores the ability to add seats
         monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _team_key())
         lic.current_license(refresh=True)
-        assert fresh.post("/api/auth/login", json={"email": "m@x.co",
-                          "password": "anotherpass1"}).status_code == 200
+        assert c.post("/api/auth/users", json={"email": "n@x.co", "name": "N",
+                      "password": "yetanotherpw1", "role": "member"}).status_code == 200
+
+
+# ── import (dashboard "Import files & folders" section) ────────────────────────────
+
+def test_import_folder_route(monkeypatch, tmp_path):
+    """Restored v2-native counterpart to the retired v1 vault import-folder endpoint —
+    see MemoryService.import_folder. The path must be under ENGRAPHIS_IMPORT_ROOTS (or
+    home) before the route will read anything under it."""
+    import_dir = tmp_path / "import-src"
+    import_dir.mkdir()
+    (import_dir / "note.md").write_text("# Title\nRoute-imported fact about aardvarks.")
+    monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(import_dir))
+    with _client(monkeypatch, tmp_path) as c:
+        r = c.post("/api/workspaces/import-folder",
+                   json={"workspace": "demo", "path": str(import_dir)})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["imported"] == 1 and body["scanned"] == 1
+
+        found = c.get("/api/recall?q=aardvarks&workspace=demo").json()
+        assert any("aardvarks" in m["content"] for m in found["memories"])
+
+
+def test_import_folder_route_rejects_path_outside_roots(monkeypatch, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("should not be imported")
+    monkeypatch.delenv("ENGRAPHIS_IMPORT_ROOTS", raising=False)
+    with _client(monkeypatch, tmp_path) as c:
+        r = c.post("/api/workspaces/import-folder",
+                   json={"workspace": "demo", "path": str(outside)})
+        assert r.status_code == 400, r.text
+
+
+def test_import_files_route_multipart_upload(monkeypatch, tmp_path):
+    """The drag-and-drop counterpart — a multipart upload, not a server path."""
+    with _client(monkeypatch, tmp_path) as c:
+        r = c.post("/api/workspaces/import-files",
+                   data={"workspace": "demo", "memory_type": "semantic"},
+                   files=[("files", ("upload.md", b"Uploaded fact about okapis.",
+                                     "text/markdown"))])
+        assert r.status_code == 200, r.text
+        assert r.json()["imported"] == 1
+
+        found = c.get("/api/recall?q=okapis&workspace=demo").json()
+        assert any("okapis" in m["content"] for m in found["memories"])
