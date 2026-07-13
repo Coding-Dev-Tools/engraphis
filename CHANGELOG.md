@@ -3,11 +3,91 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [Unreleased] — restore "Import files & folders"
+
+### Added
+- **Dashboard "Import files & folders" section, restored on the v2 engine** (`engraphis/service.py`,
+  `routes/v2_api.py`, `static/index.html`, Workspaces tab). Reported missing/"urgently" needed;
+  investigation found the retired v1 vault `/memory/vaults/import-folder` endpoint (still mounted,
+  `routes/vault.py`) wrote to the old namespace store the v2 dashboard can't see, and a `.dropzone`
+  CSS class had sat unused in `static/index.html` since the earliest reachable commit — evidence a
+  drag-and-drop import UI was planned or lost, but no matching HTML existed in any commit reachable
+  after the 2026-07-08 history rewrite (nothing to literally revert). Rebuilt as a first-class v2
+  feature instead: `MemoryService.import_folder()` (server-side path, `*.md` by default, one memory
+  per file) and `MemoryService.import_files()` (drag-and-drop / picked-file upload, recursive folder
+  drop via `webkitGetAsEntry`), both member+ gated (same `POST` → `member` rule as
+  `workspaces/create`), both bounded (`MAX_IMPORT_FILES=500`, `MAX_IMPORT_FILE_BYTES=2MB`), and every
+  imported memory marked `trusted: false` / `source: "import"` (SECURITY.md §1 — imported disk/upload
+  content is untrusted by default, same as any other non-agent write). 21 new tests
+  (`tests/test_service.py`, `tests/test_dashboard_v2.py`); offline gate green.
+
+### Security
+- **Path-traversal guard on the restored folder import**, mirroring the retired v1 endpoint's
+  convention: `MemoryService._resolve_import_root` refuses any path outside the caller's home
+  directory or `ENGRAPHIS_IMPORT_ROOTS` (SECURITY.md §5 threat framing — the path is
+  attacker-controlled if whatever calls the endpoint is, e.g. any team member who can reach the
+  dashboard). Manual review (the `/security-review` skill can't target this mounted repo — see
+  AGENTS.md sandbox notes) caught a follow-on gap before ship: `Path.rglob` follows symlinked
+  directories, so a symlink planted *inside* an allowed root could point *outside* it and defeat the
+  root-level check entirely. Fixed in `_iter_import_files` — every candidate file is independently
+  re-resolved and re-contained, not just the root. Regression test:
+  `test_import_folder_symlink_escape_blocked`.
+
 ## [0.8.5] - 2026-07-12
 
 ### Fixed
+- **Logging out instantly re-trapped you behind the sign-in modal.** `doLogout()` calls
+  `boot()`, which re-fetches `/api/bootstrap` — a 401 there (team mode requires a session
+  for it) unconditionally reopened the full-screen `showAuth()` overlay unless
+  `AUTH_SKIPPED` was already true. A fresh logout never set that flag, so clicking "Logout"
+  looked and felt exactly like "I can't log out" — you'd land right back on the blocking
+  login modal, unable to reach Settings → License (and its free-trial buttons) underneath.
+  `doLogout()` now sets `AUTH_SKIPPED=true` before calling `boot()` — the same thing the
+  existing "Skip for now" link already does — so an explicit logout lands you in the actual
+  signed-out view (banner shown, modal not reopened) instead of looping back into it.
+  `static/index.html` only; no server-side change, no automated test (no JS test harness in
+  this repo) — verified with `node --check` on the extracted script block.
+- **A brand-new team-mode instance (zero users, no license) could never bootstrap itself —
+  every visitor got a 401.** `create_user()` (called by `/api/auth/setup`) requires
+  `require_feature("team")`, so you can't create the first admin without an active license
+  — but `GET /api/license`, `POST /api/license/trial`, and `POST /api/license/team-trial`
+  all required an authenticated team session, which is impossible before any admin exists.
+  Reported as: "not logged in, no license key, clicked the free 3-day trial, literally
+  nothing happens" — the request 401'd before ever reaching the trial logic, and
+  `loadLicense()`'s empty `catch(e){}` in `static/index.html` swallowed the failure with no
+  visible error either. Fixed by adding `/api/license`, `/api/license/trial`, and
+  `/api/license/team-trial` to `dashboard_app.py`'s `_PUBLIC` set (all three are already
+  self-limited server-side — one trial per device, and `/api/license` is instance-level
+  plan info already fully public in single-user mode) and giving `loadLicense()`'s catch
+  block a visible error state. `POST /api/license/activate` deliberately stays admin-gated
+  (pasting an arbitrary key changes the whole team's plan) — a fresh self-host with a
+  purchased key bootstraps via `ENGRAPHIS_LICENSE_KEY`/`~/.engraphis/license.key` instead.
+  Tests: `test_team_trial_reachable_with_zero_users_and_no_session`,
+  `test_license_activate_still_requires_admin_session` in `tests/test_dashboard_v2.py`.
+- **Restarting an active trial returned 400 instead of no-op'ing.** `licensing.start_trial()`
+  / `start_team_trial()` treated ANY locally-parseable key — including this device's own
+  still-active trial key — as "a paid license is already active," so calling either route a
+  second time while genuinely mid-trial (e.g. the dashboard re-issuing the request, or a user
+  clicking "Start trial" again) 400'd instead of returning the current trial status. Fixed via
+  `licensing._local_material_license()`: a locally-active *trial* key now short-circuits to an
+  idempotent no-op (no relay round-trip either), while a genuinely *paid* key still correctly
+  refuses with "no trial needed." Regression tests in `tests/test_cloud_license.py` and
+  `tests/test_dashboard_v2.py` (the latter's `test_trial_start_and_rejection` was also missing
+  a `cloud_license.request_trial_key` mock, so it silently required network — fixed alongside).
 - **Dashboard 500 on empty workspaces**: `/api/memories` returns `[]` instead of crashing.
 - **Static assets in wheel**: `engraphis/static/__init__.py` + recursive glob ensures vendor bundles ship.
+- **402s surfaced as a bare "402," not the reason.** Every `LicenseError`-driven 402
+  (`inspector/app.py`'s handler, and `inspector/cloud_mount.py`'s — which is what
+  `dashboard_app.py`/`routes/v2_team.py` install) returns a flat
+  `{error, upgrade, upgrade_url, feature?, tier_required?}` body. The dashboard's `api()` JS
+  helper (`static/index.html`) only read FastAPI's `HTTPException` shape (`{detail: {error}}`),
+  so any flat-body error fell through to `String(status)` and toasted a bare `402` instead of
+  `require_feature()`'s actual actionable message (e.g. "'team' is an Engraphis Team feature…
+  Start a 3-day free trial from Settings → License panel…"). Hit team login/setup when the
+  instance's Team license/trial isn't active, `/license/activate` with a bad key, and `/sync`
+  sign-in identically. Fixed by adding a `d.error` fallback in `api()`'s message extraction —
+  backend contract (402 + `feature`) is unchanged, still covered by
+  `tests/test_dashboard_v2.py`'s license-lapse assertions.
 
 ## [0.8.4] - 2026-07-12
 
