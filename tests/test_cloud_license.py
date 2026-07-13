@@ -4,12 +4,13 @@ closed in cloud mode. Also covers the salvaged local hardening (HMAC trial + mon
 clock). Runs on the numpy-only gate (stdlib + fastapi TestClient).
 """
 import io
-import json
 import time
 import urllib.error
 import urllib.parse
 
 import pytest
+
+pytest.importorskip("fastapi")
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
@@ -193,7 +194,8 @@ def test_start_trial_activates_server_issued_pro_key(monkeypatch):
          "issued": int(now), "expires": int(now + 3 * 86400), "trial": 1}, SECRET)
     monkeypatch.setattr(cloud_license, "request_trial_key",
                         lambda base, mid, plan="team", email="": (pro_trial, ""))
-    c = _app(); _wire_register_to(c, monkeypatch)
+    c = _app()
+    _wire_register_to(c, monkeypatch)
     monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
     out = licensing.start_trial()
     assert out["plan"] == "pro" and out["is_trial"] is True
@@ -218,7 +220,8 @@ def test_start_trial_is_idempotent_while_already_on_trial(monkeypatch):
         return pro_trial, ""
 
     monkeypatch.setattr(cloud_license, "request_trial_key", _request)
-    c = _app(); _wire_register_to(c, monkeypatch)
+    c = _app()
+    _wire_register_to(c, monkeypatch)
     monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
     licensing.start_trial()
     assert len(calls) == 1
@@ -231,7 +234,8 @@ def test_start_trial_refuses_if_paid_key_already_active(monkeypatch):
     """Refusal is only correct for a key the cloud gate ACTUALLY approves right now — see
     the 2026-07-13 fix below. Wire the gate to approve so this covers the genuine "this
     key really is active" case, not just "a key that merely parses"."""
-    c = _app(); _wire_register_to(c, monkeypatch)
+    c = _app()
+    _wire_register_to(c, monkeypatch)
     monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
     monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _key(plan="pro"))
     with pytest.raises(LicenseError, match="no trial needed"):
@@ -324,7 +328,8 @@ def test_pro_trial_never_grants_team(monkeypatch):
          "issued": int(now), "expires": int(now + 3 * 86400), "trial": 1}, SECRET)
     monkeypatch.setattr(cloud_license, "request_trial_key",
                         lambda base, mid, plan="team", email="": (pro_trial, ""))
-    c = _app(); _wire_register_to(c, monkeypatch)
+    c = _app()
+    _wire_register_to(c, monkeypatch)
     monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
     licensing.start_trial()
     lic = licensing.current_license(refresh=True)
@@ -785,7 +790,8 @@ def test_licensing_start_team_trial_activates_returned_key(monkeypatch):
     monkeypatch.setattr(
         cloud_license, "request_team_trial_key",
         lambda base, mid, email="": (trial_key, ""))
-    c = _app(); _wire_register_to(c, monkeypatch)            # online-only: lease the key
+    c = _app()
+    _wire_register_to(c, monkeypatch)            # online-only: lease the key
     monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
     got = licensing.start_team_trial()
     assert got["plan"] == "team"
@@ -796,7 +802,8 @@ def test_licensing_start_team_trial_activates_returned_key(monkeypatch):
 def test_licensing_start_team_trial_refuses_if_paid_key_already_active(monkeypatch):
     """Same reasoning as test_start_trial_refuses_if_paid_key_already_active: only
     refuse when the cloud gate actually approves the existing key."""
-    c = _app(); _wire_register_to(c, monkeypatch)
+    c = _app()
+    _wire_register_to(c, monkeypatch)
     monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
     monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _key(plan="pro"))
     with pytest.raises(LicenseError, match="no trial needed"):
@@ -844,7 +851,8 @@ def test_licensing_start_team_trial_is_idempotent_while_already_on_trial(monkeyp
         return team_trial, ""
 
     monkeypatch.setattr(cloud_license, "request_team_trial_key", _request)
-    c = _app(); _wire_register_to(c, monkeypatch)
+    c = _app()
+    _wire_register_to(c, monkeypatch)
     monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
     licensing.start_team_trial()
     assert len(calls) == 1

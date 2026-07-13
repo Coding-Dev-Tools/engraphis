@@ -1,5 +1,9 @@
 """E2E: issue a key through the webhook pipeline and verify with parse_key."""
 import os
+
+import pytest
+
+pytest.importorskip("fastapi")
 import secrets
 import tempfile
 from engraphis.inspector.webhooks import issue_key
