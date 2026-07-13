@@ -709,7 +709,17 @@ def start_trial(*, now: Optional[float] = None) -> dict:
     if lic is not None:
         if lic.is_trial:
             return lic.to_public_dict()
-        raise LicenseError("a paid license is already active — no trial needed")
+        # A signature-valid, non-trial key exists locally — but _local_material_license()
+        # is deliberately signature-only (no cloud round-trip on the common path), so it
+        # can't tell a genuinely active paid key from one the cloud gate is denying
+        # (revoked, never registered, relay unreachable, seat cap). Refusing the trial on
+        # signature validity alone stranded a real user with neither working features
+        # (current_license() had already fallen back to the free tier) NOR a way to get a
+        # trial — 2026-07-13 incident. Re-check against the actual, cloud-gated
+        # entitlement before refusing: only a key CURRENTLY granting something blocks a
+        # trial.
+        if current_license(refresh=True).is_paid:
+            raise LicenseError("a paid license is already active — no trial needed")
     from engraphis import cloud_license
     from engraphis.config import settings
     base = os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip() or settings.relay_url
@@ -743,7 +753,10 @@ def start_team_trial(*, now: Optional[float] = None) -> dict:
     if lic is not None:
         if lic.is_trial:
             return lic.to_public_dict()
-        raise LicenseError("a paid license is already active — no trial needed")
+        # See the matching comment in start_trial() above — same 2026-07-13 incident,
+        # same fix: only refuse when the key is CURRENTLY entitling something.
+        if current_license(refresh=True).is_paid:
+            raise LicenseError("a paid license is already active — no trial needed")
     from engraphis import cloud_license
     from engraphis.config import settings
     base = os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip() or settings.relay_url
