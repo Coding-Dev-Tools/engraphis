@@ -5,6 +5,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-07-13
+
 ### Added
 - **Personal vs. shared folders + a redesigned Team dashboard.** A folder can now be
   created `visibility='personal'` (owned by, and visible/usable only to, the creating
@@ -25,6 +27,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
   `routes/v2_api.py`, `dashboard_app.py`, `static/index.html`;
   tests in `tests/test_personal_folders.py`, `tests/test_dashboard_v2.py`,
   `tests/test_sync_dashboard.py`.
+
+### Changed
+- README expanded with the missing features (cloud sync, encryption, import/ingest,
+  workspace ops, Docker, config, and more) and now links to the Engraphis Discord.
 
 ## [0.9.0] - 2026-07-13
 
