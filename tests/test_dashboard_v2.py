@@ -606,6 +606,27 @@ def test_login_survives_a_lapsed_team_license_but_new_seats_still_need_one(
 
 # ── import (dashboard "Import files & folders" section) ────────────────────────────
 
+
+def test_import_folder_route_rejects_path_outside_roots(monkeypatch, tmp_path):
+    """
+    The /api/workspaces/import-folder endpoint must reject paths that resolve
+    outside the allowed import roots (HOME directory or ENGRAPHIS_IMPORT_ROOTS).
+    This guards against path-traversal / symlink escapes.
+    """
+    import tempfile, os
+    with tempfile.TemporaryDirectory(dir="C:\\") as td:
+        outside = td
+        os.makedirs(outside, exist_ok=True)
+        test_file = os.path.join(outside, "test.md")
+        with open(test_file, "w") as f:
+            f.write("# test\n")
+        c = _client(monkeypatch, tmp_path)
+        r = c.post("/api/workspaces/import-folder",
+                    json={"workspace": "demo", "path": outside})
+        # Should be rejected with 400
+        assert r.status_code == 400, f"Expected 400, got {r.status_code}: {r.text}"
+
+
 def test_import_folder_route(monkeypatch, tmp_path):
     """Restored v2-native counterpart to the retired v1 vault import-folder endpoint —
     see MemoryService.import_folder. The path must be under ENGRAPHIS_IMPORT_ROOTS (or
@@ -624,16 +645,6 @@ def test_import_folder_route(monkeypatch, tmp_path):
         found = c.get("/api/recall?q=aardvarks&workspace=demo").json()
         assert any("aardvarks" in m["content"] for m in found["memories"])
 
-
-def test_import_folder_route_rejects_path_outside_roots(monkeypatch, tmp_path):
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "secret.md").write_text("should not be imported")
-    monkeypatch.delenv("ENGRAPHIS_IMPORT_ROOTS", raising=False)
-    with _client(monkeypatch, tmp_path) as c:
-        r = c.post("/api/workspaces/import-folder",
-                   json={"workspace": "demo", "path": str(outside)})
-        assert r.status_code == 400, r.text
 
 
 def test_import_files_route_multipart_upload(monkeypatch, tmp_path):
