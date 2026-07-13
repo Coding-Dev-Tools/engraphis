@@ -3,6 +3,17 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [0.8.7] - 2026-07-12
+
+### Added
+- **Dashboard "Import files & folders"** restored on v2 engine.
+- **Kilo Code integration docs** (`docs/KILO_CODE_INTEGRATION.md`).
+
+### Fixed
+- **Dashboard auth**: session handling, role badges, member management.
+- **License cloud enforcement**: lease validation, online-only gating.
+- **Service layer**: workspace operations, memory reorder, merge.
+
 ## [Unreleased] — restore "Import files & folders"
 
 ### Added
