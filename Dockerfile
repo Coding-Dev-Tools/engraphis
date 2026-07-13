@@ -47,7 +47,19 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
 # running the CMD (or any Railway/compose start-command override, which becomes its args).
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
-# Default: the raw v1 API server (single-user). For a multi-user TEAM deployment run the
-# dashboard instead — `engraphis-dashboard --no-open` — which serves team auth, roles,
-# seats, cloud-license revocation and Pro sync. docker-compose.yml does this by default.
-CMD ["engraphis-server"]
+# Default: the v2 team dashboard (multi-user auth, roles, seats, cloud-license
+# revocation, Pro sync) — this is what docker-compose.yml already defaults to, and what
+# every hosted deployment (e.g. Railway) needs, since it's the only entrypoint that
+# serves /api/auth/*, /api/license/*, and /api/bootstrap. `--no-open`: never try to launch
+# a browser in a container.
+#
+# The raw v1 single-user API server is still available — run `engraphis-server` directly
+# (see docker-compose.yml's opt-in "api" profile) — but it shares this image's exposed
+# port and root route (it serves the same static/index.html) while answering every
+# /api/* call with a blanket bearer-token 401, INCLUDING /api/auth/state and
+# /api/license/*. If this image is ever run as `engraphis-server` behind a team-mode
+# frontend, the UI will render normally but look permanently "signed out with no
+# features" no matter what the user does — that exact symptom cost real prod downtime
+# on 2026-07-13 when a host's start command silently fell back to this default. Do not
+# revert this without also fixing that ambiguity.
+CMD ["engraphis-dashboard", "--no-open"]
