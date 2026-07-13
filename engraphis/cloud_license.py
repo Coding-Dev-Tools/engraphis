@@ -194,7 +194,8 @@ _INVITE_TIMEOUT = 10.0
 
 
 def send_team_invite(base_url: str, key: str, to: str, name: str, role: str,
-                     invited_by: str, *, timeout: float = _INVITE_TIMEOUT) -> Tuple[bool, str]:
+                     invited_by: str, *, dashboard_url: str = "",
+                     timeout: float = _INVITE_TIMEOUT) -> Tuple[bool, str]:
     """POST a team-invite request to the vendor relay's ``/license/v1/team-invite``.
 
     Used by a self-hosted Team dashboard (``routes.v2_team.add_user``) that has no
@@ -209,7 +210,8 @@ def send_team_invite(base_url: str, key: str, to: str, name: str, role: str,
     """
     url = base_url.rstrip("/") + "/license/v1/team-invite"
     data = json.dumps({"key": key, "to": to, "name": name, "role": role,
-                       "invited_by": invited_by}).encode("utf-8")
+                       "invited_by": invited_by, "dashboard_url": dashboard_url}
+                      ).encode("utf-8")
     req = urllib.request.Request(
         url, data=data, method="POST", headers={"Content-Type": "application/json"})
     try:

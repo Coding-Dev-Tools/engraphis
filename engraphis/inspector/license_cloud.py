@@ -314,6 +314,7 @@ async def team_invite(request: Request):
     name = (body.get("name") or "").strip()[:120]
     role = (body.get("role") or "member").strip()[:32]
     invited_by = (body.get("invited_by") or "").strip().lower()
+    dashboard_url = (body.get("dashboard_url") or "").strip()[:2048]
 
     lic = reg.verify_for_feature(key, "team")          # bad/expired/wrong-plan/revoked → 402
     if not _EMAIL_RE.match(to):
@@ -330,7 +331,12 @@ async def team_invite(request: Request):
 
     from engraphis.inspector.webhooks import send_team_invite_email
     try:
-        await asyncio.to_thread(send_team_invite_email, to, name, role, invited_by=invited_by)
+        # Echo the just-verified Team key into the email so the relay-delivered invite
+        # also carries Pro activation (the key is this account's shared team key — the
+        # same one the caller already proved they hold). dashboard_url is forwarded from
+        # the admin (empty => "ask your admin"), never the relay host's own env value.
+        await asyncio.to_thread(send_team_invite_email, to, name, role,
+                                invited_by=invited_by, key=key, dashboard_url=dashboard_url)
     except Exception as exc:  # noqa: BLE001 — surface a safe message, don't leak internals
         return JSONResponse({"error": "delivery failed: %s" % exc}, status_code=502)
     return {"sent": True}

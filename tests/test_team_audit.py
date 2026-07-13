@@ -75,16 +75,16 @@ def test_add_user_sends_invite_email_and_reports_invited_true(monkeypatch, tmp_p
     captured = {}
     monkeypatch.setattr(
         WH, "send_team_invite_email",
-        lambda to, name, role, invited_by="": captured.update(
-            to=to, name=name, role=role, invited_by=invited_by))
+        lambda to, name, role, invited_by="", key="", dashboard_url=None:
+            captured.update(to=to, name=name, role=role, invited_by=invited_by))
 
     c = _client(monkeypatch, tmp_path)
     _admin(c)
     r = c.post("/api/auth/users", json={"email": "m@x.co", "name": "Mo",
               "password": "anotherpass1", "role": "member"})
     assert r.status_code == 200 and r.json()["invited"] is True
-    assert captured == {"to": "m@x.co", "name": "Mo", "role": "member",
-                        "invited_by": "admin@x.co"}
+    assert captured["to"] == "m@x.co" and captured["name"] == "Mo"
+    assert captured["role"] == "member" and captured["invited_by"] == "admin@x.co"
     actions = [e["action"] for e in c.get("/api/auth/audit").json()["events"]]
     assert "user.invite_email_failed" not in actions
 
@@ -93,7 +93,7 @@ def test_add_user_invite_email_failure_does_not_block_account_creation(monkeypat
     monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
     from engraphis.inspector import webhooks as WH
 
-    def boom(to, name, role, invited_by=""):
+    def boom(to, name, role, invited_by="", key="", dashboard_url=None):
         raise RuntimeError("simulated Resend outage")
 
     monkeypatch.setattr(WH, "send_team_invite_email", boom)
@@ -119,9 +119,9 @@ def test_add_user_falls_back_to_vendor_relay_when_no_local_email_configured(monk
     from engraphis import cloud_license
     captured = {}
 
-    def fake_send(base_url, key, to, name, role, invited_by):
+    def fake_send(base_url, key, to, name, role, invited_by, dashboard_url=""):
         captured.update(base_url=base_url, key=key, to=to, name=name,
-                        role=role, invited_by=invited_by)
+                        role=role, invited_by=invited_by, dashboard_url=dashboard_url)
         return True, ""
 
     monkeypatch.setattr(cloud_license, "send_team_invite", fake_send)

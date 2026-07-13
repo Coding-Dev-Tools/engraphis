@@ -417,22 +417,41 @@ def send_license_email(to: str, key: str, product_name: str = "Pro",
 
 
 def _team_invite_email_text(name: str, role: str, dashboard_url: str,
-                            invited_by: str = "") -> str:
+                            invited_by: str = "", key: str = "") -> str:
     greeting = "Hi %s," % name if name else "Hi,"
     who = "%s has added you" % invited_by if invited_by else "You've been added"
     where = ("    %s\n\n" % dashboard_url if dashboard_url else
              "    Ask your admin for your dashboard's web address.\n\n")
     reply_note = ("\nQuestions? Just reply to this email — it goes straight to %s.\n"
                   % invited_by if invited_by else "")
+    # When this instance is genuinely Team-licensed, the invite carries the *shared*
+    # team license key so the member can turn on Pro features (and cloud sync) on
+    # their own machine, taking one server-enforced seat. Built with %-formatting so
+    # the key's own characters are never re-evaluated by the outer f-string.
+    activate = ("""
+Your team plan also unlocks Pro features (analytics, export, automation, and
+cloud sync) on your own machine. Turn them on with this shared team license key:
+
+    %s
+
+To activate:
+    1. Open the Engraphis dashboard (engraphis-dashboard, http://127.0.0.1:8700)
+    2. Go to Settings -> License
+    3. Paste the key and click Activate
+
+Or set the ENGRAPHIS_LICENSE_KEY environment variable, or save the key to
+~/.engraphis/license.key. It verifies against our license server on first use and
+takes one of your team's seats -- please use it only on your own devices.
+""" % key if key else "")
     return f"""{greeting}
 
 {who} to an Engraphis team dashboard as a {role}.
 
-Sign in here:
+Sign in to the team dashboard here:
 
 {where}Use this email address to log in. Your admin sets your password directly
 and will share it with you separately — this email does not contain it.
-{reply_note}
+{activate}{reply_note}
 — The Engraphis team
 """
 
@@ -468,27 +487,35 @@ def send_password_reset_email(to: str, name: str, reset_url: str) -> None:
     _send_text_email(to, subject, text_body)
 
 
-def send_team_invite_email(to: str, name: str, role: str, *, invited_by: str = "") -> None:
+def send_team_invite_email(to: str, name: str, role: str, *, invited_by: str = "",
+                           key: str = "", dashboard_url: Optional[str] = None) -> None:
     """Notify a newly added dashboard team member (``/api/auth/users``) that
-    their account exists.
+    their account exists, and — when ``key`` is given — hand them the shared
+    Team license key so they can turn on Pro features (and cloud sync) on their
+    own machine, taking one of the team's server-enforced seats.
 
-    Deliberately carries NO password: the admin sets the initial password
-    directly in the dashboard's "Add member" form, so it is already known
-    only to the admin — emailing it too would put a live credential in the
-    mail provider's systems/inbox for no real benefit, since the admin still
-    has to get the new member set up somehow. ``invited_by`` (the admin's own
-    email) is named in the body and set as Reply-To — important when this is
-    sent through the shared vendor relay (see
-    ``inspector.license_cloud.team_invite``), where the visible From address
-    is the vendor's, not the actual team's; without this the recipient has no
-    way to tell who is inviting them or to reply to a human. Raises on
-    delivery failure (see :func:`_send_text_email`); the caller treats this as
-    best-effort and must not let it block account creation.
+    Still deliberately carries NO password: the admin sets the initial dashboard
+    password directly in the "Add member" form, so it is already known only to the
+    admin. ``key`` is different in kind — it is the account's *shared* Team key
+    (the same one every member of this team uses; see ``docs/SYNC.md``), not a
+    per-user secret, and seat count is enforced server-side — so including it is
+    what actually makes a member a licensed member rather than just a dashboard
+    login. Callers pass it only for a genuinely Team-licensed instance (see
+    ``routes.v2_team._send_invite``). ``invited_by`` (the admin's own email) is
+    named in the body and set as Reply-To — important when this is sent through
+    the shared vendor relay (see ``inspector.license_cloud.team_invite``), where
+    the visible From address is the vendor's, not the actual team's. ``dashboard_url``
+    overrides ``ENGRAPHIS_DASHBOARD_URL`` when not None (so a relay send can carry
+    the admin's own dashboard URL instead of the relay host's). Raises on delivery
+    failure (see :func:`_send_text_email`); the caller treats this as best-effort
+    and must not let it block account creation.
     """
     from engraphis.inspector.auth import _EMAIL_RE
     subject = "You've been added to an Engraphis team"
-    dashboard_url = os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
-    text_body = _team_invite_email_text(name, role, dashboard_url, invited_by=invited_by)
+    if dashboard_url is None:
+        dashboard_url = os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
+    text_body = _team_invite_email_text(name, role, dashboard_url,
+                                        invited_by=invited_by, key=key)
     reply_to = invited_by if invited_by and _EMAIL_RE.match(invited_by) else None
     _send_text_email(to, subject, text_body, reply_to=reply_to)
 

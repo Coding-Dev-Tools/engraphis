@@ -553,15 +553,21 @@ def test_team_invite_relay_sends_with_valid_team_key(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         WH, "send_team_invite_email",
-        lambda to, name, role, invited_by="": captured.update(
-            to=to, name=name, role=role, invited_by=invited_by))
+        lambda to, name, role, invited_by="", key="", dashboard_url=None:
+            captured.update(to=to, name=name, role=role, invited_by=invited_by,
+                            key=key, dashboard_url=dashboard_url))
+    team_key = _key(plan="team", seats=3)
     c = _app()
     r = c.post("/license/v1/team-invite",
-               json={"key": _key(plan="team", seats=3), "to": "new@corp.com",
+               json={"key": team_key, "to": "new@corp.com",
                      "name": "Mo", "role": "member", "invited_by": "admin@corp.com"})
     assert r.status_code == 200 and r.json()["sent"] is True
-    assert captured == {"to": "new@corp.com", "name": "Mo", "role": "member",
-                        "invited_by": "admin@corp.com"}
+    # The relay now echoes the just-verified Team key into the email so the member
+    # can activate Pro on their own machine; dashboard_url is "" when the caller
+    # does not supply one.
+    assert captured["to"] == "new@corp.com" and captured["invited_by"] == "admin@corp.com"
+    assert captured["key"] == team_key
+    assert captured["dashboard_url"] == ""
 
 
 def test_team_invite_relay_rejects_non_team_key():
@@ -594,7 +600,8 @@ def test_team_invite_relay_ignores_malformed_invited_by(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         WH, "send_team_invite_email",
-        lambda to, name, role, invited_by="": captured.update(invited_by=invited_by))
+        lambda to, name, role, invited_by="", key="", dashboard_url=None:
+            captured.update(invited_by=invited_by))
     c = _app()
     r = c.post("/license/v1/team-invite",
                json={"key": _key(plan="team"), "to": "new@corp.com",
@@ -662,7 +669,8 @@ def test_send_team_invite_client_roundtrip(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         WH, "send_team_invite_email",
-        lambda to, name, role, invited_by="": captured.update(to=to))
+        lambda to, name, role, invited_by="", key="", dashboard_url=None:
+            captured.update(to=to))
     c = _app()
     _wire_urlopen_to(c, monkeypatch)
     sent, reason = cloud_license.send_team_invite(
@@ -759,7 +767,8 @@ def test_start_team_trial_key_actually_works_with_team_invite_relay(monkeypatch)
     captured = {}
     monkeypatch.setattr(
         WH, "send_team_invite_email",
-        lambda to, name, role, invited_by="": captured.update(to=to))
+        lambda to, name, role, invited_by="", key="", dashboard_url=None:
+            captured.update(to=to))
     c = _app()
     key = c.post("/license/v1/start-trial", json={"machine_id": "dev-1"}).json()["key"]
     r = c.post("/license/v1/team-invite", json={"key": key, "to": "teammate@corp.com"})
