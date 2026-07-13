@@ -264,14 +264,50 @@ def _reject_nonfinite(token: str):
     raise ValueError("non-finite JSON constant: %s" % token)
 
 
+_MAX_BUNDLE_DEPTH = 200  # generous; real bundles are shallow. Explicit DoS guard so
+# deeply-nested input is rejected on every Python version (3.12+'s JSON scanner no
+# longer raises RecursionError for ~1000-deep input, so we can't rely on that alone).
+
+
+def _scan_depth(s: str) -> int:
+    """Cheap max-nesting-depth scan that skips JSON string literals; used to reject
+    pathologically deep bundles without relying on the JSON scanner's RecursionError."""
+    depth = 0
+    max_depth = 0
+    in_str = False
+    esc = False
+    for ch in s:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "[{":
+            depth += 1
+            if depth > max_depth:
+                max_depth = depth
+        elif ch in "]}":
+            if depth > 0:
+                depth -= 1
+    return max_depth
+
+
 def loads_strict(data: bytes):
     """Parse untrusted bundle bytes, rejecting the non-standard ``Infinity``/``NaN``
     tokens Python's ``json`` accepts by default (they later raise ``OverflowError`` in
     ``int()`` and would otherwise abort the whole sync run). Deeply-nested input that
     would raise ``RecursionError`` in the JSON scanner is normalized to ``ValueError``
     so a single hostile bundle can't crash the whole sync run (DoS)."""
+    text = data.decode("utf-8")
+    if _scan_depth(text) > _MAX_BUNDLE_DEPTH:
+        raise ValueError("bundle JSON is nested too deeply")
     try:
-        return json.loads(data.decode("utf-8"), parse_constant=_reject_nonfinite)
+        return json.loads(text, parse_constant=_reject_nonfinite)
     except RecursionError:
         raise ValueError("bundle JSON is nested too deeply")
 
