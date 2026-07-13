@@ -6,6 +6,8 @@
 
 https://engraphis.com/
 
+https://discord.com/invite/Wfr2ejBmY
+
 **Give your AI agents a memory. See it, search it, and watch it self-maintain — all in a beautiful WebUI on your own machine.**
 
 <br>
