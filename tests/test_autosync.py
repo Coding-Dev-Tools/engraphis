@@ -67,6 +67,7 @@ def test_five_minute_floor_cannot_be_beaten():
         assert autosync.normalize_policy({"cadence_minutes": v})["cadence_minutes"] >= 5
 
 
+@skip_no_stack
 def test_sync_auto_toggle_is_admin_only_but_members_still_write():
     from engraphis.inspector.auth import min_role
     # Changing team auto-sync is admin-only; reading it stays viewer-visible.
@@ -105,6 +106,7 @@ def test_run_once_skips_without_license(tmp_path, monkeypatch):
     assert autosync.run_once(None).get("skipped") == "unlicensed"
 
 
+@skip_no_stack
 def test_run_once_runs_records_and_updates_button_state(tmp_path, monkeypatch):
     from engraphis import licensing as lic
     from engraphis.config import settings
