@@ -33,8 +33,19 @@ def service() -> MemoryService:
 
 
 def set_service(svc: MemoryService) -> None:
-    """Inject a service (tests / the dashboard app)."""
+    """Inject a service (tests / the dashboard app).
+
+    Close the previously-bound service's store connection first so its SQLite/WAL
+    handle can't leak across injections and hold a lock on the DB file — under heavy
+    test churn a deferred GC close collided with the next MemoryService.create on the
+    same path and surfaced as an intermittent ``database is locked``."""
     global _service
+    prev = _service
+    if prev is not None:
+        try:
+            prev.store.close()
+        except Exception:  # noqa: BLE001 — never block the swap on a close error
+            pass
     _service = svc
 
 
