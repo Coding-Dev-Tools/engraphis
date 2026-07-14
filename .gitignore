@@ -11,6 +11,11 @@ __pycache__/
 # which can contain live license keys. Must never be committed.
 .engraphis_processed_webhooks
 undelivered_license_keys.tsv
+
+# Automation/autosync runtime policy + last-run state (engraphis/automation.py —
+# lives next to the DB or in ~/.engraphis/). Regenerable local state, not content.
+automation.json
+autosync.json
 .venv/
 venv/
 dist/
