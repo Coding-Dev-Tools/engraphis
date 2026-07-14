@@ -726,11 +726,21 @@ def get_license():
 
 @router.post("/license/activate")
 def activate_license(req: _KeyReq):
+    """Verify + persist a key. A signature-valid key can still land on the free tier
+    if the server-side cloud gate denies it (revoked, seat-capped, or this process
+    can't reach the license server) — ``licensing.activate`` degrades silently in
+    that case rather than raising, so it looked exactly like a successful
+    activation of the free tier. Surface the real reason the same way
+    :func:`get_license` does, so the caller can tell "activated Team" from
+    "accepted the key but the cloud check failed" instead of both reading as a
+    plain 200 with ``plan: free``."""
     try:
         lic = licensing.activate(req.key)
     except licensing.LicenseError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
-    return lic.to_public_dict()
+    data = lic.to_public_dict()
+    data["error"] = licensing.license_error()
+    return data
 
 
 @router.post("/license/trial")

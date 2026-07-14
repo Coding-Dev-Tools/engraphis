@@ -72,8 +72,11 @@ Write-Host "  Start Menu shortcut created."
     except subprocess.CalledProcessError as exc:
         print(f"  ⚠ PowerShell shortcut creation failed: {exc.stderr.strip()}", file=sys.stderr)
         print("  Falling back to a simple .bat launcher on Desktop.", file=sys.stderr)
+        # Don't `start` the URL here — engraphis-dashboard already opens the
+        # browser itself once the server is actually ready. Doing both opens
+        # two tabs (one immediately, dead until the server boots; one live).
         bat = desktop / "Engraphis Dashboard.bat"
-        bat.write_text('@echo off\nstart "" http://127.0.0.1:8700\nengraphis-dashboard\n'
+        bat.write_text('@echo off\nengraphis-dashboard\n'
                        'echo.\necho Dashboard stopped. Press any key.\npause >nul\n')
         print(f"  Desktop launcher created: {bat}")
 
