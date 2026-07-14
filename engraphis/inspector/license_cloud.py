@@ -336,7 +336,9 @@ async def team_invite(request: Request):
         # Echo the just-verified Team key into the email so the relay-delivered invite
         # also carries Pro activation (the key is this account's shared team key — the
         # same one the caller already proved they hold). dashboard_url is forwarded from
-        # the admin (empty => "ask your admin"), never the relay host's own env value.
+        # the admin; when empty, send_team_invite_email falls back to the relay's own
+        # ENGRAPHIS_DASHBOARD_URL and then the hosted DEFAULT_TEAM_DASHBOARD_URL, so a
+        # relay-delivered invite always carries a clickable sign-in link.
         await asyncio.to_thread(send_team_invite_email, to, name, role,
                                 invited_by=invited_by, key=key, dashboard_url=dashboard_url)
     except Exception as exc:  # noqa: BLE001 — surface a safe message, don't leak internals

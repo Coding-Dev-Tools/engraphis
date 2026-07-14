@@ -278,6 +278,25 @@ def test_team_invite_email_includes_dashboard_url_when_configured(monkeypatch):
     assert "https://dash.example.com" in captured["text_body"]
 
 
+def test_team_invite_email_defaults_to_hosted_team_dashboard(monkeypatch):
+    # When neither the caller nor ENGRAPHIS_DASHBOARD_URL supplies a dashboard URL,
+    # the invite falls back to the canonical hosted team dashboard
+    # (DEFAULT_TEAM_DASHBOARD_URL) so the member always gets a clickable sign-in
+    # link instead of "ask your admin". An explicit ENGRAPHIS_DASHBOARD_URL still
+    # wins, so a self-hoster pointing at their own dashboard is honoured.
+    from engraphis.inspector import webhooks as WH
+    captured = {}
+    monkeypatch.setattr(
+        WH, "_send_via_resend_api",
+        lambda to, subject, text_body, from_addr, api_key, reply_to=None: captured.update(
+            text_body=text_body))
+    monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
+    monkeypatch.delenv("ENGRAPHIS_DASHBOARD_URL", raising=False)
+    WH.send_team_invite_email("newmember@example.com", "", "admin")
+    assert WH.DEFAULT_TEAM_DASHBOARD_URL in captured["text_body"]
+    assert "Ask your admin" not in captured["text_body"]
+
+
 def test_team_invite_email_includes_license_key_when_provided(monkeypatch):
     # A Team-licensed instance hands the member the shared team key so they can turn on
     # Pro features on their own machine — this is what makes them a licensed member, not
@@ -300,7 +319,11 @@ def test_team_invite_email_includes_license_key_when_provided(monkeypatch):
 
 def test_team_invite_email_omits_activation_when_no_key(monkeypatch):
     # Without a key (instance not Team-licensed), the invite is dashboard-only and must
-    # not advertise a Pro-activation section it can't back up.
+    # not advertise a Pro-activation section it can't back up — no OPTION 2 block, no
+    # "Settings -> License" activation steps, and no key value. Option 1 may still
+    # mention the words "license key" as a reassurance ("no license key is needed"),
+    # which is the opposite of advertising activation, so the assertion targets the
+    # activation section specifically rather than the literal phrase.
     from engraphis.inspector import webhooks as WH
     captured = {}
     monkeypatch.setattr(
@@ -311,8 +334,10 @@ def test_team_invite_email_omits_activation_when_no_key(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_DASHBOARD_URL", raising=False)
     WH.send_team_invite_email("newmember@example.com", "Mo", "member")
     body = captured["text_body"]
+    assert "OPTION 2" not in body
+    assert "Shared team license key" not in body
     assert "Settings -> License" not in body
-    assert "license key" not in body.lower()
+    assert "Pro features" not in body
 
 
 def test_team_invite_relay_forwards_key_and_dashboard_url(monkeypatch):

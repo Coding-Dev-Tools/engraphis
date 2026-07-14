@@ -35,6 +35,14 @@ from engraphis.licensing import (
 
 logger = logging.getLogger("engraphis.webhooks")
 
+# Canonical public links used in outbound customer-facing email footers. Centralized
+# as constants so the URLs can't drift per-email — a previous invite shipped a
+# wrong repo URL (github.com/engraphis/engraphis) that 404'd for paying customers.
+# Override either per-deployment via env if a mirror/fork is the canonical surface.
+SITE_URL = os.environ.get("ENGRAPHIS_SITE_URL", "https://engraphis.com/").strip()
+REPO_URL = os.environ.get("ENGRAPHIS_REPO_URL",
+                          "https://github.com/Coding-Dev-Tools/engraphis").strip()
+
 _DEFAULT_KEY_PATH = Path(__file__).resolve().parent.parent.parent / ".secrets" / "vendor_signing.key"
 
 
@@ -417,43 +425,90 @@ def send_license_email(to: str, key: str, product_name: str = "Pro",
 
 
 def _team_invite_email_text(name: str, role: str, dashboard_url: str,
-                            invited_by: str = "", key: str = "") -> str:
+                            invited_by: str = "", key: str = "",
+                            to: str = "") -> str:
     greeting = "Hi %s," % name if name else "Hi,"
     who = "%s has added you" % invited_by if invited_by else "You've been added"
     where = ("    %s\n\n" % dashboard_url if dashboard_url else
-             "    Ask your admin for your dashboard's web address.\n\n")
+             "    Ask your admin for your team dashboard's web address.\n\n")
     reply_note = ("\nQuestions? Just reply to this email — it goes straight to %s.\n"
                   % invited_by if invited_by else "")
+    login_email = to or "the address this email was sent to"
     # When this instance is genuinely Team-licensed, the invite carries the *shared*
     # team license key so the member can turn on Pro features (and cloud sync) on
-    # their own machine, taking one server-enforced seat. Built with %-formatting so
-    # the key's own characters are never re-evaluated by the outer f-string.
+    # their OWN machine, taking one server-enforced seat. Built with %-formatting so
+    # the key's own characters are never re-evaluated by the outer .format() below.
+    #
+    # The email is deliberately structured as two clearly-separated options:
+    #   1. JOIN the team dashboard (the hosted/Railway instance) — sign in with email
+    #      + password. NO license key is involved here, and pasting the key on the
+    #      hosted instance is NOT how membership works (it just re-activates a license
+    #      that is already active there). This was a real support confusion: members
+    #      followed the concrete "paste the key" steps on the hosted dashboard and
+    #      thought they'd joined, when joining = logging in with credentials.
+    #   2. OPTIONALLY run Engraphis locally and access the team's shared memories from
+    #      your own machine — THAT is what the shared key is for. It unlocks Pro
+    #      features AND cloud sync; turning on Cloud Sync then pulls the team's
+    #      converged memory store down to your local SQLite file. The key goes into
+    #      your LOCAL dashboard (http://127.0.0.1:8700), never the team dashboard.
     activate = ("""
+──────────────────────────────────────────────────────────────────────────────
+OPTION 2 (optional): run Engraphis on your OWN computer and access the team's
+memories locally
+──────────────────────────────────────────────────────────────────────────────
 Your team plan also unlocks Pro features (analytics, export, automation, and
-cloud sync) on your own machine. Turn them on with this shared team license key:
+cloud sync) on your own machine. The shared team license key below is for THIS —
+activating Pro on a LOCAL copy of Engraphis you run yourself — NOT for the team
+dashboard above (that instance is already licensed; please don't paste this key
+there).
+
+Shared team license key:
 
     %s
 
-To activate:
-    1. Open the Engraphis dashboard (engraphis-dashboard, http://127.0.0.1:8700)
+To activate on your own machine:
+    1. Install and run Engraphis locally (the dashboard opens at
+       http://127.0.0.1:8700)
     2. Go to Settings -> License
-    3. Paste the key and click Activate
+    3. Paste the key above and click Activate
 
-Or set the ENGRAPHIS_LICENSE_KEY environment variable, or save the key to
-~/.engraphis/license.key. It verifies against our license server on first use and
-takes one of your team's seats -- please use it only on your own devices.
+(Or set the ENGRAPHIS_LICENSE_KEY environment variable, or save the key to
+~/.engraphis/license.key.) The key verifies against our license server on first
+use and takes one of your team's seats — please use it only on your own devices.
+
+To then access the team's shared memories on your machine: after activating, go
+to Settings -> Cloud Sync and turn sync on for the same workspace your team
+uses. Your local store converges with the team's (new memories and edits flow
+both ways); you keep a full local copy that works offline.
 """ % key if key else "")
-    return f"""{greeting}
+    return """{greeting}
 
 {who} to an Engraphis team dashboard as a {role}.
 
-Sign in to the team dashboard here:
+You have two ways to use Engraphis as part of this team. You only need the first
+one to be a member; the second is optional.
 
-{where}Use this email address to log in. Your admin sets your password directly
-and will share it with you separately — this email does not contain it.
+──────────────────────────────────────────────────────────────────────────────
+OPTION 1 (required to join the team): sign in to the team dashboard
+──────────────────────────────────────────────────────────────────────────────
+The team's shared memories live on a hosted dashboard. Open it and sign in:
+
+{where}Log in with this email address: {login_email}
+Your admin sets your password directly and will share it with you separately —
+this email does not contain it.
+
+No license key is needed here, and you should NOT paste a license key into this
+dashboard — joining the team means signing in with your email and password,
+nothing else.
 {activate}{reply_note}
 — The Engraphis team
-"""
+
+Learn more: {site_url}
+Source & self-hosting: {repo_url}
+""".format(greeting=greeting, who=who, role=role, where=where,
+               login_email=login_email, activate=activate, reply_note=reply_note,
+               site_url=SITE_URL, repo_url=REPO_URL)
+
 
 
 def _password_reset_email_text(name: str, reset_url: str) -> str:
@@ -526,6 +581,15 @@ def send_trial_verification_email(to: str, verify_url: str, plan: str = "team", 
     _send_text_email(to, subject, text_body)
 
 
+# The canonical hosted team dashboard (the Railway deployment members sign in
+# to). Used as the default ``dashboard_url`` in team-invite emails when neither
+# the caller nor ``ENGRAPHIS_DASHBOARD_URL`` supplies one, so an invite always
+# carries a clickable "sign in" link instead of "ask your admin". A self-hoster
+# running their own dashboard overrides this by setting ``ENGRAPHIS_DASHBOARD_URL``
+# (or by passing ``dashboard_url`` explicitly), which both take precedence.
+DEFAULT_TEAM_DASHBOARD_URL = "https://team.engraphis.com/"
+
+
 def send_team_invite_email(to: str, name: str, role: str, *, invited_by: str = "",
                            key: str = "", dashboard_url: Optional[str] = None) -> None:
     """Notify a newly added dashboard team member (``/api/auth/users``) that
@@ -551,10 +615,12 @@ def send_team_invite_email(to: str, name: str, role: str, *, invited_by: str = "
     """
     from engraphis.inspector.auth import _EMAIL_RE
     subject = "You've been added to an Engraphis team"
-    if dashboard_url is None:
+    if not (dashboard_url or "").strip():
         dashboard_url = os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
+    if not dashboard_url:
+        dashboard_url = DEFAULT_TEAM_DASHBOARD_URL
     text_body = _team_invite_email_text(name, role, dashboard_url,
-                                        invited_by=invited_by, key=key)
+                                        invited_by=invited_by, key=key, to=to)
     reply_to = invited_by if invited_by and _EMAIL_RE.match(invited_by) else None
     _send_text_email(to, subject, text_body, reply_to=reply_to)
 
