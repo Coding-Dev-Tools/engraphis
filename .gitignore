@@ -27,9 +27,12 @@ internal/
 # Runtime logs (e.g. dashboard.log from `engraphis-dashboard`) — regenerable, not content.
 *.log
 
-# Local machine-specific dashboard launchers (absolute user paths — not portable)
+# Local machine-specific launchers (absolute user paths / PM2 deploy specifics — not portable)
 /Start-Engraphis-Dashboard.bat
 /Engraphis Dashboard.lnk
+# Hermes/PM2 singleton MCP-HTTP launcher: hardcodes this machine's ENGRAPHIS_DB_PATH and PM2
+# venv. The portable, env-configurable equivalent is the tracked scripts/mcp_server_http.py.
+/engraphis-mcp-http.py
 
 # FUSE mount artifacts: orphaned unlink-while-open handles from the Cowork
 # mount layer, not real content. Safe to ignore; delete host-side once the

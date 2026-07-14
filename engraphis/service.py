@@ -22,6 +22,7 @@ import contextvars
 from pathlib import Path
 from typing import Any, Optional
 
+from engraphis.backends.extractor import ChunkingExtractor
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import MemoryType, Scope
 from engraphis.graphdata import build_graph_payload, empty_graph
@@ -296,14 +297,19 @@ class MemoryService:
                embed_dim: int = 256, vector_backend: str = "auto",
                rerank_model: Optional[str] = None,
                allowed_workspaces: Optional[list] = None,
-               extractor: str = "none",
+               extractor: Optional[str] = None,
                graph_extractor: Optional[str] = None) -> "MemoryService":
-        # graph_extractor defaults to the configured backend (ENGRAPHIS_GRAPH_EXTRACTOR,
-        # "regex" by default) so every front end — MCP server, dashboards, CLI — populates
-        # the knowledge graph without each call site having to opt in.
-        if graph_extractor is None:
+        # extractor / graph_extractor default to the configured backends
+        # (ENGRAPHIS_EXTRACTOR — "none" | "chunk" | "llm"; ENGRAPHIS_GRAPH_EXTRACTOR —
+        # "regex" by default) so every front end — dashboards, auto-maintenance, MCP
+        # server, CLI — honors the config knob without each call site opting in. An
+        # explicit value (e.g. extractor="none") still overrides the environment.
+        if extractor is None or graph_extractor is None:
             from engraphis.config import settings
-            graph_extractor = settings.graph_extractor
+            if extractor is None:
+                extractor = settings.extractor
+            if graph_extractor is None:
+                graph_extractor = settings.graph_extractor
         # One-time, safe upgrade path for a self-host whose ENGRAPHIS_DB_PATH already
         # holds a v1-shaped database (see docstring) — must run before Store() ever
         # touches the file. No-ops instantly for a fresh install or an already-v2 db.
@@ -512,11 +518,39 @@ class MemoryService:
         file, workspace-scoped, always marked untrusted (SECURITY.md §5/§1 — imported
         content did not originate from an already-trusted agent write, so it must not be
         able to launder itself into a trusted fact at merge time; see
-        ``core/engine.py``'s merge trust rule)."""
+        ``core/engine.py``'s merge trust rule).
+
+        When the configured extractor is the *offline* ``ChunkingExtractor``, a file is
+        split into several retrieval-sized memories instead of one — each still untrusted,
+        each stamped with ``provenance``/``metadata.chunk`` linking it to its file and
+        position. The LLM extractor is deliberately **never** applied here: it would ship
+        untrusted, disk-local file bytes to an external API on the one path whose whole
+        contract is local, one-memory-per-file, untrusted content (SECURITY.md §5). With
+        no extractor (the default) behaviour is byte-for-byte unchanged."""
         if not content.strip():
             return {"file": name, "skipped": True}
-        title = _title_from_content(content, fallback=Path(name).stem or name)
+        fallback = Path(name).stem or name
+        extractor = getattr(self.engine, "extractor", None)
+        chunks = extractor.extract(content) if isinstance(extractor, ChunkingExtractor) else None
         try:
+            if chunks:
+                total = len(chunks)
+                first: Optional[dict] = None
+                for i, fact in enumerate(chunks):
+                    title = (fact.title or _title_from_content(fact.content, fallback))
+                    r = self.remember(
+                        fact.content, workspace=ws,
+                        mtype=(fact.mtype.value if fact.mtype else mt.value),
+                        scope="workspace", title=title[:MAX_TITLE_CHARS],
+                        source="import", trusted=False, kind=kind,
+                        keywords=fact.keywords,
+                        metadata={**(extra_provenance or {}), "import_file": name,
+                                  "chunk": {"index": i, "of": total,
+                                            "heading": (fact.title or "")[:200]}},
+                    )
+                    first = first or r
+                return {"file": name, "id": first["id"], "op": first["op"], "chunks": total}
+            title = _title_from_content(content, fallback=fallback)
             r = self.remember(
                 content, workspace=ws, mtype=mt.value, scope="workspace",
                 title=title[:MAX_TITLE_CHARS], source="import", trusted=False, kind=kind,
@@ -624,12 +658,25 @@ class MemoryService:
     def consolidate(self, *, workspace: str, repo: Optional[str] = None,
                     dry_run: bool = False, min_cluster: int = 3,
                     archive_below: float = 0.05, profiles: bool = False,
-                    min_mentions: int = 3) -> dict:
+                    min_mentions: int = 3, infer: bool = False) -> dict:
         """Sleep-time consolidation sweep (episodic→semantic distillation + decayed-
         transient archival). The report includes a ``compaction`` block with the tokens
         the sweep saved. With ``profiles=True`` a third pass rolls each entity's memories
-        into one durable profile digest (report under ``profiles``). ``dry_run=True``
-        reports without changing anything."""
+        into one durable profile digest (report under ``profiles``). With ``infer=True`` a
+        fourth pass proposes evidence-only links between memories in different subject
+        clusters that share a bridging entity (report under ``inferences``); inferred
+        memories are low-salience and untrusted. ``infer`` is off by default — a human
+        opts in — and the pass follows this call's ``dry_run`` flag (a dry-run proposes,
+        a real run applies). ``dry_run=True`` reports without changing anything.
+
+        Licensing: manual consolidation (``infer=False``) is a free, in-product
+        housekeeping action; the **inference pass is a paid ``automation`` capability**
+        (the dream pass 4), so ``infer=True`` is gated here as defense in depth — every
+        caller (the ``/api/consolidate`` route, ``run_maintenance``) funnels through
+        this, so the Pro-only pass can't be reached without a server-approved license."""
+        if infer:
+            from engraphis.licensing import require_feature
+            require_feature("automation")
         wid, rid = self._require_scope(workspace, repo)
         try:
             min_cluster = max(2, min(20, int(min_cluster)))
@@ -640,7 +687,8 @@ class MemoryService:
                                   "archive_below a number")
         return self.engine.consolidate(workspace_id=wid, repo_id=rid, dry_run=bool(dry_run),
                                        min_cluster=min_cluster, archive_below=archive_below,
-                                       profiles=bool(profiles), min_mentions=min_mentions)
+                                       profiles=bool(profiles), min_mentions=min_mentions,
+                                       infer=bool(infer))
 
     # ── read ───────────────────────────────────────────────────────────────────
     def recall(self, query: str, *, workspace: Optional[str] = None,

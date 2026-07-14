@@ -92,8 +92,10 @@ class Settings:
         )
     )
 
-    # Fact extraction on the v2 write path: "none" (default — store text as given) or
-    # "llm" (distill raw text into discrete facts via the configured LLM before storing).
+    # Fact extraction on the v2 write path: "none" (default — store text as given),
+    # "chunk" (deterministic, offline structure-aware chunking — knobs
+    # ENGRAPHIS_CHUNK_TOKENS/_OVERLAP/_MAX), or "llm" (distill raw text into discrete
+    # facts via the configured LLM before storing).
     extractor: str = field(default_factory=lambda: _env("ENGRAPHIS_EXTRACTOR", "none").lower())
 
     llm_provider: str = field(default_factory=lambda: _env("ENGRAPHIS_LLM_PROVIDER", "openai").lower())

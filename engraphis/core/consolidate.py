@@ -46,6 +46,15 @@ PROFILE_RELATION = "profiles"
 # How many source lines the deterministic profile quotes.
 PROFILE_QUOTES = 6
 
+# Associative cross-cluster inference (dream pass 4): connect memories in *different,
+# dissimilar* subject clusters that share a bridging entity. Deliberately conservative —
+# it proposes an evidence-only link, never a synthesized new fact; dry-run by default; low
+# salience; never trusted; capped fan-out. This is the "connect distant dots" step.
+INFER_MIN_CLUSTERS = 2       # entity must appear across at least this many distinct clusters
+INFER_MAX_LINKS = 20         # cap proposals per sweep (fan-out guard)
+INFER_IMPORTANCE = 0.25      # inferred links are low-salience by construction
+INFER_RELATION = "related_by_inference"
+
 _DIGEST_SYSTEM_PROMPT = (
     "You consolidate recurring episodic agent memories into one durable semantic fact. "
     "Respond with 1-3 plain sentences capturing the stable pattern — no preamble, no "
@@ -55,6 +64,11 @@ _PROFILE_SYSTEM_PROMPT = (
     "You consolidate everything known about one subject into a compact profile. "
     "Respond with 2-4 plain sentences stating the durable facts and preferences about "
     "the subject — no preamble, no markdown, no speculation beyond what the entries state."
+)
+_INFER_SYSTEM_PROMPT = (
+    "You are given two or more notes that share a common entity. State, in ONE sentence, the "
+    "connection they suggest — grounded strictly in what the notes say, with no speculation. "
+    "No preamble, no markdown."
 )
 
 
@@ -76,7 +90,7 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
                 min_cluster: int = MIN_CLUSTER, subject_jaccard: float = SUBJECT_JACCARD,
                 archive_below: float = ARCHIVE_BELOW, dry_run: bool = False,
                 profiles: bool = False, min_mentions: int = MIN_PROFILE_MENTIONS,
-                llm: Any = None, now: Optional[float] = None) -> dict:
+                infer: bool = False, llm: Any = None, now: Optional[float] = None) -> dict:
     """Run one consolidation sweep over a workspace (optionally one repo). Returns a
     JSON-able report; with ``dry_run=True`` it only reports what *would* happen.
 
@@ -154,6 +168,16 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
         report["profiles"] = consolidate_profiles(
             engine, workspace_id=workspace_id, repo_id=repo_id,
             min_mentions=min_mentions, dry_run=dry_run, llm=llm, now=now)
+
+    # ── pass 4 (opt-in): associative cross-cluster inference ─────────────────
+    if infer:
+        # The inference pass follows the sweep's own ``dry_run`` flag: a dry-run sweep
+        # proposes into the report; a real sweep applies the low-salience, untrusted,
+        # linked memories. It is OFF by default (``infer=False``) so a human opts in —
+        # the safety property is "off by default", not "dry-run by default".
+        report["inferences"] = infer_links(
+            engine, workspace_id=workspace_id, repo_id=repo_id,
+            subject_jaccard=subject_jaccard, dry_run=dry_run, llm=llm, now=now)
 
     return report
 
@@ -347,3 +371,134 @@ def _write_profile(engine, name: str, etype: str, sources: list[MemoryRecord],
     engine.store.audit("consolidation", "profile", profile_id,
                        f"profiled {len(sources)} memories about {name}")
     return profile_id
+
+
+# ── pass 4: associative cross-cluster inference (the "connect distant dots" step) ──
+
+def infer_links(engine, *, workspace_id: str, repo_id: Optional[str] = None,
+                subject_jaccard: float = SUBJECT_JACCARD, max_links: int = INFER_MAX_LINKS,
+                dry_run: bool = True, llm: Any = None, now: Optional[float] = None) -> dict:
+    """Connect memories that sit in *different, dissimilar* subject clusters but share a
+    bridging entity — the associative step ordinary consolidation (same-subject distill)
+    never reaches.
+
+    It never fabricates a claim: an inferred memory states only that a shared entity
+    connects two otherwise-separate topics, and quotes both sides. Written memories are
+    low-salience, ``trusted:false``, ``source='dream_inference'``, and linked back to their
+    sources, so a bad inference is visible, downweighted, and never merge-eligible into a
+    trusted fact (SECURITY.md — memory poisoning). ``dry_run=True`` (default) only proposes;
+    fan-out is capped at ``max_links``. Deterministic and offline; an optional LLM only
+    rephrases the connection and fails soft to the deterministic text.
+    """
+    store = engine.store
+    now = now or time.time()
+    flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id)
+    live = [m for m in store.list_memories(flt, limit=5000)
+            if m.mtype in (MemoryType.EPISODIC, MemoryType.SEMANTIC)
+            and m.metadata.get("provenance", {}).get("source") != "dream_inference"]
+    report: dict = {"workspace_id": workspace_id, "repo_id": repo_id, "dry_run": dry_run,
+                    "entities_considered": 0, "links_created": [], "skipped_existing": 0}
+    if len(live) < 2:
+        return report
+
+    clusters = _cluster_by_subject(live, threshold=subject_jaccard)
+    cluster_of: dict[str, int] = {}
+    subjects: list[set] = []
+    for ci, cl in enumerate(clusters):
+        subjects.append(set(_common_tokens(cl, k=8)) if len(cl) > 1
+                        else tokenize(f"{cl[0].title} {cl[0].content}"))
+        for m in cl:
+            cluster_of[m.id] = ci
+
+    # Precompute each live memory's searchable text once (the entity loop no longer
+    # rebuilds an f-string per (entity × memory) — the hot path of this sweep).
+    live_text = [(m, f"{m.title} {m.content}".lower()) for m in live]
+    for ent in store.list_entities(flt, limit=2000):
+        name = (ent.name or "").strip()
+        if len(name) < PROFILE_MIN_NAME_LEN:
+            continue
+        # Word-boundary match so "Redis" doesn't fire on "rediscovered": the bridging
+        # entity has to appear as a *whole* token, not a substring inside an unrelated
+        # word. Cheaper and more precise than the old ``needle in text`` substring scan.
+        pat = re.compile(r"\b" + re.escape(name.lower()) + r"\b")
+        mentions = [m for m, text in live_text if pat.search(text)]
+        cis = sorted({cluster_of[m.id] for m in mentions if m.id in cluster_of})
+        if len(cis) < INFER_MIN_CLUSTERS:
+            continue
+        # Only genuinely non-obvious: every bridged pair must be *dissimilar* in subject.
+        # A similar pair is a missed same-subject merge — the distill pass's job, not this.
+        if not all(jaccard(subjects[a], subjects[b]) < subject_jaccard
+                   for i, a in enumerate(cis) for b in cis[i + 1:]):
+            continue
+        report["entities_considered"] += 1
+        reps = _cluster_reps(mentions, cluster_of, cis)
+        if any(_has_inference(store, m.id) for m in reps):
+            report["skipped_existing"] += 1
+            continue
+        content = _build_inference_content(name, ent.ntype, reps, subjects, cis, llm=llm)
+        entry = {"entity": name, "etype": ent.ntype,
+                 "bridges": [", ".join(sorted(subjects[c])[:4]) for c in cis],
+                 "sources": [m.id for m in reps]}
+        if dry_run:
+            entry["would_link"] = entry["sources"]
+        else:
+            entry["id"] = _write_inference(engine, name, ent.ntype, reps,
+                                           content=content, now=now)
+        report["links_created"].append(entry)
+        if len(report["links_created"]) >= max_links:
+            break
+    return report
+
+
+def _cluster_reps(mentions: list[MemoryRecord], cluster_of: dict, cis: list[int]) -> list[MemoryRecord]:
+    """One representative memory per bridged cluster (first mention seen in each)."""
+    reps: list[MemoryRecord] = []
+    seen: set[int] = set()
+    for m in mentions:
+        ci = cluster_of.get(m.id)
+        if ci in cis and ci not in seen:
+            reps.append(m)
+            seen.add(ci)
+    return reps
+
+
+def _has_inference(store, memory_id: str) -> bool:
+    return any(link["relation"] == INFER_RELATION for link in store.get_links(memory_id))
+
+
+def _build_inference_content(name: str, etype: str, reps: list[MemoryRecord],
+                             subjects: list[set], cis: list[int], *, llm: Any) -> str:
+    label = f"{name} ({etype})" if etype else name
+    topics = "; ".join(f"'{', '.join(sorted(subjects[c])[:4]) or 'a topic'}'" for c in cis)
+    quotes = [m.content.strip().replace("\n", " ")[:200] for m in reps]
+    content = (f"Possible connection via {label}: it links {topics}.\n"
+               + "\n".join(f"- {q}" for q in quotes))
+    if llm is not None:
+        summary = _llm_summary(
+            llm, _INFER_SYSTEM_PROMPT,
+            f"Shared entity: {name}\nConnected notes:\n"
+            + "\n".join(f"- {m.content.strip()}" for m in reps))
+        if summary:
+            content = f"{summary}\n\n(Inferred connection via {label}, from {len(reps)} notes)"
+    return content
+
+
+def _write_inference(engine, name: str, etype: str, reps: list[MemoryRecord],
+                   *, content: str, now: float) -> str:
+    first = reps[0]
+    inference_id = engine.remember(
+        content,
+        workspace_id=first.workspace_id, repo_id=first.repo_id,
+        mtype=MemoryType.SEMANTIC, scope=Scope(first.scope),
+        title=f"Inferred connection: {name}"[:200], importance=INFER_IMPORTANCE,
+        keywords=[name],
+        metadata={"provenance": {"source": "dream_inference", "entity": name,
+                                 "etype": etype, "trusted": False,
+                                 "links": [m.id for m in reps]}},
+        resolve_conflicts=False,   # an inference is new by construction
+    )
+    for m in reps:
+        engine.store.add_link(inference_id, m.id, INFER_RELATION)
+    engine.store.audit("consolidation", "infer", inference_id,
+                       f"inferred a connection via {name} from {len(reps)} notes")
+    return inference_id
