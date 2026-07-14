@@ -38,13 +38,15 @@ def main() -> int:
         return 0
 
     policy = automation.load_policy()
-    if args.apply and not args.force and not automation.due(policy):
-        print("Not due yet (cadence %sh). Use --force to run now."
+    svc = MemoryService.create(settings.db_path, embed_model=settings.embed_model,
+                               embed_dim=settings.embed_dim or 256)
+    # Fire on the cadence OR on the "dreaming" trigger (enough new episodics + a quiet
+    # store), so a scheduled run also catches bursts of activity between cadence ticks.
+    if args.apply and not args.force and not automation.dream_due(svc, policy=policy):
+        print("Not due yet (cadence %sh, no dream trigger). Use --force to run now."
               % policy.get("cadence_hours"))
         return 0
 
-    svc = MemoryService.create(settings.db_path, embed_model=settings.embed_model,
-                               embed_dim=settings.embed_dim or 256)
     result = automation.run_maintenance(svc, dry_run=not args.apply, policy=policy)
     print(json.dumps(result, indent=2, default=str))
     return 0

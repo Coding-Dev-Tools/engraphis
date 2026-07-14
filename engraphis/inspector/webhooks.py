@@ -487,6 +487,45 @@ def send_password_reset_email(to: str, name: str, reset_url: str) -> None:
     _send_text_email(to, subject, text_body)
 
 
+def _trial_verify_email_text(verify_url: str, plan: str, minutes: int) -> str:
+    label = plan.title()
+    return f"""Someone requested a free {label} trial for Engraphis using this email address.
+
+Confirm it's you and get your trial key here — this link works once and expires in
+{minutes} minutes:
+
+    {verify_url}
+
+Opening it mints your trial key and shows it on a confirmation page, with
+instructions to activate it in your dashboard (Settings -> License -> paste key ->
+Activate).
+
+If you didn't request this, you can safely ignore this email: no trial has been
+issued, and none will be unless this link is opened.
+
+— The Engraphis team
+"""
+
+
+def send_trial_verification_email(to: str, verify_url: str, plan: str = "team", *,
+                                   minutes: int = 30) -> None:
+    """Deliver a one-time magic link that mints a self-serve trial key on click.
+
+    Part of the 2026-07-14 trial-abuse hardening: ``inspector.license_cloud``'s
+    ``POST /license/v1/start-trial`` no longer issues a key synchronously from a bare
+    machine_id (trivially reset by deleting one local file — see that module's
+    comment); it emails this link instead, and the matching ``GET .../start-trial/
+    verify`` mints the key only once it's opened. Raises on delivery failure (see
+    :func:`_send_text_email`) — unlike the password-reset send above, the caller DOES
+    let a failure change the HTTP response (502): trial start is opt-in self-serve
+    (no account to enumerate), and silently swallowing the failure would strand the
+    requester with a pending token they can never redeem.
+    """
+    subject = "Confirm your Engraphis %s trial" % plan.title()
+    text_body = _trial_verify_email_text(verify_url, plan, minutes)
+    _send_text_email(to, subject, text_body)
+
+
 def send_team_invite_email(to: str, name: str, role: str, *, invited_by: str = "",
                            key: str = "", dashboard_url: Optional[str] = None) -> None:
     """Notify a newly added dashboard team member (``/api/auth/users``) that

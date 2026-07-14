@@ -162,11 +162,15 @@ def create_app() -> FastAPI:
         print("[engraphis] ship-safety: %s" % warning, file=sys.stderr)
 
     _maybe_start_autosync()
+    _maybe_start_dreaming()
+    _maybe_start_license_revalidation()
     return app
 
 
 #: Guard so repeated ``create_app()`` calls (or a re-import) never spawn a second loop.
 _AUTOSYNC_STARTED = False
+_DREAMING_STARTED = False
+_REVALIDATE_STARTED = False
 
 
 def _maybe_start_autosync() -> None:
@@ -207,4 +211,89 @@ def _maybe_start_autosync() -> None:
     _AUTOSYNC_STARTED = True
 
 
-app = create_app()
+def _maybe_start_dreaming() -> None:
+    """Launch the background "dreaming" loop once — automated consolidation without cron.
+
+    A single daemon thread polls the persisted maintenance policy (:mod:`engraphis.automation`)
+    and runs a sweep whenever the cadence is due **or** the dreaming trigger fires (enough new
+    episodic memories have accumulated and the store has gone quiet — ``automation.dream_due``).
+    Same safety envelope as the auto-sync loop: **opt-in** (the policy defaults to disabled),
+    **Pro-gated** (``run_maintenance`` funnels through ``require_feature('automation')`` and the
+    loop checks ``has_feature`` first so the free tier no-ops cheaply), fully **fault-isolated**
+    (every error swallowed, retried next tick), skipped under pytest, and switch-offable with
+    ``ENGRAPHIS_DREAM_LOOP=0``. Polls every 5 minutes — consolidation is heavier than a sync."""
+    global _DREAMING_STARTED
+    if _DREAMING_STARTED:
+        return
+    import sys
+    if "pytest" in sys.modules or _os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    if _os.environ.get("ENGRAPHIS_DREAM_LOOP", "1").strip().lower() in (
+            "0", "false", "no", "off"):
+        return
+    import threading
+    import time
+
+    def _loop() -> None:
+        from engraphis import automation, licensing
+        from engraphis.routes import v2_api
+        time.sleep(20)   # let startup settle (after the autosync poll)
+        while True:
+            try:
+                if licensing.has_feature("automation"):
+                    svc = v2_api.service()
+                    if automation.dream_due(svc):
+                        automation.run_maintenance(svc, dry_run=False)
+            except Exception:  # noqa: BLE001 — the loop must outlive any single failure
+                pass
+            time.sleep(300)
+
+    threading.Thread(target=_loop, name="engraphis-dreaming", daemon=True).start()
+    _DREAMING_STARTED = True
+
+
+def _maybe_start_license_revalidation() -> None:
+    """Launch a background loop that periodically re-checks an active paid license
+    against the vendor relay — unless disabled or under pytest.
+
+    ``gate()`` only re-registers when the cached lease actually expires, which means a
+    revoked/refunded key can keep working locally for up to the full lease TTL before
+    the next natural gate check catches it. This loop closes that latency gap: it calls
+    :func:`cloud_license.revalidate` on a cadence far shorter than the lease TTL, and
+    ``revalidate`` itself deletes the cached lease the moment the server denies the key
+    — so the very next feature check (``gate()``/``current_license(refresh=True)``)
+    fails closed immediately instead of waiting out the lease. A no-op when there is no
+    key configured or the key is a local-only construct (nothing to revalidate against).
+    Same safety envelope as the other background loops: fully fault-isolated, skipped
+    under pytest, switch-offable with ``ENGRAPHIS_REVALIDATE_LOOP=0``."""
+    global _REVALIDATE_STARTED
+    if _REVALIDATE_STARTED:
+        return
+    import sys
+    if "pytest" in sys.modules or _os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    if _os.environ.get("ENGRAPHIS_REVALIDATE_LOOP", "1").strip().lower() in (
+            "0", "false", "no", "off"):
+        return
+    import threading
+    import time
+
+    def _loop() -> None:
+        from engraphis import cloud_license, licensing
+        from engraphis.config import settings
+        time.sleep(30)   # let startup settle (after the autosync/dreaming polls)
+        while True:
+            try:
+                material = licensing._read_key_material()
+                lic = licensing.current_license()
+                if material and lic.is_paid:
+                    base = (_os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip()
+                            or lic.cloud_url or (settings.relay_url or "").strip())
+                    if base:
+                        cloud_license.revalidate(lic, material, base_url=base)
+            except Exception:  # noqa: BLE001 — the loop must outlive any single failure
+                pass
+            time.sleep(600)
+
+    threading.Thread(target=_loop, name="engraphis-revalidate", daemon=True).start()
+    _REVALIDATE_STARTED = True

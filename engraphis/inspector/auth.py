@@ -164,27 +164,64 @@ class AuthStore:
 
     def create_user(self, email: str, name: str, password: str, role: str,
                     *, seat_limit: Optional[int] = None) -> dict:
-        from engraphis.licensing import require_feature
-        require_feature("team")
+        # The very first user (bootstrap admin, called from /api/auth/setup on a
+        # zero-user store) is exempt from the license gate. Every user after that
+        # still requires an active Team license — this only closes the chicken-and-egg
+        # deadlock where you can't get a license (paste a key = requires an admin
+        # session; start a trial = requires the relay to be reachable and the trial
+        # unclaimed) without already having an admin account, and you can't create
+        # that account without a license. 2026-07-14 incident: the frontend was made to
+        # auto-start a Team trial before setup, but that still depended on the relay
+        # round-trip succeeding, so it was not a real fix — bootstrap must work
+        # unconditionally. Adding seats beyond the first is untouched.
         email = self._clean_email(email)
         name = (name or "").strip()[:120]
         if role not in ROLES:
             raise AuthError("role must be one of: %s" % ", ".join(ROLES))
         _validate_password(password)
-        if seat_limit is not None and self.count_active_users() >= seat_limit:
-            raise AuthError(
-                "seat limit reached (%d) — upgrade your Team license for more seats"
-                % seat_limit)
+        # Hash outside the write transaction — PBKDF2 is CPU-bound and must not hold the
+        # SQLite write lock that serializes the bootstrap gate below.
         uid = "usr_" + secrets.token_hex(8)
+        pw_hash = _hash_password(password, iterations=self.iterations)
+        created_at = time.time()
+        # Atomic bootstrap gate: hold a write lock (BEGIN IMMEDIATE) from the zero-user
+        # check through the INSERT, so two concurrent /api/auth/setup requests can't both
+        # observe count==0 and both create an unlicensed admin. UNIQUE(email) only blocks
+        # same-email doubles; this closes the different-email race. The license gate, the
+        # seat-limit check, and the INSERT commit as one unit; any failure rolls back.
+        conn = self.conn
+        started = False
         try:
-            self.conn.execute(
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                started = True
+            except sqlite3.OperationalError:
+                pass  # already inside a caller-managed transaction — don't nest
+            if int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]) > 0:
+                from engraphis.licensing import require_feature
+                require_feature("team")
+            if seat_limit is not None and int(conn.execute(
+                    "SELECT COUNT(*) FROM users WHERE disabled=0").fetchone()[0]) >= seat_limit:
+                raise AuthError(
+                    "seat limit reached (%d) — upgrade your Team license for more seats"
+                    % seat_limit)
+            conn.execute(
                 "INSERT INTO users (id, email, name, role, pw_hash, created_at) "
                 "VALUES (?,?,?,?,?,?)",
-                (uid, email, name, role,
-                 _hash_password(password, iterations=self.iterations), time.time()))
-            self.conn.commit()
+                (uid, email, name, role, pw_hash, created_at))
+            if started:
+                conn.commit()
         except sqlite3.IntegrityError:
+            if started:
+                conn.rollback()
             raise AuthError("a user with that email already exists")
+        except Exception:
+            if started:
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
+            raise
         return self.get_user(uid)
 
     def get_user(self, user_id: str) -> Optional[dict]:

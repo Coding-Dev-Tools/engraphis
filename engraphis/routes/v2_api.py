@@ -500,12 +500,15 @@ def merge(req: _MergeReq):
 class _ConsolidateReq(BaseModel):
     workspace: Optional[str] = None
     dry_run: bool = True
+    infer: bool = False
 
 
 @router.post("/consolidate")
 def consolidate(req: _ConsolidateReq):
+    if req.infer:
+        _paid("automation")
     ws = req.workspace or _default_ws()
-    return _run(service().consolidate, workspace=ws, dry_run=req.dry_run)
+    return _run(service().consolidate, workspace=ws, dry_run=req.dry_run, infer=req.infer)
 
 
 # ── analytics (Pro) ───────────────────────────────────────────────────────────
@@ -649,6 +652,10 @@ class _AutomationReq(BaseModel):
     min_cluster: Optional[int] = None
     archive_below: Optional[float] = None
     workspaces: Optional[list] = None
+    dream: Optional[bool] = None
+    dream_min_new: Optional[int] = None
+    dream_idle_minutes: Optional[int] = None
+    infer: Optional[bool] = None
 
 
 @router.get("/automation")
@@ -667,7 +674,8 @@ def automation_set(req: _AutomationReq):
     current = automation.load_policy()
     merged = {k: (getattr(req, k) if getattr(req, k) is not None else current.get(k))
               for k in ("enabled", "cadence_hours", "consolidate", "min_cluster",
-                        "archive_below", "workspaces")}
+                        "archive_below", "workspaces",
+                        "dream", "dream_min_new", "dream_idle_minutes", "infer")}
     return _run(automation.save_policy, merged)
 
 
@@ -705,6 +713,10 @@ class _KeyReq(BaseModel):
     key: str
 
 
+class _TrialReq(BaseModel):
+    email: str = ""
+
+
 @router.get("/license")
 def get_license():
     lic = licensing.current_license(refresh=True).to_public_dict()
@@ -722,24 +734,29 @@ def activate_license(req: _KeyReq):
 
 
 @router.post("/license/trial")
-def start_trial():
-    """Begin the one-time local free trial (unlocks every Pro feature for the trial
-    window, no key required). 400 if a paid license is active or the trial is spent."""
+def start_trial(req: _TrialReq):
+    """Begin the one-time self-serve free Pro trial. Requires ``email`` in the body —
+    since 2026-07-14 a key is no longer issued synchronously; a one-time confirmation
+    link is emailed to it instead (see ``licensing.start_trial``), so a normal
+    response here is ``{"pending": true, ...}``, not an activated license. 400 if the
+    email is missing/invalid, a paid license is active, or the trial is spent."""
     try:
-        return licensing.start_trial()
+        return licensing.start_trial(email=req.email)
     except licensing.LicenseError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 
 
 @router.post("/license/team-trial")
-def start_team_trial():
+def start_team_trial(req: _TrialReq):
     """Begin the one-time self-serve Team trial (unlocks Team mode, seats, and the
-    invite-email relay — a real signed key from the vendor, no purchase). One
-    network round-trip to the relay, unlike the fully-offline Pro trial above; see
-    ``licensing.start_team_trial``. 400 if a paid license is active, this device's
-    trial was already claimed, or the relay is unreachable."""
+    invite-email relay — a real signed key from the vendor, no purchase). Requires
+    ``email`` in the body; since 2026-07-14 a normal response is ``{"pending": true,
+    ...}`` — the key is only minted once a confirmation link emailed to it is opened,
+    not returned synchronously here. See ``licensing.start_team_trial``. 400 if the
+    email is missing/invalid, a paid license is active, this device's trial was
+    already claimed, or the relay is unreachable."""
     try:
-        return licensing.start_team_trial()
+        return licensing.start_team_trial(email=req.email)
     except licensing.LicenseError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
 

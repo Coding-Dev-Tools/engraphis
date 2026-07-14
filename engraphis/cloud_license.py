@@ -34,6 +34,16 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 _LEASE_PREFIX = "ENGRLS1"
+
+
+class Revoked(Exception):
+    """The license server explicitly DENIED this key (HTTP 402/403) — it is revoked,
+    expired, refunded, or over its seat cap.
+
+    Distinct from a network failure (``register`` returns ``None``): a denial is an
+    authoritative server decision that must propagate immediately, while an unreachable
+    server falls back to the cached lease (offline grace). ``revalidate`` and ``gate``
+    treat a ``Revoked`` as fail-closed and an offline result as grace, respectively."""
 def _state_dir() -> Path:
     """Base dir for machine-id + lease state; ``ENGRAPHIS_STATE_DIR`` relocates it onto a
     persistent writable volume (Docker) so device binding survives redeploys."""
@@ -170,14 +180,27 @@ def _valid_lease_for(key_id: str, mid: str) -> Optional[dict]:
     return None
 
 
+def _delete_lease() -> None:
+    """Remove the cached lease so the next ``gate`` call must re-register (and, if the
+    key was revoked, be denied). Best-effort, never raises."""
+    try:
+        _LEASE_FILE.unlink()
+    except OSError:
+        pass
+
+
 # ── registration (phone home) ────────────────────────────────────────────────────────
 
 def register(base_url: str, key: str, mid: str, *, timeout: float = _REGISTER_TIMEOUT
              ) -> Optional[str]:
-    """POST the key to the cloud; return a signed lease token, or None on any failure/deny.
+    """POST the key to the cloud; return a signed lease token, or None on a failure.
 
-    A 402/403 (invalid, expired, revoked, or seat-limited) returns None — the caller then
-    fails closed. Network errors also return None (fail closed once the old lease lapses)."""
+    Distinguishes a server DENIAL from being offline — the one piece of information the
+    revocation path needs: a 402/403 (invalid, expired, revoked, or seat-limited) RAISES
+    :class:`Revoked` so the caller fails closed immediately; a network error returns
+    ``None`` so the caller can fall back to the cached lease (offline grace). Other HTTP
+    statuses (e.g. a transient 5xx) also return ``None`` — no lease was minted, but the
+    server did not definitively deny the key."""
     url = base_url.rstrip("/") + "/license/v1/register"
     data = json.dumps({"key": key, "machine_id": mid}).encode("utf-8")
     req = urllib.request.Request(
@@ -186,8 +209,12 @@ def register(base_url: str, key: str, mid: str, *, timeout: float = _REGISTER_TI
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         return body.get("lease") or None
+    except urllib.error.HTTPError as exc:
+        if exc.code in (402, 403):
+            raise Revoked("license denied by the server (HTTP %d)" % exc.code)
+        return None  # transient/other HTTP status — no lease, but not a denial either
     except (urllib.error.URLError, ValueError, TimeoutError, OSError):
-        return None
+        return None  # offline / unreachable
 
 
 _INVITE_TIMEOUT = 10.0
@@ -229,15 +256,22 @@ def send_team_invite(base_url: str, key: str, to: str, name: str, role: str,
 
 
 def request_trial_key(base_url: str, mid: str, plan: str = "team", email: str = "", *,
-                      timeout: float = _INVITE_TIMEOUT) -> Tuple[Optional[str], str]:
+                      timeout: float = _INVITE_TIMEOUT) -> Tuple[Optional[str], str, bool]:
     """POST to the vendor relay's self-serve ``/license/v1/start-trial`` and return
-    ``(signed_key, reason)`` for a one-time trial of ``plan`` ("pro" or "team"). *key* is
-    ``None`` on any failure — already used on this device (409), network error, bad
-    response — with *reason* explaining why. Used by :func:`engraphis.licensing.
-    start_trial` (pro) and :func:`~engraphis.licensing.start_team_trial` (team): the trial
-    is a REAL, independently verifiable vendor-signed key (never a client-only claim), so
-    it satisfies the same server-side gates (/register, team_invite) every paid feature
-    uses."""
+    ``(key, reason, pending)``.
+
+    Since 2026-07-14 the relay no longer issues a key synchronously from this call —
+    machine_id alone was a trivially-resettable trial-abuse vector (delete one local
+    file, get infinite "free" trials; see ``inspector.license_cloud``'s module comment).
+    A real key now requires the caller to open a one-time magic link sent to *email*
+    (redeemed server-side, not by this client — there is no matching "confirm" call
+    here to make: the link is meant to be clicked from the inbox, not fetched by this
+    process). So the normal, successful outcome of THIS call is ``(None, <a "check
+    your email" message>, True)`` — ``key`` stays non-None only for compatibility with
+    a relay that still short-circuits. ``pending`` is False on every other outcome
+    (already-used-device 409, bad request, or a network/relay failure): those are hard
+    stops, not "come back later". Used by :func:`engraphis.licensing.start_trial`
+    (pro) and :func:`~engraphis.licensing.start_team_trial` (team)."""
     url = base_url.rstrip("/") + "/license/v1/start-trial"
     data = json.dumps({"machine_id": mid, "email": email, "plan": plan}).encode("utf-8")
     req = urllib.request.Request(
@@ -246,19 +280,25 @@ def request_trial_key(base_url: str, mid: str, plan: str = "team", email: str = 
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         key = body.get("key")
-        return (key, "") if key else (None, "relay returned no key")
+        if key:
+            return key, "", False
+        if body.get("pending"):
+            return None, (body.get("message") or
+                          "check your email to confirm and activate the trial"), True
+        return None, "relay returned no key", False
     except urllib.error.HTTPError as exc:
         try:
             detail = json.loads(exc.read().decode("utf-8")).get("error", "")
         except Exception:
             detail = ""
-        return None, (detail or "relay returned HTTP %d" % exc.code)
+        return None, (detail or "relay returned HTTP %d" % exc.code), False
     except (urllib.error.URLError, ValueError, TimeoutError, OSError) as exc:
-        return None, "relay unreachable: %s" % exc
+        return None, "relay unreachable: %s" % exc, False
 
 
 def request_team_trial_key(base_url: str, mid: str, email: str = "", *,
-                           timeout: float = _INVITE_TIMEOUT) -> Tuple[Optional[str], str]:
+                           timeout: float = _INVITE_TIMEOUT
+                           ) -> Tuple[Optional[str], str, bool]:
     """Backward-compat wrapper for :func:`request_trial_key` with ``plan="team"``."""
     return request_trial_key(base_url, mid, plan="team", email=email, timeout=timeout)
 
@@ -268,10 +308,13 @@ def gate(lic, key_material: str, *, base_url: Optional[str] = None) -> Tuple[boo
 
     Returns ``(allowed, reason)``. ``base_url`` (the caller usually passes the env
     override or the URL signed into the key) takes precedence over ``ENGRAPHIS_CLOUD_URL``.
-    With no server at all this is inert (allow) — the caller (``licensing._cloud_gate``)
-    is responsible for denying ``enforce: "cloud"`` keys before ever reaching that case.
-    In cloud mode, requires a valid lease, fetching/renewing one by registering; fails
-    closed if it can't."""
+    **With no server resolved at all this fails CLOSED** — there is deliberately no
+    offline path to paid features (the caller, ``licensing._cloud_gate``, resolves a
+    default relay URL and also fails closed, so this only bites a deliberately blanked
+    config — defense in depth). In cloud mode, requires a valid lease, fetching/renewing
+    one by registering; fails closed if it can't. A :class:`Revoked` denial from
+    :func:`register` is treated the same as any other failure to obtain a lease — fail
+    closed with a reason, never an uncaught exception."""
     base = (base_url or "").strip().rstrip("/") or cloud_url()
     if not base:
         # Online-only: no server to verify against ⇒ no offline path to paid features.
@@ -282,7 +325,10 @@ def gate(lic, key_material: str, *, base_url: Optional[str] = None) -> Tuple[boo
     mid = machine_id()
     if _valid_lease_for(lic.key_id, mid) is not None:
         return True, ""                              # within an unexpired lease window
-    token = register(base, key_material, mid)        # (re)register / renew
+    try:
+        token = register(base, key_material, mid)    # (re)register / renew
+    except Revoked as exc:
+        return False, str(exc)
     if token:
         try:
             p = verify_lease(token)
@@ -294,3 +340,31 @@ def gate(lic, key_material: str, *, base_url: Optional[str] = None) -> Tuple[boo
     return False, ("cloud license verification failed — this license could not be "
                    "validated with %s (revoked, seat limit, or offline past the lease "
                    "window)" % base)
+
+
+def revalidate(lic, key_material: str, *, base_url: Optional[str] = None) -> str:
+    """Background re-check of an already-cached lease.
+
+    ``gate()`` short-circuits on a still-valid cached lease and so can't by itself tell
+    a genuine server DENIAL (revoked/refunded/seat-limit) from merely being offline
+    until the lease itself expires — a real revocation-latency gap for a paying
+    customer's session. This is the fix: call it periodically (or on-demand) against an
+    already-active license to close that gap immediately instead of waiting out the
+    lease TTL. Returns ``"ok"`` (re-registered, lease refreshed), ``"revoked"`` (the
+    server explicitly denied the key — the cached lease is deleted so the very next
+    ``gate()`` call must re-register and will be denied too), or ``"offline"`` (server
+    unreachable — the cached lease is left alone, preserving offline grace for a
+    legitimately paying customer who's briefly disconnected)."""
+    base = (base_url or "").strip().rstrip("/") or cloud_url()
+    if not base:
+        return "offline"
+    mid = machine_id()
+    try:
+        token = register(base, key_material, mid)
+    except Revoked:
+        _delete_lease()
+        return "revoked"
+    if token:
+        _write_lease(token)
+        return "ok"
+    return "offline"

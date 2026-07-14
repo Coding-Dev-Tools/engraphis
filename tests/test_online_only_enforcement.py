@@ -178,8 +178,9 @@ def test_request_trial_key_posts_plan(monkeypatch):
         return _Resp()
 
     monkeypatch.setattr(cl.urllib.request, "urlopen", _urlopen)
-    key, reason = cl.request_trial_key("http://vendor.test", "mid-1", plan="pro", email="a@b.co")
-    assert key == "ENGR1.fake"
+    key, reason, pending = cl.request_trial_key(
+        "http://vendor.test", "mid-1", plan="pro", email="a@b.co")
+    assert key == "ENGR1.fake" and pending is False
     assert captured["plan"] == "pro"
     assert captured["url"].endswith("/license/v1/start-trial")
 

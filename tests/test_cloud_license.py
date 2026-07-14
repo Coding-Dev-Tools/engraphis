@@ -4,6 +4,7 @@ closed in cloud mode. Also covers the salvaged local hardening (HMAC trial + mon
 clock). Runs on the numpy-only gate (stdlib + fastapi TestClient).
 """
 import io
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -183,6 +184,74 @@ def test_current_license_enforces_cloud_mode(monkeypatch):
     assert licensing.current_license(refresh=True) == licensing.License.free()  # revoked → free
 
 
+# ── background revocation re-validation (non-blocking) ──────────────────────────────────
+
+def test_register_raises_revoked_on_server_denial(monkeypatch):
+    # A 402/403 from the server is an authoritative DENIAL, not 'offline': register must
+    # raise Revoked so revalidate/gate fail closed immediately instead of falling back to
+    # the cached lease (offline grace). Network/5xx errors stay None (the grace path).
+    class _HTTPError(urllib.error.HTTPError):
+        def __init__(self, code): super().__init__("http://x", code, "denied", None, io.BytesIO(b""))
+    def _urlopen(req, timeout=None): raise _HTTPError(402)
+    monkeypatch.setattr(cloud_license.urllib.request, "urlopen", _urlopen)
+    with pytest.raises(cloud_license.Revoked):
+        cloud_license.register("http://cloud.test", _key(), "m-1")
+    def _urlopen_5xx(req, timeout=None): raise _HTTPError(503)
+    monkeypatch.setattr(cloud_license.urllib.request, "urlopen", _urlopen_5xx)
+    assert cloud_license.register("http://cloud.test", _key(), "m-1") is None
+
+
+def test_revalidate_revoked_deletes_lease(monkeypatch):
+    # A paid key with a valid local lease: gate short-circuits (no server hit), but the
+    # background revalidate contacts the server and, on a denial, DELETES the lease so the
+    # next gate call must re-register and be denied. This is the revocation-latency fix.
+    c = _app()
+    _wire_register_to(c, monkeypatch)
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    key = _key()
+    lic = parse_key(key)
+    assert cloud_license.gate(lic, key)[0] is True
+    assert cloud_license._LEASE_FILE.exists()
+    reg.revoke(lic.key_id)
+    def _revoking_register(base, k, mid, timeout=6.0):
+        r = c.post("/license/v1/register", json={"key": k, "machine_id": mid})
+        if r.status_code in (402, 403):
+            raise cloud_license.Revoked("denied")
+        return r.json().get("lease") if r.status_code == 200 else None
+    monkeypatch.setattr(cloud_license, "register", _revoking_register)
+    assert cloud_license.revalidate(lic, key, base_url="http://cloud.test") == "revoked"
+    assert not cloud_license._LEASE_FILE.exists()
+    assert cloud_license.gate(lic, key)[0] is False
+
+
+def test_revalidate_offline_keeps_lease_grace(monkeypatch):
+    # A paying customer briefly offline: revalidate can't reach the server → 'offline', and
+    # the cached lease STAYS (offline grace), so paid features keep working.
+    c = _app()
+    _wire_register_to(c, monkeypatch)
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    key = _key()
+    lic = parse_key(key)
+    cloud_license.gate(lic, key)
+    monkeypatch.setattr(cloud_license, "register", lambda *a, **k: None)
+    assert cloud_license.revalidate(lic, key, base_url="http://cloud.test") == "offline"
+    assert cloud_license._LEASE_FILE.exists()
+    assert cloud_license.gate(lic, key)[0] is True
+
+
+def test_revalidate_ok_refreshes_lease(monkeypatch):
+    # An online, still-valid key: revalidate re-registers (refreshing the seat + lease) and
+    # returns 'ok'. This is the steady state for a paying customer.
+    c = _app()
+    _wire_register_to(c, monkeypatch)
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    key = _key()
+    lic = parse_key(key)
+    cloud_license.gate(lic, key)
+    assert cloud_license.revalidate(lic, key, base_url="http://cloud.test") == "ok"
+    assert cloud_license._LEASE_FILE.exists()
+
+
 # ── server-issued trial + monotonic clock (lease anti-rollback) ─────────────────────────
 
 def test_start_trial_activates_server_issued_pro_key(monkeypatch):
@@ -193,11 +262,11 @@ def test_start_trial_activates_server_issued_pro_key(monkeypatch):
         {"v": 1, "plan": "pro", "email": "trial@engraphis.local", "seats": 1,
          "issued": int(now), "expires": int(now + 3 * 86400), "trial": 1}, SECRET)
     monkeypatch.setattr(cloud_license, "request_trial_key",
-                        lambda base, mid, plan="team", email="": (pro_trial, ""))
+                        lambda base, mid, plan="team", email="": (pro_trial, "", False))
     c = _app()
     _wire_register_to(c, monkeypatch)
     monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
-    out = licensing.start_trial()
+    out = licensing.start_trial(email="trial@engraphis.local")
     assert out["plan"] == "pro" and out["is_trial"] is True
     assert licensing.current_license(refresh=True).plan == "pro"
     assert licensing.has_feature("analytics") is True
@@ -217,16 +286,16 @@ def test_start_trial_is_idempotent_while_already_on_trial(monkeypatch):
 
     def _request(base, mid, plan="team", email=""):
         calls.append(1)
-        return pro_trial, ""
+        return pro_trial, "", False
 
     monkeypatch.setattr(cloud_license, "request_trial_key", _request)
     c = _app()
     _wire_register_to(c, monkeypatch)
     monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
-    licensing.start_trial()
+    licensing.start_trial(email="trial@engraphis.local")
     assert len(calls) == 1
-    out = licensing.start_trial()   # re-call: must not error, must not hit the relay again
-    assert out["plan"] == "pro" and out["is_trial"] is True
+    out = licensing.start_trial(email="trial@engraphis.local")   # re-call: must not error,
+    assert out["plan"] == "pro" and out["is_trial"] is True      # must not hit the relay again
     assert len(calls) == 1          # no second relay round-trip
 
 
@@ -272,8 +341,8 @@ def test_start_trial_proceeds_when_local_key_is_cloud_denied(monkeypatch):
         {"v": 1, "plan": "pro", "email": "trial@engraphis.local", "seats": 1,
          "issued": int(now), "expires": int(now + 3 * 86400), "trial": 1}, SECRET)
     monkeypatch.setattr(cloud_license, "request_trial_key",
-                        lambda base, mid, plan="pro", email="": (pro_trial, ""))
-    out = licensing.start_trial()            # must NOT raise "already active"
+                        lambda base, mid, plan="pro", email="": (pro_trial, "", False))
+    out = licensing.start_trial(email="trial@engraphis.local")  # must NOT raise "already active"
     assert out["plan"] == "pro" and out["is_trial"] is True
     assert licensing.has_feature("analytics") is True
 
@@ -327,11 +396,11 @@ def test_pro_trial_never_grants_team(monkeypatch):
         {"v": 1, "plan": "pro", "email": "trial@engraphis.local", "seats": 1,
          "issued": int(now), "expires": int(now + 3 * 86400), "trial": 1}, SECRET)
     monkeypatch.setattr(cloud_license, "request_trial_key",
-                        lambda base, mid, plan="team", email="": (pro_trial, ""))
+                        lambda base, mid, plan="team", email="": (pro_trial, "", False))
     c = _app()
     _wire_register_to(c, monkeypatch)
     monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
-    licensing.start_trial()
+    licensing.start_trial(email="trial@engraphis.local")
     lic = licensing.current_license(refresh=True)
     assert lic.is_trial and lic.plan == "pro"
     assert licensing.has_feature("team") is False
@@ -701,12 +770,51 @@ def test_send_team_invite_client_fails_closed_on_network_error(monkeypatch):
 # ── self-serve Team trial: real signed key, one-per-device, must work with the ─────────
 # team-invite relay above (that's the whole point — a trial user needs the "click
 # button, send invite" experience to actually work, or they never see the value).
+#
+# 2026-07-14 hardening: POST /start-trial no longer hands back a key synchronously — it
+# emails a one-time magic link, and GET /start-trial/verify (opened from that email)
+# mints the key. Tests below mock the outbound send (no real SMTP in CI) and drive the
+# link explicitly, same as a user clicking it, via the two helpers immediately below.
 
-def test_start_team_trial_issues_signed_team_key():
+def _capture_verify_url(monkeypatch):
+    """Stub outbound trial-verification email (no real SMTP/Resend in tests); returns
+    a dict populated with the last send's ``to``/``url``/``plan`` on each POST."""
+    from engraphis.inspector import webhooks as WH
+    captured: dict = {}
+
+    def _fake_send(to, verify_url, plan="team", *, minutes=30):
+        captured.update(to=to, url=verify_url, plan=plan)
+
+    monkeypatch.setattr(WH, "send_trial_verification_email", _fake_send)
+    return captured
+
+
+def _token_from_url(url: str) -> str:
+    return urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["token"][0]
+
+
+def _key_from_verify_html(html: str) -> str:
+    m = re.search(r"<pre[^>]*>([^<]+)</pre>", html)
+    assert m, "no key found in verify-page HTML: %r" % html[:300]
+    return m.group(1).strip()
+
+
+def _start_and_confirm(c, captured, machine_id, email="dev@example.com", plan="team"):
+    """POST /start-trial then immediately follow the (captured, mocked) magic link —
+    the full happy path a real user drives by hand. Returns the confirmed key."""
+    r = c.post("/license/v1/start-trial",
+               json={"machine_id": machine_id, "email": email, "plan": plan})
+    assert r.status_code == 200 and r.json().get("pending") is True
+    token = _token_from_url(captured["url"])
+    v = c.get("/license/v1/start-trial/verify", params={"token": token})
+    assert v.status_code == 200, v.text
+    return _key_from_verify_html(v.text)
+
+
+def test_start_team_trial_issues_signed_team_key(monkeypatch):
     c = _app()
-    r = c.post("/license/v1/start-trial", json={"machine_id": "dev-1"})
-    assert r.status_code == 200
-    key = r.json()["key"]
+    captured = _capture_verify_url(monkeypatch)
+    key = _start_and_confirm(c, captured, "dev-1")
     lic = parse_key(key)
     # Free Team trial is always 5 seats for TRIAL_DAYS (3) — see TEAM_TRIAL_SEATS.
     assert lic.plan == "team" and lic.has("team") and lic.seats == 5
@@ -716,47 +824,162 @@ def test_start_team_trial_issues_signed_team_key():
     assert 2.9 < days_left <= 3.0
 
 
-def test_start_team_trial_grants_five_seats_regardless_of_request_body():
+def test_start_team_trial_grants_five_seats_regardless_of_request_body(monkeypatch):
     """5 seats, unconditionally — a caller cannot request a different seat count.
     The endpoint doesn't even read a ``seats`` field, so spoofing one in the body
     must have zero effect on what gets issued."""
     c = _app()
+    captured = _capture_verify_url(monkeypatch)
     r = c.post("/license/v1/start-trial",
-               json={"machine_id": "dev-spoof", "seats": 1, "plan": "team"})
+               json={"machine_id": "dev-spoof", "email": "a@example.com",
+                     "seats": 1, "plan": "team"})
     assert r.status_code == 200
-    lic = parse_key(r.json()["key"])
-    assert lic.seats == 5
+    token = _token_from_url(captured["url"])
+    key = _key_from_verify_html(
+        c.get("/license/v1/start-trial/verify", params={"token": token}).text)
+    assert parse_key(key).seats == 5
 
     r2 = c.post("/license/v1/start-trial",
-                json={"machine_id": "dev-spoof-2", "seats": 999, "plan": "team"})
+                json={"machine_id": "dev-spoof-2", "email": "b@example.com",
+                      "seats": 999, "plan": "team"})
     assert r2.status_code == 200
-    assert parse_key(r2.json()["key"]).seats == 5
+    token2 = _token_from_url(captured["url"])
+    key2 = _key_from_verify_html(
+        c.get("/license/v1/start-trial/verify", params={"token": token2}).text)
+    assert parse_key(key2).seats == 5
 
 
-def test_start_pro_trial_stays_single_seat():
+def test_start_pro_trial_stays_single_seat(monkeypatch):
     """The 5-seat grant is Team-specific; a Pro trial via this same relay endpoint
     is unaffected."""
     c = _app()
-    r = c.post("/license/v1/start-trial", json={"machine_id": "dev-pro", "plan": "pro"})
-    assert r.status_code == 200
-    lic = parse_key(r.json()["key"])
+    captured = _capture_verify_url(monkeypatch)
+    key = _start_and_confirm(c, captured, "dev-pro", email="pro@example.com", plan="pro")
+    lic = parse_key(key)
     assert lic.plan == "pro" and lic.seats == 1
 
 
 def test_start_team_trial_requires_machine_id():
     c = _app()
-    assert c.post("/license/v1/start-trial", json={}).status_code == 400
+    assert c.post("/license/v1/start-trial",
+                  json={"email": "a@example.com"}).status_code == 400
 
 
-def test_start_team_trial_rejects_second_grant_same_device():
+def test_start_team_trial_requires_valid_email():
     c = _app()
-    first = c.post("/license/v1/start-trial", json={"machine_id": "dev-1"})
+    assert c.post("/license/v1/start-trial",
+                  json={"machine_id": "dev-1"}).status_code == 400
+    assert c.post("/license/v1/start-trial",
+                  json={"machine_id": "dev-1", "email": "not-an-email"}).status_code == 400
+
+
+def test_start_team_trial_resend_supersedes_earlier_unclicked_link(monkeypatch):
+    """A second, unconfirmed /start-trial request for the same still-pending device is
+    a resend, not a conflict — trial_grants isn't written until a link is opened, so
+    there's nothing to 409 on yet. The superseded OLD link must stop working."""
+    c = _app()
+    captured = _capture_verify_url(monkeypatch)
+    first = c.post("/license/v1/start-trial",
+                   json={"machine_id": "dev-1", "email": "dev@example.com"})
     assert first.status_code == 200
-    second = c.post("/license/v1/start-trial", json={"machine_id": "dev-1"})
-    assert second.status_code == 409
+    old_token = _token_from_url(captured["url"])
+
+    second = c.post("/license/v1/start-trial",
+                    json={"machine_id": "dev-1", "email": "dev@example.com"})
+    assert second.status_code == 200
+    new_token = _token_from_url(captured["url"])
+    assert new_token != old_token
+
+    stale = c.get("/license/v1/start-trial/verify", params={"token": old_token})
+    assert stale.status_code == 400
+
+    fresh = c.get("/license/v1/start-trial/verify", params={"token": new_token})
+    assert fresh.status_code == 200
+
+
+def test_start_team_trial_rejects_grant_after_device_already_confirmed(monkeypatch):
+    c = _app()
+    captured = _capture_verify_url(monkeypatch)
+    key = _start_and_confirm(c, captured, "dev-1")
+    assert key
+
+    # a fresh /start-trial request for the SAME (now-granted) device is refused outright
+    r2 = c.post("/license/v1/start-trial",
+               json={"machine_id": "dev-1", "email": "dev@example.com"})
+    assert r2.status_code == 409
+
     # a DIFFERENT device is unaffected
-    third = c.post("/license/v1/start-trial", json={"machine_id": "dev-2"})
-    assert third.status_code == 200
+    r3 = c.post("/license/v1/start-trial",
+               json={"machine_id": "dev-2", "email": "other@example.com"})
+    assert r3.status_code == 200
+
+
+def test_start_team_trial_verify_rejects_unknown_token():
+    c = _app()
+    r = c.get("/license/v1/start-trial/verify", params={"token": "not-a-real-token"})
+    assert r.status_code == 400
+
+
+def test_start_team_trial_verify_link_is_one_time_use(monkeypatch):
+    c = _app()
+    captured = _capture_verify_url(monkeypatch)
+    c.post("/license/v1/start-trial",
+          json={"machine_id": "dev-1", "email": "dev@example.com"})
+    token = _token_from_url(captured["url"])
+    first = c.get("/license/v1/start-trial/verify", params={"token": token})
+    assert first.status_code == 200
+    replay = c.get("/license/v1/start-trial/verify", params={"token": token})
+    assert replay.status_code == 400
+
+
+def test_start_team_trial_verify_rejects_expired_token(monkeypatch):
+    c = _app()
+    captured = _capture_verify_url(monkeypatch)
+    monkeypatch.setattr(license_cloud, "_TRIAL_TOKEN_TTL_SECONDS", -1)  # already expired
+    r = c.post("/license/v1/start-trial",
+               json={"machine_id": "dev-1", "email": "dev@example.com"})
+    assert r.status_code == 200
+    token = _token_from_url(captured["url"])
+    v = c.get("/license/v1/start-trial/verify", params={"token": token})
+    assert v.status_code == 400
+    assert "expired" in v.text.lower()
+
+
+def test_start_team_trial_surfaces_email_delivery_failure_as_502(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+
+    def boom(*a, **k):
+        raise RuntimeError("simulated Resend outage")
+
+    monkeypatch.setattr(WH, "send_trial_verification_email", boom)
+    c = _app()
+    r = c.post("/license/v1/start-trial",
+               json={"machine_id": "dev-1", "email": "dev@example.com"})
+    assert r.status_code == 502
+
+
+def test_start_team_trial_rate_limits_by_source_ip(monkeypatch):
+    """POST /start-trial itself is IP rate-limited — independent of whether any grant
+    ever happens, since sending mail is a cost/abuse vector on its own."""
+    monkeypatch.setattr(license_cloud, "_trial_rate_limit_per_hour", lambda: 2)
+    c = _app()
+    _capture_verify_url(monkeypatch)
+    headers = {"X-Forwarded-For": "203.0.113.9"}
+    for i in range(2):
+        r = c.post("/license/v1/start-trial",
+                   json={"machine_id": "dev-%d" % i, "email": "dev%d@example.com" % i},
+                   headers=headers)
+        assert r.status_code == 200
+    over = c.post("/license/v1/start-trial",
+                  json={"machine_id": "dev-over", "email": "over@example.com"},
+                  headers=headers)
+    assert over.status_code == 429
+
+    # a DIFFERENT source IP is unaffected by this one's cap
+    other = c.post("/license/v1/start-trial",
+                   json={"machine_id": "dev-other", "email": "other@example.com"},
+                   headers={"X-Forwarded-For": "198.51.100.4"})
+    assert other.status_code == 200
 
 
 def test_start_team_trial_key_actually_works_with_team_invite_relay(monkeypatch):
@@ -764,32 +987,40 @@ def test_start_team_trial_key_actually_works_with_team_invite_relay(monkeypatch)
     everywhere a purchased key is, specifically including the invite relay — an
     offline/local-only trial claim never could be."""
     from engraphis.inspector import webhooks as WH
-    captured = {}
+    captured_invite = {}
     monkeypatch.setattr(
         WH, "send_team_invite_email",
         lambda to, name, role, invited_by="", key="", dashboard_url=None:
-            captured.update(to=to))
+            captured_invite.update(to=to))
     c = _app()
-    key = c.post("/license/v1/start-trial", json={"machine_id": "dev-1"}).json()["key"]
+    captured = _capture_verify_url(monkeypatch)
+    key = _start_and_confirm(c, captured, "dev-1")
     r = c.post("/license/v1/team-invite", json={"key": key, "to": "teammate@corp.com"})
     assert r.status_code == 200 and r.json()["sent"] is True
-    assert captured["to"] == "teammate@corp.com"
+    assert captured_invite["to"] == "teammate@corp.com"
 
 
-def test_request_team_trial_key_client_roundtrip(monkeypatch):
+def test_request_team_trial_key_client_returns_pending(monkeypatch):
     c = _app()
+    _capture_verify_url(monkeypatch)
     _wire_urlopen_to(c, monkeypatch)
-    key, reason = cloud_license.request_team_trial_key("http://relay.test", "dev-1")
-    assert key and reason == ""
-    assert parse_key(key).plan == "team"
+    key, reason, pending = cloud_license.request_team_trial_key(
+        "http://relay.test", "dev-1", email="dev@example.com")
+    assert key is None and pending is True and reason
 
 
 def test_request_team_trial_key_client_reports_already_used(monkeypatch):
     c = _app()
+    captured = _capture_verify_url(monkeypatch)
     _wire_urlopen_to(c, monkeypatch)
-    cloud_license.request_team_trial_key("http://relay.test", "dev-1")
-    key, reason = cloud_license.request_team_trial_key("http://relay.test", "dev-1")
-    assert key is None and "already been used" in reason
+    cloud_license.request_team_trial_key("http://relay.test", "dev-1", email="dev@example.com")
+    token = _token_from_url(captured["url"])
+    confirmed = c.get("/license/v1/start-trial/verify", params={"token": token})
+    assert confirmed.status_code == 200                 # the device now holds a grant
+    key, reason, pending = cloud_license.request_team_trial_key(
+        "http://relay.test", "dev-1", email="dev@example.com")
+    assert key is None and pending is False
+    assert "already been used" in reason
 
 
 # ── licensing.start_team_trial: the client-facing entry point ──────────────────────────
@@ -798,11 +1029,11 @@ def test_licensing_start_team_trial_activates_returned_key(monkeypatch):
     trial_key = _key(plan="team", email="trial@engraphis.local")
     monkeypatch.setattr(
         cloud_license, "request_team_trial_key",
-        lambda base, mid, email="": (trial_key, ""))
+        lambda base, mid, email="": (trial_key, "", False))
     c = _app()
     _wire_register_to(c, monkeypatch)            # online-only: lease the key
     monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
-    got = licensing.start_team_trial()
+    got = licensing.start_team_trial(email="trial@engraphis.local")
     assert got["plan"] == "team"
     assert licensing.current_license(refresh=True).plan == "team"
     assert licensing.has_feature("team") is True
@@ -840,8 +1071,8 @@ def test_licensing_start_team_trial_proceeds_when_local_key_is_cloud_denied(monk
     trial_key = _key(plan="team", email="trial@engraphis.local")
     monkeypatch.setattr(
         cloud_license, "request_team_trial_key",
-        lambda base, mid, email="": (trial_key, ""))
-    out = licensing.start_team_trial()       # must NOT raise "already active"
+        lambda base, mid, email="": (trial_key, "", False))
+    out = licensing.start_team_trial(email="trial@engraphis.local")  # must NOT raise "already active"
     assert out["plan"] == "team"
     assert licensing.has_feature("team") is True
 
@@ -857,15 +1088,15 @@ def test_licensing_start_team_trial_is_idempotent_while_already_on_trial(monkeyp
 
     def _request(base, mid, email=""):
         calls.append(1)
-        return team_trial, ""
+        return team_trial, "", False
 
     monkeypatch.setattr(cloud_license, "request_team_trial_key", _request)
     c = _app()
     _wire_register_to(c, monkeypatch)
     monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
-    licensing.start_team_trial()
+    licensing.start_team_trial(email="trial@engraphis.local")
     assert len(calls) == 1
-    out = licensing.start_team_trial()
+    out = licensing.start_team_trial(email="trial@engraphis.local")
     assert out["plan"] == "team" and out["is_trial"] is True
     assert len(calls) == 1          # no second relay round-trip
 
@@ -873,6 +1104,34 @@ def test_licensing_start_team_trial_is_idempotent_while_already_on_trial(monkeyp
 def test_licensing_start_team_trial_surfaces_relay_denial(monkeypatch):
     monkeypatch.setattr(
         cloud_license, "request_team_trial_key",
-        lambda base, mid, email="": (None, "the free Team trial has already been used"))
+        lambda base, mid, email="": (None, "the free Team trial has already been used", False))
     with pytest.raises(LicenseError, match="already been used"):
-        licensing.start_team_trial()
+        licensing.start_team_trial(email="trial@engraphis.local")
+
+
+def test_licensing_start_trial_requires_email(monkeypatch):
+    """The 2026-07-14 hardening: a bare call with no email must fail locally, fast,
+    without ever reaching the relay (machine_id alone is no longer sufficient)."""
+    called = []
+    monkeypatch.setattr(
+        cloud_license, "request_trial_key",
+        lambda *a, **k: called.append(1) or (None, "should not be called", False))
+    with pytest.raises(LicenseError, match="email"):
+        licensing.start_trial()
+    with pytest.raises(LicenseError, match="email"):
+        licensing.start_trial(email="not-an-email")
+    assert not called
+
+
+def test_licensing_start_trial_surfaces_pending_status(monkeypatch):
+    """The normal successful outcome of licensing.start_trial() is now 'pending' — no
+    key, nothing activated — since the relay only emails a magic link. Regression
+    guard against silently treating a pending response as an activated license."""
+    monkeypatch.setattr(
+        cloud_license, "request_trial_key",
+        lambda base, mid, plan="pro", email="":
+            (None, "check your email to confirm and activate the trial", True))
+    out = licensing.start_trial(email="me@example.com")
+    assert out == {"pending": True,
+                   "message": "check your email to confirm and activate the trial"}
+    assert licensing.current_license(refresh=True).plan == "free"  # nothing activated yet

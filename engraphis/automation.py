@@ -29,6 +29,18 @@ DEFAULT_POLICY: dict = {
     "min_cluster": 3,
     "archive_below": 0.05,
     "workspaces": [],  # empty = every workspace the caller can see
+    # "Dreaming" trigger: run a sweep *before* the cadence elapses when enough new
+    # episodic memories have piled up AND the store has gone quiet (the user paused).
+    # Purely additive to the cadence in ``due()`` — it can only cause more sweeps, never
+    # fewer — so existing cron behaviour is unchanged when left at defaults.
+    "dream": True,
+    "dream_min_new": 25,       # new episodics since last run before an early sweep is worth it
+    "dream_idle_minutes": 15,  # ...and this long since the most recent write ("went quiet")
+    # Cross-cluster inference (consolidate pass 4). OFF by default: it writes new
+    # (low-salience, untrusted, linked) memories, so a human opts in. When on, a sweep
+    # (manual *or* the dream loop) runs the inference pass too — following the sweep's
+    # own dry_run flag, so a dry-run preview proposes and a real run applies.
+    "infer": False,
 }
 
 _POLICY_KEYS = set(DEFAULT_POLICY)
@@ -78,6 +90,16 @@ def normalize_policy(raw: dict) -> dict:
         p["archive_below"] = 0.05
     wss = p.get("workspaces") or []
     p["workspaces"] = [str(w) for w in wss] if isinstance(wss, list) else []
+    p["dream"] = bool(p["dream"])
+    p["infer"] = bool(p["infer"])
+    try:
+        p["dream_min_new"] = max(1, int(p["dream_min_new"] or 25))
+    except (TypeError, ValueError):
+        p["dream_min_new"] = 25
+    try:
+        p["dream_idle_minutes"] = max(0, int(p["dream_idle_minutes"]))
+    except (TypeError, ValueError):
+        p["dream_idle_minutes"] = 15
     return p
 
 
@@ -131,6 +153,75 @@ def due(policy: dict, *, now: Optional[float] = None) -> bool:
         return True
 
 
+def dream_signals(memories: Any, *, last_run: Optional[float],
+                  now: float) -> tuple[int, Optional[float]]:
+    """From an iterable of memory records, compute ``(new_episodic, idle_seconds)``:
+    how many *episodic* memories were ingested since ``last_run`` (accumulation) and how
+    long since the most recent write of any kind (idle). ``idle_seconds`` is ``None`` for
+    an empty store. Pure and side-effect-free so it unit-tests without a database."""
+    newest = 0.0
+    new_episodic = 0
+    for m in memories:
+        ts = float(getattr(m, "ingested_at", 0) or 0)
+        if ts > newest:
+            newest = ts
+        mtype = getattr(getattr(m, "mtype", ""), "value", getattr(m, "mtype", ""))
+        if str(mtype) == "episodic" and (last_run is None or ts > float(last_run)):
+            new_episodic += 1
+    return new_episodic, (now - newest if newest else None)
+
+
+def should_dream(policy: dict, memories: Any, *, now: Optional[float] = None) -> bool:
+    """True when accumulation + idle warrant a sweep *before* the cadence is due.
+
+    Requires the policy be enabled and dreaming on, then: at least ``dream_min_new`` new
+    episodic memories since ``last_run`` **and** the store idle for ``dream_idle_minutes``.
+    The idle guard means a sweep never fights a live editing burst; the accumulation guard
+    means it never runs on a store nothing has been added to."""
+    if not policy.get("enabled") or not policy.get("dream", True):
+        return False
+    now = time.time() if now is None else now
+    new_episodic, idle = dream_signals(
+        memories, last_run=policy.get("last_run"), now=now)
+    if new_episodic < int(policy.get("dream_min_new", 25)):
+        return False
+    if idle is None:
+        return False
+    return idle >= int(policy.get("dream_idle_minutes", 15)) * 60.0
+
+
+def dream_due(service: Any, *, policy: Optional[dict] = None,
+              now: Optional[float] = None, scan_limit: int = 5000) -> bool:
+    """Should a scheduled sweep run now? ``due()`` (cadence) **or** ``should_dream()``
+    (accumulation+idle). Reads recent memories from the service's store — the only IO in
+    the trigger — and is purely additive to the cadence, so cron users are unaffected."""
+    pol = load_policy() if policy is None else policy
+    if due(pol, now=now):
+        return True
+    try:
+        from engraphis.core.interfaces import SearchFilter
+        targets = pol.get("workspaces") or []
+        if targets:
+            # Only accumulation/idle *within* the scoped workspaces can fire a sweep
+            # — a burst in an out-of-scope workspace must not trigger one. Names are
+            # resolved to ids with a read-only lookup (never create) so a stale policy
+            # entry can't mint an empty folder.
+            memories: list = []
+            conn = service.store.conn
+            for name in targets:
+                row = conn.execute(
+                    "SELECT id FROM workspaces WHERE name=?", (str(name),)).fetchone()
+                if not row:
+                    continue
+                memories.extend(service.store.list_memories(
+                    SearchFilter(workspace_id=row["id"]), limit=scan_limit))
+        else:
+            memories = service.store.list_memories(SearchFilter(), limit=scan_limit)
+    except Exception:  # noqa: BLE001 - a trigger must never crash the scheduled job
+        return False
+    return should_dream(pol, memories, now=now)
+
+
 def run_maintenance(service: Any, *, dry_run: bool = True,
                     policy: Optional[dict] = None, record: bool = True,
                     now: Optional[float] = None) -> dict:
@@ -156,7 +247,8 @@ def run_maintenance(service: Any, *, dry_run: bool = True,
                 entry["consolidate"] = service.consolidate(
                     workspace=ws, dry_run=dry_run,
                     min_cluster=pol["min_cluster"],
-                    archive_below=pol["archive_below"])
+                    archive_below=pol["archive_below"],
+                    infer=bool(pol.get("infer", False)))
         except Exception as exc:  # noqa: BLE001 - isolate a bad workspace
             entry["error"] = str(exc)
         runs.append(entry)

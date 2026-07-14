@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -690,21 +691,36 @@ def _local_material_license() -> Optional[License]:
         return None
 
 
-def start_trial(*, now: Optional[float] = None) -> dict:
-    """Begin the one-time self-serve Pro trial by fetching a REAL, short-lived,
-    vendor-signed Pro key from the license server and activating it — exactly like
-    :func:`start_team_trial`, and exactly like a purchase (just Pro-tier, short-lived).
+#: Loose RFC-5322-ish check, deliberately permissive — this is a fast local rejection
+#: of obvious garbage, not the authoritative check. The relay (``inspector.auth._EMAIL_RE``)
+#: is the real gate, since it's the one that actually has to send mail to the address.
+_TRIAL_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def start_trial(*, email: str = "", now: Optional[float] = None) -> dict:
+    """Begin the one-time self-serve Pro trial by requesting a REAL, short-lived,
+    vendor-signed Pro key from the license server — exactly like :func:`start_team_trial`,
+    and exactly like a purchase (just Pro-tier, short-lived).
 
     There is no offline/local trial grant anymore: a trial is a genuine server-issued
     credential, verified by the same server-side gate every paid feature uses, so it
-    cannot be forged by editing local files. If this device already holds an ACTIVE
-    trial key (any plan — the server only ever grants one, see ``_local_material_
-    license``), this is an idempotent no-op that returns the current status rather
-    than erroring, so a UI that calls this on every "Start trial" click doesn't have
-    to special-case "already trialing". Refuses (raises :class:`LicenseError`) if a
-    genuinely PAID key is already active, if this device already claimed its
-    one-time trial and it has since expired (server 409 on re-request), or if the
-    license server is unreachable."""
+    cannot be forged by editing local files. Since 2026-07-14 the relay also no longer
+    hands back a key from this one call — machine_id alone was trivially resettable
+    (delete a local file, get another "free" trial forever), so *email* is now required
+    and the actual key is minted only once a one-time magic link sent to it is opened
+    (see ``inspector.license_cloud``). This function's return value reflects that: on
+    the normal successful path there is nothing to activate yet, so it returns
+    ``{"pending": True, "message": ...}`` instead of an activated license — the caller
+    (the dashboard's "Start trial" button) should surface that message ("check your
+    email") rather than assume Pro just turned on.
+
+    If this device already holds an ACTIVE trial key (any plan — the server only ever
+    grants one, see ``_local_material_license``), this is an idempotent no-op that
+    returns the current status rather than erroring, so a UI that calls this on every
+    "Start trial" click doesn't have to special-case "already trialing". Raises
+    :class:`LicenseError` if *email* is missing/malformed, if a genuinely PAID key is
+    already active, if this device already claimed its one-time trial (server 409), or
+    if the license server is unreachable."""
     lic = _local_material_license()
     if lic is not None:
         if lic.is_trial:
@@ -720,35 +736,45 @@ def start_trial(*, now: Optional[float] = None) -> dict:
         # trial.
         if current_license(refresh=True).is_paid:
             raise LicenseError("a paid license is already active — no trial needed")
+    email = (email or "").strip().lower()
+    if not email or not _TRIAL_EMAIL_RE.match(email):
+        raise LicenseError("a valid email address is required to start a trial")
     from engraphis import cloud_license
     from engraphis.config import settings
     base = os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip() or settings.relay_url
-    key, reason = cloud_license.request_trial_key(
-        base, cloud_license.machine_id(), plan="pro")
+    key, reason, pending = cloud_license.request_trial_key(
+        base, cloud_license.machine_id(), plan="pro", email=email)
+    if pending:
+        return {"pending": True, "message": reason}
     if not key:
         raise LicenseError(reason or "could not start the free trial — try again shortly")
     _mark_trial_used()   # advisory-only UI hint; the server is the real one-per-device gate
     return activate(key).to_public_dict()
 
 
-def start_team_trial(*, now: Optional[float] = None) -> dict:
+def start_team_trial(*, email: str = "", now: Optional[float] = None) -> dict:
     """Begin the one-time self-serve Team trial: unlike :func:`start_trial` (Pro,
-    fully local/offline), this fetches a REAL signed ``team`` key from the vendor
-    relay and activates it exactly like a purchased key. The extra network
-    round-trip is required, not incidental: the resulting key is later presented to
-    OTHER server-side gates (the team-invite relay, ``/register``) that only accept
-    a genuinely vendor-signed credential, and an offline client-only claim (like the
-    Pro trial's) can never satisfy those — see ``inspector.license_cloud.
+    fully local/offline), this requests a REAL signed ``team`` key from the vendor
+    relay exactly like a purchased key would be. The extra network round-trip is
+    required, not incidental: the resulting key is later presented to OTHER
+    server-side gates (the team-invite relay, ``/register``) that only accept a
+    genuinely vendor-signed credential, and an offline client-only claim (like the Pro
+    trial's used to be) can never satisfy those — see ``inspector.license_cloud.
     start_team_trial`` for the full reasoning. Without this, a trialing user could
-    open Team mode locally but could never actually send a team invite, which
-    defeats the point of letting them trial Team at all.
+    open Team mode locally but could never actually send a team invite, which defeats
+    the point of letting them trial Team at all.
+
+    Since 2026-07-14 *email* is required and the key is minted only once a one-time
+    magic link sent to it is opened — see :func:`start_trial`'s docstring for the full
+    reasoning (same relay endpoint, same hardening). The normal successful return here
+    is likewise ``{"pending": True, "message": ...}``, not an activated license.
 
     If this device already holds an ACTIVE trial key (any plan), this is an
     idempotent no-op that returns the current status — same reasoning as
-    :func:`start_trial`. Refuses (raises :class:`LicenseError`) if a genuinely PAID
-    key is already active, if this device's one-time trial is already spent (relay
-    409), or if the relay is unreachable. ``now`` is accepted (unused) only for
-    signature parity with :func:`start_trial`."""
+    :func:`start_trial`. Raises :class:`LicenseError` if *email* is missing/malformed,
+    if a genuinely PAID key is already active, if this device's one-time trial is
+    already spent (relay 409), or if the relay is unreachable. ``now`` is accepted
+    (unused) only for signature parity with :func:`start_trial`."""
     lic = _local_material_license()
     if lic is not None:
         if lic.is_trial:
@@ -757,10 +783,16 @@ def start_team_trial(*, now: Optional[float] = None) -> dict:
         # same fix: only refuse when the key is CURRENTLY entitling something.
         if current_license(refresh=True).is_paid:
             raise LicenseError("a paid license is already active — no trial needed")
+    email = (email or "").strip().lower()
+    if not email or not _TRIAL_EMAIL_RE.match(email):
+        raise LicenseError("a valid email address is required to start a trial")
     from engraphis import cloud_license
     from engraphis.config import settings
     base = os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip() or settings.relay_url
-    key, reason = cloud_license.request_team_trial_key(base, cloud_license.machine_id())
+    key, reason, pending = cloud_license.request_team_trial_key(
+        base, cloud_license.machine_id(), email=email)
+    if pending:
+        return {"pending": True, "message": reason}
     if not key:
         raise LicenseError(reason or "could not start the Team trial — try again shortly")
     _mark_trial_used()   # advisory-only UI hint; the server is the real one-per-device gate

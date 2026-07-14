@@ -12,15 +12,17 @@ from __future__ import annotations
 import asyncio
 import hmac
 import os
+import secrets
 import time
+from typing import Optional
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from engraphis import cloud_license
 from engraphis.config import settings
 from engraphis.inspector import license_registry as reg
-from engraphis.inspector.auth import _EMAIL_RE
+from engraphis.inspector.auth import _EMAIL_RE, _hash_token
 from engraphis.inspector.webhooks import _load_signing_secret
 from engraphis.licensing import LicenseError, PLAN_FEATURES, parse_key
 
@@ -357,8 +359,20 @@ async def team_invite(request: Request):
 # machine_id ever (soft identifier — see ``_clean_machine_id``'s docstring in
 # license_registry.py for the same honesty-about-limits as seat accounting: this raises
 # the bar against casual reset-by-wipe, it does not claim to defeat a scripted attacker
-# minting fresh machine ids). The resulting key's own short expiry plus the tight
-# per-key invite cap above bound the cost of that residual gap.
+# minting fresh machine ids).
+#
+# 2026-07-14: machine_id alone used to be enough to mint a key synchronously — delete
+# ``~/.engraphis/machine_id`` and every device looks "new" to trial_grants, so anyone
+# willing to run one `rm` got infinite free trials. Two independent hardenings now sit
+# in front of a grant: (1) a real, controlled email address is required and the key is
+# only minted after a one-time magic link sent to it is opened (below) — resetting
+# machine_id no longer helps without also owning a fresh inbox; (2) POST /start-trial
+# itself is IP rate-limited (``_bump_trial_rate``), since sending mail is a cost/abuse
+# vector independent of whether a grant ever happens. Neither claims to stop a determined
+# attacker with many mailboxes and many source IPs — same honesty-about-limits as
+# machine_id — they raise the bar from "one shell command" to "sustained, resourced
+# effort", and the resulting key's own short expiry plus the tight per-key invite cap
+# above bound the cost of what gets through anyway.
 
 _TRIAL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS trial_grants (
@@ -366,6 +380,31 @@ CREATE TABLE IF NOT EXISTS trial_grants (
     email      TEXT,
     plan       TEXT,
     issued_at  REAL NOT NULL
+);
+"""
+
+_TRIAL_PENDING_SCHEMA = """
+CREATE TABLE IF NOT EXISTS trial_pending (
+    token_hash TEXT PRIMARY KEY,
+    machine_id TEXT NOT NULL,
+    email      TEXT NOT NULL,
+    plan       TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS trial_pending_machine_idx ON trial_pending(machine_id);
+"""
+
+#: How long a magic link stays valid. Long enough to go check an inbox, short enough
+#: that an unclicked link isn't a standing liability sitting in the DB.
+_TRIAL_TOKEN_TTL_SECONDS = 1800
+
+_TRIAL_RATE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS trial_start_attempts (
+    ip     TEXT NOT NULL,
+    window TEXT NOT NULL,
+    count  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (ip, window)
 );
 """
 
@@ -381,15 +420,131 @@ def _ensure_trial_plan_column(conn) -> None:
         pass
 
 
+def _trial_rate_limit_per_hour() -> int:
+    try:
+        return max(1, int(os.environ.get("ENGRAPHIS_TRIAL_RATE_LIMIT_PER_HOUR", "5")))
+    except ValueError:
+        return 5
+
+
+def _hour_bucket(now: Optional[float] = None) -> str:
+    import datetime as _dt
+    ts = now if now is not None else time.time()
+    return _dt.datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d-%H")
+
+
+def _client_ip(request: Request) -> str:
+    """Best-effort real client IP behind a proxy.
+
+    Railway (and any PaaS fronting this relay) terminates TLS and forwards the
+    original address in ``X-Forwarded-For``; ``request.client.host`` there is just the
+    proxy. Trusts the FIRST address in that header (the original client, by
+    convention) when present, falling back to the direct peer for local/dev. Same
+    honesty-about-limits as ``_clean_machine_id``: a soft identifier good enough to
+    rate-limit a naive script hammering one address, not a defense against an attacker
+    who rotates source IPs on purpose.
+    """
+    fwd = request.headers.get("x-forwarded-for", "")
+    if fwd:
+        first = fwd.split(",")[0].strip()
+        if first:
+            return first[:64]
+    return ((request.client.host if request.client else "") or "unknown")[:64]
+
+
+def _bump_trial_rate(ip: str) -> bool:
+    """Atomically bump this hour's /start-trial request count for *ip*. Returns True
+    if the request is allowed (was under the cap before this call), False if already
+    at/over ``ENGRAPHIS_TRIAL_RATE_LIMIT_PER_HOUR``. Same BEGIN IMMEDIATE idiom as
+    :func:`_bump_invite_count` — the check-then-write must be one atomic step so two
+    concurrent requests from the same IP can't both slip through one under the cap."""
+    conn = reg.connect()
+    try:
+        conn.executescript(_TRIAL_RATE_SCHEMA)
+        window = _hour_bucket()
+        cap = _trial_rate_limit_per_hour()
+        prev_iso = conn.isolation_level
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT count FROM trial_start_attempts WHERE ip=? AND window=?",
+                (ip, window)).fetchone()
+            count = int(row["count"]) if row else 0
+            if count >= cap:
+                conn.execute("COMMIT")
+                return False
+            conn.execute(
+                "INSERT INTO trial_start_attempts(ip, window, count) VALUES (?,?,1) "
+                "ON CONFLICT(ip, window) DO UPDATE SET count = count + 1",
+                (ip, window))
+            conn.execute("COMMIT")
+        except BaseException:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.isolation_level = prev_iso
+    finally:
+        conn.close()
+    return True
+
+
+def _relay_public_base(request: Request) -> str:
+    """Base URL to build the magic link against. ``ENGRAPHIS_RELAY_PUBLIC_URL`` (set
+    once by the operator) takes precedence over ``request.base_url`` because a proxy
+    (Railway included) can terminate TLS and forward plain HTTP internally, which would
+    otherwise bake an ``http://`` link into a real email — same env-override precedence
+    pattern as ``ENGRAPHIS_KEY_CLOUD_URL`` in ``webhooks.issue_key``."""
+    override = os.environ.get("ENGRAPHIS_RELAY_PUBLIC_URL", "").strip().rstrip("/")
+    if override:
+        return override
+    return str(request.base_url).rstrip("/")
+
+
+def _trial_verify_success_html(key: str, plan: str, days: int) -> str:
+    import html as _html
+    label = _html.escape(plan.title())
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<title>Your Engraphis {label} trial key</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:640px;margin:48px auto;padding:0 16px">
+<h2>Your {label} trial is confirmed</h2>
+<p>{days}-day trial key — paste this into your dashboard's Settings &rarr; License panel:</p>
+<pre style="background:#f4f4f5;padding:14px;border-radius:8px;overflow-wrap:break-word;
+white-space:pre-wrap;font-size:13px">{_html.escape(key)}</pre>
+<ol>
+<li>Open the Engraphis dashboard (default http://127.0.0.1:8700)</li>
+<li>Go to Settings &rarr; License</li>
+<li>Paste the key above and click Activate</li>
+</ol>
+<p>You can close this page.</p>
+</body></html>"""
+
+
+def _trial_verify_error_html(message: str) -> str:
+    import html as _html
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<title>Engraphis trial</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:640px;margin:48px auto;padding:0 16px">
+<h2>Couldn't confirm your trial</h2>
+<p>{_html.escape(message)}</p>
+</body></html>"""
+
+
 @router.post("/start-trial")
 async def start_team_trial(request: Request):
-    """Issue a one-time, self-serve, real signed trial key for *machine_id*.
+    """Request a one-time, self-serve trial for *machine_id* + *email*.
 
-    ``plan`` selects the tier ("pro" or "team", default "team"). The key is a genuine
-    short-lived vendor-signed key carrying ``trial: 1``, so every downstream server-side
-    gate (/register, team_invite) treats it exactly like a purchase. One trial per device
-    ever, any plan: 409 if this device already claimed one; 400 for a missing machine_id
-    or an unknown plan."""
+    Does NOT issue a key synchronously (see the 2026-07-14 module comment above): it
+    emails a one-time magic link to *email* and mints the real signed key only when
+    that link is opened (:func:`verify_team_trial`, the ``GET`` companion below).
+    ``plan`` selects the tier ("pro" or "team", default "team"). 429 if this source IP
+    has requested too many trials recently (``ENGRAPHIS_TRIAL_RATE_LIMIT_PER_HOUR``,
+    default 5/hour); 400 for a missing machine_id, an unknown plan, or a missing/
+    malformed email; 409 if this device already holds a trial grant; 502 if the
+    verification email could not be sent."""
     try:
         body = await request.json()
     except Exception:
@@ -401,13 +556,23 @@ async def start_team_trial(request: Request):
         return JSONResponse({"error": "machine_id required"}, status_code=400)
     if plan not in PLAN_FEATURES:
         return JSONResponse({"error": "unknown plan '%s'" % plan}, status_code=400)
-    if email and not _EMAIL_RE.match(email):
-        email = ""
+    if not email or not _EMAIL_RE.match(email):
+        return JSONResponse(
+            {"error": "a valid email address is required to start a trial"},
+            status_code=400)
+
+    if not _bump_trial_rate(_client_ip(request)):
+        return JSONResponse(
+            {"error": "too many trial requests from this network — try again later"},
+            status_code=429)
 
     conn = reg.connect()
     try:
         conn.executescript(_TRIAL_SCHEMA)
         _ensure_trial_plan_column(conn)
+        conn.executescript(_TRIAL_PENDING_SCHEMA)
+        now = time.time()
+        token = secrets.token_urlsafe(32)
         prev_iso = conn.isolation_level
         conn.isolation_level = None
         try:
@@ -419,9 +584,92 @@ async def start_team_trial(request: Request):
                 return JSONResponse(
                     {"error": "the free trial has already been used on this device"},
                     status_code=409)
+            # A fresh request supersedes any earlier unclicked link for this device —
+            # only the newest email/token pair should ever be redeemable.
+            conn.execute("DELETE FROM trial_pending WHERE machine_id=?", (mid,))
+            conn.execute(
+                "INSERT INTO trial_pending(token_hash, machine_id, email, plan, "
+                "created_at, expires_at) VALUES (?,?,?,?,?,?)",
+                (_hash_token(token), mid, email, plan, now,
+                 now + _TRIAL_TOKEN_TTL_SECONDS))
+            conn.execute("COMMIT")
+        except BaseException:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.isolation_level = prev_iso
+    finally:
+        conn.close()
+
+    verify_url = "%s/license/v1/start-trial/verify?token=%s" % (
+        _relay_public_base(request), token)
+    from engraphis.inspector.webhooks import send_trial_verification_email
+    try:
+        await asyncio.to_thread(
+            send_trial_verification_email, email, verify_url, plan,
+            minutes=_TRIAL_TOKEN_TTL_SECONDS // 60)
+    except Exception as exc:  # noqa: BLE001 — surface a safe message, don't leak internals
+        return JSONResponse({"error": "delivery failed: %s" % exc}, status_code=502)
+
+    return {"pending": True,
+            "message": "check %s for a link to confirm and activate your trial" % email,
+            "expires_in": _TRIAL_TOKEN_TTL_SECONDS}
+
+
+@router.get("/start-trial/verify")
+async def verify_team_trial(token: str = ""):
+    """Redeem a magic-link token from :func:`start_team_trial` — mints and displays the
+    real signed trial key. Answers a small HTML page, not JSON: this is meant to be
+    opened directly from the confirmation email by a human, who needs to read and copy
+    a key, not parse a response body. One-time: the token is deleted on first use
+    (success OR a stale/losing race), so replaying a link never mints twice."""
+    token = (token or "").strip()
+    if not token:
+        return HTMLResponse(_trial_verify_error_html("Missing token."), status_code=400)
+
+    conn = reg.connect()
+    try:
+        conn.executescript(_TRIAL_SCHEMA)
+        _ensure_trial_plan_column(conn)
+        conn.executescript(_TRIAL_PENDING_SCHEMA)
+        now = time.time()
+        token_hash = _hash_token(token)
+        prev_iso = conn.isolation_level
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT machine_id, email, plan, expires_at FROM trial_pending "
+                "WHERE token_hash=?", (token_hash,)).fetchone()
+            if row is None:
+                conn.execute("COMMIT")
+                return HTMLResponse(
+                    _trial_verify_error_html(
+                        "This link is invalid or has already been used."),
+                    status_code=400)
+            if row["expires_at"] < now:
+                conn.execute("DELETE FROM trial_pending WHERE token_hash=?", (token_hash,))
+                conn.execute("COMMIT")
+                return HTMLResponse(
+                    _trial_verify_error_html(
+                        "This link has expired — request a new trial from the dashboard."),
+                    status_code=400)
+            mid, email, plan = row["machine_id"], row["email"], row["plan"]
+            existing = conn.execute(
+                "SELECT 1 FROM trial_grants WHERE machine_id=?", (mid,)).fetchone()
+            conn.execute("DELETE FROM trial_pending WHERE token_hash=?", (token_hash,))
+            if existing:
+                conn.execute("COMMIT")
+                return HTMLResponse(
+                    _trial_verify_error_html(
+                        "The free trial has already been used on this device."),
+                    status_code=409)
             conn.execute(
                 "INSERT INTO trial_grants(machine_id, email, plan, issued_at) "
-                "VALUES (?,?,?,?)", (mid, email or None, plan, time.time()))
+                "VALUES (?,?,?,?)", (mid, email, plan, now))
             conn.execute("COMMIT")
         except BaseException:
             try:
@@ -440,6 +688,5 @@ async def start_team_trial(request: Request):
     # not derived from any request input (there is none to derive from; see the
     # constant's docstring above). Pro trials stay single-seat.
     seats = TEAM_TRIAL_SEATS if plan == "team" else 1
-    key = issue_key(email or "trial@engraphis.local", product_name=plan, seats=seats,
-                    days=TRIAL_DAYS, trial=True)
-    return {"key": key, "days": TRIAL_DAYS, "plan": plan}
+    key = issue_key(email, product_name=plan, seats=seats, days=TRIAL_DAYS, trial=True)
+    return HTMLResponse(_trial_verify_success_html(key, plan, TRIAL_DAYS))
