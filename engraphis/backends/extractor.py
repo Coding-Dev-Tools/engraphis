@@ -6,23 +6,41 @@ stays offline-capable (AGENTS.md §3.8):
 
 * ``PassthroughExtractor`` — the default: the caller's text is stored exactly as given
   (today's behaviour, zero dependencies, zero network).
+* ``ChunkingExtractor``   — splits a document into retrieval-sized, structure-aware
+  chunks (one ``ExtractedFact`` each) *without* an LLM: headings start new chunks and
+  become the title, fenced code blocks stay intact, prose is packed to a token budget
+  with a small sentence overlap. Deterministic and offline (numpy/stdlib only) so it
+  runs under the offline gate; the answer to "one memory per file dilutes recall".
 * ``LLMExtractor``        — distills a raw blob (a conversation turn, a log, a diff
   summary) into discrete, self-contained facts with type/importance/keyword hints,
   using any configured LLM. Fails soft: any error degrades to passthrough, never to a
   lost write.
 
-Selected via ``get_extractor()`` from ``ENGRAPHIS_EXTRACTOR`` (= ``none`` | ``llm``) —
-a config change, not a refactor, matching every other backend swap in this codebase.
+Selected via ``get_extractor()`` from ``ENGRAPHIS_EXTRACTOR`` (= ``none`` | ``chunk`` |
+``llm``) — a config change, not a refactor, matching every other backend swap here.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any, Optional
 
 from engraphis.core.interfaces import ExtractedFact, MemoryType
+from engraphis.core.textutil import estimate_tokens, tokenize
 
 MAX_FACTS = 12
+
+# Structure-aware chunking defaults (offline, deterministic). Overridable via
+# ENGRAPHIS_CHUNK_TOKENS / ENGRAPHIS_CHUNK_OVERLAP / ENGRAPHIS_CHUNK_MAX.
+CHUNK_TARGET_TOKENS = 256   # target tokens per prose chunk
+CHUNK_OVERLAP_TOKENS = 32   # sentence-level overlap carried between adjacent chunks
+CHUNK_MAX = 200             # hard cap on chunks per document (amplification guard)
+
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*$")
+_FENCE_RE = re.compile(r"^(```+|~~~+)")
+_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+_PARA_SPLIT_RE = re.compile(r"\n\s*\n")
 
 # LLM output is untrusted input too (indirect prompt injection can steer it): strip the
 # same control characters service.py strips from direct writes, so extracted facts can't
@@ -114,6 +132,199 @@ class LLMExtractor:
         return out
 
 
+class ChunkingExtractor:
+    """Deterministic, offline, structure-aware chunker (``Extractor`` protocol).
+
+    Splits a document into retrieval-sized ``ExtractedFact`` chunks that preserve
+    meaning rather than cutting at arbitrary character counts:
+
+    * Markdown headings (``#``..``######``) start a new chunk; the heading path
+      (``H1 > H2``) becomes the chunk title and is kept as context.
+    * Fenced code blocks (```` ``` ````/``~~~``) are emitted whole — never split
+      mid-fence.
+    * Prose is packed paragraph-by-paragraph up to ``target_tokens``, with a small
+      sentence-level overlap so a fact straddling a boundary survives in both chunks.
+
+    numpy/stdlib only — no model, no network — so it is safe inside the offline gate
+    and identical across runs (a requirement for deterministic-embedder eval).
+    """
+
+    def __init__(self, *, target_tokens: int = CHUNK_TARGET_TOKENS,
+                 overlap_tokens: int = CHUNK_OVERLAP_TOKENS,
+                 max_chunks: int = CHUNK_MAX) -> None:
+        self.target_tokens = max(16, int(target_tokens))
+        self.overlap_tokens = max(0, min(int(overlap_tokens), self.target_tokens // 2))
+        self.max_chunks = max(1, int(max_chunks))
+
+    def extract(self, text: str, *, context: str = "") -> list[ExtractedFact]:
+        text = text or ""
+        if not text.strip():
+            return []
+        facts: list[ExtractedFact] = []
+        for heading_path, content in self._chunks(text):
+            content = _defang(content, 100_000)
+            if not content:
+                continue
+            leaf = heading_path.split(" > ")[-1] if heading_path else ""
+            title = _defang(leaf or _first_line(content), 1_000)
+            facts.append(ExtractedFact(content=content, title=title[:200],
+                                       keywords=_keywords(content)))
+            if len(facts) >= self.max_chunks:
+                break
+        # Never lose the write: an all-whitespace/degenerate parse falls back to the
+        # whole text, exactly like PassthroughExtractor.
+        return facts or [ExtractedFact(content=_defang(text, 100_000))]
+
+    # ── internals ────────────────────────────────────────────────────────────
+    def _chunks(self, text: str) -> list[tuple[str, str]]:
+        out: list[tuple[str, str]] = []
+        for heading_path, kind, body in self._segment(text):
+            if len(out) >= self.max_chunks:
+                break
+            if kind == "code":
+                out.append((heading_path, body))          # atomic — never split
+            else:
+                for piece in self._pack(body):
+                    out.append((heading_path, piece))
+                    if len(out) >= self.max_chunks:
+                        break
+        return out[: self.max_chunks]
+
+    def _segment(self, text: str) -> list[tuple[str, str, str]]:
+        """Split into ``(heading_path, kind, body)`` segments, preserving code fences
+        whole and tracking the active markdown heading stack."""
+        lines = text.split("\n")
+        heading_stack: list[tuple[int, str]] = []
+        segments: list[tuple[str, str, str]] = []
+        prose: list[str] = []
+        n = len(lines)
+
+        def path() -> str:
+            return " > ".join(t for _, t in heading_stack)
+
+        def flush() -> None:
+            if prose:
+                body = "\n".join(prose).strip()
+                if body:
+                    segments.append((path(), "prose", body))
+                prose.clear()
+
+        i = 0
+        while i < n:
+            line = lines[i]
+            stripped = line.strip()
+            fence = _FENCE_RE.match(stripped)
+            heading = _HEADING_RE.match(line)
+            if fence:
+                flush()
+                marker = fence.group(1)[:3]
+                block = [line]
+                i += 1
+                while i < n:
+                    block.append(lines[i])
+                    closed = lines[i].strip().startswith(marker)
+                    i += 1
+                    if closed:
+                        break
+                segments.append((path(), "code", "\n".join(block).strip()))
+                continue
+            if heading:
+                flush()
+                level = len(heading.group(1))
+                heading_stack[:] = [(lv, t) for lv, t in heading_stack if lv < level]
+                heading_stack.append((level, heading.group(2).strip()))
+                prose.append(line)  # keep heading text in the body too, for lexical recall
+                i += 1
+                continue
+            prose.append(line)
+            i += 1
+        flush()
+        return segments
+
+    def _pack(self, body: str) -> list[str]:
+        """Greedily pack paragraphs to the token budget with sentence overlap."""
+        paras = [p.strip() for p in _PARA_SPLIT_RE.split(body) if p.strip()]
+        chunks: list[str] = []
+        cur: list[str] = []
+        cur_tokens = 0
+        for para in paras:
+            ptokens = estimate_tokens(para)
+            if cur and cur_tokens + ptokens > self.target_tokens:
+                joined = "\n\n".join(cur)
+                chunks.append(joined)
+                tail = self._overlap_tail(joined)
+                cur = [tail] if tail else []
+                cur_tokens = estimate_tokens(tail) if tail else 0
+            if ptokens > self.target_tokens:
+                for group in self._split_paragraph(para):
+                    chunks.append(group)
+                cur, cur_tokens = [], 0
+                continue
+            cur.append(para)
+            cur_tokens += ptokens
+        if cur:
+            chunks.append("\n\n".join(cur))
+        return chunks
+
+    def _split_paragraph(self, para: str) -> list[str]:
+        """Split an oversized paragraph on sentence boundaries (never mid-sentence)."""
+        sentences = [s for s in _SENTENCE_RE.split(para.strip()) if s]
+        groups: list[str] = []
+        cur: list[str] = []
+        cur_tokens = 0
+        for sent in sentences:
+            stokens = estimate_tokens(sent)
+            if cur and cur_tokens + stokens > self.target_tokens:
+                joined = " ".join(cur)
+                groups.append(joined)
+                tail = self._overlap_tail(joined)
+                cur = [tail] if tail else []
+                cur_tokens = estimate_tokens(tail) if tail else 0
+            cur.append(sent)
+            cur_tokens += stokens
+        if cur:
+            groups.append(" ".join(cur))
+        return groups
+
+    def _overlap_tail(self, text: str) -> str:
+        """Trailing whole sentences of ``text`` up to ``overlap_tokens``."""
+        if self.overlap_tokens <= 0:
+            return ""
+        sentences = [s for s in _SENTENCE_RE.split(text.strip()) if s]
+        tail: list[str] = []
+        tokens = 0
+        for sent in reversed(sentences):
+            if tail and tokens + estimate_tokens(sent) > self.overlap_tokens:
+                break
+            tail.insert(0, sent)
+            tokens += estimate_tokens(sent)
+            if tokens >= self.overlap_tokens:
+                break
+        return " ".join(tail).strip()
+
+
+def _first_line(text: str) -> str:
+    for line in text.splitlines():
+        candidate = line.strip().lstrip("#").strip()
+        if candidate:
+            return candidate[:200]
+    return "chunk"
+
+
+def _keywords(text: str, k: int = 8) -> list[str]:
+    counts: dict[str, int] = {}
+    for token in tokenize(text):
+        counts[token] = counts.get(token, 0) + 1
+    return sorted(counts, key=lambda t: (-counts[t], t))[:k]
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
+
 def _loads_lenient(raw: str) -> dict:
     """Parse JSON that may arrive wrapped in markdown fences or prose."""
     raw = (raw or "").strip()
@@ -133,11 +344,20 @@ def _loads_lenient(raw: str) -> dict:
 def get_extractor(kind: str = "none", llm: Any = None):
     """Factory mirroring ``get_embedder``/``get_vector_index``: config in, backend out.
 
-    ``kind='llm'`` with no ``llm`` builds the v1 multi-provider ``LLMClient`` from
-    settings (heavy import gated here, never in ``core/``). Anything else — including
-    an LLM kind with no usable client — returns the offline passthrough.
+    ``kind='chunk'`` returns the deterministic, offline ``ChunkingExtractor`` (knobs from
+    ``ENGRAPHIS_CHUNK_TOKENS``/``_OVERLAP``/``_MAX``). ``kind='llm'`` with no ``llm``
+    builds the v1 multi-provider ``LLMClient`` from settings (heavy import gated here,
+    never in ``core/``). Anything else — including an LLM kind with no usable client —
+    returns the offline passthrough.
     """
-    if (kind or "none").lower() != "llm":
+    kind = (kind or "none").lower()
+    if kind == "chunk":
+        return ChunkingExtractor(
+            target_tokens=_env_int("ENGRAPHIS_CHUNK_TOKENS", CHUNK_TARGET_TOKENS),
+            overlap_tokens=_env_int("ENGRAPHIS_CHUNK_OVERLAP", CHUNK_OVERLAP_TOKENS),
+            max_chunks=_env_int("ENGRAPHIS_CHUNK_MAX", CHUNK_MAX),
+        )
+    if kind != "llm":
         return PassthroughExtractor()
     if llm is None:
         try:

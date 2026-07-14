@@ -115,6 +115,70 @@ def test_team_disabled_by_default(monkeypatch, tmp_path):
         assert c.get("/api/auth/state").json()["enabled"] is False
 
 
+def test_automation_policy_round_trips_dream_knobs(monkeypatch, tmp_path):
+    # The dream/infer knobs (dream, dream_min_new, dream_idle_minutes, infer) are
+    # part of the maintenance policy. They must round-trip through the API so the
+    # dashboard controls can't silently desync from the persisted policy.
+    with _client(monkeypatch, tmp_path, key=_team_key()) as c:
+        r = c.post("/api/automation", json={"enabled": True, "dream": False,
+                                            "dream_min_new": 7, "dream_idle_minutes": 0,
+                                            "infer": True})
+        assert r.status_code == 200
+        p = c.get("/api/automation").json()
+        assert p["dream"] is False
+        assert p["dream_min_new"] == 7
+        assert p["dream_idle_minutes"] == 0   # 0 is valid and must survive (not coerced)
+        assert p["infer"] is True            # the inference pass is Pro-gated via automation
+
+
+def test_consolidate_inference_pass_is_pro_gated(monkeypatch, tmp_path):
+    # The inference pass (infer=True) is a paid `automation` capability — the dream
+    # pass 4 — so it must 402 on the free tier; the base sweep (infer=False) stays free.
+    with _client(monkeypatch, tmp_path) as c:                       # no key -> free tier
+        base = c.post("/api/consolidate", json={"workspace": "demo", "dry_run": True})
+        assert base.status_code == 200                       # manual consolidate is free
+        gated = c.post("/api/consolidate",
+                       json={"workspace": "demo", "dry_run": True, "infer": True})
+        assert gated.status_code == 402
+        assert gated.json()["detail"]["feature"] == "automation"    # structured 402
+    with _client(monkeypatch, tmp_path, key=_team_key()) as c:     # automation unlocked
+        r = c.post("/api/consolidate",
+                  json={"workspace": "demo", "dry_run": True, "infer": True})
+        assert r.status_code == 200
+        assert "inferences" in r.json()                     # the pass ran, ungated now
+
+
+def test_maintenance_run_proposes_inference_when_policy_on(monkeypatch, tmp_path):
+    # The inference pass (consolidate pass 4) is reachable from the maintenance run
+    # endpoint when the policy opts in — proving the wiring through run_maintenance ->
+    # service.consolidate(infer=...). Dry-run so nothing is written; we only assert
+    # the inferences block is present and proposes the Redis bridge.
+    with _client(monkeypatch, tmp_path, key=_team_key()) as c:
+        from engraphis.routes import v2_api
+        svc = v2_api.service()
+        for t in ("Redis caches API responses to cut gateway latency",
+                  "Redis raises throughput on the gateway API",
+                  "User login sessions live in Redis keyed by a signed session token",
+                  "Redis expires each login session token on logout"):
+            svc.remember(t, workspace="demo", mtype="episodic",
+                         resolve_conflicts=False, scope="workspace")
+        c.post("/api/automation", json={"enabled": True, "consolidate": True,
+                                        "infer": True, "dream": False,
+                                        "workspaces": ["demo"],
+                                        "cadence_hours": 999, "dream_min_new": 99999})
+        r = c.post("/api/maintenance/run", json={"dry_run": True})
+        assert r.status_code == 200
+        demo = next(x for x in r.json()["runs"] if x["workspace"] == "demo")
+        assert "inferences" in demo["consolidate"]
+        inf = demo["consolidate"]["inferences"]
+        assert any(e["entity"].lower() == "redis" for e in inf["links_created"])
+
+
+def test_team_disabled_by_default(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as c:
+        assert c.get("/api/auth/state").json()["enabled"] is False
+
+
 def test_team_flow_setup_login_roles(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path, team=True, key=_team_key()) as c:
         assert c.get("/api/auth/state").json()["needs_setup"] is True
@@ -423,7 +487,10 @@ def test_trial_start_and_rejection(monkeypatch, tmp_path):
     so this stays on the offline gate, same as the Team-trial test below. The re-call
     must NOT hit the relay a second time (there is only one ``request_trial_key`` stub
     below, good for exactly one call) — ``start_trial`` recognizes the already-active
-    trial key locally and short-circuits before ever reaching the relay client."""
+    trial key locally and short-circuits before ever reaching the relay client. Since
+    2026-07-14 an email is required in the request body too (the mock below still
+    returns a key synchronously — ``pending=False`` — simulating a relay that short-
+    circuits, so the "activates immediately" shape of this test stays valid)."""
     from engraphis import cloud_license
     monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(_SECRET).hex())
     trial_key = compose_key(
@@ -432,15 +499,46 @@ def test_trial_start_and_rejection(monkeypatch, tmp_path):
          "trial": 1}, _SECRET)
     monkeypatch.setattr(
         cloud_license, "request_trial_key",
-        lambda base, mid, plan="pro", email="": (trial_key, ""))
+        lambda base, mid, plan="pro", email="": (trial_key, "", False))
     with _client(monkeypatch, tmp_path) as c:
-        r = c.post("/api/license/trial", json={})
+        r = c.post("/api/license/trial", json={"email": "trial@engraphis.local"})
         assert r.status_code == 200
         lic = c.get("/api/license").json()
         assert lic["is_trial"] is True
-        r2 = c.post("/api/license/trial", json={})
+        r2 = c.post("/api/license/trial", json={"email": "trial@engraphis.local"})
         assert r2.status_code == 200  # no-op: already on trial
         assert r2.json()["is_trial"] is True
+
+
+def test_trial_start_requires_email(monkeypatch, tmp_path):
+    """2026-07-14 hardening: machine_id alone is no longer enough — a missing/blank
+    email must 400 before ever reaching the relay client."""
+    from engraphis import cloud_license
+    called = []
+    monkeypatch.setattr(
+        cloud_license, "request_trial_key",
+        lambda *a, **k: called.append(1) or (None, "should not be called", False))
+    with _client(monkeypatch, tmp_path) as c:
+        r = c.post("/api/license/trial", json={})
+        assert r.status_code == 400
+        assert "email" in r.json()["detail"]["error"].lower()
+    assert not called
+
+
+def test_trial_start_route_surfaces_pending_status(monkeypatch, tmp_path):
+    """The route's normal successful response is now {"pending": true, ...} — a real
+    key is minted only once the emailed magic link is opened, not from this call."""
+    from engraphis import cloud_license
+    monkeypatch.setattr(
+        cloud_license, "request_trial_key",
+        lambda base, mid, plan="pro", email="":
+            (None, "check your email to confirm and activate the trial", True))
+    with _client(monkeypatch, tmp_path) as c:
+        r = c.post("/api/license/trial", json={"email": "w@example.com"})
+        assert r.status_code == 200
+        assert r.json()["pending"] is True
+        # nothing activated yet
+        assert c.get("/api/license").json()["plan"] == "free"
 
 
 def test_team_trial_route_activates_relay_issued_key(monkeypatch, tmp_path):
@@ -457,9 +555,9 @@ def test_team_trial_route_activates_relay_issued_key(monkeypatch, tmp_path):
          "issued": int(time.time()), "expires": int(time.time() + 3 * 86400)}, _SECRET)
     monkeypatch.setattr(
         cloud_license, "request_team_trial_key",
-        lambda base, mid, email="": (trial_key, ""))
+        lambda base, mid, email="": (trial_key, "", False))
     with _client(monkeypatch, tmp_path) as c:
-        r = c.post("/api/license/team-trial", json={})
+        r = c.post("/api/license/team-trial", json={"email": "trial@engraphis.local"})
         assert r.status_code == 200 and r.json()["plan"] == "team"
         assert c.get("/api/license").json()["plan"] == "team"
 
@@ -483,14 +581,14 @@ def test_team_trial_reachable_with_zero_users_and_no_session(monkeypatch, tmp_pa
          "issued": int(time.time()), "expires": int(time.time() + 3 * 86400)}, _SECRET)
     monkeypatch.setattr(
         cloud_license, "request_team_trial_key",
-        lambda base, mid, email="": (trial_key, ""))
+        lambda base, mid, email="": (trial_key, "", False))
     # team=True, key=None: team mode is on but there is no license and no user yet.
     with _client(monkeypatch, tmp_path, team=True) as c:
         # reading license state pre-login must not 401
         r0 = c.get("/api/license")
         assert r0.status_code == 200 and r0.json()["plan"] == "free"
         # starting the Team trial pre-login must not 401 either
-        r1 = c.post("/api/license/team-trial", json={})
+        r1 = c.post("/api/license/team-trial", json={"email": "w@x.co"})
         assert r1.status_code == 200 and r1.json()["plan"] == "team"
         # the trial key is now active -> the first admin can be created and signed in
         r2 = c.post("/api/auth/setup", json={"email": "w@x.co", "name": "W",
@@ -524,9 +622,9 @@ def test_team_trial_route_surfaces_relay_denial_as_400(monkeypatch, tmp_path):
     monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setattr(
         cloud_license, "request_team_trial_key",
-        lambda base, mid, email="": (None, "the free Team trial has already been used"))
+        lambda base, mid, email="": (None, "the free Team trial has already been used", False))
     with _client(monkeypatch, tmp_path) as c:
-        r = c.post("/api/license/team-trial", json={})
+        r = c.post("/api/license/team-trial", json={"email": "w@x.co"})
         assert r.status_code == 400
         assert "already been used" in r.json()["detail"]["error"]
 
