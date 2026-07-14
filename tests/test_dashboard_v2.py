@@ -34,7 +34,7 @@ def _client(monkeypatch, tmp_path, *, team=False, key=None):
     monkeypatch.setattr(settings, "db_path", db)
     monkeypatch.setattr(settings, "embed_model", "")
     monkeypatch.setenv("ENGRAPHIS_EMBED_MODEL", "")
-    monkeypatch.setenv("ENGRAPHIS_TEAM_MODE", "1" if team else "")
+    monkeypatch.setenv("ENGRAPHIS_TEAM_MODE", "1" if team else "0")
     monkeypatch.setattr(lic, "_LICENSE_FILE", tmp_path / "license.key")
     if key:
         monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
