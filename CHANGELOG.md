@@ -5,6 +5,24 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-07-14
+
+### Fixed
+- **The dashboard (`engraphis-dashboard` / `http://127.0.0.1:8700`) would not start.**
+  `scripts/start_dashboard.py` runs uvicorn against `engraphis.dashboard_app:app`, but
+  `dashboard_app.py` only defined the `create_app()` factory and never built a module-level
+  `app` instance — so uvicorn aborted with `Attribute "app" not found` and nothing bound
+  port 8700. The missing `app = create_app()` (present in `engraphis/app.py` and
+  `engraphis/redirector.py`, but dropped from `dashboard_app.py`) is now restored. The
+  background autosync/dreaming/revalidation loops inside `create_app()` are pytest-guarded,
+  so importing the module under test is side-effect-free.
+- **Flaky `database is locked` dashboard test.**
+  `test_consolidate_inference_pass_is_pro_gated` opened two FastAPI `TestClient` lifespans
+  back-to-back on the same temp DB file; the first app's still-open SQLite connection
+  blocked the second's schema init. Split into two one-client test functions, matching
+  the convention already documented above `test_analytics_and_export_*` (two TestClients
+  in one test reproducibly deadlock). Full suite now green (693 passed, 3 skipped).
+
 ## [0.9.3] - 2026-07-14
 
 ### Added

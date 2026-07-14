@@ -297,3 +297,9 @@ def _maybe_start_license_revalidation() -> None:
 
     threading.Thread(target=_loop, name="engraphis-revalidate", daemon=True).start()
     _REVALIDATE_STARTED = True
+
+
+#: Module-level ASGI app for ``uvicorn engraphis.dashboard_app:app`` (see
+#: scripts/start_dashboard.py). Built once at import; the background loops inside
+#: create_app() are pytest-guarded so importing this module under test is safe.
+app = create_app()
