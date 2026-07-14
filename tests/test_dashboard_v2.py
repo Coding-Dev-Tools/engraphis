@@ -141,6 +141,11 @@ def test_consolidate_inference_pass_is_pro_gated(monkeypatch, tmp_path):
                        json={"workspace": "demo", "dry_run": True, "infer": True})
         assert gated.status_code == 402
         assert gated.json()["detail"]["feature"] == "automation"    # structured 402
+
+
+def test_consolidate_inference_pass_runs_with_team_key(monkeypatch, tmp_path):
+    # One TestClient per test function — see the note on test_analytics_and_export_*.
+    # With automation unlocked (Team license) the inference pass runs ungated.
     with _client(monkeypatch, tmp_path, key=_team_key()) as c:     # automation unlocked
         r = c.post("/api/consolidate",
                   json={"workspace": "demo", "dry_run": True, "infer": True})
