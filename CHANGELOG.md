@@ -24,8 +24,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
   (`ENGRAPHIS_CHUNK_MAX`, default 200) bounds amplification. numpy/stdlib only, so it runs
   under the offline gate and is byte-identical across runs. This lifts recall on long,
   multi-topic documents that previously became one diluted memory. New: `ChunkingExtractor`
-  in `backends/extractor.py`; `tests/test_chunking_extractor.py`. Design note:
-  `docs/proposals/chunking-extractor.md`.
+  in `backends/extractor.py`; `tests/test_chunking_extractor.py`.
 - **File/folder imports chunk too.** With `ENGRAPHIS_EXTRACTOR=chunk`,
   `import_folder`/`import_files` split each file into several retrieval-sized memories
   (each still `trusted:false`, stamped with `metadata.chunk={index,of,heading}`) instead of
@@ -41,8 +40,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
   run a consolidation sweep *before* the cadence when enough new episodic memories have
   accumulated **and** the store has gone quiet (`dream_min_new` / `dream_idle_minutes` policy
   knobs); wired into `scripts/auto_maintain.py`. Purely additive to the existing cadence, so
-  cron behaviour is unchanged; still Pro-gated. `tests/test_dreaming_trigger.py`. Design note:
-  `docs/proposals/auto-dreaming-consolidation.md`.
+  cron behaviour is unchanged; still Pro-gated. `tests/test_dreaming_trigger.py`.
 - **Associative cross-cluster inference (dream pass 4).** `consolidate.infer_links` /
   `consolidate(infer=True)` proposes evidence-only links between memories in *different,
   dissimilar* subject clusters that share a bridging entity — the "connect distant dots" step

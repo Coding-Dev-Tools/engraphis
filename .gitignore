@@ -24,6 +24,9 @@ models_cache/
 .secrets/
 internal/
 
+# Local internal design-review tooling output (candid self-assessment, not for the repo).
+.commandcode/
+
 # Runtime logs (e.g. dashboard.log from `engraphis-dashboard`) — regenerable, not content.
 *.log
 
