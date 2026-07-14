@@ -22,9 +22,7 @@ https://discord.com/invite/Wfr2ejBmY
 
 ---
 
-> **📝 Maintainers:** keep this README in sync with the code — review and update it **daily**
-> (features, env vars, pricing, and the tab list drift fast). When code and docs disagree,
-> the code wins; fix the doc in the same change. See `AGENTS.md` for the canonical scope.
+>Open-Source users: Remember to Update regularly! Improvements and fixes twice a day. Invite your friends!
 >
 > **Beta:** the **Team** layer (multi-user dashboard, seats, roles, audit log, team invite
 > emails, cloud sync relay) is **early-access beta** — expect rough edges and breaking
