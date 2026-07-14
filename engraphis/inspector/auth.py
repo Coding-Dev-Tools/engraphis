@@ -2,8 +2,11 @@
 
 Design constraints, in order:
 
-* **Off by default.** Without ``ENGRAPHIS_TEAM_MODE=1`` *and* a ``team`` license this
-  module is never constructed; the single-user Inspector is untouched.
+* **On by default (opt-out).** Only ``ENGRAPHIS_TEAM_MODE=0`` (or false/no/off) disables
+  it. A ``team`` license is still required to *add seats* beyond the first admin (the
+  bootstrap admin is created unconditionally); without one the module is constructed but
+  reports upgrade-required (``team_locked``) rather than enabling auth — the single-user
+  Inspector is untouched except for that signal.
 * **stdlib only** — PBKDF2-HMAC-SHA256 (:data:`PBKDF2_ITERATIONS`), ``secrets`` tokens,
   SQLite. Session tokens are stored **hashed** (SHA-256): a leaked users DB does not
   yield usable cookies. Passwords: ≥ :data:`MIN_PASSWORD_LEN` chars, per-user salt.

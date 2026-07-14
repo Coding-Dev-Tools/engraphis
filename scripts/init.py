@@ -109,8 +109,8 @@ def _env_content(db_path: Path, token: str) -> str:
     lines += [
         "# Unlock Pro/Team (analytics, export, multi-user). A key can live here OR in",
         "# ~/.engraphis/license.key (the Inspector's license dialog writes that file).",
+        "# Team mode is ON by default; set ENGRAPHIS_TEAM_MODE=0 to disable.",
         "# ENGRAPHIS_LICENSE_KEY=ENGR1.xxxxx.yyyyy",
-        "# ENGRAPHIS_TEAM_MODE=1",
     ]
     return "\n".join(lines) + "\n"
 

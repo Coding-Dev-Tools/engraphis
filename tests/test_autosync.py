@@ -157,7 +157,7 @@ def _client(monkeypatch, tmp_path, *, key=None):
     monkeypatch.setattr(settings, "db_path", db)
     monkeypatch.setattr(settings, "embed_model", "")
     monkeypatch.setenv("ENGRAPHIS_EMBED_MODEL", "")
-    monkeypatch.setenv("ENGRAPHIS_TEAM_MODE", "")
+    monkeypatch.setenv("ENGRAPHIS_TEAM_MODE", "0")
     monkeypatch.setenv("ENGRAPHIS_AUTOSYNC_STATE", str(tmp_path / "autosync.json"))
     monkeypatch.setattr(lic, "_LICENSE_FILE", tmp_path / "license.key")
     if key:

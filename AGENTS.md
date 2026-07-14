@@ -60,7 +60,8 @@ engraphis-init --check
 python -m scripts.license_admin keygen                 # vendor keypair → .secrets/ (gitignored)
 python -m scripts.license_admin issue --email a@b.co --plan team --seats 5 --days 365
 ENGRAPHIS_LICENSE_KEY=ENGR1...   # or ~/.engraphis/license.key; free tier = no key
-ENGRAPHIS_TEAM_MODE=1            # multi-user Inspector (needs a 'team' license)
+# Team mode is ON by default (multi-user Inspector). Set ENGRAPHIS_TEAM_MODE=0 to disable.
+# A 'team' license is required to add seats beyond the first admin.
 
 # ── Sleep-time consolidation (schedulable local job; also an MCP tool) ────────
 python -m scripts.consolidate --db engraphis.db --workspace acme --dry-run

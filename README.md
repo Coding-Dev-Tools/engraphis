@@ -310,7 +310,7 @@ All via environment (or `.env`):
 | `ENGRAPHIS_LLM_API_KEY` | — | LLM API key (only for chat/synthesis and `extractor=llm`) |
 | `ENGRAPHIS_LLM_BASE_URL` | — | Base URL for openrouter / custom OpenAI-compatible endpoints |
 | `ENGRAPHIS_LICENSE_KEY` | — | Pro/Team key (or `~/.engraphis/license.key`) |
-| `ENGRAPHIS_TEAM_MODE` | — | Set `1` to enable per-user logins + roles |
+| `ENGRAPHIS_TEAM_MODE` | `1` | Team mode is ON by default (per-user logins + roles). Set `0` to disable |
 | `ENGRAPHIS_LOOP_INTERVAL` | `60` | Background consolidation loop interval in seconds (0 = disabled) |
 | `ENGRAPHIS_DECAY_HALFLIFE_DAYS` | `7` | Ebbinghaus decay half-life (higher = memories persist longer) |
 | `ENGRAPHIS_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted reverse-proxy IPs for TLS termination (`*` = trust all) |

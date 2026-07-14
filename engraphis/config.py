@@ -57,12 +57,13 @@ class Settings:
     allowed_workspaces: list = field(
         default_factory=lambda: _parse_csv(_env("ENGRAPHIS_WORKSPACES", ""))
     )
-    # Team mode (Pro): multi-user Inspector logins/roles. Only takes effect with a
+    # Team mode (Pro): multi-user Inspector logins/roles. ON by default (opt-out) —
+    # set ENGRAPHIS_TEAM_MODE=0/false/no/off to disable. Only takes effect with a
     # license carrying the 'team' feature; without one the Inspector reports
     # upgrade-required instead of enabling auth (engraphis/inspector/app.py).
     team_mode: bool = field(
         default_factory=lambda: _env("ENGRAPHIS_TEAM_MODE", "").lower()
-        in ("1", "true", "yes", "on")
+        not in ("0", "false", "no", "off")
     )
 
     # Managed cloud-sync relay base URL (client side). When set, `python -m scripts.sync

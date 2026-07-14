@@ -62,7 +62,7 @@ any other local tool the agent has. Path is attacker-controlled if agent's instr
 
 ### 7. Team mode & license keys (commercial layer)
 
-Team mode (`ENGRAPHIS_TEAM_MODE=1` + `team` license) adds per-user sessions:
+Team mode (`ENGRAPHIS_TEAM_MODE`, ON by default unless set to `0` + a `team` license) adds per-user sessions:
 
 - **Passwords:** PBKDF2-HMAC-SHA256, 600k iterations, ≥10 chars; constant-time verification;
   no user-enumeration timing oracle

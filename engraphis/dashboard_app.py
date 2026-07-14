@@ -127,7 +127,13 @@ def create_app() -> FastAPI:
         # regardless of whether team mode is enabled.
         if settings.api_token and _bearer_ok(request):
             return await call_next(request)
-        if team_enabled and auth_store is not None:
+        # Require a real team license to enforce per-user sessions (live, not just at
+        # startup) so a solo/no-license install stays fully open and a login wall appears
+        # the moment a team license key is added — even via the dashboard UI at runtime.
+        # `team_enabled` only means the auth plumbing is mounted (mode on, store present);
+        # `licensing.has_feature("team")` is the actual entitlement check. Without it, fall
+        # through to single-user mode below.
+        if team_enabled and auth_store is not None and licensing.has_feature("team"):
             from engraphis.inspector.auth import min_role, role_at_least
             from engraphis.routes.v2_team import _COOKIE
             user = auth_store.resolve_session(request.cookies.get(_COOKIE, ""))

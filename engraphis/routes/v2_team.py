@@ -1,8 +1,9 @@
 """Team mode (multi-user auth) for the v2 dashboard — reuses the Inspector's AuthStore.
 
-Enabled only when ``ENGRAPHIS_TEAM_MODE`` is truthy; otherwise ``/api/auth/state``
-reports ``{"enabled": false}`` and the dashboard stays single-user. Sessions are an
-HttpOnly, SameSite=Strict cookie; roles (viewer/member/admin) are enforced server-side.
+ON by default; set ``ENGRAPHIS_TEAM_MODE=0`` (or false/no/off) to disable. With it on,
+``/api/auth/state`` reports ``{"enabled": true}`` and the dashboard requires per-user
+logins. Sessions are an HttpOnly, SameSite=Strict cookie; roles (viewer/member/admin)
+are enforced server-side.
 """
 from __future__ import annotations
 
@@ -157,6 +158,13 @@ def attach(app: FastAPI, service):
         app.include_router(router)
         return False, None
 
+    # Team mode is ON by default, but the login wall only activates with a real
+    # ``team`` license present. Solo/no-license installs stay fully open — no forced
+    # sign-in — until a team license key is added (mirrors the Inspector's
+    # team_active()). ``attach`` mounts the auth plumbing whenever mode is on and
+    # returns ``(True, store)``; the live entitlement check lives in the dashboard's
+    # request gate (licensing.has_feature("team")) and in /api/auth/state below, so the
+    # wall appears the instant a license is present — even added at runtime via the UI.
     store = AuthStore(_users_db_path(settings.db_path))
 
     def _user(request: Request) -> Optional[dict]:
@@ -173,7 +181,11 @@ def attach(app: FastAPI, service):
 
     @router.get("/state")
     def state(request: Request):
-        return {"enabled": True, "needs_setup": store.count_users() == 0,
+        # `enabled` reflects whether the login wall is actually active (needs a team
+        # license, checked live), so the UI shows the open/solo experience until a
+        # license is added and the enforced mode the moment one is present.
+        return {"enabled": licensing.has_feature("team"),
+                "needs_setup": store.count_users() == 0,
                 "user": _user(request)}
 
     @router.post("/setup")
