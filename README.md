@@ -22,6 +22,14 @@ https://discord.com/invite/Wfr2ejBmY
 
 ---
 
+> **📝 Maintainers:** keep this README in sync with the code — review and update it **daily**
+> (features, env vars, pricing, and the tab list drift fast). When code and docs disagree,
+> the code wins; fix the doc in the same change. See `AGENTS.md` for the canonical scope.
+>
+> **Beta:** the **Team** layer (multi-user dashboard, seats, roles, audit log, team invite
+> emails, cloud sync relay) is **early-access beta** — expect rough edges and breaking
+> changes before it stabilizes. The single-user engine, dashboard, and MCP server are stable.
+
 ## The WebUI — one command, local-first
 
 ```bash
@@ -46,9 +54,9 @@ Everything lives in a single SQLite file on your machine.
 | **Audit** | Full governance ledger — who did what, when, and why |
 | **Knowledge Graph** | Interactive force-directed graph of entities and their relationships — click any node to see every linked memory |
 | **Consolidate** | Run a consolidation sweep on demand — see what got distilled and what got pruned |
-| **Automation** *(Pro)* | Scheduled consolidation + retention policies that keep the store clean on autopilot (dashboard config, plus `scripts/auto_maintain` for cron / Task Scheduler) |
+| **Automation** *(Pro)* | Scheduled consolidation + retention policies on autopilot — plus **auto-dreaming**: a background consolidation + cross-cluster inference loop that fires when the store has accumulated enough new memories *and* gone idle. Configurable from the dashboard (cadence, dream trigger, idle threshold, inference toggle) or the `GET/POST /automation` API, and via `scripts/auto_maintain` for cron / Task Scheduler |
 | **Workspaces** | Create, rename, describe, copy, merge, and delete workspaces; import files & folders; drag-and-drop upload |
-| **Team** | Multi-user access with PBKDF2 logins, password reset, admin / member / viewer roles, seat management, and team audit log (Team) |
+| **Team** *(beta)* | Multi-user access with PBKDF2 logins, password reset, admin / member / viewer roles, seat management, and team audit log (Team) — **early-access beta** |
 | **Settings** | License activation (Pro/Team), cloud sync, appearance, and engine/store info |
 
 The dashboard is powered by the v2 engine — the same `MemoryService` that backs the MCP server
@@ -197,6 +205,11 @@ commercial deployments. **Pro is $10/mo ($100/yr), Team is $20/seat/mo ($200/sea
 and you can unlock every Pro feature with a **3-day free trial right in the dashboard**
 (Settings → License), no key and no card.
 
+> **Team is early-access beta.** Multi-user logins, seats, roles, the team audit log,
+> team invite emails, and the cloud-sync relay are all in active development — expect
+> rough edges and breaking changes. Pro (single-user paid features) is stable. Free is
+> stable.
+
 | | Free (available now) | Pro — $10/mo or $100/yr | Team — $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
 | Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
@@ -206,12 +219,12 @@ and you can unlock every Pro feature with a **3-day free trial right in the dash
 | Auto-sync (hands-off cadence) | | ✓ | ✓ |
 | Analytics: growth, retention, decay forecast + entities | | ✓ | ✓ |
 | Analytics HTML report (self-contained, shareable) | | ✓ | ✓ |
-| Automated maintenance: scheduled consolidation + retention policies | | ✓ | ✓ |
+| Automated maintenance: scheduled consolidation + retention policies + **auto-dreaming** | | ✓ | ✓ |
 | Signed compliance export (checksummed bi-temporal bundle) | | ✓ | ✓ |
 | Priority support | | ✓ | ✓ |
-| Multi-user dashboard: logins, roles, seat management | | | ✓ |
-| Team audit log + CSV export | | | ✓ |
-| Team invite emails (vendor relay, zero email setup) | | | ✓ |
+| Multi-user dashboard: logins, roles, seat management *(beta)* | | | ✓ |
+| Team audit log + CSV export *(beta)* | | | ✓ |
+| Team invite emails (vendor relay, zero email setup) *(beta)* | | | ✓ |
 
 ---
 
@@ -286,8 +299,40 @@ Drag-and-drop or server-side import, both member-gated and bounded:
   machine running Engraphis, one memory per file, with path-traversal guards.
 - **MCP ingest** — `engraphis_ingest` accepts raw text and extracts discrete facts
   (when `ENGRAPHIS_EXTRACTOR=llm` is configured; otherwise stores verbatim).
+- **Sub-file chunking** — set `ENGRAPHIS_EXTRACTOR=chunk` to split long, multi-topic
+  documents into retrieval-sized, structure-aware pieces (headings start new chunks;
+  ~256-token target with sentence-level overlap) *without an LLM*. Each chunk becomes
+  its own memory, so recall returns the relevant **passage** instead of a whole file —
+  a big context-reduction win on long docs. Works across all three ingest paths
+  (dashboard upload, `import_folder`, and `engraphis_ingest`). Measure the payoff with
+  the bundled eval: `python -m eval.chunking_eval --dataset eval/datasets/longdoc.jsonl --k 5`
+  (whole-file vs. chunked, same recall pipeline, offline).
 
 All imported memories are marked **untrusted** by default.
+
+---
+
+## Automated maintenance & auto-dreaming *(Pro)*
+
+Engraphis can keep its own store clean without you clicking anything. The Automation
+tab (and the `GET/POST /automation` + `POST /maintenance/run` API) exposes a maintenance
+**policy** with two modes that compose:
+
+- **Scheduled maintenance** — a consolidation + retention sweep on a fixed cadence
+  (`cadence_hours`). Recurring episodic memories are distilled into semantic digests,
+  and memories fading below `archive_below` retention are archived bi-temporally (pinned
+  memories are always protected).
+- **Auto-dreaming** — a *background* consolidation + **cross-cluster inference** loop
+  (no cron needed — it runs inside the dashboard process) that fires when **both** hold:
+  the store has accumulated ≥ `dream_min_new` new episodic memories since the last sweep,
+  *and* the store has been idle for `dream_idle_minutes`. Dreaming emits low-salience
+  `dream_inference` memories (cross-cluster/entity profiles, marked untrusted and linked
+  back to their sources) so inferred knowledge is auditable and never silently promoted.
+
+Knobs (dashboard Automation tab ↔ `/automation` API): `enabled`, `cadence_hours`,
+`consolidate`, `min_cluster`, `archive_below`, `dream`, `dream_min_new`,
+`dream_idle_minutes`, `infer`. Headless / no-dashboard-open: `python -m scripts.auto_maintain --apply`
+(via Task Scheduler or cron).
 
 ---
 
@@ -303,7 +348,7 @@ All via environment (or `.env`):
 | `ENGRAPHIS_API_TOKEN` | — | If set, REST API requires `Authorization: Bearer <token>` |
 | `ENGRAPHIS_DB_KEY` | — | Encrypt the database at rest (SQLCipher). Or use `ENGRAPHIS_DB_KEY_FILE` |
 | `ENGRAPHIS_EMBED_MODEL` | `all-MiniLM-L6-v2` | sentence-transformers model |
-| `ENGRAPHIS_EXTRACTOR` | `none` | `none` = store verbatim; `llm` = extract facts via LLM before storing |
+| `ENGRAPHIS_EXTRACTOR` | `none` | `none` = store verbatim; `chunk` = sub-file structure-aware chunking (offline, no LLM); `llm` = extract facts via LLM before storing |
 | `ENGRAPHIS_GRAPH_EXTRACTOR` | `regex` | `regex` = dependency-free NER (offline); `none` = disable graph population |
 | `ENGRAPHIS_LLM_PROVIDER` | `openai` | `openai \| anthropic \| google \| openrouter \| custom` |
 | `ENGRAPHIS_LLM_MODEL` | `gpt-4o-mini` | Model name (provider-specific) |
