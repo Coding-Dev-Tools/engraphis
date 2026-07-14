@@ -5,6 +5,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-07-14
+
 ### Added
 - **Email-verified self-serve trial + abuse protections on the trial endpoint.**
   Starting a trial now requires a verified email and sends a one-time confirmation link
