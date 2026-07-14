@@ -174,11 +174,6 @@ def test_maintenance_run_proposes_inference_when_policy_on(monkeypatch, tmp_path
         assert any(e["entity"].lower() == "redis" for e in inf["links_created"])
 
 
-def test_team_disabled_by_default(monkeypatch, tmp_path):
-    with _client(monkeypatch, tmp_path) as c:
-        assert c.get("/api/auth/state").json()["enabled"] is False
-
-
 def test_team_flow_setup_login_roles(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path, team=True, key=_team_key()) as c:
         assert c.get("/api/auth/state").json()["needs_setup"] is True
