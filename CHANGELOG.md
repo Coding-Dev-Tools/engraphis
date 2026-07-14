@@ -5,6 +5,56 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-07-14
+
+### Changed
+- **Team mode is now ON by default (opt-out).** `ENGRAPHIS_TEAM_MODE` defaults to on;
+  set `ENGRAPHIS_TEAM_MODE=0` (or false/no/off) to disable. The per-user login wall is
+  no longer raised just because the mode flag is on — it now requires a *live* `team`
+  feature entitlement (`licensing.has_feature("team")`), checked at request time in
+  `dashboard_app.py` and reflected in `/api/auth/state`. Solo / no-license installs stay
+  fully open, and the wall appears the moment a team license key is added — even via the
+  dashboard UI at runtime. A `team` license is still required to *add seats* beyond the
+  first admin (bootstrap admin is created unconditionally). Docs (`.env.example`,
+  `AGENTS.md`, `README.md`, `SECURITY.md`, `scripts/init.py`) and team-mode test fixtures
+  updated.
+- **Team-invite email rewritten to separate "join" from "activate a key".** The old
+  invite conflated the two, so members pasted the shared team key into the hosted/Railway
+  dashboard, saw it "work" (it just re-activated a license already active there), and
+  thought they'd joined — when joining means signing in with email + password. The email
+  now frames two distinct options: **Option 1** (required to join) sign in to the team
+  dashboard with email + the admin-set password — explicitly *no license key needed here,
+  don't paste one*; **Option 2** (optional) run Engraphis on your own machine and access
+  the team's memories locally — that is what the shared team key is for (LOCAL
+  `http://127.0.0.1:8700` → Settings → License, then Settings → Cloud Sync to pull the
+  converged team store down to a local offline copy). Invites now always carry a
+  clickable sign-in link: `dashboard_url` resolves explicit arg → `ENGRAPHIS_DASHBOARD_URL`
+  → `DEFAULT_TEAM_DASHBOARD_URL` (`https://team.engraphis.com/`). A footer with the
+  canonical site + repo links is added as env-overridable module constants
+  (`SITE_URL`/`REPO_URL`) so the URLs can't drift per-email. `tests/test_billing.py`.
+
+### Fixed
+- **Intermittent `database is locked` from `set_service`.** `routes/v2_api.set_service`
+  swapped the global `MemoryService` without closing the previously-bound service's store
+  connection, so under heavy test churn a deferred-GC close of the old SQLite/WAL handle
+  collided with the next `MemoryService.create` on the same path. The prior store is now
+  closed on swap (best-effort, never blocks the swap on a close error).
+
+### Docs
+- **README now documents three previously-undocumented shipped features** (the features
+  themselves shipped in 0.9.3): sub-file chunking (`ENGRAPHIS_EXTRACTOR=chunk` + the
+  `eval.chunking_eval` whole-file-vs-chunked harness), auto-dreaming (the background
+  cross-cluster-inference loop, accumulation + idle trigger, `dream_inference`
+  provenance/auditability), and every automation dream knob exposed via the dashboard
+  Automation tab and the `GET/POST /automation` + `POST /maintenance/run` API. Also: a
+  **Team early-access beta** callout (top + feature/pricing tables + Free-vs-Pro section)
+  and a **daily-update reminder for maintainers** near the top (code wins; fix the doc in
+  the same change).
+
+### Chore
+- `.gitignore` now excludes `automation.json` / `autosync.json` (regenerable local
+  runtime state from `engraphis/automation.py`, not source content).
+
 ## [0.9.4] - 2026-07-14
 
 ### Fixed
