@@ -129,6 +129,11 @@ pip install "engraphis[encryption]" # SQLCipher encryption-at-rest extra
 pip install engraphis               # core library — numpy only, fully offline
 ```
 
+> **Linux / macOS:** if `pip install` fails with `error: externally-managed-environment`,
+> your system Python is marked read-only (PEP 668). Install into a virtual environment
+> instead — `python3 -m venv venv && source venv/bin/activate && pip install "engraphis[server]"`
+> — or use Docker (`docker compose up`). `pipx install "engraphis[server]"` also works.
+
 > First run downloads `all-MiniLM-L6-v2` (~80 MB). Without it, the engine falls back
 > to a deterministic offline embedder so it always runs.
 

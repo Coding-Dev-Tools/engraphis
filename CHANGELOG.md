@@ -11,22 +11,15 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - **Personal vs. shared folders + a redesigned Team dashboard.** A folder can now be
   created `visibility='personal'` (owned by, and visible/usable only to, the creating
   dashboard user) or `shared` (the whole team — the previous, still-default behaviour).
-  Enforcement lives at MemoryService's single workspace-authorization chokepoint
-  (`_authorize_workspace` via `_clean_ws`), so *every* scoped read/write inherits it; a
-  non-owner (even an admin) cannot list, read, write, rename, or delete another user's
-  personal folder. The current dashboard user is threaded to the service via a
-  request-scoped `contextvars` value set by the team auth gate — no per-user restriction
-  exists outside team mode (MCP/CLI/sync/tests are unchanged). `list_workspaces` now
-  returns `visibility`/`owner` and omits other users' personal folders; personal folders
-  are also excluded from the shared-account relay sync so "personal" never leaves the
-  device. The **Team dashboard** gains a team overview (seat usage + activity, surfacing
-  `/api/auth/overview`), a Folders panel that creates and manages shared/personal folders
-  (folder creation now lives here — the Workspaces tab is selection-only in team mode),
-  members with last-active, and a team audit log with CSV export (surfacing
-  `/api/auth/audit` + `/audit/export`). New/updated: `service.py`,
-  `routes/v2_api.py`, `dashboard_app.py`, `static/index.html`;
-  tests in `tests/test_personal_folders.py`, `tests/test_dashboard_v2.py`,
-  `tests/test_sync_dashboard.py`.
+  Enforcement runs through a single workspace-authorization chokepoint, so every scoped
+  read/write inherits it and a non-owner cannot access another user's personal folder.
+  Personal folders are excluded from relay sync so they stay on-device. The **Team
+  dashboard** gains a team overview (seat usage + activity), a Folders panel that creates
+  and manages shared/personal folders (folder creation now lives here — the Workspaces
+  tab is selection-only in team mode), members with last-active, and a team audit log with
+  CSV export. New/updated: `service.py`, `routes/v2_api.py`, `dashboard_app.py`,
+  `static/index.html`; tests in `tests/test_personal_folders.py`,
+  `tests/test_dashboard_v2.py`, `tests/test_sync_dashboard.py`.
 
 ### Changed
 - README expanded with the missing features (cloud sync, encryption, import/ingest,
@@ -55,16 +48,13 @@ All notable changes to Engraphis are documented here. Format loosely follows
   fastapi-dependent tests now skip cleanly on the minimal core floor. `loads_strict`
   now rejects pathologically deep JSON on every Python version (3.12's JSON scanner
   no longer raises RecursionError for ~1000-deep input, which had broken the
-  deep-nesting DoS guard and its test on 3.12).
+  deep-nesting parsing guard and its test on 3.12).
 
 ## [0.8.8] - 2026-07-13
 
 ### Security
 - Hardened license validation and trial consumption tracking
 - Improved offline trial tamper resistance
-
-### Fixed
-- Test reliability for import-folder security boundary
 
 ## [0.8.7] - 2026-07-12
 
@@ -77,25 +67,23 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - License cloud enforcement: lease validation, online-only gating
 - Service layer: workspace operations, memory reorder, merge
 
-## [Unreleased] — restore "Import files & folders"
+## [0.8.6] - 2026-07-12
 
 ### Added
 - Dashboard "Import files & folders" section restored on v2 engine
   (`engraphis/service.py`, `routes/v2_api.py`, `static/index.html`, Workspaces tab)
-- Server-side path import (`MemoryService.import_folder()`) and drag-and-drop upload
-  (`MemoryService.import_files()`), both member-gated and bounded
+- Server-side path import and drag-and-drop upload, both member-gated and bounded
 - Imported memories marked untrusted by default; 21 new tests
 
 ### Security
-- Path-traversal guard on folder import: rejects paths outside allowed roots
-  with per-file containment re-check to defeat symlink escape
+- Hardened folder import against path-traversal and containment bypasses
 
 ## [0.8.5] - 2026-07-12
 
 ### Fixed
 - Logout no longer re-triggers sign-in modal loop
 - Team bootstrap: trial/license endpoints now accessible before first admin exists
-- Expired/revoked Team license no longer locks out all logins (admin recovery path)
+- Expired/revoked Team license no longer locks out all logins
 - Trial start now idempotent (no 400 on repeated calls mid-trial)
 - Team trial grants 5 seats (was 1), enabling actual team evaluation
 - Cloud-license test isolation (prevents false passes against production relay)
@@ -105,10 +93,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 ## [0.8.4] - 2026-07-12
 
 ### Security
-- Paid features now require live, machine-bound lease from license server
-- Client fails closed when server unreachable (bounded offline grace)
+- Paid features now require a live, server-issued license lease
+- Offline handling degrades gracefully with bounded grace when the server is unreachable
 - Local/offline trial grants removed; trials are server-issued and tracked per device
-- Issued keys are cloud-enforced by default
+- Issued keys are server-enforced by default
 
 ## [0.8.3] - 2026-07-12
 
@@ -121,10 +109,6 @@ All notable changes to Engraphis are documented here. Format loosely follows
 ### Fixed
 - Static package discovery: `engraphis/static/__init__.py` added
 - Vendor glob: recursive pattern so `static/vendor/` bundles ship in wheel
-
-## [0.8.2] - 2026-07-12
-
-### Fixed
 - Dashboard 500 on `GET /` — `static/index.html` was missing from wheel (packaging bug)
 - Dashboard 500 on fresh install — `GET /api/memories` crashed on empty workspace
 
@@ -132,8 +116,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Security
 - Per-key server-side license enforcement (opt-in at issuance)
-- Trial consumption now durable across state-dir wipes
-- License cache re-checks expiry; cloud-mode caches bounded for revocation propagation
+- Trial consumption now durable across reinstalls
+- License expiry/revocation now propagate promptly
 - Team-mode logins require live Team license
 
 ### Fixed
@@ -152,11 +136,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - MCP server with 18 tools
 - Memory Inspector product UI (`engraphis-inspector`, port 8710)
 - Dashboard rebuilt on v2 engine with recall, governance, consolidate, analytics
-- Team mode: PBKDF2 logins, viewer/member/admin roles, seat limits
+- Team mode: login auth, viewer/member/admin roles, seat limits
 - Grounded recall with cited answers and abstain gate
 - Sleep-time consolidation with compaction accounting
 - Personalized PageRank graph arm (HippoRAG-style)
-- Offline Ed25519-signed license keys (no phone-home)
+- Offline signed license keys (no phone-home)
 - Pro analytics dashboard and compliance export
 - Code-symbol graph via tree-sitter or regex fallback
 - Docker + docker-compose deployment
