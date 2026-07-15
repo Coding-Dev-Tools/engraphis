@@ -515,6 +515,23 @@ def proactive(workspace: Optional[str] = None, k: int = 10):
             "handoff": out.get("handoff") or out.get("last_session")}
 
 
+class _ProactiveContextReq(BaseModel):
+    workspace: Optional[str] = None
+    repo: Optional[str] = None
+    task: str = ""
+    agent_state: str = ""
+    k: int = 10
+    synthesize: bool = False
+
+
+@router.post("/proactive-context")
+def proactive_context(req: _ProactiveContextReq):
+    ws = req.workspace or _default_ws()
+    return _run(service().proactive_context, workspace=ws, repo=req.repo,
+                task=req.task, agent_state=req.agent_state, k=req.k,
+                synthesize=req.synthesize)
+
+
 @router.get("/audit")
 def audit(workspace: Optional[str] = None, limit: int = 100):
     ws = workspace or _require_ws()
