@@ -718,6 +718,50 @@ def engraphis_consolidate(
         return _err(exc)
 
 
+@mcp.tool(
+    name="engraphis_answer",
+    annotations={"title": "Grounded answer (grounded recall + synthesis)",
+                 "readOnlyHint": True, "openWorldHint": False},
+)
+def engraphis_answer(
+    query: Annotated[str, Field(description="The question to answer from memory. Natural language, e.g. 'how do we handle auth?'.",
+                                  min_length=1, max_length=10_000)],
+    workspace: Annotated[str, Field(description="Top-level scope, e.g. an org or product name ('acme'). Defaults to 'default' if omitted.",
+                                    min_length=1, max_length=200)] = "default",
+    repo: Annotated[Optional[str], Field(description="Repository scope within the workspace.",
+                                         max_length=200)] = None,
+    k: Annotated[int, Field(description="Max memories to consider (1-50).", ge=1, le=50)] = 8,
+    min_support: Annotated[float, Field(description="Absolute support floor 0..1. Memories below this don't count as evidence. Default 0.25.", ge=0.0, le=1.0)] = 0.25,
+    synthesize: Annotated[bool, Field(description="If true, ask LLM to write prose answer with citations; if false (default), return extractive answer with citations.")] = False,
+) -> str:
+    """Grounded answer from memory — not just memories, but an *answer*.
+
+    Runs grounded recall (hybrid vector + lexical + graph + rerank) and returns either:
+    * An extractive answer (citations only, deterministic, offline) — always safe.
+    * A synthesised prose answer with inline [n] citations — if ``synthesize=True" and an LLM is configured.
+
+    If evidence is below the support floor, returns ``grounded=false, abstained=true" with a reason — never hallucinates.
+    Every claim is cited with [n] linking to the source memory. The deterministic path never introduces claims not in the sources.
+    """
+    try:
+        svc = service()
+        result = svc.grounded_recall(query=query, workspace=workspace, repo=repo, k=k,
+                                     min_support=min_support)
+        answer = result.get("answer", {})
+        return _ok({
+            "query": query,
+            "answer": answer.get("answer", ""),
+            "grounded": answer.get("grounded", False),
+            "abstained": answer.get("abstained", True),
+            "reason": answer.get("reason", ""),
+            "support": answer.get("support", 0.0),
+            "synthesized": answer.get("synthesized", False),
+            "citations": answer.get("citations", []),
+        })
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
 def main() -> None:
     """Console entry point (``engraphis-mcp``). Runs over stdio."""
     mcp.run()

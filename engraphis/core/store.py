@@ -581,6 +581,13 @@ class Store:
             "INSERT INTO audit(id, ts, actor, action, target, detail) VALUES (?,?,?,?,?,?)",
             (ids.new_id("audit"), now_ts(), actor, action, target, detail),
         )
+        # Many callers (engine.pin/merge, service.correct/rename/delete, the team
+        # auth audit events) invoke audit() as their final statement with no follow-up
+        # commit. Without this, the row sits in an uncommitted transaction and is lost
+        # when the connection closes or an unrelated commit interleaves — silently
+        # dropping team-mode accountability records. Commit here so every audit event
+        # persists; an extra commit is harmless when a caller commits again afterward.
+        self.conn.commit()
 
     # ── sync state (device identity + per-peer cursors) ─────────────────────────
     def get_sync_state(self, key: str) -> Optional[str]:
