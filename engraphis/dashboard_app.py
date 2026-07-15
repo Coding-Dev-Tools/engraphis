@@ -136,7 +136,16 @@ def create_app() -> FastAPI:
         if team_enabled and auth_store is not None and licensing.has_feature("team"):
             from engraphis.inspector.auth import min_role, role_at_least
             from engraphis.routes.v2_team import _COOKIE
-            user = auth_store.resolve_session(request.cookies.get(_COOKIE, ""))
+            # Agent connect: a per-user API bearer token (minted via POST /api/auth/token)
+            # authenticates exactly like a cookie session, but for headless agents. Try it
+            # first so an agent with no cookie is still bound to its member identity, then
+            # fall back to the browser session cookie. Either way the resolved member is
+            # bound via set_current_user so personal-folder ownership holds on every
+            # workspace-scoped read/write.
+            supplied = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+            user = auth_store.resolve_api_token(supplied) if supplied else None
+            if user is None:
+                user = auth_store.resolve_session(request.cookies.get(_COOKIE, ""))
             if user is None:
                 return JSONResponse({"error": "authentication required", "auth": "team"},
                                     status_code=401)
