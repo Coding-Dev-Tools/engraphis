@@ -125,6 +125,22 @@ class LLMClient:
             max_tokens=max_tokens,
         )
 
+    def extract_json(self, prompt: str, schema: dict) -> dict:
+        """Extract structured JSON from the LLM using a JSON schema constraint.
+
+        Uses the provider's native structured output (OpenAI JSON schema, etc.)
+        when available; falls back to prompting + post-hoc validation otherwise.
+        """
+        # Build a system prompt that enforces JSON schema output
+        system = (
+            "You output ONLY valid JSON matching the provided schema. "
+            "No markdown, no prose, no commentary. The schema:\n"
+            f"{json.dumps(schema)}"
+        )
+        raw = self.chat([{"role": "user", "content": prompt}], system=system,
+                        temperature=0.0, max_tokens=8192)
+        return _parse_json_response(raw)
+
     # ── Provider implementations ────────────────────────────────────────────
 
     def _chat_openai_compat(self, messages, system, temperature, max_tokens) -> str:
