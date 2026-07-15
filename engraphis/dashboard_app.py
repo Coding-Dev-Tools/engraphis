@@ -53,7 +53,53 @@ _PUBLIC = {"/", "/api/health", "/api/ready", "/api/auth/state", "/api/auth/login
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Engraphis Dashboard", docs_url="/api/docs", openapi_url="/api/openapi.json")
+    # MCP-over-HTTP agent connect: build the streamable-http ASGI app up front so we can
+    # give the dashboard a lifespan that initializes its session manager (a mounted
+    # sub-app's own lifespan does NOT run in Starlette - only the root app's does -
+    # which is why a naive app.mount('/mcp', mcp.streamable_http_app()) raises
+    # 'Task group is not initialized'). The endpoint is built at '/' inside the sub-app
+    # so mounting under /mcp lines up (Starlette strips the mount prefix).
+    import contextlib as _contextlib
+    _mcp_asgi = None
+    _mcp_mgr = None
+    try:
+        import engraphis.mcp_server as _mcp_mod
+        from mcp.server.transport_security import TransportSecuritySettings
+        # The dashboard's own _auth_gate already enforces Team-license + member-token on
+        # /mcp, so MCP's DNS-rebinding host allowlist (default: localhost only) is both
+        # unnecessary here and harmful - it would 421 a real deployment domain
+        # (team.engraphis.com) and the test client. Disable it for the mounted instance;
+        # auth is the real boundary. Left set (not restored) because the route guard
+        # reads it per request; the standalone mcp_server_http.py runs in its own process
+        # where this mutation does not apply.
+        _mcp_mod.mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False)
+        # The MCP session manager's run() is once-per-instance, but create_app() may be
+        # called more than once in a process (tests, re-import). Reset the lazily-created
+        # manager so each app gets a fresh, runnable one. No-op for the first call.
+        try:
+            _mcp_mod.mcp._session_manager = None
+        except Exception:  # noqa: BLE001 - private attr; stay robust across mcp versions
+            pass
+        _prev_path = _mcp_mod.mcp.settings.streamable_http_path
+        _mcp_mod.mcp.settings.streamable_http_path = "/"
+        _mcp_asgi = _mcp_mod.mcp.streamable_http_app()
+        _mcp_mod.mcp.settings.streamable_http_path = _prev_path
+        _mcp_mgr = _mcp_mod.mcp.session_manager
+    except Exception as _exc:  # noqa: BLE001 - MCP mount stays optional (e.g. mcp not installed)
+        import sys as _sys
+        print("[engraphis] MCP /mcp mount skipped: %s" % _exc, file=_sys.stderr)
+
+    @_contextlib.asynccontextmanager
+    async def _lifespan(app: FastAPI):
+        if _mcp_asgi is not None:
+            async with _mcp_mgr.run():
+                yield
+        else:
+            yield
+
+    app = FastAPI(title="Engraphis Dashboard", docs_url="/api/docs",
+                  openapi_url="/api/openapi.json", lifespan=_lifespan)
     svc = MemoryService.create(
         settings.db_path, embed_model=settings.embed_model,
         embed_dim=settings.embed_dim or 256,
@@ -119,8 +165,29 @@ def create_app() -> FastAPI:
         # is exactly "no per-user restriction".
         set_current_user(None)
         path = request.url.path
-        if not path.startswith("/api/") or path in _PUBLIC or path.startswith("/api/docs") \
+        if (not path.startswith("/api/") and not (path == "/mcp" or path.startswith("/mcp/"))) \
+                or path in _PUBLIC or path.startswith("/api/docs") \
                 or path.startswith("/api/openapi"):
+            return await call_next(request)
+        # MCP-over-HTTP agent endpoint (/mcp) — Team-gated (402 without a Team license)
+        # and member-authenticated (per-user bearer token or cookie), so "a Team license
+        # is required to connect" holds for MCP agents exactly as it does for
+        # /api/remember. The MCP tools then reuse the dashboard's shared MemoryService.
+        if path == "/mcp" or path.startswith("/mcp/"):
+            from engraphis.routes.v2_team import _COOKIE
+            if not (team_enabled and auth_store is not None
+                    and licensing.has_feature("team")):
+                return JSONResponse({"error": "a Team license is required to connect agents",
+                                      "feature": "team", "auth": "team"}, status_code=402)
+            supplied = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+            mu = auth_store.resolve_api_token(supplied) if supplied else None
+            if mu is None:
+                mu = auth_store.resolve_session(request.cookies.get(_COOKIE, ""))
+            if mu is None:
+                return JSONResponse({"error": "authentication required", "auth": "team"},
+                                    status_code=401)
+            request.state.user = mu
+            set_current_user(mu)
             return await call_next(request)
         # Service-account bearer token bypass — skips team auth entirely,
         # allowing CI/CD scripts and automation to use the same ENGRAPHIS_API_TOKEN
@@ -175,6 +242,13 @@ def create_app() -> FastAPI:
     for warning in licensing.production_warnings():
         import sys
         print("[engraphis] ship-safety: %s" % warning, file=sys.stderr)
+
+    # Share the dashboard's MemoryService with the MCP server (single writer, no second
+    # SQLite connection) and mount the pre-built streamable-http app at /mcp. The session
+    # manager is initialized in the app's lifespan (see _lifespan above).
+    if _mcp_asgi is not None:
+        _mcp_mod.set_service(svc)
+        app.mount("/mcp", _mcp_asgi)
 
     _maybe_start_autosync()
     _maybe_start_dreaming()
