@@ -107,13 +107,13 @@ def test_remember_with_bearer_writes_to_cloud(monkeypatch, tmp_path):
 
 
 def test_remember_requires_team_license_402(monkeypatch, tmp_path):
-    # team mode ON but no Team license -> agent write is 402 ("need a team license")
+    # No Team license -> agent writes are 402 even when authenticated with the
+    # instance service token. Per-user token minting itself is unavailable until Team
+    # setup is unlocked by an active Team entitlement.
+    monkeypatch.setattr(settings, "api_token", "service-token")
     with _client(monkeypatch, tmp_path, key=None) as c:
-        _setup_admin(c)  # bootstrap admin is exempt from the license gate
-        token = _mint(c)["token"]
-        c.cookies.clear()
         r = c.post("/api/remember", json={"content": "x", "workspace": "demo"},
-                   headers={"Authorization": f"Bearer {token}"})
+                   headers={"Authorization": "Bearer service-token"})
         assert r.status_code == 402
         assert r.json()["detail"]["feature"] == "team"
 
