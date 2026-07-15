@@ -948,6 +948,54 @@ class MemoryService:
         return {"memories": [_mem_to_dict(r) for r in out["memories"]],
                "last_session": out["last_session"]}
 
+    def proactive_context(self, *, workspace: str, repo: Optional[str] = None,
+                          task: str = "", agent_state: str = "", k: int = 10,
+                          synthesize: bool = False) -> dict:
+        """Agent-ready proactive context packet.
+
+        Combines queryless proactive recall, optional task-specific recall, and the
+        last-session handoff into a cited context summary. Deterministic by default;
+        when ``synthesize`` is true and an LLM is configured, the model may rewrite the
+        summary, but only if it cites retrieved memories with ``[n]`` markers.
+        """
+        task = _clean_text(task, field="task", max_chars=MAX_CONTENT_CHARS, required=False)
+        agent_state = _clean_text(agent_state, field="agent_state",
+                                  max_chars=MAX_CONTENT_CHARS, required=False)
+        k = max(1, min(MAX_K, int(k)))
+        proactive = self.recall_proactive(workspace=workspace, repo=repo, k=k)
+        memories = list(proactive.get("memories") or [])
+        query = "\n".join(x for x in (task, agent_state) if x).strip()
+        if query:
+            try:
+                recalled = self.recall(query, workspace=workspace, repo=repo, k=k,
+                                       reinforce=False)
+                memories.extend(recalled.get("memories") or [])
+            except Exception:
+                pass
+        llm = None
+        if synthesize:
+            try:
+                from engraphis.config import settings
+                if settings.llm_api_key:
+                    from engraphis.llm.client import LLMClient
+                    llm = LLMClient()
+            except Exception:
+                llm = None
+        try:
+            from engraphis.ai_context import build_proactive_context
+            out = build_proactive_context(
+                task=task, agent_state=agent_state, memories=memories,
+                last_session=proactive.get("last_session") or {}, llm=llm,
+                synthesize=bool(synthesize),
+            )
+        finally:
+            if llm is not None:
+                try:
+                    llm.close()
+                except Exception:
+                    pass
+        return {"workspace": self._clean_ws(workspace), "repo": repo, **out}
+
     # ── linking & events (A-MEM-style) ───────────────────────────────────────────
     def record_event(self, kind: str, content: str, *, workspace: str,
                      repo: Optional[str] = None, session_id: Optional[str] = None,

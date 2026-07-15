@@ -320,6 +320,38 @@ def engraphis_recall_proactive(
 
 
 @mcp.tool(
+    name="engraphis_proactive_context",
+    annotations={"title": "Agent-ready proactive context", "readOnlyHint": True,
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def engraphis_proactive_context(
+    workspace: Annotated[str, Field(description="Workspace to surface context from.",
+                                    min_length=1, max_length=200)],
+    repo: Annotated[Optional[str], Field(description="Repo scope within the workspace.",
+                                         max_length=200)] = None,
+    task: Annotated[str, Field(description="Current task/goal. Used to bias recall and frame the summary.",
+                               max_length=100_000)] = "",
+    agent_state: Annotated[str, Field(description="Optional current agent state: plan, open files, errors, partial findings.",
+                                      max_length=100_000)] = "",
+    k: Annotated[int, Field(description="Max memories to consider (1-50).", ge=1, le=50)] = 10,
+    synthesize: Annotated[bool, Field(description="If true and an LLM is configured, synthesize a concise cited context summary; otherwise deterministic/offline.")] = False,
+) -> str:
+    """Return an agent-ready context packet before the agent knows what to ask.
+
+    Combines proactive recall, optional task-specific recall, and last-session handoff
+    into a cited ``context_summary`` plus ``suggested_queries``. Deterministic by
+    default; LLM synthesis is opt-in and accepted only when it cites source memories.
+    """
+    try:
+        return _ok(service().proactive_context(
+            workspace=workspace, repo=repo, task=task, agent_state=agent_state,
+            k=k, synthesize=synthesize,
+        ))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
     name="engraphis_forget",
     annotations={"title": "Forget a memory", "readOnlyHint": False,
                  "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
