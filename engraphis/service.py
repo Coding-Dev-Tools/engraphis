@@ -1578,8 +1578,12 @@ class MemoryService:
                 frontier.append(nxt)
         if len(members) == 1:
             return [rec]
-        return sorted(members.values(),
-                      key=lambda r: (r.valid_from or r.ingested_at or 0, r.id))
+        return sorted(members.values(), key=lambda r: (
+            r.valid_from or r.ingested_at or 0,
+            r.valid_to is None,               # if timestamps tie, closed history precedes live
+            r.valid_to if r.valid_to is not None else float("inf"),
+            r.id,
+        ))
 
     def _successor_of(self, memory_id: str, seen: set):
         escaped = memory_id.replace("%", "\\%").replace("_", "\\_")

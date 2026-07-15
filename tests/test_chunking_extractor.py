@@ -8,6 +8,7 @@ control-character defanging.
 from engraphis.backends.extractor import (
     ChunkingExtractor,
     PassthroughExtractor,
+    StructuredLLMExtractor,
     get_extractor,
 )
 from engraphis.core.interfaces import Extractor
@@ -124,3 +125,63 @@ def test_control_characters_are_defanged():
     joined = "".join(f.content for f in facts)
     assert "\x00" not in joined and "\x07" not in joined and "\x1b" not in joined
     assert "payload here" in joined
+
+
+class _StructuredMockLLM:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def extract_json(self, prompt, schema):
+        assert "Extract discrete" in prompt
+        assert "facts" in schema.get("properties", {})
+        return self.payload
+
+
+class _FailingMockLLM:
+    def extract_json(self, prompt, schema):
+        raise RuntimeError("boom")
+
+
+def test_structured_llm_extractor_validates_and_preserves_metadata():
+    ex = StructuredLLMExtractor(_StructuredMockLLM({
+        "facts": [{
+            "content": "Engraphis uses PASETO for auth tokens.",
+            "title": "Auth tokens",
+            "mtype": "semantic",
+            "importance": 0.8,
+            "keywords": ["engraphis", "paseto", "auth"],
+            "entities": ["Engraphis", "PASETO"],
+            "relations": [{"source": "Engraphis", "relation": "uses", "target": "PASETO"}],
+        }],
+    }))
+    facts = ex.extract("raw text")
+    assert len(facts) == 1
+    fact = facts[0]
+    assert fact.content == "Engraphis uses PASETO for auth tokens."
+    assert fact.mtype.value == "semantic"
+    assert fact.importance == 0.8
+    assert fact.metadata["entities"] == ["Engraphis", "PASETO"]
+    assert fact.metadata["relations"] == [
+        {"source": "Engraphis", "relation": "uses", "target": "PASETO"},
+    ]
+    assert fact.metadata["structured_extraction"]["entities"] == ["Engraphis", "PASETO"]
+
+
+def test_structured_llm_extractor_accepts_single_fact_object():
+    ex = StructuredLLMExtractor(_StructuredMockLLM({
+        "content": "Use pnpm for frontend packages.",
+        "title": "Package manager",
+        "mtype": "procedural",
+        "importance": 2.0,
+    }))
+    fact = ex.extract("raw text")[0]
+    assert fact.title == "Package manager"
+    assert fact.mtype.value == "procedural"
+    assert fact.importance == 1.0
+
+
+def test_structured_llm_extractor_falls_back_to_chunking_on_failure():
+    facts = StructuredLLMExtractor(_FailingMockLLM()).extract("# Title\n\nUse pnpm.")
+    assert len(facts) == 1
+    assert facts[0].title == "Title"
+    assert "pnpm" in facts[0].content

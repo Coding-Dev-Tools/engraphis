@@ -125,7 +125,7 @@ class LLMClient:
             max_tokens=max_tokens,
         )
 
-    def extract_json(self, prompt: str, schema: dict) -> dict:
+    def extract_json(self, prompt: str, schema: dict) -> Any:
         """Extract structured JSON from the LLM using a JSON schema constraint.
 
         Uses the provider's native structured output (OpenAI JSON schema, etc.)
