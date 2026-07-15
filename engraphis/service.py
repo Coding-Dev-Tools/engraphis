@@ -1654,11 +1654,10 @@ class MemoryService:
         ents = conn.execute(
             "SELECT id, name, etype FROM entities WHERE workspace_id=? LIMIT ?",
             (wid, limit)).fetchall()
-        # Lazy backfill: a workspace whose memories predate graph extraction being
-        # enabled has memories but no entities. On first Graph-tab open, extract and
-        # persist its graph so existing installs light up on update without a manual
-        # migration. Idempotent (feed() de-dupes) and only runs when extraction is on.
-        if not ents and self.engine.graph_extractor is not None:
+        # Lazy backfill: old memories can predate graph extraction or predate the
+        # structured-metadata graph bridge. On first Graph-tab open in a process, feed
+        # the missing graph state once; feed() de-dupes entities/edges.
+        if self._should_backfill_graph(wid, bool(ents)):
             self._lazy_backfill_graph(wid)
             ents = conn.execute(
                 "SELECT id, name, etype FROM entities WHERE workspace_id=? LIMIT ?",
@@ -1666,6 +1665,27 @@ class MemoryService:
         edgs = conn.execute(
             "SELECT src, dst, relation FROM edges WHERE workspace_id=?", (wid,)).fetchall()
         return build_graph_payload(ws, ents, edgs)
+
+    def _should_backfill_graph(self, wid: str, has_entities: bool) -> bool:
+        if wid in self._graph_backfilled:
+            return False
+        if not has_entities and self.engine.graph_extractor is not None:
+            return True
+        return self._has_structured_graph_rows(wid)
+
+    def _has_structured_graph_rows(self, wid: str) -> bool:
+        import json as _json
+        rows = self.store.conn.execute(
+            "SELECT metadata FROM memories WHERE workspace_id=? AND expired_at IS NULL "
+            "AND (metadata LIKE '%entities%' OR metadata LIKE '%relations%')", (wid,))
+        for row in rows:
+            try:
+                meta = _json.loads(row["metadata"] or "{}")
+            except ValueError:
+                continue
+            if self.engine._has_structured_graph_metadata(meta):
+                return True
+        return False
 
     def _lazy_backfill_graph(self, wid: str) -> None:
         """One-time, on-demand knowledge-graph population for a workspace whose
@@ -1679,18 +1699,34 @@ class MemoryService:
         if wid in self._graph_backfilled:
             return
         self._graph_backfilled.add(wid)
-        from engraphis.backends.graph_extractor import feed as _graph_feed
+        from engraphis.backends.graph_extractor import (
+            StructuredMetadataGraphExtractor, feed as _graph_feed,
+        )
+        import json as _json
         rows = self.store.conn.execute(
-            "SELECT repo_id, title, content FROM memories "
+            "SELECT repo_id, title, content, metadata FROM memories "
             "WHERE workspace_id=? AND expired_at IS NULL", (wid,)).fetchall()
         for r in rows:
             try:
-                _graph_feed(self.store, r["content"] or "", workspace_id=wid,
-                            repo_id=r["repo_id"], title=r["title"] or "",
-                            extractor=self.engine.graph_extractor,
-                            provenance={"source": "lazy_backfill"})
-            except Exception:
-                continue
+                meta = _json.loads(r["metadata"] or "{}")
+            except ValueError:
+                meta = {}
+            if self.engine._has_structured_graph_metadata(meta):
+                try:
+                    _graph_feed(self.store, r["content"] or "", workspace_id=wid,
+                                repo_id=r["repo_id"], title=r["title"] or "",
+                                extractor=StructuredMetadataGraphExtractor(meta),
+                                provenance={"source": "structured_backfill"})
+                except Exception:
+                    pass
+            if self.engine.graph_extractor is not None:
+                try:
+                    _graph_feed(self.store, r["content"] or "", workspace_id=wid,
+                                repo_id=r["repo_id"], title=r["title"] or "",
+                                extractor=self.engine.graph_extractor,
+                                provenance={"source": "lazy_backfill"})
+                except Exception:
+                    pass
 
     # ── introspection ───────────────────────────────────────────────────────────
     def stats(self, *, workspace: Optional[str] = None) -> dict:
