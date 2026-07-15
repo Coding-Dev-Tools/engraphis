@@ -1,6 +1,7 @@
 from engraphis.backends.extractor import (
     LLMExtractor,
     PassthroughExtractor,
+    StructuredLLMExtractor,
     get_extractor,
 )
 from engraphis.core.interfaces import Extractor, MemoryType
@@ -15,6 +16,15 @@ class FakeLLM:
     def chat(self, messages, system=None, **kw):
         self.calls.append((messages, system))
         return self.response
+
+
+class FakeStructuredLLM:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def extract_json(self, prompt, schema):
+        assert "facts" in schema.get("properties", {})
+        return self.payload
 
 
 def test_passthrough_returns_single_fact_verbatim():
@@ -101,3 +111,23 @@ def test_engine_ingest_without_extractor_is_passthrough():
     out = eng.ingest("just one fact", workspace_id=wid, repo_id=rid)
     assert out["count"] == 1 and out["extracted"] is False
     assert eng.store.get_memory(out["facts"][0]["id"]).content == "just one fact"
+
+
+def test_engine_ingest_preserves_structured_extractor_metadata():
+    from engraphis.core.engine import MemoryEngine
+    eng = MemoryEngine.create(":memory:")
+    eng.extractor = StructuredLLMExtractor(FakeStructuredLLM({
+        "facts": [{
+            "content": "Engraphis stores memories in SQLite.",
+            "entities": ["Engraphis", "SQLite"],
+            "relations": [{"source": "Engraphis", "relation": "stores_in", "target": "SQLite"}],
+        }],
+    }))
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    out = eng.ingest("raw transcript blob", workspace_id=wid, repo_id=rid,
+                     metadata={"source": "test"})
+    rec = eng.store.get_memory(out["facts"][0]["id"])
+    assert rec.metadata["source"] == "test"
+    assert rec.metadata["entities"] == ["Engraphis", "SQLite"]
+    assert rec.metadata["relations"][0]["target"] == "SQLite"

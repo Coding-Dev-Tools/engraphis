@@ -250,12 +250,14 @@ class MemoryEngine:
             extracted = False
 
         results = []
+        base_metadata = dict(metadata or {})
         for f in facts:
+            fact_metadata = {**base_metadata, **(getattr(f, "metadata", {}) or {})}
             results.append(self.remember_with_resolution(
                 f.content, workspace_id=workspace_id, repo_id=repo_id,
                 session_id=session_id, mtype=f.mtype or default_mtype, scope=scope,
                 title=f.title, importance=f.importance, keywords=f.keywords,
-                metadata=metadata, resolve_conflicts=resolve_conflicts,
+                metadata=fact_metadata, resolve_conflicts=resolve_conflicts,
             ))
         return {"facts": results, "count": len(results), "extracted": extracted}
 
