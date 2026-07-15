@@ -125,6 +125,22 @@ embeddings. You bring the LLM only for optional chat/synthesis.
 
 ---
 
+## Host on Railway (team, no install for members)
+
+The dashboard ships as a Docker image that defaults to the v2 **team** dashboard
+(multi-user logins, roles, seats, cloud-license revocation). Deploy one instance for
+your team; members sign in at your URL and connect their agents over HTTP/MCP — they
+never install Engraphis locally. See [`docs/HOSTING_RAILWAY.md`](docs/HOSTING_RAILWAY.md)
+for the 5-minute guide (volume, custom domain, activate a Team key, invite members,
+connect agents).
+
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new?template=https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/railway.json)
+
+> The button provisions a service from this repo's Dockerfile. After it builds, you add
+> a persistent `/data` volume (so activated keys + memories survive redeploys) and set
+> `ENGRAPHIS_FORWARDED_ALLOW_IPS=*` — both one-click steps in the Railway dashboard;
+> full walk-through in the hosting guide.
+
 ## Install
 
 ```bash
