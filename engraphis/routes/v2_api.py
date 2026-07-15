@@ -507,6 +507,39 @@ def merge(req: _MergeReq):
                 title=req.title, mtype=req.memory_type, reason=req.reason)
 
 
+# ── agent connect (Team) ───────────────────────────────────────────────────────
+# The remote agent write path. An agent authenticates with a per-user bearer token
+# (POST /api/auth/token) and stores memories on THIS cloud instance's v2 store — the
+# same DB the dashboard reads — instead of running Engraphis locally. Gated by the
+# instance's Team license (``_paid('team')``) so a free / lapsed instance can't host
+# team agents: 402 without it. Workspace scoping + personal-folder ownership come from
+# the auth gate's ``set_current_user`` (see dashboard_app._auth_gate). Parameters mirror
+# the local MCP ``engraphis_remember`` tool so an agent gets identical semantics whether
+# it writes locally or to the cloud.
+class _RememberReq(BaseModel):
+    content: str
+    workspace: str = "default"
+    repo: Optional[str] = None
+    mtype: str = "semantic"
+    scope: str = "repo"
+    title: str = ""
+    importance: float = 0.0
+    keywords: Optional[list] = None
+    metadata: Optional[dict] = None
+    source: str = "agent"
+    trusted: bool = True
+    dedupe: bool = True
+
+
+@router.post("/remember")
+def remember(req: _RememberReq):
+    _paid("team")
+    return _run(service().remember, req.content, workspace=req.workspace,
+                repo=req.repo, mtype=req.mtype, scope=req.scope, title=req.title,
+                importance=req.importance, keywords=req.keywords, metadata=req.metadata,
+                source=req.source, trusted=req.trusted, resolve_conflicts=req.dedupe)
+
+
 # ── consolidate ───────────────────────────────────────────────────────────────
 class _ConsolidateReq(BaseModel):
     workspace: Optional[str] = None
