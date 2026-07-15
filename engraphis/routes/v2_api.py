@@ -363,6 +363,10 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = None, limit: in
         ws = service()._clean_ws(ws)
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
+    # Enforce personal-folder ownership before any read. The semantic recall path goes
+    # through the service (which enforces this), but this raw-SQLite browse path does
+    # not, so a team member could otherwise read another user's personal folder by name.
+    service()._enforce_personal_access(ws)
     conn = _sql.connect("file:%s?mode=ro" % settings.db_path, uri=True)
     conn.row_factory = _sql.Row
     try:
