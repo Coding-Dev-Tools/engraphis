@@ -168,6 +168,66 @@ class RegexGraphExtractor:
         return GraphExtraction(entities=entities, relations=relations)
 
 
+class StructuredMetadataGraphExtractor:
+    """Graph extractor over ``ExtractedFact.metadata`` from ``llm_structured``.
+
+    The structured fact extractor already validated the LLM payload before it became
+    metadata, but metadata is still untrusted input at this boundary. This adapter is
+    deliberately conservative: it accepts strings or ``{"name", "type"}`` entity
+    objects, accepts common relation key aliases, adds relation endpoints as entities,
+    and leaves final defanging / de-duplication to ``feed()``.
+    """
+
+    def __init__(self, metadata: Optional[dict] = None) -> None:
+        self.metadata = metadata or {}
+
+    def extract(self, content: str, *, title: str = "") -> GraphExtraction:
+        raw_entities = self._items("entities")
+        raw_relations = self._items("relations")
+        entities: list[tuple[str, str]] = []
+        seen: set[str] = set()
+
+        def add_entity(name: str, etype: str = "person_or_concept") -> None:
+            clean = _defang(name)
+            if not clean:
+                return
+            key = clean.lower()
+            if key in seen:
+                return
+            seen.add(key)
+            entities.append((clean, _defang(etype) or "person_or_concept"))
+
+        for item in raw_entities[:_MAX_COOCCUR_ENTITIES * 2]:
+            if isinstance(item, str):
+                add_entity(item)
+            elif isinstance(item, dict):
+                add_entity(str(item.get("name") or item.get("entity") or ""),
+                           str(item.get("type") or item.get("etype") or "person_or_concept"))
+
+        relations: list[tuple[str, str, str]] = []
+        for item in raw_relations[:_MAX_RELATIONS]:
+            if not isinstance(item, dict):
+                continue
+            src = str(item.get("source") or item.get("src") or item.get("from") or "")
+            rel = str(item.get("relation") or item.get("type") or item.get("predicate") or "")
+            dst = str(item.get("target") or item.get("dst") or item.get("to") or "")
+            if not (src and rel and dst):
+                continue
+            add_entity(src)
+            add_entity(dst)
+            relations.append((src, rel, dst))
+        return GraphExtraction(entities=entities, relations=relations)
+
+    def _items(self, key: str) -> list[Any]:
+        direct = self.metadata.get(key)
+        if isinstance(direct, list):
+            return direct
+        structured = self.metadata.get("structured_extraction")
+        if isinstance(structured, dict) and isinstance(structured.get(key), list):
+            return structured[key]
+        return []
+
+
 def get_graph_extractor(kind: str = "none"):
     """Factory mirroring ``get_extractor``: config in, backend out. ``kind='regex'``
     -> heuristic NER; anything else (incl. ``'none'``) -> the no-op passthrough."""

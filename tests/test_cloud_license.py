@@ -115,8 +115,9 @@ def test_verify_endpoint_reflects_status():
 
 def test_revoke_endpoint_requires_admin_token(monkeypatch):
     c = _app()
-    kid = parse_key(_key()).key_id
-    reg.record_issued(_key())
+    key = _key()
+    kid = parse_key(key).key_id
+    reg.record_issued(key)
     assert c.post("/license/v1/revoke/%s" % kid).status_code == 401
     monkeypatch.setattr(settings, "api_token", "adm1n")
     ok = c.post("/license/v1/revoke/%s" % kid, headers={"Authorization": "Bearer adm1n"})
