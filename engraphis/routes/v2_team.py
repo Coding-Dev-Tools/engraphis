@@ -189,13 +189,24 @@ def attach(app: FastAPI, service):
     def state(request: Request):
         # `enabled` reflects whether the login wall is actually active (needs a team
         # license, checked live), so the UI shows the open/solo experience until a
-        # license is added and the enforced mode the moment one is present.
-        return {"enabled": licensing.has_feature("team"),
-                "needs_setup": store.count_users() == 0,
+        # license is added and the enforced mode the moment one is present. The setup
+        # prompt is likewise hidden until Team is active; otherwise a public dashboard
+        # could be pre-seeded with an attacker-owned first admin before the owner starts
+        # a Team trial or installs a Team key.
+        active = licensing.has_feature("team")
+        return {"enabled": active,
+                "needs_setup": active and store.count_users() == 0,
                 "user": _user(request)}
 
     @router.post("/setup")
     def setup(body: SetupReq, request: Request, response: Response):
+        if not licensing.has_feature("team"):
+            raise HTTPException(status_code=402, detail={
+                "error": "Team setup requires an active Team license",
+                "feature": "team",
+                "tier_required": licensing.required_plan("team"),
+                "upgrade_url": licensing.upgrade_url(),
+            })
         if store.count_users() > 0:
             raise HTTPException(status_code=400, detail={"error": "team already set up"})
         try:

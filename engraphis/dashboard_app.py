@@ -27,12 +27,13 @@ _STATIC = Path(__file__).resolve().parent / "static"
 _INDEX = _STATIC / "index.html"
 
 # Reachable without any session/token in every mode: the page shell, liveness, and
-# the auth bootstrap endpoints themselves (state/login/setup must work while logged
-# out) — same shape as engraphis/inspector/app.py's _PUBLIC set.
+# the auth bootstrap endpoints themselves (state/login/setup must be reachable while
+# logged out; setup still refuses to create the first admin until Team is active) — same
+# shape as engraphis/inspector/app.py's _PUBLIC set.
 #
-# The /api/license and /api/license/*-trial entries close a real deadlock: create_user()
-# (called by /api/auth/setup) requires require_feature("team"), so a brand-new team-mode
-# instance with zero users can't create its first admin without an active license — but
+# The /api/license and /api/license/*-trial entries close a real deadlock: /api/auth/setup
+# requires an active Team entitlement, so a brand-new team-mode instance with zero users
+# can't create its first admin without an active license — but
 # before this fix, obtaining that license (reading /api/license, or starting a Pro/Team
 # trial) itself required an authenticated team session, which is impossible with zero users.
 # Every visitor hit a 401 the instant they touched Settings → License or clicked "Start

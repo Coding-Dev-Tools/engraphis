@@ -90,9 +90,14 @@ def test_team_mode_defaults_on_but_auth_wall_waits_for_team_license(monkeypatch,
     with TestClient(create_app()) as c:
         assert c.get("/api/auth/state").json() == {
             "enabled": False,
-            "needs_setup": True,
+            "needs_setup": False,
             "user": None,
         }
+        assert c.post("/api/auth/setup", json={
+            "email": "w@x.co",
+            "name": "W",
+            "password": "supersecret1",
+        }).status_code == 402
         assert c.get("/api/bootstrap").status_code == 200
 
 
@@ -616,6 +621,10 @@ def test_team_trial_reachable_with_zero_users_and_no_session(monkeypatch, tmp_pa
         # reading license state pre-login must not 401
         r0 = c.get("/api/license")
         assert r0.status_code == 200 and r0.json()["plan"] == "free"
+        # first-admin setup stays closed until Team is active, even though the route is public
+        locked = c.post("/api/auth/setup", json={"email": "w@x.co", "name": "W",
+                        "password": "supersecret1"})
+        assert locked.status_code == 402
         # starting the Team trial pre-login must not 401 either
         r1 = c.post("/api/license/team-trial", json={"email": "w@x.co"})
         assert r1.status_code == 200 and r1.json()["plan"] == "team"
