@@ -736,7 +736,7 @@ class MemoryService:
                         repo: Optional[str] = None, mtypes: Optional[list] = None,
                         k: int = 8, as_of: Optional[float] = None,
                         min_support: Optional[float] = None,
-                        max_citations: int = 5) -> dict:
+                        max_citations: int = 5, llm=None) -> dict:
         """Grounded recall: an answer built strictly from retrieved memories, with
         ``[n]`` citations and an explicit abstain when evidence is insufficient
         (``core.grounded``). This path is offline/deterministic (extractive answer) — no
@@ -783,7 +783,7 @@ class MemoryService:
 
         ans = self.engine.grounded_recall(
             query, workspace_id=wid, repo_id=rid, mtypes=mts, as_of=as_of, k=k,
-            min_support=min_support, max_citations=max_citations,
+            llm=llm, min_support=min_support, max_citations=max_citations,
         )
         return {"query": query, **ans.to_dict()}
 
