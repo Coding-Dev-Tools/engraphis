@@ -122,6 +122,11 @@ class DelUserReq(BaseModel):
     user_id: str
 
 
+class TokenReq(BaseModel):
+    label: str = Field(default="", max_length=120,
+                       description="A memorable name for this agent token (e.g. 'claude-code-laptop').")
+
+
 def _enabled() -> bool:
     return os.environ.get("ENGRAPHIS_TEAM_MODE", "").lower() in {"1", "true", "yes", "on"}
 
@@ -379,6 +384,63 @@ def attach(app: FastAPI, service):
                 "members": members,
                 "activity": store.action_counts(),
                 "events_total": store.count_events()}
+
+    # ── per-user API tokens (agent connect) ─────────────────────────────────────
+    # A signed-in member mints a long-lived bearer token here (from the dashboard UI)
+    # and pastes it into their agent's config. The token authenticates the agent to
+    # /api/* exactly like a cookie session would (see dashboard_app._auth_gate), bound
+    # to that member for personal-folder authz and role enforcement. The Team-license
+    # gate itself lives on the agent endpoints (e.g. POST /api/remember -> _paid('team')).
+
+    @router.post("/token")
+    def create_token(body: TokenReq, request: Request):
+        u = _require(request, "viewer")
+        row = store.create_api_token(u["id"], label=body.label)
+        ip = request.client.host if request.client else None
+        store.record_event("api_token.created", actor_id=u["id"], actor_email=u["email"],
+                           detail=row["label"] or "(unlabelled)", ip=ip)
+        # ``token`` is returned ONCE; list_api_tokens below never includes it.
+        return row
+
+    @router.get("/tokens")
+    def list_tokens(request: Request):
+        u = _require(request, "viewer")
+        return {"tokens": store.list_api_tokens(u["id"])}
+
+    @router.delete("/token/{token_id}")
+    def revoke_token(token_id: str, request: Request):
+        u = _require(request, "viewer")
+        ok = store.revoke_api_token(u["id"], token_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail={"error": "token not found"})
+        ip = request.client.host if request.client else None
+        store.record_event("api_token.revoked", actor_id=u["id"], actor_email=u["email"],
+                           target=token_id, ip=ip)
+        return {"ok": True}
+
+    @router.get("/connect-info")
+    def connect_info(request: Request):
+        """Who am I + the base URL/config an agent should use. Works with either a
+        cookie session (browser) or a per-user bearer token (agent verifying itself)."""
+        u = getattr(request.state, "user", None) or _user(request)
+        if not u:
+            raise HTTPException(status_code=401, detail={"error": "authentication required"})
+        base = os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip().rstrip("/")
+        if not base:
+            base = str(request.base_url).rstrip("/")
+        return {
+            "user": {"id": u["id"], "email": u["email"], "name": u.get("name", ""),
+                     "role": u["role"]},
+            "api_base": base + "/api",
+            "dashboard_url": base,
+            # A ready-to-paste snippet for an HTTP-capable agent/MCP-shell:
+            "snippet": (
+                f"ENGRAPHIS_API_URL={base}/api\n"
+                f"Authorization: Bearer <your-token>\n"
+                f"POST {base}/api/remember   {{\"content\": \"...\", \"workspace\": \"default\"}}\n"
+                f"GET  {base}/api/recall?q=...&workspace=default"),
+            "mcp_over_http": False,  # /mcp mount is a follow-up; agents use HTTP today.
+        }
 
     app.include_router(router)
     return True, store

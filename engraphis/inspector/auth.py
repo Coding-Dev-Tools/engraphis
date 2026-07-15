@@ -69,6 +69,20 @@ CREATE TABLE IF NOT EXISTS password_resets (
     used       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_reset_user ON password_resets(user_id);
+-- Per-user API tokens (agent connect): a Team member mints a long-lived bearer token
+-- from the dashboard and pastes it into their agent's config. Only the SHA-256 hash is
+-- stored (like session tokens), so a leaked users DB contains no usable secrets.
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id           TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(id),
+    label        TEXT NOT NULL DEFAULT '',
+    token_hash   TEXT NOT NULL UNIQUE,
+    created_at   REAL NOT NULL,
+    last_used_at REAL,
+    revoked      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_api_token_user ON api_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_api_token_hash ON api_tokens(token_hash);
 CREATE TABLE IF NOT EXISTS audit_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts          REAL NOT NULL,
@@ -461,6 +475,59 @@ class AuthStore:
     def revoke_user_sessions(self, user_id: str) -> None:
         self.conn.execute("DELETE FROM auth_sessions WHERE user_id=?", (user_id,))
         self.conn.commit()
+
+    # ── per-user API tokens (agent connect) ─────────────────────────────────────
+    def create_api_token(self, user_id: str, *, label: str = "") -> dict:
+        """Mint a long-lived per-user bearer token for an agent/automation client.
+
+        The raw token is returned ONCE; only its SHA-256 hash is persisted (see
+        :data:`api_tokens`), so a stolen users DB yields no usable secrets. Bound to
+        ``user_id``; a disabled user's tokens are refused by :meth:`resolve_api_token`.
+        """
+        tok = secrets.token_urlsafe(32)
+        tid = "tok_" + secrets.token_hex(8)
+        now = time.time()
+        label = (label or "")[:120]
+        self.conn.execute(
+            "INSERT INTO api_tokens (id, user_id, label, token_hash, created_at) "
+            "VALUES (?,?,?,?,?)", (tid, user_id, label, _hash_token(tok), now))
+        self.conn.commit()
+        return {"id": tid, "label": label, "created_at": now,
+                "last_used_at": None, "revoked": 0, "token": tok}
+
+    def resolve_api_token(self, token: str) -> Optional[dict]:
+        """Resolve a bearer API token to its user, or ``None``. Rejects revoked tokens
+        and tokens whose owner is disabled. Best-effort stamps ``last_used_at``."""
+        if not token:
+            return None
+        row = self.conn.execute(
+            "SELECT t.id, t.user_id, t.revoked, u.disabled FROM api_tokens t "
+            "JOIN users u ON u.id = t.user_id WHERE t.token_hash=?",
+            (_hash_token(token),)).fetchone()
+        if row is None or row["revoked"] or row["disabled"]:
+            return None
+        try:
+            self.conn.execute("UPDATE api_tokens SET last_used_at=? WHERE id=?",
+                              (time.time(), row["id"]))
+            self.conn.commit()
+        except sqlite3.Error:
+            pass
+        return self.get_user(row["user_id"])
+
+    def list_api_tokens(self, user_id: str) -> list:
+        rows = self.conn.execute(
+            "SELECT id, label, created_at, last_used_at, revoked FROM api_tokens "
+            "WHERE user_id=? ORDER BY created_at DESC", (user_id,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def revoke_api_token(self, user_id: str, token_id: str) -> bool:
+        """Revoke one of *user_id*'s own tokens (scoped to the caller so a member can't
+        revoke another member's). Returns True if a row was affected."""
+        cur = self.conn.execute(
+            "UPDATE api_tokens SET revoked=1 WHERE id=? AND user_id=? AND revoked=0",
+            (token_id, user_id))
+        self.conn.commit()
+        return cur.rowcount > 0
 
     # ── team audit log ─────────────────────────────────────────────────────────
     def record_event(self, action: str, *, actor_id: Optional[str] = None,
