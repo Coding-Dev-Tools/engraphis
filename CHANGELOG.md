@@ -5,6 +5,22 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+- **Agent Connect (Team): connect agents to a hosted instance instead of running locally.**
+  Team members mint a per-user API token from the dashboard and point their agent at the
+  instance's HTTP API to store memories in the cloud v2 store (the same DB the dashboard
+  reads). New: `POST /api/remember` (Team-gated, mirrors the local `engraphis_remember`
+  MCP tool's params), per-user bearer-token endpoints (`POST /api/auth/token`,
+  `GET /api/auth/tokens`, `DELETE /api/auth/token/{id}`), and `GET /api/auth/connect-info`
+  to verify a token + discover the API base. The dashboard auth gate now accepts a
+  per-user bearer token exactly like a cookie session (bound to the member for role +
+  personal-folder authz); disabled members' tokens are refused instantly. Tokens are
+  SHA-256 hashed at rest (raw token shown once). A free / lapsed instance returns `402`
+  on `/api/remember`, so a Team license is required to host team agents. See
+  `docs/AGENT_CONNECT.md`. (`tests/test_agent_connect.py`.)
+  *Note:* MCP-over-HTTP at `/mcp` is deferred to a follow-up (needs a service-injection
+  refactor of `mcp_server.py` to avoid a second SQLite writer); agents use the HTTP API.
+
 ## [0.9.5] - 2026-07-14
 
 ### Changed
