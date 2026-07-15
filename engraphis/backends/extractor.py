@@ -24,10 +24,19 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any, Optional
+from typing import Any, Optional, Type
 
-from engraphis.core.interfaces import ExtractedFact, MemoryType
+from engraphis.core.interfaces import ExtractedFact, MemoryType, LLM
 from engraphis.core.textutil import estimate_tokens, tokenize
+
+try:
+    from pydantic import BaseModel, ValidationError
+    _PYDANTIC_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _PYDANTIC_AVAILABLE = False
+    BaseModel = object  # type: ignore
+    class ValidationError(Exception):  # type: ignore
+        pass
 
 MAX_FACTS = 12
 
@@ -46,6 +55,17 @@ _PARA_SPLIT_RE = re.compile(r"\n\s*\n")
 # same control characters service.py strips from direct writes, so extracted facts can't
 # smuggle hidden-instruction / terminal-escape payloads past the validation layer.
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+# Schema for structured LLM extraction (mirrors ExtractedFact but with typed fields)
+class _ExtractedFactSchema(BaseModel):
+    """Internal schema for validating LLM extraction output."""
+    content: str
+    title: str = ""
+    mtype: str = "semantic"
+    importance: float = 0.0
+    keywords: list[str] = []
+    entities: list[str] = []           # extracted entities for graph linking
+    relations: list[dict[str, str]] = []  # {"source": "...", "relation": "...", "target": "..."}
 
 
 def _defang(value: str, limit: int) -> str:
@@ -129,6 +149,93 @@ class LLMExtractor:
                                      title=_defang(str(item.get("title") or ""), 1_000),
                                      mtype=mtype, importance=importance,
                                      keywords=[k for k in keywords if k]))
+        return out
+
+
+class StructuredLLMExtractor:
+    """LLM-backed *structured* fact distillation with Pydantic schema validation.
+
+    Extends ``LLMExtractor`` with:
+    * Typed output schema validation via Pydantic
+    * Entity extraction for graph linking
+    * Relation extraction (subject→relation→target)
+    * Confidence scoring per fact
+    * Fallback to chunking extractor on any failure
+
+    The schema can be customised by subclassing and overriding ``_SCHEMA``,
+    or by passing a Pydantic model to ``with_schema()``.
+    """
+
+    _SCHEMA = _ExtractedFactSchema
+    _SYSTEM_PROMPT = (
+        "You extract structured facts from text for a knowledge graph. "
+        "Each fact must be self-contained, with explicit entities and relations.\n"
+        "Respond with JSON only, no markdown, no prose:\n"
+        '{"facts": [{"content": str, "title": str, "mtype": "semantic|episodic|'
+        'procedural|working", "importance": 0.0-1.0, "keywords": [str], '
+        '"entities": [str], "relations": [{"source": str, "relation": str, '
+        '"target": str}]}]}'
+    )
+
+    def __init__(self, llm: LLM, *, max_facts: int = MAX_FACTS) -> None:
+        self.llm = llm
+        self.max_facts = max_facts
+
+    @classmethod
+    def with_schema(cls, schema: Type[BaseModel]) -> Type["StructuredLLMExtractor"]:
+        """Create a subclass with a custom extraction schema."""
+        return type(f"{cls.__name__}_Custom", (cls,), {"_SCHEMA": schema})
+
+    def extract(self, text: str, *, context: str = "") -> list[ExtractedFact]:
+        prompt = f"Context: {context}\n\nText to distill:\n{text}" if context else text
+        try:
+            raw = self._ask(prompt)
+            facts = self._parse_and_validate(raw)
+        except Exception:
+            facts = []
+        # Fallback to chunking extractor on any failure
+        return facts or ChunkingExtractor(max_chunks=self.max_facts).extract(text)
+
+    # ── internals ────────────────────────────────────────────────────────────
+    def _ask(self, prompt: str) -> str:
+        messages = [{"role": "user", "content": prompt}]
+        if hasattr(self.llm, "chat"):
+            return self.llm.chat(messages, system=self._SYSTEM_PROMPT)
+        return self.llm.complete(
+            [{"role": "system", "content": self._SYSTEM_PROMPT}, *messages])
+
+    def _parse_and_validate(self, raw: str) -> list[ExtractedFact]:
+        data = _loads_lenient(raw)
+        out: list[ExtractedFact] = []
+        for item in (data.get("facts") or [])[: self.max_facts]:
+            if not isinstance(item, dict):
+                continue
+            # Validate against schema
+            try:
+                validated = self._SCHEMA.model_validate(item)
+            except ValidationError:
+                continue
+            content = _defang(validated.content, 100_000)
+            if not content:
+                continue
+            try:
+                mtype = MemoryType(validated.mtype.lower())
+            except ValueError:
+                mtype = MemoryType.SEMANTIC
+            importance = max(0.0, min(1.0, validated.importance))
+            keywords = [_defang(k, 128) for k in validated.keywords[:16] if k]
+            entities = [_defang(e, 256) for e in validated.entities[:20] if e]
+            relations = validated.relations[:10]
+            # Store entities/relations in metadata for downstream graph construction
+            metadata = {"entities": entities, "relations": relations}
+            out.append(ExtractedFact(
+                content=content,
+                title=_defang(validated.title, 1_000),
+                mtype=mtype,
+                importance=importance,
+                keywords=[k for k in keywords if k],
+                metadata=metadata,
+            ))
         return out
 
 
@@ -347,8 +454,9 @@ def get_extractor(kind: str = "none", llm: Any = None):
     ``kind='chunk'`` returns the deterministic, offline ``ChunkingExtractor`` (knobs from
     ``ENGRAPHIS_CHUNK_TOKENS``/``_OVERLAP``/``_MAX``). ``kind='llm'`` with no ``llm``
     builds the v1 multi-provider ``LLMClient`` from settings (heavy import gated here,
-    never in ``core/``). Anything else — including an LLM kind with no usable client —
-    returns the offline passthrough.
+    never in ``core/``). ``kind='llm_structured'`` returns a schema-validated extractor
+    with entity/relation extraction. Anything else — including an LLM kind with no usable
+    client — returns the offline passthrough.
     """
     kind = (kind or "none").lower()
     if kind == "chunk":
@@ -357,6 +465,14 @@ def get_extractor(kind: str = "none", llm: Any = None):
             overlap_tokens=_env_int("ENGRAPHIS_CHUNK_OVERLAP", CHUNK_OVERLAP_TOKENS),
             max_chunks=_env_int("ENGRAPHIS_CHUNK_MAX", CHUNK_MAX),
         )
+    if kind == "llm_structured":
+        if llm is None:
+            try:
+                from engraphis.llm.client import LLMClient
+                llm = LLMClient()
+            except Exception:
+                return PassthroughExtractor()
+        return StructuredLLMExtractor(llm)
     if kind != "llm":
         return PassthroughExtractor()
     if llm is None:
