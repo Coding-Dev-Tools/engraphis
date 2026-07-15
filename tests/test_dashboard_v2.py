@@ -823,3 +823,41 @@ def test_personal_folders_are_isolated_per_user(monkeypatch, tmp_path):
                c.get("/api/workspaces", headers=hdr(alice)).json()["workspaces"]}
         assert vis["alice-secret"] == "personal"
         assert vis["team-proj"] == "shared"
+
+
+def test_llm_status_reports_config_without_leaking_key(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as c:
+        monkeypatch.setattr(settings, "llm_provider", "openai")
+        monkeypatch.setattr(settings, "llm_model", "gpt-4o-mini")
+        monkeypatch.setattr(settings, "llm_api_key", "sk-secret-xxx")
+        s = c.get("/api/llm/status").json()
+        assert s["provider"] == "openai" and s["model"] == "gpt-4o-mini"
+        assert s["key_set"] is True and s["configured"] is True
+        # the actual key is never returned — only whether one is set
+        assert "sk-secret-xxx" not in c.get("/api/llm/status").text
+        assert "ENGRAPHIS_LLM_API_KEY=<your-key>" in s["env_snippet"]
+        assert "ENGRAPHIS_EXTRACTOR=llm_structured" in s["env_snippet"]
+
+
+def test_llm_test_reports_clear_error_when_no_key(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as c:
+        monkeypatch.setattr(settings, "llm_api_key", "")
+        r = c.post("/api/llm/test").json()
+        assert r["ok"] is False
+        assert "API key" in r["error"]
+
+
+def test_llm_test_surfaces_ping_result(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as c:
+        monkeypatch.setattr(settings, "llm_api_key", "sk-test")
+        monkeypatch.setattr(settings, "llm_provider", "openai")
+        monkeypatch.setattr(settings, "llm_model", "gpt-4o-mini")
+        import engraphis.llm.client as _lc
+        class _Stub:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def ping(self): return {"ok": True, "reply": "ok", "error": "",
+                                    "provider": "openai", "model": "gpt-4o-mini"}
+        monkeypatch.setattr(_lc, "LLMClient", lambda *a, **k: _Stub())
+        r = c.post("/api/llm/test").json()
+        assert r["ok"] is True and r["reply"] == "ok"

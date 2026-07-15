@@ -187,6 +187,63 @@ def workspaces():
     return _run(service().list_workspaces)
 
 
+# ── LLM connection status + test (dashboard "Connect your LLM" card) ───────────
+
+# Provider → sensible default model, so the dashboard's provider picker can prefill a
+# working model name without the user needing to know the provider's catalogue.
+_LLM_DEFAULT_MODELS = {
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-3-5-sonnet-20241022",
+    "google": "gemini-1.5-flash",
+    "openrouter": "openai/gpt-4o-mini",
+}
+
+
+@router.get("/llm/status")
+def llm_status():
+    """Report the configured LLM provider/model/key presence and the active extractor,
+    plus a ready-to-paste .env snippet for the dashboard's "Connect your LLM" card.
+    Never returns the API key itself — only whether one is set."""
+    provider = settings.llm_provider or "openai"
+    model = settings.llm_model or _LLM_DEFAULT_MODELS.get(provider, "")
+    key_set = bool(settings.llm_api_key)
+    return {
+        "provider": provider,
+        "model": model,
+        "key_set": key_set,
+        "base_url": settings.llm_base_url or "",
+        "extractor": settings.extractor,
+        "configured": key_set and bool(model),
+        "default_models": _LLM_DEFAULT_MODELS,
+        # A copy-paste .env block so the user doesn't have to memorise var names.
+        "env_snippet": (
+            f"ENGRAPHIS_LLM_PROVIDER={provider}\n"
+            f"ENGRAPHIS_LLM_MODEL={model}\n"
+            f"ENGRAPHIS_LLM_API_KEY=<your-key>\n"
+            + (f"ENGRAPHIS_LLM_BASE_URL={settings.llm_base_url}\n" if settings.llm_base_url else "")
+            + ("ENGRAPHIS_EXTRACTOR=llm_structured\n" if key_set else "# set ENGRAPHIS_EXTRACTOR=llm_structured to use it\n")
+        ),
+    }
+
+
+@router.post("/llm/test")
+def llm_test():
+    """Live-test the configured LLM with a tiny completion. POST so the dashboard auth
+    gate (member+ in team mode) applies — testing spends a fraction of a cent of the
+    instance's API credit, so it's not a viewer action. Returns the ping result; never
+    raises (the client's ping() already swallows every failure into ``ok=False``)."""
+    if not settings.llm_api_key:
+        return {"ok": False, "error": "No API key configured. Set ENGRAPHIS_LLM_API_KEY in your .env and restart.",
+                "provider": settings.llm_provider, "model": settings.llm_model}
+    try:
+        from engraphis.llm.client import LLMClient
+        with LLMClient() as llm:
+            return llm.ping()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc),
+                "provider": settings.llm_provider, "model": settings.llm_model}
+
+
 class _CreateWsReq(BaseModel):
     workspace: str
     description: str = ""
