@@ -86,7 +86,7 @@ def create_app() -> FastAPI:
         _mcp_asgi = _mcp_mod.mcp.streamable_http_app()
         _mcp_mod.mcp.settings.streamable_http_path = _prev_path
         _mcp_mgr = _mcp_mod.mcp.session_manager
-    except Exception as _exc:  # noqa: BLE001 - MCP mount stays optional (e.g. mcp not installed)
+    except (Exception, SystemExit) as _exc:  # noqa: BLE001 - MCP mount stays optional
         import sys as _sys
         print("[engraphis] MCP /mcp mount skipped: %s" % _exc, file=_sys.stderr)
 
@@ -100,6 +100,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="Engraphis Dashboard", docs_url="/api/docs",
                   openapi_url="/api/openapi.json", lifespan=_lifespan)
+    app.state.mcp_over_http = _mcp_asgi is not None
     svc = MemoryService.create(
         settings.db_path, embed_model=settings.embed_model,
         embed_dim=settings.embed_dim or 256,

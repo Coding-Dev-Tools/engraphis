@@ -748,25 +748,30 @@ def engraphis_answer(
 
     Runs grounded recall (hybrid vector + lexical + graph + rerank) and returns either:
     * An extractive answer (citations only, deterministic, offline) — always safe.
-    * A synthesised prose answer with inline [n] citations — if ``synthesize=True" and an LLM is configured.
+    * A synthesized prose answer with inline [n] citations — if ``synthesize=True`` and an LLM is configured.
 
-    If evidence is below the support floor, returns ``grounded=false, abstained=true" with a reason — never hallucinates.
+    If evidence is below the support floor, returns ``grounded=false, abstained=true`` with a reason — never hallucinates.
     Every claim is cited with [n] linking to the source memory. The deterministic path never introduces claims not in the sources.
     """
     try:
-        svc = service()
-        result = svc.grounded_recall(query=query, workspace=workspace, repo=repo, k=k,
-                                     min_support=min_support)
-        answer = result.get("answer", {})
+        llm = None
+        if synthesize:
+            try:
+                from engraphis.llm.client import LLMClient
+                llm = LLMClient()
+            except Exception:
+                llm = None  # no configured LLM -> service/engine stays deterministic
+        result = service().grounded_recall(query=query, workspace=workspace, repo=repo, k=k,
+                                           min_support=min_support, llm=llm)
         return _ok({
-            "query": query,
-            "answer": answer.get("answer", ""),
-            "grounded": answer.get("grounded", False),
-            "abstained": answer.get("abstained", True),
-            "reason": answer.get("reason", ""),
-            "support": answer.get("support", 0.0),
-            "synthesized": answer.get("synthesized", False),
-            "citations": answer.get("citations", []),
+            "query": result.get("query", query),
+            "answer": result.get("answer", ""),
+            "grounded": result.get("grounded", False),
+            "abstained": result.get("abstained", True),
+            "reason": result.get("reason", ""),
+            "support": result.get("support", 0.0),
+            "synthesized": result.get("synthesized", False),
+            "citations": result.get("citations", []),
         })
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
