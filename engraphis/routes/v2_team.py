@@ -128,7 +128,8 @@ class TokenReq(BaseModel):
 
 
 def _enabled() -> bool:
-    return os.environ.get("ENGRAPHIS_TEAM_MODE", "").lower() in {"1", "true", "yes", "on"}
+    value = os.environ.get("ENGRAPHIS_TEAM_MODE", "").strip().lower()
+    return value not in {"0", "false", "no", "off"}
 
 
 def _users_db_path(db_path: str) -> str:

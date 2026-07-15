@@ -67,6 +67,35 @@ def test_dashboard_serves_and_bootstraps(monkeypatch, tmp_path):
         assert b["license"]["plan"] == "free"
 
 
+@pytest.mark.parametrize("raw", ["0", " false ", "NO", "Off"])
+def test_team_mode_env_opt_out_parsing(monkeypatch, raw):
+    from engraphis.routes.v2_team import _enabled
+    monkeypatch.setenv("ENGRAPHIS_TEAM_MODE", raw)
+    assert _enabled() is False
+
+
+def test_team_mode_defaults_on_but_auth_wall_waits_for_team_license(monkeypatch, tmp_path):
+    db = str(tmp_path / "dash.db")
+    monkeypatch.setattr(settings, "db_path", db)
+    monkeypatch.setattr(settings, "embed_model", "")
+    monkeypatch.setenv("ENGRAPHIS_EMBED_MODEL", "")
+    monkeypatch.delenv("ENGRAPHIS_TEAM_MODE", raising=False)
+    monkeypatch.setattr(lic, "_LICENSE_FILE", tmp_path / "license.key")
+    monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY", raising=False)
+    lic.current_license(refresh=True)
+    svc = _seed(db)
+    from engraphis.routes import v2_api
+    v2_api.set_service(svc)
+    from engraphis.dashboard_app import create_app
+    with TestClient(create_app()) as c:
+        assert c.get("/api/auth/state").json() == {
+            "enabled": False,
+            "needs_setup": True,
+            "user": None,
+        }
+        assert c.get("/api/bootstrap").status_code == 200
+
+
 def test_recall_why_timeline_and_detail(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as c:
         r = c.get("/api/recall?q=database&workspace=demo").json()
