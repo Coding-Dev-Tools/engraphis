@@ -107,8 +107,29 @@ is exactly "a Team license is required to host team agents."
 
 ## MCP-over-HTTP (`/mcp`)
 
-A streamable-HTTP MCP endpoint at `/mcp` (so MCP-native agents point one URL at the cloud
-instance) is planned but **not yet mounted** — mounting it as-is would spin up a second
-writer to the same SQLite (WAL lock contention). It needs a service-injection refactor of
-`engraphis/mcp_server.py` so it shares the dashboard's `MemoryService`. Until then, agents
-use the HTTP API above (most agents can call HTTP via a tool/MCP-shell).
+A streamable-HTTP MCP endpoint is mounted at `/mcp` on the dashboard, so an **MCP-native
+agent** (Claude Code, Cursor, ...) points one URL at the cloud instance and reuses the same
+v2 store the dashboard reads (the MCP tools share the dashboard's single `MemoryService` —
+no second SQLite writer). It is Team-gated and member-authenticated exactly like
+`/api/remember` (402 without a Team license, 401 without a per-user bearer token).
+
+Agent config (streamable-http transport) — add to your MCP client:
+
+```json
+{
+  "engraphis": {
+    "url": "https://team.engraphis.com/mcp",
+    "headers": { "Authorization": "Bearer <your-token>" }
+  }
+}
+```
+
+The tools are the same as the local `engraphis-mcp` server (`engraphis_remember`,
+`engraphis_recall`, `engraphis_start_session`, ...) — an agent gets identical semantics
+whether it writes locally or to the cloud.
+
+**Security note:** the dashboard's own `_auth_gate` enforces the Team license + member token
+on `/mcp`, so MCP's built-in DNS-rebinding host allowlist (which defaults to localhost only)
+is disabled on the mounted instance — otherwise it would reject a real deployment domain
+like `team.engraphis.com`. Auth is the real boundary here. (The standalone
+`engraphis-mcp-http` launcher is unaffected — it runs in its own process on localhost.)
