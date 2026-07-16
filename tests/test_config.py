@@ -62,3 +62,21 @@ def test_license_server_url_migrates_retired_signed_host(monkeypatch):
     assert config.resolve_license_server_url(
         "https://engraphis-production.up.railway.app/",
     ) == config.DEFAULT_RELAY_URL
+
+
+def test_license_server_url_migrates_retired_cloud_override(monkeypatch):
+    monkeypatch.setenv(
+        "ENGRAPHIS_CLOUD_URL",
+        "https://engraphis-production.up.railway.app/",
+    )
+    assert config.resolve_license_server_url("https://signed.example") == config.DEFAULT_RELAY_URL
+
+
+def test_license_server_url_migrates_retired_relay_override(monkeypatch):
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
+    monkeypatch.setattr(
+        config.settings,
+        "relay_url",
+        "https://engraphis-production.up.railway.app",
+    )
+    assert config.resolve_license_server_url() == config.DEFAULT_RELAY_URL
