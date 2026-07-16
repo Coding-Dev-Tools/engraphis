@@ -176,7 +176,11 @@ def detect_lang(file_path: str) -> Optional[str]:
 
 
 def _content_hash(content: str) -> str:
-    return hashlib.sha1(content.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    # Stable per-symbol change marker retained for compatibility with already indexed
+    # repositories. It is not used as an integrity or security primitive.
+    return hashlib.sha1(
+        content.encode("utf-8", errors="ignore"), usedforsecurity=False
+    ).hexdigest()[:16]
 
 
 # ── tree-sitter backend ────────────────────────────────────────────────────────
