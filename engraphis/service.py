@@ -302,9 +302,9 @@ class MemoryService:
                extractor: Optional[str] = None,
                graph_extractor: Optional[str] = None) -> "MemoryService":
         # extractor / graph_extractor default to the configured backends
-        # (ENGRAPHIS_EXTRACTOR — "none" | "chunk" | "llm"; ENGRAPHIS_GRAPH_EXTRACTOR —
-        # "regex" by default) so every front end — dashboards, auto-maintenance, MCP
-        # server, CLI — honors the config knob without each call site opting in. An
+        # (ENGRAPHIS_EXTRACTOR — "none" | "chunk" | "llm" | "llm_structured";
+        # ENGRAPHIS_GRAPH_EXTRACTOR — "regex" by default) so the dashboard,
+        # auto-maintenance, MCP server, and CLI all honor the same config knob. An
         # explicit value (e.g. extractor="none") still overrides the environment.
         if extractor is None or graph_extractor is None:
             from engraphis.config import settings

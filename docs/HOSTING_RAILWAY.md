@@ -54,19 +54,26 @@ For `https://team.engraphis.com`:
 3. **Variables → add:** `ENGRAPHIS_DASHBOARD_URL=https://team.engraphis.com`
    (with `https://`, no trailing slash) — this is what invite/password-reset emails link to.
 
-## 5. Bootstrap the admin + activate the Team license
-Open your Railway URL. The first `/api/auth/setup` creates the **admin** account (email +
-password) — the bootstrap admin is **exempt** from the license gate, so you can set up with
-no key yet. Then **Settings → License → paste your Team key → Activate**. The Team key sets
-the **seat cap** and is server-validated against the relay; a free/lapsed instance keeps
-the UI working but gates agent-connect to `402`.
+## 5. Activate Team, then bootstrap the admin
+`POST /api/auth/setup` deliberately refuses to create the first admin until a Team
+entitlement is active. Bootstrap it one of two ways:
+
+- **Purchased key:** add `ENGRAPHIS_LICENSE_KEY=<your-key>` in Railway Variables and
+  redeploy. The key is server-validated and sets the seat cap.
+- **Trial:** open the dashboard, choose **Start Team trial**, and open the confirmation
+  link sent to your email. The public license/trial routes work before login.
+
+Once `/api/license` reports `plan: "team"`, the dashboard presents **Create admin
+account**. Create the admin, then use **Settings → License** for later key replacement.
+`/api/license/activate` stays admin-only; a purchased key cannot be pasted through that
+route before the first admin exists.
 
 ## 6. Invite members (seats)
 **Team → Add member** (email + initial password + role: viewer/member/admin). Each member
 is a seat; you can't add more active members than your Team license's seats. Members get an
 invite email pointing at your dashboard URL; they sign in with email + password — **no
-key, no local install**. (Login is deliberately never license-gated, so a lapsed key never
-locks the team out of the UI.)
+key, no local install**. If the license later lapses, the authentication wall stays active
+and existing users can still sign in, while Team-gated operations return `402`.
 
 ## 7. Members connect their agents
 Each member signs in, opens **Settings → Connect your agent → Create token**, and pastes
@@ -97,5 +104,5 @@ unlocks the write endpoints (`402` without it).
   cookies must not transit cleartext.
 - Per-user tokens are SHA-256 hashed at rest; the raw token is shown once. Disabling a
   member instantly invalidates their tokens.
-- `/api/remember` (and `/mcp`) require an active Team license (`402` otherwise) — that's
-  the "a Team license is required to connect" gate. Login is never gated.
+- `/api/remember` and `/mcp` require an active Team license (`402` otherwise).
+  A lapse keeps the authentication wall in place; existing users can still log in.
