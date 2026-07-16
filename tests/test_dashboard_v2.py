@@ -78,6 +78,7 @@ def test_team_mode_env_opt_out_parsing(monkeypatch, raw):
 
 def test_license_background_refresh_retries_configured_key(monkeypatch):
     from engraphis.dashboard_app import _refresh_configured_license
+
     calls = []
     monkeypatch.setattr(lic, "_read_key_material", lambda: "configured-key")
     monkeypatch.setattr(
