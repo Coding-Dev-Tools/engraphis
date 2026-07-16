@@ -674,7 +674,8 @@ async def verify_team_trial(token: str = ""):
             from engraphis.licensing import TRIAL_DAYS
             seats = TEAM_TRIAL_SEATS if plan == "team" else 1
             key = issue_key(
-                email, product_name=plan, seats=seats, days=TRIAL_DAYS, trial=True)
+                email, product_name=plan, seats=seats, days=TRIAL_DAYS,
+                trial=True, record=False)
             conn.execute("DELETE FROM trial_pending WHERE token_hash=?", (token_hash,))
             conn.execute(
                 "INSERT INTO trial_grants(machine_id, email, plan, issued_at) "
@@ -691,4 +692,8 @@ async def verify_team_trial(token: str = ""):
     finally:
         conn.close()
 
+    try:  # best-effort registry write after the trial transaction releases its lock
+        reg.record_issued(key)
+    except Exception:
+        pass
     return HTMLResponse(_trial_verify_success_html(key, plan, TRIAL_DAYS))
