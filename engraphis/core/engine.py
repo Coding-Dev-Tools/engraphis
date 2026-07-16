@@ -376,7 +376,8 @@ class MemoryEngine:
         qvec = self.embedder.embed([query])[0]
         qn = qvec / (float(np.linalg.norm(qvec)) or 1.0)
         sem: dict[str, float] = {}
-        for mid, vec in self.store.iter_vectors(flt, include_invalid=include_invalid):
+        for mid, vec in self.store.iter_vectors(
+                flt, include_invalid=include_invalid, dim=int(qn.shape[0])):
             sem[mid] = float(np.dot(qn, vec))
         q_tokens = tokenize(query)
         out: list[tuple[float, MemoryRecord]] = []

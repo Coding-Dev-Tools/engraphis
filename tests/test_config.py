@@ -37,6 +37,11 @@ def test_service_builds_offline_with_default_rerank_model(monkeypatch):
     assert svc.recall("a durable fact", workspace="w", repo="r")["count"] >= 1
 
 
+def test_embed_dim_defaults_to_default_model_dimension(monkeypatch):
+    monkeypatch.delenv("ENGRAPHIS_EMBED_DIM", raising=False)
+    assert Settings().embed_dim == 384
+
+
 def test_license_server_url_precedence(monkeypatch):
     monkeypatch.setattr(config.settings, "relay_url", "https://relay.example/")
     monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)

@@ -1,66 +1,92 @@
-"""Repair mixed embedding dimensions in engraphis.db.
-
-Root cause: the store accumulated memory vectors of two different dimensions
-(384 from the canonical all-MiniLM-L6-v2 model, and 256 from an earlier
-deterministic-fallback default). ``NumpyVectorIndex.search`` does
-``np.vstack([...])`` over all scope-matching vectors, which raises
-``ValueError: all the input array dimensions ... size 384 ... size 256`` and
-breaks recall fleet-wide.
-
-Fix: re-embed every non-384 vector at the canonical 384 dimension using the
-offline deterministic embedder, restoring dimensional homogeneity so recall
-works again. The backup is the caller's responsibility (cron archive).
-"""
+"""Re-embed vectors whose dimensions differ from the configured embedder."""
 from __future__ import annotations
 
+import argparse
 import sqlite3
-import sys
+import time
+from pathlib import Path
+from typing import Optional
 
 from engraphis.backends.embedder_deterministic import DeterministicEmbedder
+from engraphis.backends.embedder_st import get_embedder
+from engraphis.config import settings
 
-CANON_DIM = 384
+
+def repair(db_path: str, *, model_name: Optional[str] = None,
+           dim: Optional[int] = None, backup: bool = True) -> dict:
+    """Re-embed dimension-mismatched rows into the active model's vector space."""
+    configured_model = settings.embed_model if model_name is None else model_name
+    embedder = get_embedder(configured_model or None, dim or settings.embed_dim or 384)
+    if configured_model and isinstance(embedder, DeterministicEmbedder):
+        raise RuntimeError(
+            "configured embedder %r is unavailable; install its dependency before repair"
+            % configured_model)
+
+    path = Path(db_path).expanduser().resolve()
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    backup_path = None
+    try:
+        target_dim = int(embedder.dim)
+        rows = conn.execute(
+            "SELECT v.id, m.title, m.content "
+            "FROM mem_vectors v JOIN memories m ON m.id=v.id "
+            "WHERE v.dim!=? ORDER BY v.id",
+            (target_dim,),
+        ).fetchall()
+        if rows and backup:
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+            backup_path = path.with_name("%s.embed-repair-%s.bak" % (path.name, stamp))
+            backup_conn = sqlite3.connect(str(backup_path))
+            try:
+                conn.backup(backup_conn)
+            finally:
+                backup_conn.close()
+
+        model = configured_model or "deterministic"
+        with conn:
+            for start in range(0, len(rows), 128):
+                batch = rows[start:start + 128]
+                texts = [
+                    ("%s\n%s" % (row["title"] or "", row["content"] or "")).strip()
+                    for row in batch
+                ]
+                vectors = embedder.embed(texts)
+                conn.executemany(
+                    "UPDATE mem_vectors SET dim=?, vector=?, model=? WHERE id=?",
+                    [(target_dim, vector.tobytes(), model, row["id"])
+                     for row, vector in zip(batch, vectors)],
+                )
+
+        by_dim = {
+            int(row[0]): int(row[1])
+            for row in conn.execute(
+                "SELECT dim, COUNT(*) FROM mem_vectors GROUP BY dim").fetchall()
+        }
+        return {
+            "repaired": len(rows),
+            "target_dim": target_dim,
+            "by_dim": by_dim,
+            "backup": str(backup_path) if backup_path else None,
+        }
+    finally:
+        conn.close()
 
 
-def repair(db_path: str) -> dict:
-    emb = DeterministicEmbedder(CANON_DIM)
-    con = sqlite3.connect(db_path)
-    con.row_factory = sqlite3.Row
-    cur = con.cursor()
-
-    # Memory text source: title + content (matches write-path embedding text).
-    rows = cur.execute(
-        "SELECT v.id AS id, m.title AS title, m.content AS content "
-        "FROM mem_vectors v JOIN memories m ON m.id = v.id "
-        "WHERE v.dim <> ?",
-        (CANON_DIM,),
-    ).fetchall()
-
-    n = 0
-    for r in rows:
-        text = f"{r['title'] or ''}\n{r['content'] or ''}".strip()
-        vec = emb.embed([text])[0]
-        norm = float(__import__("numpy").linalg.norm(vec))
-        if norm > 0:
-            vec = vec / norm
-        cur.execute(
-            "UPDATE mem_vectors SET dim=?, vector=?, model='' WHERE id=?",
-            (CANON_DIM, vec.tobytes(), r["id"]),
-        )
-        n += 1
-
-    con.commit()
-
-    by_dim = {}
-    for dim, in cur.execute("SELECT dim FROM mem_vectors"):
-        by_dim[dim] = by_dim.get(dim, 0) + 1
-    con.close()
-    return {"repaired": n, "by_dim": by_dim}
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Repair vectors whose dimensions differ from the active embedder")
+    parser.add_argument(
+        "db_path", nargs="?",
+        default=str(Path(__file__).resolve().parents[1] / "engraphis.db"))
+    parser.add_argument("--model", default=None, help="override ENGRAPHIS_EMBED_MODEL")
+    parser.add_argument("--dim", type=int, default=None,
+                        help="fallback dimension when no model is configured")
+    parser.add_argument("--no-backup", action="store_true")
+    args = parser.parse_args()
+    print(repair(args.db_path, model_name=args.model, dim=args.dim,
+                 backup=not args.no_backup))
 
 
 if __name__ == "__main__":
-    import os
-
-    p = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "engraphis.db")
-    print("repairing:", p)
-    print(repair(p))
+    main()
