@@ -164,9 +164,11 @@ settings = Settings()
 
 def resolve_license_server_url(signed_url: str = "") -> str:
     """Resolve the license server, including known vendor-host migrations."""
-    override = _env("ENGRAPHIS_CLOUD_URL", "").rstrip("/")
-    signed = (signed_url or "").strip().rstrip("/")
-    if signed in RETIRED_RELAY_URLS:
-        signed = ""
-    relay = (settings.relay_url or "").strip().rstrip("/")
+    def canonicalize(url: str) -> str:
+        normalized = (url or "").strip().rstrip("/")
+        return DEFAULT_RELAY_URL if normalized in RETIRED_RELAY_URLS else normalized
+
+    override = canonicalize(_env("ENGRAPHIS_CLOUD_URL", ""))
+    signed = canonicalize(signed_url)
+    relay = canonicalize(settings.relay_url)
     return override or signed or relay
