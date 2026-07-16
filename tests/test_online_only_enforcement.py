@@ -136,9 +136,9 @@ def test_cached_lease_survives_server_outage(monkeypatch):
     _grant(monkeypatch)
     monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _key())
     assert has_feature("analytics")                       # obtains + caches the lease
-    def _boom(*a, **k):
-        raise AssertionError("must not re-hit the server while the lease is valid")
-    monkeypatch.setattr(cl, "register", _boom)
+    # A transient outage returns no lease but is not an authoritative denial; the cached
+    # signed lease remains valid offline grace until its TTL expires.
+    monkeypatch.setattr(cl, "register", lambda *a, **k: None)
     lic._cached = None
     lic._cache_recheck_at = 0
     assert has_feature("analytics")                       # served from the cached lease
@@ -188,6 +188,9 @@ def test_request_trial_key_posts_plan(monkeypatch):
 # ── recheck cadence: every paid license re-validates against the server ───────────────
 
 def test_every_paid_license_gets_rolling_recheck():
-    # Free tier: no rolling recheck; paid licenses re-validate against the server.
-    # TODO: assert free tier skips recheck and paid tier triggers a server recheck.
-    pass
+    now = 1_000.0
+    assert lic._license_recheck_at(License.free(), now=now) == float("inf")
+    assert lic._license_recheck_at(
+        License(plan="pro"), now=now) == now + lic._CLOUD_RECHECK_SECONDS
+    assert lic._license_recheck_at(
+        License(plan="team", expires=now + 30), now=now) == now + 30

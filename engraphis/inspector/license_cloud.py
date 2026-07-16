@@ -662,13 +662,20 @@ async def verify_team_trial(token: str = ""):
             mid, email, plan = row["machine_id"], row["email"], row["plan"]
             existing = conn.execute(
                 "SELECT 1 FROM trial_grants WHERE machine_id=?", (mid,)).fetchone()
-            conn.execute("DELETE FROM trial_pending WHERE token_hash=?", (token_hash,))
             if existing:
+                conn.execute(
+                    "DELETE FROM trial_pending WHERE token_hash=?", (token_hash,))
                 conn.execute("COMMIT")
                 return HTMLResponse(
                     _trial_verify_error_html(
                         "The free trial has already been used on this device."),
                     status_code=409)
+            from engraphis.inspector.webhooks import issue_key
+            from engraphis.licensing import TRIAL_DAYS
+            seats = TEAM_TRIAL_SEATS if plan == "team" else 1
+            key = issue_key(
+                email, product_name=plan, seats=seats, days=TRIAL_DAYS, trial=True)
+            conn.execute("DELETE FROM trial_pending WHERE token_hash=?", (token_hash,))
             conn.execute(
                 "INSERT INTO trial_grants(machine_id, email, plan, issued_at) "
                 "VALUES (?,?,?,?)", (mid, email, plan, now))
@@ -684,11 +691,4 @@ async def verify_team_trial(token: str = ""):
     finally:
         conn.close()
 
-    from engraphis.inspector.webhooks import issue_key
-    from engraphis.licensing import TRIAL_DAYS
-    # Team trials are always TEAM_TRIAL_SEATS (5) for TRIAL_DAYS (3) — unconditionally,
-    # not derived from any request input (there is none to derive from; see the
-    # constant's docstring above). Pro trials stay single-seat.
-    seats = TEAM_TRIAL_SEATS if plan == "team" else 1
-    key = issue_key(email, product_name=plan, seats=seats, days=TRIAL_DAYS, trial=True)
     return HTMLResponse(_trial_verify_success_html(key, plan, TRIAL_DAYS))

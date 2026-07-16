@@ -44,6 +44,14 @@ def _cloud_env(monkeypatch, tmp_path):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _reset_api_token():
+    """Ensure settings.api_token is clean for each test (prevents cross-test leakage)."""
+    original = settings.api_token
+    yield
+    settings.api_token = original
+
+
 def _key(plan="pro", email="buyer@example.com", *, seats=1, expires_in_days=30):
     now = time.time()
     exp = None if expires_in_days is None else int(now + expires_in_days * 86400)
@@ -173,6 +181,24 @@ def test_cloud_gate_allows_then_fails_closed_after_revoke(monkeypatch, tmp_path)
     assert allowed2 is False and "cloud" in reason.lower()
 
 
+def test_cloud_gate_revocation_overrides_a_valid_cached_lease(monkeypatch):
+    c = _app()
+    _wire_register_to(c, monkeypatch)
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    key = _key()
+    parsed = parse_key(key)
+    assert cloud_license.gate(parsed, key)[0] is True
+    assert cloud_license._LEASE_FILE.exists()
+
+    def denied(*args, **kwargs):
+        raise cloud_license.Revoked("denied")
+    monkeypatch.setattr(cloud_license, "register", denied)
+    allowed, reason = cloud_license.gate(parsed, key)
+
+    assert allowed is False and "denied" in reason
+    assert not cloud_license._LEASE_FILE.exists()
+
+
 def test_current_license_enforces_cloud_mode(monkeypatch):
     c = _app()
     _wire_register_to(c, monkeypatch)
@@ -203,9 +229,8 @@ def test_register_raises_revoked_on_server_denial(monkeypatch):
 
 
 def test_revalidate_revoked_deletes_lease(monkeypatch):
-    # A paid key with a valid local lease: gate short-circuits (no server hit), but the
-    # background revalidate contacts the server and, on a denial, DELETES the lease so the
-    # next gate call must re-register and be denied. This is the revocation-latency fix.
+    # A paid key with a valid local lease is periodically checked online. Background
+    # revalidation uses the same denial path and deletes the lease immediately.
     c = _app()
     _wire_register_to(c, monkeypatch)
     monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
@@ -519,6 +544,10 @@ def test_seat_cap_holds_under_concurrent_claims():
     file-backed DB; the atomic BEGIN IMMEDIATE path must grant exactly `seats`, never more,
     and never surface a 'database is locked' error (busy_timeout serializes writers)."""
     import threading
+    # Pre-create schema/WAL before the barrier. Otherwise a cold SQLite connection can do
+    # journal setup while other workers are already waiting, turning a timing regression
+    # into a hung test instead of a failure.
+    reg.connect().close()
     lic = parse_key(_key(plan="team", seats=3))
     n = 12
     barrier = threading.Barrier(n)
@@ -527,7 +556,7 @@ def test_seat_cap_holds_under_concurrent_claims():
     def worker(i):
         conn = reg.connect()                       # each thread its own connection
         try:
-            barrier.wait()                         # release all claimants simultaneously
+            barrier.wait(timeout=10)               # release all claimants simultaneously
             reg.claim_seat(conn, lic, "dev-%d" % i)
             results[i] = "ok"
         except LicenseError:
@@ -537,12 +566,13 @@ def test_seat_cap_holds_under_concurrent_claims():
         finally:
             conn.close()
 
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    threads = [threading.Thread(target=worker, args=(i,), daemon=True) for i in range(n)]
     for th in threads:
         th.start()
     for th in threads:
-        th.join()
+        th.join(timeout=20)
 
+    assert not any(th.is_alive() for th in threads), results
     assert not any(str(r).startswith("err:") for r in results), results
     assert results.count("ok") == 3, results       # exactly the cap, never overshoot
     conn = reg.connect()
@@ -810,6 +840,31 @@ def _start_and_confirm(c, captured, machine_id, email="dev@example.com", plan="t
     v = c.get("/license/v1/start-trial/verify", params={"token": token})
     assert v.status_code == 200, v.text
     return _key_from_verify_html(v.text)
+
+
+def test_trial_signing_failure_does_not_consume_magic_link(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+
+    c = _app()
+    captured = _capture_verify_url(monkeypatch)
+    assert c.post("/license/v1/start-trial", json={
+        "machine_id": "dev-signing-retry",
+        "email": "retry@example.com",
+        "plan": "team",
+    }).status_code == 200
+    token = _token_from_url(captured["url"])
+    issue_key = WH.issue_key
+    monkeypatch.setattr(
+        WH, "issue_key",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("signing failed")))
+
+    with pytest.raises(RuntimeError, match="signing failed"):
+        c.get("/license/v1/start-trial/verify", params={"token": token})
+
+    monkeypatch.setattr(WH, "issue_key", issue_key)
+    retry = c.get("/license/v1/start-trial/verify", params={"token": token})
+    assert retry.status_code == 200
+    assert parse_key(_key_from_verify_html(retry.text)).is_trial is True
 
 
 def test_start_team_trial_issues_signed_team_key(monkeypatch):

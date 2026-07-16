@@ -666,7 +666,9 @@ def _issue_and_email(email_addr: str, product_name: str, seats: int,
     """Mint a signed key and email it. On ANY delivery failure, persist the key to
     the 0600 fallback file (never the log) and still return it, so a paid or trial
     key is never lost and the webhook can 202 without a Polar retry-storm."""
-    key = issue_key(email_addr, product_name=product_name, seats=seats, days=days)
+    key = issue_key(
+        email_addr, product_name=product_name, seats=seats, days=days,
+        trial=is_trial)
     label = _plan_label(product_name)
     try:
         send_license_email(email_addr, key, product_name=label, is_trial=is_trial)
