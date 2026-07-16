@@ -394,13 +394,16 @@ class SyncEngine:
 
         Includes invalidated memories on purpose: a closed ``valid_to`` is state that
         must propagate so a forget/correct on one device reaches the others."""
+        ws_row = self.store.conn.execute(
+            "SELECT name FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
+        ws_name = ws_row["name"] if ws_row else "default"
+        if self.allowed_workspaces is not None and ws_name not in self.allowed_workspaces:
+            raise SyncError("workspace %r is not authorized for sync" % ws_name)
         flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id)
         # 'secret'-flagged memories never leave the device — sync is the first feature to
         # transmit memory content off-box, so this is the first place the label bites.
         mems = [m for m in self.store.list_memories(flt, include_invalid=True)
                 if m.sensitivity != "secret"]
-        ws_row = self.store.conn.execute(
-            "SELECT name FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
         if repo_id is not None:
             repo_rows = self.store.conn.execute(
                 "SELECT id, name FROM repos WHERE workspace_id=? AND id=?",
@@ -413,7 +416,7 @@ class SyncEngine:
         return {
             "format": SYNC_FORMAT, "version": SYNC_VERSION,
             "device_id": self.device_id, "created_at": now_ts(),
-            "workspace_name": ws_row["name"] if ws_row else "default",
+            "workspace_name": ws_name,
             "repos": {r["id"]: r["name"] for r in repo_rows},
             "memories": [record_to_dict(m) for m in mems],
             "mem_links": [{"a": ln["a"], "b": ln["b"], "relation": ln["relation"]}
@@ -517,6 +520,12 @@ class SyncEngine:
                 # across the scope boundary (SECURITY.md §3 confinement).
                 report["rejected"] += 1
                 continue
+            if (existing is not None and only_repo_id is not None
+                    and existing.repo_id != only_repo_id):
+                # The incoming row's claimed repo cannot re-home an existing memory from
+                # another repo during a repo-restricted sync.
+                report["rejected"] += 1
+                continue
             if existing is None:
                 if not dry_run:
                     self._write(rec)
@@ -558,6 +567,9 @@ class SyncEngine:
             if local_ws is not None and (ma.workspace_id != local_ws
                                          or mb.workspace_id != local_ws):
                 continue
+            if (only_repo_id is not None
+                    and (ma.repo_id != only_repo_id or mb.repo_id != only_repo_id)):
+                continue
             if self.store.has_link(a, b, relation=rel):
                 continue
             if not dry_run:
@@ -593,12 +605,10 @@ class SyncEngine:
 
         Full-state and idempotent, so it is safe to run on any cadence (cron, a
         file-watcher, or by hand) and safe to interrupt. Returns a per-peer report."""
-        ws_row = self.store.conn.execute(
-            "SELECT name FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
-        ws_name = ws_row["name"] if ws_row else "default"
+        bundle = self.export_bundle(workspace_id, repo_id=repo_id)
+        ws_name = bundle["workspace_name"]
 
         own_name = "bundle-%s.json" % self.device_id
-        bundle = self.export_bundle(workspace_id, repo_id=repo_id)
         pushed = False
         if not dry_run:
             transport.push(own_name, json.dumps(bundle).encode("utf-8"))
