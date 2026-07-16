@@ -5,6 +5,7 @@ precision win on top of hybrid retrieval) can be turned on by config
 instead of only in code. The default must stay empty so the offline/numpy-only CI path is
 unchanged (empty -> None -> IdentityReranker, no torch).
 """
+from engraphis import config
 from engraphis.config import Settings
 
 
@@ -34,3 +35,25 @@ def test_service_builds_offline_with_default_rerank_model(monkeypatch):
     svc = MemoryService.create(":memory:", rerank_model=(Settings().rerank_model or None))
     assert svc.remember("a durable fact", workspace="w", repo="r")["stored"] is True
     assert svc.recall("a durable fact", workspace="w", repo="r")["count"] >= 1
+
+
+def test_license_server_url_precedence(monkeypatch):
+    monkeypatch.setattr(config.settings, "relay_url", "https://relay.example/")
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
+    assert config.resolve_license_server_url() == "https://relay.example"
+    assert config.resolve_license_server_url(
+        "https://signed.example/",
+    ) == "https://signed.example"
+
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "https://override.example/")
+    assert config.resolve_license_server_url(
+        "https://signed.example/",
+    ) == "https://override.example"
+
+
+def test_license_server_url_migrates_retired_signed_host(monkeypatch):
+    monkeypatch.setattr(config.settings, "relay_url", config.DEFAULT_RELAY_URL)
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
+    assert config.resolve_license_server_url(
+        "https://engraphis-production.up.railway.app/",
+    ) == config.DEFAULT_RELAY_URL
