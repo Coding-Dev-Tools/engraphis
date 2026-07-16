@@ -1,3 +1,4 @@
+import re
 import time
 
 from engraphis.core.consolidate import consolidate
@@ -42,6 +43,22 @@ def test_consolidate_is_idempotent():
     assert len(first["digests_created"]) == 1
     assert len(second["digests_created"]) == 0
     assert second["skipped_already_consolidated"] >= 1
+
+
+def test_consolidate_processes_new_members_of_an_existing_cluster():
+    eng, wid, rid = _engine_with_repeats()
+    consolidate(eng, workspace_id=wid, repo_id=rid)
+    new_ids = [
+        eng.remember(
+            f"Build failed on the flaky network integration test in CI run {run}.",
+            workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC,
+            resolve_conflicts=False)
+        for run in (404, 505, 606)
+    ]
+
+    report = consolidate(eng, workspace_id=wid, repo_id=rid)
+
+    assert set(report["digests_created"][0]["consolidates"]) == set(new_ids)
 
 
 def test_consolidate_dry_run_changes_nothing():
@@ -100,6 +117,132 @@ def test_consolidate_llm_failure_falls_back_to_deterministic():
     report = consolidate(eng, workspace_id=wid, repo_id=rid, llm=BrokenLLM())
     digest = eng.store.get_memory(report["digests_created"][0]["id"])
     assert "Recurring pattern" in digest.content
+
+
+# ── structured LLM consolidation (schema-first, graph-fed, safe fallback) ─────
+
+class _StructuredConsolidationLLM:
+    def extract_json(self, prompt, schema):
+        self.prompt = prompt
+        self.schema = schema
+        source_ids = re.findall(r"ID: (mem_[A-Z0-9]+)", prompt)
+        return {
+            "subject": "Acme API auth tokens",
+            "facts": [{
+                "content": "Acme API uses PASETO tokens after JWT key rotation failures.",
+                "title": "Acme API auth standard",
+                "confidence": 0.91,
+                "importance": 0.8,
+                "keywords": ["Acme API", "PASETO", "JWT"],
+                "entities": ["Acme API", "PASETO", "JWT"],
+                "relations": [{"source": "Acme API", "relation": "uses",
+                               "target": "PASETO", "confidence": 0.9}],
+                "source_ids": source_ids[:2],
+            }],
+        }
+
+
+class _BrokenStructuredConsolidationLLM:
+    def extract_json(self, prompt, schema):
+        raise RuntimeError("provider down")
+
+
+def _engine_with_auth_repeats():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    for run in (101, 202, 303):
+        eng.remember(
+            f"Auth outage: Acme API switched from JWT to PASETO after key rotation "
+            f"failed in CI run {run}.",
+            workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC,
+            resolve_conflicts=False)
+    return eng, wid, rid
+
+
+def test_structured_consolidation_writes_typed_fact_graph_and_can_supersede_sources():
+    eng, wid, rid = _engine_with_auth_repeats()
+    llm = _StructuredConsolidationLLM()
+    report = consolidate(eng, workspace_id=wid, repo_id=rid, structured=True,
+                         supersede_sources=True, llm=llm)
+
+    assert report["structured"]["attempted"] == 1
+    assert report["structured"]["succeeded"] == 1
+    entry = report["digests_created"][0]
+    assert entry["structured"] is True
+    digest = eng.store.get_memory(entry["id"])
+    assert digest.mtype == MemoryType.SEMANTIC
+    assert digest.metadata["provenance"]["source"] == "structured_consolidation"
+    assert digest.metadata["structured_consolidation"]["confidence"] == 0.91
+    assert digest.metadata["entities"] == ["Acme API", "PASETO", "JWT"]
+    assert digest.metadata["relations"][0]["relation"] == "uses"
+    assert "source_ids" in digest.metadata["provenance"]
+    llm_audit = digest.metadata["structured_consolidation"]["llm"]
+    assert len(llm_audit["prompt_sha256"]) == 64
+    assert len(llm_audit["response_sha256"]) == 64
+
+    # Structured metadata feeds graph nodes/edges even without the regex graph extractor.
+    ents = {e.name: e.id for e in eng.store.list_entities(
+        SearchFilter(workspace_id=wid, repo_id=rid))}
+    assert {"Acme API", "PASETO", "JWT"} <= set(ents)
+    edges = eng.store.edges_in_scope(SearchFilter(workspace_id=wid, repo_id=rid))
+    assert any(e.src == ents["Acme API"] and e.dst == ents["PASETO"]
+               and e.relation == "uses" for e in edges)
+
+    # Supersession is explicit and opt-in: source episodes leave live recall but remain
+    # inspectable in history.
+    live_ids = {m.id for m in eng.store.list_memories(SearchFilter(workspace_id=wid), limit=20)}
+    for source_id in entry["superseded_sources"]:
+        assert source_id not in live_ids
+        assert eng.store.get_memory(source_id).valid_to is not None
+    episodes = [
+        memory for memory in eng.store.list_memories(
+            SearchFilter(workspace_id=wid), include_invalid=True, limit=20)
+        if memory.mtype == MemoryType.EPISODIC
+    ]
+    assert len(entry["superseded_sources"]) == 2
+    assert sum(memory.valid_to is None for memory in episodes) == 1
+
+
+
+def test_structured_consolidation_failure_falls_back_to_deterministic_digest():
+    eng, wid, rid = _engine_with_auth_repeats()
+    report = consolidate(eng, workspace_id=wid, repo_id=rid, structured=True,
+                         llm=_BrokenStructuredConsolidationLLM())
+    assert report["structured"]["attempted"] == 1
+    assert report["structured"]["fallbacks"] == 1
+    digest = eng.store.get_memory(report["digests_created"][0]["id"])
+    assert "Recurring pattern" in digest.content
+    assert digest.metadata["provenance"]["source"] == "consolidation"
+
+
+def test_structured_consolidation_rejects_facts_without_prompt_sources():
+    class HallucinatedSourceLLM:
+        def extract_json(self, prompt, schema):
+            return {
+                "subject": "auth",
+                "facts": [{
+                    "content": "Use an invented authentication standard.",
+                    "title": "Invented standard",
+                    "confidence": 0.9,
+                    "source_ids": ["mem_NOT_IN_PROMPT"],
+                }],
+            }
+
+    eng, wid, rid = _engine_with_auth_repeats()
+    report = consolidate(eng, workspace_id=wid, repo_id=rid, structured=True,
+                         llm=HallucinatedSourceLLM())
+
+    assert report["structured"]["succeeded"] == 0
+    assert report["structured"]["fallbacks"] == 1
+    digest = eng.store.get_memory(report["digests_created"][0]["id"])
+    assert digest.metadata["provenance"]["source"] == "consolidation"
+
+
+def test_supersede_sources_requires_structured_mode():
+    eng, wid, rid = _engine_with_auth_repeats()
+    with pytest.raises(ValueError, match="requires structured"):
+        consolidate(eng, workspace_id=wid, repo_id=rid, supersede_sources=True)
 
 
 # ── compaction token-accounting (made a number) ───────
@@ -220,6 +363,27 @@ def test_profiles_dry_run_changes_nothing():
     assert report["profiles_created"] and "would_profile" in report["profiles_created"][0]
 
 
+def test_profiles_do_not_match_entity_names_inside_other_words():
+    from engraphis.core.consolidate import consolidate_profiles
+    from engraphis.core.interfaces import Node
+
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    eng.store.upsert_entity(Node(
+        id="", name="Redis", ntype="tech", workspace_id=wid, repo_id=rid))
+    for run in range(3):
+        eng.remember(
+            f"We rediscovered an unrelated archive in run {run}.",
+            workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC,
+            resolve_conflicts=False)
+
+    report = consolidate_profiles(
+        eng, workspace_id=wid, repo_id=rid, min_mentions=3)
+
+    assert report["profiles_created"] == []
+
+
 # ── scheduled report artifact (scripts/consolidate.py --report, Team-gated) ──────────
 
 import pytest  # noqa: E402
@@ -305,6 +469,14 @@ def test_report_flag_renders_html_when_extension_says_so(_license_env, tmp_path)
     assert "Engraphis consolidation report" in page
     assert "dry run — nothing changed" in page
     assert "<script" not in page and "src=" not in page   # self-contained here too
+
+
+def test_supersede_sources_cli_flag_requires_structured(_license_env, tmp_path, capsys):
+    db = _seed_db(tmp_path)
+    assert consolidate_main([
+        "--db", str(db), "--workspace", "w", "--supersede-sources",
+    ]) == 2
+    assert "requires --structured" in capsys.readouterr().err
 
 
 def test_sweep_without_report_needs_no_license(_license_env, tmp_path):
