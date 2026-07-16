@@ -44,6 +44,16 @@ mcp = FastMCP("engraphis_mcp")
 _service: Optional[MemoryService] = None
 
 
+def set_service(svc: MemoryService) -> None:
+    """Inject an external MemoryService (e.g. the dashboard's) so the MCP tools share
+    ONE writer with the dashboard instead of opening a second connection to the same
+    SQLite file (which would cause WAL ``database is locked`` contention — the exact
+    problem ``scripts/mcp_server_http.py`` was written to avoid). When not injected,
+    :func:`service` lazily builds a local service (standalone stdio/HTTP MCP)."""
+    global _service
+    _service = svc
+
+
 def service() -> MemoryService:
     """Lazily build the service so server startup is instant (model loads on first use)."""
     global _service
@@ -66,6 +76,27 @@ def _err(exc: Exception) -> str:
     if isinstance(exc, ValidationError):
         return f"Error: {exc}"
     return f"Error: {type(exc).__name__}: {exc}"
+
+
+_READ_ONLY_TOOLS = frozenset({
+    "engraphis_recall",
+    "engraphis_recall_grounded",
+    "engraphis_why",
+    "engraphis_timeline",
+    "engraphis_recall_proactive",
+    "engraphis_search_code",
+    "engraphis_stats",
+})
+_ADMIN_TOOLS = frozenset({"engraphis_consolidate"})
+
+
+def minimum_role(tool_name: str) -> str:
+    """Dashboard role required for an MCP tool; unknown/new tools default to member."""
+    if tool_name in _ADMIN_TOOLS:
+        return "admin"
+    if tool_name in _READ_ONLY_TOOLS:
+        return "viewer"
+    return "member"
 
 
 @mcp.tool(
