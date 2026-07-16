@@ -436,22 +436,19 @@ def _hour_bucket(now: Optional[float] = None) -> str:
 
 
 def _client_ip(request: Request) -> str:
-    """Best-effort real client IP behind a proxy.
+    """Return the direct peer unless that peer is configured as a forwarding proxy.
 
-    Railway (and any PaaS fronting this relay) terminates TLS and forwards the
-    original address in ``X-Forwarded-For``; ``request.client.host`` there is just the
-    proxy. Trusts the FIRST address in that header (the original client, by
-    convention) when present, falling back to the direct peer for local/dev. Same
-    honesty-about-limits as ``_clean_machine_id``: a soft identifier good enough to
-    rate-limit a naive script hammering one address, not a defense against an attacker
-    who rotates source IPs on purpose.
+    ``ENGRAPHIS_FORWARDED_ALLOW_IPS`` accepts ``*`` (for platforms such as Railway
+    where the proxy peer is not stable) or comma-separated exact direct-peer IPs.
     """
+    direct = ((request.client.host if request.client else "") or "unknown")[:64]
+    allowed_raw = os.environ.get("ENGRAPHIS_FORWARDED_ALLOW_IPS", "").strip()
+    allowed = {item.strip() for item in allowed_raw.split(",") if item.strip()}
+    if "*" not in allowed and direct not in allowed:
+        return direct
     fwd = request.headers.get("x-forwarded-for", "")
-    if fwd:
-        first = fwd.split(",")[0].strip()
-        if first:
-            return first[:64]
-    return ((request.client.host if request.client else "") or "unknown")[:64]
+    first = fwd.split(",", 1)[0].strip()
+    return first[:64] if first else direct
 
 
 def _bump_trial_rate(ip: str) -> bool:

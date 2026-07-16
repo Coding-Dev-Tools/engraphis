@@ -35,6 +35,7 @@ def _cloud_env(monkeypatch, tmp_path):
     monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(tmp_path / "relay.db"))
     monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
     monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_FORWARDED_ALLOW_IPS", raising=False)
     # keep all client-side state files inside tmp
     monkeypatch.setattr(cloud_license, "_DIR", tmp_path)
     monkeypatch.setattr(cloud_license, "_LEASE_FILE", tmp_path / "lease.sig")
@@ -1014,9 +1015,10 @@ def test_start_team_trial_surfaces_email_delivery_failure_as_502(monkeypatch):
     assert r.status_code == 502
 
 
-def test_start_team_trial_rate_limits_by_source_ip(monkeypatch):
-    """POST /start-trial itself is IP rate-limited — independent of whether any grant
-    ever happens, since sending mail is a cost/abuse vector on its own."""
+@pytest.mark.parametrize("trusted_peers", ["*", "testclient, 127.0.0.1"])
+def test_start_team_trial_rate_limits_by_trusted_forwarded_source(monkeypatch, trusted_peers):
+    """Trusted proxies may partition the rate limit by the forwarded client address."""
+    monkeypatch.setenv("ENGRAPHIS_FORWARDED_ALLOW_IPS", trusted_peers)
     monkeypatch.setattr(license_cloud, "_trial_rate_limit_per_hour", lambda: 2)
     c = _app()
     _capture_verify_url(monkeypatch)
@@ -1031,11 +1033,30 @@ def test_start_team_trial_rate_limits_by_source_ip(monkeypatch):
                   headers=headers)
     assert over.status_code == 429
 
-    # a DIFFERENT source IP is unaffected by this one's cap
     other = c.post("/license/v1/start-trial",
                    json={"machine_id": "dev-other", "email": "other@example.com"},
                    headers={"X-Forwarded-For": "198.51.100.4"})
     assert other.status_code == 200
+
+
+def test_start_team_trial_ignores_forwarded_source_from_untrusted_peer(monkeypatch):
+    """Spoofing X-Forwarded-For cannot evade a direct-peer rate limit."""
+    monkeypatch.setattr(license_cloud, "_trial_rate_limit_per_hour", lambda: 2)
+    c = _app()
+    _capture_verify_url(monkeypatch)
+    for i, spoofed in enumerate(("203.0.113.1", "203.0.113.2")):
+        r = c.post(
+            "/license/v1/start-trial",
+            json={"machine_id": "dev-%d" % i, "email": "dev%d@example.com" % i},
+            headers={"X-Forwarded-For": spoofed},
+        )
+        assert r.status_code == 200
+    over = c.post(
+        "/license/v1/start-trial",
+        json={"machine_id": "dev-over", "email": "over@example.com"},
+        headers={"X-Forwarded-For": "203.0.113.3"},
+    )
+    assert over.status_code == 429
 
 
 def test_start_team_trial_key_actually_works_with_team_invite_relay(monkeypatch):

@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS issued_licenses (
     seats      INTEGER,
     issued     REAL,
     expires    REAL,
+    subscription_id TEXT,
     status     TEXT NOT NULL DEFAULT 'active',   -- 'active' | 'revoked'
     created_at REAL NOT NULL,
     revoked_at REAL
@@ -87,6 +88,13 @@ def connect(db_path: Optional[str] = None) -> sqlite3.Connection:
         conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(_SCHEMA)
     conn.executescript(_REG_SCHEMA)
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(issued_licenses)").fetchall()}
+    if "subscription_id" not in columns:
+        conn.execute("ALTER TABLE issued_licenses ADD COLUMN subscription_id TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_issued_subscription "
+        "ON issued_licenses(subscription_id)")
     return conn
 
 
@@ -104,19 +112,22 @@ def record_issued(key: str, *, db_path: Optional[str] = None) -> str:
     """Record a freshly issued key in the registry (idempotent). Returns its key_id.
 
     Called from the fulfillment path (:func:`webhooks.issue_key`). Never raises on a
-    duplicate — re-issuing the same key just refreshes the row."""
+    duplicate, and never reactivates a revoked key.
+    """
     lic = parse_key(key)
     conn = connect(db_path)
     try:
         conn.execute(
             "INSERT INTO issued_licenses "
-            "  (key_id, email, plan, seats, issued, expires, status, created_at) "
-            "VALUES (?,?,?,?,?,?, 'active', ?) "
+            "  (key_id, email, plan, seats, issued, expires, subscription_id, status, "
+            "   created_at) "
+            "VALUES (?,?,?,?,?,?,?, 'active', ?) "
             "ON CONFLICT(key_id) DO UPDATE SET "
             "  email=excluded.email, plan=excluded.plan, seats=excluded.seats, "
-            "  issued=excluded.issued, expires=excluded.expires",
+            "  issued=excluded.issued, expires=excluded.expires, "
+            "  subscription_id=excluded.subscription_id",
             (lic.key_id, lic.email, lic.plan, lic.seats, lic.issued, lic.expires,
-             time.time()),
+             lic.subscription_id or None, time.time()),
         )
         conn.commit()
     finally:
@@ -125,19 +136,56 @@ def record_issued(key: str, *, db_path: Optional[str] = None) -> str:
 
 
 def revoke(key_id: str, *, db_path: Optional[str] = None) -> bool:
-    """Mark a key revoked. Returns True if a row was updated.
+    """Persist a revocation tombstone. Returns True when state changed.
 
-    A revoked key still has a valid signature but is refused by :func:`verify_for_feature`
-    — use for refunds, leaked keys, or abuse."""
+    The tombstone also covers valid keys that were never recorded because an earlier
+    best-effort registry write failed. A later :func:`record_issued` fills its metadata
+    without reactivating it.
+    """
+    now = time.time()
     conn = connect(db_path)
     try:
         cur = conn.execute(
-            "UPDATE issued_licenses SET status='revoked', revoked_at=? "
-            "WHERE key_id=? AND status!='revoked'",
-            (time.time(), key_id),
+            "INSERT INTO issued_licenses(key_id, status, created_at, revoked_at) "
+            "VALUES (?, 'revoked', ?, ?) "
+            "ON CONFLICT(key_id) DO UPDATE SET "
+            "status='revoked', revoked_at=excluded.revoked_at "
+            "WHERE issued_licenses.status!='revoked'",
+            (key_id, now, now),
         )
         conn.commit()
         return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def revoke_superseded(subscription_id: str, keep_key_id: str, *,
+                      db_path: Optional[str] = None) -> int:
+    """Revoke older active keys after a replacement key is durably registered.
+
+    Refuses to revoke anything unless ``keep_key_id`` is already recorded for the same
+    subscription, so a failed best-effort write cannot strand a customer without a key.
+    """
+    subscription_id = (subscription_id or "").strip()[:128]
+    keep_key_id = (keep_key_id or "").strip()
+    if not subscription_id or not keep_key_id:
+        return 0
+    conn = connect(db_path)
+    try:
+        with conn:
+            replacement = conn.execute(
+                "SELECT 1 FROM issued_licenses "
+                "WHERE key_id=? AND subscription_id=? AND status='active'",
+                (keep_key_id, subscription_id),
+            ).fetchone()
+            if replacement is None:
+                return 0
+            cur = conn.execute(
+                "UPDATE issued_licenses SET status='revoked', revoked_at=? "
+                "WHERE subscription_id=? AND key_id!=? AND status!='revoked'",
+                (time.time(), subscription_id, keep_key_id),
+            )
+        return cur.rowcount
     finally:
         conn.close()
 

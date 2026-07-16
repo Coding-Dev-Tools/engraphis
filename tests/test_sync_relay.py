@@ -35,11 +35,14 @@ def _relay_env(monkeypatch, tmp_path):
     yield
 
 
-def _key(plan="pro", email="buyer@example.com", *, expires_in_days=30):
+def _key(plan="pro", email="buyer@example.com", *, expires_in_days=30,
+         subscription_id=""):
     now = time.time()
     exp = None if expires_in_days is None else int(now + expires_in_days * 86400)
     payload = {"v": 1, "plan": plan, "email": email, "seats": 1,
                "issued": int(now), "expires": exp}
+    if subscription_id:
+        payload["subscription_id"] = subscription_id
     return licensing.compose_key(payload, SECRET)
 
 
@@ -131,6 +134,48 @@ def test_registry_record_then_revoke():
 def test_unknown_key_is_not_treated_as_revoked():
     # a validly-signed key with no registry row (sold pre-registry) is allowed
     assert reg.is_revoked("deadbeef0000") is False
+
+
+def test_registry_unknown_revocation_survives_late_issuance_record():
+    key = _key(subscription_id="sub-late-record")
+    kid = licensing.parse_key(key).key_id
+
+    assert reg.revoke(kid) is True
+    assert reg.record_issued(key) == kid
+    assert reg.is_revoked(kid) is True
+
+    conn = reg.connect()
+    try:
+        row = conn.execute(
+            "SELECT email, subscription_id, status FROM issued_licenses WHERE key_id=?",
+            (kid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert dict(row) == {
+        "email": "buyer@example.com",
+        "subscription_id": "sub-late-record",
+        "status": "revoked",
+    }
+
+
+def test_registry_revokes_superseded_only_after_replacement_is_recorded():
+    subscription_id = "sub-renewal"
+    older = [
+        _key(email="old-one@example.com", subscription_id=subscription_id),
+        _key(email="old-two@example.com", subscription_id=subscription_id),
+    ]
+    replacement = _key(email="replacement@example.com", subscription_id=subscription_id)
+    old_ids = [reg.record_issued(key) for key in older]
+    replacement_id = licensing.parse_key(replacement).key_id
+
+    assert reg.revoke_superseded(subscription_id, replacement_id) == 0
+    assert not any(reg.is_revoked(kid) for kid in old_ids)
+
+    assert reg.record_issued(replacement) == replacement_id
+    assert reg.revoke_superseded(subscription_id, replacement_id) == 2
+    assert all(reg.is_revoked(kid) for kid in old_ids)
+    assert reg.is_revoked(replacement_id) is False
 
 
 # ── client RelayTransport, end-to-end against the real endpoints ────────────────────────

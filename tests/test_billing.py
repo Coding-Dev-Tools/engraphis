@@ -7,11 +7,13 @@ Covers the four regressions that made live purchases silently fail:
   3. the vendor seed must load from an INLINE hex env var (container reality);
   4. a redelivered webhook-id must not mint a second key (idempotency).
 """
+import asyncio
 import base64
 import hashlib
 import hmac
 import json
 import secrets
+import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -43,6 +45,7 @@ def _isolate(monkeypatch, tmp_path):
     monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", VENDOR_PUB)
     # Fresh per-test durable dedup DB + fallback dir under tmp_path.
     monkeypatch.setenv("ENGRAPHIS_WEBHOOK_STATE", str(tmp_path / "webhooks.db"))
+    monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(tmp_path / "relay.db"))
     for var in ("ENGRAPHIS_SIGNING_KEY", "ENGRAPHIS_SMTP_HOST", "ENGRAPHIS_SMTP_USER",
                 "ENGRAPHIS_SMTP_PASSWORD", "ENGRAPHIS_SMTP_FROM", "ENGRAPHIS_SMTP_PORT"):
         monkeypatch.delenv(var, raising=False)
@@ -177,6 +180,30 @@ def test_stale_processing_reservation_can_be_reclaimed(monkeypatch):
     conn.close()
     assert B.reserve_webhook("wid_crashed") is False
 
+def test_sqlite_reservation_failure_is_retryable_without_fulfillment(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+
+    conn = B._dedup_conn()
+    with conn:
+        conn.execute(
+            "CREATE TRIGGER fail_reservation BEFORE INSERT ON processed "
+            "BEGIN SELECT RAISE(FAIL, 'reservation unavailable'); END")
+    conn.close()
+
+    fulfilled = []
+    monkeypatch.setattr(WH, "handle_order_paid", lambda data: fulfilled.append(data))
+    client = _inspector_client(monkeypatch)
+    body = _body({"type": "order.paid", "data": {
+        "id": "order_reservation_error",
+        "customer": {"email": "buyer@example.com"},
+        "product": {"name": "Engraphis Pro"}}})
+
+    response = _post(client, WHSEC, "evt_reservation_error", body)
+
+    assert response.status_code == 503
+    assert response.json()["error"] == "webhook state unavailable"
+    assert fulfilled == []
+
 
 
 
@@ -190,6 +217,33 @@ def test_oversized_body_rejected(monkeypatch):
                  "webhook-timestamp": str(int(time.time())), "webhook-signature": "v1,x"},
     )
     assert r.status_code == 413
+
+def test_lengthless_chunked_oversize_stops_streaming(monkeypatch):
+    monkeypatch.setenv("POLAR_WEBHOOK_SECRET", WHSEC)
+    chunk = b"x" * (B._MAX_BODY_BYTES // 2)
+    messages = [
+        {"type": "http.request", "body": chunk, "more_body": True},
+        {"type": "http.request", "body": chunk, "more_body": True},
+        {"type": "http.request", "body": b"x", "more_body": True},
+        {"type": "http.request", "body": b"must-not-be-read", "more_body": False},
+    ]
+    reads = 0
+
+    async def receive():
+        nonlocal reads
+        reads += 1
+        return messages.pop(0)
+
+    from fastapi import Request
+    request = Request({
+        "type": "http", "method": "POST", "path": "/webhooks/polar",
+        "headers": [], "query_string": b"",
+    }, receive)
+
+    response = asyncio.run(B.polar_webhook(request))
+
+    assert response.status_code == 413
+    assert reads == 3
 
 
 # ── email delivery: Resend HTTPS API (hosts like Railway block outbound SMTP) ──
@@ -465,8 +519,10 @@ def test_paid_order_key_is_full_length_not_trial(monkeypatch):
     key = WH.handle_order_paid({
         "id": "order_1", "customer": {"email": "buyer@example.com"},
         "product": {"name": "Engraphis Pro"}})
-    days_left = (parse_key(key).expires - time.time()) / 86400
+    lic = parse_key(key)
+    days_left = (lic.expires - time.time()) / 86400
     assert days_left > 30, f"paid monthly key should be ~35d, got {days_left:.1f}d"
+    assert lic.subscription_id == ""
 
 
 def test_route_trial_then_conversion_two_distinct_keys(monkeypatch):
@@ -588,9 +644,8 @@ def test_subscription_created_trial_team_uses_top_level_seats(monkeypatch):
 
 # ── mid-cycle seat sync: subscription.updated fires for MANY unrelated status
 # transitions AND for genuine seat-count changes. Must reissue ONLY on a real
-# seat-count change for an active/trialing subscription, never on first sighting
-# (that would double-issue alongside the order.paid/trial key already minted at
-# purchase) and never on unrelated status churn. ──────────────────────────────
+# seat-count change for an active subscription, never while trialing, never on
+# first sighting, and never on unrelated status churn. ─────────────────────────
 def _sub_updated_body(sub_id, status, seats, product="Engraphis Team"):
     return _body({"type": "subscription.updated", "data": {
         "id": sub_id, "status": status, "seats": seats,
@@ -663,7 +718,7 @@ def test_revoked_subscription_update_never_reissues(monkeypatch):
     revoked = _sub_updated_body("sub_revoke", "canceled", 3)
     r = _post(client, WHSEC, "evt_su_rv", revoked)
     assert r.json()["status"] == "ignored"
-    assert r.json()["reason"] == "not an active/trialing subscription"
+    assert r.json()["reason"] == "not an active subscription"
 
 
 def test_seat_sync_key_reflects_correct_new_count(monkeypatch):
@@ -675,6 +730,7 @@ def test_seat_sync_key_reflects_correct_new_count(monkeypatch):
         "product": {"name": "Engraphis Team"}, "seats": 9})
     lic = parse_key(key)
     assert lic.plan == "team" and lic.seats == 9
+    assert lic.subscription_id == "sub_direct"
 
 
 def test_get_record_known_seats_roundtrip(tmp_path, monkeypatch):
@@ -710,3 +766,144 @@ def test_failed_seatsync_fulfillment_does_not_advance_baseline(monkeypatch):
     r2 = _post(client, WHSEC, "evt_cw_retry", _sub_updated_body("sub_cw", "active", 8))
     assert r2.json() == {"status": "fulfilled", "key_issued": True}
     assert B.get_known_seats("sub_cw") == 8
+
+
+def test_trialing_seat_update_cannot_mint_paid_key(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+
+    trial_payload = {
+        "id": "sub_trial_update", "status": "trialing", "seats": 5,
+        "customer": {"email": "lead@example.com"},
+        "product": {"name": "Engraphis Team"}}
+    assert WH.handle_subscription_updated(trial_payload) is None
+    B.record_known_seats("sub_trial_update", 2)
+    issued = []
+    monkeypatch.setattr(
+        WH, "handle_subscription_updated", lambda payload: issued.append(payload) or "key")
+    client = _inspector_client(monkeypatch)
+
+    response = _post(
+        client, WHSEC, "evt_trial_seats",
+        _sub_updated_body("sub_trial_update", "trialing", 5))
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "ignored"
+    assert issued == []
+    assert B.get_known_seats("sub_trial_update") == 2
+
+
+def test_seat_fulfillment_is_versioned_across_repeated_counts(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+
+    sent = []
+    monkeypatch.setattr(
+        WH, "send_license_email",
+        lambda _to, key, **_kwargs: sent.append(parse_key(key).seats))
+    client = _inspector_client(monkeypatch)
+    B.record_known_seats("sub_cycle", 2)
+
+    first = _post(
+        client, WHSEC, "evt_seat_v1",
+        _sub_updated_body("sub_cycle", "active", 4))
+    retry = _post(
+        client, WHSEC, "evt_seat_v1",
+        _sub_updated_body("sub_cycle", "active", 4))
+    second = _post(
+        client, WHSEC, "evt_seat_v2",
+        _sub_updated_body("sub_cycle", "active", 2))
+    repeated = _post(
+        client, WHSEC, "evt_seat_v3",
+        _sub_updated_body("sub_cycle", "active", 4))
+
+    assert first.json()["key_issued"] is True
+    assert retry.json()["status"] == "ignored"
+    assert second.json()["key_issued"] is True
+    assert repeated.json()["key_issued"] is True
+    assert sent == [4, 2, 4]
+
+
+def test_baseline_and_completion_failure_releases_claims_for_retry(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+
+    monkeypatch.setattr(WH, "send_license_email", lambda *_args, **_kwargs: None)
+    client = _inspector_client(monkeypatch)
+    B.record_known_seats("sub_atomic", 3)
+    conn = B._dedup_conn()
+    with conn:
+        conn.execute(
+            "CREATE TRIGGER fail_baseline BEFORE UPDATE ON subscription_seats "
+            "BEGIN SELECT RAISE(FAIL, 'baseline unavailable'); END")
+    conn.close()
+    body = _sub_updated_body("sub_atomic", "active", 8)
+
+    failed = _post(client, WHSEC, "evt_atomic", body)
+
+    assert failed.status_code == 503
+    assert B.get_known_seats("sub_atomic") == 3
+    conn = B._dedup_conn()
+    pending = conn.execute(
+        "SELECT COUNT(*) FROM processed WHERE webhook_id IN (?, ?)",
+        ("dlv:evt_atomic", "ful:seatsync:sub_atomic:evt_atomic")).fetchone()[0]
+    with conn:
+        conn.execute("DROP TRIGGER fail_baseline")
+    conn.close()
+    assert pending == 0
+
+    retried = _post(client, WHSEC, "evt_atomic", body)
+    assert retried.json() == {"status": "fulfilled", "key_issued": True}
+    assert B.get_known_seats("sub_atomic") == 8
+
+
+def test_order_replacement_records_subscription_then_revokes_older_key(monkeypatch):
+    from engraphis.inspector import license_registry as LR
+    from engraphis.inspector import webhooks as WH
+
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
+    old_key = WH.issue_key(
+        "buyer@example.com", product_name="Engraphis Team", seats=2, days=10,
+        subscription_id="sub_renew")
+    old_id = parse_key(old_key).key_id
+    sent = []
+    monkeypatch.setattr(
+        WH, "send_license_email", lambda _to, key, **_kwargs: sent.append(key))
+    client = _inspector_client(monkeypatch)
+    body = _body({"type": "order.paid", "data": {
+        "id": "order_renewal",
+        "customer": {"email": "buyer@example.com"},
+        "product": {"name": "Engraphis Team"},
+        "subscription": {"id": "  sub_renew  ", "seats": 3}}})
+
+    response = _post(client, WHSEC, "evt_renewal", body)
+
+    assert response.json() == {"status": "fulfilled", "key_issued": True}
+    replacement = parse_key(sent[0])
+    assert replacement.subscription_id == "sub_renew"
+    assert LR.is_revoked(old_id) is True
+    assert LR.is_revoked(replacement.key_id) is False
+
+
+def test_registry_failure_never_revokes_existing_subscription_key(monkeypatch):
+    from engraphis.inspector import license_registry as LR
+    from engraphis.inspector import webhooks as WH
+
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
+    old_key = WH.issue_key(
+        "buyer@example.com", product_name="Engraphis Team", seats=2, days=10,
+        subscription_id="sub_registry_guard")
+    old_id = parse_key(old_key).key_id
+    revoke_calls = []
+
+    def fail_record(_key):
+        raise sqlite3.OperationalError("registry unavailable")
+
+    monkeypatch.setattr(LR, "record_issued", fail_record)
+    monkeypatch.setattr(
+        LR, "revoke_superseded",
+        lambda *args, **kwargs: revoke_calls.append((args, kwargs)))
+
+    WH.issue_key(
+        "buyer@example.com", product_name="Engraphis Team", seats=5, days=35,
+        subscription_id="sub_registry_guard")
+
+    assert revoke_calls == []
+    assert LR.is_revoked(old_id) is False

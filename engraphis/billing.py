@@ -75,6 +75,10 @@ _mem_lock = threading.Lock()
 _mem_seen: "set[str]" = set()
 _RESERVATION_TTL_SECONDS = 300
 
+class WebhookStateError(RuntimeError):
+    """The configured durable webhook state store could not complete an operation."""
+
+
 
 def _dedup_path() -> Optional[str]:
     override = os.environ.get("ENGRAPHIS_WEBHOOK_STATE", "").strip()
@@ -84,8 +88,8 @@ def _dedup_path() -> Optional[str]:
     if db and db != ":memory:":
         try:
             return str(Path(db).expanduser().resolve().parent / ".engraphis_webhooks.db")
-        except Exception:
-            return None
+        except (OSError, RuntimeError) as exc:
+            raise WebhookStateError("could not resolve durable webhook state path") from exc
     return None
 
 
@@ -93,6 +97,7 @@ def _dedup_conn() -> Optional[sqlite3.Connection]:
     path = _dedup_path()
     if not path:
         return None
+    conn = None
     try:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(path, timeout=30)
@@ -116,8 +121,10 @@ def _dedup_conn() -> Optional[sqlite3.Connection]:
         except OSError:
             pass
         return conn
-    except sqlite3.Error:
-        return None
+    except (OSError, sqlite3.Error) as exc:
+        if conn is not None:
+            conn.close()
+        raise WebhookStateError("durable webhook state store unavailable") from exc
 
 
 def reserve_webhook(webhook_id: str) -> bool:
@@ -125,7 +132,8 @@ def reserve_webhook(webhook_id: str) -> bool:
 
     Completed claims remain permanent. An unfinished claim can be reclaimed after
     :data:`_RESERVATION_TTL_SECONDS`, preventing a process crash before fulfillment
-    from suppressing the purchase forever.
+    from suppressing the purchase forever. In-memory state is used only when no
+    durable store is configured; a configured store failure is retryable and raises.
     """
     conn = _dedup_conn()
     if conn is None:
@@ -147,12 +155,8 @@ def reserve_webhook(webhook_id: str) -> bool:
                 "AND state='processing' AND ts<=?",
                 (now, webhook_id, now - _RESERVATION_TTL_SECONDS))
         return cur.rowcount == 1
-    except sqlite3.Error:
-        with _mem_lock:
-            if webhook_id in _mem_seen:
-                return False
-            _mem_seen.add(webhook_id)
-            return True
+    except sqlite3.Error as exc:
+        raise WebhookStateError("could not reserve durable webhook claim") from exc
     finally:
         conn.close()
 
@@ -164,11 +168,14 @@ def complete_webhook(webhook_id: str) -> None:
         return
     try:
         with conn:
-            conn.execute(
-                "UPDATE processed SET state='fulfilled', ts=? WHERE webhook_id=?",
+            cur = conn.execute(
+                "UPDATE processed SET state='fulfilled', ts=? "
+                "WHERE webhook_id=? AND state='processing'",
                 (time.time(), webhook_id))
-    except sqlite3.Error:
-        pass
+            if cur.rowcount != 1:
+                raise WebhookStateError("webhook claim was not pending")
+    except sqlite3.Error as exc:
+        raise WebhookStateError("could not complete durable webhook claim") from exc
     finally:
         conn.close()
 
@@ -183,8 +190,8 @@ def release_webhook(webhook_id: str) -> None:
     try:
         with conn:
             conn.execute("DELETE FROM processed WHERE webhook_id = ?", (webhook_id,))
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as exc:
+        raise WebhookStateError("could not release durable webhook claim") from exc
     finally:
         conn.close()
 
@@ -207,17 +214,17 @@ def get_known_seats(subscription_id: str) -> Optional[int]:
             "SELECT seats FROM subscription_seats WHERE subscription_id = ?",
             (subscription_id,)).fetchone()
         return int(row[0]) if row else None
-    except sqlite3.Error:
-        return None
+    except sqlite3.Error as exc:
+        raise WebhookStateError("could not read durable seat baseline") from exc
     finally:
         conn.close()
 
 
-def record_known_seats(subscription_id: str, seats: int) -> None:
-    """Persist *seats* as the new baseline for *subscription_id*."""
+def record_known_seats(subscription_id: str, seats: int) -> bool:
+    """Persist *seats* as the new baseline. Return false without a durable store."""
     conn = _dedup_conn()
     if conn is None:
-        return
+        return False
     try:
         with conn:
             conn.execute(
@@ -225,10 +232,46 @@ def record_known_seats(subscription_id: str, seats: int) -> None:
                 "VALUES (?, ?, ?) ON CONFLICT(subscription_id) DO UPDATE SET "
                 "seats=excluded.seats, updated_at=excluded.updated_at",
                 (subscription_id, seats, time.time()))
-    except sqlite3.Error:
-        pass
+        return True
+    except sqlite3.Error as exc:
+        raise WebhookStateError("could not persist durable seat baseline") from exc
     finally:
         conn.close()
+
+def _finalize_webhook(delivery_id: str, fulfillment_id: str,
+                      seat_baseline: Optional[tuple[str, int]] = None) -> None:
+    """Persist the seat baseline and complete both claims in one transaction."""
+    conn = _dedup_conn()
+    if conn is None:
+        return
+    try:
+        with conn:
+            now = time.time()
+            if seat_baseline is not None:
+                conn.execute(
+                    "INSERT INTO subscription_seats(subscription_id, seats, updated_at) "
+                    "VALUES (?, ?, ?) ON CONFLICT(subscription_id) DO UPDATE SET "
+                    "seats=excluded.seats, updated_at=excluded.updated_at",
+                    (*seat_baseline, now))
+            for claim_id in (fulfillment_id, delivery_id):
+                cur = conn.execute(
+                    "UPDATE processed SET state='fulfilled', ts=? "
+                    "WHERE webhook_id=? AND state='processing'",
+                    (now, claim_id))
+                if cur.rowcount != 1:
+                    raise WebhookStateError("webhook claim was not pending")
+    except sqlite3.Error as exc:
+        raise WebhookStateError("could not atomically finalize webhook") from exc
+    finally:
+        conn.close()
+
+def _release_claims(*claim_ids: str) -> None:
+    """Best-effort rollback used only while returning a retryable failure."""
+    for claim_id in claim_ids:
+        try:
+            release_webhook(claim_id)
+        except WebhookStateError:
+            logger.exception("polar webhook: could not release claim %s", claim_id)
 
 
 def _subscription_id(data: dict) -> str:
@@ -236,7 +279,7 @@ def _subscription_id(data: dict) -> str:
     if not raw:
         subscription = data.get("subscription")
         raw = subscription.get("id") if isinstance(subscription, dict) else subscription
-    return str(raw or "").strip()
+    return str(raw or "").strip()[:128]
 
 
 @router.post("/webhooks/polar")
@@ -259,9 +302,12 @@ async def polar_webhook(request: Request):
     if content_length > _MAX_BODY_BYTES:
         return JSONResponse({"error": "payload too large"}, status_code=413)
 
-    raw_body = await request.body()
-    if len(raw_body) > _MAX_BODY_BYTES:
-        return JSONResponse({"error": "payload too large"}, status_code=413)
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > _MAX_BODY_BYTES:
+            return JSONResponse({"error": "payload too large"}, status_code=413)
+        body.extend(chunk)
+    raw_body = bytes(body)
     body_str = raw_body.decode("utf-8", errors="replace")
 
     webhook_id = request.headers.get("webhook-id", "")
@@ -286,7 +332,7 @@ async def polar_webhook(request: Request):
         return JSONResponse(
             {"error": "POLAR_WEBHOOK_SECRET is not valid base64"}, status_code=500)
 
-    signed_content = f"{webhook_id}.{timestamp}.{body_str}".encode("utf-8")
+    signed_content = f"{webhook_id}.{timestamp}.".encode("utf-8") + raw_body
     expected_digest = hmac.new(secret_bytes, signed_content, hashlib.sha256).digest()
     expected_b64 = base64.b64encode(expected_digest).decode("ascii")
 
@@ -317,11 +363,11 @@ async def polar_webhook(request: Request):
     #   subscription.created -> ONLY when the subscription is in a free trial, to grant
     #                           an immediate trial-length key. Fulfillment "trial:<sub id>".
     #   subscription.updated -> Team seat count changed mid-cycle (add/remove seats via
-    #                           the Customer Portal). Only when status is active/trialing
-    #                           AND the seat count actually differs from the last known
-    #                           baseline for this subscription (see get_known_seats /
-    #                           record_known_seats) — otherwise this event also fires for
-    #                           cancel/uncancel/past_due/revoked and would spam a re-issue.
+    #                           the Customer Portal). Only when status is active AND the
+    #                           seat count actually differs from the last known baseline
+    #                           for this subscription (see get_known_seats /
+    #                           record_known_seats) — trialing updates wait for payment,
+    #                           and unrelated updates cannot spam replacement keys.
     # A non-trial subscription.created is a no-op: its paid key comes from order.paid, so
     # a canceled trial can never keep Pro — the short trial key just expires.
     pending_seat_baseline = None  # (sub_id, seats), persisted only after key issuance
@@ -343,65 +389,81 @@ async def polar_webhook(request: Request):
         pending_seat_baseline = (sub_id, _extract_seats(data))
     elif event_type == "subscription.updated":
         status = str(data.get("status", "")).strip().lower()
-        sub_id = str(data.get("id") or "")
-        if status not in ("active", "trialing") or not sub_id:
-            return JSONResponse({"status": "ignored", "reason": "not an active/trialing "
+        sub_id = str(data.get("id") or "").strip()[:128]
+        if status != "active" or not sub_id:
+            return JSONResponse({"status": "ignored", "reason": "not an active "
                                  "subscription", "type": event_type}, status_code=202)
         from engraphis.inspector.webhooks import _extract_seats
         new_seats = _extract_seats(data)
-        prior_seats = get_known_seats(sub_id)
+        try:
+            prior_seats = get_known_seats(sub_id)
+        except WebhookStateError:
+            logger.exception("polar webhook: could not read seat baseline")
+            return JSONResponse({"error": "webhook state unavailable"}, status_code=503)
         if prior_seats is None:
-            # First sighting of this subscription: seed the baseline so the NEXT update can
-            # detect a real change. Nothing to (re-)fulfill — the initial key came from
-            # order.paid. Safe to persist immediately (no fulfillment depends on it).
-            record_known_seats(sub_id, new_seats)
-            return JSONResponse({"status": "ignored", "reason": "baseline recorded",
+            # First sighting seeds the baseline; the initial paid key came from order.paid.
+            try:
+                persisted = record_known_seats(sub_id, new_seats)
+            except WebhookStateError:
+                logger.exception("polar webhook: could not seed seat baseline")
+                return JSONResponse({"error": "webhook state unavailable"}, status_code=503)
+            reason = "baseline recorded" if persisted else "durable baseline unavailable"
+            return JSONResponse({"status": "ignored", "reason": reason,
                                  "type": event_type}, status_code=202)
         if prior_seats == new_seats:
             return JSONResponse({"status": "ignored", "reason": "no seat-count change",
                                  "type": event_type}, status_code=202)
-        # Real seat change. DEFER advancing the baseline until the re-issue actually
-        # succeeds: recording it up-front meant a crash (or a failed/retried fulfillment)
-        # left the baseline advanced while no new key went out, and Polar's retry then saw
-        # prior == new and skipped the re-issue permanently. Persisted at the success path.
         pending_seat_baseline = (sub_id, new_seats)
         from engraphis.inspector.webhooks import handle_subscription_updated as _fulfill
-        fulfillment_key = "seatsync:" + sub_id + ":" + str(new_seats)
+        # webhook-id is covered by the signature and stable across retries of one
+        # delivery. Versioning by it permits legitimate A -> B -> A seat cycles while
+        # retaining idempotency for a retried logical update.
+        fulfillment_key = "seatsync:" + sub_id + ":" + webhook_id
     else:
         return JSONResponse({"status": "ignored", "type": event_type}, status_code=202)
 
     # Two-layer dedup: delivery-level (a retry of this exact webhook) and
-    # fulfillment-level (one key per order/trial, even across different deliveries).
-    if not reserve_webhook("dlv:" + webhook_id):
-        logger.info("polar webhook: duplicate delivery %s ignored", webhook_id)
-        return JSONResponse({"status": "duplicate", "key_issued": False}, status_code=202)
-    if not reserve_webhook("ful:" + fulfillment_key):
-        complete_webhook("dlv:" + webhook_id)
-        logger.info("polar webhook: %s already fulfilled — no second key", fulfillment_key)
-        return JSONResponse({"status": "already_fulfilled", "key_issued": False},
-                            status_code=202)
+    # fulfillment-level (one key per order/trial/update version).
+    delivery_claim = "dlv:" + webhook_id
+    fulfillment_claim = "ful:" + fulfillment_key
+    delivery_reserved = False
+    try:
+        if not reserve_webhook(delivery_claim):
+            logger.info("polar webhook: duplicate delivery %s ignored", webhook_id)
+            return JSONResponse(
+                {"status": "duplicate", "key_issued": False}, status_code=202)
+        delivery_reserved = True
+        if not reserve_webhook(fulfillment_claim):
+            complete_webhook(delivery_claim)
+            logger.info("polar webhook: %s already fulfilled — no second key", fulfillment_key)
+            return JSONResponse({"status": "already_fulfilled", "key_issued": False},
+                                status_code=202)
+    except WebhookStateError:
+        if delivery_reserved:
+            _release_claims(delivery_claim)
+        logger.exception("polar webhook: durable reservation failed")
+        return JSONResponse({"error": "webhook state unavailable"}, status_code=503)
 
     try:
         # Blocking work (Ed25519 sign + email) runs off the event loop.
         key = await asyncio.to_thread(_fulfill, data)
     except Exception as exc:  # noqa: BLE001 — surface a safe message, log full trace
-        release_webhook("dlv:" + webhook_id)
-        release_webhook("ful:" + fulfillment_key)  # let Polar retry this event
+        _release_claims(delivery_claim, fulfillment_claim)
         logger.exception("polar webhook: fulfillment failed")
         return JSONResponse({"error": "fulfillment failed: %s" % exc}, status_code=500)
 
     if not key:
         # Nothing issued (missing email) — release the claims so a corrected delivery
         # isn't permanently suppressed.
-        release_webhook("dlv:" + webhook_id)
-        release_webhook("ful:" + fulfillment_key)
+        _release_claims(delivery_claim, fulfillment_claim)
         return JSONResponse({"status": "fulfilled", "key_issued": False}, status_code=202)
 
-    if pending_seat_baseline is not None:
-        # Key is out — now it's safe to advance the seat baseline. A crash before this
-        # point simply leaves the old baseline, so Polar's retry re-detects the change.
-        record_known_seats(*pending_seat_baseline)
-    complete_webhook("ful:" + fulfillment_key)
-    complete_webhook("dlv:" + webhook_id)
+    try:
+        # Baseline advancement and both durable completion markers share one commit.
+        _finalize_webhook(delivery_claim, fulfillment_claim, pending_seat_baseline)
+    except WebhookStateError:
+        _release_claims(delivery_claim, fulfillment_claim)
+        logger.exception("polar webhook: durable finalization failed")
+        return JSONResponse({"error": "webhook state unavailable"}, status_code=503)
     logger.info("polar webhook: issued key for %s", fulfillment_key)
     return JSONResponse({"status": "fulfilled", "key_issued": True}, status_code=202)

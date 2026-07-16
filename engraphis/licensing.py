@@ -369,6 +369,9 @@ class License:
     enforce: str = ""
     #: License-server URL baked into the key at issuance — also signed/unforgeable.
     cloud_url: str = ""
+    #: Vendor-side subscription identity used only to supersede older keys for the same
+    #: subscription. Signed into the key, but deliberately omitted from public UI data.
+    subscription_id: str = ""
 
     @classmethod
     def free(cls) -> "License":
@@ -504,6 +507,7 @@ def parse_key(key: str, *, now: Optional[float] = None) -> License:
         is_trial=bool(payload.get("trial")),
         enforce=str(payload.get("enforce", "") or "").strip().lower(),
         cloud_url=str(payload.get("cloud_url", "") or "").strip().rstrip("/"),
+        subscription_id=str(payload.get("subscription_id", "") or "").strip()[:128],
     )
 
 
@@ -613,7 +617,13 @@ def current_license(*, refresh: bool = False) -> License:
     # free trial is a real, short-lived, server-issued key (see start_trial) that flows
     # through the exact same gate. No key, or a server-denied key ⇒ the free tier.
     _cached = License.free()
-    _cache_recheck_at = _license_recheck_at(_cached)
+    # A configured key that temporarily failed its cloud gate must retry automatically.
+    # Caching the free fallback forever forced users to restart or paste the same key
+    # again after an outage. No-key free installs remain permanently cached.
+    _cache_recheck_at = (
+        time.time() + _CLOUD_RECHECK_SECONDS
+        if material else _license_recheck_at(_cached)
+    )
     return _cached
 
 

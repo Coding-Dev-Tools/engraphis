@@ -144,6 +144,16 @@ def _extract_email(data: dict) -> Optional[str]:
     return (cust.get("email") or data.get("customer_email")
             or data.get("email") or user.get("email"))
 
+def _extract_subscription_id(data: dict, *, object_is_subscription: bool = False) -> str:
+    """Normalized Polar subscription id carried into the signed license payload."""
+    raw = data.get("subscription_id")
+    if not raw:
+        subscription = data.get("subscription")
+        raw = subscription.get("id") if isinstance(subscription, dict) else subscription
+    if not raw and object_is_subscription:
+        raw = data.get("id")
+    return str(raw or "").strip()[:128]
+
 
 def _extract_product_name(data: dict) -> str:
     product = data.get("product") or {}
@@ -217,8 +227,9 @@ def _trial_days(period_end, *, now: Optional[float] = None) -> int:
 
 
 def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
-               days: Optional[int] = None, metadata: Optional[dict] = None,
-               *, trial: bool = False, record: bool = True) -> str:
+              days: Optional[int] = None, metadata: Optional[dict] = None,
+              *, trial: bool = False, record: bool = True,
+              subscription_id: str = "") -> str:
     """Generate a signed ``ENGR1.xxx.yyy`` key for *email_addr*.
 
     Uses the pinned vendor signing key (``.secrets/vendor_signing.key`` or
@@ -241,6 +252,7 @@ def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
     if days is None:
         days = _key_days(product_name, metadata or {})
 
+    subscription_id = str(subscription_id or "").strip()[:128]
     now = time.time()
     payload = {
         "v": 1,
@@ -249,6 +261,7 @@ def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
         "seats": max(1, int(seats)),
         "issued": int(now),
         "expires": int(now + days * 86400),
+        **({"subscription_id": subscription_id} if subscription_id else {}),
     }
     if trial:
         payload["trial"] = 1               # signed trial marker -> License.is_trial (UI)
@@ -267,11 +280,14 @@ def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
     key = compose_key(payload, secret)
     logger.info("issued %s key for %s (expires in %d days)", plan, email_addr, days)
     if record:
-        try:  # registry is best-effort; a write failure must never block fulfillment/email
-            from engraphis.inspector.license_registry import record_issued
-            record_issued(key)
+        try:  # Registry writes remain best-effort; never revoke before recording.
+            from engraphis.inspector.license_registry import (
+                record_issued, revoke_superseded)
+            key_id = record_issued(key)
+            if subscription_id:
+                revoke_superseded(subscription_id, key_id)
         except Exception as exc:
-            logger.warning("could not record issued key in registry: %s", exc)
+            logger.warning("could not record/reconcile issued key in registry: %s", exc)
     return key
 
 
@@ -665,13 +681,14 @@ def _persist_fallback_key(email_addr: str, key: str, product_name: str) -> Optio
 
 
 def _issue_and_email(email_addr: str, product_name: str, seats: int,
-                     days: Optional[int], *, is_trial: bool = False) -> str:
+                     days: Optional[int], *, is_trial: bool = False,
+                     subscription_id: str = "") -> str:
     """Mint a signed key and email it. On ANY delivery failure, persist the key to
     the 0600 fallback file (never the log) and still return it, so a paid or trial
     key is never lost and the webhook can 202 without a Polar retry-storm."""
     key = issue_key(
         email_addr, product_name=product_name, seats=seats, days=days,
-        trial=is_trial)
+        trial=is_trial, subscription_id=subscription_id)
     label = _plan_label(product_name)
     try:
         send_license_email(email_addr, key, product_name=label, is_trial=is_trial)
@@ -704,7 +721,9 @@ def handle_order_paid(payload: dict) -> Optional[str]:
     product_name = _extract_product_name(payload)
     seats = _extract_seats(payload)
     days = _key_days(product_name, product.get("metadata") or {})
-    return _issue_and_email(email_addr, product_name, seats, days)
+    return _issue_and_email(
+        email_addr, product_name, seats, days,
+        subscription_id=_extract_subscription_id(payload))
 
 
 def handle_subscription_updated(payload: dict) -> Optional[str]:
@@ -712,14 +731,13 @@ def handle_subscription_updated(payload: dict) -> Optional[str]:
     removes seats via the Customer Portal or API).
 
     Polar's ``subscription.updated`` is a catch-all also fired for cancel /
-    uncancel / past-due / revoked transitions, so the caller (``engraphis.billing``)
-    must already have filtered to ``status in (active, trialing)`` AND confirmed
-    the seat count actually changed since the last sighting (tracked durably by
-    subscription id) before invoking this — that guard is what stops this from
-    re-issuing (and re-emailing) a key on every unrelated update, and from ever
-    double-issuing on the update that immediately follows a fresh subscription. This
-    function itself always (re)issues a fresh key reflecting the current seat count.
+    uncancel / trialing / past-due / revoked transitions, so both this function
+    and its route caller require ``status == active`` after a real seat-count
+    change. Trialing replacements must remain trial-bounded and are therefore
+    ignored until payment rather than minted as normal paid-period keys.
     """
+    if str(payload.get("status", "")).strip().lower() != "active":
+        return None
     email_addr = _extract_email(payload)
     if not email_addr:
         logger.warning("subscription.updated missing customer email — cannot re-issue key")
@@ -730,7 +748,9 @@ def handle_subscription_updated(payload: dict) -> Optional[str]:
     days = _key_days(product_name, product.get("metadata") or {})
     logger.info("seat count changed for %s (%s) -> %d seats, re-issuing key",
                 email_addr, product_name, seats)
-    return _issue_and_email(email_addr, product_name, seats, days)
+    return _issue_and_email(
+        email_addr, product_name, seats, days,
+        subscription_id=_extract_subscription_id(payload, object_is_subscription=True))
 
 
 def handle_subscription_created(payload: dict) -> Optional[str]:
@@ -756,4 +776,6 @@ def handle_subscription_created(payload: dict) -> Optional[str]:
     days = _trial_days(payload.get("current_period_end"))
     logger.info("trial started for %s (%s) — issuing %d-day key",
                 email_addr, product_name, days)
-    return _issue_and_email(email_addr, product_name, seats, days, is_trial=True)
+    return _issue_and_email(
+        email_addr, product_name, seats, days, is_trial=True,
+        subscription_id=_extract_subscription_id(payload, object_is_subscription=True))
