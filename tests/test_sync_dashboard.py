@@ -15,7 +15,7 @@ pytest.importorskip("httpx", reason="httpx not installed")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from engraphis import licensing as lic  # noqa: E402
-from engraphis.config import settings  # noqa: E402
+from engraphis.config import DEFAULT_RELAY_URL, settings  # noqa: E402
 from engraphis.licensing import compose_key, ed25519_public_key  # noqa: E402
 from engraphis.service import MemoryService  # noqa: E402
 
@@ -74,6 +74,13 @@ def test_sync_status_locked_without_key(monkeypatch, tmp_path):
         assert d["has_key"] is False
         assert d["relay_url"].startswith("https://")   # defaults to the managed relay
         assert d["last"] is None
+
+
+def test_sync_status_migrates_retired_relay_url(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        settings, "relay_url", "https://engraphis-production.up.railway.app/")
+    with _client(monkeypatch, tmp_path) as c:
+        assert c.get("/api/sync/status").json()["relay_url"] == DEFAULT_RELAY_URL
 
 
 def test_sync_run_requires_license(monkeypatch, tmp_path):
