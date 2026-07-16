@@ -28,7 +28,7 @@ def service() -> MemoryService:
     if _service is None:
         _service = MemoryService.create(
             settings.db_path, embed_model=settings.embed_model,
-            embed_dim=settings.embed_dim or 256)
+            embed_dim=settings.embed_dim or 384)
     return _service
 
 
@@ -172,9 +172,11 @@ def bootstrap():
     emb = None
     try:
         from engraphis.backends import embedder_st as _est
+        from engraphis.backends.embedder_deterministic import DeterministicEmbedder
         e = service().engine.embedder
         d = int(getattr(e, "dim", 0))
-        emb = {"class": type(e).__name__, "dim": d, "semantic": d >= 384,
+        semantic = not isinstance(e, DeterministicEmbedder)
+        emb = {"class": type(e).__name__, "dim": d, "semantic": semantic,
                "model": settings.embed_model, "error": getattr(_est, "LAST_EMBEDDER_ERROR", "")}
     except Exception:  # noqa: BLE001
         pass

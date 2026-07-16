@@ -33,7 +33,7 @@ class NumpyVectorIndex:
         n = float(np.linalg.norm(q))
         if n > 0:
             q = q / n
-        rows = list(self.store.iter_vectors(filter))
+        rows = list(self.store.iter_vectors(filter, dim=int(q.shape[0])))
         if not rows:
             return []
         ids = [r[0] for r in rows]
