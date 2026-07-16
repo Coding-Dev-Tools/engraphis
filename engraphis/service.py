@@ -1679,6 +1679,12 @@ class MemoryService:
         n_mem = c.execute("SELECT COUNT(*) AS n FROM memories WHERE workspace_id=?", (wid,)).fetchone()["n"]
         msub = "(SELECT id FROM memories WHERE workspace_id=?)"
         rsub = "(SELECT id FROM repos WHERE workspace_id=?)"
+        ssub = f"(SELECT id FROM symbols WHERE repo_id IN {rsub})"
+        c.execute(
+            f"DELETE FROM code_memory_links WHERE repo_id IN {rsub} "
+            f"OR memory_id IN {msub} OR symbol_id IN {ssub}",
+            (wid, wid, wid),
+        )
         c.execute(f"DELETE FROM mem_fts WHERE id IN {msub}", (wid,))
         c.execute(f"DELETE FROM mem_vectors WHERE id IN {msub}", (wid,))
         try:
@@ -1691,6 +1697,7 @@ class MemoryService:
         c.execute("DELETE FROM edges WHERE workspace_id=?", (wid,))
         c.execute("DELETE FROM sessions WHERE workspace_id=?", (wid,))
         c.execute("DELETE FROM events WHERE workspace_id=?", (wid,))
+        c.execute(f"DELETE FROM code_files WHERE repo_id IN {rsub}", (wid,))
         c.execute(f"DELETE FROM code_edges WHERE repo_id IN {rsub}", (wid,))
         c.execute(f"DELETE FROM symbols WHERE repo_id IN {rsub}", (wid,))
         c.execute("DELETE FROM repos WHERE workspace_id=?", (wid,))
@@ -1725,8 +1732,9 @@ class MemoryService:
         n_mem = c.execute("SELECT COUNT(*) AS n FROM memories WHERE workspace_id=?",
                           (wid_src,)).fetchone()["n"]
 
-        # 1) Repos: fold same-named repos together (repoint their symbols/code_edges
-        #    at the surviving row and drop the duplicate), else just relabel.
+        # 1) Repos: fold same-named repos together (repoint their incremental file
+        #    state, symbols, code edges, and memory bridges at the surviving row and
+        #    drop the duplicate), else just relabel.
         repo_remap: dict = {}
         src_repos = [dict(x) for x in c.execute(
             "SELECT id, name FROM repos WHERE workspace_id=?", (wid_src,))]
@@ -1736,8 +1744,50 @@ class MemoryService:
             ).fetchone()
             if existing:
                 repo_remap[r["id"]] = existing["id"]
+                # ``code_files`` is keyed by (repo_id, file), so fold overlapping file
+                # snapshots deterministically before the duplicate repo disappears.
+                for code_file in [dict(x) for x in c.execute(
+                        "SELECT * FROM code_files WHERE repo_id=?", (r["id"],))]:
+                    current = c.execute(
+                        "SELECT * FROM code_files WHERE repo_id=? AND file=?",
+                        (existing["id"], code_file["file"]),
+                    ).fetchone()
+                    if current is None:
+                        c.execute(
+                            "UPDATE code_files SET repo_id=? WHERE repo_id=? AND file=?",
+                            (existing["id"], r["id"], code_file["file"]),
+                        )
+                        continue
+                    current = dict(current)
+                    incoming_key = (
+                        float(code_file["indexed_at"] or 0),
+                        str(code_file["content_hash"] or ""),
+                    )
+                    current_key = (
+                        float(current["indexed_at"] or 0),
+                        str(current["content_hash"] or ""),
+                    )
+                    if incoming_key > current_key:
+                        c.execute(
+                            "UPDATE code_files SET lang=?, content_hash=?, size_bytes=?, "
+                            "mtime_ns=?, backend=?, indexed_at=? WHERE repo_id=? AND file=?",
+                            (
+                                code_file["lang"], code_file["content_hash"],
+                                code_file["size_bytes"], code_file["mtime_ns"],
+                                code_file["backend"], code_file["indexed_at"],
+                                existing["id"], code_file["file"],
+                            ),
+                        )
+                    c.execute(
+                        "DELETE FROM code_files WHERE repo_id=? AND file=?",
+                        (r["id"], code_file["file"]),
+                    )
                 c.execute("UPDATE symbols SET repo_id=? WHERE repo_id=?", (existing["id"], r["id"]))
                 c.execute("UPDATE code_edges SET repo_id=? WHERE repo_id=?", (existing["id"], r["id"]))
+                c.execute(
+                    "UPDATE code_memory_links SET repo_id=? WHERE repo_id=?",
+                    (existing["id"], r["id"]),
+                )
                 c.execute("DELETE FROM repos WHERE id=?", (r["id"],))
             else:
                 c.execute("UPDATE repos SET workspace_id=? WHERE id=?", (wid_dst, r["id"]))
@@ -1840,6 +1890,7 @@ class MemoryService:
         #    which (unlike merge's non-colliding case) must be remapped since the repo
         #    id itself changes.
         repo_remap: dict = {}
+        symbol_remap: dict = {}
         for r in [dict(x) for x in c.execute(
                 "SELECT * FROM repos WHERE workspace_id=?", (wid_src,))]:
             nrid = ids.new_id("repo")
@@ -1849,25 +1900,38 @@ class MemoryService:
                 "created_at, indexed_at, settings) VALUES (?,?,?,?,?,?,?,?,?)",
                 (nrid, wid_dst, r["name"], r["root_path"], r["vcs_remote"], r["primary_lang"],
                  ts, r["indexed_at"], r["settings"]))
-            symbol_remap: dict = {}
+            for code_file in [dict(x) for x in c.execute(
+                    "SELECT * FROM code_files WHERE repo_id=?", (r["id"],))]:
+                c.execute(
+                    "INSERT INTO code_files(repo_id, file, lang, content_hash, size_bytes, "
+                    "mtime_ns, backend, indexed_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        nrid, code_file["file"], code_file["lang"],
+                        code_file["content_hash"], code_file["size_bytes"],
+                        code_file["mtime_ns"], code_file["backend"],
+                        code_file["indexed_at"],
+                    ),
+                )
             for s in [dict(x) for x in c.execute(
                     "SELECT * FROM symbols WHERE repo_id=?", (r["id"],))]:
                 nsid = ids.new_id("symbol")
                 symbol_remap[s["id"]] = nsid
                 c.execute(
                     "INSERT INTO symbols(id, repo_id, kind, name, fqname, file, span, signature, "
-                    "lang, exported, content_hash, embedding_ref, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "docstring, lang, exported, content_hash, embedding_ref, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (nsid, nrid, s["kind"], s["name"], s["fqname"], s["file"], s["span"],
-                     s["signature"], s["lang"], s["exported"], s["content_hash"],
-                     s["embedding_ref"], s["updated_at"]))
+                     s["signature"], s["docstring"], s["lang"], s["exported"],
+                     s["content_hash"], s["embedding_ref"], s["updated_at"]))
             for ce in [dict(x) for x in c.execute(
                     "SELECT * FROM code_edges WHERE repo_id=?", (r["id"],))]:
                 c.execute(
-                    "INSERT INTO code_edges(id, repo_id, src, dst, relation, file, line) "
-                    "VALUES (?,?,?,?,?,?,?)",
+                    "INSERT INTO code_edges(id, repo_id, src, dst, relation, layer, file, line) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
                     (ids.new_id("edge"), nrid, symbol_remap.get(ce["src"], ce["src"]),
-                     symbol_remap.get(ce["dst"], ce["dst"]), ce["relation"], ce["file"], ce["line"]))
+                     symbol_remap.get(ce["dst"], ce["dst"]), ce["relation"],
+                     ce["layer"] or "entity",
+                     ce["file"], ce["line"]))
 
         def _new_repo(old_repo_id):
             return repo_remap.get(old_repo_id, old_repo_id) if old_repo_id is not None else None
@@ -1888,13 +1952,14 @@ class MemoryService:
         for ed in [dict(x) for x in c.execute(
                 "SELECT * FROM edges WHERE workspace_id=?", (wid_src,))]:
             c.execute(
-                "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation, weight, "
-                "valid_from, valid_to, ingested_at, expired_at, provenance) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation, layer, "
+                "weight, valid_from, valid_to, ingested_at, expired_at, provenance) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (ids.new_id("edge"), wid_dst, _new_repo(ed["repo_id"]),
                  entity_remap.get(ed["src"], ed["src"]), entity_remap.get(ed["dst"], ed["dst"]),
-                 ed["relation"], ed["weight"], ed["valid_from"], ed["valid_to"],
-                 ed["ingested_at"], ed["expired_at"], ed["provenance"]))
+                 ed["relation"], ed["layer"] or "semantic", ed["weight"],
+                 ed["valid_from"], ed["valid_to"], ed["ingested_at"],
+                 ed["expired_at"], ed["provenance"]))
 
         # 4) Sessions, cloned with fresh ids (memories/events below repoint at these).
         session_remap: dict = {}
@@ -1965,7 +2030,29 @@ class MemoryService:
                     ),
                 )
 
-        # 7) Events, cloned with fresh ids.
+        # 7) Code↔memory bridges, after both endpoint remaps are complete.
+        if repo_remap and symbol_remap and memory_remap:
+            old_repo_ids = list(repo_remap)
+            marks = ",".join("?" for _ in old_repo_ids)
+            for link in [dict(x) for x in c.execute(
+                    f"SELECT * FROM code_memory_links WHERE repo_id IN ({marks})",
+                    old_repo_ids,
+            )]:
+                new_symbol = symbol_remap.get(link["symbol_id"])
+                new_memory = memory_remap.get(link["memory_id"])
+                if new_symbol is None or new_memory is None:
+                    continue
+                c.execute(
+                    "INSERT INTO code_memory_links(id, repo_id, symbol_id, memory_id, "
+                    "relation, confidence, created_at) VALUES (?,?,?,?,?,?,?)",
+                    (
+                        ids.new_id("edge"), repo_remap[link["repo_id"]],
+                        new_symbol, new_memory, link["relation"],
+                        link["confidence"], link["created_at"],
+                    ),
+                )
+
+        # 8) Events, cloned with fresh ids.
         for ev in [dict(x) for x in c.execute(
                 "SELECT * FROM events WHERE workspace_id=?", (wid_src,))]:
             c.execute(
