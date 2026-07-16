@@ -12,9 +12,6 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import os as _os
-_os.environ["ENGRAPHIS_EMBED_MODEL"] = (
-    _os.environ.get("ENGRAPHIS_EMBED_MODEL", "").strip()
-    or "sentence-transformers/all-MiniLM-L6-v2")
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
