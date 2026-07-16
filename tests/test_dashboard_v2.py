@@ -341,6 +341,17 @@ def test_viewer_role_denied_on_governance_and_admin_routes(monkeypatch, tmp_path
                            "password": "anotherpass1"}).status_code == 200
         assert member.post("/api/workspaces/create",
                            json={"workspace": "member-folder"}).status_code == 200
+        # Account-wide/server-local operations remain admin-only even for a normal member.
+        assert member.post("/api/sync/run", json={}).status_code == 403
+        assert member.post("/api/code/index", json={
+            "workspace": "demo", "repo": "r", "root_path": str(tmp_path),
+        }).status_code == 403
+        assert member.post("/api/workspaces/import-folder", json={
+            "workspace": "demo", "path": str(tmp_path),
+        }).status_code == 403
+        assert member.post("/api/resources/postgres", json={
+            "workspace": "demo", "dsn": "postgresql://example.invalid/db",
+        }).status_code == 403
         assert admin.post("/api/workspaces/create",
                           json={"workspace": "admin-folder"}).status_code == 200
         # and the folders they made are visible to the whole team (shared, not per-user)

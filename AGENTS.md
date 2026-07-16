@@ -20,7 +20,7 @@ most common mistake here.
 | Status | The v2 target design. Phases 0–1 done; parts of 2/3/5 done (see §6). | Working reference implementation; flat namespaces. |
 | Model | Scoped + bi-temporal + typed; interface-driven. | Single flat `namespace` string per memory. |
 | Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/`, `static/` |
-| Data | new v2 schema (`SCHEMA_VERSION = 2`) | `engraphis_v1.db` |
+| Data | new v2 schema (`SCHEMA_VERSION = 3`) | `engraphis_v1.db` |
 | Entry | `MemoryEngine.create()` → `core/engine.py` | `python -m scripts.start_server` → FastAPI on :8700 |
 
 **Rule:** build new capability on **v2** (`core/` + `backends/`) behind the interfaces.
@@ -178,17 +178,19 @@ These are pure, unit-tested functions — change them only with a corresponding 
 
 ---
 
-## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 2`)
+## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 3`)
 
 - **Scope hierarchy:** `workspace → repo → session → memory`. Scopes: `session|repo|workspace|user`.
 - **Bi-temporal validity on every record:** world-time `valid_from/valid_to` +
   system-time `ingested_at/expired_at`. Reads hide facts outside their validity window
   unless `include_invalid=True` or an `as_of` anchor is given.
 - **IDs:** ULID, time-sortable, **typed prefixes** (`ws_`, `repo_`, `ses_`, `mem_`, `ent_`,
-  `edg_`, `sym_`, `evt_`, `job_`, `aud_`) — `core/ids.py`. Lexicographic sort == chronological.
+  `edg_`, `sym_`, `evt_`, `job_`, `aud_`, `dev_`, `rcpt_`) — `core/ids.py`.
+  Lexicographic sort == chronological.
 - **Tables:** `workspaces`, `repos`, `sessions`, `memories`, `mem_vectors`,
   `mem_fts` (FTS5 + plain-table fallback), `entities`, `edges` (bi-temporal), `mem_links`,
-  `symbols`, `code_edges`, `events`, `audit`, `schema_migrations`.
+  `symbols`, `code_edges`, `code_files`, `code_memory_links`, `operation_receipts`,
+  `events`, `audit`, `schema_migrations`.
 - **Vectors are stored L2-normalized** so cosine similarity == dot product.
 
 ---
@@ -207,26 +209,37 @@ These are pure, unit-tested functions — change them only with a corresponding 
   (`core/graphrank.py`, default; `graph_mode="1hop"` retained for ablation); **A-MEM-style
   evolution** (`MemoryEngine._evolve`: new writes auto-link to related live neighbors and
   reinforce them — bounded, idempotent, audited).
-- **Done — partial Phase 3:** **MCP server exists** (`engraphis/mcp_server.py`, 18 tools:
+- **Done — expanded Phase 3:** **MCP server exists** (`engraphis/mcp_server.py`, 27 tools:
   write/read (incl. **grounded recall** — `engraphis_recall_grounded`: cited answer or abstain)/
   governance/code/session — do not assume only `remember`/`recall` exist, check the
   tool list) and a **code-symbol graph** (`backends/codegraph.py`, tree-sitter with a
   dependency-free regex fallback; `MemoryEngine.index_repo()` / `engraphis_search_code`).
-  Languages: Python, JavaScript, TypeScript, C#, C, C++ (C#/C/C++ are regex-level today —
-  a `CompositeSymbolIndexer` routes them to the regex backend even when tree-sitter is
-  installed, so no untested AST grammar maps ship; AST maps can move them to the primary
-  later with no caller change). An unknown `languages=` filter is rejected with an
+  Languages: Python, JavaScript, TypeScript, Go, Rust, Java, C#, C, C++, SQL, and Terraform
+  (unsupported AST grammars route to the regex backend). Definitions, calls, imports,
+  ownership, inheritance/implementation, variables, and docstrings/comments are indexed.
+  An unknown `languages=` filter is rejected with an
   actionable error instead of silently indexing nothing. Traversal prunes build/dep dirs
   *during* the walk and honours a root `.engraphisignore` (gitignore-style; hardcoded
   default excludes are non-negotiable — an untrusted repo can't `!`-re-expose them);
   symlinked files are not followed out of root. Call-graph edges are name-based, not
-  type-resolved (best-effort, documented as such in `backends/codegraph.py`).
-  **Not done:** incremental/file-watcher re-indexing (today `index_repo` is a full
-  re-scan; idempotent per file, not incremental), git-as-world-time signal.
+  type-resolved (best-effort, documented as such in `backends/codegraph.py`). Content hashes
+  provide incremental per-file indexing; code↔memory links, layered unified graph overlays,
+  weighted communities/hotspots, path queries, git/PR impact, portable JSON/HTML/Markdown
+  exports, and a union merge driver are implemented. **Not done:** live file-watcher
+  re-indexing and git-as-world-time validity.
+- **Done — intent-native/layered memory protocol:** the transport-neutral service exposes
+  `remember` / `link` / intent-aware `recall`; edges are tagged as temporal/entity/causal/
+  semantic inside the same database; the dashboard can filter layers and overlay code plus
+  linked experience. Optional host/LLM retention supervision is advisory, bounded, audited,
+  and never silently drops a write.
+- **Done — local resource ingestion + privacy receipts:** stdlib text/code/HTML/DOCX ingestion,
+  optional PDF/image OCR/audio-video transcription/PostgreSQL catalog adapters, content-free
+  SHA-256-chained operation receipts, receipt verification/export, and the read-only
+  `engraphis-graph-server` team surface.
 - **Done — partial Phase 5:** input validation/sanitization, optional bearer auth, CORS
   allow-list, governance tools (`forget`/`pin`/`correct`, audited, never a hard delete),
-  Apache-2.0 licensing/packaging. **Not done:** encryption at rest, built-in rate limiting,
-  per-token tenant authorization — see `SECURITY.md`.
+  Apache-2.0 licensing/packaging, and optional SQLCipher encryption at rest.
+  **Not done:** built-in rate limiting and per-token tenant authorization — see `SECURITY.md`.
 - **Done — manual merge (N→1 governance op):** `MemoryEngine.merge()` /
   `MemoryService.merge()` combine several selected memories into one — the multi-input
   generalization of `correct`. Sources are bi-temporally closed (retired into history,
@@ -272,7 +285,8 @@ These are pure, unit-tested functions — change them only with a corresponding 
   gated CLI `python -m scripts.sync --remote <dir>` **or** `--relay [<url>]`
   (`require_feature("sync")` lives in the script — `core/` stays license-free). The
   untrusted-bundle apply path is validated/clamped and **scope-confined** (a bundle can't
-  cross a workspace/repo boundary; `secret` memories aren't exported; provenance is stamped).
+  cross a workspace/repo boundary; `secret` memories aren't exported or remotely mutated;
+  Team personal folders are never sent to the shared-account relay; provenance is stamped).
   See `docs/SYNC.md`.
   **Not done:** end-to-end encryption of relay bundles (client-side encrypt/decrypt; the
   relay already stores opaque bytes), HLC per-field clock, entity/edge graph sync,
@@ -321,3 +335,5 @@ These are pure, unit-tested functions — change them only with a corresponding 
   you change that file — this is a docs-drift surface like `README.md`.
 
 > When code and docs disagree, the code wins — then fix the doc in the same change.
+
+## Imported Claude Cowork project instructions

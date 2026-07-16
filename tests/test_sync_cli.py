@@ -8,6 +8,8 @@ shipped entry point could drive it. These tests lock the wiring in place.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from engraphis.backends.sync_folder import get_transport
@@ -118,6 +120,28 @@ def test_cli_bare_relay_without_config_is_an_error(db_with_workspace, monkeypatc
     monkeypatch.setattr(settings, "relay_url", "")
     rc = sync_main(["--db", db_with_workspace, "--workspace", "acme", "--relay"])
     assert rc == 2
+
+
+def test_cli_refuses_to_upload_personal_workspace_to_shared_relay(
+        db_with_workspace, _capture_transport):
+    engine = MemoryEngine.create(db_with_workspace)
+    row = engine.store.conn.execute(
+        "SELECT id FROM workspaces WHERE name='acme'"
+    ).fetchone()
+    engine.store.conn.execute(
+        "UPDATE workspaces SET settings=? WHERE id=?",
+        (json.dumps({"visibility": "personal", "owner": "owner@example.com"}), row["id"]),
+    )
+    engine.store.conn.commit()
+    engine.store.close()
+
+    rc = sync_main([
+        "--db", db_with_workspace, "--workspace", "acme",
+        "--relay", "https://sync.test",
+    ])
+
+    assert rc == 2
+    assert _capture_transport == {}
 
 
 def test_cli_requires_exactly_one_transport(db_with_workspace, tmp_path):

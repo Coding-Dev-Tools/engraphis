@@ -362,10 +362,9 @@ class License:
     expires: Optional[float] = None
     features: frozenset = field(default_factory=frozenset)
     key_id: str = ""  # short fingerprint for support/display; never the key itself
-    is_trial: bool = False  # True when this License is a time-boxed local trial grant
-    #: ``"cloud"`` = this key is ONLY valid with a live server-side lease (see
-    #: :func:`_cloud_gate`); "" = classic offline verification. Part of the signed
-    #: payload, so a customer cannot strip it without breaking the signature.
+    is_trial: bool = False  # True when this is a time-boxed server-issued trial key
+    #: Historical signed policy marker. Every paid/trial key now requires a live
+    #: server-side lease regardless of this value; it remains for key compatibility.
     enforce: str = ""
     #: License-server URL baked into the key at issuance — also signed/unforgeable.
     cloud_url: str = ""
@@ -590,10 +589,11 @@ def invalidate_cache() -> None:
 
 
 def current_license(*, refresh: bool = False) -> License:
-    """The verified license for this process, or a trial/``License.free()``. Never
-    raises — a bad key degrades (to an active trial, else the free tier) and the reason
-    is kept in :func:`license_error`. A valid paid key always takes precedence over a
-    trial; an active local trial takes precedence over free."""
+    """The server-verified paid/trial license for this process, or ``License.free()``.
+
+    Never raises: a bad, revoked, expired, or currently unverifiable key degrades to the
+    free tier and the reason is kept in :func:`license_error`.
+    """
     global _cached, _cache_error, _cache_recheck_at
     if _cached is not None and not refresh and time.time() < _cache_recheck_at:
         return _cached
@@ -825,7 +825,8 @@ def require_feature(feature: str) -> None:
         tier = required_plan(feature)
         raise LicenseError(
             "'%s' is an Engraphis %s feature (%s). Start a %d-day free trial from the "
-            "dashboard's Settings → License panel (one click, no key), or buy at %s and "
+            "dashboard's Settings → License panel (email confirmation required), or buy "
+            "at %s and "
             "paste the key there, set ENGRAPHIS_LICENSE_KEY, or save it to "
             "~/.engraphis/license.key."
             % (feature, tier.capitalize(), desc, TRIAL_DAYS, upgrade_url(tier)),

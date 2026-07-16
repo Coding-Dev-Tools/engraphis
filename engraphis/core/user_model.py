@@ -15,7 +15,7 @@ personalization can be layered on top instead of replacing it.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Union
 
 from engraphis.core.textutil import tokenize
 
@@ -50,7 +50,7 @@ class UserModel:
         self,
         query: str,
         selected_memories: Iterable[Any],
-        feedback: Optional[Feedback | dict[str, Any]] = None,
+        feedback: Optional[Union[Feedback, dict[str, Any]]] = None,
     ) -> "UserModel":
         """Learn preferences from a query + memories the user/agent selected.
 
@@ -180,7 +180,7 @@ class UserModel:
         bucket[key] = _clamp(bucket.get(key, 0.0) + delta, -_MAX_WEIGHT, _MAX_WEIGHT)
 
 
-def _feedback(value: Optional[Feedback | dict[str, Any]]) -> Feedback:
+def _feedback(value: Optional[Union[Feedback, dict[str, Any]]]) -> Feedback:
     if isinstance(value, Feedback):
         return value
     if isinstance(value, dict):

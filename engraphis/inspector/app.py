@@ -375,13 +375,26 @@ def create_app(service: Optional[MemoryService] = None,
     async def audit_log(workspace: str, limit: int = 100):
         return svc().audit_log(workspace=workspace, limit=limit)
 
+    @app.get("/api/receipts")
+    async def receipts(workspace: str, limit: int = 100):
+        return svc().receipt_log(workspace=workspace, limit=limit)
+
+    @app.get("/api/receipts/verify")
+    async def receipts_verify(workspace: str):
+        return svc().verify_receipts(workspace=workspace)
+
     @app.get("/api/graph")
-    async def graph(workspace: str, limit: int = 2000):
+    async def graph(workspace: str, limit: int = 2000, layers: str = "",
+                    include_code: bool = False, repo: Optional[str] = None):
         """Entity-relation network for the Graph tab -- same
         :meth:`MemoryService.graph` the v1-look dashboard's ``/api/graph`` calls
         (engraphis/graphdata.py), so both UIs render identical graphs and share
         the same workspace-binding isolation guard."""
-        return svc().graph(workspace=workspace, limit=limit)
+        selected = [x.strip() for x in layers.split(",") if x.strip()] if layers else None
+        return svc().graph(
+            workspace=workspace, limit=limit, layers=selected,
+            include_code=include_code, repo=repo,
+        )
 
     # ── Pro: analytics & compliance export (the 402 upgrade path) ───────────
     @app.get("/api/analytics")

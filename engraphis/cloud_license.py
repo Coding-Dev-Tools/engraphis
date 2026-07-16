@@ -24,6 +24,7 @@ There is deliberately no offline unlock path for Pro/Team.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -32,6 +33,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 from typing import Optional, Tuple
+from urllib.parse import urlsplit, urlunsplit
 
 _LEASE_PREFIX = "ENGRLS1"
 _JSON_HEADERS = {
@@ -50,6 +52,8 @@ class Revoked(Exception):
     authoritative server decision that must propagate immediately, while an unreachable
     server falls back to the cached lease (offline grace). ``revalidate`` and ``gate``
     treat a ``Revoked`` as fail-closed and an offline result as grace, respectively."""
+
+
 def _state_dir() -> Path:
     """Base dir for machine-id + lease state; ``ENGRAPHIS_STATE_DIR`` relocates it onto a
     persistent writable volume (Docker) so device binding survives redeploys."""
@@ -63,6 +67,38 @@ _MACHINE_ID_FILE = _DIR / "machine_id"
 _REGISTER_TIMEOUT = 6.0
 
 logger = logging.getLogger("engraphis")
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def validate_cloud_base_url(value: str) -> str:
+    """Require HTTPS for remote cloud endpoints; allow HTTP only on loopback."""
+    parts = urlsplit(str(value or "").strip())
+    scheme = parts.scheme.lower()
+    if scheme not in {"http", "https"} or not parts.hostname:
+        raise ValueError("license server URL must be an absolute http(s) URL")
+    try:
+        parts.port
+    except ValueError as exc:
+        raise ValueError("license server URL has an invalid port") from exc
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("license server URL must not contain embedded credentials")
+    if "\\" in parts.netloc or any(char.isspace() for char in parts.netloc):
+        raise ValueError("license server URL contains an invalid host")
+    if parts.query or parts.fragment:
+        raise ValueError("license server URL must not contain a query string or fragment")
+    if scheme != "https" and not _is_loopback_host(parts.hostname.lower()):
+        raise ValueError("license server URL must use HTTPS unless it targets loopback")
+    return urlunsplit((scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
+
+
 #: Process-stable device-id cache, keyed by the resolved machine-id file path
 #: (so tests that repoint _MACHINE_ID_FILE still get isolated ids). This is the
 #: real fix for the silent-trial-death bug: even if the id can NEVER be persisted
@@ -207,12 +243,17 @@ def register(base_url: str, key: str, mid: str, *, timeout: float = _REGISTER_TI
     ``None`` so the caller can fall back to the cached lease (offline grace). Other HTTP
     statuses (e.g. a transient 5xx) also return ``None`` — no lease was minted, but the
     server did not definitively deny the key."""
-    url = base_url.rstrip("/") + "/license/v1/register"
+    try:
+        base = validate_cloud_base_url(base_url)
+    except ValueError as exc:
+        logger.warning("license registration blocked: %s", exc)
+        return None
+    url = base + "/license/v1/register"
     data = json.dumps({"key": key, "machine_id": mid}).encode("utf-8")
     req = urllib.request.Request(
         url, data=data, method="POST", headers=_JSON_HEADERS)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
             body = json.loads(resp.read().decode("utf-8"))
         return body.get("lease") or None
     except urllib.error.HTTPError as exc:
@@ -241,14 +282,18 @@ def send_team_invite(base_url: str, key: str, to: str, name: str, role: str,
     whether the notification goes out, so a relay hiccup must never look like a
     bigger failure than it is.
     """
-    url = base_url.rstrip("/") + "/license/v1/team-invite"
+    try:
+        base = validate_cloud_base_url(base_url)
+    except ValueError as exc:
+        return False, str(exc)
+    url = base + "/license/v1/team-invite"
     data = json.dumps({"key": key, "to": to, "name": name, "role": role,
                        "invited_by": invited_by, "dashboard_url": dashboard_url}
                       ).encode("utf-8")
     req = urllib.request.Request(
         url, data=data, method="POST", headers=_JSON_HEADERS)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
             body = json.loads(resp.read().decode("utf-8"))
         return bool(body.get("sent")), ""
     except urllib.error.HTTPError as exc:
@@ -278,12 +323,16 @@ def request_trial_key(base_url: str, mid: str, plan: str = "team", email: str = 
     (already-used-device 409, bad request, or a network/relay failure): those are hard
     stops, not "come back later". Used by :func:`engraphis.licensing.start_trial`
     (pro) and :func:`~engraphis.licensing.start_team_trial` (team)."""
-    url = base_url.rstrip("/") + "/license/v1/start-trial"
+    try:
+        base = validate_cloud_base_url(base_url)
+    except ValueError as exc:
+        return None, str(exc), False
+    url = base + "/license/v1/start-trial"
     data = json.dumps({"machine_id": mid, "email": email, "plan": plan}).encode("utf-8")
     req = urllib.request.Request(
         url, data=data, method="POST", headers=_JSON_HEADERS)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
             body = json.loads(resp.read().decode("utf-8"))
         key = body.get("key")
         if key:
@@ -328,6 +377,13 @@ def gate(lic, key_material: str, *, base_url: Optional[str] = None) -> Tuple[boo
         # this only bites a deliberately blanked config — defense in depth. Fail closed.)
         return False, ("server-side license verification is required but no license "
                        "server is configured")
+    try:
+        base = validate_cloud_base_url(base)
+    except ValueError as exc:
+        # A malformed/insecure endpoint is a configuration error, not an offline
+        # condition. Do not silently honor a cached lease, and do not echo the original
+        # URL because it may contain embedded credentials.
+        return False, "cloud license verification is blocked: %s" % exc
     mid = machine_id()
     cached = _valid_lease_for(lic.key_id, mid)
     try:
@@ -361,6 +417,11 @@ def revalidate(lic, key_material: str, *, base_url: Optional[str] = None) -> str
 
     base = (base_url or "").strip().rstrip("/") or cloud_url()
     if not base:
+        return "offline"
+    try:
+        base = validate_cloud_base_url(base)
+    except ValueError:
+        licensing.invalidate_cache()
         return "offline"
     mid = machine_id()
     try:

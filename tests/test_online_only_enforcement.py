@@ -64,7 +64,7 @@ def _key(plan="pro", days=365, cloud=True, trial=False, seats=1):
         payload["trial"] = 1
     if cloud:                       # a key minted with the server URL signed in
         payload["enforce"] = "cloud"
-        payload["cloud_url"] = "http://vendor.test"
+        payload["cloud_url"] = "https://vendor.test"
     return compose_key(payload, SECRET)
 
 
@@ -181,7 +181,7 @@ def test_request_trial_key_posts_plan_with_client_headers(monkeypatch):
 
     monkeypatch.setattr(cl.urllib.request, "urlopen", _urlopen)
     key, reason, pending = cl.request_trial_key(
-        "http://vendor.test", "mid-1", plan="pro", email="a@b.co")
+        "http://127.0.0.1", "mid-1", plan="pro", email="a@b.co")
     assert key == "ENGR1.fake" and pending is False
     assert captured["plan"] == "pro"
     assert captured["url"].endswith("/license/v1/start-trial")

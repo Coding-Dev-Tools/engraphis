@@ -322,35 +322,72 @@ class _ImportFolderReq(BaseModel):
     path: str
     file_pattern: str = "*.md"
     memory_type: str = "semantic"
+    derive_facts: bool = False
 
 
 @router.post("/workspaces/import-folder")
 def workspaces_import_folder(req: _ImportFolderReq):
     """Import files from a directory on the machine running Engraphis into ``workspace``,
-    one memory per file (see MemoryService.import_folder, SECURITY.md §5). POST defaults
-    to the member role in min_role() — same as workspaces/create — so a viewer can't
-    trigger a disk read; the traversal guard itself lives in the service layer."""
+    one memory per file (see MemoryService.import_folder, SECURITY.md §5). Team mode
+    restricts this server-local filesystem read to administrators; the allowlisted-root
+    traversal guard itself lives in the service layer."""
     return _run(service().import_folder, workspace=req.workspace, path=req.path,
-                file_pattern=req.file_pattern, memory_type=req.memory_type)
+                file_pattern=req.file_pattern, memory_type=req.memory_type,
+                derive_facts=req.derive_facts)
 
 
 @router.post("/workspaces/import-files")
 async def workspaces_import_files(workspace: str = Form(...),
                                   memory_type: str = Form("semantic"),
+                                  derive_facts: bool = Form(False),
                                   files: list[UploadFile] = File(...)):
     """Drag-and-drop / picked-file upload counterpart to import-folder (see
     MemoryService.import_files). Each upload is read bounded by
-    ``MemoryService.MAX_IMPORT_FILE_BYTES`` before decoding — a resource bound, not a
+    ``MemoryService.MAX_IMPORT_RESOURCE_BYTES`` — a resource bound, not a
     security boundary (see that constant's docstring); the rest of validation is
     transport-agnostic and lives in the service layer, same as every other write."""
-    from engraphis.service import MAX_IMPORT_FILE_BYTES
+    from engraphis.service import (
+        MAX_IMPORT_FILES,
+        MAX_IMPORT_RESOURCE_BYTES,
+        MAX_IMPORT_TOTAL_BYTES,
+    )
+    if len(files) > MAX_IMPORT_FILES:
+        raise HTTPException(status_code=413, detail={
+            "error": f"too many files (max {MAX_IMPORT_FILES})"
+        })
     payload = []
+    total = 0
     for f in files:
-        raw = await f.read(MAX_IMPORT_FILE_BYTES)
+        remaining = MAX_IMPORT_TOTAL_BYTES - total
+        raw = await f.read(min(MAX_IMPORT_RESOURCE_BYTES, max(0, remaining)) + 1)
+        if len(raw) > MAX_IMPORT_RESOURCE_BYTES:
+            raise HTTPException(status_code=413, detail={
+                "error": f"{f.filename or 'file'} is too large"
+            })
+        if len(raw) > remaining:
+            raise HTTPException(status_code=413, detail={
+                "error": f"upload batch exceeds {MAX_IMPORT_TOTAL_BYTES} bytes"
+            })
+        total += len(raw)
         payload.append({"name": f.filename or "untitled",
-                        "content": raw.decode("utf-8", errors="replace")})
+                        "data": raw})
     return _run(service().import_files, workspace=workspace, files=payload,
-                memory_type=memory_type)
+                memory_type=memory_type, derive_facts=derive_facts)
+
+
+class _PostgresImportReq(BaseModel):
+    dsn: str
+    workspace: str
+    repo: Optional[str] = None
+    schemas: Optional[list[str]] = None
+
+
+@router.post("/resources/postgres")
+def resources_postgres(req: _PostgresImportReq):
+    return _run(
+        service().import_postgres_schema, req.dsn, workspace=req.workspace,
+        repo=req.repo, schemas=req.schemas,
+    )
 
 
 class _UpdateMemReq(BaseModel):
@@ -536,6 +573,36 @@ def audit(workspace: Optional[str] = None, limit: int = 100):
     return _run(service().audit_log, workspace=ws, limit=limit)
 
 
+@router.get("/receipts")
+def receipts(workspace: Optional[str] = None, limit: int = 100):
+    ws = workspace or _require_ws()
+    return _run(service().receipt_log, workspace=ws, limit=limit)
+
+
+@router.get("/receipts/verify")
+def receipts_verify(workspace: Optional[str] = None, expected_head: str = "",
+                    expected_count: Optional[int] = None):
+    ws = workspace or _require_ws()
+    return _run(
+        service().verify_receipts, workspace=ws,
+        expected_head=expected_head, expected_count=expected_count,
+    )
+
+
+@router.get("/receipts/export")
+def receipts_export(workspace: Optional[str] = None):
+    ws = workspace or _require_ws()
+    from fastapi.responses import JSONResponse
+    body = _run(service().export_receipts, workspace=ws)
+    fname = "engraphis-receipts-%s-%s.json" % (
+        (ws or "workspace").replace("/", "_"),
+        __import__("time").strftime("%Y%m%d"),
+    )
+    return JSONResponse(body, headers={
+        "Content-Disposition": 'attachment; filename="%s"' % fname,
+    })
+
+
 # ── governance: pin / forget / correct ───────────────────────────────────────
 class _IdReq(BaseModel):
     id: str
@@ -605,6 +672,8 @@ class _RememberReq(BaseModel):
     source: str = "agent"
     trusted: bool = True
     dedupe: bool = True
+    retention_class: Optional[str] = None
+    retention_reason: str = ""
 
 
 @router.post("/remember")
@@ -613,7 +682,69 @@ def remember(req: _RememberReq):
     return _run(service().remember, req.content, workspace=req.workspace,
                 repo=req.repo, mtype=req.mtype, scope=req.scope, title=req.title,
                 importance=req.importance, keywords=req.keywords, metadata=req.metadata,
-                source=req.source, trusted=req.trusted, resolve_conflicts=req.dedupe)
+                source=req.source, trusted=req.trusted, resolve_conflicts=req.dedupe,
+                retention_class=req.retention_class,
+                retention_reason=req.retention_reason)
+
+
+class _IntentRememberReq(BaseModel):
+    text: str
+    workspace: str = "default"
+    repo: Optional[str] = None
+    title: str = ""
+    mtype: str = "semantic"
+    scope: str = "repo"
+    importance: float = 0.0
+    metadata: Optional[dict] = None
+    retention_class: Optional[str] = None
+    retention_reason: str = ""
+
+
+@router.post("/intent/remember")
+def intent_remember(req: _IntentRememberReq):
+    return _run(
+        service().intent_remember, req.text, workspace=req.workspace, repo=req.repo,
+        title=req.title, mtype=req.mtype, scope=req.scope, importance=req.importance,
+        metadata=req.metadata, retention_class=req.retention_class,
+        retention_reason=req.retention_reason,
+    )
+
+
+class _IntentLinkReq(BaseModel):
+    source_id: str
+    target_id: str
+    workspace: str
+    repo: Optional[str] = None
+    relation: str = "related"
+    layer: Optional[str] = None
+    reason: str = ""
+
+
+@router.post("/intent/link")
+def intent_link(req: _IntentLinkReq):
+    return _run(
+        service().intent_link, req.source_id, req.target_id, workspace=req.workspace,
+        repo=req.repo, relation=req.relation, layer=req.layer, reason=req.reason,
+    )
+
+
+class _IntentRecallReq(BaseModel):
+    query: str
+    intent: str = "recall"
+    workspace: Optional[str] = None
+    repo: Optional[str] = None
+    mtypes: Optional[list] = None
+    k: int = 8
+    as_of: Optional[float] = None
+
+
+@router.post("/intent/recall")
+def intent_recall(req: _IntentRecallReq):
+    return _run(
+        service().intent_recall, req.query, intent=req.intent,
+        workspace=req.workspace or _default_ws(), repo=req.repo,
+        mtypes=req.mtypes, k=req.k, as_of=req.as_of,
+    )
 
 
 # ── consolidate ───────────────────────────────────────────────────────────────
@@ -816,7 +947,9 @@ def maintenance_run(req: _MaintenanceReq):
 
 # ── knowledge graph (entities + relations, scoped to a workspace) ──────────────
 @router.get("/graph")
-def graph(workspace: Optional[str] = None, limit: int = 2000):
+def graph(workspace: Optional[str] = None, limit: int = 2000,
+          layers: Optional[str] = None, include_code: bool = False,
+          repo: Optional[str] = None):
     """Entity-relation network for a workspace — vis-network-ready nodes/edges
     plus type counts, top-connected, and connectivity stats.
 
@@ -828,7 +961,68 @@ def graph(workspace: Optional[str] = None, limit: int = 2000):
     service closes that gap.
     """
     ws = workspace or _default_ws()
-    return _run(service().graph, workspace=ws, limit=limit)
+    selected = [x.strip() for x in layers.split(",") if x.strip()] if layers else None
+    return _run(
+        service().graph, workspace=ws, limit=limit, layers=selected,
+        include_code=include_code, repo=repo,
+    )
+
+
+class _CodeIndexReq(BaseModel):
+    workspace: str
+    repo: str
+    root_path: str
+    languages: Optional[list] = None
+
+
+@router.post("/code/index")
+def code_index(req: _CodeIndexReq):
+    return _run(
+        service().index_repo, workspace=req.workspace, repo=req.repo,
+        root_path=req.root_path, languages=req.languages,
+    )
+
+
+@router.get("/code/search")
+def code_search(query: str, workspace: str, repo: str, limit: int = 20):
+    return _run(
+        service().search_code, query, workspace=workspace, repo=repo, limit=limit,
+    )
+
+
+class _CodePathReq(BaseModel):
+    workspace: str
+    repo: str
+    source: str
+    target: str
+    max_depth: int = 8
+
+
+@router.post("/code/path")
+def code_path(req: _CodePathReq):
+    return _run(
+        service().code_path, req.source, req.target, workspace=req.workspace,
+        repo=req.repo, max_depth=req.max_depth,
+    )
+
+
+class _CodeImpactReq(BaseModel):
+    workspace: str
+    repo: str
+    changed_files: list[str]
+
+
+@router.post("/code/impact")
+def code_impact(req: _CodeImpactReq):
+    return _run(
+        service().code_impact, req.changed_files,
+        workspace=req.workspace, repo=req.repo,
+    )
+
+
+@router.get("/code/export")
+def code_export(workspace: str, repo: str):
+    return _run(service().export_code_graph, workspace=workspace, repo=repo)
 
 
 # ── license ───────────────────────────────────────────────────────────────────
@@ -916,8 +1110,8 @@ def sync_status():
     has_key = bool(licensing._read_key_material())
     lic = licensing.current_license(refresh=False)
     return {
-        # Ready only when the plan includes sync AND a key is configured (the relay needs
-        # a real key; a local trial alone can't reach it — it stays folder-sync only).
+        # Ready only when the plan includes sync AND a key is configured. Purchased and
+        # trial entitlements are both real server-issued keys.
         "available": bool(licensing.has_feature("sync") and has_key),
         "has_key": has_key,
         "plan": lic.plan,

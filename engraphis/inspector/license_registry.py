@@ -84,7 +84,15 @@ def connect(db_path: Optional[str] = None) -> sqlite3.Connection:
         # persistent per-DB setting (harmless to re-assert each connect) and requires a
         # local filesystem, which Railway/Fly volumes are. NORMAL sync is the right
         # durability/throughput trade for a single-instance relay behind a volume.
-        conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError as exc:
+            # Concurrent first requests may race while one connection flips the
+            # persistent journal mode. The winner establishes WAL; the others can safely
+            # continue and will observe it on their next connection.
+            if "locked" not in str(exc).lower():
+                conn.close()
+                raise
         conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(_SCHEMA)
     conn.executescript(_REG_SCHEMA)

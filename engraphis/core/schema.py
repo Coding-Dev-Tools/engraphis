@@ -8,7 +8,7 @@ with a plain-table fallback so the schema initializes on any SQLite build).
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS edges (
     src          TEXT NOT NULL,
     dst          TEXT NOT NULL,
     relation     TEXT NOT NULL,
+    layer        TEXT DEFAULT 'semantic',
     weight       REAL DEFAULT 1.0,
     valid_from   REAL,
     valid_to     REAL,
@@ -125,6 +126,8 @@ CREATE TABLE IF NOT EXISTS mem_links (
     a          TEXT,
     b          TEXT,
     relation   TEXT,
+    layer      TEXT DEFAULT 'semantic',
+    reason     TEXT DEFAULT '',
     created_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_mem_links_ab ON mem_links(a, b);
@@ -139,6 +142,7 @@ CREATE TABLE IF NOT EXISTS symbols (
     file          TEXT,
     span          TEXT,
     signature     TEXT,
+    docstring     TEXT DEFAULT '',
     lang          TEXT,
     exported      INTEGER,
     content_hash  TEXT,
@@ -153,10 +157,40 @@ CREATE TABLE IF NOT EXISTS code_edges (
     src      TEXT,
     dst      TEXT,
     relation TEXT,                                  -- calls|imports|references|implements|tests
+    layer    TEXT DEFAULT 'entity',
     file     TEXT,
     line     INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_code_edge_src ON code_edges(repo_id, src);
+CREATE INDEX IF NOT EXISTS idx_code_edge_dst ON code_edges(repo_id, dst);
+
+CREATE TABLE IF NOT EXISTS code_files (
+    repo_id       TEXT NOT NULL,
+    file          TEXT NOT NULL,
+    lang          TEXT,
+    content_hash  TEXT NOT NULL,
+    size_bytes    INTEGER DEFAULT 0,
+    mtime_ns      INTEGER DEFAULT 0,
+    backend       TEXT DEFAULT '',
+    indexed_at    REAL,
+    PRIMARY KEY(repo_id, file)
+);
+CREATE INDEX IF NOT EXISTS idx_code_files_lang ON code_files(repo_id, lang);
+
+CREATE TABLE IF NOT EXISTS code_memory_links (
+    id          TEXT PRIMARY KEY,
+    repo_id     TEXT NOT NULL,
+    symbol_id   TEXT NOT NULL,
+    memory_id   TEXT NOT NULL,
+    relation    TEXT DEFAULT 'mentions',
+    confidence  REAL DEFAULT 1.0,
+    created_at  REAL,
+    UNIQUE(repo_id, symbol_id, memory_id, relation)
+);
+CREATE INDEX IF NOT EXISTS idx_code_mem_symbol
+    ON code_memory_links(repo_id, symbol_id);
+CREATE INDEX IF NOT EXISTS idx_code_mem_memory
+    ON code_memory_links(repo_id, memory_id);
 
 -- ── Event ledger & audit ───────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS events (
@@ -179,6 +213,35 @@ CREATE TABLE IF NOT EXISTS audit (
     action TEXT,
     target TEXT,
     detail TEXT
+);
+
+CREATE TABLE IF NOT EXISTS operation_receipts (
+    id             TEXT PRIMARY KEY,
+    ts             REAL NOT NULL,
+    operation      TEXT NOT NULL,
+    workspace_id   TEXT,
+    repo_id        TEXT,
+    scope_digest   TEXT NOT NULL,
+    actor          TEXT DEFAULT 'system',
+    target_count   INTEGER DEFAULT 0,
+    status         TEXT DEFAULT 'ok',
+    payload        TEXT NOT NULL,
+    prev_hash      TEXT DEFAULT '',
+    receipt_hash   TEXT NOT NULL UNIQUE
+);
+CREATE INDEX IF NOT EXISTS idx_receipt_scope
+    ON operation_receipts(workspace_id, ts, id);
+CREATE INDEX IF NOT EXISTS idx_receipt_operation
+    ON operation_receipts(operation, ts);
+
+-- Independent chain anchor maintained atomically with each receipt. It detects tail
+-- truncation (which predecessor hashes alone cannot detect without an expected head).
+CREATE TABLE IF NOT EXISTS receipt_chain_heads (
+    workspace_id  TEXT PRIMARY KEY,
+    receipt_count INTEGER NOT NULL,
+    head_hash     TEXT NOT NULL,
+    integrity_error TEXT NOT NULL DEFAULT '',
+    updated_at    REAL NOT NULL
 );
 
 -- ── Sync state (device identity + per-peer cursors) ─────────────────────────
