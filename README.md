@@ -149,7 +149,7 @@ first admin, invite members, and connect agents).
 ## Install
 
 ```bash
-pip install "engraphis[all]"        # dashboard + MCP server + code graph + encryption + everything
+pip install "engraphis[all]"        # dashboard + MCP server + code graph + available platform extras
 pip install "engraphis[server]"     # dashboard + REST API
 pip install "engraphis[mcp]"        # MCP server only
 pip install "engraphis[documents]"  # PDF + image OCR bindings
@@ -158,6 +158,11 @@ pip install "engraphis[postgres]"   # PostgreSQL schema introspection
 pip install "engraphis[encryption]" # SQLCipher encryption-at-rest extra
 pip install engraphis               # core library — numpy only, fully offline
 ```
+
+The core library supports Python 3.9+. The upstream MCP SDK requires Python 3.10+, so
+use Python 3.10 or newer for the `mcp` or `all` installation paths.
+`sqlcipher3-binary` currently publishes Linux wheels; on Windows, `all` installs without
+that optional driver and `engraphis[encryption]` requires a compatible SQLCipher build.
 
 > **Linux / macOS:** if `pip install` fails with `error: externally-managed-environment`,
 > your system Python is marked read-only (PEP 668). Install into a virtual environment
@@ -415,9 +420,11 @@ All via environment (or `.env`):
 | `ENGRAPHIS_EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | sentence-transformers model |
 | `ENGRAPHIS_EXTRACTOR` | `none` | `none` = verbatim; `chunk` = offline structure-aware chunks; `llm` = free-form LLM facts; `llm_structured` = schema-validated facts + graph metadata |
 | `ENGRAPHIS_GRAPH_EXTRACTOR` | `regex` | `regex` = offline heuristic NER; `none` = disable heuristic text extraction (validated `llm_structured` metadata still feeds the graph) |
-| `ENGRAPHIS_RETENTION_SUPERVISOR` | `none` | `none` = deterministic only; `llm` = optional bounded ephemeral/normal/critical classification |
+| `ENGRAPHIS_RETENTION_SUPERVISOR` | `none` | `none` = deterministic only; `llm` = sends a bounded excerpt to the configured provider for advisory ephemeral/normal/critical classification |
 | `ENGRAPHIS_WHISPER_MODEL` | — | Enables local faster-whisper audio/video transcription |
 | `ENGRAPHIS_POSTGRES_DSN` | — | CLI-only PostgreSQL source; used for the connection and never stored |
+| `ENGRAPHIS_POSTGRES_CONNECT_TIMEOUT` | `10` | PostgreSQL introspection connection timeout in seconds (bounded to 1–120) |
+| `ENGRAPHIS_POSTGRES_STATEMENT_TIMEOUT_MS` | `30000` | Per-introspection PostgreSQL statement timeout in milliseconds (bounded to 1–300000) |
 | `ENGRAPHIS_GRAPH_TOKEN` | — | Bearer token for `engraphis-graph-server`; required off-loopback |
 | `ENGRAPHIS_LLM_PROVIDER` | `openai` | `openai \| anthropic \| google \| openrouter \| custom` |
 | `ENGRAPHIS_LLM_MODEL` | `gpt-4o-mini` | Model name (provider-specific) |

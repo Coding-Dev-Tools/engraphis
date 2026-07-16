@@ -19,6 +19,7 @@ import io
 import json
 import mimetypes
 import os
+import re
 import tempfile
 import zipfile
 from html.parser import HTMLParser
@@ -49,6 +50,7 @@ SUPPORTED_EXTENSIONS = (
 MAX_DOCX_XML_BYTES = 20_000_000
 MAX_EXTRACTED_TEXT_CHARS = 200_000
 MAX_IMAGE_PIXELS = 50_000_000
+MAX_PDF_PAGES = 1_000
 
 
 class ResourceExtractionError(ValueError):
@@ -139,8 +141,12 @@ def _docx_text(data: bytes) -> tuple[str, dict]:
             raw = archive.read(info)
     except (KeyError, zipfile.BadZipFile) as exc:
         raise ResourceExtractionError(f"invalid DOCX: {exc}") from exc
+    if re.search(br"<!\s*(?:DOCTYPE|ENTITY)\b", raw, flags=re.IGNORECASE):
+        raise ResourceExtractionError("DOCX XML declarations and entities are not allowed")
     try:
-        root = ElementTree.fromstring(raw)
+        # The size cap and explicit DTD/entity rejection above make stdlib parsing
+        # appropriate here without adding a hard XML dependency to the offline core.
+        root = ElementTree.fromstring(raw)  # nosec B314
     except ElementTree.ParseError as exc:
         raise ResourceExtractionError(f"invalid DOCX XML: {exc}") from exc
     namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -161,14 +167,49 @@ def _pdf_text(data: bytes) -> tuple[str, dict, list[str]]:
         ) from exc
     try:
         reader = PdfReader(io.BytesIO(data))
-        pages = [(page.extract_text() or "").strip() for page in reader.pages]
+        total_pages = len(reader.pages)
+        page_limit = min(total_pages, MAX_PDF_PAGES)
+        pages = []
+        empty = 0
+        processed = 0
+        text_chars = 0
+        text_truncated = False
+        for index in range(page_limit):
+            page_text = (reader.pages[index].extract_text() or "").strip()
+            processed += 1
+            if not page_text:
+                empty += 1
+                continue
+            separator_chars = 2 if pages else 0
+            remaining = MAX_EXTRACTED_TEXT_CHARS - text_chars - separator_chars
+            if remaining <= 0:
+                text_truncated = True
+                break
+            if len(page_text) > remaining:
+                page_text = page_text[:remaining]
+                text_truncated = True
+            pages.append(page_text)
+            text_chars += separator_chars + len(page_text)
+            if text_truncated:
+                break
     except Exception as exc:
         raise ResourceExtractionError(f"PDF extraction failed: {exc}") from exc
     warnings = []
-    empty = sum(1 for page in pages if not page)
+    if total_pages > MAX_PDF_PAGES:
+        warnings.append(
+            f"PDF page extraction limited to the first {MAX_PDF_PAGES} of "
+            f"{total_pages} pages"
+        )
     if empty:
         warnings.append(f"{empty} PDF page(s) had no extractable text; OCR may be needed")
-    return "\n\n".join(page for page in pages if page), {"pages": len(pages)}, warnings
+    if text_truncated:
+        warnings.append(
+            f"extracted text truncated to {MAX_EXTRACTED_TEXT_CHARS} characters"
+        )
+    return "\n\n".join(pages), {
+        "pages": total_pages,
+        "pages_extracted": processed,
+    }, warnings
 
 
 def _image_text(data: bytes) -> tuple[str, dict]:

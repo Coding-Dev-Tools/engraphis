@@ -38,8 +38,9 @@ server = [
     "sentence-transformers>=2.7",
 ]
 # The MCP server — plug Engraphis into Claude Code, Cursor, Cline, Zed, etc.
+# The upstream MCP SDK requires Python 3.10+; the numpy-only core remains Python 3.9.
 mcp = [
-    "mcp>=1.2.0",
+    "mcp>=1.2.0; python_version >= '3.10'",
     "pydantic>=2.0",
     "sentence-transformers>=2.7",
 ]
@@ -67,7 +68,9 @@ postgres = [
 encryption = [
     "sqlcipher3-binary>=0.5.0",
 ]
-# Everything, for a full self-hosted install.
+# Everything available on the current platform, for a full self-hosted install.
+# sqlcipher3-binary currently publishes Linux wheels only; Windows users can still
+# install ``all`` and add a separately provisioned SQLCipher driver if desired.
 all = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
@@ -75,7 +78,7 @@ all = [
     "pydantic>=2.0",
     "python-dotenv>=1.0",
     "sentence-transformers>=2.7",
-    "mcp>=1.2.0",
+    "mcp>=1.2.0; python_version >= '3.10'",
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.2",
     "pypdf>=4.0",
@@ -83,7 +86,7 @@ all = [
     "pytesseract>=0.3.10",
     "faster-whisper>=1.0",
     "psycopg[binary]>=3.1",
-    "sqlcipher3-binary>=0.5.0",
+    "sqlcipher3-binary>=0.5.0; platform_system != 'Windows'",
 ]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.4"]
 # Everything needed to run the FULL offline gate in CI (lint + all extras-gated tests)
@@ -94,7 +97,7 @@ test = [
     "ruff>=0.4",
     "fastapi>=0.110",
     "httpx>=0.25",
-    "mcp>=1.2.0",
+    "mcp>=1.2.0; python_version >= '3.10'",
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.2",
     "pypdf>=4.0",
@@ -102,7 +105,7 @@ test = [
     "pytesseract>=0.3.10",
     "faster-whisper>=1.0",
     "psycopg[binary]>=3.1",
-    "sqlcipher3-binary>=0.5.0",
+    "sqlcipher3-binary>=0.5.0; platform_system != 'Windows'",
 ]
 
 [project.urls]

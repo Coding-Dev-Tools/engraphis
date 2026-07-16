@@ -6,6 +6,8 @@ silently discards a write.
 """
 from __future__ import annotations
 
+import math
+import re
 from typing import Optional
 
 from engraphis.core.interfaces import MemoryType, RetentionDecision
@@ -22,6 +24,16 @@ _SCHEMA = {
     "required": ["label", "retain", "importance", "stability", "reason"],
     "additionalProperties": False,
 }
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _bounded_number(value, *, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool):
+        raise ValueError("retention numeric fields must be numbers")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("retention numeric fields must be finite")
+    return max(minimum, min(maximum, number))
 
 
 class LLMRetentionSupervisor:
@@ -57,12 +69,19 @@ class LLMRetentionSupervisor:
         label = str(raw.get("label") or "normal").lower()
         if label not in {"ephemeral", "normal", "critical"}:
             label = "normal"
+        retain = raw.get("retain", True)
+        if not isinstance(retain, bool):
+            raise ValueError("retention retain field must be a boolean")
         return RetentionDecision(
             label=label,
-            retain=bool(raw.get("retain", True)),
-            importance=max(0.0, min(1.0, float(raw.get("importance", 0.5)))),
-            stability=max(0.05, min(100.0, float(raw.get("stability", 1.0)))),
-            reason=str(raw.get("reason") or "")[:500],
+            retain=retain,
+            importance=_bounded_number(
+                raw.get("importance", 0.5), minimum=0.0, maximum=1.0
+            ),
+            stability=_bounded_number(
+                raw.get("stability", 1.0), minimum=0.05, maximum=100.0
+            ),
+            reason=_CONTROL_RE.sub("", str(raw.get("reason") or ""))[:500],
         )
 
 

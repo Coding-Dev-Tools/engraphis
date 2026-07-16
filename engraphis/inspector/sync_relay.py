@@ -15,7 +15,7 @@ untrusted anyway), so an end-to-end-encrypted client can push ciphertext unchang
 from __future__ import annotations
 
 import base64
-import os
+import re
 import sqlite3
 import time
 from typing import Optional
@@ -28,6 +28,10 @@ from engraphis.licensing import LicenseError
 
 SYNC_FEATURE = "sync"
 MAX_BUNDLE_BYTES = 256 * 1024 * 1024  # match FolderTransport's cap
+MAX_WORKSPACE_BYTES = 350 * 1024 * 1024
+MAX_BUNDLES_PER_WORKSPACE = 64
+MAX_BUNDLE_NAME_CHARS = 200
+MAX_WORKSPACE_ID_CHARS = 200
 
 _BUNDLE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS sync_bundles (
@@ -48,8 +52,26 @@ def _conn(db_path: Optional[str] = None) -> sqlite3.Connection:
 
 
 def _safe_name(name: str) -> str:
-    """Never let a bundle name escape its namespace (path traversal / separators)."""
-    return os.path.basename(name or "").strip()
+    """Return a bounded portable bundle name, or ``""`` when invalid."""
+    value = str(name or "").strip()
+    if (
+        len(value) > MAX_BUNDLE_NAME_CHARS
+        or not value.endswith(".json")
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value) is None
+    ):
+        return ""
+    return value
+
+
+def _safe_workspace_id(workspace_id: str) -> str:
+    value = str(workspace_id or "").strip()
+    if (
+        not value
+        or len(value) > MAX_WORKSPACE_ID_CHARS
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+    ):
+        return ""
+    return value
 
 
 def _bearer_key(request: Request) -> str:
@@ -102,25 +124,45 @@ router = APIRouter(prefix="/relay/v1", tags=["sync-relay"])
 async def push_bundle(workspace_id: str, name: str, request: Request):
     """Store (overwrite) one full-state bundle for the caller's account+workspace."""
     _lic, account_id = _authorize(request)          # raises → 402 if unlicensed
-    data = await request.body()
-    if len(data) > MAX_BUNDLE_BYTES:
-        return JSONResponse({"error": "bundle too large"}, status_code=413)
+    workspace = _safe_workspace_id(workspace_id)
     safe = _safe_name(name)
-    if not safe:
-        return JSONResponse({"error": "invalid bundle name"}, status_code=400)
+    if not workspace or not safe:
+        return JSONResponse({"error": "invalid workspace or bundle name"}, status_code=400)
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(data) + len(chunk) > MAX_BUNDLE_BYTES:
+            return JSONResponse({"error": "bundle too large"}, status_code=413)
+        data.extend(chunk)
+    payload = bytes(data)
     conn = _conn()
     try:
+        usage = conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(data)), 0) AS total, "
+            "COALESCE(MAX(CASE WHEN name=? THEN LENGTH(data) ELSE 0 END), 0) AS replacing "
+            "FROM sync_bundles WHERE account_id=? AND workspace_id=?",
+            (safe, account_id, workspace),
+        ).fetchone()
+        replacing = int(usage["replacing"] or 0)
+        if replacing == 0 and int(usage["n"] or 0) >= MAX_BUNDLES_PER_WORKSPACE:
+            return JSONResponse(
+                {"error": "workspace has too many device bundles"}, status_code=413
+            )
+        projected = int(usage["total"] or 0) - replacing + len(payload)
+        if projected > MAX_WORKSPACE_BYTES:
+            return JSONResponse(
+                {"error": "workspace relay storage limit exceeded"}, status_code=413
+            )
         conn.execute(
             "INSERT INTO sync_bundles (account_id, workspace_id, name, data, updated_at) "
             "VALUES (?,?,?,?,?) "
             "ON CONFLICT(account_id, workspace_id, name) DO UPDATE SET "
             "  data=excluded.data, updated_at=excluded.updated_at",
-            (account_id, workspace_id, safe, data, time.time()),
+            (account_id, workspace, safe, payload, time.time()),
         )
         conn.commit()
     finally:
         conn.close()
-    return {"ok": True, "name": safe, "bytes": len(data)}
+    return {"ok": True, "name": safe, "bytes": len(payload)}
 
 
 @router.get("/{workspace_id}/bundles")
@@ -130,12 +172,15 @@ async def pull_bundles(workspace_id: str, request: Request):
     Isolation is enforced by ``account_id`` in the WHERE clause: a caller only ever sees
     bundles pushed under their own license identity."""
     _lic, account_id = _authorize(request)
+    workspace = _safe_workspace_id(workspace_id)
+    if not workspace:
+        return JSONResponse({"error": "invalid workspace"}, status_code=400)
     conn = _conn()
     try:
         rows = conn.execute(
             "SELECT name, data FROM sync_bundles WHERE account_id=? AND workspace_id=? "
             "ORDER BY name",
-            (account_id, workspace_id),
+            (account_id, workspace),
         ).fetchall()
     finally:
         conn.close()
@@ -149,12 +194,15 @@ async def pull_bundles(workspace_id: str, request: Request):
 async def list_names(workspace_id: str, request: Request):
     """Bundle names only (no payloads) for the caller's account+workspace."""
     _lic, account_id = _authorize(request)
+    workspace = _safe_workspace_id(workspace_id)
+    if not workspace:
+        return JSONResponse({"error": "invalid workspace"}, status_code=400)
     conn = _conn()
     try:
         rows = conn.execute(
             "SELECT name FROM sync_bundles WHERE account_id=? AND workspace_id=? "
             "ORDER BY name",
-            (account_id, workspace_id),
+            (account_id, workspace),
         ).fetchall()
     finally:
         conn.close()

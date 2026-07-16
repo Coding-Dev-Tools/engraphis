@@ -215,10 +215,10 @@ def test_register_raises_revoked_on_server_denial(monkeypatch):
     def _urlopen(req, timeout=None): raise _HTTPError(402)
     monkeypatch.setattr(cloud_license.urllib.request, "urlopen", _urlopen)
     with pytest.raises(cloud_license.Revoked):
-        cloud_license.register("http://cloud.test", _key(), "m-1")
+        cloud_license.register("http://127.0.0.1", _key(), "m-1")
     def _urlopen_5xx(req, timeout=None): raise _HTTPError(503)
     monkeypatch.setattr(cloud_license.urllib.request, "urlopen", _urlopen_5xx)
-    assert cloud_license.register("http://cloud.test", _key(), "m-1") is None
+    assert cloud_license.register("http://127.0.0.1", _key(), "m-1") is None
 
 
 def test_license_client_sets_cloudflare_safe_headers(monkeypatch):
@@ -235,11 +235,28 @@ def test_license_client_sets_cloudflare_safe_headers(monkeypatch):
         return _Resp()
 
     monkeypatch.setattr(cloud_license.urllib.request, "urlopen", fake_urlopen)
-    assert cloud_license.register("http://cloud.test", _key(), "m-1") is None
+    assert cloud_license.register("http://127.0.0.1", _key(), "m-1") is None
     assert captured == {
         "user_agent": "Engraphis/1.0 (+https://engraphis.com)",
         "accept": "application/json",
     }
+
+
+def test_license_clients_refuse_plain_http_off_loopback(monkeypatch):
+    def unexpected_network(*args, **kwargs):
+        raise AssertionError("insecure URL must be rejected before opening a connection")
+
+    monkeypatch.setattr(cloud_license.urllib.request, "urlopen", unexpected_network)
+    assert cloud_license.register("http://relay.example", _key(), "m-1") is None
+    sent, reason = cloud_license.send_team_invite(
+        "http://relay.example", _key(plan="team"), "new@corp.com",
+        "Mo", "member", "admin@corp.com",
+    )
+    assert sent is False and "HTTPS" in reason
+    key, reason, pending = cloud_license.request_team_trial_key(
+        "http://relay.example", "m-1", email="new@corp.com"
+    )
+    assert key is None and pending is False and "HTTPS" in reason
 
 
 def test_revalidate_revoked_deletes_lease(monkeypatch):
@@ -828,7 +845,7 @@ def test_send_team_invite_client_roundtrip(monkeypatch):
     c = _app()
     _wire_urlopen_to(c, monkeypatch)
     sent, reason = cloud_license.send_team_invite(
-        "http://relay.test", _key(plan="team"), "new@corp.com", "Mo", "member",
+        "http://127.0.0.1", _key(plan="team"), "new@corp.com", "Mo", "member",
         "admin@corp.com")
     assert sent is True and reason == ""
     assert captured["to"] == "new@corp.com"
@@ -838,7 +855,7 @@ def test_send_team_invite_client_reports_reason_on_402(monkeypatch):
     c = _app()
     _wire_urlopen_to(c, monkeypatch)
     sent, reason = cloud_license.send_team_invite(
-        "http://relay.test", _key(plan="pro"), "new@corp.com", "Mo", "member", "a@b.com")
+        "http://127.0.0.1", _key(plan="pro"), "new@corp.com", "Mo", "member", "a@b.com")
     assert sent is False and "team" in reason.lower()
 
 
@@ -848,7 +865,7 @@ def test_send_team_invite_client_fails_closed_on_network_error(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", boom)
     sent, reason = cloud_license.send_team_invite(
-        "http://relay.test", _key(plan="team"), "new@corp.com", "Mo", "member", "a@b.com")
+        "http://127.0.0.1", _key(plan="team"), "new@corp.com", "Mo", "member", "a@b.com")
     assert sent is False and "unreachable" in reason.lower()
 
 
@@ -1135,7 +1152,7 @@ def test_request_team_trial_key_client_returns_pending(monkeypatch):
     _capture_verify_url(monkeypatch)
     _wire_urlopen_to(c, monkeypatch)
     key, reason, pending = cloud_license.request_team_trial_key(
-        "http://relay.test", "dev-1", email="dev@example.com")
+        "http://127.0.0.1", "dev-1", email="dev@example.com")
     assert key is None and pending is True and reason
 
 
@@ -1143,12 +1160,14 @@ def test_request_team_trial_key_client_reports_already_used(monkeypatch):
     c = _app()
     captured = _capture_verify_url(monkeypatch)
     _wire_urlopen_to(c, monkeypatch)
-    cloud_license.request_team_trial_key("http://relay.test", "dev-1", email="dev@example.com")
+    cloud_license.request_team_trial_key(
+        "http://127.0.0.1", "dev-1", email="dev@example.com"
+    )
     token = _token_from_url(captured["url"])
     confirmed = c.get("/license/v1/start-trial/verify", params={"token": token})
     assert confirmed.status_code == 200                 # the device now holds a grant
     key, reason, pending = cloud_license.request_team_trial_key(
-        "http://relay.test", "dev-1", email="dev@example.com")
+        "http://127.0.0.1", "dev-1", email="dev@example.com")
     assert key is None and pending is False
     assert "already been used" in reason
 

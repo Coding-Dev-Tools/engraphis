@@ -39,6 +39,10 @@ class FolderTransport:
 
     def push(self, name: str, data: bytes) -> None:
         """Atomically write ``data`` to ``root/<name>`` (temp + fsync + os.replace)."""
+        if len(data) > MAX_BUNDLE_BYTES:
+            raise ValueError(
+                f"sync bundle exceeds the {MAX_BUNDLE_BYTES}-byte transport limit"
+            )
         safe = os.path.basename(name)  # never let a bundle name escape the folder
         dest = self.root / safe
         tmp = self.root / (safe + ".tmp")

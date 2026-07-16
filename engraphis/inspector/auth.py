@@ -122,9 +122,11 @@ def min_role(method: str, path: str) -> str:
         return "viewer"
     if path in (
         "/api/code/index", "/api/workspaces/import-folder", "/api/resources/postgres",
+        "/api/sync/run",
     ):
         # These operations read server-local files or make a caller-selected outbound
-        # database connection. Only an administrator may choose those sources.
+        # connection, or mutate every shared workspace through the account-wide relay.
+        # Only an administrator may choose those sources/actions.
         return "admin"
     if path.startswith("/api/auth/users") or path.startswith("/api/auth/audit") \
             or path == "/api/auth/overview" or path in (

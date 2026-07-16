@@ -77,6 +77,7 @@ def test_sync_auto_toggle_is_admin_only_but_members_still_write():
     assert min_role("POST", "/api/code/index") == "admin"
     assert min_role("POST", "/api/workspaces/import-folder") == "admin"
     assert min_role("POST", "/api/resources/postgres") == "admin"
+    assert min_role("POST", "/api/sync/run") == "admin"
     assert min_role("POST", "/api/code/path") == "viewer"
     # Members keep "store + view": they can write memories; viewers only read.
     assert min_role("POST", "/api/correct") == "member"

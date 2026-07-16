@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 
 from engraphis.backends import postgres_schema
 from engraphis.core.interfaces import SchemaSnapshot, SearchFilter
@@ -67,6 +69,30 @@ class _Connection:
 
     def close(self):
         self.closed = True
+
+
+def test_postgres_connect_and_statement_timeouts_are_bounded(monkeypatch):
+    captured = {}
+    connection = _Connection()
+
+    def connect(dsn, **kwargs):
+        captured["dsn"] = dsn
+        captured.update(kwargs)
+        return connection
+
+    monkeypatch.setitem(sys.modules, "psycopg", types.SimpleNamespace(connect=connect))
+    monkeypatch.setenv("ENGRAPHIS_POSTGRES_CONNECT_TIMEOUT", "9999")
+    monkeypatch.setenv("ENGRAPHIS_POSTGRES_STATEMENT_TIMEOUT_MS", "45000")
+
+    snapshot = postgres_schema.PostgresSchemaIntrospector().inspect(
+        "postgresql://local/appdb"
+    )
+
+    assert snapshot.metadata["database"] == "appdb"
+    assert captured["connect_timeout"] == postgres_schema._MAX_CONNECT_TIMEOUT_SECONDS
+    timeout_call = connection.cursor_obj.calls[0]
+    assert "set_config('statement_timeout'" in timeout_call[0]
+    assert timeout_call[1] == ("45000",)
 
 
 def test_postgres_introspection_is_filtered_bounded_and_cross_schema_safe(monkeypatch):

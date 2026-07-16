@@ -1,8 +1,11 @@
 import io
+import sys
+import types
 import zipfile
 
 import pytest
 
+from engraphis.backends import resources
 from engraphis.backends.resources import (
     LocalResourceExtractor,
     ResourceExtractionError,
@@ -39,6 +42,46 @@ def test_stdlib_resource_extractors_cover_html_docx_and_code():
 def test_unknown_binary_resource_fails_actionably():
     with pytest.raises(ResourceExtractionError):
         LocalResourceExtractor().extract_bytes("blob.bin", b"\x00\x01\x02\x03" * 100)
+
+
+def test_docx_rejects_dtd_and_entity_declarations():
+    xml = (
+        '<?xml version="1.0"?>' + (" " * 5_000)
+        + '<!DOCTYPE x [<!ENTITY payload "unsafe">]>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:body><w:p><w:r><w:t>&payload;</w:t></w:r></w:p></w:body></w:document>"
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr("word/document.xml", xml)
+
+    with pytest.raises(ResourceExtractionError, match="entities are not allowed"):
+        LocalResourceExtractor().extract_bytes("unsafe.docx", buf.getvalue())
+
+
+def test_pdf_extraction_bounds_pages_and_text(monkeypatch):
+    class _Page:
+        def __init__(self, text):
+            self.text = text
+
+        def extract_text(self):
+            return self.text
+
+    class _Reader:
+        def __init__(self, _stream):
+            self.pages = [_Page("first"), _Page("second"), _Page("third")]
+
+    monkeypatch.setitem(sys.modules, "pypdf", types.SimpleNamespace(PdfReader=_Reader))
+    monkeypatch.setattr(resources, "MAX_PDF_PAGES", 2)
+    monkeypatch.setattr(resources, "MAX_EXTRACTED_TEXT_CHARS", 8)
+
+    result = LocalResourceExtractor().extract_bytes("bounded.pdf", b"%PDF-fake")
+
+    assert result.text == "first\n\ns"
+    assert result.metadata["pages"] == 3
+    assert result.metadata["pages_extracted"] == 2
+    assert any("first 2 of 3 pages" in warning for warning in result.warnings)
+    assert any("truncated to 8 characters" in warning for warning in result.warnings)
 
 
 def test_import_files_accepts_bytes_and_preserves_resource_provenance():

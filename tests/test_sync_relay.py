@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from engraphis import licensing
+from engraphis.backends import sync_relay as relay_backend
 from engraphis.licensing import LicenseError, ed25519_public_key
 from engraphis.inspector import license_registry as reg
 from engraphis.inspector import sync_relay
@@ -114,6 +115,46 @@ def test_accounts_are_isolated():
     assert [x["name"] for x in a_view] == ["bundle-A.json"]  # still only A's own
 
 
+def test_relay_rejects_invalid_names_and_streams_body_with_a_hard_cap(monkeypatch):
+    c = _app()
+    key = _key()
+    assert c.post(
+        "/relay/v1/ws1/bundles/.hidden.json", content=b"ok", headers=_auth(key)
+    ).status_code == 400
+
+    monkeypatch.setattr(sync_relay, "MAX_BUNDLE_BYTES", 4)
+    oversized = c.post(
+        "/relay/v1/ws1/bundles/bundle-a.json",
+        content=b"12345",
+        headers=_auth(key),
+    )
+    assert oversized.status_code == 413
+    assert c.get(
+        "/relay/v1/ws1/names", headers=_auth(key)
+    ).json()["names"] == []
+
+
+def test_relay_bounds_bundle_count_and_total_workspace_storage(monkeypatch):
+    c = _app()
+    key = _key()
+    monkeypatch.setattr(sync_relay, "MAX_BUNDLES_PER_WORKSPACE", 1)
+    monkeypatch.setattr(sync_relay, "MAX_WORKSPACE_BYTES", 5)
+
+    first = c.post(
+        "/relay/v1/ws1/bundles/bundle-a.json", content=b"1234", headers=_auth(key)
+    )
+    assert first.status_code == 200
+    assert c.post(
+        "/relay/v1/ws1/bundles/bundle-b.json", content=b"1", headers=_auth(key)
+    ).status_code == 413
+    assert c.post(
+        "/relay/v1/ws1/bundles/bundle-a.json", content=b"12345", headers=_auth(key)
+    ).status_code == 200
+    assert c.post(
+        "/relay/v1/ws1/bundles/bundle-a.json", content=b"123456", headers=_auth(key)
+    ).status_code == 413
+
+
 def test_wrong_plan_feature_is_rejected():
     # a pro key does not grant 'team'; verify_for_feature must refuse it
     with pytest.raises(LicenseError, match="team"):
@@ -184,7 +225,7 @@ def _wire_transport_to(client, monkeypatch):
     """Route the transport's urllib calls into the in-process TestClient."""
     class _Resp:
         def __init__(self, data): self._d = data
-        def read(self): return self._d
+        def read(self, _limit=-1): return self._d
         def __enter__(self): return self
         def __exit__(self, *a): return False
 
@@ -206,7 +247,7 @@ def _wire_transport_to(client, monkeypatch):
 def test_relay_transport_roundtrip(monkeypatch):
     c = _app()
     _wire_transport_to(c, monkeypatch)
-    t = RelayTransport("http://relay.test", "ws1", license_key=_key())
+    t = RelayTransport("http://127.0.0.1", "ws1", license_key=_key())
     t.push("bundle-devA.json", b'{"m":1}')
     assert t.list_names() == ["bundle-devA.json"]
     assert t.pull() == [("bundle-devA.json", b'{"m":1}')]
@@ -215,10 +256,45 @@ def test_relay_transport_roundtrip(monkeypatch):
 def test_relay_transport_surfaces_license_rejection(monkeypatch):
     c = _app()
     _wire_transport_to(c, monkeypatch)
-    t = RelayTransport("http://relay.test", "ws1", license_key="")  # no license
+    t = RelayTransport("http://127.0.0.1", "ws1", license_key="")  # no license
     with pytest.raises(RelayError) as ei:
         t.pull()
     assert ei.value.status == 402
+
+
+def test_relay_transport_requires_https_off_loopback():
+    with pytest.raises(ValueError, match="must use HTTPS"):
+        RelayTransport("http://relay.example", "ws1", license_key="secret")
+    with pytest.raises(ValueError, match="embedded credentials"):
+        RelayTransport("https://user:pass@relay.example", "ws1", license_key="secret")
+
+
+def test_relay_transport_rejects_invalid_response(monkeypatch):
+    class _Response:
+        def read(self, _limit):
+            return b'{"bundles":[{"name":"x","data":"not base64!"}]}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: _Response())
+    transport = RelayTransport("https://relay.example", "ws1", license_key="secret")
+    with pytest.raises(RelayError, match="invalid bundle response"):
+        transport.pull()
+
+
+def test_relay_transport_rejects_oversized_upload_before_network(monkeypatch):
+    monkeypatch.setattr(relay_backend, "MAX_RELAY_BUNDLE_BYTES", 3)
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *args, **kwargs: pytest.fail("oversized upload reached the network"),
+    )
+    transport = RelayTransport("https://relay.example", "ws1", license_key="secret")
+    with pytest.raises(RelayError, match="upload safety limit"):
+        transport.push("bundle-x.json", b"1234")
 
 
 # ── Team seat enforcement at the relay: non-shareable beyond `seats`, seats float ───────
