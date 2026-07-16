@@ -5,8 +5,6 @@ import argparse
 import ipaddress
 import os
 
-from engraphis.read_only_api import create_read_only_app
-
 
 def _loopback(host: str) -> bool:
     # An empty host string makes the socket layer bind ALL interfaces, so it is
@@ -39,6 +37,7 @@ def main(argv=None) -> int:
         )
     try:
         import uvicorn
+        from engraphis.read_only_api import create_read_only_app
     except ImportError as exc:
         raise SystemExit(
             "The server extra is required: pip install \"engraphis[server]\""
