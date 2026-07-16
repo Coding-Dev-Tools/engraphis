@@ -35,6 +35,8 @@ MAX_KEYWORDS = 64
 MAX_KEYWORD_CHARS = 128
 MAX_METADATA_BYTES = 16_384
 MAX_K = 50
+MAX_CONTEXT_TASK_CHARS = 10_000
+MAX_AGENT_STATE_CHARS = 20_000
 # import_folder/import_files (SECURITY.md §5 — reads/accepts local-content by path or
 # upload; these bound resource use, not access scope, same framing as index_repo's
 # max_files/max_file_bytes).
@@ -658,7 +660,8 @@ class MemoryService:
     def consolidate(self, *, workspace: str, repo: Optional[str] = None,
                     dry_run: bool = False, min_cluster: int = 3,
                     archive_below: float = 0.05, profiles: bool = False,
-                    min_mentions: int = 3, infer: bool = False) -> dict:
+                    min_mentions: int = 3, infer: bool = False,
+                    structured: bool = False, supersede_sources: bool = False) -> dict:
         """Sleep-time consolidation sweep (episodic→semantic distillation + decayed-
         transient archival). The report includes a ``compaction`` block with the tokens
         the sweep saved. With ``profiles=True`` a third pass rolls each entity's memories
@@ -673,7 +676,14 @@ class MemoryService:
         housekeeping action; the **inference pass is a paid ``automation`` capability**
         (the dream pass 4), so ``infer=True`` is gated here as defense in depth — every
         caller (the ``/api/consolidate`` route, ``run_maintenance``) funnels through
-        this, so the Pro-only pass can't be reached without a server-approved license."""
+        this, so the Pro-only pass can't be reached without a server-approved license.
+
+        ``structured=True`` asks a configured LLM to emit schema-validated consolidated
+        facts with graph hints; any provider/schema failure falls back to the deterministic
+        digest path. ``supersede_sources=True`` is intentionally opt-in: it bi-temporally
+        closes the source episodes only after validated structured facts are written."""
+        if supersede_sources and not structured:
+            raise ValidationError("supersede_sources requires structured=true")
         if infer:
             from engraphis.licensing import require_feature
             require_feature("automation")
@@ -685,10 +695,26 @@ class MemoryService:
         except (TypeError, ValueError):
             raise ValidationError("min_cluster/min_mentions must be integers and "
                                   "archive_below a number")
-        return self.engine.consolidate(workspace_id=wid, repo_id=rid, dry_run=bool(dry_run),
-                                       min_cluster=min_cluster, archive_below=archive_below,
-                                       profiles=bool(profiles), min_mentions=min_mentions,
-                                       infer=bool(infer))
+        llm = None
+        if structured:
+            try:
+                from engraphis.llm.client import LLMClient
+                llm = LLMClient()
+            except Exception:
+                llm = None
+        try:
+            return self.engine.consolidate(
+                workspace_id=wid, repo_id=rid, dry_run=bool(dry_run),
+                min_cluster=min_cluster, archive_below=archive_below,
+                profiles=bool(profiles), min_mentions=min_mentions,
+                infer=bool(infer), structured=bool(structured),
+                supersede_sources=bool(supersede_sources), llm=llm)
+        finally:
+            if llm is not None and hasattr(llm, "close"):
+                try:
+                    llm.close()
+                except Exception:
+                    pass
 
     # ── read ───────────────────────────────────────────────────────────────────
     def recall(self, query: str, *, workspace: Optional[str] = None,
@@ -958,9 +984,10 @@ class MemoryService:
         when ``synthesize`` is true and an LLM is configured, the model may rewrite the
         summary, but only if it cites retrieved memories with ``[n]`` markers.
         """
-        task = _clean_text(task, field="task", max_chars=MAX_CONTENT_CHARS, required=False)
+        task = _clean_text(task, field="task", max_chars=MAX_CONTEXT_TASK_CHARS,
+                           required=False)
         agent_state = _clean_text(agent_state, field="agent_state",
-                                  max_chars=MAX_CONTENT_CHARS, required=False)
+                                  max_chars=MAX_AGENT_STATE_CHARS, required=False)
         k = max(1, min(MAX_K, int(k)))
         proactive = self.recall_proactive(workspace=workspace, repo=repo, k=k)
         memories = list(proactive.get("memories") or [])

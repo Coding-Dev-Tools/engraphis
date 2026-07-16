@@ -623,6 +623,8 @@ class _ConsolidateReq(BaseModel):
     workspace: Optional[str] = None
     dry_run: bool = True
     infer: bool = False
+    structured: bool = False
+    supersede_sources: bool = False
 
 
 @router.post("/consolidate")
@@ -630,7 +632,8 @@ def consolidate(req: _ConsolidateReq):
     if req.infer:
         _paid("automation")
     ws = req.workspace or _default_ws()
-    return _run(service().consolidate, workspace=ws, dry_run=req.dry_run, infer=req.infer)
+    return _run(service().consolidate, workspace=ws, dry_run=req.dry_run, infer=req.infer,
+                structured=req.structured, supersede_sources=req.supersede_sources)
 
 
 # ── analytics (Pro) ───────────────────────────────────────────────────────────
