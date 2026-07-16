@@ -1,6 +1,6 @@
 # Engraphis MCP tools — reference
 
-All 20 tools, grouped by job. Parameters are `name (type, default)` — no default means required.
+All 27 tools, grouped by job. Parameters are `name (type, default)` — no default means required.
 Every tool returns a JSON string; on failure it returns `"Error: <reason>"` instead of raising.
 Governance tools (`forget`/`pin`/`correct`/`link`) verify the memory actually belongs to the
 `workspace`/`repo` you pass **before** changing anything, so you can't touch memories outside a
@@ -29,6 +29,9 @@ Store a memory so it can be recalled later, across turns, sessions, and repos.
   **reinforces** the existing one (`op:"noop"`); a same-subject update **supersedes** the old one
   (`op:"invalidate"`, old closed not deleted). Set `False` only for intentionally repeated
   episodic log entries.
+- `retention_class (str, None)` — optional host classification: `ephemeral` | `normal` |
+  `critical`; advisory and bounded, never a silent discard.
+- `retention_reason (str, "")` — short content-free rationale for that classification.
 
 Returns `{id, workspace, repo, scope, mtype, stored:true, op}` where `op` is `add` | `noop` |
 `invalidate` (with `superseded:[old_id,…]`).
@@ -157,24 +160,29 @@ Explicitly connect two memories (A-MEM-style) when a plain recall wouldn't surfa
 
 - `a (str)`, `b (str)`, `workspace (str)`, `repo (str, None)`, `relation (str, "related")` —
   e.g. `caused_by`, `fixed_by`.
+- `layer (str, None)` — `temporal` | `entity` | `causal` | `semantic`; omitted means infer
+  from `relation`.
+- `reason (str, "")` — optional rationale/context for why the relationship exists; persisted
+  with the link and shown by inspection/graph APIs.
 
-Returns `{a, b, relation, linked:true}`.
+Returns `{a, b, relation, layer, reason, linked:true, receipt}`.
 
 ---
 
 ## Code
 
 ### `engraphis_index_repo`
-Parse a repository into the code-symbol graph: function/class/method definitions plus best-effort
-call/import edges. Run once when you start in a repo (or after large changes) so `search_code` has
-something to search. AST via tree-sitter when available, dependency-free regex fallback otherwise.
+Incrementally parse a repository into the code-symbol graph: modules/files, functions, classes,
+methods, variables, docstrings/comments, definitions, calls, imports, inheritance, and
+implementation edges. AST via tree-sitter when available, dependency-free regex fallback
+otherwise. Existing memories that mention symbols are linked into the same traversal graph.
 
 - `workspace (str)`, `repo (str)`, `root_path (str)` — local path to the repo root,
   `languages (list[str], None)` — omit to index every supported language found.
 
-Returns `{files_indexed, symbols, edges, backend}`. Re-indexing is safe (per-file replace, not
-duplicate). Reads local files at `root_path` — same trust boundary as any local tool; nothing is
-sent anywhere.
+Returns `{files_indexed, files_unchanged, files_removed, symbols, edges, code_memory_links,
+backend}`. Re-indexing hashes files, skips unchanged content, and removes deleted files only after
+a complete scan. Reads local files at `root_path`; nothing is sent anywhere.
 
 ### `engraphis_search_code`
 Find definitions by name, with their callers — structural search that costs far fewer tokens than
@@ -183,8 +191,29 @@ grepping or dumping files, and answers "what calls this / what breaks if I chang
 - `query (str)` — symbol or partial name, `workspace (str)`, `repo (str)` (must be indexed first),
   `limit (int, 20)`.
 
-Returns `{query, symbols:[{name, fqname, kind, file, span, signature,
-called_by:[{src, file, line}]}]}`.
+Returns `{query, symbols:[{name, fqname, kind, file, span, signature, docstring,
+called_by:[…], linked_memories:[…]}]}`.
+
+### `engraphis_code_path`
+Find the shortest path across definitions, calls, imports, aliases, and code↔memory links.
+
+- `source (str)`, `target (str)` — symbol, file, or memory id.
+- `workspace (str)`, `repo (str)`, `max_depth (int, 8)`.
+
+Returns `{found, source, target, hops, path, edges}` with direction and provenance fields.
+
+### `engraphis_code_impact`
+Estimate commit/PR impact from repo-relative changed files.
+
+- `changed_files (list[str])`, `workspace (str)`, `repo (str)`.
+
+Returns risk score/level, touched symbols, inbound edges, dependent files, linked memories,
+communities affected, hotspots, and potential conflict zones.
+
+### `engraphis_export_code_graph`
+Return portable `graph.json` data plus a human-readable Markdown report and self-contained HTML.
+
+- `workspace (str)`, `repo (str)`.
 
 ---
 
@@ -223,6 +252,12 @@ crisp fact.
 
 Returns `{workspace, repo, count, extracted, facts: [{id, op, superseded?}]}`.
 
+### `engraphis_ingest_postgres_schema`
+Inspect a live PostgreSQL catalog into schema memories plus typed database/schema/table/column/
+constraint graph nodes. The DSN is used for the connection only and is never stored or returned.
+
+- `dsn (str)`, `workspace (str)`, `repo (str, None)`, `schemas (list[str], None)`.
+
 ### `engraphis_consolidate`
 One sleep-time consolidation sweep: recurring episodic memories on the same subject become a
 single durable semantic digest (linked to sources via `consolidates` links), and fully-decayed
@@ -242,6 +277,18 @@ Returns `{clusters_found, digests_created, archived, skipped_already_consolidate
 
 ## Ops
 
+### `engraphis_receipts`
+List content-free, SHA-256-chained operation receipts for a workspace.
+
+- `workspace (str)`, `limit (int, 100)`.
+
+### `engraphis_verify_receipts`
+Recompute hashes and validate chain order. Returns `{valid, count, head, errors}`.
+
+### `engraphis_export_receipts`
+Return the receipt-only export bundle plus verification result; raw memory/query contents and
+actor/workspace names are excluded.
+
 ### `engraphis_stats`
 Memory counts (overall or for one workspace) — handy for onboarding/health checks.
 
@@ -258,6 +305,7 @@ Returns `{memories, by_type, workspaces, sessions, schema_version}`.
 - "Why?" / "since when?" → `why` / `timeline` (not `recall` — those see history).
 - Fact is wrong → `correct` (keeps the chain). Fact is obsolete with no replacement → `forget`.
 - Must never fade → `pin`. Two facts belong together → `link`.
-- Working in code → `index_repo` once, then `search_code`.
+- Working in code → `index_repo`, then `search_code`; use `code_path`/`code_impact` for structural
+  questions and PR triage.
 - Multi-step task → wrap in `start_session` … `end_session`.
 - Have a blob, not a fact → `ingest`. Memory getting noisy → `consolidate` (dry-run first).

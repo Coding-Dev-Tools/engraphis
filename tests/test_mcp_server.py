@@ -19,9 +19,12 @@ _ALL_TOOLS = {
     "engraphis_remember", "engraphis_recall", "engraphis_why", "engraphis_timeline",
     "engraphis_recall_proactive", "engraphis_forget", "engraphis_pin", "engraphis_correct",
     "engraphis_link", "engraphis_record_event", "engraphis_index_repo",
-    "engraphis_search_code", "engraphis_start_session", "engraphis_end_session",
+    "engraphis_search_code", "engraphis_code_path", "engraphis_code_impact",
+    "engraphis_export_code_graph", "engraphis_start_session", "engraphis_end_session",
     "engraphis_stats", "engraphis_proactive_context", "engraphis_recall_grounded",
-    "engraphis_answer",
+    "engraphis_answer", "engraphis_ingest", "engraphis_consolidate",
+    "engraphis_ingest_postgres_schema",
+    "engraphis_receipts", "engraphis_verify_receipts", "engraphis_export_receipts",
 }
 
 
@@ -160,8 +163,10 @@ def test_link_and_record_event_tools(monkeypatch):
     a = json.loads(srv.engraphis_remember(content="Memory A.", workspace="acme", repo="web"))
     b = json.loads(srv.engraphis_remember(content="Memory B.", workspace="acme", repo="web"))
     link = json.loads(srv.engraphis_link(a=a["id"], b=b["id"], workspace="acme", repo="web",
-                                         relation="related"))
+                                         relation="related", reason="same subsystem"))
     assert link["linked"] is True
+    assert link["reason"] == "same subsystem"
+    assert srv.service().store.get_links(a["id"])[0]["reason"] == "same subsystem"
 
     ev = json.loads(srv.engraphis_record_event(
         kind="decision", content="Chose PASETO over JWT.", workspace="acme", repo="web"))
@@ -185,3 +190,30 @@ def test_index_repo_and_search_code_tools(monkeypatch, tmp_path):
 
     out = json.loads(srv.engraphis_search_code(query="add", workspace="acme", repo="sample"))
     assert any(s["name"] == "add" for s in out["symbols"])
+
+    path = json.loads(srv.engraphis_code_path(
+        source="calc.py", target="add", workspace="acme", repo="sample",
+    ))
+    assert path["found"] is True
+    impact = json.loads(srv.engraphis_code_impact(
+        changed_files=["calc.py"], workspace="acme", repo="sample",
+    ))
+    assert impact["metrics"]["symbols_touched"] >= 1
+    exported = json.loads(srv.engraphis_export_code_graph(
+        workspace="acme", repo="sample",
+    ))
+    assert exported["graph"]["format"] == "engraphis-code-graph/1"
+    assert "# Engraphis Code Graph Report" in exported["report_markdown"]
+
+
+def test_receipt_tools(monkeypatch):
+    srv = _module_with_memory_db(monkeypatch)
+    srv.engraphis_remember(
+        content="Receipts cover this write.", workspace="acme", scope="workspace"
+    )
+    listed = json.loads(srv.engraphis_receipts(workspace="acme"))
+    assert listed["entries"][0]["operation"] == "remember"
+    verified = json.loads(srv.engraphis_verify_receipts(workspace="acme"))
+    assert verified["valid"] is True
+    exported = json.loads(srv.engraphis_export_receipts(workspace="acme"))
+    assert exported["verification"]["valid"] is True
