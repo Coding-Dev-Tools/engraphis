@@ -5,6 +5,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-07-16
+
 ### Added
 - **Agent Connect for hosted Team instances.** Members can mint SHA-256-hashed per-user
   bearer tokens in Settings and use the hosted v2 store through `POST /api/remember`,
@@ -46,7 +48,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
   trial before first-admin setup. Purchased keys bootstrap through
   `ENGRAPHIS_LICENSE_KEY` or the license file; `/api/license/activate` remains admin-only.
 - Package fallback metadata and all user-facing tool inventories now agree on version
-  `0.9.5` and 20 MCP tools.
+  `0.9.6` and 20 MCP tools.
 
 ### Fixed
 - **Agent Connect and dashboard lifecycle:** corrected generated endpoint URLs, retained
