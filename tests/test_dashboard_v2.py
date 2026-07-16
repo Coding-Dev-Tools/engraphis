@@ -76,6 +76,17 @@ def test_team_mode_env_opt_out_parsing(monkeypatch, raw):
     assert _enabled() is False
 
 
+def test_license_background_refresh_retries_configured_key(monkeypatch):
+    from engraphis.dashboard_app import _refresh_configured_license
+
+    calls = []
+    monkeypatch.setattr(lic, "_read_key_material", lambda: "configured-key")
+    monkeypatch.setattr(
+        lic, "current_license", lambda *, refresh=False: calls.append(refresh))
+    _refresh_configured_license()
+    assert calls == [True]
+
+
 def test_team_setup_waits_for_active_license(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path, team=True, key=None) as c:
         state = c.get("/api/auth/state").json()
