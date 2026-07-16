@@ -9,6 +9,9 @@ from engraphis import config
 from engraphis.config import Settings
 
 
+RETIRED_RELAY_URL = "https://engraphis-production.up.railway.app"
+
+
 def test_rerank_model_defaults_to_empty(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_RERANK_MODEL", raising=False)
     assert Settings().rerank_model == ""
@@ -62,3 +65,17 @@ def test_license_server_url_migrates_retired_signed_host(monkeypatch):
     assert config.resolve_license_server_url(
         "https://engraphis-production.up.railway.app/",
     ) == config.DEFAULT_RELAY_URL
+
+
+def test_retired_cloud_url_override_is_canonicalized(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", RETIRED_RELAY_URL + "/")
+    assert (
+        config.resolve_license_server_url("https://signed.example")
+        == config.DEFAULT_RELAY_URL
+    )
+
+
+def test_retired_relay_url_override_is_canonicalized(monkeypatch):
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
+    monkeypatch.setattr(config.settings, "relay_url", RETIRED_RELAY_URL)
+    assert config.resolve_license_server_url() == config.DEFAULT_RELAY_URL
