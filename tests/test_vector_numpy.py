@@ -1,4 +1,5 @@
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
+from engraphis.backends.vector_sqlitevec import _cosine_from_l2
 from engraphis.core.interfaces import MemoryRecord, Scope
 from engraphis.core.store import Store
 
@@ -39,3 +40,9 @@ def test_delete_removes_from_index():
     index.delete([mid])
     assert index.search(vec, k=1) == []
     store.close()
+
+
+def test_sqlitevec_l2_distance_converts_to_cosine_similarity():
+    assert _cosine_from_l2(0.0) == 1.0
+    assert abs(_cosine_from_l2(2 ** 0.5)) < 1e-12
+    assert _cosine_from_l2(2.0) == -1.0

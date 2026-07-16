@@ -132,12 +132,79 @@ def test_apply_is_idempotent_on_replay():
 def test_dry_run_writes_nothing():
     store = Store(":memory:")
     se = SyncEngine(store)
-    bundle = {"format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
-              "memories": [{"id": "mem_a", "content": "one"}], "mem_links": []}
+    bundle = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
+        "memories": [{"id": "mem_a", "content": "one"},
+                     {"id": "mem_b", "content": "two"}],
+        "mem_links": [{"a": "mem_a", "b": "mem_b", "relation": "related"}],
+    }
     rep = se.apply_bundle(bundle, dry_run=True)
-    assert rep["added"] == 1 and rep["dry_run"] is True
-    assert store.get_memory("mem_a") is None                  # nothing persisted
+    assert rep["added"] == 2 and rep["links_added"] == 1 and rep["dry_run"] is True
+    assert store.get_memory("mem_a") is None
     assert store.conn.execute("SELECT COUNT(*) c FROM workspaces").fetchone()["c"] == 0
+    assert store.conn.execute("SELECT COUNT(*) c FROM audit").fetchone()["c"] == 0
+
+
+def test_apply_rejects_memory_with_undeclared_remote_repo():
+    store = Store(":memory:")
+    bundle = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
+        "memories": [{"id": "mem_a", "content": "one", "repo_id": "remote_repo"}],
+        "mem_links": [],
+    }
+
+    report = SyncEngine(store).apply_bundle(bundle)
+
+    assert report["rejected"] == 1 and report["added"] == 0
+    assert store.get_memory("mem_a") is None
+
+
+def test_dry_run_resolves_remote_repo_by_name_without_mutating():
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    local_repo = store.get_or_create_repo(wid, "api")
+    bundle = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w",
+        "repos": {"remote_repo": "api"},
+        "memories": [{"id": "mem_a", "content": "one", "repo_id": "remote_repo"}],
+        "mem_links": [],
+    }
+
+    report = SyncEngine(store).apply_bundle(
+        bundle, only_repo_id=local_repo, dry_run=True)
+
+    assert report["added"] == 1 and report["rejected"] == 0
+    assert store.get_memory("mem_a") is None
+
+
+def test_bundle_links_must_reference_accepted_bundle_memories():
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    store.add_memory(MemoryRecord(id="mem_a", content="one", workspace_id=wid))
+    store.add_memory(MemoryRecord(id="mem_b", content="two", workspace_id=wid))
+    bundle = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
+        "memories": [],
+        "mem_links": [{"a": "mem_a", "b": "mem_b", "relation": "injected"}],
+    }
+
+    report = SyncEngine(store).apply_bundle(bundle)
+
+    assert report["links_added"] == 0
+    assert not store.has_link("mem_a", "mem_b", relation="injected")
+
+
+def test_repo_scoped_export_includes_only_that_repo_metadata():
+    store = Store(":memory:")
+    se = SyncEngine(store)
+    wid = store.get_or_create_workspace("w")
+    keep = store.get_or_create_repo(wid, "keep")
+    drop = store.get_or_create_repo(wid, "drop")
+    store.add_memory(MemoryRecord(id="mem_keep", content="x", workspace_id=wid,
+                                  repo_id=keep, scope=Scope.REPO, mtype=MemoryType.SEMANTIC))
+    bundle = se.export_bundle(wid, repo_id=keep)
+    assert bundle["repos"] == {keep: "keep"}
+    assert drop not in bundle["repos"]
 
 
 # ── two-device integration over the folder transport ──────────────────────────
@@ -340,7 +407,11 @@ def test_sync_auditing_for_adds_updates_and_links():
     # 3. Test audit logging for memory links
     bundle_link = {
         "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
-        "memories": [{"id": "mem_b", "content": "another fact"}],
+        # Links are accepted only between memories present in the bundle and accepted by
+        # this apply pass. Include mem_a as an unchanged bundle memory so the link is
+        # legitimate, while mem_b is newly added.
+        "memories": [{"id": "mem_a", "content": "hello updated", "last_access": 200.0},
+                     {"id": "mem_b", "content": "another fact"}],
         "mem_links": [{"a": "mem_a", "b": "mem_b", "relation": "related"}]
     }
     se.apply_bundle(bundle_link)

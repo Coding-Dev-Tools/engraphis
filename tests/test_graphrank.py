@@ -48,13 +48,14 @@ def _graph_fixture():
     emb = DeterministicEmbedder(dim=64)
     index = NumpyVectorIndex(store)
 
+    entity_ids = {}
     for name in ("alphasvc", "betasvc", "gammasvc"):
-        store.upsert_entity(Node(id="", name=name, ntype="service",
-                                 workspace_id=wid, repo_id=rid))
-    store.upsert_edge(Edge(id="", src="alphasvc", dst="betasvc", relation="calls",
-                           workspace_id=wid, repo_id=rid))
-    store.upsert_edge(Edge(id="", src="betasvc", dst="gammasvc", relation="calls",
-                           workspace_id=wid, repo_id=rid))
+        entity_ids[name] = store.upsert_entity(Node(id="", name=name, ntype="service",
+                                                    workspace_id=wid, repo_id=rid))
+    store.upsert_edge(Edge(id="", src=entity_ids["alphasvc"], dst=entity_ids["betasvc"],
+                           relation="calls", workspace_id=wid, repo_id=rid))
+    store.upsert_edge(Edge(id="", src=entity_ids["betasvc"], dst=entity_ids["gammasvc"],
+                           relation="calls", workspace_id=wid, repo_id=rid))
 
     texts = {
         "m1": "alphasvc handles the login flow.",

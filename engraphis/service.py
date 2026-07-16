@@ -24,7 +24,7 @@ from typing import Any, Optional
 
 from engraphis.backends.extractor import ChunkingExtractor
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.interfaces import MemoryType, Scope
+from engraphis.core.interfaces import MemoryType, Scope, SearchFilter
 from engraphis.graphdata import build_graph_payload, empty_graph
 
 # ── validation limits (memory-poisoning / resource-exhaustion guards) ──────────
@@ -1070,10 +1070,14 @@ class MemoryService:
         the current user is omitted entirely — you can't see, count, or select a folder
         that isn't yours — mirroring the access check in ``_authorize_workspace``. Outside
         team mode there is no current user, so every folder is listed as before."""
+        import time as _time
+        now = _time.time()
         rows = self.store.conn.execute(
             "SELECT w.id, w.name, w.settings AS settings, COUNT(m.id) AS n FROM workspaces w "
-            "LEFT JOIN memories m ON m.workspace_id = w.id AND m.expired_at IS NULL "
-            "GROUP BY w.id, w.name, w.settings ORDER BY w.name").fetchall()
+            "LEFT JOIN memories m ON m.workspace_id = w.id "
+            "AND (m.valid_from IS NULL OR m.valid_from<=?) "
+            "AND (m.valid_to IS NULL OR ?<m.valid_to) AND m.expired_at IS NULL "
+            "GROUP BY w.id, w.name, w.settings ORDER BY w.name", (now, now)).fetchall()
         user = current_user()
         my_email = (user or {}).get("email") or ""
         out = []
@@ -1710,8 +1714,10 @@ class MemoryService:
             ents = conn.execute(
                 "SELECT id, name, etype FROM entities WHERE workspace_id=? LIMIT ?",
                 (wid, limit)).fetchall()
-        edgs = conn.execute(
-            "SELECT src, dst, relation FROM edges WHERE workspace_id=?", (wid,)).fetchall()
+        node_ids = {r["id"] for r in ents}
+        edgs = [{"src": e.src, "dst": e.dst, "relation": e.relation}
+                for e in self.store.edges_in_scope(SearchFilter(workspace_id=wid))
+                if e.src in node_ids and e.dst in node_ids]
         return build_graph_payload(ws, ents, edgs)
 
     def _should_backfill_graph(self, wid: str, has_entities: bool) -> bool:
@@ -1723,9 +1729,13 @@ class MemoryService:
 
     def _has_structured_graph_rows(self, wid: str) -> bool:
         import json as _json
+        import time as _time
+        now = _time.time()
         rows = self.store.conn.execute(
-            "SELECT metadata FROM memories WHERE workspace_id=? AND expired_at IS NULL "
-            "AND (metadata LIKE '%entities%' OR metadata LIKE '%relations%')", (wid,))
+            "SELECT metadata FROM memories WHERE workspace_id=? "
+            "AND (valid_from IS NULL OR valid_from<=?) "
+            "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL "
+            "AND (metadata LIKE '%entities%' OR metadata LIKE '%relations%')", (wid, now, now))
         for row in rows:
             try:
                 meta = _json.loads(row["metadata"] or "{}")
@@ -1751,9 +1761,13 @@ class MemoryService:
             StructuredMetadataGraphExtractor, feed as _graph_feed,
         )
         import json as _json
+        import time as _time
+        now = _time.time()
         rows = self.store.conn.execute(
-            "SELECT repo_id, title, content, metadata FROM memories "
-            "WHERE workspace_id=? AND expired_at IS NULL", (wid,)).fetchall()
+            "SELECT id, repo_id, title, content, metadata FROM memories "
+            "WHERE workspace_id=? AND (valid_from IS NULL OR valid_from<=?) "
+            "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL",
+            (wid, now, now)).fetchall()
         for r in rows:
             try:
                 meta = _json.loads(r["metadata"] or "{}")
@@ -1764,7 +1778,7 @@ class MemoryService:
                     _graph_feed(self.store, r["content"] or "", workspace_id=wid,
                                 repo_id=r["repo_id"], title=r["title"] or "",
                                 extractor=StructuredMetadataGraphExtractor(meta),
-                                provenance={"source": "structured_backfill"})
+                                provenance={"source": "structured_backfill", "memory_id": r["id"]})
                 except Exception:
                     pass
             if self.engine.graph_extractor is not None:
@@ -1772,7 +1786,7 @@ class MemoryService:
                     _graph_feed(self.store, r["content"] or "", workspace_id=wid,
                                 repo_id=r["repo_id"], title=r["title"] or "",
                                 extractor=self.engine.graph_extractor,
-                                provenance={"source": "lazy_backfill"})
+                                provenance={"source": "lazy_backfill", "memory_id": r["id"]})
                 except Exception:
                     pass
 

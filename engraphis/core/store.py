@@ -48,6 +48,21 @@ def _loads(raw: Any, default: Any) -> Any:
         return default
 
 
+def _provenance_memory_ids(provenance: Any) -> list[str]:
+    if not isinstance(provenance, dict):
+        return []
+    values = [provenance.get("memory_id")]
+    many = provenance.get("memory_ids")
+    if isinstance(many, (list, tuple, set)):
+        values.extend(many)
+    out: list[str] = []
+    for value in values:
+        mid = str(value or "")
+        if mid and mid not in out:
+            out.append(mid)
+    return out
+
+
 def _fts5_available(conn: sqlite3.Connection) -> bool:
     try:
         conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS _fts_probe USING fts5(x)")
@@ -234,7 +249,7 @@ class Store:
             if existing["workspace_id"] != rec.workspace_id:
                 self.audit("system", "cross_workspace_overwrite_blocked", rec.id,
                            f"existing workspace={existing['workspace_id']}, "
-                           f"incoming workspace={rec.workspace_id}")
+                           f"incoming workspace={rec.workspace_id}", commit=False)
                 rec.id = ids.new_id("memory")
             elif audit:
                 # Generic provenance-change record for direct writes. The sync path
@@ -242,7 +257,7 @@ class Store:
                 # so a synced update yields exactly one audit row rather than a duplicate.
                 self.audit("system", "overwrite", rec.id,
                            f"existing provenance={existing['provenance']}, "
-                           f"incoming provenance={_dumps(rec.provenance)}")
+                           f"incoming provenance={_dumps(rec.provenance)}", commit=False)
         ts = now_ts()
         rec.ingested_at = rec.ingested_at or ts
         rec.valid_from = rec.valid_from if rec.valid_from is not None else ts
@@ -301,7 +316,8 @@ class Store:
         at = at if at is not None else now_ts()
         self.conn.execute("UPDATE memories SET valid_to=? WHERE id=? AND valid_to IS NULL",
                           (at, memory_id))
-        self.audit(actor, "invalidate", memory_id, reason)
+        self.audit(actor, "invalidate", memory_id, reason, commit=False)
+        self.invalidate_edges_for_memory(memory_id, at=at, commit=False)
         self.conn.commit()
 
     def set_pinned(self, memory_id: str, pinned: bool) -> None:
@@ -355,26 +371,31 @@ class Store:
             (mid, title, content, keywords),
         )
 
-    def fts_search(self, query: str, k: int = 20) -> list[tuple[str, float]]:
+    def fts_search(self, query: str, k: int = 20,
+                   *, filter: Optional[SearchFilter] = None) -> list[tuple[str, float]]:
         """Lexical arm. Uses FTS5 BM25 when available, else a LIKE fallback."""
         q = (query or "").strip()
         if not q:
             return []
+        where, params = self._where(filter, include_invalid=False, alias="m")
+        extra = (" AND " + " AND ".join(where)) if where else ""
         if self.has_fts5:
             try:
                 rows = self.conn.execute(
-                    "SELECT id, bm25(mem_fts) AS rank FROM mem_fts "
-                    "WHERE mem_fts MATCH ? ORDER BY rank LIMIT ?",
-                    (_fts_query(q), k),
+                    "SELECT f.id, bm25(mem_fts) AS rank FROM mem_fts f "
+                    "JOIN memories m ON m.id = f.id "
+                    "WHERE mem_fts MATCH ?" + extra + " ORDER BY rank LIMIT ?",
+                    (_fts_query(q), *params, k),
                 ).fetchall()
-                # bm25: lower is better → convert to a descending score
-                return [(r["id"], 1.0 / (1.0 + max(r["rank"], 0.0))) for r in rows]
+                # FTS5 BM25 scores are negative; lower is better, so negate them.
+                return [(r["id"], -float(r["rank"])) for r in rows]
             except sqlite3.OperationalError:
                 pass
         like = f"%{q}%"
         rows = self.conn.execute(
-            "SELECT id FROM mem_fts WHERE content LIKE ? OR title LIKE ? LIMIT ?",
-            (like, like, k),
+            "SELECT f.id FROM mem_fts f JOIN memories m ON m.id = f.id "
+            "WHERE (f.content LIKE ? OR f.title LIKE ?)" + extra + " LIMIT ?",
+            (like, like, *params, k),
         ).fetchall()
         return [(r["id"], 0.5) for r in rows]
 
@@ -434,8 +455,58 @@ class Store:
 
     def invalidate_edge(self, edge_id: str, at: Optional[float] = None) -> None:
         self.conn.execute("UPDATE edges SET valid_to=? WHERE id=? AND valid_to IS NULL",
-                          (at or now_ts(), edge_id))
+                          (now_ts() if at is None else at, edge_id))
         self.conn.commit()
+
+    def add_edge_support(self, edge_id: str, provenance: dict) -> None:
+        """Record another source memory supporting an existing graph edge."""
+        incoming = _provenance_memory_ids(provenance)
+        if not incoming:
+            return
+        row = self.conn.execute("SELECT provenance FROM edges WHERE id=?", (edge_id,)).fetchone()
+        if row is None:
+            return
+        stored = _loads(row["provenance"], {})
+        if not isinstance(stored, dict):
+            stored = {}
+        supports = _provenance_memory_ids(stored)
+        merged = supports + [mid for mid in incoming if mid not in supports]
+        if merged == supports:
+            return
+        stored["memory_id"] = merged[0]
+        stored["memory_ids"] = merged
+        self.conn.execute("UPDATE edges SET provenance=? WHERE id=?",
+                          (_dumps(stored), edge_id))
+        self.conn.commit()
+
+    def invalidate_edges_for_memory(self, memory_id: str, *, at: Optional[float] = None,
+                                    commit: bool = True) -> None:
+        """Remove one memory's support and close edges with no remaining sources."""
+        ts = at if at is not None else now_ts()
+        rows = self.conn.execute(
+            "SELECT id, provenance FROM edges WHERE valid_to IS NULL AND provenance LIKE ?",
+            (f"%{memory_id}%",),
+        ).fetchall()
+        ids_to_close: list[str] = []
+        for row in rows:
+            prov = _loads(row["provenance"], {})
+            supports = _provenance_memory_ids(prov)
+            if memory_id not in supports:
+                continue
+            remaining = [mid for mid in supports if mid != memory_id]
+            if not remaining:
+                ids_to_close.append(row["id"])
+                continue
+            prov["memory_id"] = remaining[0]
+            prov["memory_ids"] = remaining
+            self.conn.execute("UPDATE edges SET provenance=? WHERE id=?",
+                              (_dumps(prov), row["id"]))
+        if ids_to_close:
+            marks = ",".join("?" for _ in ids_to_close)
+            self.conn.execute(f"UPDATE edges SET valid_to=? WHERE id IN ({marks})",
+                              (ts, *ids_to_close))
+        if commit:
+            self.conn.commit()
 
     # ── memory-to-memory links (A-MEM style) ────────────────────────────────────
     def add_link(self, a: str, b: str, relation: str = "related") -> None:
@@ -576,18 +647,14 @@ class Store:
         self.conn.commit()
         return eid
 
-    def audit(self, actor: str, action: str, target: str, detail: str = "") -> None:
+    def audit(self, actor: str, action: str, target: str, detail: str = "",
+              *, commit: bool = True) -> None:
         self.conn.execute(
             "INSERT INTO audit(id, ts, actor, action, target, detail) VALUES (?,?,?,?,?,?)",
             (ids.new_id("audit"), now_ts(), actor, action, target, detail),
         )
-        # Many callers (engine.pin/merge, service.correct/rename/delete, the team
-        # auth audit events) invoke audit() as their final statement with no follow-up
-        # commit. Without this, the row sits in an uncommitted transaction and is lost
-        # when the connection closes or an unrelated commit interleaves — silently
-        # dropping team-mode accountability records. Commit here so every audit event
-        # persists; an extra commit is harmless when a caller commits again afterward.
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     # ── sync state (device identity + per-peer cursors) ─────────────────────────
     def get_sync_state(self, key: str) -> Optional[str]:
