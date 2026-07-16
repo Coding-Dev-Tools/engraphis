@@ -57,8 +57,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
   entitlement immediately while transient failures may use an unexpired lease; runtime
   public-key replacement is test-only; trial verification links survive signing failures;
   webhook reservations are retry-safe after crashes; subscription seat baselines no
-  longer suppress the first real update; and registry writes no longer occur inside the
-  SQLite trial transaction.
+  longer suppress the first real update; registry writes no longer occur inside the SQLite
+  trial transaction; and managed license requests use Cloudflare-compatible client headers
+  while signed keys for the retired Railway host migrate to the canonical relay.
+- **Python and packaging compatibility:** rate-limit buckets and audit exports use
+  timezone-aware UTC APIs, and package metadata uses the SPDX license format.
 - **Memory and retrieval integrity:** audit writes are committed durably, recall excludes
   non-live rows, sync dry-runs validate remote repository mappings, graph provenance is
   pruned per memory instead of deleting shared edges, SQLite-vector distances are
