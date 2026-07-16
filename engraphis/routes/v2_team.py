@@ -440,6 +440,9 @@ def attach(app: FastAPI, service):
         base = os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip().rstrip("/")
         if not base:
             base = str(request.base_url).rstrip("/")
+        # Importability is not availability: the MCP package can be installed while app
+        # construction still refuses the mount (for example, an invalid public URL).
+        mcp_on = bool(getattr(request.app.state, "mcp_over_http", False))
         return {
             "user": {"id": u["id"], "email": u["email"], "name": u.get("name", ""),
                      "role": u["role"]},
@@ -451,7 +454,8 @@ def attach(app: FastAPI, service):
                 f"Authorization: Bearer <your-token>\n"
                 f"POST {base}/api/remember   {{\"content\": \"...\", \"workspace\": \"default\"}}\n"
                 f"GET  {base}/api/recall?q=...&workspace=default"),
-            "mcp_over_http": False,  # /mcp mount is a follow-up; agents use HTTP today.
+            "mcp_over_http": mcp_on,
+            "mcp_url": (base + "/mcp") if mcp_on else None,
         }
 
     app.include_router(router)
