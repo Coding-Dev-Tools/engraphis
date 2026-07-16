@@ -20,7 +20,8 @@ _ALL_TOOLS = {
     "engraphis_recall_proactive", "engraphis_forget", "engraphis_pin", "engraphis_correct",
     "engraphis_link", "engraphis_record_event", "engraphis_index_repo",
     "engraphis_search_code", "engraphis_start_session", "engraphis_end_session",
-    "engraphis_stats",
+    "engraphis_stats", "engraphis_proactive_context", "engraphis_recall_grounded",
+    "engraphis_answer",
 }
 
 
@@ -57,6 +58,26 @@ def test_remember_reports_resolution_op(monkeypatch):
     assert first["op"] == "add"
     assert second["op"] == "noop"
     assert second["id"] == first["id"]
+
+
+def test_grounded_recall_tool_returns_flat_answer_payload(monkeypatch):
+    srv = _module_with_memory_db(monkeypatch)
+    srv.engraphis_remember(
+        content="The API uses PASETO tokens for authentication.", workspace="acme", repo="api")
+    out = json.loads(srv.engraphis_recall_grounded(
+        query="Which auth tokens does the API use?", workspace="acme", repo="api",
+        min_support=0.0))
+    assert out["query"] == "Which auth tokens does the API use?"
+    assert out["grounded"] is True
+    assert out["abstained"] is False
+    assert "PASETO" in out["answer"]
+    assert out["citations"]
+
+    alias = json.loads(srv.engraphis_answer(
+        query="Which auth tokens does the API use?", workspace="acme", repo="api",
+        min_support=0.0))
+    assert alias["grounded"] is True
+    assert "PASETO" in alias["answer"]
 
 
 def test_tool_returns_actionable_error_on_bad_input(monkeypatch):

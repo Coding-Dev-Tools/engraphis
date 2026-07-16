@@ -187,6 +187,63 @@ def workspaces():
     return _run(service().list_workspaces)
 
 
+# ── LLM connection status + test (dashboard "Connect your LLM" card) ───────────
+
+# Provider → sensible default model, so the dashboard's provider picker can prefill a
+# working model name without the user needing to know the provider's catalogue.
+_LLM_DEFAULT_MODELS = {
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-3-5-sonnet-20241022",
+    "google": "gemini-1.5-flash",
+    "openrouter": "openai/gpt-4o-mini",
+}
+
+
+@router.get("/llm/status")
+def llm_status():
+    """Report the configured LLM provider/model/key presence and the active extractor,
+    plus a ready-to-paste .env snippet for the dashboard's "Connect your LLM" card.
+    Never returns the API key itself — only whether one is set."""
+    provider = settings.llm_provider or "openai"
+    model = settings.llm_model or _LLM_DEFAULT_MODELS.get(provider, "")
+    key_set = bool(settings.llm_api_key)
+    return {
+        "provider": provider,
+        "model": model,
+        "key_set": key_set,
+        "base_url": settings.llm_base_url or "",
+        "extractor": settings.extractor,
+        "configured": key_set and bool(model),
+        "default_models": _LLM_DEFAULT_MODELS,
+        # A copy-paste .env block so the user doesn't have to memorise var names.
+        "env_snippet": (
+            f"ENGRAPHIS_LLM_PROVIDER={provider}\n"
+            f"ENGRAPHIS_LLM_MODEL={model}\n"
+            f"ENGRAPHIS_LLM_API_KEY=<your-key>\n"
+            + (f"ENGRAPHIS_LLM_BASE_URL={settings.llm_base_url}\n" if settings.llm_base_url else "")
+            + ("ENGRAPHIS_EXTRACTOR=llm_structured\n" if key_set else "# set ENGRAPHIS_EXTRACTOR=llm_structured to use it\n")
+        ),
+    }
+
+
+@router.post("/llm/test")
+def llm_test():
+    """Live-test the configured LLM with a tiny completion. POST so the dashboard auth
+    gate (member+ in team mode) applies — testing spends a fraction of a cent of the
+    instance's API credit, so it's not a viewer action. Returns the ping result; never
+    raises (the client's ping() already swallows every failure into ``ok=False``)."""
+    if not settings.llm_api_key:
+        return {"ok": False, "error": "No API key configured. Set ENGRAPHIS_LLM_API_KEY in your .env and restart.",
+                "provider": settings.llm_provider, "model": settings.llm_model}
+    try:
+        from engraphis.llm.client import LLMClient
+        with LLMClient() as llm:
+            return llm.ping()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": str(exc),
+                "provider": settings.llm_provider, "model": settings.llm_model}
+
+
 class _CreateWsReq(BaseModel):
     workspace: str
     description: str = ""
@@ -363,6 +420,10 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = None, limit: in
         ws = service()._clean_ws(ws)
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
+    # Enforce personal-folder ownership before any read. The semantic recall path goes
+    # through the service (which enforces this), but this raw-SQLite browse path does
+    # not, so a team member could otherwise read another user's personal folder by name.
+    service()._enforce_personal_access(ws)
     conn = _sql.connect("file:%s?mode=ro" % settings.db_path, uri=True)
     conn.row_factory = _sql.Row
     try:
@@ -452,6 +513,23 @@ def proactive(workspace: Optional[str] = None, k: int = 10):
     mems = out.get("memories") or out.get("results") or []
     return {"workspace": ws, "memories": [_mem(m) for m in mems],
             "handoff": out.get("handoff") or out.get("last_session")}
+
+
+class _ProactiveContextReq(BaseModel):
+    workspace: Optional[str] = None
+    repo: Optional[str] = None
+    task: str = ""
+    agent_state: str = ""
+    k: int = 10
+    synthesize: bool = False
+
+
+@router.post("/proactive-context")
+def proactive_context(req: _ProactiveContextReq):
+    ws = req.workspace or _default_ws()
+    return _run(service().proactive_context, workspace=ws, repo=req.repo,
+                task=req.task, agent_state=req.agent_state, k=req.k,
+                synthesize=req.synthesize)
 
 
 @router.get("/audit")
@@ -545,6 +623,8 @@ class _ConsolidateReq(BaseModel):
     workspace: Optional[str] = None
     dry_run: bool = True
     infer: bool = False
+    structured: bool = False
+    supersede_sources: bool = False
 
 
 @router.post("/consolidate")
@@ -552,7 +632,8 @@ def consolidate(req: _ConsolidateReq):
     if req.infer:
         _paid("automation")
     ws = req.workspace or _default_ws()
-    return _run(service().consolidate, workspace=ws, dry_run=req.dry_run, infer=req.infer)
+    return _run(service().consolidate, workspace=ws, dry_run=req.dry_run, infer=req.infer,
+                structured=req.structured, supersede_sources=req.supersede_sources)
 
 
 # ── analytics (Pro) ───────────────────────────────────────────────────────────

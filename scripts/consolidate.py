@@ -12,6 +12,9 @@ Your machine, your schedule — no cloud service involved. Examples::
     # Nicer digests via the configured LLM (falls back to deterministic on error)
     python -m scripts.consolidate --db engraphis.db --workspace acme --llm
 
+    # Schema-first LLM distillation with entity/relation graph hints
+    python -m scripts.consolidate --db engraphis.db --workspace acme --structured
+
     # Team: also write a human-readable summary report (.md or .html by extension)
     python -m scripts.consolidate --db engraphis.db --workspace acme \
         --report reports/consolidation-$(date +%F).md
@@ -37,8 +40,10 @@ from engraphis.core.engine import MemoryEngine
 def _live_count(engine: MemoryEngine, workspace_id: str, repo_id=None) -> int:
     """Live (non-expired, currently valid) memories in scope — the before/after metric."""
     sql = ("SELECT COUNT(*) AS n FROM memories WHERE workspace_id=? "
-           "AND expired_at IS NULL AND (valid_to IS NULL OR valid_to > ?)")
-    args = [workspace_id, time.time()]
+           "AND expired_at IS NULL AND (valid_from IS NULL OR valid_from<=?) "
+           "AND (valid_to IS NULL OR ?<valid_to)")
+    now = time.time()
+    args = [workspace_id, now, now]
     if repo_id:
         sql += " AND repo_id=?"
         args.append(repo_id)
@@ -52,6 +57,7 @@ def _report_sections(report: dict, *, workspace: str, repo, before: int, after: 
     archived = report.get("archived", [])
     comp = report.get("compaction", {})
     profiles = (report.get("profiles") or {}).get("profiles_created", [])
+    structured = report.get("structured") or {}
     merged = sum(len(d.get("consolidates") or d.get("would_consolidate") or [])
                  for d in digests)
     generated = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
@@ -77,6 +83,13 @@ def _report_sections(report: dict, *, workspace: str, repo, before: int, after: 
         ("Decayed & pruned (bi-temporal close — recoverable, audited)", [
             ("transients archived", len(archived)),
             ("tokens freed", comp.get("archived_tokens_freed", 0)),
+        ]),
+        ("Structured LLM distillation", [
+            ("enabled", bool(structured.get("enabled"))),
+            ("attempted", structured.get("attempted", 0)),
+            ("succeeded", structured.get("succeeded", 0)),
+            ("fallbacks", structured.get("fallbacks", 0)),
+            ("sources superseded", structured.get("sources_superseded", 0)),
         ]),
         ("Entity profiles", [
             ("profiles created", len(profiles)),
@@ -143,6 +156,12 @@ def main(argv=None) -> int:
     ap.add_argument("--profiles", action="store_true",
                     help="Also roll each entity's memories into one durable profile "
                          "digest (needs graph entities; report lands under 'profiles').")
+    ap.add_argument("--structured", action="store_true",
+                    help="Use configured LLM for schema-validated consolidation facts "
+                         "with entities/relations/confidence; falls back to deterministic.")
+    ap.add_argument("--supersede-sources", action="store_true",
+                    help="Only with --structured: bi-temporally close source episodes "
+                         "after validated facts are written.")
     ap.add_argument("--min-mentions", type=int, default=3,
                     help="Memories mentioning an entity before it earns a profile "
                          "(default 3; only used with --profiles).")
@@ -151,6 +170,10 @@ def main(argv=None) -> int:
                          "merged/decayed/pruned counts, before/after — to PATH. "
                          "The sweep itself stays free.")
     args = ap.parse_args(argv)
+    if args.supersede_sources and not args.structured:
+        print("error: --supersede-sources requires --structured", file=sys.stderr)
+        return 2
+
 
     if args.report:
         # Team gate for the report artifact only — checked up front so a scheduled
@@ -180,7 +203,7 @@ def main(argv=None) -> int:
         rid = rid_row["id"]
 
     llm = None
-    if args.llm:
+    if args.llm or args.structured:
         try:
             from engraphis.llm.client import LLMClient
             llm = LLMClient()
@@ -189,11 +212,19 @@ def main(argv=None) -> int:
                   file=sys.stderr)
 
     before = _live_count(engine, wid_row["id"], rid)
-    report = engine.consolidate(
-        workspace_id=wid_row["id"], repo_id=rid, dry_run=args.dry_run,
-        min_cluster=args.min_cluster, archive_below=args.archive_below, llm=llm,
-        profiles=args.profiles, min_mentions=args.min_mentions,
-    )
+    try:
+        report = engine.consolidate(
+            workspace_id=wid_row["id"], repo_id=rid, dry_run=args.dry_run,
+            min_cluster=args.min_cluster, archive_below=args.archive_below, llm=llm,
+            profiles=args.profiles, min_mentions=args.min_mentions,
+            structured=args.structured, supersede_sources=args.supersede_sources,
+        )
+    finally:
+        if llm is not None and hasattr(llm, "close"):
+            try:
+                llm.close()
+            except Exception:
+                pass
     print(json.dumps(report, indent=2))
     if args.report:
         after = _live_count(engine, wid_row["id"], rid)

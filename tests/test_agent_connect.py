@@ -34,12 +34,15 @@ def _seed(db_path: str) -> None:
                  scope="workspace", title="DB choice")
 
 
-def _client(monkeypatch, tmp_path, *, key=None):
+def _client(monkeypatch, tmp_path, *, key=None, team_mode="1"):
     db = str(tmp_path / "agent.db")
     monkeypatch.setattr(settings, "db_path", db)
     monkeypatch.setattr(settings, "embed_model", "")
     monkeypatch.setenv("ENGRAPHIS_EMBED_MODEL", "")
-    monkeypatch.setenv("ENGRAPHIS_TEAM_MODE", "1")
+    if team_mode is None:
+        monkeypatch.delenv("ENGRAPHIS_TEAM_MODE", raising=False)
+    else:
+        monkeypatch.setenv("ENGRAPHIS_TEAM_MODE", team_mode)
     monkeypatch.setattr(lic, "_LICENSE_FILE", tmp_path / "license.key")
     if key:
         monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
@@ -106,14 +109,41 @@ def test_remember_with_bearer_writes_to_cloud(monkeypatch, tmp_path):
                    for m in rec.json()["memories"])
 
 
-def test_remember_requires_team_license_402(monkeypatch, tmp_path):
-    # team mode ON but no Team license -> agent write is 402 ("need a team license")
-    with _client(monkeypatch, tmp_path, key=None) as c:
-        _setup_admin(c)  # bootstrap admin is exempt from the license gate
-        token = _mint(c)["token"]
+def test_team_mode_defaults_on_when_environment_is_unset(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path, key=_team_key(), team_mode=None) as c:
+        assert c.get("/api/auth/state").json()["enabled"] is True
+        assert c.post(
+            "/api/remember",
+            json={"content": "x", "workspace": "demo"}).status_code == 401
+
+
+def test_viewer_can_mint_read_only_api_token(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path, key=_team_key()) as c:
+        _setup_admin(c)
+        assert c.post("/api/auth/users", json={
+            "email": "viewer@x.co", "name": "Viewer", "role": "viewer",
+            "password": "viewerpass12",
+        }).status_code == 200
         c.cookies.clear()
+        assert c.post("/api/auth/login", json={
+            "email": "viewer@x.co", "password": "viewerpass12",
+        }).status_code == 200
+        token = _mint(c, label="viewer-agent")["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        c.cookies.clear()
+
+        assert c.get(
+            "/api/recall?q=database&workspace=demo", headers=headers).status_code == 200
+        assert c.post(
+            "/api/remember", json={"content": "x", "workspace": "demo"},
+            headers=headers).status_code == 403
+
+
+def test_remember_requires_team_license_402(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "api_token", "service-token")
+    with _client(monkeypatch, tmp_path, key=None) as c:
         r = c.post("/api/remember", json={"content": "x", "workspace": "demo"},
-                   headers={"Authorization": f"Bearer {token}"})
+                   headers={"Authorization": "Bearer service-token"})
         assert r.status_code == 402
         assert r.json()["detail"]["feature"] == "team"
 

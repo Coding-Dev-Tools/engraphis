@@ -142,12 +142,27 @@ class MemoryEngine:
         except Exception:
             pass
 
-        # Optional graph population (backends.graph_extractor)
+        # Optional graph population (backends.graph_extractor). Structured fact metadata
+        # from llm_structured is already validated before storage, so feed it directly
+        # into the graph even when the regex graph extractor is disabled; then run the
+        # configured text extractor too (idempotent via feed/store de-duping).
+        if self._has_structured_graph_metadata(meta):
+            try:
+                from engraphis.backends.graph_extractor import (
+                    StructuredMetadataGraphExtractor, feed as _graph_feed,
+                )
+                _graph_feed(self.store, content, workspace_id=workspace_id,
+                            repo_id=repo_id, title=title,
+                            extractor=StructuredMetadataGraphExtractor(meta),
+                            provenance={"source": "structured_extractor", "memory_id": mid})
+            except Exception:
+                pass
         if self.graph_extractor is not None:
             try:
                 from engraphis.backends.graph_extractor import feed as _graph_feed
                 _graph_feed(self.store, content, workspace_id=workspace_id,
-                           repo_id=repo_id, title=title, extractor=self.graph_extractor)
+                            repo_id=repo_id, title=title, extractor=self.graph_extractor,
+                            provenance={"source": "graph_extractor", "memory_id": mid})
             except Exception:
                 pass
 
@@ -170,6 +185,15 @@ class MemoryEngine:
         if linked:
             out["linked"] = linked
         return out
+
+    def _has_structured_graph_metadata(self, metadata: dict) -> bool:
+        if isinstance(metadata.get("entities"), list) or isinstance(metadata.get("relations"), list):
+            return True
+        structured = metadata.get("structured_extraction")
+        return isinstance(structured, dict) and (
+            isinstance(structured.get("entities"), list)
+            or isinstance(structured.get("relations"), list)
+        )
 
     def _evolve(self, new_id: str, neighbors: list, *, exclude: Optional[set] = None) -> list[str]:
         """A-MEM-style memory evolution on write: a new memory
@@ -250,12 +274,14 @@ class MemoryEngine:
             extracted = False
 
         results = []
+        base_metadata = dict(metadata or {})
         for f in facts:
+            fact_metadata = {**base_metadata, **(getattr(f, "metadata", {}) or {})}
             results.append(self.remember_with_resolution(
                 f.content, workspace_id=workspace_id, repo_id=repo_id,
                 session_id=session_id, mtype=f.mtype or default_mtype, scope=scope,
                 title=f.title, importance=f.importance, keywords=f.keywords,
-                metadata=metadata, resolve_conflicts=resolve_conflicts,
+                metadata=fact_metadata, resolve_conflicts=resolve_conflicts,
             ))
         return {"facts": results, "count": len(results), "extracted": extracted}
 
