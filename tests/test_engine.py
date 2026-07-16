@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 
 from engraphis.backends.vector_numpy import NumpyVectorIndex
@@ -220,6 +222,16 @@ def test_pin_sets_flag_and_audits():
     assert eng.store.get_memory(mid).pinned is True
     eng.pin(mid, pinned=False)
     assert eng.store.get_memory(mid).pinned is False
+
+
+def test_audit_rows_are_durable_without_a_later_write(tmp_path):
+    db = tmp_path / "audit.db"
+    eng = MemoryEngine.create(str(db))
+    eng.store.audit("test", "standalone", "target")
+
+    with sqlite3.connect(db) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM audit WHERE action='standalone'").fetchone()[0] == 1
 
 
 def test_correct_supersedes_without_deleting():
