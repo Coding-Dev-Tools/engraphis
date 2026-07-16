@@ -1,3 +1,10 @@
+import json
+import os
+from types import SimpleNamespace
+
+import pytest
+
+from scripts import graph_cli
 from scripts.graph_cli import _merge_payloads, build_parser
 
 
@@ -54,3 +61,146 @@ def test_graph_union_merge_tolerates_invalid_timestamps():
         {"generated_at": 2, "nodes": [], "files": [], "edges": []},
     ])
     assert merged["generated_at"] == 2
+
+
+def test_graph_union_merge_ignores_malformed_rows_and_normalizes_line_numbers():
+    merged = _merge_payloads([{
+        "format": "engraphis-code-graph/1",
+        "generated_at": "not-finite",
+        "files": "not-a-list",
+        "nodes": [
+            None,
+            "bad",
+            {"id": "sym", "file": "a.py", "fqname": "run", "kind": "function"},
+        ],
+        "edges": [
+            {"src": "", "dst": "run", "relation": "calls"},
+            {"src": "run", "dst": "helper", "relation": {"bad": True}, "line": "bad"},
+            {"src": "run", "dst": "helper", "relation": "calls", "layer": "causal"},
+            {"src": "run", "dst": "helper", "relation": "calls", "layer": "semantic"},
+        ],
+        "memory_links": [
+            {"symbol_id": "", "memory_id": "mem_x"},
+            {"symbol_id": "sym", "memory_id": "mem_x", "relation": "mentions"},
+        ],
+        "analysis": "not-an-object",
+    }])
+
+    assert [node["id"] for node in merged["nodes"]] == ["sym"]
+    assert merged["edges"][0]["line"] == 0
+    assert {edge["layer"] for edge in merged["edges"] if edge["relation"] == "calls"} == {
+        "causal", "semantic",
+    }
+    assert len(merged["memory_links"]) == 1
+    assert merged["analysis"] == {}
+    json.dumps(merged, allow_nan=False)
+
+
+def test_merge_driver_rejects_oversized_or_deep_inputs(monkeypatch, tmp_path):
+    oversized = tmp_path / "oversized.json"
+    oversized.write_text("x" * 20, encoding="utf-8")
+    monkeypatch.setattr(graph_cli, "MAX_MERGE_EXPORT_BYTES", 10)
+    assert graph_cli._load_merge_payload(str(oversized)) is None
+
+    deep = tmp_path / "deep.json"
+    deep.write_text("[" * 205 + "0" + "]" * 205, encoding="utf-8")
+    monkeypatch.setattr(graph_cli, "MAX_MERGE_EXPORT_BYTES", 10_000)
+    assert graph_cli._load_merge_payload(str(deep)) is None
+
+
+def test_merge_driver_writes_valid_output_when_one_parent_is_malformed(tmp_path):
+    base = tmp_path / "base.json"
+    current = tmp_path / "current.json"
+    other = tmp_path / "other.json"
+    base.write_text("{bad json", encoding="utf-8")
+    current.write_text(json.dumps({
+        "format": "engraphis-code-graph/1",
+        "generated_at": 1,
+        "nodes": [],
+        "files": [],
+        "edges": [],
+        "memory_links": [],
+    }), encoding="utf-8")
+    other.write_text(json.dumps({
+        "format": "engraphis-code-graph/1",
+        "generated_at": 2,
+        "nodes": [],
+        "files": [],
+        "edges": [],
+        "memory_links": [],
+    }), encoding="utf-8")
+
+    graph_cli._merge(SimpleNamespace(
+        base=str(base), current=str(current), other=str(other)
+    ))
+
+    merged = json.loads(current.read_text(encoding="utf-8"))
+    assert merged["format"] == "engraphis-code-graph/1"
+    assert not current.with_name(current.name + ".engraphis.tmp").exists()
+
+
+def test_merge_driver_fails_closed_when_current_or_incoming_is_invalid(tmp_path):
+    base = tmp_path / "base.json"
+    current = tmp_path / "current.json"
+    other = tmp_path / "other.json"
+    base.write_text("{}", encoding="utf-8")
+    current.write_text('{"format":"engraphis-code-graph/1"}', encoding="utf-8")
+    other.write_text("{bad json", encoding="utf-8")
+    before = current.read_bytes()
+
+    with pytest.raises(graph_cli.ValidationError, match="current and incoming"):
+        graph_cli._merge(SimpleNamespace(
+            base=str(base), current=str(current), other=str(other)
+        ))
+
+    assert current.read_bytes() == before
+
+
+def test_merge_driver_rejects_unknown_graph_format(tmp_path):
+    source = tmp_path / "graph.json"
+    source.write_text('{"format":"hostile/1"}', encoding="utf-8")
+    assert graph_cli._load_merge_payload(str(source)) is None
+
+
+def test_merge_driver_does_not_use_predictable_temp_symlink(tmp_path):
+    payload = json.dumps({
+        "format": "engraphis-code-graph/1",
+        "generated_at": 1,
+        "nodes": [],
+        "files": [],
+        "edges": [],
+        "memory_links": [],
+    })
+    base = tmp_path / "base.json"
+    current = tmp_path / "current.json"
+    other = tmp_path / "other.json"
+    for path in (base, current, other):
+        path.write_text(payload, encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("untouched", encoding="utf-8")
+    predictable = current.with_name(current.name + ".engraphis.tmp")
+    try:
+        os.symlink(outside, predictable)
+    except (OSError, NotImplementedError):
+        predictable.write_text("sentinel", encoding="utf-8")
+
+    graph_cli._merge(SimpleNamespace(
+        base=str(base), current=str(current), other=str(other)
+    ))
+
+    assert outside.read_text(encoding="utf-8") == "untouched"
+    assert predictable.exists()
+
+
+def test_install_merge_driver_rejects_unsafe_attributes_before_git(monkeypatch, tmp_path):
+    (tmp_path / ".gitattributes").mkdir()
+    monkeypatch.setattr(
+        graph_cli.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("git config ran before path validation"),
+    )
+
+    with pytest.raises(graph_cli.ValidationError, match="regular file"):
+        graph_cli._install_merge_driver(SimpleNamespace(
+            root=str(tmp_path), graph_path="graph.json"
+        ))

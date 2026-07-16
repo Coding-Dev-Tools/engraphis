@@ -580,9 +580,13 @@ def receipts(workspace: Optional[str] = None, limit: int = 100):
 
 
 @router.get("/receipts/verify")
-def receipts_verify(workspace: Optional[str] = None):
+def receipts_verify(workspace: Optional[str] = None, expected_head: str = "",
+                    expected_count: Optional[int] = None):
     ws = workspace or _require_ws()
-    return _run(service().verify_receipts, workspace=ws)
+    return _run(
+        service().verify_receipts, workspace=ws,
+        expected_head=expected_head, expected_count=expected_count,
+    )
 
 
 @router.get("/receipts/export")
@@ -1106,8 +1110,8 @@ def sync_status():
     has_key = bool(licensing._read_key_material())
     lic = licensing.current_license(refresh=False)
     return {
-        # Ready only when the plan includes sync AND a key is configured (the relay needs
-        # a real key; a local trial alone can't reach it — it stays folder-sync only).
+        # Ready only when the plan includes sync AND a key is configured. Purchased and
+        # trial entitlements are both real server-issued keys.
         "available": bool(licensing.has_feature("sync") and has_key),
         "has_key": has_key,
         "plan": lic.plan,
