@@ -324,26 +324,35 @@ def test_cached_license_expires_without_restart(monkeypatch):
     assert not has_feature("analytics")
 
 
-def test_recheck_bound_is_scheduled_for_every_paid_license(monkeypatch):
-    """Online-only: EVERY paid license (purchased OR a server-issued trial key, with or
-    without cloud markers) re-validates against the vendor server on the rolling cadence,
-    so a revoked key / lapsed lease propagates within the window instead of surviving in a
-    long-running process until restart. Only the free tier waits (it never phones home)."""
-    monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
-    now = 1_000_000.0
-    far = now + 10 * 365 * 86400
-    cadence = now + lic._CLOUD_RECHECK_SECONDS
+def test_revoke_clears_cache_immediately(monkeypatch, tmp_path):
+    """Regression: when the vendor relay denies a key (revoked/refunded/seat-limit),
+    ``cloud_license.revalidate`` must drop the in-memory license cache so the very next
+    ``current_license()`` call re-validates and falls back to free — the dead key must
+    not keep granting features until its cached lease TTL expires. Driven fully offline
+    by stubbing ``cloud_license.gate`` so the result is deterministic."""
+    from engraphis import cloud_license
+    monkeypatch.setattr(lic, "_LICENSE_FILE", tmp_path / "license.key")
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(SECRET).hex())
+    key = compose_key({"v": 1, "plan": "team", "email": "w@x.co", "seats": 5,
+                      "issued": int(time.time()),
+                      "expires": int(time.time()) + 365 * 86400}, SECRET)
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
 
-    # Free tier never contacts the server → bounded only by expiry (none here → infinite).
-    assert lic._license_recheck_at(License.free(), now=now) == float("inf")
+    # Simulate the relay accepting the key during normal operation.
+    monkeypatch.setattr(cloud_license, "gate", lambda lic_obj, km, **kw: (True, ""))
+    assert current_license(refresh=True).plan == "team"
+    assert has_feature("team")
 
-    # Plain paid key, key with the server URL baked in, enforce:"cloud", and a trial key
-    # all get the rolling re-check now.
-    for kw in ({}, {"cloud_url": "https://lic.example"}, {"enforce": "cloud"},
-               {"is_trial": True}):
-        L = License(plan="pro", expires=far, **kw)
-        assert lic._license_recheck_at(L, now=now) == cadence
-
-    # A nearer key expiry still wins over the cadence.
-    soon = License(plan="pro", expires=now + 100)
-    assert lic._license_recheck_at(soon, now=now) == now + 100
+    # Now the relay denies the key. revalidate() contacts register() directly (not
+    # gate(), which may use offline grace), so mock that authoritative denial and also
+    # make the next current_license() gate fail closed.
+    def _revoked(*args, **kwargs):
+        raise cloud_license.Revoked("revoked")
+    monkeypatch.setattr(cloud_license, "register", _revoked)
+    monkeypatch.setattr(cloud_license, "gate",
+                        lambda lic_obj, km, **kw: (False, "revoked"))
+    assert cloud_license.revalidate(
+        current_license(), key, base_url="https://lic.example") == "revoked"
+    # No lingering entitlement from the stale cache — the dead key stops granting at once.
+    assert current_license().plan == "free"
+    assert not has_feature("team")

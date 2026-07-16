@@ -35,6 +35,7 @@ and stated everywhere the numbers appear (`eval/external.py`).
 # Correctness gate (deterministic, no download)
 python -m pytest tests/ -q
 python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
+python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5
 python -m eval.harness --dataset eval/datasets/graph_multihop.jsonl --k 5
 python -m eval.ablation
 

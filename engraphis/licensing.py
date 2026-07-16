@@ -293,26 +293,6 @@ def _trial_used_elsewhere() -> bool:
     return False
 
 
-def _write_trial_tombstones(payload: dict) -> None:
-    """Best-effort: record trial consumption in every independent location. Content is
-    informational (signed for forensics); presence is what :func:`_trial_used_elsewhere`
-    checks. A location that can't be written is skipped — the others still hold."""
-    body = json.dumps({"data": payload, "sig": _sign_trial(payload)})
-    for path in _trial_tombstone_files():
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(body, encoding="utf-8")
-            try:
-                os.chmod(path, 0o600)
-            except OSError:
-                pass
-        except OSError:
-            continue
-
-#: Monotonic wall-clock anchor. Persists the highest wall-clock time ever observed so a
-#: user cannot roll the system clock backward to resurrect an expired key/lease or stretch
-#: a trial. Advisory (the file is local and deletable) — it just closes the trivial
-#: "set the date back" bypass; real expiry enforcement is the cloud lease.
 _MONOTONIC_FILE = _STATE_DIR / ".clock_anchor"
 
 
@@ -533,10 +513,9 @@ _cached: Optional[License] = None
 _cache_error: str = ""
 _cache_recheck_at: float = float("inf")  # wall-clock time after which the cache is stale
 
-#: Cloud-mode cache lifetime. Bounded so a REVOKED key degrades in a long-running
-#: process within minutes of its lease lapsing instead of at the next restart. The
-#: re-check is cheap: the stored lease verifies locally, so no network round-trip
-#: happens until the lease itself needs renewing.
+#: Cloud-mode cache lifetime. Each refresh contacts the license server; an authoritative
+#: denial fails closed immediately, while a transient network failure may continue using
+#: the existing signed lease until its expiry.
 _CLOUD_RECHECK_SECONDS = 900
 
 
@@ -594,6 +573,18 @@ def _cloud_gate(lic: "License", material: str) -> tuple:
         return cloud_license.gate(lic, material, base_url=base)
     except Exception as exc:  # any error verifying with the server → fail closed
         return False, "cloud verification error: %s" % exc
+
+
+def invalidate_cache() -> None:
+    """Drop the in-memory license cache so the next :func:`current_license` re-verifies.
+
+    ``cloud_license.revalidate`` calls this the instant the server denies a key (revoked
+    /refunded/seat-limit), so a paying customer's revoked entitlement stops working
+    immediately instead of lingering until the lease TTL — without forcing the test
+    suite to reach into private module state."""
+    global _cached, _cache_recheck_at
+    _cached = None
+    _cache_recheck_at = float("inf")
 
 
 def current_license(*, refresh: bool = False) -> License:
@@ -660,17 +651,6 @@ def trial_status(*, now: Optional[float] = None) -> dict:
     used = _trial_used_locally() or _trial_used_elsewhere()
     return {"active": False, "used": bool(used), "days_left": 0,
             "trial_days": TRIAL_DAYS}
-
-
-def _trial_license(status: dict) -> License:
-    """RETIRED — no longer called. The offline/local trial grant it used to synthesize was
-    a bypass (any local file could mint Pro without the server). Trials are now real
-    server-issued keys. Kept only so stray references don't break; do NOT reintroduce it
-    into :func:`current_license`."""
-    return License(plan="pro", email="trial", seats=1,
-                   issued=status.get("started"), expires=status.get("expires"),
-                   features=frozenset(PLAN_FEATURES["pro"]), key_id="trial",
-                   is_trial=True)
 
 
 def _local_material_license() -> Optional[License]:

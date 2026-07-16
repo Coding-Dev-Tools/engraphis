@@ -1,6 +1,6 @@
 # Engraphis MCP tools — reference
 
-All 18 tools, grouped by job. Parameters are `name (type, default)` — no default means required.
+All 20 tools, grouped by job. Parameters are `name (type, default)` — no default means required.
 Every tool returns a JSON string; on failure it returns `"Error: <reason>"` instead of raising.
 Governance tools (`forget`/`pin`/`correct`/`link`) verify the memory actually belongs to the
 `workspace`/`repo` you pass **before** changing anything, so you can't touch memories outside a
@@ -67,17 +67,22 @@ arm, retention, provenance}]}`. `context` is a token-budgeted pack ready to drop
 ### `engraphis_recall_grounded`
 Answer a question **strictly from** stored memories, with `[n]` citations — or **abstain** when
 nothing in scope supports it. Use when you want a grounded, non-hallucinated answer and would
-rather get "insufficient evidence" than a guess. The answer is extractive (no LLM is called), so it
-never introduces a claim that isn't in a cited memory.
+rather get "insufficient evidence" than a guess. The default answer is deterministic and
+extractive; optional LLM synthesis is accepted only when its claims remain cited.
 
 - `query (str)` — the question, e.g. `"which auth scheme did we standardise on?"`.
 - `workspace (str, None)`, `repo (str, None)`, `mtypes (list[str], None)`, `k (int, 8)`.
 - `min_support (float, None)` — absolute support floor `0..1`; raise it to demand stronger
   evidence before answering.
+- `synthesize (bool, false)` — ask a configured LLM for cited prose; falls back safely.
 
 Returns `{query, grounded, abstained, answer, support, reason, synthesized, citations:[{n, id,
 title, content, score, support, provenance}]}`. When `grounded` is false, `answer` is empty and
 `reason` says why (insufficient evidence, or unknown workspace/repo).
+
+### `engraphis_answer`
+Backward-compatible grounded-answer alias. Prefer `engraphis_recall_grounded` for new configs;
+keep using this only if an existing agent already references it.
 
 ### `engraphis_recall_proactive`
 Conscious recall with **no query**: high-importance, recent, well-reinforced memories. Use at the
@@ -87,6 +92,18 @@ start of a task to load context before you know what to ask.
 
 Returns `{memories:[…], last_session:{summary, open_threads, outcome}}`. When `repo` is given,
 `last_session` is the most recent *ended* session for that repo (or `{}` if none) — the handoff.
+
+### `engraphis_proactive_context`
+Build a task-aware context packet from proactive recall, optional current agent state, and the
+last-session handoff. Use at task start when an agent needs ready-to-use, cited context rather
+than the raw queryless memory list.
+
+- `workspace (str)`, `repo (str, None)`, `task (str, "")`, `agent_state (str, "")`,
+  `k (int, 10)`, `synthesize (bool, false)`.
+
+Returns `{context_summary, suggested_memories, citations, suggested_queries, last_session,
+grounded, synthesized, reason}`.
+
 
 ---
 
@@ -237,7 +254,7 @@ Returns `{memories, by_type, workspaces, sessions, schema_version}`.
 ## Quick decision guide
 
 - Learned a durable fact → `remember`. Raw thing that happened → `record_event`.
-- Need context and have a question → `recall`. Need context and don't yet → `recall_proactive`.
+- Need raw context and have a question → `recall`. Need raw context and don't yet → `recall_proactive`. Need a task-ready packet → `proactive_context`.
 - "Why?" / "since when?" → `why` / `timeline` (not `recall` — those see history).
 - Fact is wrong → `correct` (keeps the chain). Fact is obsolete with no replacement → `forget`.
 - Must never fade → `pin`. Two facts belong together → `link`.

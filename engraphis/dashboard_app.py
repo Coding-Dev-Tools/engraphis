@@ -27,25 +27,20 @@ _STATIC = Path(__file__).resolve().parent / "static"
 _INDEX = _STATIC / "index.html"
 
 # Reachable without any session/token in every mode: the page shell, liveness, and
-# the auth bootstrap endpoints themselves (state/login/setup must work while logged
-# out) — same shape as engraphis/inspector/app.py's _PUBLIC set.
+# auth bootstrap endpoints (state/login/setup must be reachable while logged out;
+# setup still refuses to create the first admin until Team is active).
 #
-# The /api/license and /api/license/*-trial entries close a real deadlock: create_user()
-# (called by /api/auth/setup) requires require_feature("team"), so a brand-new team-mode
-# instance with zero users can't create its first admin without an active license — but
-# before this fix, obtaining that license (reading /api/license, or starting a Pro/Team
-# trial) itself required an authenticated team session, which is impossible with zero users.
-# Every visitor hit a 401 the instant they touched Settings → License or clicked "Start
-# trial," logged in or not. These three are safe to expose pre-login: GET /api/license is
-# instance-level plan info (already fully public in single-user mode), and the trial
-# endpoints are self-limited server-side regardless of who calls them (one trial per device
-# via cloud_license, refused if a paid key is already active). Deliberately NOT adding
-# /api/license/activate here: unlike the _PUBLIC entries below (whole path skips the auth
-# gate, role check included), pasting an arbitrary key is a whole-team-affecting action and
-# stays behind min_role()'s existing admin check — a fresh self-host bootstraps a purchased
-# key via ENGRAPHIS_LICENSE_KEY/~/.engraphis/license.key (server-side config), not this
-# endpoint, so making it public isn't needed to fix the deadlock and would let ANY visitor
-# (any role, or no session) change the whole team's license.
+# The /api/license and /api/license/*-trial entries close a real deadlock:
+# /api/auth/setup requires an active Team entitlement, so a new instance cannot create
+# its first admin before installing a Team key or starting a trial. Those license paths
+# must therefore remain reachable without an authenticated session.
+# Without those exceptions, every visitor would hit 401 in Settings → License or after
+# clicking "Start trial." These paths are safe to expose pre-login: GET /api/license
+# returns instance-level plan info, and trial endpoints are self-limited server-side
+# (one trial per device; refused if a paid key is already active).
+# /api/license/activate remains admin-only because it changes entitlement for the whole
+# team. A new self-hosted instance bootstraps a purchased key through
+# ENGRAPHIS_LICENSE_KEY or ~/.engraphis/license.key instead.
 _PUBLIC = {"/", "/api/health", "/api/ready", "/api/auth/state", "/api/auth/login",
            "/api/auth/setup", "/api/auth/logout", "/api/auth/forgot", "/api/auth/reset",
            "/api/license", "/api/license/trial", "/api/license/team-trial",
@@ -86,7 +81,7 @@ def create_app() -> FastAPI:
         _mcp_asgi = _mcp_mod.mcp.streamable_http_app()
         _mcp_mod.mcp.settings.streamable_http_path = _prev_path
         _mcp_mgr = _mcp_mod.mcp.session_manager
-    except Exception as _exc:  # noqa: BLE001 - MCP mount stays optional (e.g. mcp not installed)
+    except (Exception, SystemExit) as _exc:  # noqa: BLE001 - MCP mount stays optional
         import sys as _sys
         print("[engraphis] MCP /mcp mount skipped: %s" % _exc, file=_sys.stderr)
 
@@ -100,6 +95,19 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="Engraphis Dashboard", docs_url="/api/docs",
                   openapi_url="/api/openapi.json", lifespan=_lifespan)
+    app.state.mcp_over_http = _mcp_asgi is not None
+
+    @app.exception_handler(licensing.LicenseError)
+    async def _license_error(_request: Request, exc: licensing.LicenseError):
+        feature = exc.feature or "team"
+        body = {
+            "error": str(exc),
+            "feature": feature,
+            "tier_required": licensing.required_plan(feature),
+            "upgrade_url": licensing.upgrade_url(),
+        }
+        return JSONResponse({**body, "detail": body}, status_code=402)
+
     svc = MemoryService.create(
         settings.db_path, embed_model=settings.embed_model,
         embed_dim=settings.embed_dim or 256,
@@ -135,12 +143,9 @@ def create_app() -> FastAPI:
     from engraphis.inspector.cloud_mount import mount_cloud_endpoints
     mount_cloud_endpoints(app)
 
-    # Team mode (multi-user auth) — optional; attached only when the module is present
-    # and a valid Team license is active, so single-user setups are unaffected.
-    # ``attach`` mounts /api/auth/* AND tells us whether real per-user sessions are
-    # active, so the gate below can require one for every other /api/* route —
-    # without this, team mode would only protect the user-management endpoints and
-    # leave recall/governance/export open to anyone who can reach the port.
+    # Team auth plumbing is mounted whenever team mode is configured. The request gate
+    # activates for a live Team license or an already-provisioned user database, so a
+    # lapsed license never turns a private team instance into an open single-user app.
     team_enabled, auth_store = False, None
     try:
         from engraphis.routes import v2_team
@@ -186,6 +191,10 @@ def create_app() -> FastAPI:
             if mu is None:
                 return JSONResponse({"error": "authentication required", "auth": "team"},
                                     status_code=401)
+            from engraphis.inspector.auth import role_at_least
+            if not role_at_least(mu["role"], "member"):
+                return JSONResponse({"error": "requires the member role"},
+                                    status_code=403)
             request.state.user = mu
             set_current_user(mu)
             return await call_next(request)
@@ -194,13 +203,14 @@ def create_app() -> FastAPI:
         # regardless of whether team mode is enabled.
         if settings.api_token and _bearer_ok(request):
             return await call_next(request)
-        # Require a real team license to enforce per-user sessions (live, not just at
-        # startup) so a solo/no-license install stays fully open and a login wall appears
-        # the moment a team license key is added — even via the dashboard UI at runtime.
-        # `team_enabled` only means the auth plumbing is mounted (mode on, store present);
-        # `licensing.has_feature("team")` is the actual entitlement check. Without it, fall
-        # through to single-user mode below.
-        if team_enabled and auth_store is not None and licensing.has_feature("team"):
+        # A new, unlicensed instance with no users remains open for solo use. Once a Team
+        # license activates the wall—or any users have been provisioned—the wall stays up
+        # even if entitlement later lapses. Login remains public; paid writes and seat
+        # growth keep their route-level license gates.
+        team_auth_active = (team_enabled and auth_store is not None
+                            and (licensing.has_feature("team")
+                                 or auth_store.count_users() > 0))
+        if team_auth_active:
             from engraphis.inspector.auth import min_role, role_at_least
             from engraphis.routes.v2_team import _COOKIE
             # Agent connect: a per-user API bearer token (minted via POST /api/auth/token)

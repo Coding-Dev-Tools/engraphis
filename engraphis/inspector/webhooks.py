@@ -218,12 +218,14 @@ def _trial_days(period_end, *, now: Optional[float] = None) -> int:
 
 def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
                days: Optional[int] = None, metadata: Optional[dict] = None,
-               *, trial: bool = False) -> str:
+               *, trial: bool = False, record: bool = True) -> str:
     """Generate a signed ``ENGR1.xxx.yyy`` key for *email_addr*.
 
     Uses the pinned vendor signing key (``.secrets/vendor_signing.key`` or
     ``ENGRAPHIS_SIGNING_KEY`` env). ``product_name`` maps to a plan tier; ``days``
-    (or product/metadata inference via :func:`_key_days`) sets validity.
+    (or product/metadata inference via :func:`_key_days`) sets validity. ``record=False``
+    is for callers already holding the relay DB write lock; they should call
+    ``license_registry.record_issued`` after committing.
     """
     secret = _load_signing_secret()
     pub = ed25519_public_key(secret).hex()
@@ -264,11 +266,12 @@ def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
         payload["cloud_url"] = enforce_url
     key = compose_key(payload, secret)
     logger.info("issued %s key for %s (expires in %d days)", plan, email_addr, days)
-    try:  # registry is best-effort; a write failure must never block fulfillment/email
-        from engraphis.inspector.license_registry import record_issued
-        record_issued(key)
-    except Exception as exc:
-        logger.warning("could not record issued key in registry: %s", exc)
+    if record:
+        try:  # registry is best-effort; a write failure must never block fulfillment/email
+            from engraphis.inspector.license_registry import record_issued
+            record_issued(key)
+        except Exception as exc:
+            logger.warning("could not record issued key in registry: %s", exc)
     return key
 
 
@@ -666,7 +669,9 @@ def _issue_and_email(email_addr: str, product_name: str, seats: int,
     """Mint a signed key and email it. On ANY delivery failure, persist the key to
     the 0600 fallback file (never the log) and still return it, so a paid or trial
     key is never lost and the webhook can 202 without a Polar retry-storm."""
-    key = issue_key(email_addr, product_name=product_name, seats=seats, days=days)
+    key = issue_key(
+        email_addr, product_name=product_name, seats=seats, days=days,
+        trial=is_trial)
     label = _plan_label(product_name)
     try:
         send_license_email(email_addr, key, product_name=label, is_trial=is_trial)

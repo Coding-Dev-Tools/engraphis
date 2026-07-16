@@ -43,12 +43,13 @@ def _days_until_forgotten(stability: float, last_access: Optional[float],
 def analytics_from_rows(mem_rows: Iterable[dict], audit_counts: dict,
                         entity_rows: Iterable[dict], *, now: Optional[float] = None) -> dict:
     """Pure aggregation. ``mem_rows`` need: mtype, stability, last_access, ingested_at,
-    importance, pinned, valid_to, expired_at. ``audit_counts`` maps action→count.
-    ``entity_rows`` need: name, etype, n (mention/edge count)."""
+    importance, pinned, valid_from, valid_to, expired_at. ``audit_counts`` maps
+    action→count. ``entity_rows`` need: name, etype, n (mention/edge count)."""
     now = time.time() if now is None else now
     rows = list(mem_rows)
     live = [r for r in rows
             if r.get("expired_at") is None
+            and (r.get("valid_from") is None or r["valid_from"] <= now)
             and (r.get("valid_to") is None or now < r["valid_to"])]
 
     # ── growth: weekly ingest counts, oldest→newest, exactly _GROWTH_WEEKS buckets ──
@@ -238,15 +239,19 @@ def compute_analytics(store: Any, workspace_id: str, *, now: Optional[float] = N
     conn = store.conn
     mem_rows = [dict(r) for r in conn.execute(
         "SELECT mtype, stability, last_access, ingested_at, importance, pinned, "
-        "valid_to, expired_at FROM memories WHERE workspace_id=?", (workspace_id,))]
+        "valid_from, valid_to, expired_at FROM memories WHERE workspace_id=?",
+        (workspace_id,))]
     audit_counts = {r["action"]: r["n"] for r in conn.execute(
         "SELECT a.action, COUNT(*) AS n FROM audit a JOIN memories m ON m.id = a.target "
         "WHERE m.workspace_id=? GROUP BY a.action", (workspace_id,))}
+    t = now if now is not None else time.time()
     entity_rows = [dict(r) for r in conn.execute(
         "SELECT e.name, e.etype, COUNT(ed.id) AS n FROM entities e "
         "LEFT JOIN edges ed ON (ed.src = e.id OR ed.dst = e.id) "
+        "AND (ed.valid_from IS NULL OR ed.valid_from<=?) "
+        "AND (ed.valid_to IS NULL OR ?<ed.valid_to) AND ed.expired_at IS NULL "
         "WHERE e.workspace_id=? GROUP BY e.id, e.name, e.etype "
-        "ORDER BY n DESC, e.created_at DESC LIMIT 8", (workspace_id,))]
+        "ORDER BY n DESC, e.created_at DESC LIMIT 8", (t, t, workspace_id))]
     return analytics_from_rows(mem_rows, audit_counts, entity_rows, now=now)
 
 

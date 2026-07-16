@@ -116,13 +116,16 @@ class ExtractedFact:
     """One distilled, self-contained fact produced by an ``Extractor`` (§8.2).
 
     ``mtype``/``importance``/``keywords`` are *hints* — the write path may override
-    them; ``content`` is the only required field.
+    them; ``content`` is the only required field. ``metadata`` is optional structured
+    extraction payload (entities/relations/confidence, etc.) and is merged into the
+    stored memory metadata by the ingest path.
     """
     content: str
     title: str = ""
     mtype: Optional[MemoryType] = None
     importance: float = 0.0
     keywords: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 # ── Protocols ────────────────────────────────────────────────────────────────
@@ -169,7 +172,7 @@ class Reranker(Protocol):
 class LLM(Protocol):
     """External or local model for synthesis and structured extraction (§8.2)."""
     def complete(self, messages: list[dict], **kw: Any) -> str: ...
-    def extract_json(self, prompt: str, schema: dict) -> dict: ...
+    def extract_json(self, prompt: str, schema: dict) -> Any: ...
 
 
 @runtime_checkable

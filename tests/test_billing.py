@@ -157,6 +157,29 @@ def test_reserve_release_roundtrip():
     assert B.reserve_webhook("wid_x") is True     # retry can claim again
 
 
+def test_stale_processing_reservation_can_be_reclaimed(monkeypatch):
+    monkeypatch.setattr(B, "_RESERVATION_TTL_SECONDS", 5)
+    assert B.reserve_webhook("wid_crashed") is True
+    conn = B._dedup_conn()
+    with conn:
+        conn.execute(
+            "UPDATE processed SET ts=? WHERE webhook_id=?",
+            (time.time() - 10, "wid_crashed"))
+    conn.close()
+
+    assert B.reserve_webhook("wid_crashed") is True
+    B.complete_webhook("wid_crashed")
+    conn = B._dedup_conn()
+    with conn:
+        conn.execute(
+            "UPDATE processed SET ts=? WHERE webhook_id=?",
+            (time.time() - 10, "wid_crashed"))
+    conn.close()
+    assert B.reserve_webhook("wid_crashed") is False
+
+
+
+
 # ── hardening: oversized body is rejected before buffering/fulfillment ─────────
 def test_oversized_body_rejected(monkeypatch):
     monkeypatch.setenv("POLAR_WEBHOOK_SECRET", WHSEC)
@@ -422,6 +445,7 @@ def test_trial_subscription_issues_short_lived_key(monkeypatch):
     lic = parse_key(key)
     days_left = (lic.expires - time.time()) / 86400
     assert lic.plan == "pro"
+    assert lic.is_trial is True
     # short (covers the ~3-day trial), and nowhere near the 35-day paid key
     assert 2 < days_left <= 5, f"trial key lasted {days_left:.1f}d"
 
@@ -591,6 +615,24 @@ def test_seat_increase_reissues_key_with_new_count(monkeypatch):
     grown = _sub_updated_body("sub_grow", "active", 7)
     r = _post(client, WHSEC, "evt_su_grown", grown)
     assert r.json() == {"status": "fulfilled", "key_issued": True}
+
+
+def test_order_paid_records_baseline_before_first_real_seat_change(monkeypatch):
+    client = _inspector_client(monkeypatch)
+    order = _body({"type": "order.paid", "data": {
+        "id": "order_team_baseline",
+        "customer": {"email": "lead@example.com"},
+        "product": {"name": "Engraphis Team"},
+        "subscription": {"id": "sub_from_order", "seats": 3},
+    }})
+    assert _post(
+        client, WHSEC, "evt_order_baseline", order).json()["status"] == "fulfilled"
+    assert B.get_known_seats("sub_from_order") == 3
+
+    changed = _sub_updated_body("sub_from_order", "active", 7)
+    result = _post(client, WHSEC, "evt_first_real_change", changed)
+    assert result.json() == {"status": "fulfilled", "key_issued": True}
+    assert B.get_known_seats("sub_from_order") == 7
 
 
 def test_seat_decrease_reissues_key_with_new_count(monkeypatch):

@@ -12,6 +12,7 @@ The arms are pluggable:
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -56,10 +57,10 @@ class RecallEngine:
         # ── arms ─────────────────────────────────────────────────────────────
         qvec = self.embedder.embed([query])[0]
         vec = dict(self.index.search(qvec, candidate_k, filter=flt))   # id -> cosine
-        lex = dict(self.store.fts_search(query, candidate_k))          # id -> lexical
+        lex = dict(self.store.fts_search(query, candidate_k, filter=flt))  # id -> lexical
         graph = self._graph_arm(query, flt, now)                       # id -> weight
 
-        # ── gather candidates and enforce visibility (lexical arm is unfiltered) ──
+        # ── gather candidates and enforce visibility defensively ─────────────
         recs: dict[str, MemoryRecord] = {}
         for mid in set(vec) | set(lex) | set(graph):
             rec = self.store.get_memory(mid)
@@ -119,9 +120,9 @@ class RecallEngine:
         memories by walk probability. Multi-hop associations surface without
         expanding an explicit hop count; entity nodes are prefixed so names can
         never collide with memory ids."""
-        ql = query.lower()
-        all_names = [n for n in self._entities(flt) if n]
-        seeds = [n for n in all_names if n.lower() in ql]
+        entity_map = self._entity_map(flt)
+        patterns = {eid: _entity_pattern(name) for eid, name in entity_map.items() if name}
+        seeds = [eid for eid, pattern in patterns.items() if pattern.search(query)]
         if not seeds:
             return {}
 
@@ -136,12 +137,11 @@ class RecallEngine:
             connect(ent(e.src), ent(e.dst), max(float(e.weight or 1.0), 1e-6))
 
         recs = self.store.list_memories(flt, limit=500)
-        lowered = {n: n.lower() for n in all_names}
         for rec in recs:
-            hay = f"{rec.title} {rec.content}".lower()
-            for name, low in lowered.items():
-                if low in hay:
-                    connect(rec.id, ent(name), 1.0)
+            hay = f"{rec.title} {rec.content}"
+            for eid, pattern in patterns.items():
+                if pattern.search(hay):
+                    connect(rec.id, ent(eid), 1.0)
         for link in self.store.links_among([r.id for r in recs]):
             connect(link["a"], link["b"], 1.0)
 
@@ -150,38 +150,33 @@ class RecallEngine:
         if len(adj) > 4000:
             return self._graph_arm_1hop(query, flt, now)
 
-        ranked = personalized_pagerank(adj, [ent(s) for s in seeds])
+        ranked = personalized_pagerank(adj, [ent(eid) for eid in seeds])
         return {nid: score for nid, score in ranked.items()
                 if not nid.startswith("ent::") and score > 0.0}
 
     def _graph_arm_1hop(self, query: str, flt: SearchFilter, now: float) -> dict[str, float]:
-        ql = query.lower()
-        seed_names = [name for name in self._entities(flt) if name and name.lower() in ql]
-        if not seed_names:
-            return {}
-        # Resolve entity names to their node IDs so neighbors() matches the edges table.
-        seed_ids: list[str] = []
-        marks = ",".join("?" for _ in seed_names)
-        for row in self.store.conn.execute(
-            f"SELECT id FROM entities WHERE name IN ({marks})", seed_names
-        ).fetchall():
-            seed_ids.append(row["id"])
+        entity_map = self._entity_map(flt)
+        patterns = {eid: _entity_pattern(name) for eid, name in entity_map.items() if name}
+        seed_ids = [eid for eid, pattern in patterns.items() if pattern.search(query)]
         if not seed_ids:
             return {}
-        names = set(seed_names)
+        names = {entity_map[eid] for eid in seed_ids if entity_map.get(eid)}
         for e in self.store.neighbors(seed_ids, at=now):
-            names.add(e.src)
-            names.add(e.dst)
+            if e.src in entity_map:
+                names.add(entity_map[e.src])
+            if e.dst in entity_map:
+                names.add(entity_map[e.dst])
         out: dict[str, float] = {}
+        name_patterns = [_entity_pattern(name) for name in names if name]
         for rec in self.store.list_memories(flt, limit=500):
-            hay = f"{rec.title} {rec.content}".lower()
-            hits = sum(1 for n in names if n and n.lower() in hay)
+            hay = f"{rec.title} {rec.content}"
+            hits = sum(1 for pattern in name_patterns if pattern.search(hay))
             if hits:
                 out[rec.id] = float(hits)
         return out
 
-    def _entities(self, flt: SearchFilter) -> list[str]:
-        sql = "SELECT DISTINCT name FROM entities"
+    def _entity_map(self, flt: SearchFilter) -> dict[str, str]:
+        sql = "SELECT DISTINCT id, name FROM entities"
         clauses, params = [], []
         if flt.workspace_id:
             clauses.append("workspace_id=?")
@@ -191,7 +186,9 @@ class RecallEngine:
             params.append(flt.repo_id)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        return [r["name"] for r in self.store.conn.execute(sql, params).fetchall()]
+        return {r["id"]: r["name"] for r in self.store.conn.execute(sql, params).fetchall()}
+
+
 
     @staticmethod
     def _visible(rec: MemoryRecord, flt: SearchFilter, now: float) -> bool:
@@ -226,6 +223,11 @@ class RecallEngine:
                 break
             parts.append(block)
         return "\n\n".join(parts)
+
+
+def _entity_pattern(name: str) -> re.Pattern[str]:
+    """Match an entity as a complete token/phrase, not inside unrelated words."""
+    return re.compile(r"(?<!\w)" + re.escape(name) + r"(?!\w)", re.IGNORECASE)
 
 
 def _ranked(arm: dict[str, float], recs: dict) -> list[str]:

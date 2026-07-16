@@ -13,7 +13,7 @@ NOW = 1_750_000_000.0
 def _row(**kw):
     base = {"mtype": "semantic", "stability": 1.0, "last_access": NOW,
             "ingested_at": NOW, "importance": 0.0, "pinned": 0,
-            "valid_to": None, "expired_at": None}
+            "valid_from": None, "valid_to": None, "expired_at": None}
     base.update(kw)
     return base
 
@@ -49,6 +49,13 @@ def test_analytics_from_rows_core_shape_and_counts():
     assert out["by_type"] == {"semantic": 4}
     assert out["resolver_mix"] == {"invalidate": 2, "noop": 3}
     assert out["top_entities"][0]["name"] == "Alice"
+
+
+def test_future_validity_is_not_counted_as_live():
+    out = analytics_from_rows(
+        [_row(), _row(valid_from=NOW + 60)], {}, [], now=NOW)
+    assert out["totals"]["all_rows"] == 2
+    assert out["totals"]["live"] == 1
 
 
 def test_growth_buckets_place_old_memories_correctly():

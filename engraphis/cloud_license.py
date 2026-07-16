@@ -311,10 +311,10 @@ def gate(lic, key_material: str, *, base_url: Optional[str] = None) -> Tuple[boo
     **With no server resolved at all this fails CLOSED** — there is deliberately no
     offline path to paid features (the caller, ``licensing._cloud_gate``, resolves a
     default relay URL and also fails closed, so this only bites a deliberately blanked
-    config — defense in depth). In cloud mode, requires a valid lease, fetching/renewing
-    one by registering; fails closed if it can't. A :class:`Revoked` denial from
-    :func:`register` is treated the same as any other failure to obtain a lease — fail
-    closed with a reason, never an uncaught exception."""
+    config — defense in depth). In cloud mode, every cache refresh contacts the server:
+    an authoritative denial fails closed immediately, while a transient network failure
+    may use an existing unexpired lease as offline grace. Without such a lease, failure
+    to register fails closed."""
     base = (base_url or "").strip().rstrip("/") or cloud_url()
     if not base:
         # Online-only: no server to verify against ⇒ no offline path to paid features.
@@ -323,38 +323,36 @@ def gate(lic, key_material: str, *, base_url: Optional[str] = None) -> Tuple[boo
         return False, ("server-side license verification is required but no license "
                        "server is configured")
     mid = machine_id()
-    if _valid_lease_for(lic.key_id, mid) is not None:
-        return True, ""                              # within an unexpired lease window
+    cached = _valid_lease_for(lic.key_id, mid)
     try:
-        token = register(base, key_material, mid)    # (re)register / renew
+        token = register(base, key_material, mid)
     except Revoked as exc:
+        _delete_lease()
         return False, str(exc)
     if token:
         try:
-            p = verify_lease(token)
+            payload = verify_lease(token)
         except Exception:
-            p = None
-        if p and p.get("key_id") == lic.key_id and p.get("machine_id") == mid:
+            payload = None
+        if (payload and payload.get("key_id") == lic.key_id
+                and payload.get("machine_id") == mid):
             _write_lease(token)
             return True, ""
-    return False, ("cloud license verification failed — this license could not be "
-                   "validated with %s (revoked, seat limit, or offline past the lease "
-                   "window)" % base)
+    if cached is not None:
+        return True, ""
+    return False, ("cloud license verification failed — could not reach license server at %s "
+                   "(offline or network error)" % base)
 
 
 def revalidate(lic, key_material: str, *, base_url: Optional[str] = None) -> str:
-    """Background re-check of an already-cached lease.
+    """Refresh an active cloud lease without sacrificing offline grace.
 
-    ``gate()`` short-circuits on a still-valid cached lease and so can't by itself tell
-    a genuine server DENIAL (revoked/refunded/seat-limit) from merely being offline
-    until the lease itself expires — a real revocation-latency gap for a paying
-    customer's session. This is the fix: call it periodically (or on-demand) against an
-    already-active license to close that gap immediately instead of waiting out the
-    lease TTL. Returns ``"ok"`` (re-registered, lease refreshed), ``"revoked"`` (the
-    server explicitly denied the key — the cached lease is deleted so the very next
-    ``gate()`` call must re-register and will be denied too), or ``"offline"`` (server
-    unreachable — the cached lease is left alone, preserving offline grace for a
-    legitimately paying customer who's briefly disconnected)."""
+    Unlike :func:`gate`, this path always contacts the server. An authoritative denial
+    deletes the cached lease and invalidates the process cache immediately; a network or
+    transient server failure leaves the existing lease untouched until its signed expiry.
+    """
+    from engraphis import licensing
+
     base = (base_url or "").strip().rstrip("/") or cloud_url()
     if not base:
         return "offline"
@@ -363,8 +361,15 @@ def revalidate(lic, key_material: str, *, base_url: Optional[str] = None) -> str
         token = register(base, key_material, mid)
     except Revoked:
         _delete_lease()
+        licensing.invalidate_cache()
         return "revoked"
-    if token:
-        _write_lease(token)
-        return "ok"
-    return "offline"
+    if not token:
+        return "offline"
+    try:
+        payload = verify_lease(token)
+    except Exception:
+        return "offline"
+    if payload.get("key_id") != lic.key_id or payload.get("machine_id") != mid:
+        return "offline"
+    _write_lease(token)
+    return "ok"
