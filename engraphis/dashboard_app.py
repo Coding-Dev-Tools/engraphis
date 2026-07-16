@@ -412,20 +412,24 @@ def _maybe_start_dreaming() -> None:
     _DREAMING_STARTED = True
 
 
+def _refresh_configured_license() -> None:
+    """Refresh a configured key even when its cached fallback is currently free."""
+    from engraphis import licensing
+    if licensing._read_key_material():
+        licensing.current_license(refresh=True)
+
+
 def _maybe_start_license_revalidation() -> None:
-    """Launch a background loop that periodically re-checks an active paid license
+    """Launch a background loop that periodically refreshes a configured license
     against the vendor relay — unless disabled or under pytest.
 
     ``gate()`` only re-registers when the cached lease actually expires, which means a
     revoked/refunded key can keep working locally for up to the full lease TTL before
-    the next natural gate check catches it. This loop closes that latency gap: it calls
-    :func:`cloud_license.revalidate` on a cadence far shorter than the lease TTL, and
-    ``revalidate`` itself deletes the cached lease the moment the server denies the key
-    — so the very next feature check (``gate()``/``current_license(refresh=True)``)
-    fails closed immediately instead of waiting out the lease. A no-op when there is no
-    key configured or the key is a local-only construct (nothing to revalidate against).
-    Same safety envelope as the other background loops: fully fault-isolated, skipped
-    under pytest, switch-offable with ``ENGRAPHIS_REVALIDATE_LOOP=0``."""
+    the next natural gate check catches it. Calling
+    ``current_license(refresh=True)`` both propagates revocation and recovers a valid key
+    after a transient service outage. A no-op when there is no configured key. Same
+    safety envelope as the other background loops: fully fault-isolated, skipped under
+    pytest, switch-offable with ``ENGRAPHIS_REVALIDATE_LOOP=0``."""
     global _REVALIDATE_STARTED
     if _REVALIDATE_STARTED:
         return
@@ -439,17 +443,10 @@ def _maybe_start_license_revalidation() -> None:
     import time
 
     def _loop() -> None:
-        from engraphis import cloud_license, licensing
-        from engraphis.config import resolve_license_server_url
         time.sleep(30)   # let startup settle (after the autosync/dreaming polls)
         while True:
             try:
-                material = licensing._read_key_material()
-                lic = licensing.current_license()
-                if material and lic.is_paid:
-                    base = resolve_license_server_url(lic.cloud_url)
-                    if base:
-                        cloud_license.revalidate(lic, material, base_url=base)
+                _refresh_configured_license()
             except Exception:  # noqa: BLE001 — the loop must outlive any single failure
                 pass
             time.sleep(600)

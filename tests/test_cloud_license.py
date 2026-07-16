@@ -654,6 +654,26 @@ def test_all_paid_keys_require_server_even_without_enforce_claim(monkeypatch):
     assert got.plan == "pro" and got.has("sync")
 
 
+def test_configured_key_retries_after_free_fallback_cache(monkeypatch):
+    """A transient outage must not pin a valid configured key to free forever."""
+    key = _key()
+    lic_parsed = parse_key(key)
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
+    monkeypatch.setattr(cloud_license, "register", lambda *a, **k: None)
+    assert licensing.current_license(refresh=True).plan == "free"
+    assert licensing._cache_recheck_at != float("inf")
+
+    def ok_register(base, k, mid, **kw):
+        payload = {"v": 1, "key_id": lic_parsed.key_id, "plan": lic_parsed.plan,
+                   "features": sorted(lic_parsed.features), "machine_id": mid,
+                   "issued": int(time.time()), "expires": int(time.time() + 3600)}
+        return cloud_license.compose_lease(payload, SECRET)
+
+    monkeypatch.setattr(cloud_license, "register", ok_register)
+    monkeypatch.setattr(licensing, "_cache_recheck_at", 0)
+    assert licensing.current_license().plan == "pro"
+
+
 # ── team-invite relay: self-hosted dashboards with no mail account of their own ────────
 # borrow the vendor's, gated by a real 'team' key (same trust boundary as every other
 # licensed feature) and rate-limited per key so it can't become an open relay.

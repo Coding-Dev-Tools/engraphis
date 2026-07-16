@@ -622,7 +622,13 @@ def current_license(*, refresh: bool = False) -> License:
     # free trial is a real, short-lived, server-issued key (see start_trial) that flows
     # through the exact same gate. No key, or a server-denied key ⇒ the free tier.
     _cached = License.free()
-    _cache_recheck_at = _license_recheck_at(_cached)
+    # A configured key that temporarily failed its cloud gate must retry automatically.
+    # Caching the free fallback forever forced users to restart or paste the same key
+    # again after an outage. No-key free installs remain permanently cached.
+    _cache_recheck_at = (
+        time.time() + _CLOUD_RECHECK_SECONDS
+        if material else _license_recheck_at(_cached)
+    )
     return _cached
 
 
