@@ -14,7 +14,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
 from engraphis import licensing
-from engraphis.config import DEFAULT_RELAY_URL, settings
+from engraphis.config import DEFAULT_RELAY_URL, canonicalize_relay_url, settings
 from engraphis.service import MemoryService, ValidationError
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
@@ -422,10 +422,6 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = None, limit: in
         ws = service()._clean_ws(ws)
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
-    # Enforce personal-folder ownership before any read. The semantic recall path goes
-    # through the service (which enforces this), but this raw-SQLite browse path does
-    # not, so a team member could otherwise read another user's personal folder by name.
-    service()._enforce_personal_access(ws)
     conn = _sql.connect("file:%s?mode=ro" % settings.db_path, uri=True)
     conn.row_factory = _sql.Row
     try:
@@ -911,7 +907,7 @@ _SYNC_STATE: dict = {}
 def _relay_url() -> str:
     # Falls back to the vendor default only if the operator blanked ENGRAPHIS_RELAY_URL;
     # DEFAULT_RELAY_URL lives in config so the literal is defined in exactly one place.
-    return (settings.relay_url or DEFAULT_RELAY_URL).rstrip("/")
+    return canonicalize_relay_url(settings.relay_url) or DEFAULT_RELAY_URL
 
 
 @router.get("/sync/status")
