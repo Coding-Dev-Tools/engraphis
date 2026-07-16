@@ -65,7 +65,7 @@ def main(argv=None) -> int:
 
     engine = MemoryEngine.create(args.db)
     wid_row = engine.store.conn.execute(
-        "SELECT id FROM workspaces WHERE name=?", (args.workspace,)).fetchone()
+        "SELECT id, settings FROM workspaces WHERE name=?", (args.workspace,)).fetchone()
     if not wid_row:
         print(f"error: no workspace named '{args.workspace}' in {args.db}", file=sys.stderr)
         return 2
@@ -84,6 +84,18 @@ def main(argv=None) -> int:
     from engraphis.backends.sync_folder import get_transport
 
     if use_relay:
+        try:
+            workspace_settings = json.loads(wid_row["settings"] or "{}")
+        except (TypeError, ValueError):
+            workspace_settings = {}
+        if isinstance(workspace_settings, dict) \
+                and workspace_settings.get("visibility") == "personal":
+            print(
+                "error: personal workspaces are device-local and cannot be uploaded "
+                "to the shared-account relay",
+                file=sys.stderr,
+            )
+            return 2
         # Namespace the relay by workspace NAME (not the per-device local id) so every
         # device on the account lands in one bucket; account isolation is enforced
         # server-side by the license key. See engraphis/inspector/sync_relay.py.

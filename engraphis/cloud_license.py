@@ -84,8 +84,14 @@ def validate_cloud_base_url(value: str) -> str:
     scheme = parts.scheme.lower()
     if scheme not in {"http", "https"} or not parts.hostname:
         raise ValueError("license server URL must be an absolute http(s) URL")
+    try:
+        parts.port
+    except ValueError as exc:
+        raise ValueError("license server URL has an invalid port") from exc
     if parts.username is not None or parts.password is not None:
         raise ValueError("license server URL must not contain embedded credentials")
+    if "\\" in parts.netloc or any(char.isspace() for char in parts.netloc):
+        raise ValueError("license server URL contains an invalid host")
     if parts.query or parts.fragment:
         raise ValueError("license server URL must not contain a query string or fragment")
     if scheme != "https" and not _is_loopback_host(parts.hostname.lower()):
@@ -371,6 +377,13 @@ def gate(lic, key_material: str, *, base_url: Optional[str] = None) -> Tuple[boo
         # this only bites a deliberately blanked config — defense in depth. Fail closed.)
         return False, ("server-side license verification is required but no license "
                        "server is configured")
+    try:
+        base = validate_cloud_base_url(base)
+    except ValueError as exc:
+        # A malformed/insecure endpoint is a configuration error, not an offline
+        # condition. Do not silently honor a cached lease, and do not echo the original
+        # URL because it may contain embedded credentials.
+        return False, "cloud license verification is blocked: %s" % exc
     mid = machine_id()
     cached = _valid_lease_for(lic.key_id, mid)
     try:
@@ -404,6 +417,11 @@ def revalidate(lic, key_material: str, *, base_url: Optional[str] = None) -> str
 
     base = (base_url or "").strip().rstrip("/") or cloud_url()
     if not base:
+        return "offline"
+    try:
+        base = validate_cloud_base_url(base)
+    except ValueError:
+        licensing.invalidate_cache()
         return "offline"
     mid = machine_id()
     try:

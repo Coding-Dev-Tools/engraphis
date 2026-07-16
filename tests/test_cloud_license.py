@@ -162,7 +162,7 @@ def test_gate_fails_closed_without_server(monkeypatch):
 def test_cloud_gate_allows_then_fails_closed_after_revoke(monkeypatch, tmp_path):
     c = _app()
     _wire_register_to(c, monkeypatch)
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://127.0.0.1")
     key = _key()
     lic = parse_key(key)
     allowed, _ = cloud_license.gate(lic, key)               # registers, stores lease
@@ -177,7 +177,7 @@ def test_cloud_gate_allows_then_fails_closed_after_revoke(monkeypatch, tmp_path)
 def test_cloud_gate_revocation_overrides_a_valid_cached_lease(monkeypatch):
     c = _app()
     _wire_register_to(c, monkeypatch)
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://127.0.0.1")
     key = _key()
     parsed = parse_key(key)
     assert cloud_license.gate(parsed, key)[0] is True
@@ -195,7 +195,7 @@ def test_cloud_gate_revocation_overrides_a_valid_cached_lease(monkeypatch):
 def test_current_license_enforces_cloud_mode(monkeypatch):
     c = _app()
     _wire_register_to(c, monkeypatch)
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://127.0.0.1")
     key = _key()
     monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
     assert licensing.current_license(refresh=True).plan == "pro"   # registered → paid
@@ -259,12 +259,35 @@ def test_license_clients_refuse_plain_http_off_loopback(monkeypatch):
     assert key is None and pending is False and "HTTPS" in reason
 
 
+def test_gate_rejects_invalid_server_url_even_with_cached_lease_and_redacts_it(monkeypatch):
+    c = _app()
+    _wire_register_to(c, monkeypatch)
+    key = _key()
+    lic = parse_key(key)
+    assert cloud_license.gate(lic, key, base_url="http://127.0.0.1")[0] is True
+    assert cloud_license._LEASE_FILE.exists()
+
+    allowed, reason = cloud_license.gate(
+        lic, key, base_url="https://user:super-secret@relay.example"
+    )
+
+    assert allowed is False
+    assert "embedded credentials" in reason
+    assert "super-secret" not in reason
+
+    allowed, reason = cloud_license.gate(
+        lic, key, base_url="https://relay.example:not-a-port"
+    )
+    assert allowed is False
+    assert "invalid port" in reason
+
+
 def test_revalidate_revoked_deletes_lease(monkeypatch):
     # A paid key with a valid local lease is periodically checked online. Background
     # revalidation uses the same denial path and deletes the lease immediately.
     c = _app()
     _wire_register_to(c, monkeypatch)
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://127.0.0.1")
     key = _key()
     lic = parse_key(key)
     assert cloud_license.gate(lic, key)[0] is True
@@ -276,7 +299,7 @@ def test_revalidate_revoked_deletes_lease(monkeypatch):
             raise cloud_license.Revoked("denied")
         return r.json().get("lease") if r.status_code == 200 else None
     monkeypatch.setattr(cloud_license, "register", _revoking_register)
-    assert cloud_license.revalidate(lic, key, base_url="http://cloud.test") == "revoked"
+    assert cloud_license.revalidate(lic, key, base_url="http://127.0.0.1") == "revoked"
     assert not cloud_license._LEASE_FILE.exists()
     assert cloud_license.gate(lic, key)[0] is False
 
@@ -286,12 +309,12 @@ def test_revalidate_offline_keeps_lease_grace(monkeypatch):
     # the cached lease STAYS (offline grace), so paid features keep working.
     c = _app()
     _wire_register_to(c, monkeypatch)
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://127.0.0.1")
     key = _key()
     lic = parse_key(key)
     cloud_license.gate(lic, key)
     monkeypatch.setattr(cloud_license, "register", lambda *a, **k: None)
-    assert cloud_license.revalidate(lic, key, base_url="http://cloud.test") == "offline"
+    assert cloud_license.revalidate(lic, key, base_url="http://127.0.0.1") == "offline"
     assert cloud_license._LEASE_FILE.exists()
     assert cloud_license.gate(lic, key)[0] is True
 
@@ -301,11 +324,11 @@ def test_revalidate_ok_refreshes_lease(monkeypatch):
     # returns 'ok'. This is the steady state for a paying customer.
     c = _app()
     _wire_register_to(c, monkeypatch)
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://127.0.0.1")
     key = _key()
     lic = parse_key(key)
     cloud_license.gate(lic, key)
-    assert cloud_license.revalidate(lic, key, base_url="http://cloud.test") == "ok"
+    assert cloud_license.revalidate(lic, key, base_url="http://127.0.0.1") == "ok"
     assert cloud_license._LEASE_FILE.exists()
 
 
@@ -322,7 +345,7 @@ def test_start_trial_activates_server_issued_pro_key(monkeypatch):
                         lambda base, mid, plan="team", email="": (pro_trial, "", False))
     c = _app()
     _wire_register_to(c, monkeypatch)
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://127.0.0.1")
     out = licensing.start_trial(email="trial@engraphis.local")
     assert out["plan"] == "pro" and out["is_trial"] is True
     assert licensing.current_license(refresh=True).plan == "pro"
@@ -348,7 +371,7 @@ def test_start_trial_is_idempotent_while_already_on_trial(monkeypatch):
     monkeypatch.setattr(cloud_license, "request_trial_key", _request)
     c = _app()
     _wire_register_to(c, monkeypatch)
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://127.0.0.1")
     licensing.start_trial(email="trial@engraphis.local")
     assert len(calls) == 1
     out = licensing.start_trial(email="trial@engraphis.local")   # re-call: must not error,
@@ -362,7 +385,7 @@ def test_start_trial_refuses_if_paid_key_already_active(monkeypatch):
     key really is active" case, not just "a key that merely parses"."""
     c = _app()
     _wire_register_to(c, monkeypatch)
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://127.0.0.1")
     monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _key(plan="pro"))
     with pytest.raises(LicenseError, match="no trial needed"):
         licensing.start_trial()
@@ -387,7 +410,7 @@ def test_start_trial_proceeds_when_local_key_is_cloud_denied(monkeypatch):
         return r.json().get("lease") if r.status_code == 200 else None
 
     monkeypatch.setattr(cloud_license, "register", fake_register)
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://127.0.0.1")
     licensing.activate(stale_key)            # persists (signature-only check, like a real
                                               # customer pasting an old key)
     assert licensing.current_license(refresh=True).plan == "free"   # cloud gate denies it
@@ -435,7 +458,7 @@ def test_team_feature_cannot_be_bypassed_in_cloud_mode(monkeypatch):
     key with no lease loses team capability — a local patch to trial/key can't restore it."""
     c = _app()
     _wire_register_to(c, monkeypatch)
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://127.0.0.1")
     key = _key(plan="team", seats=3)
     monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
     assert licensing.current_license(refresh=True).plan == "team"
@@ -456,7 +479,7 @@ def test_pro_trial_never_grants_team(monkeypatch):
                         lambda base, mid, plan="team", email="": (pro_trial, "", False))
     c = _app()
     _wire_register_to(c, monkeypatch)
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://127.0.0.1")
     licensing.start_trial(email="trial@engraphis.local")
     lic = licensing.current_license(refresh=True)
     assert lic.is_trial and lic.plan == "pro"
@@ -1181,7 +1204,7 @@ def test_licensing_start_team_trial_activates_returned_key(monkeypatch):
         lambda base, mid, email="": (trial_key, "", False))
     c = _app()
     _wire_register_to(c, monkeypatch)            # online-only: lease the key
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://127.0.0.1")
     got = licensing.start_team_trial(email="trial@engraphis.local")
     assert got["plan"] == "team"
     assert licensing.current_license(refresh=True).plan == "team"
@@ -1193,7 +1216,7 @@ def test_licensing_start_team_trial_refuses_if_paid_key_already_active(monkeypat
     refuse when the cloud gate actually approves the existing key."""
     c = _app()
     _wire_register_to(c, monkeypatch)
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://127.0.0.1")
     monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _key(plan="pro"))
     with pytest.raises(LicenseError, match="no trial needed"):
         licensing.start_team_trial()
@@ -1212,7 +1235,7 @@ def test_licensing_start_team_trial_proceeds_when_local_key_is_cloud_denied(monk
         return r.json().get("lease") if r.status_code == 200 else None
 
     monkeypatch.setattr(cloud_license, "register", fake_register)
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://127.0.0.1")
     licensing.activate(stale_key)
     assert licensing.current_license(refresh=True).plan == "free"
     assert licensing.has_feature("team") is False
@@ -1242,7 +1265,7 @@ def test_licensing_start_team_trial_is_idempotent_while_already_on_trial(monkeyp
     monkeypatch.setattr(cloud_license, "request_team_trial_key", _request)
     c = _app()
     _wire_register_to(c, monkeypatch)
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://cloud.test")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "http://127.0.0.1")
     licensing.start_team_trial(email="trial@engraphis.local")
     assert len(calls) == 1
     out = licensing.start_team_trial(email="trial@engraphis.local")

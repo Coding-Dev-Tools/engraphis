@@ -2157,9 +2157,25 @@ class MemoryService:
             "entries": entries,
         }
 
-    def verify_receipts(self, *, workspace: str) -> dict:
+    def verify_receipts(self, *, workspace: str, expected_head: str = "",
+                        expected_count: Optional[int] = None) -> dict:
+        """Verify the local chain and optionally compare an externally saved anchor."""
         wid, _ = self._require_scope(workspace, None)
-        return self.store.verify_receipts(workspace_id=wid)
+        expected_head = _clean_text(
+            expected_head, field="expected_head", max_chars=128, required=False
+        )
+        if expected_count is not None:
+            try:
+                expected_count = int(expected_count)
+            except (TypeError, ValueError, OverflowError):
+                raise ValidationError("expected_count must be an integer")
+            if expected_count < 0:
+                raise ValidationError("expected_count must be non-negative")
+        return self.store.verify_receipts(
+            workspace_id=wid,
+            expected_head=expected_head,
+            expected_count=expected_count,
+        )
 
     def export_receipts(self, *, workspace: str) -> dict:
         """Export only public receipt payloads and chain hashes."""

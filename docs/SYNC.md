@@ -148,7 +148,10 @@ Schedule it like any other local job:
 
 Exactly one of `--remote` / `--relay` is required. Sync is full-state and idempotent, so
 running it on any cadence — or interrupting it — is safe. It's a **Pro** feature; the 3-day
-local trial (Settings → License, one click, no key) unlocks it for evaluation.
+server-issued trial (Settings → License, confirm the emailed link) unlocks it for evaluation.
+The managed relay accepts at most 64 MiB per device bundle and 256 MiB per workspace;
+current clients fetch one raw bundle at a time rather than constructing an unbounded bulk
+base64 response.
 
 ### Automatic sync (no button, no cron)
 
@@ -180,8 +183,8 @@ admin** can flip these toggles (`/api/sync/auto` POST is admin-gated in
 is orthogonal to who can *write* memories: a **member** keeps "store + view" (create,
 edit, correct, pin, forget, and read), a **viewer** stays read-only, and an **admin** gets
 those plus team management and the auto-sync switches. A member's writes still trigger
-on-change sync when an admin has enabled it — the sync follows the *write*, not the
-writer's role.
+the next scheduled sync when an admin has enabled it; writes never bypass the configured
+cadence based on the writer's role.
 
 The relay is namespaced by an account id derived from the license **email**, so every
 device that syncs with the *same* Team key lands in one shared bucket — that is what makes
@@ -209,15 +212,19 @@ bundle as hostile:
 - **Fail-safe parsing.** Non-finite JSON (`Infinity`/`NaN`) is rejected, and one malformed
   or hostile bundle is recorded and skipped — it never aborts the whole sync.
 - **No secrets on the wire.** Embeddings are never serialized (rebuilt locally);
-  `secret`-flagged memories are excluded from export by default; the auth/license database
-  is a separate file that is never part of a bundle.
+  `secret`-flagged memories are excluded from export and cannot be overwritten or
+  downgraded by a remote bundle; the auth/license database is a separate file that is
+  never part of a bundle. Dashboard/auto-sync also refuses to upload Team personal folders
+  to the shared-account relay, and the CLI applies the same guard for `--relay`.
 - **Provenance.** Every synced-in memory is tagged `provenance.synced_from_device`, so
   "why is this known?" stays answerable.
 
 **Trust boundary, stated plainly:** within a workspace you *choose* to sync, any peer can
 add, relabel, or invalidate memories — that's what sharing a replica means (like any
 collaborator in a shared doc), and it's bi-temporal and audited, never a hard delete.
-Sync only ever moves data within the scope you pointed it at.
+Sync only ever moves data within the scope you pointed it at. Today's relay encrypts data
+in transit with HTTPS but stores opaque bundle bytes in plaintext at rest; it is not yet
+zero-knowledge/end-to-end encrypted.
 
 ---
 

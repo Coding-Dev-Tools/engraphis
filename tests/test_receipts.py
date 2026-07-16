@@ -62,6 +62,100 @@ def test_concurrent_receipts_form_one_valid_chain():
     assert verification["head"] in {receipt["hash"] for receipt in receipts}
 
 
+def test_receipt_anchor_detects_tail_truncation():
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("team")
+    first = store.record_receipt("remember", workspace_id=wid)
+    second = store.record_receipt("recall", workspace_id=wid)
+    assert store.verify_receipts(workspace_id=wid)["valid"] is True
+
+    store.conn.execute("DELETE FROM operation_receipts WHERE id=?", (second["id"],))
+    store.conn.commit()
+
+    verification = store.verify_receipts(workspace_id=wid)
+    assert verification["valid"] is False
+    assert {error["error"] for error in verification["errors"]} >= {
+        "anchor_count_mismatch", "anchor_head_mismatch",
+    }
+    assert verification["head"] == first["hash"]
+
+
+def test_receipt_append_after_truncation_preserves_integrity_failure():
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("team")
+    store.record_receipt("remember", workspace_id=wid)
+    second = store.record_receipt("recall", workspace_id=wid)
+    store.conn.execute("DELETE FROM operation_receipts WHERE id=?", (second["id"],))
+    store.conn.commit()
+
+    # Receipt integrity problems must stay visible, but must not turn a completed memory
+    # operation into a misleading API failure merely because its receipt is appended next.
+    store.record_receipt("link", workspace_id=wid)
+
+    verification = store.verify_receipts(workspace_id=wid)
+    assert verification["valid"] is False
+    assert "anchor_integrity_error" in {
+        error["error"] for error in verification["errors"]
+    }
+
+
+def test_receipt_anchor_migration_normalizes_legacy_null_scope(tmp_path):
+    db = str(tmp_path / "receipts.db")
+    store = Store(db)
+    workspace = store.get_or_create_workspace("team")
+    receipt = store.record_receipt("remember", workspace_id=workspace)
+    store.conn.execute("DELETE FROM receipt_chain_heads")
+    store.conn.execute(
+        "UPDATE operation_receipts SET workspace_id=NULL, repo_id=NULL WHERE id=?",
+        (receipt["id"],),
+    )
+    store.conn.commit()
+    store.close()
+
+    reopened = Store(db)
+    try:
+        row = reopened.conn.execute(
+            "SELECT workspace_id, repo_id FROM operation_receipts WHERE id=?",
+            (receipt["id"],),
+        ).fetchone()
+        assert tuple(row) == ("", "")
+        assert reopened.verify_receipts(workspace_id="")["valid"] is True
+    finally:
+        reopened.close()
+
+
+def test_external_receipt_anchor_detects_rewritten_local_anchor():
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("team")
+    first = store.record_receipt("remember", workspace_id=wid)
+    store.record_receipt("recall", workspace_id=wid)
+    saved = store.verify_receipts(workspace_id=wid)
+
+    # Simulate an attacker truncating both the receipt tail and the anchor stored in the
+    # same database. Local verification alone cannot prove history against a full rewrite;
+    # an externally saved head/count can.
+    store.conn.execute(
+        "DELETE FROM operation_receipts WHERE receipt_hash!=?",
+        (first["hash"],),
+    )
+    store.conn.execute(
+        "UPDATE receipt_chain_heads SET receipt_count=1, head_hash=? WHERE workspace_id=?",
+        (first["hash"], wid),
+    )
+    store.conn.commit()
+
+    assert store.verify_receipts(workspace_id=wid)["valid"] is True
+    verification = store.verify_receipts(
+        workspace_id=wid,
+        expected_head=saved["head"],
+        expected_count=saved["count"],
+    )
+    assert verification["valid"] is False
+    assert {error["error"] for error in verification["errors"]} >= {
+        "expected_head_mismatch", "expected_count_mismatch",
+    }
+
+
 def test_receipts_are_serialized_across_store_connections(tmp_path):
     db = str(tmp_path / "team.db")
     stores = [Store(db) for _ in range(4)]

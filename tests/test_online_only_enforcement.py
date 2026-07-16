@@ -64,7 +64,7 @@ def _key(plan="pro", days=365, cloud=True, trial=False, seats=1):
         payload["trial"] = 1
     if cloud:                       # a key minted with the server URL signed in
         payload["enforce"] = "cloud"
-        payload["cloud_url"] = "http://vendor.test"
+        payload["cloud_url"] = "https://vendor.test"
     return compose_key(payload, SECRET)
 
 

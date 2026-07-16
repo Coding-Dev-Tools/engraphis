@@ -285,7 +285,8 @@ These are pure, unit-tested functions — change them only with a corresponding 
   gated CLI `python -m scripts.sync --remote <dir>` **or** `--relay [<url>]`
   (`require_feature("sync")` lives in the script — `core/` stays license-free). The
   untrusted-bundle apply path is validated/clamped and **scope-confined** (a bundle can't
-  cross a workspace/repo boundary; `secret` memories aren't exported; provenance is stamped).
+  cross a workspace/repo boundary; `secret` memories aren't exported or remotely mutated;
+  Team personal folders are never sent to the shared-account relay; provenance is stamped).
   See `docs/SYNC.md`.
   **Not done:** end-to-end encryption of relay bundles (client-side encrypt/decrypt; the
   relay already stores opaque bytes), HLC per-field clock, entity/edge graph sync,

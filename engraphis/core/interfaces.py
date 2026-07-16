@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Literal, Optional, Protocol, runtime_checkable
+from typing import Any, Iterable, Literal, Optional, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -258,13 +258,13 @@ class SyncTransport(Protocol):
 
     Deliberately dumb: it stores and retrieves named byte blobs and knows nothing
     about memory semantics, so a shared folder (Dropbox/iCloud/Syncthing/git), an
-    object store, or a managed end-to-end-encrypted relay are interchangeable behind
-    these three calls — same interface-first swap as ``VectorIndex``/``Embedder``.
+    object store, or a managed relay are interchangeable behind these three calls —
+    same interface-first swap as ``VectorIndex``/``Embedder``.
     A transport may encrypt ``data`` in ``push`` and decrypt in ``pull``; the sync
     engine treats every pulled bundle as untrusted regardless.
     """
     def push(self, name: str, data: bytes) -> None: ...
-    def pull(self) -> list[tuple[str, bytes]]: ...
+    def pull(self) -> Iterable[tuple[str, bytes]]: ...
     def list_names(self) -> list[str]: ...
 
 

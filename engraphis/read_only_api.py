@@ -123,7 +123,11 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
         return run(svc.receipt_log, workspace=workspace, limit=limit)
 
     @app.get("/receipts/verify")
-    def verify_receipts(workspace: str):
-        return run(svc.verify_receipts, workspace=workspace)
+    def verify_receipts(workspace: str, expected_head: str = "",
+                        expected_count: Optional[int] = None):
+        return run(
+            svc.verify_receipts, workspace=workspace,
+            expected_head=expected_head, expected_count=expected_count,
+        )
 
     return app

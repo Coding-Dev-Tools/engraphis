@@ -295,7 +295,7 @@ server-issued Pro or Team trial** after email confirmation — no card required.
 | Code | `engraphis_code_impact` | Rank changed files by symbols, dependents, communities, memories, and hotspots |
 | Code | `engraphis_export_code_graph` | Portable graph JSON + Markdown + HTML report |
 | Audit | `engraphis_receipts` | List content-free hashed operation receipts |
-| Audit | `engraphis_verify_receipts` | Verify the receipt chain |
+| Audit | `engraphis_verify_receipts` | Verify the receipt chain, local tail anchor, and optional externally saved head/count |
 | Audit | `engraphis_export_receipts` | Export the shareable receipt-only audit bundle |
 | Governance | `engraphis_forget` | Retire a memory — bi-temporal close, never deleted |
 | Governance | `engraphis_pin` | Exempt from future automatic decay/pruning |

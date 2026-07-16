@@ -14,16 +14,37 @@ folder stays small and there is nothing to garbage-collect. Writes are atomic
 (temp file + ``os.replace``) so a half-written bundle is never observed — the same
 mount-safe discipline the rest of the repo uses (AGENTS.md §7).
 
-The managed, end-to-end-encrypted relay (the headline Pro upsell) is a different
-``SyncTransport`` implementation that plugs in here unchanged; this backend is what
-makes the feature real and testable today.
+The managed TLS relay (the headline Pro upsell) is a different ``SyncTransport``
+implementation that plugs in here unchanged. Client-side end-to-end encryption is a
+documented follow-up; today's relay stores opaque but plaintext bundle bytes at rest.
 """
 from __future__ import annotations
 
+import heapq
 import os
+import re
+import stat
 from pathlib import Path
+from typing import Optional
 
 MAX_BUNDLE_BYTES = 256 * 1024 * 1024  # skip absurdly large blobs before reading them
+MAX_TOTAL_PULL_BYTES = 256 * 1024 * 1024
+MAX_BUNDLES = 64
+MAX_DIRECTORY_ENTRIES = 10_000
+MAX_BUNDLE_NAME_CHARS = 200
+
+
+def _safe_name(name: object) -> str:
+    raw = str(name or "").strip()
+    value = os.path.basename(raw)
+    if (
+        value != raw
+        or len(value) > MAX_BUNDLE_NAME_CHARS
+        or not value.endswith(".json")
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", value) is None
+    ):
+        return ""
+    return value
 
 
 class FolderTransport:
@@ -43,7 +64,9 @@ class FolderTransport:
             raise ValueError(
                 f"sync bundle exceeds the {MAX_BUNDLE_BYTES}-byte transport limit"
             )
-        safe = os.path.basename(name)  # never let a bundle name escape the folder
+        safe = _safe_name(name)
+        if not safe:
+            raise ValueError("sync bundle name is invalid")
         dest = self.root / safe
         tmp = self.root / (safe + ".tmp")
         with open(tmp, "wb") as fh:
@@ -59,17 +82,70 @@ class FolderTransport:
         shared folder ever holds a corrupt or hostile blob (defense in depth — the
         sync engine also caps row counts once the JSON is parsed)."""
         out: list[tuple[str, bytes]] = []
-        for p in sorted(self.root.glob("*.json")):
-            try:
-                if p.stat().st_size > MAX_BUNDLE_BYTES:
-                    continue
-                out.append((p.name, p.read_bytes()))
-            except OSError:
-                continue  # a peer mid-write; skip this pass, catch it next sync
+        total = 0
+        for p in self._bundle_paths():
+            data = self._read_regular_bundle(p)
+            if data is None:
+                continue
+            if total + len(data) > MAX_TOTAL_PULL_BYTES:
+                continue
+            out.append((p.name, data))
+            total += len(data)
         return out
 
     def list_names(self) -> list[str]:
-        return [p.name for p in sorted(self.root.glob("*.json"))]
+        return [p.name for p in self._bundle_paths()]
+
+    def _bundle_paths(self) -> list[Path]:
+        """Return a deterministic, bounded set of regular bundle files.
+
+        The shared folder is untrusted. Do not follow symlinks, and do not materialize an
+        unbounded directory listing merely to sort it.
+        """
+        def candidates():
+            try:
+                with os.scandir(self.root) as entries:
+                    for index, entry in enumerate(entries):
+                        if index >= MAX_DIRECTORY_ENTRIES:
+                            break
+                        try:
+                            if not entry.is_file(follow_symlinks=False):
+                                continue
+                        except OSError:
+                            continue
+                        if _safe_name(entry.name) == entry.name:
+                            yield Path(entry.path)
+            except OSError:
+                return
+
+        return heapq.nsmallest(MAX_BUNDLES, candidates(), key=lambda path: path.name)
+
+    @staticmethod
+    def _read_regular_bundle(path: Path) -> Optional[bytes]:
+        """Open one bundle without following a symlink swapped in after enumeration."""
+        fd = -1
+        try:
+            before = os.lstat(path)
+            if not stat.S_ISREG(before.st_mode):
+                return None
+            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(path, flags)
+            opened = os.fstat(fd)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+                or opened.st_size > MAX_BUNDLE_BYTES
+            ):
+                return None
+            with os.fdopen(fd, "rb") as fh:
+                fd = -1
+                data = fh.read(MAX_BUNDLE_BYTES + 1)
+            return data if len(data) <= MAX_BUNDLE_BYTES else None
+        except OSError:
+            return None  # peer mid-write/replaced file; retry on the next sync pass
+        finally:
+            if fd >= 0:
+                os.close(fd)
 
 
 def get_transport(kind: str = "folder", **kw):

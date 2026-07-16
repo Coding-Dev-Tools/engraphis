@@ -163,6 +163,7 @@ class Store:
             "ALTER TABLE mem_links ADD COLUMN reason TEXT DEFAULT ''",
             "ALTER TABLE code_edges ADD COLUMN layer TEXT DEFAULT 'entity'",
             "ALTER TABLE symbols ADD COLUMN docstring TEXT DEFAULT ''",
+            "ALTER TABLE receipt_chain_heads ADD COLUMN integrity_error TEXT DEFAULT ''",
         ):
             try:
                 self.conn.execute(stmt)
@@ -184,6 +185,27 @@ class Store:
                             f"UPDATE {table} SET layer=? WHERE rowid=?",
                             (inferred, row["rowid"]),
                         )
+        # Backfill the independent receipt anchor for databases created before the
+        # anchor table existed. From this point onward every append updates it atomically,
+        # allowing verification to detect deletion of the newest receipt as well as an
+        # interior chain break.
+        self.conn.execute(
+            "UPDATE operation_receipts SET workspace_id='' WHERE workspace_id IS NULL"
+        )
+        self.conn.execute(
+            "UPDATE operation_receipts SET repo_id='' WHERE repo_id IS NULL"
+        )
+        self.conn.execute(
+            "INSERT OR IGNORE INTO receipt_chain_heads "
+            "(workspace_id, receipt_count, head_hash, integrity_error, updated_at) "
+            "SELECT COALESCE(r.workspace_id, ''), COUNT(*), "
+            "  (SELECT r2.receipt_hash FROM operation_receipts r2 "
+            "   WHERE COALESCE(r2.workspace_id, '')=COALESCE(r.workspace_id, '') "
+            "   ORDER BY r2.rowid DESC LIMIT 1), "
+            "  '', "
+            "  COALESCE(MAX(r.ts), 0) "
+            "FROM operation_receipts r GROUP BY COALESCE(r.workspace_id, '')"
+        )
         self.conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?,?)",
             (SCHEMA_VERSION, now_ts()),
@@ -943,8 +965,9 @@ class Store:
 
         The public payload intentionally excludes raw content, query text, titles,
         workspace/repo names, raw ids, and actor identity. Scope and actor are represented
-        by one-way digests; receipts are chained per workspace so deletion/reordering is
-        detectable during verification.
+        by one-way digests. Receipts are chained per workspace and the current count/head
+        is anchored independently, so modification, reordering, interior deletion, and
+        tail truncation are detectable during verification.
         """
         operation = str(operation or "unknown")[:80]
         actor = str(actor or "system")[:200]
@@ -964,12 +987,31 @@ class Store:
                     f"{workspace_id}\0{repo_id}".encode("utf-8")
                 ).hexdigest()[:24]
                 actor_digest = hashlib.sha256(actor.encode("utf-8")).hexdigest()[:16]
-                prev = self.conn.execute(
-                    "SELECT receipt_hash FROM operation_receipts WHERE workspace_id=? "
-                    "ORDER BY rowid DESC LIMIT 1",
+                chain = self.conn.execute(
+                    "SELECT COUNT(*) AS n, "
+                    "COALESCE((SELECT receipt_hash FROM operation_receipts "
+                    "WHERE workspace_id=? ORDER BY rowid DESC LIMIT 1), '') AS head "
+                    "FROM operation_receipts WHERE workspace_id=?",
+                    (workspace_id, workspace_id),
+                ).fetchone()
+                current_count = int(chain["n"] or 0)
+                prev_hash = str(chain["head"] or "")
+                anchor = self.conn.execute(
+                    "SELECT receipt_count, head_hash, integrity_error "
+                    "FROM receipt_chain_heads "
+                    "WHERE workspace_id=?",
                     (workspace_id,),
                 ).fetchone()
-                prev_hash = prev["receipt_hash"] if prev else ""
+                anchor_error = str(anchor["integrity_error"] or "") if anchor else ""
+                if anchor is not None and (
+                    int(anchor["receipt_count"]) != current_count
+                    or str(anchor["head_hash"]) != prev_hash
+                ):
+                    # Preserve evidence of the mismatch without bricking the operation that
+                    # requested this receipt. The new receipt continues from the rows that
+                    # actually remain, while verification stays invalid until an explicit
+                    # repair/export decision clears the persistent integrity marker.
+                    anchor_error = anchor_error or "pre_append_anchor_mismatch"
                 safe_meta = _receipt_metadata(metadata or {})
                 payload_obj = {
                     "version": 1,
@@ -997,6 +1039,20 @@ class Store:
                         payload, prev_hash, receipt_hash,
                     ),
                 )
+                self.conn.execute(
+                    "INSERT INTO receipt_chain_heads "
+                    "(workspace_id, receipt_count, head_hash, integrity_error, updated_at) "
+                    "VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(workspace_id) DO UPDATE SET "
+                    "receipt_count=excluded.receipt_count, "
+                    "head_hash=excluded.head_hash, "
+                    "integrity_error=CASE "
+                    "WHEN receipt_chain_heads.integrity_error!='' "
+                    "THEN receipt_chain_heads.integrity_error "
+                    "ELSE excluded.integrity_error END, "
+                    "updated_at=excluded.updated_at",
+                    (workspace_id, current_count + 1, receipt_hash, anchor_error, ts),
+                )
                 self.conn.commit()
                 return {**payload_obj, "hash": receipt_hash}
             except Exception:
@@ -1018,7 +1074,8 @@ class Store:
                 out.append(payload)
         return out
 
-    def verify_receipts(self, *, workspace_id: str) -> dict:
+    def verify_receipts(self, *, workspace_id: str, expected_head: str = "",
+                        expected_count: Optional[int] = None) -> dict:
         rows = self.conn.execute(
             "SELECT id, payload, prev_hash, receipt_hash FROM operation_receipts "
             "WHERE workspace_id=? ORDER BY rowid ASC",
@@ -1038,10 +1095,45 @@ class Store:
             if row["prev_hash"] != previous:
                 errors.append({"index": index, "id": row["id"], "error": "chain_break"})
             previous = row["receipt_hash"]
+        anchor = self.conn.execute(
+            "SELECT receipt_count, head_hash, integrity_error "
+            "FROM receipt_chain_heads WHERE workspace_id=?",
+            (workspace_id,),
+        ).fetchone()
+        if rows and anchor is None:
+            errors.append({"index": len(rows), "id": "", "error": "missing_anchor"})
+        elif anchor is not None:
+            if int(anchor["receipt_count"]) != len(rows):
+                errors.append({
+                    "index": len(rows), "id": "", "error": "anchor_count_mismatch",
+                })
+            if str(anchor["head_hash"]) != previous:
+                errors.append({
+                    "index": len(rows), "id": "", "error": "anchor_head_mismatch",
+                })
+            if str(anchor["integrity_error"] or ""):
+                errors.append({
+                    "index": len(rows), "id": "", "error": "anchor_integrity_error",
+                })
+        expected_head = str(expected_head or "").strip()
+        if expected_head and previous != expected_head:
+            errors.append({
+                "index": len(rows), "id": "", "error": "expected_head_mismatch",
+            })
+        if expected_count is not None:
+            try:
+                external_count = max(0, int(expected_count))
+            except (TypeError, ValueError, OverflowError):
+                external_count = -1
+            if external_count != len(rows):
+                errors.append({
+                    "index": len(rows), "id": "", "error": "expected_count_mismatch",
+                })
         return {
             "valid": not errors,
             "count": len(rows),
             "head": previous,
+            "anchored": anchor is not None,
             "errors": errors,
         }
 

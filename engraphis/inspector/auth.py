@@ -26,7 +26,9 @@ import hmac
 import re
 import secrets
 import sqlite3
+import threading
 import time
+from functools import wraps
 from typing import Optional
 
 PBKDF2_ITERATIONS = 600_000
@@ -38,6 +40,10 @@ LOCKOUT_SECONDS = 60
 RESET_TOKEN_TTL_SECONDS = 1800   # a "forgot password" link is single-use, 30 min
 RESET_REQUEST_MAX = 3            # … and throttled per-email so it can't mail-bomb
 RESET_REQUEST_WINDOW = 3600      # an inbox (independent of the login lockout above)
+MAX_THROTTLE_KEYS = 10_000       # bound unique-email memory use under credential spraying
+MAX_SESSIONS_PER_USER = 20
+MAX_ACTIVE_API_TOKENS = 100
+MAX_REVOKED_API_TOKENS = 100
 
 ROLES = ("viewer", "member", "admin")
 _ROLE_RANK = {r: i for i, r in enumerate(ROLES)}
@@ -102,6 +108,15 @@ class AuthError(ValueError):
     """User-facing auth failure; message is safe to surface."""
 
 
+def _serialized(method):
+    """Serialize access to AuthStore's shared SQLite connection and in-memory throttles."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
 def role_at_least(role: str, minimum: str) -> bool:
     return _ROLE_RANK.get(role, -1) >= _ROLE_RANK.get(minimum, 99)
 
@@ -158,7 +173,10 @@ def _verify_password(password: str, encoded: str) -> bool:
 
 
 def _hash_token(token: str) -> str:
-    return hashlib.sha256(token.encode("ascii")).hexdigest()
+    # Generated tokens are ASCII, but cookies/Authorization headers are untrusted input.
+    # UTF-8 keeps malformed non-ASCII credentials on the normal "not found" path instead
+    # of raising UnicodeEncodeError and turning an auth failure into a 500.
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
 
 
 def _validate_password(password: str) -> None:
@@ -176,13 +194,25 @@ class AuthStore:
     """Users + sessions for team mode. One instance per Inspector process."""
 
     def __init__(self, db_path: str, *, iterations: int = PBKDF2_ITERATIONS) -> None:
+        self._lock = threading.RLock()
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA busy_timeout=5000")
+        self.conn.execute("PRAGMA foreign_keys=ON")
+        if db_path != ":memory:":
+            try:
+                self.conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower():
+                    self.conn.close()
+                    raise
+            self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(_SCHEMA)
         self.iterations = int(iterations)
         self._failures: dict = {}   # email -> list[fail_ts] (in-memory throttle)
         self._reset_requests: dict = {}   # email -> list[req_ts] (forgot-password throttle)
         self._last_prune: float = 0.0
+        self._last_throttle_prune: float = 0.0
 
     # ── users ──────────────────────────────────────────────────────────────────
     @staticmethod
@@ -192,6 +222,7 @@ class AuthStore:
             raise AuthError("invalid email address")
         return email
 
+    @_serialized
     def create_user(self, email: str, name: str, password: str, role: str,
                     *, seat_limit: Optional[int] = None) -> dict:
         # The very first user (bootstrap admin, called from /api/auth/setup on a
@@ -222,11 +253,9 @@ class AuthStore:
         conn = self.conn
         started = False
         try:
-            try:
+            if not conn.in_transaction:
                 conn.execute("BEGIN IMMEDIATE")
                 started = True
-            except sqlite3.OperationalError:
-                pass  # already inside a caller-managed transaction — don't nest
             if int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]) > 0:
                 from engraphis.licensing import require_feature
                 require_feature("team")
@@ -254,64 +283,90 @@ class AuthStore:
             raise
         return self.get_user(uid)
 
+    @_serialized
     def get_user(self, user_id: str) -> Optional[dict]:
         row = self.conn.execute(
             "SELECT id, email, name, role, created_at, disabled FROM users WHERE id=?",
             (user_id,)).fetchone()
         return dict(row) if row else None
 
+    @_serialized
     def list_users(self) -> list:
         return [dict(r) for r in self.conn.execute(
             "SELECT id, email, name, role, created_at, disabled FROM users "
             "ORDER BY created_at")]
 
+    @_serialized
     def count_users(self) -> int:
         return int(self.conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"])
 
+    @_serialized
     def count_active_users(self) -> int:
         return int(self.conn.execute(
             "SELECT COUNT(*) AS n FROM users WHERE disabled=0").fetchone()["n"])
 
+    @_serialized
     def _count_active_admins(self) -> int:
         return int(self.conn.execute(
             "SELECT COUNT(*) AS n FROM users WHERE role='admin' AND disabled=0"
         ).fetchone()["n"])
 
+    @_serialized
     def update_user(self, user_id: str, *, role: Optional[str] = None,
                     disabled: Optional[bool] = None,
                     seat_limit: Optional[int] = None) -> dict:
-        user = self.get_user(user_id)
-        if user is None:
+        preliminary = self.get_user(user_id)
+        if preliminary is None:
             raise AuthError("no such user")
-        # Never let the last active admin lock everyone out.
-        losing_admin = (user["role"] == "admin" and not user["disabled"] and
-                        ((role is not None and role != "admin") or disabled))
-        if losing_admin and self._count_active_admins() <= 1:
-            raise AuthError("cannot demote or disable the last active admin")
-        # Re-enabling a disabled user consumes a seat, exactly like creating one, so it must
-        # honour the same licensed cap. Without this a team could exceed its paid seats via
-        # disable → add a replacement → re-enable the original — a path create_user's own
-        # seat check can't see.
-        reenabling = disabled is False and bool(user["disabled"])
-        if reenabling:
+        if disabled is False and bool(preliminary["disabled"]):
             from engraphis.licensing import require_feature
             require_feature("team")
-        if reenabling and seat_limit is not None and self.count_active_users() >= seat_limit:
-            raise AuthError(
-                "seat limit reached (%d) — upgrade your Team license for more seats"
-                % seat_limit)
         if role is not None:
             if role not in ROLES:
                 raise AuthError("role must be one of: %s" % ", ".join(ROLES))
-            self.conn.execute("UPDATE users SET role=? WHERE id=?", (role, user_id))
-        if disabled is not None:
-            self.conn.execute("UPDATE users SET disabled=? WHERE id=?",
-                              (1 if disabled else 0, user_id))
-            if disabled:
-                self.revoke_user_sessions(user_id)
-        self.conn.commit()
+        conn = self.conn
+        started = not conn.in_transaction
+        try:
+            if started:
+                conn.execute("BEGIN IMMEDIATE")
+            user = self.get_user(user_id)
+            if user is None:
+                raise AuthError("no such user")
+            # Never let concurrent demotions/disables remove every active admin.
+            losing_admin = (
+                user["role"] == "admin" and not user["disabled"]
+                and ((role is not None and role != "admin") or disabled)
+            )
+            if losing_admin and self._count_active_admins() <= 1:
+                raise AuthError("cannot demote or disable the last active admin")
+            # Re-enabling consumes a seat. Keep the count check and update in one write
+            # transaction so concurrent admin requests cannot oversubscribe the license.
+            reenabling = disabled is False and bool(user["disabled"])
+            if reenabling and seat_limit is not None \
+                    and self.count_active_users() >= seat_limit:
+                raise AuthError(
+                    "seat limit reached (%d) — upgrade your Team license for more seats"
+                    % seat_limit)
+            if role is not None:
+                conn.execute("UPDATE users SET role=? WHERE id=?", (role, user_id))
+            if disabled is not None:
+                conn.execute(
+                    "UPDATE users SET disabled=? WHERE id=?",
+                    (1 if disabled else 0, user_id),
+                )
+                if disabled:
+                    conn.execute("DELETE FROM auth_sessions WHERE user_id=?", (user_id,))
+                    conn.execute("UPDATE api_tokens SET revoked=1 WHERE user_id=?", (user_id,))
+                    self._prune_revoked_api_tokens(user_id)
+            if started:
+                conn.commit()
+        except BaseException:
+            if started and conn.in_transaction:
+                conn.rollback()
+            raise
         return self.get_user(user_id)
 
+    @_serialized
     def delete_user(self, user_id: str) -> dict:
         """Permanently remove a team member. Unlike ``disable`` (which flips a flag but
         leaves the row — and its UNIQUE ``email`` — in place), this frees both the
@@ -321,27 +376,66 @@ class AuthStore:
         codebase has no soft-delete convention, and ``audit_events`` (recorded by the
         caller with the email captured beforehand) already preserves the history.
         Returns the deleted user's row (pre-delete snapshot) for the caller's audit log."""
-        user = self.get_user(user_id)
-        if user is None:
-            raise AuthError("no such user")
-        # Same guard as update_user's demote/disable path — deletion is a strictly
-        # stronger version of disable, so it must never be able to lock everyone out.
-        if user["role"] == "admin" and not user["disabled"] and self._count_active_admins() <= 1:
-            raise AuthError("cannot delete the last active admin")
-        self.revoke_user_sessions(user_id)
-        self.conn.execute("DELETE FROM users WHERE id=?", (user_id,))
-        self.conn.commit()
-        return user
+        conn = self.conn
+        started = not conn.in_transaction
+        try:
+            if started:
+                conn.execute("BEGIN IMMEDIATE")
+            user = self.get_user(user_id)
+            if user is None:
+                raise AuthError("no such user")
+            # Same guard as update_user's demote/disable path — deletion is a strictly
+            # stronger version of disable, so it must never lock everyone out.
+            if user["role"] == "admin" and not user["disabled"] \
+                    and self._count_active_admins() <= 1:
+                raise AuthError("cannot delete the last active admin")
+            conn.execute("DELETE FROM auth_sessions WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM password_resets WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM api_tokens WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+            if started:
+                conn.commit()
+            return user
+        except BaseException:
+            if started and conn.in_transaction:
+                conn.rollback()
+            raise
 
     # ── login throttle (in-memory, per-process) ────────────────────────────────
+    def _prune_throttle_maps(self, now: float) -> None:
+        periodic = now - self._last_throttle_prune >= 60
+        for bucket, window in (
+            (self._failures, LOCKOUT_WINDOW),
+            (self._reset_requests, RESET_REQUEST_WINDOW),
+        ):
+            if periodic:
+                for email, stamps in list(bucket.items()):
+                    live = [stamp for stamp in stamps if now - stamp < window]
+                    if live:
+                        bucket[email] = live
+                    else:
+                        bucket.pop(email, None)
+            # Dict insertion order is used as a small LRU: callers pop/reinsert a
+            # touched key. This keeps a credential-spraying request O(1) once the
+            # map reaches its cap instead of sorting ten thousand entries per hit.
+            while len(bucket) > MAX_THROTTLE_KEYS:
+                bucket.pop(next(iter(bucket)))
+        if periodic:
+            self._last_throttle_prune = now
+
+    @_serialized
     def _locked_until(self, email: str) -> float:
         now = time.time()
+        self._prune_throttle_maps(now)
         fails = [t for t in self._failures.get(email, []) if now - t < LOCKOUT_WINDOW]
-        self._failures[email] = fails
+        self._failures.pop(email, None)
+        if fails:
+            self._failures[email] = fails
         if len(fails) >= LOCKOUT_FAILS:
             return fails[-1] + LOCKOUT_SECONDS
         return 0.0
 
+    @_serialized
     def login(self, email: str, password: str, *, ip: Optional[str] = None) -> dict:
         """Verify credentials → new session. Raises :class:`AuthError` (generic message —
         never reveals which of email/password was wrong) or the lockout notice.
@@ -369,7 +463,10 @@ class AuthStore:
         encoded = row["pw_hash"] if row else _hash_password("x", iterations=self.iterations)
         ok = _verify_password(password or "", encoded)
         if not ok or row is None or row["disabled"]:
-            self._failures.setdefault(email, []).append(time.time())
+            fails = self._failures.pop(email, [])
+            fails.append(time.time())
+            self._failures[email] = fails
+            self._prune_throttle_maps(time.time())
             self.record_event("login.failed", actor_email=email, ip=ip,
                               detail=("account_disabled" if row and row["disabled"]
                                       else "bad_credentials"))
@@ -382,6 +479,7 @@ class AuthStore:
         return user
 
     # ── password reset ("forgot password") ─────────────────────────────────────
+    @_serialized
     def request_password_reset(self, email: str) -> Optional[dict]:
         """Issue a single-use password-reset token for *email*, or return ``None``.
 
@@ -398,10 +496,13 @@ class AuthStore:
         """
         email = self._clean_email(email)
         now = time.time()
+        self._prune_throttle_maps(now)
         hits = [t for t in self._reset_requests.get(email, []) if now - t < RESET_REQUEST_WINDOW]
         throttled = len(hits) >= RESET_REQUEST_MAX
         hits.append(now)
+        self._reset_requests.pop(email, None)
         self._reset_requests[email] = hits
+        self._prune_throttle_maps(now)
         if throttled:
             self.record_event("password_reset.throttled", actor_email=email)
             return None
@@ -419,6 +520,7 @@ class AuthStore:
         self.record_event("password_reset.requested", actor_id=row["id"], actor_email=email)
         return {"token": token, "email": row["email"], "name": row["name"]}
 
+    @_serialized
     def reset_password(self, token: str, new_password: str) -> dict:
         """Consume a password-reset token and set *new_password*.
 
@@ -431,30 +533,59 @@ class AuthStore:
         caller can sign the user straight back in.
         """
         _validate_password(new_password)
-        row = self.conn.execute(
-            "SELECT user_id, expires_at, used FROM password_resets WHERE token_hash=?",
-            (_hash_token(token),)).fetchone()
-        if row is None or row["used"] or row["expires_at"] < time.time():
-            raise AuthError("invalid or expired reset link")
-        user = self.get_user(row["user_id"])
-        if user is None or user["disabled"]:
-            raise AuthError("invalid or expired reset link")
-        self.conn.execute(
-            "UPDATE users SET pw_hash=? WHERE id=?",
-            (_hash_password(new_password, iterations=self.iterations), user["id"]))
-        self.conn.execute("UPDATE password_resets SET used=1 WHERE token_hash=?",
-                          (_hash_token(token),))
-        self.conn.commit()
-        self.revoke_user_sessions(user["id"])
+        password_hash = _hash_password(new_password, iterations=self.iterations)
+        reset_hash = _hash_token(token)
+        new_token = secrets.token_urlsafe(32)
+        new_token_hash = _hash_token(new_token)
+        now = time.time()
+        conn = self.conn
+        started = not conn.in_transaction
+        try:
+            if started:
+                conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT user_id, expires_at, used FROM password_resets WHERE token_hash=?",
+                (reset_hash,),
+            ).fetchone()
+            if row is None or row["used"] or row["expires_at"] < now:
+                raise AuthError("invalid or expired reset link")
+            user = self.get_user(row["user_id"])
+            if user is None or user["disabled"]:
+                raise AuthError("invalid or expired reset link")
+            conn.execute(
+                "UPDATE users SET pw_hash=? WHERE id=?",
+                (password_hash, user["id"]),
+            )
+            consumed = conn.execute(
+                "UPDATE password_resets SET used=1 "
+                "WHERE token_hash=? AND used=0 AND expires_at>=?",
+                (reset_hash, now),
+            )
+            if consumed.rowcount != 1:
+                raise AuthError("invalid or expired reset link")
+            conn.execute("DELETE FROM auth_sessions WHERE user_id=?", (user["id"],))
+            conn.execute("UPDATE api_tokens SET revoked=1 WHERE user_id=?", (user["id"],))
+            self._prune_revoked_api_tokens(user["id"])
+            conn.execute(
+                "INSERT INTO auth_sessions "
+                "(token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)",
+                (new_token_hash, user["id"], now, now + SESSION_TTL_SECONDS),
+            )
+            if started:
+                conn.commit()
+        except BaseException:
+            if started and conn.in_transaction:
+                conn.rollback()
+            raise
         self._failures.pop(user["email"], None)
         self.record_event("password_reset.completed", actor_id=user["id"],
                           actor_email=user["email"])
-        new_token = self.create_session(user["id"])
         result = self.get_user(user["id"])
         result["token"] = new_token
         return result
 
     # ── sessions (raw token to the client, hash in the DB) ─────────────────────
+    @_serialized
     def create_session(self, user_id: str, *, ttl: int = SESSION_TTL_SECONDS) -> str:
         token = secrets.token_urlsafe(32)
         now = time.time()
@@ -462,9 +593,16 @@ class AuthStore:
             "INSERT INTO auth_sessions (token_hash, user_id, created_at, expires_at) "
             "VALUES (?,?,?,?)", (_hash_token(token), user_id, now, now + ttl))
         self.conn.execute("DELETE FROM auth_sessions WHERE expires_at < ?", (now,))
+        self.conn.execute(
+            "DELETE FROM auth_sessions WHERE token_hash IN ("
+            "SELECT token_hash FROM auth_sessions WHERE user_id=? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?)",
+            (user_id, MAX_SESSIONS_PER_USER),
+        )
         self.conn.commit()
         return token
 
+    @_serialized
     def resolve_session(self, token: str) -> Optional[dict]:
         if not token:
             return None
@@ -483,16 +621,19 @@ class AuthStore:
             return None
         return self.get_user(row["user_id"])
 
+    @_serialized
     def revoke_session(self, token: str) -> None:
         self.conn.execute("DELETE FROM auth_sessions WHERE token_hash=?",
                           (_hash_token(token),))
         self.conn.commit()
 
+    @_serialized
     def revoke_user_sessions(self, user_id: str) -> None:
         self.conn.execute("DELETE FROM auth_sessions WHERE user_id=?", (user_id,))
         self.conn.commit()
 
     # ── per-user API tokens (agent connect) ─────────────────────────────────────
+    @_serialized
     def create_api_token(self, user_id: str, *, label: str = "") -> dict:
         """Mint a long-lived per-user bearer token for an agent/automation client.
 
@@ -504,6 +645,15 @@ class AuthStore:
         tid = "tok_" + secrets.token_hex(8)
         now = time.time()
         label = (label or "")[:120]
+        active = int(self.conn.execute(
+            "SELECT COUNT(*) FROM api_tokens WHERE user_id=? AND revoked=0",
+            (user_id,),
+        ).fetchone()[0])
+        if active >= MAX_ACTIVE_API_TOKENS:
+            raise AuthError(
+                "active API token limit reached (%d); revoke an old token first"
+                % MAX_ACTIVE_API_TOKENS
+            )
         self.conn.execute(
             "INSERT INTO api_tokens (id, user_id, label, token_hash, created_at) "
             "VALUES (?,?,?,?,?)", (tid, user_id, label, _hash_token(tok), now))
@@ -511,6 +661,7 @@ class AuthStore:
         return {"id": tid, "label": label, "created_at": now,
                 "last_used_at": None, "revoked": 0, "token": tok}
 
+    @_serialized
     def resolve_api_token(self, token: str) -> Optional[dict]:
         """Resolve a bearer API token to its user, or ``None``. Rejects revoked tokens
         and tokens whose owner is disabled. Best-effort stamps ``last_used_at``."""
@@ -530,22 +681,34 @@ class AuthStore:
             pass
         return self.get_user(row["user_id"])
 
+    @_serialized
     def list_api_tokens(self, user_id: str) -> list:
         rows = self.conn.execute(
             "SELECT id, label, created_at, last_used_at, revoked FROM api_tokens "
             "WHERE user_id=? ORDER BY created_at DESC", (user_id,)).fetchall()
         return [dict(r) for r in rows]
 
+    def _prune_revoked_api_tokens(self, user_id: str) -> None:
+        self.conn.execute(
+            "DELETE FROM api_tokens WHERE id IN ("
+            "SELECT id FROM api_tokens WHERE user_id=? AND revoked=1 "
+            "ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?)",
+            (user_id, MAX_REVOKED_API_TOKENS),
+        )
+
+    @_serialized
     def revoke_api_token(self, user_id: str, token_id: str) -> bool:
         """Revoke one of *user_id*'s own tokens (scoped to the caller so a member can't
         revoke another member's). Returns True if a row was affected."""
         cur = self.conn.execute(
             "UPDATE api_tokens SET revoked=1 WHERE id=? AND user_id=? AND revoked=0",
             (token_id, user_id))
+        self._prune_revoked_api_tokens(user_id)
         self.conn.commit()
         return cur.rowcount > 0
 
     # ── team audit log ─────────────────────────────────────────────────────────
+    @_serialized
     def record_event(self, action: str, *, actor_id: Optional[str] = None,
                      actor_email: Optional[str] = None, target: Optional[str] = None,
                      detail: Optional[str] = None, ip: Optional[str] = None) -> None:
@@ -556,12 +719,16 @@ class AuthStore:
             self.conn.execute(
                 "INSERT INTO audit_events (ts, actor_id, actor_email, action, target, detail, ip) "
                 "VALUES (?,?,?,?,?,?,?)",
-                (time.time(), actor_id, actor_email, str(action)[:64],
-                 (target or None), (detail or None), (ip or None)))
+                (time.time(), str(actor_id)[:200] if actor_id else None,
+                 str(actor_email)[:320] if actor_email else None, str(action)[:64],
+                 str(target)[:320] if target else None,
+                 str(detail)[:1000] if detail else None,
+                 str(ip)[:128] if ip else None))
             self.conn.commit()
         except sqlite3.Error:
             pass
 
+    @_serialized
     def list_events(self, *, limit: int = 100, action: Optional[str] = None,
                     actor_id: Optional[str] = None, since: Optional[float] = None) -> list:
         """Most-recent-first audit events, with optional filters. ``limit`` is clamped to
@@ -585,10 +752,12 @@ class AuthStore:
         params.append(limit)
         return [dict(r) for r in self.conn.execute(sql, params)]
 
+    @_serialized
     def count_events(self) -> int:
         return int(self.conn.execute(
             "SELECT COUNT(*) AS n FROM audit_events").fetchone()["n"])
 
+    @_serialized
     def action_counts(self, *, since: Optional[float] = None) -> dict:
         sql = "SELECT action, COUNT(*) AS n FROM audit_events"
         params: list = []
@@ -598,6 +767,7 @@ class AuthStore:
         sql += " GROUP BY action ORDER BY n DESC"
         return {r["action"]: r["n"] for r in self.conn.execute(sql, params)}
 
+    @_serialized
     def last_active(self) -> dict:
         """Map user_id -> last successful-login timestamp (for the admin seat overview)."""
         rows = self.conn.execute(

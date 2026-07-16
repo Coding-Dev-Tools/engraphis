@@ -855,10 +855,23 @@ def engraphis_receipts(
 def engraphis_verify_receipts(
     workspace: Annotated[str, Field(description="Workspace whose receipt chain to verify.",
                                     min_length=1, max_length=200)],
+    expected_head: Annotated[Optional[str], Field(
+        description="Previously saved chain head to compare against (detects replacement "
+                    "or truncation even if the local anchor was also altered).",
+        max_length=128,
+    )] = None,
+    expected_count: Annotated[Optional[int], Field(
+        description="Previously saved receipt count to compare against.",
+        ge=0,
+    )] = None,
 ) -> str:
-    """Verify receipt hashes, embedded payload fields, and predecessor links."""
+    """Verify hashes, predecessor links, the local anchor, and optional external anchor."""
     try:
-        return _ok(service().verify_receipts(workspace=workspace))
+        return _ok(service().verify_receipts(
+            workspace=workspace,
+            expected_head=expected_head or "",
+            expected_count=expected_count,
+        ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
