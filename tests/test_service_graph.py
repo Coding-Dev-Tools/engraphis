@@ -8,8 +8,20 @@ main point of this file — lock in that graph() enforces the same
 workspace-binding isolation boundary as every other read (service.py's
 _clean_ws), which the dashboard-only implementation it replaced did not.
 """
+from engraphis.backends.extractor import StructuredLLMExtractor
 from engraphis.backends.graph_extractor import get_graph_extractor
+from engraphis.core.interfaces import Edge, MemoryRecord, MemoryType, Scope, SearchFilter
 from engraphis.service import MemoryService, ValidationError
+
+
+class _StructuredGraphLLM:
+    def extract_json(self, prompt, schema):
+        return {"facts": [{
+            "content": "Engraphis stores memories in SQLite.",
+            "title": "Storage backend",
+            "entities": ["Engraphis", "SQLite"],
+            "relations": [{"source": "engraphis", "relation": "stores_in", "target": "SQLite"}],
+        }]}
 
 
 def _seed_entities(svc, workspace, rows, edges):
@@ -99,6 +111,47 @@ def test_remember_populates_graph_when_extractor_wired():
     assert all(n["id"] != n["label"] for n in nodes)
 
 
+def test_structured_extractor_metadata_populates_graph_without_regex_extractor():
+    """llm_structured emits validated entity/relation hints; those should feed the
+    graph directly even when the regex text graph extractor is disabled."""
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    svc.engine.extractor = StructuredLLMExtractor(_StructuredGraphLLM())
+    svc.ingest("raw transcript blob", workspace="acme", scope="workspace")
+
+    g = svc.graph(workspace="acme")
+    id_by_label = {n["label"]: n["id"] for n in g["nodes"]}
+    assert {"Engraphis", "SQLite"} <= set(id_by_label)
+    assert {"from": id_by_label["Engraphis"], "to": id_by_label["SQLite"],
+            "label": "stores_in"} in g["edges"]
+
+
+def test_graph_hides_edges_from_forgotten_memory():
+    svc = MemoryService.create(":memory:", graph_extractor="regex")
+    out = svc.remember("Alice Johnson works at Acme Corp.", workspace="acme",
+                       scope="workspace")
+    assert svc.graph(workspace="acme")["edges"]
+
+    svc.forget(out["id"], workspace="acme")
+    assert svc.graph(workspace="acme")["edges"] == []
+
+
+def test_graph_lazy_backfills_structured_metadata_without_regex_extractor():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid = svc.store.get_or_create_workspace("acme")
+    svc.store.add_memory(MemoryRecord(
+        id="", content="Engraphis stores memories in SQLite.",
+        workspace_id=wid, scope=Scope.WORKSPACE, mtype=MemoryType.SEMANTIC,
+        metadata={"entities": ["Engraphis", "SQLite"],
+                  "relations": [{"source": "engraphis", "relation": "stores_in",
+                                 "target": "SQLite"}]},
+    ))
+    g = svc.graph(workspace="acme")
+    id_by_label = {n["label"]: n["id"] for n in g["nodes"]}
+    assert {"Engraphis", "SQLite"} <= set(id_by_label)
+    assert {"from": id_by_label["Engraphis"], "to": id_by_label["SQLite"],
+            "label": "stores_in"} in g["edges"]
+
+
 def test_graph_lazy_backfills_preexisting_memories():
     """Memories written while extraction was OFF have no entities. When extraction
     is later enabled (an update), the first Graph-tab open backfills that
@@ -121,3 +174,43 @@ def test_graph_lazy_backfill_is_idempotent():
     first = svc.graph(workspace="acme")["stats"]["entities"]
     second = svc.graph(workspace="acme")["stats"]["entities"]
     assert first == second and first >= 2
+
+
+def test_graph_hides_edges_before_their_validity_window():
+    svc = MemoryService.create(":memory:")
+    _seed_entities(
+        svc, "acme",
+        [("Alice", "person"), ("Acme Corp", "organization")],
+        [("Alice", "Acme Corp", "works_at")])
+    svc.store.conn.execute(
+        "UPDATE edges SET valid_from=? WHERE id='edge0'", (10**12,))
+    svc.store.conn.commit()
+
+    assert svc.graph(workspace="acme")["edges"] == []
+
+
+def test_forgetting_one_support_keeps_a_multi_source_edge_live():
+    svc = MemoryService.create(":memory:")
+    wid, ids = _seed_entities(
+        svc, "acme",
+        [("Alice", "person"), ("Acme Corp", "organization")], [])
+    first = svc.store.add_memory(MemoryRecord(
+        id="", content="Alice works at Acme Corp.", workspace_id=wid,
+        scope=Scope.WORKSPACE))
+    second = svc.store.add_memory(MemoryRecord(
+        id="", content="Acme Corp employs Alice.", workspace_id=wid,
+        scope=Scope.WORKSPACE))
+    edge_id = svc.store.upsert_edge(Edge(
+        id="", src=ids["Alice"], dst=ids["Acme Corp"], relation="works_at",
+        workspace_id=wid))
+    svc.store.add_edge_support(edge_id, {"memory_id": first})
+    svc.store.add_edge_support(edge_id, {"memory_id": second})
+
+    svc.store.invalidate_edges_for_memory(first)
+
+    edges = svc.store.edges_in_scope(SearchFilter(workspace_id=wid))
+    assert [edge.id for edge in edges] == [edge_id]
+    assert edges[0].provenance["memory_ids"] == [second]
+
+    svc.store.invalidate_edges_for_memory(second)
+    assert svc.store.edges_in_scope(SearchFilter(workspace_id=wid)) == []

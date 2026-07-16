@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS mem_links (
     relation   TEXT,
     created_at REAL
 );
+CREATE INDEX IF NOT EXISTS idx_mem_links_ab ON mem_links(a, b);
 
 -- ── Code symbol graph ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS symbols (

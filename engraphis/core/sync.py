@@ -66,6 +66,7 @@ MAX_STABILITY = 1e6                # clamp so a bundle can't dominate retention 
 MAX_ACCESS_COUNT = 1_000_000_000
 MAX_SESSION_ID_CHARS = 128
 MAX_REPOS = 10_000                 # cap repos map so an empty-memories bundle can't bloat
+MAX_WORKSPACE_NAME_CHARS = 200
 MAX_REPO_NAME_CHARS = 200
 TS_FUTURE_SKEW = 2 * 86400         # tolerate 2 days of cross-device clock skew, no more
 _VALID_SENSITIVITY = ("normal", "sensitive", "secret")
@@ -400,8 +401,13 @@ class SyncEngine:
                 if m.sensitivity != "secret"]
         ws_row = self.store.conn.execute(
             "SELECT name FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
-        repo_rows = self.store.conn.execute(
-            "SELECT id, name FROM repos WHERE workspace_id=?", (workspace_id,)).fetchall()
+        if repo_id is not None:
+            repo_rows = self.store.conn.execute(
+                "SELECT id, name FROM repos WHERE workspace_id=? AND id=?",
+                (workspace_id, repo_id)).fetchall()
+        else:
+            repo_rows = self.store.conn.execute(
+                "SELECT id, name FROM repos WHERE workspace_id=?", (workspace_id,)).fetchall()
         ids_in = [m.id for m in mems]
         links = self.store.links_among(ids_in) if ids_in else []
         return {
@@ -439,7 +445,12 @@ class SyncEngine:
         if len(mem_dicts) > MAX_MEMORIES or len(link_dicts) > MAX_LINKS:
             raise SyncError("bundle exceeds size caps")
 
-        ws_name = into_workspace or bundle.get("workspace_name") or "default"
+        raw_ws_name = into_workspace if into_workspace is not None else bundle.get("workspace_name")
+        if raw_ws_name is not None and not isinstance(raw_ws_name, str):
+            raise SyncError("bundle workspace_name must be a string")
+        ws_name = _clamp_str(raw_ws_name or "default", MAX_WORKSPACE_NAME_CHARS).strip()
+        if not ws_name:
+            ws_name = "default"
         if self.allowed_workspaces is not None and ws_name not in self.allowed_workspaces:
             raise SyncError("workspace %r is not authorized for sync" % ws_name)
         report = {"added": 0, "updated": 0, "unchanged": 0, "rejected": 0,
@@ -448,20 +459,31 @@ class SyncEngine:
         # Resolve scope by NAME (per-device ids differ; names are the sync key). A
         # dry run must not mutate, so it resolves existing ids only and never creates.
         remote_repos = bundle.get("repos") or {}
-        if isinstance(remote_repos, dict) and len(remote_repos) > MAX_REPOS:
+        if not isinstance(remote_repos, dict):
+            raise SyncError("bundle repos must be an object")
+        if len(remote_repos) > MAX_REPOS:
             raise SyncError("bundle exceeds repo cap")
-        repo_remap: dict[str, str] = {}
+        valid_remote_repos = {
+            rid: _clamp_str(rname, MAX_REPO_NAME_CHARS)
+            for rid, rname in remote_repos.items()
+            if isinstance(rid, str) and isinstance(rname, str) and rname
+        }
+        repo_remap: dict[str, Optional[str]] = {}
         if dry_run:
             row = self.store.conn.execute(
                 "SELECT id FROM workspaces WHERE name=?", (ws_name,)).fetchone()
             local_ws = row["id"] if row else None
+            for rid, rname in valid_remote_repos.items():
+                repo_row = (self.store.conn.execute(
+                    "SELECT id FROM repos WHERE workspace_id=? AND name=?",
+                    (local_ws, rname)).fetchone() if local_ws is not None else None)
+                repo_remap[rid] = repo_row["id"] if repo_row else None
         else:
             local_ws = self.store.get_or_create_workspace(ws_name)
-            if isinstance(remote_repos, dict):
-                for rid, rname in remote_repos.items():
-                    if isinstance(rid, str) and isinstance(rname, str) and rname:
-                        repo_remap[rid] = self.store.get_or_create_repo(
-                            local_ws, _clamp_str(rname, MAX_REPO_NAME_CHARS))
+            for rid, rname in valid_remote_repos.items():
+                repo_remap[rid] = self.store.get_or_create_repo(local_ws, rname)
+
+        accepted: dict[str, MemoryRecord] = {}
 
         for d in mem_dicts:
             rec = dict_to_record(d)
@@ -471,9 +493,19 @@ class SyncEngine:
             # Re-home into local scope, and tag provenance with the origin device so a
             # synced-in memory stays auditable ("why is this known?" — AGENTS.md §3.6).
             rec.workspace_id = local_ws
-            rec.repo_id = repo_remap.get(d.get("repo_id")) if d.get("repo_id") else None
+            remote_repo_id = d.get("repo_id")
+            if remote_repo_id:
+                if remote_repo_id not in repo_remap:
+                    report["rejected"] += 1
+                    continue
+                rec.repo_id = repo_remap[remote_repo_id]
+                if rec.repo_id is None and only_repo_id is not None:
+                    report["rejected"] += 1
+                    continue
+            else:
+                rec.repo_id = None
             if only_repo_id is not None and rec.repo_id != only_repo_id:
-                report["rejected"] += 1        # outside the repo this sync is restricted to
+                report["rejected"] += 1
                 continue
             if src_device:
                 prov = dict(rec.provenance or {})
@@ -493,7 +525,9 @@ class SyncEngine:
                         "sync_add", rec.id,
                         f"new memory created from synced bundle (device: {src_device or 'peer'})")
                 report["added"] += 1
+                accepted[rec.id] = rec
             else:
+                accepted[rec.id] = existing
                 merged = merge_record(existing, rec)
                 if _signature(merged) == _signature(existing):
                     report["unchanged"] += 1
@@ -508,25 +542,26 @@ class SyncEngine:
                             "sync_overwrite", merged.id,
                             "content replaced by synced bundle (last-writer-wins)")
                     report["updated"] += 1
+                    accepted[rec.id] = merged
 
         # mem_links: grow-only set; endpoints must be memories we actually hold.
         for ln in link_dicts:
             if not isinstance(ln, dict):
                 continue
             a, b = ln.get("a"), ln.get("b")
-            rel = ln.get("relation") or "related"
+            rel = _clamp_str(ln.get("relation") or "related", 64) or "related"
             if not isinstance(a, str) or not isinstance(b, str) or a == b:
                 continue
-            ma, mb = self.store.get_memory(a), self.store.get_memory(b)
-            if ma is None or mb is None:
+            if a not in accepted or b not in accepted:
                 continue
+            ma, mb = accepted[a], accepted[b]
             if local_ws is not None and (ma.workspace_id != local_ws
                                          or mb.workspace_id != local_ws):
-                continue  # never link across the workspace boundary
+                continue
             if self.store.has_link(a, b, relation=rel):
                 continue
             if not dry_run:
-                self.store.add_link(a, b, _clamp_str(rel, 64))
+                self.store.add_link(a, b, rel)
                 self.store.audit(
                     "sync:%s" % _clamp_str(src_device or "peer", 128),
                     "sync_link", a,

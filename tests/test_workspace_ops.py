@@ -42,6 +42,17 @@ def test_create_makes_empty_shared_workspace():
     assert mid in _mem_ids(svc, "team-alpha")
 
 
+def test_workspace_counts_exclude_superseded_memories():
+    svc = _svc()
+    old = svc.remember("The deploy region is iad.", workspace="team-alpha",
+                       scope="workspace")["id"]
+    svc.store.close_validity(old)
+    svc.remember("The deploy region is fra.", workspace="team-alpha", scope="workspace")
+
+    listed = {w["name"]: w for w in svc.list_workspaces()["workspaces"]}
+    assert listed["team-alpha"]["memories"] == 1
+
+
 def test_create_rejects_duplicate_name():
     svc = _svc()
     svc.create_workspace("dupe")
