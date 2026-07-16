@@ -5,6 +5,21 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+- Schema v3 logical graph layers (`temporal`, `entity`, `causal`, `semantic`), privacy-safe
+  SHA-256 receipt chains, optional LLM/host retention supervision, and a persistent code↔memory
+  bridge.
+- Incremental multi-language repository indexing (Python, JS/TS, Go, Rust, Java, C#, C/C++,
+  SQL, Terraform), docstrings/comments, variables, inheritance/implementation, weighted
+  communities, hotspots, path queries, git/PR impact analysis, portable JSON/HTML/Markdown
+  exports, and a graph union merge driver.
+- Local multi-format resource ingestion for text/code/HTML/DOCX, optional PDF/image OCR and
+  faster-whisper transcription, plus live PostgreSQL schema introspection with DSN redaction.
+- Seven MCP tools for code paths/impact/export, PostgreSQL schema ingestion, and receipt
+  list/verify/export, bringing the tool surface from 20 to 27.
+- `engraphis-graph` workflow CLI and token-protected `engraphis-graph-server` read-only HTTP
+  surface.
+
 ## [0.9.6] - 2026-07-16
 
 ### Added

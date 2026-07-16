@@ -507,7 +507,10 @@ def test_sync_auditing_for_adds_updates_and_links():
         # legitimate, while mem_b is newly added.
         "memories": [{"id": "mem_a", "content": "hello updated", "last_access": 200.0},
                      {"id": "mem_b", "content": "another fact"}],
-        "mem_links": [{"a": "mem_a", "b": "mem_b", "relation": "related"}]
+        "mem_links": [{
+            "a": "mem_a", "b": "mem_b", "relation": "related",
+            "layer": "causal", "reason": "same deployment path",
+        }]
     }
     se.apply_bundle(bundle_link)
     audits = store.conn.execute("SELECT action, target FROM audit ORDER BY ts ASC").fetchall()
@@ -516,6 +519,9 @@ def test_sync_auditing_for_adds_updates_and_links():
     assert audits[2]["target"] == "mem_b"
     assert audits[3]["action"] == "sync_link"
     assert audits[3]["target"] == "mem_a"
+    link = store.get_links("mem_a")[0]
+    assert link["layer"] == "causal"
+    assert link["reason"] == "same deployment path"
 
 
 def test_deeply_nested_json_does_not_crash_sync_decoding(tmp_path):
@@ -533,5 +539,4 @@ def test_deeply_nested_json_does_not_crash_sync_decoding(tmp_path):
     report = sa.sync(get_transport("folder", root=str(root)), wa)
     assert report["totals"]["added"] == 0
     assert any(x.get("bundle") == "bundle-dev_nested.json" and x.get("error") == "unreadable" for x in report["applied"])
-
 

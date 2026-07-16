@@ -121,6 +121,14 @@ def test_chunk_cap_bounds_amplification():
     assert len(facts) <= 7
 
 
+def test_single_giant_sentence_is_split_without_silent_truncation():
+    text = "word " * 30_000
+    facts = ChunkingExtractor(target_tokens=256, overlap_tokens=0).extract(text)
+    assert len(facts) > 1
+    assert sum(fact.content.count("word") for fact in facts) == 30_000
+    assert all(len(fact.content) <= 100_000 for fact in facts)
+
+
 def test_control_characters_are_defanged():
     text = "Legit line.\n\nHidden\x00\x07escape\x1b payload here."
     facts = ChunkingExtractor(target_tokens=64).extract(text)

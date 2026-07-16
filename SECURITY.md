@@ -53,14 +53,33 @@ DOMPurify at all render sites. Verified against payloads with `onerror` handlers
 ### 5. Code indexing
 `engraphis_index_repo` parses source files under a path you give it — same trust boundary as
 any other local tool the agent has. Path is attacker-controlled if agent's instructions are.
-`max_files`/`max_file_bytes` bound resource use, not access scope.
+`max_files`/`max_file_bytes` bound resource use, not access scope. Traversal does not follow
+file symlinks outside the root, prunes dependency/build directories during the walk, and honors
+the root `.engraphisignore` without allowing negation rules to re-expose hardcoded excludes.
+In Team mode, filesystem indexing and folder imports require the admin role.
 
-### 6. Supply chain
+### 6. Local resource and database ingestion
+- Uploaded and folder-imported files are size/count bounded, marked `trusted:false`, and parsed
+  as data. Missing optional PDF/OCR/transcription tools fail explicitly.
+- Audio/video transcription runs only when `ENGRAPHIS_WHISPER_MODEL` is configured. Depending on
+  the faster-whisper model name, the underlying library may download a model; use an absolute
+  local model path when strictly offline operation is required.
+- PostgreSQL introspection makes an outbound connection using the caller-provided DSN and requires
+  admin privileges in Team mode. The DSN is never stored, returned, placed in receipts, or included
+  in an error; only a one-way source digest is retained. Use a read-only database account and limit
+  network reachability at the OS/firewall layer.
+
+### 7. Read-only graph server
+`engraphis-graph-server` has no mutation routes, disables recall reinforcement and receipt writes,
+and refuses non-loopback binding unless `ENGRAPHIS_GRAPH_TOKEN` (or `ENGRAPHIS_API_TOKEN`) is set.
+The token protects access, not transport confidentiality; use TLS at a reverse proxy off-host.
+
+### 8. Supply chain
 - Core runs on `numpy` alone; heavy components gated behind extras
 - Code-graph backend falls back to regex indexer on any failure
 - Pin versions and run `pip audit` in your environment
 
-### 7. Team mode & license keys (commercial layer)
+### 9. Team mode & license keys (commercial layer)
 
 Team mode (`ENGRAPHIS_TEAM_MODE`, ON by default unless set to `0` + a `team` license) adds per-user sessions:
 

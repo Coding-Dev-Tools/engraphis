@@ -5,6 +5,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 try:
     from dotenv import load_dotenv
@@ -90,7 +91,7 @@ class Settings:
             "sentence-transformers/all-MiniLM-L6-v2",
         )
     )
-    embed_dim: int | None = field(
+    embed_dim: Optional[int] = field(
         default_factory=lambda: (
             _env_int("ENGRAPHIS_EMBED_DIM", 384) or None
         )
@@ -117,6 +118,13 @@ class Settings:
     # heuristic NER, no API key, populated on every ingest; "none" disables graph
     # population. Defaults on so the Graph tab works out of the box for every install.
     graph_extractor: str = field(default_factory=lambda: _env("ENGRAPHIS_GRAPH_EXTRACTOR", "regex").lower())
+
+    # Optional host-LLM importance/retention classification. "none" keeps the fully
+    # deterministic local write path; "llm" asks the configured provider for a bounded
+    # ephemeral/normal/critical signal and degrades safely on any failure.
+    retention_supervisor: str = field(
+        default_factory=lambda: _env("ENGRAPHIS_RETENTION_SUPERVISOR", "none").lower()
+    )
 
     loop_interval: int = field(default_factory=lambda: _env_int("ENGRAPHIS_LOOP_INTERVAL", 60))
     loop_top_k: int = field(default_factory=lambda: _env_int("ENGRAPHIS_LOOP_TOP_K", 20))

@@ -49,6 +49,19 @@ code = [
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.2",
 ]
+# Local resource extraction. Text/code/HTML/DOCX remain stdlib-only; this adds PDF
+# extraction and image OCR bindings (the Tesseract executable is installed separately).
+documents = [
+    "pypdf>=4.0",
+    "Pillow>=10.0",
+    "pytesseract>=0.3.10",
+]
+transcription = [
+    "faster-whisper>=1.0",
+]
+postgres = [
+    "psycopg[binary]>=3.1",
+]
 # Encryption at rest for the memory database (SQLCipher / AES-256). Opt-in: set
 # ENGRAPHIS_DB_KEY (or ENGRAPHIS_DB_KEY_FILE). Without this the DB is plaintext.
 encryption = [
@@ -65,6 +78,11 @@ all = [
     "mcp>=1.2.0",
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.2",
+    "pypdf>=4.0",
+    "Pillow>=10.0",
+    "pytesseract>=0.3.10",
+    "faster-whisper>=1.0",
+    "psycopg[binary]>=3.1",
     "sqlcipher3-binary>=0.5.0",
 ]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.4"]
@@ -79,6 +97,11 @@ test = [
     "mcp>=1.2.0",
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.2",
+    "pypdf>=4.0",
+    "Pillow>=10.0",
+    "pytesseract>=0.3.10",
+    "faster-whisper>=1.0",
+    "psycopg[binary]>=3.1",
     "sqlcipher3-binary>=0.5.0",
 ]
 
@@ -94,19 +117,25 @@ engraphis-mcp = "engraphis.mcp_server:main"
 engraphis-inspector = "scripts.inspector:main"
 engraphis-dashboard = "scripts.start_dashboard:main"
 engraphis-consolidate = "scripts.consolidate:main"
+engraphis-graph = "scripts.graph_cli:main"
+engraphis-graph-server = "scripts.graph_server:main"
 engraphis-init = "scripts.init:main"
 engraphis-update = "scripts.update:main"
+
+[tool.setuptools]
+include-package-data = false
 
 [tool.setuptools.packages.find]
 include = ["engraphis*", "scripts*"]
 
 [tool.setuptools.package-data]
 "engraphis.inspector" = ["index.html"]
-# Recursive glob so the vendored assets under static/vendor/ ship too, not just the
-# top-level files. Requires engraphis/static/__init__.py so the dir is a discovered
-# package — without it these data rules match nothing and index.html is left out of
-# the wheel (dashboard 500s with "index.html does not exist").
-"engraphis.static" = ["**/*"]
+# Keep the shipped dashboard assets explicit. A recursive catch-all also packages ignored
+# runtime artifacts such as static/__pycache__/*.pyc after a local compile check.
+"engraphis.static" = ["*.html", "*.png", "*.ico", "vendor/*"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["*.pyc", "*.pyo", "__pycache__/*"]
 
 [tool.ruff]
 line-length = 100
