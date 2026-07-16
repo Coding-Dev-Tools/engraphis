@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from engraphis.ai_context import build_proactive_context  # noqa: E402
 from engraphis.routes import v2_api  # noqa: E402
-from engraphis.service import MemoryService  # noqa: E402
+from engraphis.service import MemoryService, ValidationError  # noqa: E402
 
 
 class _CitingLLM:
@@ -44,6 +44,21 @@ def test_service_proactive_context_is_deterministic_and_cited():
     assert "[1]" in out["context_summary"]
     assert out["citations"][0]["id"]
     assert any("Storage backend" in q or "persistence" in q for q in out["suggested_queries"])
+
+
+def test_ai_context_treats_string_open_threads_as_one_query():
+    out = build_proactive_context(
+        memories=[], last_session={"open_threads": "finish the migration"})
+    assert out["suggested_queries"] == ["finish the migration"]
+    assert "finish the migration" in out["context_summary"]
+
+
+def test_service_proactive_context_bounds_agent_inputs():
+    svc = MemoryService.create(":memory:", embed_model="")
+    with pytest.raises(ValidationError, match="task exceeds"):
+        svc.proactive_context(workspace="acme", task="x" * 10_001)
+    with pytest.raises(ValidationError, match="agent_state exceeds"):
+        svc.proactive_context(workspace="acme", agent_state="x" * 20_001)
 
 
 def test_api_proactive_context_round_trip():

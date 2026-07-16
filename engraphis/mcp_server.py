@@ -200,6 +200,9 @@ def engraphis_recall_grounded(
                            "below which the tool abstains instead of answering. Omit for the "
                            "default; raise it to demand stronger evidence (0 disables the abstain gate).", ge=0.0,
                            le=1.0)] = None,
+    synthesize: Annotated[bool, Field(description="If true and an LLM is configured, "
+                          "synthesize cited prose; otherwise return the deterministic "
+                          "extractive answer.")] = False,
 ) -> str:
     """Answer a question *strictly from* stored memories, with citations — or abstain.
 
@@ -208,8 +211,8 @@ def engraphis_recall_grounded(
     to a ``[n]`` citation, and — crucially — refuses to answer when nothing in scope
     actually supports the query (``grounded: false``). Use it when you want a grounded,
     non-hallucinated answer and would rather get "insufficient evidence" than a guess.
-    The answer is extractive/deterministic (no LLM is called), so it never introduces a
-    claim that is not in a cited memory.
+    The deterministic default never introduces a claim that is not in a cited memory.
+    With ``synthesize=True``, configured LLM prose is accepted only when citations hold.
 
     Returns:
         str: JSON ``{"query","grounded","abstained","answer","support","reason",
@@ -217,13 +220,54 @@ def engraphis_recall_grounded(
         "provenance"}]}``. When ``grounded`` is false, ``answer`` is empty and ``reason``
         explains why (insufficient evidence, or unknown workspace/repo).
     """
+    llm = None
     try:
+        if synthesize:
+            try:
+                from engraphis.llm.client import LLMClient
+                llm = LLMClient()
+            except Exception:
+                llm = None
         return _ok(service().grounded_recall(
             query, workspace=workspace, repo=repo, mtypes=mtypes, k=k,
-            min_support=min_support,
+            min_support=min_support, llm=llm,
         ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
+    finally:
+        if llm is not None and hasattr(llm, "close"):
+            try:
+                llm.close()
+            except Exception:
+                pass
+
+
+@mcp.tool(
+    name="engraphis_answer",
+    annotations={"title": "Grounded answer (compatibility alias)",
+                 "readOnlyHint": True, "destructiveHint": False,
+                 "idempotentHint": True, "openWorldHint": False},
+)
+def engraphis_answer(
+    query: Annotated[str, Field(description="The question to answer from memory.",
+                                min_length=1, max_length=10_000)],
+    workspace: Annotated[str, Field(description="Workspace to search.",
+                                    min_length=1, max_length=200)] = "default",
+    repo: Annotated[Optional[str], Field(description="Repository scope within the workspace.",
+                                         max_length=200)] = None,
+    k: Annotated[int, Field(description="Max memories to consider (1-50).", ge=1, le=50)] = 8,
+    min_support: Annotated[float, Field(description="Absolute support floor 0..1. Memories below this don't count as evidence.", ge=0.0, le=1.0)] = 0.25,
+    synthesize: Annotated[bool, Field(description="If true, ask configured LLM for cited prose; otherwise deterministic/extractive.")] = False,
+) -> str:
+    """Backward-compatible alias for ``engraphis_recall_grounded``.
+
+    Kept so existing agent configs that adopted the answer tool continue to work; new
+    integrations should prefer ``engraphis_recall_grounded`` for the clearer name.
+    """
+    return engraphis_recall_grounded(
+        query=query, workspace=workspace, repo=repo, mtypes=None, k=k,
+        min_support=min_support, synthesize=synthesize,
+    )
 
 
 @mcp.tool(
@@ -330,9 +374,9 @@ def engraphis_proactive_context(
     repo: Annotated[Optional[str], Field(description="Repo scope within the workspace.",
                                          max_length=200)] = None,
     task: Annotated[str, Field(description="Current task/goal. Used to bias recall and frame the summary.",
-                               max_length=100_000)] = "",
+                               max_length=10_000)] = "",
     agent_state: Annotated[str, Field(description="Optional current agent state: plan, open files, errors, partial findings.",
-                                      max_length=100_000)] = "",
+                                      max_length=20_000)] = "",
     k: Annotated[int, Field(description="Max memories to consider (1-50).", ge=1, le=50)] = 10,
     synthesize: Annotated[bool, Field(description="If true and an LLM is configured, synthesize a concise cited context summary; otherwise deterministic/offline.")] = False,
 ) -> str:
@@ -727,7 +771,7 @@ def engraphis_ingest(
 @mcp.tool(
     name="engraphis_consolidate",
     annotations={"title": "Consolidate memories (sleep-time sweep)", "readOnlyHint": False,
-                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+                 "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
 )
 def engraphis_consolidate(
     workspace: Annotated[str, Field(description="Workspace to consolidate.", min_length=1,
@@ -739,13 +783,21 @@ def engraphis_consolidate(
     profiles: Annotated[bool, Field(description="Also roll each entity's scattered "
                         "memories into one durable profile digest (needs graph "
                         "entities). Report lands under 'profiles'.")] = False,
+    structured: Annotated[bool, Field(description="If true, use configured LLM for "
+                          "schema-validated consolidation facts/entities/relations; "
+                          "falls back to deterministic digest on any failure.")] = False,
+    supersede_sources: Annotated[bool, Field(description="Only with structured=True: "
+                                "bi-temporally close source episodes after validated "
+                                "facts are written. Defaults false for safety.")] = False,
 ) -> str:
     """Run one sleep-time consolidation sweep: recurring episodic memories on the same
     subject are distilled into one durable semantic digest (linked to its sources), and
     fully-decayed transient memories are archived (bi-temporally closed — never deleted,
     always audited, pinned memories exempt). Idempotent: already-consolidated clusters
     are skipped. With ``profiles=True`` each entity's memories are also rolled into one
-    durable profile digest. Good moments to call it: session end, or on a schedule.
+    durable profile digest. With ``structured=True`` a configured LLM may produce
+    schema-validated facts/entities/relations; provider/schema failure falls back to the
+    deterministic digest. Good moments to call it: session end, or on a schedule.
 
     Returns:
         str: JSON report ``{"clusters_found","digests_created","archived",
@@ -755,58 +807,12 @@ def engraphis_consolidate(
     """
     try:
         return _ok(service().consolidate(workspace=workspace, repo=repo, dry_run=dry_run,
-                                         profiles=profiles))
+                                         profiles=profiles, structured=structured,
+                                         supersede_sources=supersede_sources))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
 
-@mcp.tool(
-    name="engraphis_answer",
-    annotations={"title": "Grounded answer (grounded recall + synthesis)",
-                 "readOnlyHint": True, "openWorldHint": False},
-)
-def engraphis_answer(
-    query: Annotated[str, Field(description="The question to answer from memory. Natural language, e.g. 'how do we handle auth?'.",
-                                  min_length=1, max_length=10_000)],
-    workspace: Annotated[str, Field(description="Top-level scope, e.g. an org or product name ('acme'). Defaults to 'default' if omitted.",
-                                    min_length=1, max_length=200)] = "default",
-    repo: Annotated[Optional[str], Field(description="Repository scope within the workspace.",
-                                         max_length=200)] = None,
-    k: Annotated[int, Field(description="Max memories to consider (1-50).", ge=1, le=50)] = 8,
-    min_support: Annotated[float, Field(description="Absolute support floor 0..1. Memories below this don't count as evidence. Default 0.25.", ge=0.0, le=1.0)] = 0.25,
-    synthesize: Annotated[bool, Field(description="If true, ask LLM to write prose answer with citations; if false (default), return extractive answer with citations.")] = False,
-) -> str:
-    """Grounded answer from memory — not just memories, but an *answer*.
-
-    Runs grounded recall (hybrid vector + lexical + graph + rerank) and returns either:
-    * An extractive answer (citations only, deterministic, offline) — always safe.
-    * A synthesized prose answer with inline [n] citations — if ``synthesize=True`` and an LLM is configured.
-
-    If evidence is below the support floor, returns ``grounded=false, abstained=true`` with a reason — never hallucinates.
-    Every claim is cited with [n] linking to the source memory. The deterministic path never introduces claims not in the sources.
-    """
-    try:
-        llm = None
-        if synthesize:
-            try:
-                from engraphis.llm.client import LLMClient
-                llm = LLMClient()
-            except Exception:
-                llm = None  # no configured LLM -> service/engine stays deterministic
-        result = service().grounded_recall(query=query, workspace=workspace, repo=repo, k=k,
-                                           min_support=min_support, llm=llm)
-        return _ok({
-            "query": result.get("query", query),
-            "answer": result.get("answer", ""),
-            "grounded": result.get("grounded", False),
-            "abstained": result.get("abstained", True),
-            "reason": result.get("reason", ""),
-            "support": result.get("support", 0.0),
-            "synthesized": result.get("synthesized", False),
-            "citations": result.get("citations", []),
-        })
-    except Exception as exc:  # noqa: BLE001
-        return _err(exc)
 
 
 def main() -> None:
