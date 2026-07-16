@@ -112,6 +112,7 @@ agent** (Claude Code, Cursor, ...) points one URL at the cloud instance and reus
 v2 store the dashboard reads (the MCP tools share the dashboard's single `MemoryService` —
 no second SQLite writer). It is Team-gated and member-authenticated exactly like
 `/api/remember` (402 without a Team license, 401 without a per-user bearer token).
+Browser session cookies are deliberately not accepted on this machine-to-machine endpoint.
 
 Agent config (streamable-http transport) — add to your MCP client:
 
@@ -128,8 +129,11 @@ The tools are the same as the local `engraphis-mcp` server (`engraphis_remember`
 `engraphis_recall`, `engraphis_start_session`, ...) — an agent gets identical semantics
 whether it writes locally or to the cloud.
 
-**Security note:** the dashboard's own `_auth_gate` enforces the Team license + member token
-on `/mcp`, so MCP's built-in DNS-rebinding host allowlist (which defaults to localhost only)
-is disabled on the mounted instance — otherwise it would reject a real deployment domain
-like `team.engraphis.com`. Auth is the real boundary here. (The standalone
-`engraphis-mcp-http` launcher is unaffected — it runs in its own process on localhost.)
+**Security note:** MCP's built-in DNS-rebinding protection remains enabled. Loopback hosts
+remain allowed by default; a hosted deployment must set `ENGRAPHIS_DASHBOARD_URL` to its
+canonical public URL (for example, `https://team.engraphis.com`) so that exact Host and
+Origin are added to the transport allowlist. Requests with any other Host are rejected.
+The per-user bearer token is checked on every request, and dashboard roles carry through to
+tools: viewers may use read tools, members may use mutating tools, and
+`engraphis_consolidate` requires admin. The standalone `engraphis-mcp-http` launcher keeps
+its own SDK defaults.
