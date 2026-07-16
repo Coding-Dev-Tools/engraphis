@@ -133,6 +133,12 @@ def _clean_metadata(value: Any) -> dict:
         raise ValidationError("metadata must be JSON-serializable")
     if len(encoded.encode("utf-8")) > MAX_METADATA_BYTES:
         raise ValidationError(f"metadata exceeds {MAX_METADATA_BYTES} bytes")
+    if "retention_supervision" in value:
+        # Reserved service-internal channel: the engine trusts this key as a host
+        # retention decision (raw importance/stability, far past the bounded
+        # ``retention_class`` presets). Only ``remember()`` may set it, after
+        # validating ``retention_class`` — never a caller-supplied metadata dict.
+        value = {k: v for k, v in value.items() if k != "retention_supervision"}
     return value
 
 
@@ -1738,6 +1744,32 @@ class MemoryService:
         repo_remap: dict = {}
         src_repos = [dict(x) for x in c.execute(
             "SELECT id, name FROM repos WHERE workspace_id=?", (wid_src,))]
+
+        def _remap_file_links(loser_repo: str, winner_repo: str, file: str) -> None:
+            """Re-point memory↔code links from a losing file snapshot's symbols to
+            the winning snapshot's same-fqname symbols, so provenance survives the
+            fold instead of being cleared with the stale symbols. Links whose
+            symbol has no surviving counterpart (or that would duplicate an
+            existing link) are left for ``clear_symbols_for_file`` to drop."""
+            rows = c.execute(
+                "SELECT l.id AS link_id, s.fqname FROM code_memory_links l "
+                "JOIN symbols s ON s.id=l.symbol_id "
+                "WHERE s.repo_id=? AND s.file=?",
+                (loser_repo, file),
+            ).fetchall()
+            for row in rows:
+                winner = c.execute(
+                    "SELECT id FROM symbols WHERE repo_id=? AND file=? AND fqname=? "
+                    "LIMIT 1",
+                    (winner_repo, file, row["fqname"]),
+                ).fetchone()
+                if winner:
+                    c.execute(
+                        "UPDATE OR IGNORE code_memory_links SET symbol_id=? "
+                        "WHERE id=?",
+                        (winner["id"], row["link_id"]),
+                    )
+
         for r in src_repos:
             existing = c.execute(
                 "SELECT id FROM repos WHERE workspace_id=? AND name=?", (wid_dst, r["name"])
@@ -1778,16 +1810,37 @@ class MemoryService:
                                 existing["id"], code_file["file"],
                             ),
                         )
+                        # The surviving repo's older snapshot of this file loses:
+                        # re-point its memory links at the incoming same-fqname
+                        # symbols, then drop its symbols/edges so the incoming
+                        # ones don't land next to stale duplicates.
+                        _remap_file_links(existing["id"], r["id"], code_file["file"])
+                        self.store.clear_symbols_for_file(
+                            existing["id"], code_file["file"], commit=False
+                        )
+                    else:
+                        # The surviving repo's snapshot wins: re-point the losing
+                        # side's memory links at the surviving symbols, then drop
+                        # its symbols before the blanket repo-id relabel would
+                        # move them over as duplicates.
+                        _remap_file_links(r["id"], existing["id"], code_file["file"])
+                        self.store.clear_symbols_for_file(
+                            r["id"], code_file["file"], commit=False
+                        )
                     c.execute(
                         "DELETE FROM code_files WHERE repo_id=? AND file=?",
                         (r["id"], code_file["file"]),
                     )
                 c.execute("UPDATE symbols SET repo_id=? WHERE repo_id=?", (existing["id"], r["id"]))
                 c.execute("UPDATE code_edges SET repo_id=? WHERE repo_id=?", (existing["id"], r["id"]))
+                # OR IGNORE + delete-leftovers: a link remapped by fqname above
+                # could otherwise collide with an identical surviving link on the
+                # UNIQUE(repo_id, symbol_id, memory_id, relation) constraint.
                 c.execute(
-                    "UPDATE code_memory_links SET repo_id=? WHERE repo_id=?",
+                    "UPDATE OR IGNORE code_memory_links SET repo_id=? WHERE repo_id=?",
                     (existing["id"], r["id"]),
                 )
+                c.execute("DELETE FROM code_memory_links WHERE repo_id=?", (r["id"],))
                 c.execute("DELETE FROM repos WHERE id=?", (r["id"],))
             else:
                 c.execute("UPDATE repos SET workspace_id=? WHERE id=?", (wid_dst, r["id"]))
@@ -2332,12 +2385,20 @@ class MemoryService:
             selected_layers = {
                 _enum(layer, GraphLayer, "layer").value for layer in layers
             }
+        # Nodes are capped at ``limit``; edges need their own cap or a large workspace
+        # graph / indexed repo lets the lowest-privilege caller pull an unbounded
+        # payload (the SQL fetches are LIMIT-ed too, so server-side work stays
+        # bounded as well — entity edges sync from peers, so they are as attacker-
+        # growable as code edges).
+        edge_cap = max(limit * 8, 2000)
         edgs = [
             {
                 "src": edge.src, "dst": edge.dst, "relation": edge.relation,
                 "layer": edge.layer.value if edge.layer else "semantic",
             }
-            for edge in self.store.edges_in_scope(SearchFilter(workspace_id=wid))
+            for edge in self.store.edges_in_scope(
+                SearchFilter(workspace_id=wid), limit=edge_cap
+            )
             if edge.src in node_ids and edge.dst in node_ids
             and (
                 selected_layers is None
@@ -2369,7 +2430,7 @@ class MemoryService:
                 rid = repo_row["id"]
                 repo_name = repo_row["name"]
                 repo_names.append(repo_name)
-                symbols = self.store.list_symbols(rid)
+                symbols = self.store.list_symbols(rid, limit=limit)
                 symbol_node: dict[str, str] = {}
                 symbol_id_node: dict[str, str] = {}
                 for symbol in symbols:
@@ -2413,7 +2474,9 @@ class MemoryService:
                     return file_nodes.get(file_name)
 
                 if selected_layers is None or "entity" in selected_layers:
-                    for edge in self.store.list_code_edges(rid):
+                    for edge in self.store.list_code_edges(rid, limit=edge_cap):
+                        if len(edgs) >= edge_cap:
+                            break
                         src = code_endpoint(edge.get("src") or "", edge.get("file") or "")
                         dst = code_endpoint(edge.get("dst") or "")
                         if src and dst and src != dst:
@@ -2424,7 +2487,9 @@ class MemoryService:
                             })
                 linked_memory_ids = set()
                 if selected_layers is None or "semantic" in selected_layers:
-                    for link in self.store.list_code_memory_links(rid):
+                    for link in self.store.list_code_memory_links(rid, limit=edge_cap):
+                        if len(edgs) >= edge_cap:
+                            break
                         code_id = symbol_id_node.get(link.get("symbol_id"))
                         memory_id = link.get("memory_id")
                         if not code_id or not memory_id:
@@ -2451,6 +2516,8 @@ class MemoryService:
                             if selected_layers else None
                         ),
                     ):
+                        if len(edgs) >= edge_cap:
+                            break
                         edgs.append({
                             "src": link["a"], "dst": link["b"],
                             "relation": link["relation"],
