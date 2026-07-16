@@ -1,3 +1,5 @@
+import pytest
+
 from engraphis.backends.extractor import (
     LLMExtractor,
     PassthroughExtractor,
@@ -114,6 +116,7 @@ def test_engine_ingest_without_extractor_is_passthrough():
 
 
 def test_engine_ingest_preserves_structured_extractor_metadata():
+    pytest.importorskip("pydantic")
     from engraphis.core.engine import MemoryEngine
     eng = MemoryEngine.create(":memory:")
     eng.extractor = StructuredLLMExtractor(FakeStructuredLLM({
