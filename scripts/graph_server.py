@@ -9,7 +9,12 @@ from engraphis.read_only_api import create_read_only_app
 
 
 def _loopback(host: str) -> bool:
-    if host in {"localhost", ""}:
+    # An empty host string makes the socket layer bind ALL interfaces, so it is
+    # emphatically not loopback; any unparseable hostname is treated as
+    # non-loopback too (fail closed: a token is then required).
+    if not host:
+        return False
+    if host == "localhost":
         return True
     try:
         return ipaddress.ip_address(host).is_loopback

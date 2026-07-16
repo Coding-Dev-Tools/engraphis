@@ -140,7 +140,8 @@ include = ["engraphis*", "scripts*"]
 "engraphis.inspector" = ["index.html"]
 # Keep the shipped dashboard assets explicit. A recursive catch-all also packages ignored
 # runtime artifacts such as static/__pycache__/*.pyc after a local compile check.
-"engraphis.static" = ["*.html", "*.png", "*.ico", "vendor/*"]
+# vendor/**/* covers nested vendor assets too (vendor/* alone doesn't cross "/").
+"engraphis.static" = ["*.html", "*.png", "*.ico", "vendor/*", "vendor/**/*"]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["*.pyc", "*.pyo", "__pycache__/*"]

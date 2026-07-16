@@ -285,6 +285,35 @@ def test_folder_transport_rejects_file_swapped_after_enumeration(tmp_path, monke
     assert swapped is True
 
 
+def test_folder_transport_push_never_writes_through_planted_symlinks(tmp_path):
+    """The shared folder is hostile on the WRITE side too: a peer who pre-plants
+    symlinks at the temp or destination paths must not be able to redirect our
+    own push into an arbitrary local file (PR #19 review follow-up)."""
+    root = tmp_path / "share"
+    root.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"precious")
+    try:
+        # The legacy predictable temp path and the destination itself.
+        os.symlink(victim, root / "bundle-a.json.tmp")
+        os.symlink(victim, root / "bundle-a.json")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable (e.g. unprivileged Windows)")
+
+    transport = FolderTransport(str(root))
+    transport.push("bundle-a.json", b'{"mine":true}')
+
+    # The victim file is untouched and the destination is now a real file.
+    assert victim.read_bytes() == b"precious"
+    dest = root / "bundle-a.json"
+    assert not dest.is_symlink()
+    assert dest.read_bytes() == b'{"mine":true}'
+    # No temp litter beyond the attacker's own planted link.
+    leftovers = [p.name for p in root.iterdir()
+                 if p.name.endswith(".tmp") and not p.is_symlink()]
+    assert leftovers == []
+
+
 def test_two_devices_converge(tmp_path):
     a = MemoryEngine.create(":memory:")
     b = MemoryEngine.create(":memory:")
