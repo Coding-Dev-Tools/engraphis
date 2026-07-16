@@ -42,6 +42,11 @@ def test_detect_lang_by_extension():
     assert detect_lang("foo.py") == "python"
     assert detect_lang("foo.tsx") == "typescript"
     assert detect_lang("foo.jsx") == "javascript"
+    assert detect_lang("main.go") == "go"
+    assert detect_lang("lib.rs") == "rust"
+    assert detect_lang("Service.java") == "java"
+    assert detect_lang("schema.sql") == "sql"
+    assert detect_lang("main.tf") == "terraform"
     assert detect_lang("foo.txt") is None
 
 
@@ -62,6 +67,27 @@ def test_regex_indexer_finds_function_and_class():
     fi = idx.index_file("calc.py", PY_SRC, "python")
     names = {s.name for s in fi.symbols}
     assert "add" in names and "Calculator" in names
+
+
+def test_regex_indexer_extracts_variables_comments_and_inheritance():
+    source = """
+# Main service implementation.
+class Service(BaseService):
+    pass
+
+# Maximum retry count.
+MAX_RETRIES = 4
+"""
+    result = RegexSymbolIndexer().index_file("service.py", source, "python")
+    by_name = {symbol.name: symbol for symbol in result.symbols}
+    assert by_name["Service"].docstring == "Main service implementation."
+    assert by_name["MAX_RETRIES"].kind == "variable"
+    assert by_name["MAX_RETRIES"].docstring == "Maximum retry count."
+    assert any(
+        edge.src == "Service" and edge.dst == "BaseService"
+        and edge.relation == "inherits"
+        for edge in result.edges
+    )
 
 
 def test_regex_indexer_unsupported_language_returns_empty():
@@ -148,13 +174,37 @@ def test_normalize_language_aliases():
     assert normalize_language("C#") == "csharp"
     assert normalize_language("c++") == "cpp"
     assert normalize_language("Python") == "python"
-    assert normalize_language("rust") == "rust"  # unknown passes through, then validated
+    assert normalize_language("rust") == "rust"
+    assert normalize_language("golang") == "go"
+    assert normalize_language("hcl") == "terraform"
 
 
 def test_supported_languages_set():
     langs = supported_languages()
-    assert {"python", "javascript", "typescript", "csharp", "c", "cpp"} <= langs
-    assert "rust" not in langs
+    assert {
+        "python", "javascript", "typescript", "go", "rust", "java",
+        "csharp", "c", "cpp", "sql", "terraform",
+    } <= langs
+    assert "ruby" not in langs
+
+
+@pytest.mark.parametrize(
+    ("lang", "filename", "source", "expected"),
+    [
+        ("go", "main.go", "func Build() {}\ntype Config struct {}\n", {"Build", "Config"}),
+        ("rust", "lib.rs", "pub fn build() {}\npub struct Config {}\n", {"build", "Config"}),
+        ("java", "App.java", "public class App {}\npublic static void run() {}\n",
+         {"App", "run"}),
+        ("sql", "schema.sql", "CREATE TABLE public.users (id INTEGER);\n",
+         {"public.users"}),
+        ("terraform", "main.tf", 'resource "aws_s3_bucket" "logs" {\n}\n',
+         {"aws_s3_bucket.logs"}),
+    ],
+)
+def test_regex_indexer_new_languages(lang, filename, source, expected):
+    fi = RegexSymbolIndexer().index_file(filename, source, lang)
+    assert expected <= {symbol.name for symbol in fi.symbols}
+    assert all(edge.relation == "defines" for edge in fi.edges)
 
 
 # ── the hang fix: build/generated trees are pruned during the walk ──────────────
@@ -272,7 +322,7 @@ def test_index_repo_rejects_unsupported_language(tmp_path):
     svc = MemoryService.create(":memory:")
     (tmp_path / "a.py").write_text("def a(): pass\n")
     with pytest.raises(ValidationError):
-        svc.index_repo(workspace="w", repo="r", root_path=str(tmp_path), languages=["rust"])
+        svc.index_repo(workspace="w", repo="r", root_path=str(tmp_path), languages=["ruby"])
 
 
 def test_index_repo_accepts_normalized_language_alias(tmp_path):
@@ -310,6 +360,29 @@ def test_tree_sitter_indexer_extracts_qualified_names_and_edges():
     assert "Calculator.add" in fqnames        # method, qualified by its class
     assert any(e.relation == "calls" and e.dst == "add" for e in fi.edges)
     assert any(e.relation == "imports" and e.dst == "os" for e in fi.edges)
+
+
+@_needs_tree_sitter
+def test_tree_sitter_indexer_extracts_docstrings_and_class_variables():
+    from engraphis.backends.codegraph import TreeSitterSymbolIndexer
+    source = '''
+class Child(Base):
+    """Coordinates child operations."""
+    MAX_RETRIES = 3
+
+    def run(self):
+        """Run one operation."""
+        return True
+'''
+    result = TreeSitterSymbolIndexer().index_file("child.py", source, "python")
+    by_name = {symbol.fqname: symbol for symbol in result.symbols}
+    assert by_name["Child"].docstring == "Coordinates child operations."
+    assert by_name["Child.MAX_RETRIES"].kind == "variable"
+    assert by_name["Child.run"].docstring == "Run one operation."
+    assert any(
+        edge.src == "Child" and edge.dst == "Base" and edge.relation == "inherits"
+        for edge in result.edges
+    )
 
 
 @_needs_tree_sitter

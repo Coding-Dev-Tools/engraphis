@@ -76,6 +76,16 @@ def test_min_support_override_forces_abstain():
 
 # ── optional LLM synthesis path (injected fake; core stays offline by default) ───
 
+def test_service_rejects_non_finite_support_floor():
+    from engraphis.service import MemoryService, ValidationError
+
+    service = MemoryService.create(":memory:")
+    with pytest.raises(ValidationError, match="finite"):
+        service.grounded_recall(
+            "query", workspace="w", min_support=float("nan")
+        )
+
+
 class _FakeLLM:
     def __init__(self, reply, record=None):
         self._reply = reply

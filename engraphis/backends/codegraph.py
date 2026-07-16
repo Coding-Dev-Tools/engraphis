@@ -55,10 +55,15 @@ LANG_BY_EXT = {
     ".py": "python",
     ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
     ".ts": "typescript", ".tsx": "typescript",
+    ".go": "go",
+    ".rs": "rust",
+    ".java": "java",
     ".cs": "csharp",
     ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".c++": "cpp",
     ".hpp": "cpp", ".hh": "cpp", ".hxx": "cpp",
     ".c": "c", ".h": "c",
+    ".sql": "sql",
+    ".tf": "terraform", ".tfvars": "terraform",
 }
 
 # Human-typed language names (from the ``languages=`` filter) → the canonical id used
@@ -68,9 +73,14 @@ _LANG_ALIASES = {
     "py": "python", "python": "python",
     "js": "javascript", "javascript": "javascript", "node": "javascript",
     "ts": "typescript", "typescript": "typescript",
+    "go": "go", "golang": "go",
+    "rs": "rust", "rust": "rust",
+    "java": "java",
     "cs": "csharp", "c#": "csharp", "csharp": "csharp",
     "c": "c", "h": "c",
     "c++": "cpp", "cpp": "cpp", "cplusplus": "cpp", "cxx": "cpp", "hpp": "cpp",
+    "sql": "sql",
+    "tf": "terraform", "hcl": "terraform", "terraform": "terraform",
 }
 
 
@@ -95,16 +105,41 @@ _DEF_KINDS = {
     "javascript": {"function_declaration": "function", "class_declaration": "class",
                    "method_definition": "method"},
     "typescript": {"function_declaration": "function", "class_declaration": "class",
-                   "method_definition": "method"},
+                   "method_definition": "method", "interface_declaration": "interface"},
+    "go": {"function_declaration": "function", "method_declaration": "method",
+           "type_spec": "type"},
+    "rust": {"function_item": "function", "struct_item": "class", "enum_item": "class",
+             "trait_item": "interface"},
+    "java": {"class_declaration": "class", "interface_declaration": "interface",
+             "enum_declaration": "class", "record_declaration": "class",
+             "method_declaration": "method", "constructor_declaration": "method"},
 }
 _CALL_KINDS = {"python": {"call"}, "javascript": {"call_expression"},
-              "typescript": {"call_expression"}}
+              "typescript": {"call_expression"}, "go": {"call_expression"},
+              "rust": {"call_expression"}, "java": {"method_invocation",
+                                                     "object_creation_expression"}}
 _IMPORT_KINDS = {
     "python": {"import_statement", "import_from_statement"},
     "javascript": {"import_statement"}, "typescript": {"import_statement"},
+    "go": {"import_declaration"}, "rust": {"use_declaration"},
+    "java": {"import_declaration"},
+}
+_VAR_KINDS = {
+    "python": {"assignment", "annotated_assignment"},
+    "javascript": {"variable_declarator", "field_definition"},
+    "typescript": {"variable_declarator", "public_field_definition",
+                   "required_parameter", "optional_parameter"},
+    "go": {"var_spec", "const_spec"},
+    "rust": {"const_item", "static_item"},
+    "java": {"variable_declarator"},
 }
 _CLASS_KINDS = {"python": {"class_definition"},
-               "javascript": {"class_declaration"}, "typescript": {"class_declaration"}}
+               "javascript": {"class_declaration"},
+               "typescript": {"class_declaration", "interface_declaration"},
+               "go": {"type_spec"},
+               "rust": {"struct_item", "enum_item", "trait_item"},
+               "java": {"class_declaration", "interface_declaration", "enum_declaration",
+                        "record_declaration"}}
 
 
 @dataclass
@@ -115,6 +150,7 @@ class Symbol:
     file: str
     span: str
     signature: str = ""
+    docstring: str = ""
     lang: str = ""
     exported: bool = False
     content_hash: str = ""
@@ -140,7 +176,11 @@ def detect_lang(file_path: str) -> Optional[str]:
 
 
 def _content_hash(content: str) -> str:
-    return hashlib.sha1(content.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    # Stable per-symbol change marker retained for compatibility with already indexed
+    # repositories. It is not used as an integrity or security primitive.
+    return hashlib.sha1(
+        content.encode("utf-8", errors="ignore"), usedforsecurity=False
+    ).hexdigest()[:16]
 
 
 # ── tree-sitter backend ────────────────────────────────────────────────────────
@@ -164,31 +204,74 @@ class TreeSitterSymbolIndexer:
         tree = _parse(parser, content_bytes)
         root = _cg(tree, "root_node")
         out = FileIndex()
-        self._walk(root, content_bytes, file_path, lang, out, class_stack=[])
+        self._walk(root, content_bytes, file_path, lang, out, scope_stack=[])
         return out
 
     def _walk(self, node, src: bytes, file_path: str, lang: str, out: FileIndex,
-             *, class_stack: list[str]) -> None:
+             *, scope_stack: list[tuple[str, str]]) -> None:
         kind = _node_kind(node)
         def_kinds = _DEF_KINDS.get(lang, {})
+        next_scope = scope_stack
         if kind in def_kinds:
             name = self._def_name(node, src)
             if name:
-                fqname = ".".join(class_stack + [name])
-                symbol_kind = "method" if class_stack else def_kinds[kind]
+                names = [part[0] for part in scope_stack]
+                fqname = ".".join(names + [name])
+                inside_class = any(part[1] in ("class", "interface", "type")
+                                   for part in scope_stack)
+                declared_kind = def_kinds[kind]
+                symbol_kind = (
+                    "method" if declared_kind == "method"
+                    or (inside_class and declared_kind == "function")
+                    else declared_kind
+                )
                 out.symbols.append(Symbol(
                     kind=symbol_kind, name=name, fqname=fqname, file=file_path,
                     span=f"{_start_line(node)}-{_end_line(node)}",
-                    signature=_first_line(src, node), lang=lang,
+                    signature=_first_line(src, node),
+                    docstring=_documentation(src, node, lang), lang=lang,
                     exported=not name.startswith("_"),
                     content_hash=_content_hash(_text(src, node)),
                 ))
-            if kind in _CLASS_KINDS.get(lang, set()) and name:
-                class_stack = class_stack + [name]
+                parent = ".".join(names) if names else file_path
+                out.edges.append(CodeEdge(
+                    src=parent, dst=fqname, relation="defines",
+                    file=file_path, line=_start_line(node),
+                ))
+                if kind in _CLASS_KINDS.get(lang, set()):
+                    for base, relation in self._base_targets(node, src, lang):
+                        out.edges.append(CodeEdge(
+                            src=fqname, dst=base, relation=relation,
+                            file=file_path, line=_start_line(node),
+                        ))
+                next_scope = scope_stack + [(name, symbol_kind)]
+        elif kind in _VAR_KINDS.get(lang, set()) and not any(
+            part[1] in ("function", "method") for part in scope_stack
+        ):
+            name = self._def_name(node, src)
+            if name:
+                names = [part[0] for part in scope_stack]
+                fqname = ".".join(names + [name])
+                out.symbols.append(Symbol(
+                    kind="variable", name=name, fqname=fqname, file=file_path,
+                    span=f"{_start_line(node)}-{_end_line(node)}",
+                    signature=_first_line(src, node),
+                    docstring=_documentation(src, node, lang), lang=lang,
+                    exported=not name.startswith("_"),
+                    content_hash=_content_hash(_text(src, node)),
+                ))
+                out.edges.append(CodeEdge(
+                    src=".".join(names) if names else file_path,
+                    dst=fqname, relation="defines", file=file_path,
+                    line=_start_line(node),
+                ))
         elif kind in _CALL_KINDS.get(lang, set()):
             callee = self._call_target(node, src)
             if callee:
-                caller = class_stack[-1] if class_stack else "<module>"
+                caller = (
+                    ".".join(part[0] for part in scope_stack)
+                    if scope_stack else file_path
+                )
                 out.edges.append(CodeEdge(src=caller, dst=callee, relation="calls",
                                           file=file_path, line=_start_line(node)))
         elif kind in _IMPORT_KINDS.get(lang, set()):
@@ -199,10 +282,19 @@ class TreeSitterSymbolIndexer:
         cc = _cg(node, "child_count")
         for i in range(cc):
             self._walk(_cg(node, "child", i), src, file_path, lang, out,
-                      class_stack=class_stack)
+                      scope_stack=next_scope)
 
     @staticmethod
     def _def_name(node, src: bytes) -> str:
+        if hasattr(node, "child_by_field_name"):
+            try:
+                named = _cg(node, "child_by_field_name", "name")
+                if named is not None:
+                    text = _text(src, named)
+                    if text:
+                        return text
+            except Exception:
+                pass
         cc = _cg(node, "child_count")
         for i in range(cc):
             child = _cg(node, "child", i)
@@ -212,6 +304,21 @@ class TreeSitterSymbolIndexer:
 
     @staticmethod
     def _call_target(node, src: bytes) -> str:
+        if hasattr(node, "child_by_field_name"):
+            for field_name in ("function", "name", "type"):
+                try:
+                    target = _cg(node, "child_by_field_name", field_name)
+                except Exception:
+                    target = None
+                if target is not None:
+                    target_text = _text(src, target)
+                    name = (
+                        _first_identifier(target_text)
+                        if field_name == "type"
+                        else _last_identifier(target_text)
+                    )
+                    if name:
+                        return name
         cc = _cg(node, "child_count")
         if cc == 0:
             return ""
@@ -219,26 +326,66 @@ class TreeSitterSymbolIndexer:
         fkind = _node_kind(first)
         if fkind == "identifier":
             return _text(src, first)
-        if fkind in ("attribute", "member_expression"):
-            # best-effort: use the last identifier-ish segment (obj.method -> method)
-            fcc = _cg(first, "child_count")
-            for j in range(fcc - 1, -1, -1):
-                seg = _cg(first, "child", j)
-                if _node_kind(seg) in ("identifier", "property_identifier"):
-                    return _text(src, seg)
-        return ""
+        if fkind in (
+            "attribute", "member_expression", "selector_expression", "field_expression",
+            "scoped_identifier", "qualified_identifier",
+        ):
+            return _last_identifier(_text(src, first))
+        return _last_identifier(_text(src, first))
+
+    @staticmethod
+    def _base_targets(node, src: bytes, lang: str) -> list[tuple[str, str]]:
+        return _base_targets_from_signature(_first_line(src, node), lang)
 
     @staticmethod
     def _import_targets(node, src: bytes) -> list[str]:
-        names = []
-        cc = _cg(node, "child_count")
-        for i in range(cc):
-            child = _cg(node, "child", i)
-            if _node_kind(child) in ("dotted_name", "identifier", "string"):
-                text = _text(src, child).strip("\"'")
+        wanted = {
+            "dotted_name", "string", "interpreted_string_literal", "raw_string_literal",
+            "scoped_identifier", "qualified_identifier",
+        }
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            if current is not node and _node_kind(current) in wanted:
+                text = _text(src, current).strip("\"'`")
                 if text:
-                    names.append(text)
-        return names[:1]  # the module path is conventionally the first dotted_name/string
+                    return [text]
+            cc = _cg(current, "child_count")
+            for i in range(cc - 1, -1, -1):
+                stack.append(_cg(current, "child", i))
+        return []
+
+
+def _base_targets_from_signature(first: str, lang: str) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    if lang == "python":
+        match = re.search(r"\bclass\s+\w+\s*\(([^)]*)\)", first)
+        if match:
+            out.extend(
+                (base.strip().split("[", 1)[0], "inherits")
+                for base in match.group(1).split(",") if base.strip()
+            )
+    elif lang in {"javascript", "typescript"}:
+        match = re.search(r"\bextends\s+([A-Za-z_$][\w.$]*)", first)
+        if match:
+            out.append((match.group(1), "inherits"))
+        match = re.search(r"\bimplements\s+([^{]+)", first)
+        if match:
+            out.extend(
+                (base.strip(), "implements")
+                for base in match.group(1).split(",") if base.strip()
+            )
+    elif lang == "java":
+        match = re.search(r"\bextends\s+([A-Za-z_$][\w.$<>]*)", first)
+        if match:
+            out.append((match.group(1).split("<", 1)[0], "inherits"))
+        match = re.search(r"\bimplements\s+([^{]+)", first)
+        if match:
+            out.extend(
+                (base.strip().split("<", 1)[0], "implements")
+                for base in match.group(1).split(",") if base.strip()
+            )
+    return out[:20]
 
 
 def _cg(obj: Any, name: str, *args: Any) -> Any:
@@ -266,6 +413,16 @@ def _node_kind(node: Any) -> str:
 
 def _text(src: bytes, node: Any) -> str:
     return src[_cg(node, "start_byte"):_cg(node, "end_byte")].decode("utf-8", errors="replace")
+
+
+def _last_identifier(text: str) -> str:
+    matches = re.findall(r"[A-Za-z_$][\w$]*", str(text or ""))
+    return matches[-1] if matches else ""
+
+
+def _first_identifier(text: str) -> str:
+    match = re.search(r"[A-Za-z_$][\w$]*", str(text or ""))
+    return match.group(0) if match else ""
 
 
 def _parse(parser: Any, content_bytes: bytes) -> Any:
@@ -309,6 +466,41 @@ def _first_line(src: bytes, node: Any) -> str:
     return text.splitlines()[0].strip()[:200] if text else ""
 
 
+def _documentation(src: bytes, node: Any, lang: str) -> str:
+    """Best-effort docstring or immediately leading comment block."""
+    node_text = _text(src, node)
+    if lang == "python":
+        match = re.search(
+            r"^[^\n]*\n\s*(?:[rubfRUBF]*)('''|\"\"\")([\s\S]*?)\1",
+            node_text,
+        )
+        if match:
+            return " ".join(match.group(2).strip().split())[:2_000]
+    lines = src.decode("utf-8", errors="replace").splitlines()
+    return _leading_comment_from_lines(lines, max(0, _start_line(node) - 1))
+
+
+def _leading_comment_from_lines(lines: list[str], index: int) -> str:
+    collected: list[str] = []
+    cursor = index - 1
+    while cursor >= 0 and len(collected) < 20:
+        stripped = lines[cursor].strip()
+        if not stripped:
+            if collected:
+                break
+            cursor -= 1
+            continue
+        if stripped.startswith(("#", "//", "///", "/*", "*", "--")):
+            cleaned = re.sub(r"^(?:#|///?|/\*+|\*+|--)\s?", "", stripped)
+            cleaned = cleaned.rstrip("*/ ").strip()
+            if cleaned:
+                collected.append(cleaned)
+            cursor -= 1
+            continue
+        break
+    return " ".join(reversed(collected))[:2_000]
+
+
 # ── regex backend (offline, dependency-free fallback) ──────────────────────────
 
 class RegexSymbolIndexer:
@@ -320,12 +512,35 @@ class RegexSymbolIndexer:
         "python": [
             (re.compile(r"^\s*def\s+(\w+)\s*\("), "function"),
             (re.compile(r"^\s*class\s+(\w+)"), "class"),
+            (re.compile(r"^\s*([A-Z][A-Z0-9_]{2,})\s*(?::[^=]+)?="), "variable"),
         ],
         "javascript": [
             (re.compile(r"^\s*(?:export\s+)?function\s+(\w+)\s*\("), "function"),
             (re.compile(r"^\s*(?:export\s+)?class\s+(\w+)"), "class"),
             (re.compile(r"^\s*(?:export\s+)?const\s+(\w+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>"),
              "function"),
+            (re.compile(r"^\s*(?:export\s+)?(?:const|let|var)\s+(\w+)\b"), "variable"),
+        ],
+        "go": [
+            (re.compile(r"^\s*func\s+(?:\([^)]*\)\s*)?(\w+)\s*\("), "function"),
+            (re.compile(r"^\s*type\s+(\w+)\s+(?:struct|interface)\b"), "type"),
+            (re.compile(r"^\s*(?:var|const)\s+(\w+)\b"), "variable"),
+        ],
+        "rust": [
+            (re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)\s*[<(]"),
+             "function"),
+            (re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum)\s+(\w+)"), "class"),
+            (re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?trait\s+(\w+)"), "interface"),
+            (re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:const|static)\s+(\w+)"),
+             "variable"),
+        ],
+        "java": [
+            (re.compile(
+                r"^\s*(?:(?:public|private|protected|abstract|final|static|sealed|"
+                r"non-sealed)\s+)*(?:class|interface|enum|record)\s+(\w+)"), "class"),
+            (re.compile(
+                r"^\s*(?:(?:public|private|protected|abstract|final|static|synchronized|"
+                r"native|default)\s+)+(?:[\w<>\[\],.?]+\s+)+(\w+)\s*\("), "method"),
         ],
         # C#: type declarations (class/struct/interface/record/enum) and methods. The
         # method pattern requires ≥1 modifier + ≥1 return-type token before the name so
@@ -350,6 +565,19 @@ class RegexSymbolIndexer:
             (re.compile(
                 r"^\s*(?:[\w:<>\*&\[\]]+\s+){1,8}(?:\w+::)*([\w~]+)\s*\([^;{]*\)\s*"
                 r"(?:const\b\s*)?(?:noexcept\b\s*)?(?:override\b\s*)?\{"), "function"),
+        ],
+        "sql": [
+            (re.compile(
+                r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW|FUNCTION|PROCEDURE|"
+                r"TRIGGER|INDEX)\s+(?:IF\s+NOT\s+EXISTS\s+)?[\"`[]?([\w.]+)",
+                re.IGNORECASE), "definition"),
+        ],
+        "terraform": [
+            (re.compile(
+                r'^\s*(?:resource|data)\s+"([^"]+)"\s+"([^"]+)"\s*\{'), "resource"),
+            (re.compile(
+                r'^\s*(module|variable|output|provider|locals)\s+"?([^"\s{]+)"?\s*\{'),
+             "block"),
         ],
     }
     _PATTERNS["typescript"] = _PATTERNS["javascript"]
@@ -380,23 +608,38 @@ class RegexSymbolIndexer:
         patterns = self._PATTERNS.get(lang, [])
         stop = self._STOPNAMES.get(lang, set())
         seen: set = set()  # (name, lineno) — one symbol per line even if patterns overlap
-        for lineno, line in enumerate(content.splitlines(), start=1):
+        lines = content.splitlines()
+        for lineno, line in enumerate(lines, start=1):
             if len(line) > self._MAX_LINE_LEN:
                 continue
             for pattern, kind in patterns:
                 m = pattern.match(line)
                 if not m:
                     continue
-                name = m.group(1)
+                if lang == "terraform" and (m.lastindex or 0) >= 2:
+                    name = f"{m.group(1)}.{m.group(2)}"
+                else:
+                    name = m.group(1)
                 if name in stop or (name, lineno) in seen:
                     continue
                 seen.add((name, lineno))
                 out.symbols.append(Symbol(
                     kind=kind, name=name, fqname=name, file=file_path,
-                    span=f"{lineno}-{lineno}", signature=line.strip()[:200], lang=lang,
+                    span=f"{lineno}-{lineno}", signature=line.strip()[:200],
+                    docstring=_leading_comment_from_lines(lines, lineno - 1), lang=lang,
                     exported=not name.startswith("_"),
                     content_hash=_content_hash(line),
                 ))
+                out.edges.append(CodeEdge(
+                    src=file_path, dst=name, relation="defines",
+                    file=file_path, line=lineno,
+                ))
+                if kind in {"class", "interface", "type"}:
+                    for base, relation in _base_targets_from_signature(line, lang):
+                        out.edges.append(CodeEdge(
+                            src=name, dst=base, relation=relation,
+                            file=file_path, line=lineno,
+                        ))
         return out
 
 
@@ -533,6 +776,10 @@ def _rel_posix(rel_dir: str, name: str) -> str:
 _MAX_WALK_DIRS = 200_000
 
 
+class SourceWalkLimitExceeded(RuntimeError):
+    """The bounded repository walk stopped before visiting the full tree."""
+
+
 def iter_source_files(root: str, *, exclude_dirs: Optional[set] = None,
                       respect_ignore_file: bool = True) -> Iterable[str]:
     """Yield indexable source-file paths under ``root``.
@@ -564,7 +811,9 @@ def iter_source_files(root: str, *, exclude_dirs: Optional[set] = None,
     for dirpath, dirnames, filenames in os.walk(root_str, followlinks=False):
         dirs_seen += 1
         if dirs_seen > _MAX_WALK_DIRS:
-            break
+            raise SourceWalkLimitExceeded(
+                f"repository walk exceeded {_MAX_WALK_DIRS} directories"
+            )
         rel_dir = os.path.relpath(dirpath, root_str)
         # prune in place so os.walk skips these subtrees entirely
         dirnames[:] = [

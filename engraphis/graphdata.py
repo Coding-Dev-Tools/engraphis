@@ -19,7 +19,8 @@ def empty_graph(workspace: str) -> dict:
     """The shape returned for a workspace that doesn't exist yet (not an error —
     a brand-new workspace with no memories simply has no entities yet)."""
     return {
-        "workspace": workspace, "nodes": [], "edges": [], "types": [], "top": [],
+        "workspace": workspace, "nodes": [], "edges": [], "types": [], "layers": [],
+        "top": [],
         "stats": {"entities": 0, "edges": 0, "connected": 0, "isolated": 0},
     }
 
@@ -42,14 +43,22 @@ def build_graph_payload(workspace: str, entity_rows: Sequence[Mapping[str, Any]]
     label_of = {r["id"]: (r["name"] or r["id"]) for r in entity_rows}
     etype_of = {r["id"]: (r["etype"] or DEFAULT_ETYPE) for r in entity_rows}
     deg: dict = {}
+    layers: dict = {}
     edges = []
     for e in edge_rows:
         src, dst, rel = e["src"], e["dst"], e["relation"]
         if not src or not dst:
             continue
+        layer = e.get("layer") if hasattr(e, "get") else None
+        layer = layer or "semantic"
         deg[src] = deg.get(src, 0) + 1
         deg[dst] = deg.get(dst, 0) + 1
-        edges.append({"from": src, "to": dst, "label": rel or ""})
+        layers[layer] = layers.get(layer, 0) + 1
+        reason = e.get("reason") if hasattr(e, "get") else None
+        item = {"from": src, "to": dst, "label": rel or "", "layer": layer}
+        if reason:
+            item["reason"] = reason
+        edges.append(item)
 
     # every node referenced by an edge must exist so the network renders cleanly, even
     # in the (should-never-happen) case an edge outlives its entity row
@@ -67,6 +76,8 @@ def build_graph_payload(workspace: str, entity_rows: Sequence[Mapping[str, Any]]
         "workspace": workspace, "nodes": nodes, "edges": edges,
         "types": [{"etype": k, "count": v}
                   for k, v in sorted(types.items(), key=lambda kv: -kv[1])],
+        "layers": [{"layer": k, "count": v}
+                   for k, v in sorted(layers.items(), key=lambda kv: (-kv[1], kv[0]))],
         "top": top,
         "stats": {"entities": len(nodes), "edges": len(edges),
                   "connected": connected, "isolated": len(nodes) - connected},

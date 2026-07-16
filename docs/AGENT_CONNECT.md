@@ -105,7 +105,8 @@ to host team agents.”
 
 - Tokens are stored **SHA-256 hashed** (like session cookies); a leaked users DB contains
   no usable bearer secrets. The raw token is shown **once** at creation.
-- Disable a member → their tokens stop resolving immediately (no need to revoke each).
+- Disable a member → their tokens are permanently revoked immediately; re-enabling the
+  account requires minting fresh agent tokens.
 - Expose the instance over **HTTPS** only (the session/token cookies and bearer tokens
   must not transit cleartext). Behind Railway/a proxy, set
   `ENGRAPHIS_FORWARDED_ALLOW_IPS=*` so the `Secure` flag is applied.

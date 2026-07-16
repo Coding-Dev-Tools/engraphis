@@ -18,13 +18,15 @@ from __future__ import annotations
 import os
 import re
 import json
+import hashlib
 import contextvars
+import math
 from pathlib import Path
 from typing import Any, Optional
 
 from engraphis.backends.extractor import ChunkingExtractor
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.interfaces import MemoryType, Scope, SearchFilter
+from engraphis.core.interfaces import Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter
 from engraphis.graphdata import build_graph_payload, empty_graph
 
 # ── validation limits (memory-poisoning / resource-exhaustion guards) ──────────
@@ -42,6 +44,8 @@ MAX_AGENT_STATE_CHARS = 20_000
 # max_files/max_file_bytes).
 MAX_IMPORT_FILES = 500
 MAX_IMPORT_FILE_BYTES = 2_000_000
+MAX_IMPORT_RESOURCE_BYTES = 100_000_000
+MAX_IMPORT_TOTAL_BYTES = 250_000_000
 
 # control characters except tab/newline/carriage-return
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -301,18 +305,21 @@ class MemoryService:
                rerank_model: Optional[str] = None,
                allowed_workspaces: Optional[list] = None,
                extractor: Optional[str] = None,
-               graph_extractor: Optional[str] = None) -> "MemoryService":
+               graph_extractor: Optional[str] = None,
+               retention_supervisor: Optional[str] = None) -> "MemoryService":
         # extractor / graph_extractor default to the configured backends
         # (ENGRAPHIS_EXTRACTOR — "none" | "chunk" | "llm" | "llm_structured";
         # ENGRAPHIS_GRAPH_EXTRACTOR — "regex" by default) so the dashboard,
         # auto-maintenance, MCP server, and CLI all honor the same config knob. An
         # explicit value (e.g. extractor="none") still overrides the environment.
-        if extractor is None or graph_extractor is None:
+        if extractor is None or graph_extractor is None or retention_supervisor is None:
             from engraphis.config import settings
             if extractor is None:
                 extractor = settings.extractor
             if graph_extractor is None:
                 graph_extractor = settings.graph_extractor
+            if retention_supervisor is None:
+                retention_supervisor = settings.retention_supervisor
         # One-time, safe upgrade path for a self-host whose ENGRAPHIS_DB_PATH already
         # holds a v1-shaped database (see docstring) — must run before Store() ever
         # touches the file. No-ops instantly for a fresh install or an already-v2 db.
@@ -325,7 +332,8 @@ class MemoryService:
         engine = MemoryEngine.create(
             db_path, embed_model=embed_model, embed_dim=embed_dim,
             vector_backend=vector_backend, rerank_model=rerank_model,
-            extractor=extractor, graph_extractor=graph_extractor, connect=connect,
+            extractor=extractor, graph_extractor=graph_extractor,
+            retention_supervisor=retention_supervisor, connect=connect,
         )
         return cls(engine, allowed_workspaces=allowed_workspaces)
 
@@ -440,7 +448,9 @@ class MemoryService:
                  scope: str = "repo", title: str = "", importance: float = 0.0,
                  keywords: Optional[list] = None, metadata: Optional[dict] = None,
                  source: str = "agent", trusted: bool = True,
-                 kind: Optional[str] = None, resolve_conflicts: bool = True) -> dict:
+                 kind: Optional[str] = None, resolve_conflicts: bool = True,
+                 retention_class: Optional[str] = None,
+                 retention_reason: str = "") -> dict:
         """Store one memory. Returns its id, resolved scope, and the resolution
         outcome (``op``: add/noop/invalidate — see ``MemoryEngine.remember_with_resolution``).
         """
@@ -452,10 +462,28 @@ class MemoryService:
         sc = _enum(scope, Scope, "scope")
         kws = _clean_keywords(keywords)
         meta = _clean_metadata(metadata)
+        retention = None
+        if retention_class:
+            label = _clean_text(
+                retention_class, field="retention_class", max_chars=40
+            ).lower()
+            if label not in {"ephemeral", "normal", "critical"}:
+                raise ValidationError(
+                    "retention_class must be one of: ephemeral, normal, critical"
+                )
+            reason = _clean_text(
+                retention_reason, field="retention_reason",
+                max_chars=MAX_TITLE_CHARS, required=False,
+            )
+            retention = {"source": "host", "label": label, "retain": True,
+                         "reason": reason}
+            meta = {**meta, "retention_supervision": retention}
         try:
             importance = float(importance)
         except (TypeError, ValueError):
             raise ValidationError("importance must be a number")
+        if not math.isfinite(importance):
+            raise ValidationError("importance must be finite")
         importance = max(0.0, min(1.0, importance))
 
         wid = self.store.get_or_create_workspace(ws)
@@ -479,6 +507,12 @@ class MemoryService:
             out["resolution"] = result.get("reason", "")
         if result["op"] == "invalidate":
             out["superseded"] = result["superseded"]
+        out["receipt"] = self.store.record_receipt(
+            "remember", workspace_id=wid, repo_id=rid or "", actor=provenance["source"],
+            target_count=1, status=result["op"],
+            metadata={"mtype": mt.value, "scope": sc.value, "resolution": result["op"],
+                      "retention": (retention or {}).get("label", "")},
+        )
         return out
 
     def ingest(self, content: str, *, workspace: str, repo: Optional[str] = None,
@@ -508,15 +542,89 @@ class MemoryService:
             default_mtype=mt, metadata={**meta, "provenance": provenance},
             resolve_conflicts=bool(resolve_conflicts),
         )
-        return {"workspace": ws, "repo": rp, "count": out["count"],
-                "extracted": out["extracted"],
-                "facts": [{"id": r["id"], "op": r["op"],
-                           **({"superseded": r["superseded"]} if "superseded" in r else {})}
-                          for r in out["facts"]]}
+        result = {"workspace": ws, "repo": rp, "count": out["count"],
+                  "extracted": out["extracted"],
+                  "facts": [{"id": r["id"], "op": r["op"],
+                             **({"superseded": r["superseded"]}
+                                if "superseded" in r else {})}
+                            for r in out["facts"]]}
+        result["receipt"] = self.store.record_receipt(
+            "remember", workspace_id=wid, repo_id=rid or "", actor=provenance["source"],
+            target_count=out["count"], status="ingested",
+            metadata={"extracted": bool(out["extracted"]), "mtype": mt.value,
+                      "scope": sc.value},
+        )
+        return result
+
+    # Intent-native agent protocol. These wrappers intentionally stay transport-agnostic:
+    # REST and MCP can expose the same remember/link/recall vocabulary without leaking
+    # SQLite operations into agent prompts.
+    def intent_remember(self, text: str, *, workspace: str,
+                        repo: Optional[str] = None, title: str = "",
+                        mtype: str = "semantic", scope: str = "repo",
+                        importance: float = 0.0,
+                        metadata: Optional[dict] = None,
+                        retention_class: Optional[str] = None,
+                        retention_reason: str = "") -> dict:
+        out = self.remember(
+            text, workspace=workspace, repo=repo, title=title, mtype=mtype,
+            scope=scope, importance=importance, metadata=metadata,
+            retention_class=retention_class, retention_reason=retention_reason,
+        )
+        return {"operation": "remember", **out}
+
+    def intent_link(self, source_id: str, target_id: str, *, workspace: str,
+                    repo: Optional[str] = None, relation: str = "related",
+                    layer: Optional[str] = None, reason: str = "") -> dict:
+        return {"operation": "link", **self.link(
+            source_id, target_id, workspace=workspace, repo=repo,
+            relation=relation, layer=layer, reason=reason,
+        )}
+
+    def intent_recall(self, query: str, *, intent: str = "recall",
+                      workspace: Optional[str] = None, repo: Optional[str] = None,
+                      mtypes: Optional[list] = None, k: int = 8,
+                      as_of: Optional[float] = None,
+                      reinforce: bool = True,
+                      record_receipt: bool = True) -> dict:
+        intent_clean = _clean_text(
+            intent, field="intent", max_chars=80, required=False
+        ) or "recall"
+        normalized = intent_clean.lower().replace("-", "_").replace(" ", "_")
+        layers = {
+            "explain": ["causal", "entity", "semantic"],
+            "why": ["causal", "entity", "semantic"],
+            "causal": ["causal", "entity"],
+            "summarize_history": ["temporal", "causal", "semantic"],
+            "history": ["temporal", "causal", "semantic"],
+            "timeline": ["temporal", "entity"],
+            "locate_code": ["entity", "semantic"],
+            "code": ["entity", "semantic"],
+        }.get(normalized)
+        out = self.recall(
+            query, workspace=workspace, repo=repo, mtypes=mtypes, k=k,
+            as_of=as_of, intent=intent_clean, graph_layers=layers,
+            reinforce=reinforce, record_receipt=record_receipt,
+        )
+        response = {"operation": "recall", "intent": intent_clean, **out}
+        if normalized in {"locate_code", "code"} and workspace and repo:
+            response["code"] = self.search_code(
+                query, workspace=workspace, repo=repo, limit=k
+            )
+        elif normalized in {"explain", "why"} and workspace:
+            response["explanation"] = self.why(
+                query, workspace=workspace, repo=repo, k=min(k, 10)
+            )
+        elif normalized in {"summarize_history", "history", "timeline"} and workspace:
+            response["history"] = self.timeline(
+                query, workspace=workspace, repo=repo, limit=min(max(k * 2, 10), 50)
+            )
+        return response
 
     # ── folder / file import (dashboard "Import" section) ────────────────────────
     def _import_one(self, name: str, content: str, *, ws: str, mt: MemoryType,
-                     kind: str, extra_provenance: Optional[dict] = None) -> dict:
+                    kind: str, extra_provenance: Optional[dict] = None,
+                    resource_title: str = "") -> dict:
         """Shared per-file ingest for ``import_folder``/``import_files``: one memory per
         file, workspace-scoped, always marked untrusted (SECURITY.md §5/§1 — imported
         content did not originate from an already-trusted agent write, so it must not be
@@ -526,21 +634,29 @@ class MemoryService:
         When the configured extractor is the *offline* ``ChunkingExtractor``, a file is
         split into several retrieval-sized memories instead of one — each still untrusted,
         each stamped with ``provenance``/``metadata.chunk`` linking it to its file and
-        position. The LLM extractor is deliberately **never** applied here: it would ship
-        untrusted, disk-local file bytes to an external API on the one path whose whole
-        contract is local, one-memory-per-file, untrusted content (SECURITY.md §5). With
-        no extractor (the default) behaviour is byte-for-byte unchanged."""
+        position. An LLM/custom extractor is never applied by this base import pass.
+        Callers must explicitly opt into the separate ``derive_facts`` pass, which may
+        send content to the configured provider (SECURITY.md §6). With no extractor
+        (the default) behaviour is byte-for-byte unchanged."""
         if not content.strip():
             return {"file": name, "skipped": True}
         fallback = Path(name).stem or name
         extractor = getattr(self.engine, "extractor", None)
-        chunks = extractor.extract(content) if isinstance(extractor, ChunkingExtractor) else None
+        chunker = (
+            extractor if isinstance(extractor, ChunkingExtractor)
+            else ChunkingExtractor() if len(content) > MAX_CONTENT_CHARS
+            else None
+        )
+        chunks = chunker.extract(content) if chunker is not None else None
         try:
             if chunks:
                 total = len(chunks)
                 first: Optional[dict] = None
                 for i, fact in enumerate(chunks):
-                    title = (fact.title or _title_from_content(fact.content, fallback))
+                    title = (
+                        fact.title or resource_title
+                        or _title_from_content(fact.content, fallback)
+                    )
                     r = self.remember(
                         fact.content, workspace=ws,
                         mtype=(fact.mtype.value if fact.mtype else mt.value),
@@ -550,10 +666,11 @@ class MemoryService:
                         metadata={**(extra_provenance or {}), "import_file": name,
                                   "chunk": {"index": i, "of": total,
                                             "heading": (fact.title or "")[:200]}},
+                        resolve_conflicts=False,
                     )
                     first = first or r
                 return {"file": name, "id": first["id"], "op": first["op"], "chunks": total}
-            title = _title_from_content(content, fallback=fallback)
+            title = resource_title or _title_from_content(content, fallback=fallback)
             r = self.remember(
                 content, workspace=ws, mtype=mt.value, scope="workspace",
                 title=title[:MAX_TITLE_CHARS], source="import", trusted=False, kind=kind,
@@ -563,8 +680,44 @@ class MemoryService:
         except ValidationError as exc:
             return {"file": name, "error": str(exc)}
 
+    def _derive_import_facts(self, content: str, *, ws: str, mt: MemoryType,
+                             resource_name: str, resource_kind: str,
+                             resource_meta: dict) -> tuple[int, str]:
+        """Run the explicitly requested second-pass extractor without duplicating
+        deterministic chunking already performed by ``_import_one``."""
+        extractor = getattr(self.engine, "extractor", None)
+        if extractor is None:
+            return 0, "fact derivation requested but no extractor is configured"
+        if isinstance(extractor, ChunkingExtractor):
+            return 0, (
+                "fact derivation skipped because the configured chunk extractor "
+                "already ran during import"
+            )
+
+        inputs = [content]
+        if len(content) > MAX_CONTENT_CHARS:
+            inputs = [fact.content for fact in ChunkingExtractor().extract(content)]
+
+        created = 0
+        extracted = False
+        for chunk in inputs:
+            derived = self.ingest(
+                chunk, workspace=ws, mtype=mt.value, scope="workspace",
+                metadata={"derived_from_resource": resource_name, **resource_meta},
+                source="resource_extractor", trusted=False,
+                kind=f"{resource_kind}_facts",
+            )
+            extracted = extracted or bool(derived["extracted"])
+            created += sum(
+                1 for fact in derived["facts"] if fact.get("op") != "noop"
+            )
+        if not extracted or created == 0:
+            return created, "configured extractor produced no new discrete facts"
+        return created, ""
+
     def import_folder(self, *, workspace: str, path: str, file_pattern: str = "*.md",
-                      memory_type: str = "semantic", actor: str = "user") -> dict:
+                      memory_type: str = "semantic", actor: str = "user",
+                      derive_facts: bool = False) -> dict:
         """Import files from a directory on the machine running Engraphis into
         ``workspace``, one memory per file. Restores the retired v1 vault
         ``/memory/vaults/import-folder`` capability as a first-class v2 feature (the old
@@ -584,43 +737,85 @@ class MemoryService:
         folder = _resolve_import_root(raw_path)
         wid = self.store.get_or_create_workspace(ws)
         files = _iter_import_files(folder, pattern, MAX_IMPORT_FILES)
+        total_bytes = 0
+        for file in files:
+            try:
+                total_bytes += file.stat().st_size
+            except OSError:
+                continue
+        if total_bytes > MAX_IMPORT_TOTAL_BYTES:
+            raise ValidationError(
+                f"import batch is too large (max {MAX_IMPORT_TOTAL_BYTES} bytes)"
+            )
+        from engraphis.backends.resources import get_resource_extractor
+        resource_extractor = get_resource_extractor()
 
-        imported, skipped, errors, details = 0, 0, 0, []
+        imported, skipped, errors, derived_facts = 0, 0, 0, 0
+        details, warnings = [], []
         for f in files:
             try:
-                if f.stat().st_size > MAX_IMPORT_FILE_BYTES:
+                if f.stat().st_size > MAX_IMPORT_RESOURCE_BYTES:
                     errors += 1
                     details.append({"file": f.name, "error": "file too large"})
                     continue
-                content = f.read_text(encoding="utf-8", errors="replace")
-            except OSError as exc:
+                resource = resource_extractor.extract_path(str(f))
+            except (OSError, ValueError) as exc:
+                if "no extractable text" in str(exc):
+                    skipped += 1
+                    continue
                 errors += 1
                 details.append({"file": f.name, "error": str(exc)})
                 continue
             rel = f.relative_to(folder).as_posix()
-            result = self._import_one(rel, content, ws=ws, mt=mt, kind="file_import",
-                                      extra_provenance={"import_path": rel})
+            resource_meta = {
+                **resource.metadata,
+                "media_type": resource.media_type,
+                "resource_kind": resource.kind,
+                "warnings": resource.warnings,
+            }
+            result = self._import_one(
+                rel, resource.text, ws=ws, mt=mt, kind="file_import",
+                extra_provenance={"import_path": rel, **resource_meta},
+                resource_title=resource.title,
+            )
             if result.get("skipped"):
                 skipped += 1
+                continue
             elif result.get("error"):
                 errors += 1
                 details.append(result)
+                continue
             else:
                 imported += 1
+            file_warnings = list(resource.warnings)
+            if derive_facts:
+                try:
+                    count, note = self._derive_import_facts(
+                        resource.text, ws=ws, mt=mt, resource_name=rel,
+                        resource_kind=resource.kind, resource_meta=resource_meta,
+                    )
+                    derived_facts += count
+                    if note:
+                        file_warnings.append(note)
+                except (OSError, ValueError) as exc:
+                    file_warnings.append(f"fact derivation failed: {exc}")
+            if file_warnings:
+                warnings.append({"file": rel, "warnings": file_warnings})
 
         self.store.audit(actor, "import_folder", wid,
                          f"{raw_path} ({imported} imported)")
         self.store.conn.commit()
         return {"workspace": ws, "path": str(folder), "scanned": len(files),
                 "imported": imported, "skipped": skipped, "errors": errors,
-                "details": details[:50]}
+                "derived_facts": derived_facts, "details": details[:50],
+                "warnings": warnings[:50]}
 
     def import_files(self, *, workspace: str, files: list, memory_type: str = "semantic",
-                     actor: str = "user") -> dict:
+                     actor: str = "user", derive_facts: bool = False) -> dict:
         """Drag-and-drop / picked-file counterpart to ``import_folder``: ingest
-        browser-uploaded file contents (already decoded to text by the caller — this
-        method has no transport dependency, matching the rest of this facade) as one
-        memory per file. Same untrusted-by-default marking as ``import_folder``."""
+        browser-uploaded file bytes through the local resource extractor. This method has
+        no transport dependency, matching the rest of the facade, and applies the same
+        untrusted-by-default marking as ``import_folder``."""
         ws = self._clean_ws(workspace)
         mt = _enum(memory_type, MemoryType, "memory_type")
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
@@ -630,33 +825,186 @@ class MemoryService:
         if len(files) > MAX_IMPORT_FILES:
             raise ValidationError(f"too many files (max {MAX_IMPORT_FILES})")
 
+        total_bytes = 0
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            raw = item.get("data")
+            content = item.get("content")
+            if raw is None and isinstance(content, str):
+                raw = content.encode("utf-8")
+            if isinstance(raw, (bytes, bytearray)):
+                total_bytes += len(raw)
+        if total_bytes > MAX_IMPORT_TOTAL_BYTES:
+            raise ValidationError(
+                f"import batch is too large (max {MAX_IMPORT_TOTAL_BYTES} bytes)"
+            )
+
         wid = self.store.get_or_create_workspace(ws)
-        imported, skipped, errors, details = 0, 0, 0, []
+        from engraphis.backends.resources import get_resource_extractor
+        resource_extractor = get_resource_extractor()
+        imported, skipped, errors, derived_facts = 0, 0, 0, 0
+        details, warnings = [], []
         for item in files:
             if not isinstance(item, dict):
                 errors += 1
                 continue
             name = _clean_text(item.get("name"), field="name", max_chars=MAX_NAME_CHARS,
                                required=False) or "untitled"
-            content = item.get("content") or ""
-            if not isinstance(content, str):
+            raw = item.get("data")
+            content = item.get("content")
+            if raw is None and isinstance(content, str):
+                raw = content.encode("utf-8")
+            if not isinstance(raw, (bytes, bytearray)):
                 errors += 1
-                details.append({"file": name, "error": "content must be a string"})
+                details.append({"file": name, "error": "content must be text or data bytes"})
                 continue
-            content = content[:MAX_IMPORT_FILE_BYTES]
-            result = self._import_one(name, content, ws=ws, mt=mt, kind="file_upload")
+            if len(raw) > MAX_IMPORT_RESOURCE_BYTES:
+                errors += 1
+                details.append({"file": name, "error": "file too large"})
+                continue
+            try:
+                resource = resource_extractor.extract_bytes(name, bytes(raw))
+            except ValueError as exc:
+                if "no extractable text" in str(exc):
+                    skipped += 1
+                    continue
+                errors += 1
+                details.append({"file": name, "error": str(exc)})
+                continue
+            resource_meta = {
+                **resource.metadata,
+                "media_type": resource.media_type,
+                "resource_kind": resource.kind,
+                "warnings": resource.warnings,
+            }
+            result = self._import_one(
+                name, resource.text, ws=ws, mt=mt, kind="file_upload",
+                extra_provenance=resource_meta, resource_title=resource.title,
+            )
             if result.get("skipped"):
                 skipped += 1
+                continue
             elif result.get("error"):
                 errors += 1
                 details.append(result)
+                continue
             else:
                 imported += 1
+            file_warnings = list(resource.warnings)
+            if derive_facts:
+                try:
+                    count, note = self._derive_import_facts(
+                        resource.text, ws=ws, mt=mt, resource_name=name,
+                        resource_kind=resource.kind, resource_meta=resource_meta,
+                    )
+                    derived_facts += count
+                    if note:
+                        file_warnings.append(note)
+                except (OSError, ValueError) as exc:
+                    file_warnings.append(f"fact derivation failed: {exc}")
+            if file_warnings:
+                warnings.append({"file": name, "warnings": file_warnings})
 
         self.store.audit(actor, "import_files", wid, f"{imported} imported")
         self.store.conn.commit()
         return {"workspace": ws, "scanned": len(files), "imported": imported,
-                "skipped": skipped, "errors": errors, "details": details[:50]}
+                "skipped": skipped, "errors": errors, "derived_facts": derived_facts,
+                "details": details[:50], "warnings": warnings[:50]}
+
+    def import_postgres_schema(self, dsn: str, *, workspace: str,
+                               repo: Optional[str] = None,
+                               schemas: Optional[list] = None,
+                               actor: str = "user") -> dict:
+        """Introspect a live PostgreSQL catalog into one schema memory plus graph nodes.
+
+        The DSN is never persisted, logged, or returned. Only a one-way source digest
+        produced by the backend is stored as provenance.
+        """
+        dsn = _clean_text(dsn, field="dsn", max_chars=4_000)
+        ws = self._clean_ws(workspace)
+        rp = _clean_name(repo, field="repo") if repo else None
+        selected = _clean_string_list(
+            schemas, field="schemas", max_items=100, max_chars=200
+        ) if schemas else None
+        actor = _clean_text(
+            actor, field="actor", max_chars=MAX_NAME_CHARS, required=False
+        ) or "user"
+        from engraphis.backends.postgres_schema import get_postgres_introspector
+        snapshot = get_postgres_introspector().inspect(dsn, schemas=selected)
+        pieces = (
+            [(fact.content, fact.title) for fact in ChunkingExtractor().extract(snapshot.text)]
+            if len(snapshot.text) > MAX_CONTENT_CHARS
+            else [(snapshot.text, snapshot.title)]
+        )
+        stored_rows = []
+        for index, (piece_content, piece_title) in enumerate(pieces):
+            stored_rows.append(self.remember(
+                piece_content, workspace=ws, repo=rp,
+                mtype="semantic", scope="repo" if rp else "workspace",
+                title=(piece_title or snapshot.title),
+                source="postgres_introspector", trusted=False,
+                kind="postgres_schema",
+                metadata={
+                    "postgres_schema": snapshot.metadata,
+                    "chunk": {"index": index, "of": len(pieces)},
+                },
+                resolve_conflicts=False,
+            ))
+        stored = stored_rows[0]
+        wid, rid = self._require_scope(ws, rp)
+        actual_ids: dict[str, str] = {}
+        for entity in snapshot.entities:
+            source_id = str(entity.get("id") or "")
+            name = str(entity.get("name") or source_id)
+            kind = str(entity.get("kind") or "database_object")
+            if not source_id or not name:
+                continue
+            actual_ids[source_id] = self.store.upsert_entity(Node(
+                id="", name=name[:MAX_NAME_CHARS], ntype=kind[:MAX_NAME_CHARS],
+                workspace_id=wid, repo_id=rid,
+            ))
+        relations_written = 0
+        existing = {
+            (edge.src, edge.dst, edge.relation)
+            for edge in self.store.edges_in_scope(SearchFilter(
+                workspace_id=wid, repo_id=rid
+            ))
+        }
+        for relation in snapshot.relations:
+            src = actual_ids.get(str(relation.get("source") or ""))
+            dst = actual_ids.get(str(relation.get("target") or ""))
+            rel = str(relation.get("relation") or "related")[:MAX_NAME_CHARS]
+            if not src or not dst or src == dst or (src, dst, rel) in existing:
+                continue
+            self.store.upsert_edge(Edge(
+                id="", src=src, dst=dst, relation=rel, layer=GraphLayer.ENTITY,
+                workspace_id=wid, repo_id=rid,
+                provenance={"source": "postgres_introspector",
+                            "memory_id": stored["id"],
+                            "memory_ids": [row["id"] for row in stored_rows]},
+            ))
+            existing.add((src, dst, rel))
+            relations_written += 1
+        self.store.audit(
+            actor, "import_postgres_schema", stored["id"],
+            f"{len(actual_ids)} entities, {relations_written} relations",
+        )
+        receipt = self.store.record_receipt(
+            "remember", workspace_id=wid, repo_id=rid or "",
+            actor=actor, target_count=len(stored_rows), status="postgres_schema",
+            metadata={
+                "entities": len(actual_ids),
+                "relations": relations_written,
+                "tables": snapshot.metadata.get("tables", 0),
+            },
+        )
+        return {
+            "workspace": ws, "repo": rp, "id": stored["id"],
+            "memory_ids": [row["id"] for row in stored_rows],
+            "entities": len(actual_ids), "relations": relations_written,
+            "schema": snapshot.metadata, "receipt": receipt,
+        }
 
     def consolidate(self, *, workspace: str, repo: Optional[str] = None,
                     dry_run: bool = False, min_cluster: int = 3,
@@ -691,11 +1039,14 @@ class MemoryService:
         wid, rid = self._require_scope(workspace, repo)
         try:
             min_cluster = max(2, min(20, int(min_cluster)))
-            archive_below = max(0.0, min(0.5, float(archive_below)))
+            archive_below = float(archive_below)
             min_mentions = max(2, min(50, int(min_mentions)))
         except (TypeError, ValueError):
             raise ValidationError("min_cluster/min_mentions must be integers and "
                                   "archive_below a number")
+        if not math.isfinite(archive_below):
+            raise ValidationError("archive_below must be finite")
+        archive_below = max(0.0, min(0.5, archive_below))
         llm = None
         if structured:
             try:
@@ -721,7 +1072,9 @@ class MemoryService:
     def recall(self, query: str, *, workspace: Optional[str] = None,
                repo: Optional[str] = None, mtypes: Optional[list] = None,
                k: int = 8, as_of: Optional[float] = None,
-               reinforce: bool = True) -> dict:
+               reinforce: bool = True, intent: str = "recall",
+               graph_layers: Optional[list] = None,
+               record_receipt: bool = True) -> dict:
         """Retrieve the most relevant memories for ``query`` within scope."""
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
         try:
@@ -730,6 +1083,10 @@ class MemoryService:
             raise ValidationError("k must be an integer")
         k = max(1, min(MAX_K, k))
         mts = [_enum(m, MemoryType, "mtype") for m in mtypes] if mtypes else None
+        layers = (
+            [_enum(layer, GraphLayer, "graph_layer") for layer in graph_layers]
+            if graph_layers else None
+        )
 
         # A bound instance must never do a workspace-less (global) recall — that would read
         # across every tenant's memories, the exact boundary the binding exists to enforce.
@@ -751,13 +1108,32 @@ class MemoryService:
 
         result = self.engine.recall_engine.recall(
             query,
-            _filter(wid, rid, mts, as_of),
+            _filter(wid, rid, mts, as_of, layers),
             k=k, reinforce=reinforce,
         )
-        return {
+        memories = []
+        for chunk in result.chunks:
+            item = dict(chunk)
+            arm = item.get("arm") or "hybrid"
+            item["why_recalled"] = (
+                f"Matched by {arm} retrieval; fused score "
+                f"{float(item.get('score') or 0.0):.3f}, retention "
+                f"{float(item.get('retention') or 0.0):.3f}."
+            )
+            memories.append(item)
+        out = {
             "query": query, "count": result.count,
-            "context": result.context, "memories": result.chunks,
+            "context": result.context, "memories": memories,
         }
+        if record_receipt:
+            out["receipt"] = self.store.record_receipt(
+                "recall", workspace_id=wid or "", repo_id=rid or "", actor="agent",
+                target_count=result.count, status="ok",
+                metadata={"intent": str(intent or "recall")[:80], "k": k,
+                          "result_count": result.count,
+                          "graph_layers": [layer.value for layer in layers] if layers else []},
+            )
+        return out
 
     def grounded_recall(self, query: str, *, workspace: Optional[str] = None,
                         repo: Optional[str] = None, mtypes: Optional[list] = None,
@@ -787,6 +1163,8 @@ class MemoryService:
                 min_support = float(min_support)
             except (TypeError, ValueError):
                 raise ValidationError("min_support must be a number")
+            if not math.isfinite(min_support):
+                raise ValidationError("min_support must be finite")
             min_support = max(0.0, min(1.0, min_support))
         mts = [_enum(m, MemoryType, "mtype") for m in mtypes] if mtypes else None
 
@@ -812,7 +1190,15 @@ class MemoryService:
             query, workspace_id=wid, repo_id=rid, mtypes=mts, as_of=as_of, k=k,
             llm=llm, min_support=min_support, max_citations=max_citations,
         )
-        return {"query": query, **ans.to_dict()}
+        out = {"query": query, **ans.to_dict()}
+        out["receipt"] = self.store.record_receipt(
+            "recall", workspace_id=wid or "", repo_id=rid or "", actor="agent",
+            target_count=len(out.get("citations") or []),
+            status="grounded" if out.get("grounded") else "abstained",
+            metadata={"intent": "grounded", "grounded": bool(out.get("grounded")),
+                      "citations": len(out.get("citations") or [])},
+        )
+        return out
 
     # ── session lifecycle ───────────────────────────────────────────────────────
     def start_session(self, workspace: str, *, repo: Optional[str] = None,
@@ -1036,19 +1422,35 @@ class MemoryService:
         return {"id": eid, "kind": kind}
 
     def link(self, a: str, b: str, *, workspace: str, repo: Optional[str] = None,
-            relation: str = "related") -> dict:
+             relation: str = "related", layer: Optional[str] = None,
+             reason: str = "") -> dict:
         a = _clean_text(a, field="a", max_chars=MAX_NAME_CHARS)
         b = _clean_text(b, field="b", max_chars=MAX_NAME_CHARS)
         relation = (_clean_text(relation, field="relation", max_chars=MAX_NAME_CHARS,
                                 required=False) or "related")
+        reason = _clean_text(
+            reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False
+        )
+        graph_layer = _enum(layer, GraphLayer, "layer") if layer else None
         wid, rid = self._require_scope(workspace, repo)
         self._check_owns(a, wid, rid)
         self._check_owns(b, wid, rid)
         try:
-            self.engine.link(a, b, relation=relation)
+            self.engine.link(
+                a, b, relation=relation, layer=graph_layer, reason=reason
+            )
         except KeyError as exc:
             raise ValidationError(str(exc))
-        return {"a": a, "b": b, "relation": relation, "linked": True}
+        out = {"a": a, "b": b, "relation": relation,
+               "layer": (graph_layer.value if graph_layer else None),
+               "reason": reason, "linked": True}
+        out["receipt"] = self.store.record_receipt(
+            "link", workspace_id=wid, repo_id=rid or "", actor="agent",
+            target_count=2, status="ok",
+            metadata={"relation": relation,
+                      "layer": graph_layer.value if graph_layer else "inferred"},
+        )
+        return out
 
     # ── code-symbol graph ────────────────────────────────────────────────────────
     def index_repo(self, *, workspace: str, repo: str, root_path: str,
@@ -1078,7 +1480,18 @@ class MemoryService:
                     f"Supported: {', '.join(sorted(supported))}. "
                     "Omit 'languages' to index every supported language found."
                 )
-        return self.engine.index_repo(rid, root_path, languages=langs)
+        out = self.engine.index_repo(rid, root_path, languages=langs)
+        out["workspace"] = ws
+        out["repo"] = rp
+        out["receipt"] = self.store.record_receipt(
+            "index_repo", workspace_id=wid, repo_id=rid, actor="agent",
+            target_count=out["files_indexed"], status="ok",
+            metadata={"files_scanned": out["files_scanned"],
+                      "files_indexed": out["files_indexed"],
+                      "files_removed": out["files_removed"],
+                      "symbols": out["symbols"], "edges": out["edges"]},
+        )
+        return out
 
     def search_code(self, query: str, *, workspace: str, repo: str, limit: int = 20) -> dict:
         if not repo:
@@ -1087,6 +1500,41 @@ class MemoryService:
         wid, rid = self._require_scope(workspace, repo)
         limit = max(1, min(MAX_K, int(limit)))
         return self.engine.search_code(query, repo_id=rid, limit=limit)
+
+    def code_path(self, source: str, target: str, *, workspace: str, repo: str,
+                  max_depth: int = 8) -> dict:
+        if not repo:
+            raise ValidationError("repo is required for a code path query")
+        source = _clean_text(source, field="source", max_chars=500)
+        target = _clean_text(target, field="target", max_chars=500)
+        _, rid = self._require_scope(workspace, repo)
+        try:
+            max_depth = max(1, min(32, int(max_depth)))
+        except (TypeError, ValueError):
+            raise ValidationError("max_depth must be an integer")
+        return self.engine.code_path(source, target, repo_id=rid, max_depth=max_depth)
+
+    def code_impact(self, changed_files: list, *, workspace: str, repo: str) -> dict:
+        if not repo:
+            raise ValidationError("repo is required for impact analysis")
+        files = _clean_string_list(
+            changed_files, field="changed_files", max_items=2_000, max_chars=4_000
+        )
+        _, rid = self._require_scope(workspace, repo)
+        return self.engine.analyze_impact(files, repo_id=rid)
+
+    def export_code_graph(self, *, workspace: str, repo: str) -> dict:
+        if not repo:
+            raise ValidationError("repo is required to export a code graph")
+        _, rid = self._require_scope(workspace, repo)
+        graph = self.engine.export_code_graph(repo_id=rid)
+        return {
+            "graph": graph,
+            "report_markdown": self.engine.code_graph_report(
+                repo_id=rid, payload=graph
+            ),
+            "graph_html": self.engine.code_graph_html(repo_id=rid, payload=graph),
+        }
 
     # ── inspection (powers the Memory Inspector UI) ─────────────────────────────
     def list_workspaces(self) -> dict:
@@ -1231,6 +1679,12 @@ class MemoryService:
         n_mem = c.execute("SELECT COUNT(*) AS n FROM memories WHERE workspace_id=?", (wid,)).fetchone()["n"]
         msub = "(SELECT id FROM memories WHERE workspace_id=?)"
         rsub = "(SELECT id FROM repos WHERE workspace_id=?)"
+        ssub = f"(SELECT id FROM symbols WHERE repo_id IN {rsub})"
+        c.execute(
+            f"DELETE FROM code_memory_links WHERE repo_id IN {rsub} "
+            f"OR memory_id IN {msub} OR symbol_id IN {ssub}",
+            (wid, wid, wid),
+        )
         c.execute(f"DELETE FROM mem_fts WHERE id IN {msub}", (wid,))
         c.execute(f"DELETE FROM mem_vectors WHERE id IN {msub}", (wid,))
         try:
@@ -1243,6 +1697,7 @@ class MemoryService:
         c.execute("DELETE FROM edges WHERE workspace_id=?", (wid,))
         c.execute("DELETE FROM sessions WHERE workspace_id=?", (wid,))
         c.execute("DELETE FROM events WHERE workspace_id=?", (wid,))
+        c.execute(f"DELETE FROM code_files WHERE repo_id IN {rsub}", (wid,))
         c.execute(f"DELETE FROM code_edges WHERE repo_id IN {rsub}", (wid,))
         c.execute(f"DELETE FROM symbols WHERE repo_id IN {rsub}", (wid,))
         c.execute("DELETE FROM repos WHERE workspace_id=?", (wid,))
@@ -1277,8 +1732,9 @@ class MemoryService:
         n_mem = c.execute("SELECT COUNT(*) AS n FROM memories WHERE workspace_id=?",
                           (wid_src,)).fetchone()["n"]
 
-        # 1) Repos: fold same-named repos together (repoint their symbols/code_edges
-        #    at the surviving row and drop the duplicate), else just relabel.
+        # 1) Repos: fold same-named repos together (repoint their incremental file
+        #    state, symbols, code edges, and memory bridges at the surviving row and
+        #    drop the duplicate), else just relabel.
         repo_remap: dict = {}
         src_repos = [dict(x) for x in c.execute(
             "SELECT id, name FROM repos WHERE workspace_id=?", (wid_src,))]
@@ -1288,8 +1744,50 @@ class MemoryService:
             ).fetchone()
             if existing:
                 repo_remap[r["id"]] = existing["id"]
+                # ``code_files`` is keyed by (repo_id, file), so fold overlapping file
+                # snapshots deterministically before the duplicate repo disappears.
+                for code_file in [dict(x) for x in c.execute(
+                        "SELECT * FROM code_files WHERE repo_id=?", (r["id"],))]:
+                    current = c.execute(
+                        "SELECT * FROM code_files WHERE repo_id=? AND file=?",
+                        (existing["id"], code_file["file"]),
+                    ).fetchone()
+                    if current is None:
+                        c.execute(
+                            "UPDATE code_files SET repo_id=? WHERE repo_id=? AND file=?",
+                            (existing["id"], r["id"], code_file["file"]),
+                        )
+                        continue
+                    current = dict(current)
+                    incoming_key = (
+                        float(code_file["indexed_at"] or 0),
+                        str(code_file["content_hash"] or ""),
+                    )
+                    current_key = (
+                        float(current["indexed_at"] or 0),
+                        str(current["content_hash"] or ""),
+                    )
+                    if incoming_key > current_key:
+                        c.execute(
+                            "UPDATE code_files SET lang=?, content_hash=?, size_bytes=?, "
+                            "mtime_ns=?, backend=?, indexed_at=? WHERE repo_id=? AND file=?",
+                            (
+                                code_file["lang"], code_file["content_hash"],
+                                code_file["size_bytes"], code_file["mtime_ns"],
+                                code_file["backend"], code_file["indexed_at"],
+                                existing["id"], code_file["file"],
+                            ),
+                        )
+                    c.execute(
+                        "DELETE FROM code_files WHERE repo_id=? AND file=?",
+                        (r["id"], code_file["file"]),
+                    )
                 c.execute("UPDATE symbols SET repo_id=? WHERE repo_id=?", (existing["id"], r["id"]))
                 c.execute("UPDATE code_edges SET repo_id=? WHERE repo_id=?", (existing["id"], r["id"]))
+                c.execute(
+                    "UPDATE code_memory_links SET repo_id=? WHERE repo_id=?",
+                    (existing["id"], r["id"]),
+                )
                 c.execute("DELETE FROM repos WHERE id=?", (r["id"],))
             else:
                 c.execute("UPDATE repos SET workspace_id=? WHERE id=?", (wid_dst, r["id"]))
@@ -1392,6 +1890,7 @@ class MemoryService:
         #    which (unlike merge's non-colliding case) must be remapped since the repo
         #    id itself changes.
         repo_remap: dict = {}
+        symbol_remap: dict = {}
         for r in [dict(x) for x in c.execute(
                 "SELECT * FROM repos WHERE workspace_id=?", (wid_src,))]:
             nrid = ids.new_id("repo")
@@ -1401,25 +1900,38 @@ class MemoryService:
                 "created_at, indexed_at, settings) VALUES (?,?,?,?,?,?,?,?,?)",
                 (nrid, wid_dst, r["name"], r["root_path"], r["vcs_remote"], r["primary_lang"],
                  ts, r["indexed_at"], r["settings"]))
-            symbol_remap: dict = {}
+            for code_file in [dict(x) for x in c.execute(
+                    "SELECT * FROM code_files WHERE repo_id=?", (r["id"],))]:
+                c.execute(
+                    "INSERT INTO code_files(repo_id, file, lang, content_hash, size_bytes, "
+                    "mtime_ns, backend, indexed_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        nrid, code_file["file"], code_file["lang"],
+                        code_file["content_hash"], code_file["size_bytes"],
+                        code_file["mtime_ns"], code_file["backend"],
+                        code_file["indexed_at"],
+                    ),
+                )
             for s in [dict(x) for x in c.execute(
                     "SELECT * FROM symbols WHERE repo_id=?", (r["id"],))]:
                 nsid = ids.new_id("symbol")
                 symbol_remap[s["id"]] = nsid
                 c.execute(
                     "INSERT INTO symbols(id, repo_id, kind, name, fqname, file, span, signature, "
-                    "lang, exported, content_hash, embedding_ref, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "docstring, lang, exported, content_hash, embedding_ref, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (nsid, nrid, s["kind"], s["name"], s["fqname"], s["file"], s["span"],
-                     s["signature"], s["lang"], s["exported"], s["content_hash"],
-                     s["embedding_ref"], s["updated_at"]))
+                     s["signature"], s["docstring"], s["lang"], s["exported"],
+                     s["content_hash"], s["embedding_ref"], s["updated_at"]))
             for ce in [dict(x) for x in c.execute(
                     "SELECT * FROM code_edges WHERE repo_id=?", (r["id"],))]:
                 c.execute(
-                    "INSERT INTO code_edges(id, repo_id, src, dst, relation, file, line) "
-                    "VALUES (?,?,?,?,?,?,?)",
+                    "INSERT INTO code_edges(id, repo_id, src, dst, relation, layer, file, line) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
                     (ids.new_id("edge"), nrid, symbol_remap.get(ce["src"], ce["src"]),
-                     symbol_remap.get(ce["dst"], ce["dst"]), ce["relation"], ce["file"], ce["line"]))
+                     symbol_remap.get(ce["dst"], ce["dst"]), ce["relation"],
+                     ce["layer"] or "entity",
+                     ce["file"], ce["line"]))
 
         def _new_repo(old_repo_id):
             return repo_remap.get(old_repo_id, old_repo_id) if old_repo_id is not None else None
@@ -1440,13 +1952,14 @@ class MemoryService:
         for ed in [dict(x) for x in c.execute(
                 "SELECT * FROM edges WHERE workspace_id=?", (wid_src,))]:
             c.execute(
-                "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation, weight, "
-                "valid_from, valid_to, ingested_at, expired_at, provenance) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation, layer, "
+                "weight, valid_from, valid_to, ingested_at, expired_at, provenance) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (ids.new_id("edge"), wid_dst, _new_repo(ed["repo_id"]),
                  entity_remap.get(ed["src"], ed["src"]), entity_remap.get(ed["dst"], ed["dst"]),
-                 ed["relation"], ed["weight"], ed["valid_from"], ed["valid_to"],
-                 ed["ingested_at"], ed["expired_at"], ed["provenance"]))
+                 ed["relation"], ed["layer"] or "semantic", ed["weight"],
+                 ed["valid_from"], ed["valid_to"], ed["ingested_at"],
+                 ed["expired_at"], ed["provenance"]))
 
         # 4) Sessions, cloned with fresh ids (memories/events below repoint at these).
         session_remap: dict = {}
@@ -1506,13 +2019,40 @@ class MemoryService:
             old_ids = list(memory_remap.keys())
             marks = ",".join("?" for _ in old_ids)
             for ln in [dict(x) for x in c.execute(
-                    f"SELECT a, b, relation, created_at FROM mem_links "
+                    f"SELECT a, b, relation, layer, reason, created_at FROM mem_links "
                     f"WHERE a IN ({marks}) AND b IN ({marks})", old_ids + old_ids)]:
-                c.execute("INSERT INTO mem_links(a, b, relation, created_at) VALUES (?,?,?,?)",
-                         (memory_remap[ln["a"]], memory_remap[ln["b"]], ln["relation"],
-                          ln["created_at"]))
+                c.execute(
+                    "INSERT INTO mem_links(a, b, relation, layer, reason, created_at) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (
+                        memory_remap[ln["a"]], memory_remap[ln["b"]],
+                        ln["relation"], ln["layer"], ln["reason"], ln["created_at"],
+                    ),
+                )
 
-        # 7) Events, cloned with fresh ids.
+        # 7) Code↔memory bridges, after both endpoint remaps are complete.
+        if repo_remap and symbol_remap and memory_remap:
+            old_repo_ids = list(repo_remap)
+            marks = ",".join("?" for _ in old_repo_ids)
+            for link in [dict(x) for x in c.execute(
+                    f"SELECT * FROM code_memory_links WHERE repo_id IN ({marks})",
+                    old_repo_ids,
+            )]:
+                new_symbol = symbol_remap.get(link["symbol_id"])
+                new_memory = memory_remap.get(link["memory_id"])
+                if new_symbol is None or new_memory is None:
+                    continue
+                c.execute(
+                    "INSERT INTO code_memory_links(id, repo_id, symbol_id, memory_id, "
+                    "relation, confidence, created_at) VALUES (?,?,?,?,?,?,?)",
+                    (
+                        ids.new_id("edge"), repo_remap[link["repo_id"]],
+                        new_symbol, new_memory, link["relation"],
+                        link["confidence"], link["created_at"],
+                    ),
+                )
+
+        # 8) Events, cloned with fresh ids.
         for ev in [dict(x) for x in c.execute(
                 "SELECT * FROM events WHERE workspace_id=?", (wid_src,))]:
             c.execute(
@@ -1604,6 +2144,8 @@ class MemoryService:
             other_id = link["b"] if link["a"] == mid else link["a"]
             other = self.store.get_memory(other_id)
             links.append({"id": other_id, "relation": link["relation"],
+                          "layer": link.get("layer") or "semantic",
+                          "reason": link.get("reason") or "",
                           "title": (other.title or other.content[:80]) if other else "?",
                           "live": bool(other and other.expired_at is None and
                                        other.valid_to is None)})
@@ -1691,6 +2233,43 @@ class MemoryService:
             "ORDER BY a.ts DESC LIMIT ?", (wid, limit)).fetchall()
         return {"entries": [dict(r) for r in rows]}
 
+    def receipt_log(self, *, workspace: str, limit: int = 100) -> dict:
+        """Privacy-safe receipt-only audit view (no memory/query contents)."""
+        wid, _ = self._require_scope(workspace, None)
+        limit = max(1, min(10_000, int(limit)))
+        entries = self.store.list_receipts(workspace_id=wid, limit=limit)
+        return {
+            "format": "engraphis-receipts/1",
+            "workspace_digest": hashlib.sha256(wid.encode("utf-8")).hexdigest()[:24],
+            "entries": entries,
+        }
+
+    def verify_receipts(self, *, workspace: str, expected_head: str = "",
+                        expected_count: Optional[int] = None) -> dict:
+        """Verify the local chain and optionally compare an externally saved anchor."""
+        wid, _ = self._require_scope(workspace, None)
+        expected_head = _clean_text(
+            expected_head, field="expected_head", max_chars=128, required=False
+        )
+        if expected_count is not None:
+            try:
+                expected_count = int(expected_count)
+            except (TypeError, ValueError, OverflowError):
+                raise ValidationError("expected_count must be an integer")
+            if expected_count < 0:
+                raise ValidationError("expected_count must be non-negative")
+        return self.store.verify_receipts(
+            workspace_id=wid,
+            expected_head=expected_head,
+            expected_count=expected_count,
+        )
+
+    def export_receipts(self, *, workspace: str) -> dict:
+        """Export only public receipt payloads and chain hashes."""
+        out = self.receipt_log(workspace=workspace, limit=10_000)
+        out["verification"] = self.verify_receipts(workspace=workspace)
+        return out
+
     def export_workspace(self, *, workspace: str) -> dict:
         """Full bi-temporal dump of one workspace — memories (live *and* superseded),
         sessions, and the audit trail. The compliance story in one artifact: nothing is
@@ -1709,13 +2288,18 @@ class MemoryService:
         audit = [dict(r) for r in conn.execute(
             "SELECT a.* FROM audit a JOIN memories m ON m.id = a.target "
             "WHERE m.workspace_id=? ORDER BY a.ts", (wid,))]
+        receipts = self.store.list_receipts(workspace_id=wid, limit=10_000)
         import time as _time
         return {"format": "engraphis-export/1", "exported_at": _time.time(),
                 "workspace": workspace, "counts": {"memories": len(memories),
-                "sessions": len(sessions), "audit": len(audit)},
-                "memories": memories, "sessions": sessions, "audit": audit}
+                "sessions": len(sessions), "audit": len(audit),
+                "receipts": len(receipts)},
+                "memories": memories, "sessions": sessions, "audit": audit,
+                "receipts": receipts}
 
-    def graph(self, *, workspace: str, limit: int = 2000) -> dict:
+    def graph(self, *, workspace: str, limit: int = 2000,
+              layers: Optional[list] = None, include_code: bool = False,
+              repo: Optional[str] = None) -> dict:
         """Entity-relation network for a workspace: nodes/edges plus type counts,
         top-connected entities, and connectivity stats — powers the Graph tab in
         both the v1-look dashboard and the Inspector UI (engraphis.graphdata
@@ -1741,11 +2325,142 @@ class MemoryService:
             ents = conn.execute(
                 "SELECT id, name, etype FROM entities WHERE workspace_id=? LIMIT ?",
                 (wid, limit)).fetchall()
-        node_ids = {r["id"] for r in ents}
-        edgs = [{"src": e.src, "dst": e.dst, "relation": e.relation}
-                for e in self.store.edges_in_scope(SearchFilter(workspace_id=wid))
-                if e.src in node_ids and e.dst in node_ids]
-        return build_graph_payload(ws, ents, edgs)
+        entity_rows = [dict(row) for row in ents]
+        node_ids = {row["id"] for row in entity_rows}
+        selected_layers = None
+        if layers:
+            selected_layers = {
+                _enum(layer, GraphLayer, "layer").value for layer in layers
+            }
+        edgs = [
+            {
+                "src": edge.src, "dst": edge.dst, "relation": edge.relation,
+                "layer": edge.layer.value if edge.layer else "semantic",
+            }
+            for edge in self.store.edges_in_scope(SearchFilter(workspace_id=wid))
+            if edge.src in node_ids and edge.dst in node_ids
+            and (
+                selected_layers is None
+                or (edge.layer.value if edge.layer else "semantic") in selected_layers
+            )
+        ]
+        repo_names: list[str] = []
+        if include_code and (
+            selected_layers is None
+            or {"entity", "semantic"} & selected_layers
+        ):
+            repo_rows = []
+            if repo:
+                repo_name = _clean_name(repo, field="repo")
+                rid = self._lookup_repo(wid, repo_name)
+                if rid is None:
+                    raise ValidationError(
+                        f"no repo named '{repo_name}' in workspace '{ws}'"
+                    )
+                repo_rows = [{"id": rid, "name": repo_name}]
+            else:
+                repo_rows = [
+                    dict(row) for row in conn.execute(
+                        "SELECT id, name FROM repos WHERE workspace_id=? ORDER BY name",
+                        (wid,),
+                    ).fetchall()
+                ]
+            for repo_row in repo_rows:
+                rid = repo_row["id"]
+                repo_name = repo_row["name"]
+                repo_names.append(repo_name)
+                symbols = self.store.list_symbols(rid)
+                symbol_node: dict[str, str] = {}
+                symbol_id_node: dict[str, str] = {}
+                for symbol in symbols:
+                    if len(entity_rows) >= limit:
+                        break
+                    node_id = f"code:{symbol['id']}"
+                    label = symbol.get("fqname") or symbol.get("name") or node_id
+                    entity_rows.append({
+                        "id": node_id,
+                        "name": f"{repo_name}:{label}",
+                        "etype": f"code_{symbol.get('kind') or 'symbol'}",
+                    })
+                    symbol_id_node[symbol["id"]] = node_id
+                    for key in (symbol.get("fqname"), symbol.get("name")):
+                        if key:
+                            symbol_node.setdefault(key, node_id)
+                file_nodes: dict[str, str] = {}
+
+                def code_endpoint(value: str, file_hint: str = "") -> Optional[str]:
+                    if value in symbol_node:
+                        return symbol_node[value]
+                    if value and (
+                        "/" in value or "\\" in value
+                        or value.endswith(tuple(
+                            [".py", ".js", ".ts", ".go", ".rs", ".java", ".cs",
+                             ".c", ".cpp", ".sql", ".tf"]
+                        ))
+                    ):
+                        file_name = value.replace("\\", "/")
+                    elif file_hint:
+                        file_name = file_hint.replace("\\", "/")
+                    else:
+                        return None
+                    if file_name not in file_nodes and len(entity_rows) < limit:
+                        file_nodes[file_name] = f"file:{rid}:{file_name}"
+                        entity_rows.append({
+                            "id": file_nodes[file_name],
+                            "name": f"{repo_name}:{file_name}",
+                            "etype": "code_file",
+                        })
+                    return file_nodes.get(file_name)
+
+                if selected_layers is None or "entity" in selected_layers:
+                    for edge in self.store.list_code_edges(rid):
+                        src = code_endpoint(edge.get("src") or "", edge.get("file") or "")
+                        dst = code_endpoint(edge.get("dst") or "")
+                        if src and dst and src != dst:
+                            edgs.append({
+                                "src": src, "dst": dst,
+                                "relation": edge.get("relation") or "",
+                                "layer": edge.get("layer") or "entity",
+                            })
+                linked_memory_ids = set()
+                if selected_layers is None or "semantic" in selected_layers:
+                    for link in self.store.list_code_memory_links(rid):
+                        code_id = symbol_id_node.get(link.get("symbol_id"))
+                        memory_id = link.get("memory_id")
+                        if not code_id or not memory_id:
+                            continue
+                        if memory_id not in linked_memory_ids and len(entity_rows) < limit:
+                            memory = self.store.get_memory(memory_id)
+                            if memory and memory.expired_at is None and memory.valid_to is None:
+                                entity_rows.append({
+                                    "id": memory_id,
+                                    "name": memory.title or memory.content[:80] or memory_id,
+                                    "etype": f"memory_{memory.mtype.value}",
+                                })
+                                linked_memory_ids.add(memory_id)
+                        if memory_id in linked_memory_ids:
+                            edgs.append({
+                                "src": code_id, "dst": memory_id,
+                                "relation": link.get("relation") or "mentions",
+                                "layer": "semantic",
+                            })
+                    for link in self.store.links_among(
+                        list(linked_memory_ids),
+                        layers=(
+                            [GraphLayer(layer) for layer in selected_layers]
+                            if selected_layers else None
+                        ),
+                    ):
+                        edgs.append({
+                            "src": link["a"], "dst": link["b"],
+                            "relation": link["relation"],
+                            "layer": link.get("layer") or "semantic",
+                            "reason": link.get("reason") or "",
+                        })
+        payload = build_graph_payload(ws, entity_rows, edgs)
+        payload["unified"] = bool(include_code)
+        payload["repos"] = repo_names
+        return payload
 
     def _should_backfill_graph(self, wid: str, has_entities: bool) -> bool:
         if wid in self._graph_backfilled:
@@ -1859,9 +2574,12 @@ class MemoryService:
         }
 
 
-def _filter(workspace_id, repo_id, mtypes, as_of):
+def _filter(workspace_id, repo_id, mtypes, as_of, graph_layers=None):
     from engraphis.core.interfaces import SearchFilter
-    return SearchFilter(workspace_id=workspace_id, repo_id=repo_id, mtypes=mtypes, as_of=as_of)
+    return SearchFilter(
+        workspace_id=workspace_id, repo_id=repo_id, mtypes=mtypes,
+        graph_layers=graph_layers, as_of=as_of,
+    )
 
 
 def _mem_to_dict(rec: Any) -> dict:
