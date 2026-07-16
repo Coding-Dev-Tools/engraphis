@@ -5,6 +5,8 @@ down not just correctness (headings, code fences, packing, overlap) but the safe
 properties a security review depends on: determinism, the per-document chunk cap, and
 control-character defanging.
 """
+import pytest
+
 from engraphis.backends.extractor import (
     ChunkingExtractor,
     PassthroughExtractor,
@@ -143,6 +145,7 @@ class _FailingMockLLM:
 
 
 def test_structured_llm_extractor_validates_and_preserves_metadata():
+    pytest.importorskip("pydantic")
     ex = StructuredLLMExtractor(_StructuredMockLLM({
         "facts": [{
             "content": "Engraphis uses PASETO for auth tokens.",
@@ -168,6 +171,7 @@ def test_structured_llm_extractor_validates_and_preserves_metadata():
 
 
 def test_structured_llm_extractor_accepts_single_fact_object():
+    pytest.importorskip("pydantic")
     ex = StructuredLLMExtractor(_StructuredMockLLM({
         "content": "Use pnpm for frontend packages.",
         "title": "Package manager",
