@@ -49,18 +49,19 @@ python -m eval.external --dataset locomo10.json --format locomo --k 10        # 
 python -m eval.external --dataset longmemeval_s.json --format longmemeval     # LongMemEval
 python -m eval.external --dataset locomo10.json --format locomo --offline --limit 2  # plumbing check
 
-# ── v2 Memory Inspector (product UI over MemoryService; same layer as the MCP server) ──
-python -m scripts.inspector          # http://127.0.0.1:8710 (auth: ENGRAPHIS_API_TOKEN)
+# ── Unified dashboard + memory inspector ──
+python -m scripts.start_dashboard    # http://127.0.0.1:8700
+# The standalone scripts.inspector launcher and :8710 were retired 2026-07-10.
 
 # ── Onboarding (writes .env with an absolute DB path; doctor mode verifies install) ──
 engraphis-init                   # or: python -m scripts.init
 engraphis-init --check
 
-# ── Commercial layer (gates live ONLY in inspector/app.py) ──
+# ── Commercial layer (shared dashboard/auth/license modules; never core/) ──
 python -m scripts.license_admin keygen                 # vendor keypair → .secrets/ (gitignored)
 python -m scripts.license_admin issue --email a@b.co --plan team --seats 5 --days 365
 ENGRAPHIS_LICENSE_KEY=ENGR1...   # or ~/.engraphis/license.key; free tier = no key
-# Team mode is ON by default (multi-user Inspector). Set ENGRAPHIS_TEAM_MODE=0 to disable.
+# Team mode is ON by default (multi-user dashboard). Set ENGRAPHIS_TEAM_MODE=0 to disable.
 # A 'team' license is required to add seats beyond the first admin.
 
 # ── Sleep-time consolidation (schedulable local job; also an MCP tool) ────────
@@ -240,7 +241,7 @@ These are pure, unit-tested functions — change them only with a corresponding 
   (sources stay live). Tests: `tests/test_merge.py`.
 - **Done — Phase 4 (first shipping cut):** the consolidation loop
   (`core/consolidate.py` + `scripts/consolidate.py` + `engraphis_consolidate` MCP tool +
-  Inspector button): recurring episodics → semantic digests (linked `consolidates`, audited),
+  dashboard button): recurring episodics → semantic digests (linked `consolidates`, audited),
   decayed transients archived bi-temporally; deterministic offline, optional LLM summarizer.
   Every sweep reports **compaction** — estimated context tokens before/after
   (`textutil.estimate_tokens`, ~4 chars/token, offline) — under `report["compaction"]`, so the
@@ -250,12 +251,14 @@ These are pure, unit-tested functions — change them only with a corresponding 
   `source='profile_consolidation'`, idempotent + audited — the local-first analog of a
   per-subject knowledge profile. Framed local-first: a user-schedulable job, not a cloud service.
   **Not done:** scope promotion; procedural distillation.
-- **New — v2 Memory Inspector** (`engraphis/inspector/`, `python -m scripts.inspector`,
-  :8710): product UI over `MemoryService` (same layer as the MCP server, so UI and tools
-  can't drift). Flagship screen: the supersession chain with word-level diffs — rendering
+- **Done — unified dashboard with built-in memory inspector** (`engraphis/inspector/`
+  internals mounted by `python -m scripts.start_dashboard`, :8700): product UI over
+  `MemoryService` (same layer as the MCP server, so UI and tools can't drift). The
+  standalone :8710 launcher is retired. Flagship screen: the supersession chain with
+  word-level diffs — rendering
   `resolve()`'s decision history. Accessible (ARIA tabs/labels, keyboard nav, text+color
   status), no build step, content rendered via textContent only. Optional bearer auth
-  (`ENGRAPHIS_API_TOKEN`); multi-user login is the remaining Pro gate.
+  (`ENGRAPHIS_API_TOKEN`) and Team-mode multi-user auth are enforced server-side.
 - **Done — Cloud sync (Pro, first cut):** convergent multi-device / team sync over any
   shared folder. `core/sync.py::SyncEngine` is a state-based CRDT merge over memory rows
   (bi-temporal, deterministic, idempotent) that reuses the `resolve()`/validity machinery —
