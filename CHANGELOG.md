@@ -50,8 +50,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Fixed
 - **Agent Connect and dashboard lifecycle:** corrected generated endpoint URLs, retained
-  one-time token visibility, enforced member access on `/mcp`, closed previously injected
-  stores, and made connect-info reflect the real optional MCP mount.
+  one-time token visibility, made `/mcp` bearer-only, bound MCP sessions to their initiating
+  user, rechecked tool roles on every call, retained DNS-rebinding protection, closed
+  previously injected stores, and made connect-info reflect the real optional MCP mount.
 - **License and billing enforcement:** authoritative revocations override cached
   entitlement immediately while transient failures may use an unexpired lease; runtime
   public-key replacement is test-only; trial verification links survive signing failures;
@@ -61,13 +62,16 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - **Memory and retrieval integrity:** audit writes are committed durably, recall excludes
   non-live rows, sync dry-runs validate remote repository mappings, graph provenance is
   pruned per memory instead of deleting shared edges, SQLite-vector distances are
-  converted to cosine similarity, and entity expansion matches complete names.
+  converted to cosine similarity, entity expansion matches complete names, and the
+  sentence-transformers adapters support both legacy and renamed dimension APIs.
 - **Structured-data safety:** extraction metadata survives ingest unchanged, proactive and
   consolidation inputs are bounded, structured consolidation rejects source IDs outside
   the requested cluster, and synthesized context cannot replace deterministic output
   without valid citations.
 - **Dashboard graph navigation:** focusing an isolated node now retains the requested node
   through the delayed renderer retry instead of reporting a false “Entity not in view.”
+- **Dashboard typography:** replaced sub-12px text and the flat type ramp with a consistent
+  12/16/24/32px hierarchy while preserving responsive layout.
 
 ### Documentation
 - Updated the README, Agent Connect, Railway, Kilo Code, bundled memory skill, benchmark
