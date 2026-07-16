@@ -6,51 +6,73 @@ All notable changes to Engraphis are documented here. Format loosely follows
 ## [Unreleased]
 
 ### Added
-- **Agent Connect (Team): connect agents to a hosted instance instead of running locally.**
-  Team members mint a per-user API token from the dashboard and point their agent at the
-  instance's HTTP API to store memories in the cloud v2 store (the same DB the dashboard
-  reads). New: `POST /api/remember` (Team-gated, mirrors the local `engraphis_remember`
-  MCP tool's params), per-user bearer-token endpoints (`POST /api/auth/token`,
-  `GET /api/auth/tokens`, `DELETE /api/auth/token/{id}`), and `GET /api/auth/connect-info`
-  to verify a token + discover the API base. The dashboard auth gate now accepts a
-  per-user bearer token exactly like a cookie session (bound to the member for role +
-  personal-folder authz); disabled members' tokens are refused instantly. Tokens are
-  SHA-256 hashed at rest (raw token shown once). A free / lapsed instance returns `402`
-  on `/api/remember`, so a Team license is required to host team agents. See
-  `docs/AGENT_CONNECT.md`. (`tests/test_agent_connect.py`.)
-  *Note:* MCP-over-HTTP at `/mcp` is now mounted (see follow-up entry below), so MCP-native
-  agents point one URL at the cloud instance too. The HTTP API remains for non-MCP agents.
+- **Agent Connect for hosted Team instances.** Members can mint SHA-256-hashed per-user
+  bearer tokens in Settings and use the hosted v2 store through `POST /api/remember`,
+  the existing read routes, token management under `/api/auth/token*`, and
+  `GET /api/auth/connect-info`. Tokens retain the user's role and personal-folder scope;
+  viewers are read-only and disabling a user invalidates their tokens immediately.
+- **Authenticated MCP-over-HTTP at `/mcp`.** When the MCP extra is installed, the
+  dashboard mounts the same 20 tools as the standalone server and injects its existing
+  `MemoryService`, avoiding a second SQLite writer. The endpoint requires an active Team
+  entitlement plus a member/admin cookie or bearer token; connect-info reports whether
+  the mount is actually available.
+- **One-click Railway hosting.** Added `railway.json`, the README deploy button, and
+  `docs/HOSTING_RAILWAY.md` for persistent volumes, forwarded HTTPS headers, Team
+  entitlement bootstrap, member invites, and HTTP/MCP agent connection.
+- **Two new MCP context tools.** The MCP inventory grows from 18 to 20 with
+  `engraphis_answer`, a compatibility alias for the existing grounded-recall contract,
+  and `engraphis_proactive_context`, also available at `POST /api/proactive-context`.
+  Proactive packets include bounded task/agent state, cited memories, suggested queries,
+  and the previous session handoff. Optional LLM prose is accepted only when every claim
+  carries a valid citation.
+- **Structured LLM ingestion and consolidation.** `ENGRAPHIS_EXTRACTOR=llm_structured`
+  validates typed facts, entities, relations, keywords, and confidence; that metadata is
+  preserved through storage and automatically feeds the graph. Settings now includes a
+  **Connect your LLM** card backed by `/api/llm/status` and `/api/llm/test`.
+  Consolidation adds schema-validated facts and explicit source supersession across the
+  service, REST, MCP, and CLI surfaces, with deterministic fallback on provider/schema
+  failure.
+- **Opt-in deterministic memory intelligence APIs.** Added conflict triage for duplicate,
+  refinement, contradiction, and obsolete candidates, plus a serializable `UserModel`
+  that learns interaction preferences and reranks recall results. These helpers do not
+  mutate the store or alter default recall unless a caller invokes them.
 
-### Added
-- **MCP-over-HTTP at `/mcp` (agent connect, stacked on the above).** The Engraphis MCP
-  server is mounted at `/mcp` on the dashboard so an MCP-native agent (Claude Code, Cursor)
-  points one URL at the cloud instance and reuses the same v2 store the dashboard reads.
-  `mcp_server.set_service(svc)` injects the dashboard's `MemoryService` (one writer — no
-  second SQLite connection, avoiding the WAL lock contention that `mcp_server_http.py`
-  exists to prevent). The dashboard app gains a lifespan that initializes the MCP session
-  manager (a mounted sub-app's own lifespan does not run in Starlette), and `mcp.settings.transport_security`
-  DNS-rebinding protection is disabled on the mounted instance (the dashboard's `_auth_gate`
-  is the real boundary, and the default localhost-only allowlist would 421 a real domain).
-  `/mcp` is Team-gated (402) + member-authenticated (401) exactly like `/api/remember`.
-  The session manager is reset per `create_app()` so multiple apps in one process (tests)
-  each get a fresh, runnable instance. `tests/test_agent_connect_mcp.py` (4 tests: 401,
-  402, handshake+tools/list, write-shares-dashboard-store).
+### Changed
+- **Team mode is opt-out by default.** `ENGRAPHIS_TEAM_MODE=0` (or false/no/off) disables
+  Team plumbing. A fresh solo install stays open, first-admin setup requires a live Team
+  entitlement, and an existing team's authentication wall remains active if its license
+  lapses so private data never becomes public.
+- Pre-login license status and trial routes now allow a fresh instance to start a Team
+  trial before first-admin setup. Purchased keys bootstrap through
+  `ENGRAPHIS_LICENSE_KEY` or the license file; `/api/license/activate` remains admin-only.
+- Package fallback metadata and all user-facing tool inventories now agree on version
+  `0.9.5` and 20 MCP tools.
 
 ### Fixed
-- Hardened Team and Agent Connect end to end: Team setup now requires entitlement,
-  lapsed instances keep their authentication wall, viewer tokens remain read-only, and
-  `/mcp` enforces member access while sharing the dashboard store.
-- Made license and billing state fail safely: runtime public-key overrides are test-only,
-  revocations invalidate cached entitlement immediately, trial links survive signing
-  failures, webhook reservations recover after crashes, and initial subscription seat
-  baselines no longer suppress the first real update.
-- Preserved memory integrity across restart and retrieval: audit writes are durable,
-  sync dry-runs validate remote repository mappings, graph edge provenance is pruned
-  precisely, SQLite-vector distances are converted to cosine similarity, and entity
-  expansion matches complete names rather than substrings.
-- Bounded proactive-context and consolidation inputs, required cited LLM output before it
-  can replace deterministic context, and rejected structured consolidation that cites
-  source IDs outside the requested cluster.
+- **Agent Connect and dashboard lifecycle:** corrected generated endpoint URLs, retained
+  one-time token visibility, enforced member access on `/mcp`, closed previously injected
+  stores, and made connect-info reflect the real optional MCP mount.
+- **License and billing enforcement:** authoritative revocations override cached
+  entitlement immediately while transient failures may use an unexpired lease; runtime
+  public-key replacement is test-only; trial verification links survive signing failures;
+  webhook reservations are retry-safe after crashes; subscription seat baselines no
+  longer suppress the first real update; and registry writes no longer occur inside the
+  SQLite trial transaction.
+- **Memory and retrieval integrity:** audit writes are committed durably, recall excludes
+  non-live rows, sync dry-runs validate remote repository mappings, graph provenance is
+  pruned per memory instead of deleting shared edges, SQLite-vector distances are
+  converted to cosine similarity, and entity expansion matches complete names.
+- **Structured-data safety:** extraction metadata survives ingest unchanged, proactive and
+  consolidation inputs are bounded, structured consolidation rejects source IDs outside
+  the requested cluster, and synthesized context cannot replace deterministic output
+  without valid citations.
+- **Dashboard graph navigation:** focusing an isolated node now retains the requested node
+  through the delayed renderer retry instead of reporting a false “Entity not in view.”
+
+### Documentation
+- Updated the README, Agent Connect, Railway, Kilo Code, bundled memory skill, benchmark
+  command, and package-version fallback to match the shipped routes, tool count, setup
+  order, and extractor/consolidation options; removed the unused shortcut icon helper.
 
 ## [0.9.5] - 2026-07-14
 
