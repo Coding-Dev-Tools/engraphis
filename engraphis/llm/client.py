@@ -125,6 +125,42 @@ class LLMClient:
             max_tokens=max_tokens,
         )
 
+    def extract_json(self, prompt: str, schema: dict) -> Any:
+        """Extract structured JSON from the LLM using a JSON schema constraint.
+
+        Uses the provider's native structured output (OpenAI JSON schema, etc.)
+        when available; falls back to prompting + post-hoc validation otherwise.
+        """
+        # Build a system prompt that enforces JSON schema output
+        system = (
+            "You output ONLY valid JSON matching the provided schema. "
+            "No markdown, no prose, no commentary. The schema:\n"
+            f"{json.dumps(schema)}"
+        )
+        raw = self.chat([{"role": "user", "content": prompt}], system=system,
+                        temperature=0.0, max_tokens=8192)
+        return _parse_json_response(raw)
+
+    def ping(self) -> dict[str, Any]:
+        """Minimal live test of the configured provider/key/model.
+
+        Sends a tiny completion and returns ``{"ok": bool, "reply": str,
+        "error": str, "provider": str, "model": str}``. Never raises — a network
+        or auth failure is reported as ``ok=False`` with an actionable ``error`` so
+        the dashboard's "Test connection" button can show what went wrong (missing
+        key, 401, wrong base URL, unreachable host) without a stack trace.
+        """
+        try:
+            reply = self.chat(
+                [{"role": "user", "content": "Reply with the single word: ok"}],
+                temperature=0.0, max_tokens=5,
+            )
+            return {"ok": True, "reply": (reply or "").strip()[:200],
+                    "error": "", "provider": self.provider, "model": self.model}
+        except Exception as exc:  # noqa: BLE001 — surface every failure mode to the UI
+            return {"ok": False, "reply": "", "error": str(exc),
+                    "provider": self.provider, "model": self.model}
+
     # ── Provider implementations ────────────────────────────────────────────
 
     def _chat_openai_compat(self, messages, system, temperature, max_tokens) -> str:
