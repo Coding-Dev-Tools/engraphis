@@ -10,6 +10,10 @@ backends for production.
 """
 from __future__ import annotations
 
+import hashlib
+import re
+import time
+from collections import defaultdict, deque
 from pathlib import Path
 from typing import Optional
 
@@ -19,7 +23,13 @@ from engraphis.backends.embedder_st import get_embedder
 from engraphis.backends.reranker import IdentityReranker, get_reranker
 from engraphis.backends.vector_sqlitevec import get_vector_index
 from engraphis.core import scoring
-from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
+from engraphis.core.interfaces import (
+    MemoryRecord,
+    MemoryType,
+    RetentionDecision,
+    Scope,
+    SearchFilter,
+)
 from engraphis.core.recall import RecallEngine, RecallResult
 from engraphis.core.resolve import RELATED_SIM_FLOOR, ResolutionOp, resolve
 from engraphis.core.store import Store, now_ts
@@ -37,7 +47,7 @@ EVOLVE_MAX_LINKS = 3
 class MemoryEngine:
     def __init__(self, store: Store, embedder, vector_index, reranker=None,
                  *, auto_evolve: bool = True, extractor=None,
-                 graph_extractor=None) -> None:
+                 graph_extractor=None, retention_supervisor=None) -> None:
         self.store = store
         self.embedder = embedder
         self.index = vector_index
@@ -50,15 +60,18 @@ class MemoryEngine:
         self.extractor = extractor
         # Optional graph extractor (backends.graph_extractor). None = no graph population.
         self.graph_extractor = graph_extractor
+        self.retention_supervisor = retention_supervisor
 
     @classmethod
     def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
                embed_dim: int = 384, vector_backend: str = "auto",
                rerank_model: Optional[str] = None, extractor: str = "none",
                graph_extractor: str = "none",
+               retention_supervisor: str = "none",
                auto_evolve: bool = True, connect=None) -> "MemoryEngine":
         from engraphis.backends.extractor import PassthroughExtractor, get_extractor
         from engraphis.backends.graph_extractor import get_graph_extractor as _get_ge
+        from engraphis.backends.retention import get_retention_supervisor
         store = Store(db_path, connect=connect)
         embedder = get_embedder(embed_model, embed_dim)
         index = get_vector_index(store, dim=embedder.dim, prefer=vector_backend)
@@ -67,8 +80,10 @@ class MemoryEngine:
         if isinstance(ext, PassthroughExtractor):
             ext = None                       # ingest() treats None as passthrough
         ge = _get_ge(graph_extractor) if graph_extractor and graph_extractor != "none" else None
+        supervisor = get_retention_supervisor(retention_supervisor)
         return cls(store, embedder, index, reranker, auto_evolve=auto_evolve,
-                   extractor=ext, graph_extractor=ge)
+                   extractor=ext, graph_extractor=ge,
+                   retention_supervisor=supervisor)
 
     # ── write ─────────────────────────────────────────────────────────────────
     def remember(self, content: str, *, workspace_id: str, repo_id: Optional[str] = None,
@@ -126,9 +141,16 @@ class MemoryEngine:
             # queryable later (why/timeline/inspector), not only in the audit log.
             meta["supersedes"] = [decision.target_id]
 
+        importance, stability, retention_signal = self._retention_signal(
+            content, title=title, mtype=mtype, metadata=meta, importance=importance,
+        )
+        if retention_signal:
+            meta["retention_supervision"] = retention_signal
+
         rec = MemoryRecord(
             id="", content=content, mtype=mtype, scope=scope, workspace_id=workspace_id,
             repo_id=repo_id, session_id=session_id, title=title, importance=importance,
+            stability=stability,
             keywords=keywords or [], metadata=meta, valid_from=valid_from,
             # Lift provenance into its dedicated field/column so recall/why/timeline
             # surface it (copied, not popped: consolidate.py still reads
@@ -137,10 +159,20 @@ class MemoryEngine:
             embedding=vec,
         )
         mid = self.store.add_memory(rec)
+        if retention_signal:
+            self.store.audit(
+                retention_signal.get("source", "retention"),
+                "retention_supervised",
+                mid,
+                f"{retention_signal.get('label', 'normal')}: "
+                f"{retention_signal.get('reason', '')}"[:1000],
+            )
         try:
             self.index.upsert([mid], vec.reshape(1, -1))
         except Exception:
             pass
+        if repo_id:
+            self._link_memory_to_code(mid, content=f"{title}\n{content}", repo_id=repo_id)
 
         # Optional graph population (backends.graph_extractor). Structured fact metadata
         # from llm_structured is already validated before storage, so feed it directly
@@ -185,6 +217,69 @@ class MemoryEngine:
         if linked:
             out["linked"] = linked
         return out
+
+    def _retention_signal(self, content: str, *, title: str, mtype: MemoryType,
+                          metadata: dict, importance: float) -> tuple[float, float, dict]:
+        """Apply an explicit host hint or the optional supervisor.
+
+        Supervision is advisory and bounded: failures preserve today's default
+        ``importance``/``stability`` and ``retain=False`` becomes an ephemeral candidate,
+        never a dropped write.
+        """
+        raw = metadata.get("retention_supervision")
+        decision = None
+        source = "host"
+        if isinstance(raw, dict) and raw.get("label"):
+            decision = RetentionDecision(
+                label=str(raw.get("label") or "normal"),
+                retain=bool(raw.get("retain", True)),
+                importance=raw.get("importance"),
+                stability=raw.get("stability"),
+                reason=str(raw.get("reason") or ""),
+            )
+        elif self.retention_supervisor is not None:
+            source = "llm"
+            try:
+                decision = self.retention_supervisor.decide(
+                    content, title=title, mtype=mtype, metadata=metadata,
+                )
+            except Exception:
+                decision = None
+        if decision is None:
+            return importance, 1.0, {}
+
+        label = str(decision.label or "normal").lower()
+        if label not in {"ephemeral", "normal", "critical"}:
+            label = "normal"
+        if not decision.retain:
+            label = "ephemeral"
+        preset_stability = {"ephemeral": 0.25, "normal": 1.0, "critical": 8.0}[label]
+        preset_importance = {"ephemeral": 0.1, "normal": 0.5, "critical": 0.9}[label]
+        if decision.importance is not None:
+            try:
+                proposed_importance = max(0.0, min(1.0, float(decision.importance)))
+            except (TypeError, ValueError):
+                proposed_importance = preset_importance
+        else:
+            proposed_importance = preset_importance
+        # An explicit caller-provided importance remains a floor; supervision cannot
+        # silently downgrade a user-marked critical memory.
+        final_importance = max(float(importance or 0.0), proposed_importance)
+        try:
+            final_stability = max(0.05, min(100.0, float(
+                decision.stability if decision.stability is not None else preset_stability
+            )))
+        except (TypeError, ValueError):
+            final_stability = preset_stability
+        signal = {
+            "source": source,
+            "label": label,
+            "retain": bool(decision.retain),
+            "importance": final_importance,
+            "stability": final_stability,
+            "reason": str(decision.reason or "")[:500],
+        }
+        return final_importance, final_stability, signal
 
     def _has_structured_graph_metadata(self, metadata: dict) -> bool:
         if isinstance(metadata.get("entities"), list) or isinstance(metadata.get("relations"), list):
@@ -574,11 +669,12 @@ class MemoryEngine:
                                if tokens_before else 0.0, "units": len(ids)}}
 
     # ── linking & events (A-MEM-style) ──────────────────────────────────────────
-    def link(self, a: str, b: str, *, relation: str = "related") -> None:
+    def link(self, a: str, b: str, *, relation: str = "related", layer=None,
+             reason: str = "") -> None:
         for mid in (a, b):
             if self.store.get_memory(mid) is None:
                 raise KeyError(f"no memory with id '{mid}'")
-        self.store.add_link(a, b, relation)
+        self.store.add_link(a, b, relation, layer=layer, reason=reason)
 
     def record_event(self, kind: str, content: str, *, workspace_id: str = "",
                      repo_id: str = "", session_id: str = "",
@@ -603,47 +699,141 @@ class MemoryEngine:
         §"Network exposure"). ``max_files``/``max_file_bytes`` just bound resource use
         on an unexpectedly large tree, not a security sandbox.
         """
-        from engraphis.backends.codegraph import detect_lang, get_code_indexer, iter_source_files
+        from engraphis.backends.codegraph import (
+            SourceWalkLimitExceeded,
+            detect_lang,
+            get_code_indexer,
+            iter_source_files,
+        )
 
         indexer = get_code_indexer(prefer=prefer)
-        root = Path(root_path)
-        files_indexed = symbols_found = edges_found = 0
-        for file_path in iter_source_files(str(root)):
-            if files_indexed >= max_files:
-                break
-            lang = detect_lang(file_path)
-            if lang is None or (languages and lang not in languages) or not indexer.supports(lang):
-                continue
-            p = Path(file_path)
-            try:
-                if p.stat().st_size > max_file_bytes:
+        root = Path(root_path).expanduser().resolve()
+        if not root.exists():
+            raise ValueError(f"repo root not found: {root_path}")
+        if not root.is_dir():
+            raise ValueError(f"repo root is not a directory: {root_path}")
+        max_files = max(1, int(max_files))
+        max_file_bytes = max(1, int(max_file_bytes))
+        existing = {
+            row["file"]: row
+            for row in self.store.list_code_files(repo_id, languages=languages)
+        }
+        seen: set[str] = set()
+        lang_counts: dict[str, int] = defaultdict(int)
+        files_scanned = files_indexed = files_unchanged = files_failed = files_skipped = 0
+        symbols_indexed = edges_indexed = 0
+        backend_name = type(indexer).__name__
+        scan_complete = True
+        try:
+            for file_path in iter_source_files(str(root)):
+                lang = detect_lang(file_path)
+                if (
+                    lang is None
+                    or (languages and lang not in languages)
+                    or not indexer.supports(lang)
+                ):
                     continue
-                content = p.read_text(encoding="utf-8", errors="ignore")
-            except OSError:
-                continue
-            try:
-                rel = str(p.resolve().relative_to(root.resolve()))
-            except ValueError:
-                rel = file_path
-            try:
-                fi = indexer.index_file(rel, content, lang)
-            except Exception:
-                continue  # one bad file shouldn't abort the whole repo index
-            self.store.clear_symbols_for_file(repo_id, rel)
-            for sym in fi.symbols:
-                self.store.upsert_symbol(
-                    repo_id=repo_id, kind=sym.kind, name=sym.name, fqname=sym.fqname,
-                    file=sym.file, span=sym.span, signature=sym.signature, lang=sym.lang,
-                    exported=sym.exported, content_hash=sym.content_hash,
+                if files_scanned >= max_files:
+                    scan_complete = False
+                    break
+                p = Path(file_path)
+                try:
+                    rel = p.resolve().relative_to(root).as_posix()
+                except ValueError:
+                    files_failed += 1
+                    continue
+                files_scanned += 1
+                lang_counts[lang] += 1
+                try:
+                    stat = p.stat()
+                    if stat.st_size > max_file_bytes:
+                        files_skipped += 1
+                        continue
+                    raw = p.read_bytes()
+                except OSError:
+                    files_failed += 1
+                    continue
+                seen.add(rel)
+                content_hash = hashlib.sha256(raw).hexdigest()
+                previous = existing.get(rel)
+                if previous and previous.get("content_hash") == content_hash:
+                    files_unchanged += 1
+                    continue
+                content = raw.decode("utf-8", errors="replace")
+                try:
+                    fi = indexer.index_file(rel, content, lang)
+                except Exception:
+                    files_failed += 1
+                    continue  # one bad file shouldn't abort the whole repo index
+                self.store.clear_symbols_for_file(repo_id, rel, commit=False)
+                for sym in fi.symbols:
+                    self.store.upsert_symbol(
+                        repo_id=repo_id, kind=sym.kind, name=sym.name, fqname=sym.fqname,
+                        file=sym.file, span=sym.span, signature=sym.signature,
+                        docstring=sym.docstring, lang=sym.lang,
+                        exported=sym.exported, content_hash=sym.content_hash,
+                        commit=False,
+                    )
+                    symbols_indexed += 1
+                for edge in fi.edges:
+                    self.store.add_code_edge(
+                        repo_id=repo_id, src=edge.src, dst=edge.dst,
+                        relation=edge.relation, file=edge.file, line=edge.line,
+                        commit=False,
+                    )
+                    edges_indexed += 1
+                self.store.upsert_code_file(
+                    repo_id=repo_id, file=rel, lang=lang, content_hash=content_hash,
+                    size_bytes=stat.st_size, mtime_ns=getattr(stat, "st_mtime_ns", 0),
+                    backend=backend_name, commit=False,
                 )
-                symbols_found += 1
-            for edge in fi.edges:
-                self.store.add_code_edge(repo_id=repo_id, src=edge.src, dst=edge.dst,
-                                         relation=edge.relation, file=edge.file, line=edge.line)
-                edges_found += 1
-            files_indexed += 1
-        return {"files_indexed": files_indexed, "symbols": symbols_found,
-               "edges": edges_found, "backend": type(indexer).__name__}
+                files_indexed += 1
+        except SourceWalkLimitExceeded:
+            scan_complete = False
+
+        removed = 0
+        if scan_complete:
+            for rel in sorted(set(existing) - seen):
+                self.store.remove_code_file(repo_id, rel, commit=False)
+                removed += 1
+        self.store.conn.commit()
+        code_memory_links = self.rebuild_code_memory_links(repo_id=repo_id)
+
+        primary_lang = max(lang_counts, key=lang_counts.get) if lang_counts else ""
+        self.store.update_repo_index(
+            repo_id, root_path=str(root), primary_lang=primary_lang,
+            settings={
+                "code_graph_backend": backend_name,
+                "code_graph_languages": sorted(lang_counts),
+                "code_graph_last_report": {
+                    "files_scanned": files_scanned,
+                    "files_indexed": files_indexed,
+                    "files_unchanged": files_unchanged,
+                    "files_removed": removed,
+                    "scan_complete": scan_complete,
+                },
+            },
+        )
+        return {
+            "root_path": str(root),
+            "files_scanned": files_scanned,
+            "files_indexed": files_indexed,
+            "files_unchanged": files_unchanged,
+            "files_removed": removed,
+            "files_failed": files_failed,
+            "files_skipped": files_skipped,
+            "symbols_indexed": symbols_indexed,
+            "edges_indexed": edges_indexed,
+            # Backward-compatible totals: callers that previously compared a second
+            # idempotent run to the first still see stable symbol/edge counts.
+            "symbols": self.store.count_symbols(repo_id),
+            "edges": self.store.count_code_edges(repo_id),
+            "languages": dict(sorted(lang_counts.items())),
+            "backend": backend_name,
+            "incremental": True,
+            "scan_complete": scan_complete,
+            "code_memory_links": code_memory_links,
+        }
 
     def search_code(self, query: str, *, repo_id: str, limit: int = 20) -> dict:
         """Symbol-graph + lexical code search — far cheaper than
@@ -652,7 +842,702 @@ class MemoryEngine:
         symbols = self.store.search_symbols(repo_id, query, limit=limit)
         for s in symbols:
             s["called_by"] = self.store.get_symbol_callers(repo_id, s["name"], limit=10)
+            s["linked_memories"] = self.store.memories_for_symbol(
+                repo_id, s["id"], limit=10
+            )
         return {"query": query, "symbols": symbols}
+
+    def _link_memory_to_code(self, memory_id: str, *, content: str,
+                             repo_id: str, commit: bool = True,
+                             symbols: Optional[list[dict]] = None) -> int:
+        """Persist deterministic bridges from one memory to symbols in its repo."""
+        hay = str(content or "")
+        hay_lower = hay.lower()
+        hay_tokens = tokenize(hay)
+        linked = 0
+        for symbol in symbols if symbols is not None else self.store.list_symbols(repo_id):
+            name = str(symbol.get("name") or "").strip()
+            fqname = str(symbol.get("fqname") or "").strip()
+            if len(name) < 3:
+                continue
+            confidence = 0.0
+            fqname_lower = fqname.lower()
+            name_lower = name.lower()
+            if fqname and len(fqname) >= 3 and fqname_lower in hay_lower and re.search(
+                r"(?<!\w)" + re.escape(fqname.lower()) + r"(?!\w)", hay_lower
+            ):
+                confidence = 1.0
+            elif name_lower in hay_lower and re.search(
+                r"(?<!\w)" + re.escape(name_lower) + r"(?!\w)", hay_lower
+            ):
+                confidence = 0.9
+            else:
+                name_tokens = tokenize(name)
+                if name_tokens and name_tokens <= hay_tokens:
+                    confidence = 0.75
+            if confidence <= 0.0:
+                continue
+            self.store.link_memory_symbol(
+                repo_id=repo_id, symbol_id=symbol["id"], memory_id=memory_id,
+                relation="mentions", confidence=confidence, commit=False,
+            )
+            linked += 1
+            if linked >= 200:
+                break
+        if commit and linked:
+            self.store.conn.commit()
+        return linked
+
+    def rebuild_code_memory_links(self, *, repo_id: str) -> int:
+        """Rebuild the code↔memory bridge after an incremental repository index."""
+        self.store.clear_code_memory_links(repo_id, commit=False)
+        records = self.store.list_memories(SearchFilter(repo_id=repo_id), limit=5_000)
+        symbols = self.store.list_symbols(repo_id)
+        linked = 0
+        for record in records:
+            linked += self._link_memory_to_code(
+                record.id, content=f"{record.title}\n{record.content}",
+                repo_id=repo_id, commit=False, symbols=symbols,
+            )
+        self.store.conn.commit()
+        return linked
+
+    def code_path(self, source: str, target: str, *, repo_id: str,
+                  max_depth: int = 8) -> dict:
+        """Shortest path across definitions, calls, imports, and symbol aliases."""
+        symbols = self.store.list_symbols(repo_id)
+        stored_edges = self.store.list_code_edges(repo_id)
+        adjacency: dict[str, list[tuple[str, dict, bool]]] = defaultdict(list)
+        node_meta: dict[str, dict] = {}
+        for sym in symbols:
+            meta = {
+                "kind": "symbol", "name": sym["name"], "fqname": sym["fqname"],
+                "symbol_kind": sym["kind"], "file": sym["file"], "span": sym["span"],
+            }
+            for key in {sym["name"], sym["fqname"]}:
+                if key:
+                    node_meta.setdefault(key, meta)
+            if sym["name"] and sym["fqname"] and sym["name"] != sym["fqname"]:
+                alias = {"relation": "alias", "layer": "entity", "file": sym["file"],
+                         "line": 0}
+                adjacency[sym["name"]].append((sym["fqname"], alias, True))
+                adjacency[sym["fqname"]].append((sym["name"], alias, False))
+        for edge in stored_edges:
+            src, dst = edge["src"], edge["dst"]
+            adjacency[src].append((dst, edge, True))
+            adjacency[dst].append((src, edge, False))
+            node_meta.setdefault(src, {"kind": "code", "name": src})
+            node_meta.setdefault(dst, {"kind": "code", "name": dst})
+        symbol_by_id = {symbol["id"]: symbol for symbol in symbols}
+        now = now_ts()
+        for link in self.store.list_code_memory_links(repo_id):
+            if link.get("expired_at") is not None:
+                continue
+            valid_to = link.get("valid_to")
+            if valid_to is not None and now >= float(valid_to):
+                continue
+            symbol = symbol_by_id.get(link.get("symbol_id"))
+            if not symbol or not link.get("memory_id"):
+                continue
+            code_node = symbol.get("fqname") or symbol.get("name")
+            if not code_node:
+                continue
+            memory_node = link["memory_id"]
+            bridge = {
+                "relation": link.get("relation") or "mentions",
+                "layer": "semantic",
+                "file": symbol.get("file") or "",
+                "line": 0,
+            }
+            adjacency[code_node].append((memory_node, bridge, True))
+            adjacency[memory_node].append((code_node, bridge, False))
+            node_meta[memory_node] = {
+                "kind": "memory",
+                "name": link.get("title") or memory_node,
+                "mtype": link.get("mtype") or "",
+            }
+
+        resolved_source = self._resolve_code_node(source, symbols, adjacency)
+        resolved_target = self._resolve_code_node(target, symbols, adjacency)
+        if not resolved_source or not resolved_target:
+            return {
+                "found": False, "source": source, "target": target,
+                "reason": "source or target was not found in the indexed graph",
+                "path": [], "edges": [],
+            }
+        max_depth = max(1, min(32, int(max_depth)))
+        queue = deque([resolved_source])
+        depth = {resolved_source: 0}
+        parent: dict[str, tuple[str, dict, bool]] = {}
+        while queue:
+            current = queue.popleft()
+            if current == resolved_target:
+                break
+            if depth[current] >= max_depth:
+                continue
+            for neighbor, edge, forward in adjacency.get(current, []):
+                if neighbor in depth:
+                    continue
+                depth[neighbor] = depth[current] + 1
+                parent[neighbor] = (current, edge, forward)
+                queue.append(neighbor)
+
+        if resolved_target not in depth:
+            return {
+                "found": False, "source": resolved_source, "target": resolved_target,
+                "reason": f"no path within {max_depth} hops", "path": [], "edges": [],
+            }
+        nodes = [resolved_target]
+        path_edges: list[dict] = []
+        cursor = resolved_target
+        while cursor != resolved_source:
+            previous, edge, forward = parent[cursor]
+            path_edges.append({
+                "from": previous,
+                "to": cursor,
+                "relation": edge.get("relation") or "",
+                "layer": edge.get("layer") or "entity",
+                "direction": "forward" if forward else "reverse",
+                "file": edge.get("file") or "",
+                "line": edge.get("line") or 0,
+            })
+            nodes.append(previous)
+            cursor = previous
+        nodes.reverse()
+        path_edges.reverse()
+        return {
+            "found": True,
+            "source": resolved_source,
+            "target": resolved_target,
+            "hops": len(path_edges),
+            "path": [{"id": node, **node_meta.get(node, {"kind": "code", "name": node})}
+                     for node in nodes],
+            "edges": path_edges,
+        }
+
+    @staticmethod
+    def _resolve_code_node(query: str, symbols: list[dict],
+                           adjacency: dict) -> Optional[str]:
+        raw = str(query or "").strip()
+        if raw in adjacency:
+            return raw
+        lowered = raw.lower()
+        exact = [
+            s for s in symbols
+            if str(s.get("name") or "").lower() == lowered
+            or str(s.get("fqname") or "").lower() == lowered
+            or str(s.get("file") or "").lower() == lowered
+        ]
+        candidates = exact or [
+            s for s in symbols
+            if lowered in str(s.get("name") or "").lower()
+            or lowered in str(s.get("fqname") or "").lower()
+            or lowered in str(s.get("file") or "").lower()
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda s: (
+            0 if str(s.get("fqname") or "").lower() == lowered else 1,
+            len(str(s.get("fqname") or "")),
+        ))
+        chosen = candidates[0]
+        for key in (chosen.get("fqname"), chosen.get("name"), chosen.get("file")):
+            if key in adjacency:
+                return key
+        return chosen.get("fqname") or chosen.get("name")
+
+    def analyze_code_graph(self, *, repo_id: str) -> dict:
+        """Deterministic weighted communities, hotspots, and cross-file connections."""
+        edges = self.store.list_code_edges(repo_id)
+        symbols = self.store.list_symbols(repo_id)
+        adjacency: dict[str, dict[str, float]] = defaultdict(dict)
+        degree: dict[str, int] = defaultdict(int)
+        for edge in edges:
+            src, dst = edge["src"], edge["dst"]
+            if not src or not dst:
+                continue
+            weight = (
+                1.5 if edge.get("relation") in {"calls", "inherits", "implements"} else 1.0
+            )
+            adjacency[src][dst] = adjacency[src].get(dst, 0.0) + weight
+            adjacency[dst][src] = adjacency[dst].get(src, 0.0) + weight
+            degree[src] += 1
+            degree[dst] += 1
+
+        labels = {node: node for node in adjacency}
+        for _ in range(30):
+            changed = False
+            for node in sorted(adjacency):
+                scores: dict[str, float] = defaultdict(float)
+                for neighbor, weight in adjacency[node].items():
+                    scores[labels[neighbor]] += weight
+                if not scores:
+                    continue
+                best = min(scores, key=lambda label: (-scores[label], label))
+                if best != labels[node]:
+                    labels[node] = best
+                    changed = True
+            if not changed:
+                break
+        grouped: dict[str, list[str]] = defaultdict(list)
+        for node, label in labels.items():
+            grouped[label].append(node)
+        communities = sorted(
+            grouped.values(), key=lambda members: (-len(members), min(members))
+        )
+        node_community: dict[str, int] = {}
+        summaries = []
+        for cid, members in enumerate(communities):
+            for node in members:
+                node_community[node] = cid
+            ranked = sorted(members, key=lambda node: (-degree[node], node))
+            summaries.append({
+                "id": cid,
+                "size": len(members),
+                "top_nodes": [
+                    {"node": node, "degree": degree[node]} for node in ranked[:8]
+                ],
+            })
+
+        symbol_file = {}
+        for symbol in symbols:
+            for key in (symbol.get("name"), symbol.get("fqname")):
+                if key:
+                    symbol_file.setdefault(key, symbol.get("file") or "")
+        cross_file: list[dict] = []
+        cross_degree: dict[str, int] = defaultdict(int)
+        for edge in edges:
+            src, dst = edge.get("src") or "", edge.get("dst") or ""
+            src_file = symbol_file.get(src) or edge.get("file") or ""
+            dst_file = symbol_file.get(dst) or ""
+            if not src_file or not dst_file or src_file == dst_file:
+                continue
+            cross_degree[src] += 1
+            cross_degree[dst] += 1
+            cross_file.append({
+                "src": src, "dst": dst, "relation": edge.get("relation") or "",
+                "src_file": src_file, "dst_file": dst_file,
+            })
+        cross_file.sort(key=lambda item: (
+            -(degree[item["src"]] + degree[item["dst"]]),
+            item["src_file"], item["dst_file"], item["src"], item["dst"],
+        ))
+        threshold = max(
+            5,
+            sorted(degree.values())[max(0, int(len(degree) * 0.9) - 1)]
+            if degree else 5,
+        )
+        hotspots = [
+            {
+                "node": node, "degree": count,
+                "cross_file_degree": cross_degree.get(node, 0),
+                "god_node": count >= threshold,
+            }
+            for node, count in sorted(
+                degree.items(), key=lambda item: (-item[1], item[0])
+            )[:20]
+        ]
+        return {
+            "nodes": len(adjacency),
+            "edges": len(edges),
+            "algorithm": "weighted_label_propagation",
+            "communities": summaries,
+            "hotspots": hotspots,
+            "surprising_connections": cross_file[:50],
+            "_node_community": node_community,
+        }
+
+    def analyze_impact(self, changed_files: list[str], *, repo_id: str) -> dict:
+        """Estimate graph and memory impact for a git diff / PR file list."""
+        normalized = []
+        seen = set()
+        for file in changed_files:
+            rel = str(file or "").strip().replace("\\", "/")
+            while rel.startswith("./"):
+                rel = rel[2:]
+            if rel.startswith("/"):
+                rel = rel[1:]
+            if rel and rel not in seen:
+                seen.add(rel)
+                normalized.append(rel)
+        symbols = self.store.symbols_for_files(repo_id, normalized)
+        touched_names = {
+            name for sym in symbols for name in (sym.get("name"), sym.get("fqname")) if name
+        }
+        touched_leaf_names = {str(name).split(".")[-1] for name in touched_names}
+        edges = self.store.list_code_edges(repo_id)
+        inbound = [
+            edge for edge in edges
+            if edge.get("dst") in touched_names
+            or str(edge.get("dst") or "").split(".")[-1]
+            in touched_leaf_names
+        ]
+        dependent_files = sorted({
+            edge.get("file") for edge in inbound
+            if edge.get("file") and edge.get("file") not in normalized
+        })
+
+        memory_mentions: dict[str, dict] = {}
+        touched_symbol_ids = {symbol["id"] for symbol in symbols}
+        now = now_ts()
+        for link in self.store.list_code_memory_links(repo_id):
+            if link.get("expired_at") is not None:
+                continue
+            valid_to = link.get("valid_to")
+            if valid_to is not None and now >= float(valid_to):
+                continue
+            if link.get("symbol_id") not in touched_symbol_ids:
+                continue
+            item = memory_mentions.setdefault(
+                link["memory_id"],
+                {
+                    "id": link["memory_id"],
+                    "title": link.get("title") or "",
+                    "mtype": link.get("mtype") or "",
+                    "symbols": [],
+                },
+            )
+            symbol_name = link.get("fqname") or link.get("name") or ""
+            if symbol_name and symbol_name not in item["symbols"]:
+                item["symbols"].append(symbol_name)
+        names_for_mentions = sorted(
+            {str(s.get("name")) for s in symbols
+             if s.get("name") and len(str(s.get("name"))) >= 3}
+        )[:80]
+        for name in names_for_mentions:
+            escaped = str(name).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            rows = self.store.conn.execute(
+                "SELECT id, title, mtype FROM memories WHERE repo_id=? "
+                "AND (valid_from IS NULL OR valid_from<=?) "
+                "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL "
+                "AND (title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\') LIMIT 10",
+                (repo_id, now, now, f"%{escaped}%", f"%{escaped}%"),
+            ).fetchall()
+            for row in rows:
+                item = memory_mentions.setdefault(
+                    row["id"],
+                    {"id": row["id"], "title": row["title"] or "",
+                     "mtype": row["mtype"], "symbols": []},
+                )
+                item["symbols"].append(name)
+
+        analysis = self.analyze_code_graph(repo_id=repo_id)
+        node_community = analysis.pop("_node_community")
+        communities_affected = sorted({
+            node_community[name] for name in touched_names if name in node_community
+        })
+        score = min(
+            100,
+            len(normalized) * 5
+            + len(symbols) * 2
+            + len(inbound) * 3
+            + len(memory_mentions) * 2
+            + len(communities_affected) * 5,
+        )
+        level = "low" if score < 25 else "medium" if score < 55 else "high" if score < 80 else "critical"
+        hotspot_names = {item["node"] for item in analysis["hotspots"][:10]}
+        conflict_zones = sorted(touched_names & hotspot_names)
+        return {
+            "changed_files": normalized,
+            "risk": {"score": score, "level": level},
+            "metrics": {
+                "files_touched": len(normalized),
+                "symbols_touched": len(symbols),
+                "inbound_edges": len(inbound),
+                "dependent_files": len(dependent_files),
+                "memory_mentions": len(memory_mentions),
+                "communities_affected": len(communities_affected),
+            },
+            "symbols": symbols[:200],
+            "inbound": inbound[:200],
+            "dependent_files": dependent_files[:200],
+            "memory_mentions": list(memory_mentions.values())[:100],
+            "communities_affected": communities_affected,
+            "potential_conflict_zones": conflict_zones,
+            "graph": analysis,
+        }
+
+    def export_code_graph(self, *, repo_id: str) -> dict:
+        """Portable graph.json payload for external tooling."""
+        analysis = self.analyze_code_graph(repo_id=repo_id)
+        analysis.pop("_node_community", None)
+        return {
+            "format": "engraphis-code-graph/1",
+            "generated_at": time.time(),
+            "repo_id": repo_id,
+            "files": self.store.list_code_files(repo_id),
+            "nodes": self.store.list_symbols(repo_id),
+            "edges": self.store.list_code_edges(repo_id),
+            "memory_links": self.store.list_code_memory_links(repo_id),
+            "analysis": analysis,
+        }
+
+    def code_graph_report(self, *, repo_id: str, payload: Optional[dict] = None) -> str:
+        """Human-readable GRAPH_REPORT.md companion to :meth:`export_code_graph`."""
+        payload = payload or self.export_code_graph(repo_id=repo_id)
+        analysis = payload["analysis"]
+        lines = [
+            "# Engraphis Code Graph Report",
+            "",
+            f"- Generated: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(payload['generated_at']))}",
+            f"- Files indexed: {len(payload['files'])}",
+            f"- Symbols: {len(payload['nodes'])}",
+            f"- Relationships: {len(payload['edges'])}",
+            f"- Communities: {len(analysis['communities'])}",
+            "",
+            "## Hotspots",
+            "",
+        ]
+        if analysis["hotspots"]:
+            lines.extend(
+                f"- `{item['node']}` — degree {item['degree']}"
+                for item in analysis["hotspots"]
+            )
+        else:
+            lines.append("- No connected code nodes yet.")
+        lines.extend(["", "## Communities", ""])
+        for community in analysis["communities"][:20]:
+            top = ", ".join(
+                f"`{item['node']}` ({item['degree']})"
+                for item in community["top_nodes"]
+            )
+            lines.append(
+                f"- Community {community['id']}: {community['size']} nodes"
+                + (f" — {top}" if top else "")
+            )
+        return "\n".join(lines) + "\n"
+
+    def code_graph_html(self, *, repo_id: str, payload: Optional[dict] = None) -> str:
+        """Self-contained, dependency-free graph.html export."""
+        import html
+        import json
+        payload = payload or self.export_code_graph(repo_id=repo_id)
+        safe_json = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
+        rows = []
+        for node in payload["nodes"][:5_000]:
+            rows.append(
+                "<tr><td><code>{}</code></td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
+                    html.escape(str(node.get("fqname") or node.get("name") or "")),
+                    html.escape(str(node.get("kind") or "")),
+                    html.escape(str(node.get("file") or "")),
+                    html.escape(str(node.get("span") or "")),
+                )
+            )
+        return """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Engraphis Code Graph</title>
+<style>
+body{font:14px system-ui;margin:0;color:#17202a;background:#f8fafc}
+main{max-width:1600px;margin:auto;padding:1.5rem}
+.toolbar{display:flex;gap:.7rem;flex-wrap:wrap;align-items:center}
+input,select{padding:.65rem;border:1px solid #94a3b8;border-radius:.4rem;background:white}
+input{width:min(42rem,80vw)}
+.layout{display:grid;grid-template-columns:minmax(0,1fr) 18rem;gap:1rem;margin-top:1rem}
+.canvas{background:#0f172a;border-radius:.6rem;overflow:hidden;min-height:36rem}
+svg{width:100%;height:70vh;min-height:36rem;display:block;touch-action:none}
+.edge{stroke:#64748b;stroke-opacity:.42;stroke-width:1}
+.edge.memory{stroke:#f59e0b;stroke-dasharray:4 3}
+.node circle{stroke:#e2e8f0;stroke-width:1.2;cursor:pointer}
+.node text{fill:#e2e8f0;font:10px ui-monospace,monospace;pointer-events:none}
+.node.memory circle{fill:#f59e0b}.node.external circle{fill:#64748b}
+.node.code circle{fill:#38bdf8}.node.match circle{stroke:#fb7185;stroke-width:4}
+aside{background:white;border:1px solid #e2e8f0;border-radius:.6rem;padding:1rem}
+aside code{overflow-wrap:anywhere}.muted{color:#64748b}
+table{width:100%;border-collapse:collapse;margin-top:1rem;background:white}
+th,td{text-align:left;padding:.55rem;border-bottom:1px solid #e2e8f0}
+code{font:12px ui-monospace,monospace}
+@media(max-width:850px){.layout{grid-template-columns:1fr}aside{order:-1}}
+</style></head><body>
+<main>
+<h1>Engraphis Code Graph</h1>
+<p class="muted"><span id="summary"></span></p>
+<div class="toolbar">
+<input id="filter" placeholder="Filter symbols, files, kinds, or relations"
+ aria-label="Filter graph">
+<select id="relation" aria-label="Filter by relationship"><option value="">All relations</option>
+</select>
+<span class="muted">Scroll to zoom; drag the canvas to pan.</span>
+</div>
+<div class="layout">
+<div class="canvas"><svg id="graph" role="img"
+ aria-label="Interactive code and memory relationship graph"></svg></div>
+<aside><h2>Selection</h2><div id="details" class="muted">
+Select a node to inspect its type, file, signature, and connections.</div>
+<hr><p class="muted" id="render-note"></p></aside>
+</div>
+<details><summary>Accessible symbol table</summary>
+<table><thead><tr><th>Symbol</th><th>Kind</th><th>File</th><th>Span</th></tr></thead>
+<tbody id="rows">""" + "".join(rows) + """</tbody></table></details>
+<script type="application/json" id="graph-data">""" + safe_json + """</script>
+<script>
+const graph=JSON.parse(document.getElementById('graph-data').textContent);
+document.getElementById('summary').textContent =
+  `${graph.files.length} files · ${graph.nodes.length} symbols · ` +
+  `${graph.edges.length} relations · ${graph.memory_links.length} memory links`;
+const rows=[...document.querySelectorAll('#rows tr')];
+const svg=document.getElementById('graph');
+const NS='http://www.w3.org/2000/svg';
+const MAX_NODES=1000,MAX_EDGES=3000;
+const nodes=[],byKey=new Map();
+function rememberKey(key,node){if(key&&!byKey.has(String(key)))byKey.set(String(key),node)}
+function addNode(raw,kind='code'){
+  if(nodes.length>=MAX_NODES)return null;
+  const node={...raw,_kind:kind,_i:nodes.length};
+  node.label=String(raw.fqname||raw.name||raw.title||raw.file||raw.id||'unknown');
+  nodes.push(node);
+  [raw.id,raw.fqname,raw.name,raw.file].forEach(key=>rememberKey(key,node));
+  return node;
+}
+(graph.nodes||[]).slice(0,900).forEach(node=>addNode(node));
+function endpoint(value){
+  const key=String(value||'');
+  if(!key)return null;
+  return byKey.get(key)||addNode({id:`external:${key}`,name:key,kind:'external'},'external');
+}
+const edges=[];
+(graph.edges||[]).slice(0,MAX_EDGES).forEach(edge=>{
+  const source=endpoint(edge.src),target=endpoint(edge.dst);
+  if(source&&target)edges.push({...edge,source,target,_kind:'code'});
+});
+(graph.memory_links||[]).forEach(link=>{
+  if(edges.length>=MAX_EDGES)return;
+  const source=byKey.get(String(link.symbol_id||''));
+  let target=byKey.get(String(link.memory_id||''));
+  if(!target)target=addNode({
+    id:link.memory_id,name:link.title||link.memory_id,kind:link.mtype||'memory'
+  },'memory');
+  if(source&&target)edges.push({
+    source,target,relation:link.relation||'mentions',_kind:'memory'
+  });
+});
+const groups=new Map();
+nodes.forEach(node=>{
+  const group=node._kind==='memory'?'Memories':String(node.file||'(external)');
+  if(!groups.has(group))groups.set(group,[]);
+  groups.get(group).push(node);
+});
+const cols=Math.max(1,Math.ceil(Math.sqrt(groups.size)));
+const cellW=300,cellH=230,width=Math.max(900,cols*cellW);
+const height=Math.max(650,Math.ceil(groups.size/cols)*cellH);
+svg.setAttribute('viewBox',`0 0 ${width} ${height}`);
+[...groups.entries()].forEach(([group,items],index)=>{
+  const cx=(index%cols)*cellW+cellW/2;
+  const cy=Math.floor(index/cols)*cellH+cellH/2;
+  const radius=Math.min(92,32+items.length*2.2);
+  items.forEach((node,i)=>{
+    const angle=(Math.PI*2*i/Math.max(1,items.length))-(Math.PI/2);
+    node.x=cx+(items.length===1?0:Math.cos(angle)*radius);
+    node.y=cy+(items.length===1?0:Math.sin(angle)*radius);
+    node.group=group;
+  });
+});
+const relationSelect=document.getElementById('relation');
+[...new Set(edges.map(edge=>edge.relation||''))].sort().forEach(relation=>{
+  const option=document.createElement('option');option.value=relation;
+  option.textContent=relation||'(unlabeled)';relationSelect.appendChild(option);
+});
+const edgeLayer=document.createElementNS(NS,'g');
+const nodeLayer=document.createElementNS(NS,'g');
+svg.append(edgeLayer,nodeLayer);
+edges.forEach(edge=>{
+  const line=document.createElementNS(NS,'line');
+  line.setAttribute('x1',edge.source.x);line.setAttribute('y1',edge.source.y);
+  line.setAttribute('x2',edge.target.x);line.setAttribute('y2',edge.target.y);
+  line.setAttribute('class',`edge ${edge._kind}`);
+  const title=document.createElementNS(NS,'title');
+  title.textContent=edge.relation||'';line.appendChild(title);
+  edge.el=line;edgeLayer.appendChild(line);
+});
+nodes.forEach(node=>{
+  const group=document.createElementNS(NS,'g');
+  group.setAttribute('class',`node ${node._kind}`);
+  group.setAttribute('transform',`translate(${node.x} ${node.y})`);
+  group.setAttribute('tabindex','0');group.setAttribute('role','button');
+  group.setAttribute('aria-label',node.label);
+  const circle=document.createElementNS(NS,'circle');
+  circle.setAttribute('r',node._kind==='memory'?8:node._kind==='external'?5:6);
+  const title=document.createElementNS(NS,'title');title.textContent=node.label;
+  circle.appendChild(title);group.appendChild(circle);
+  if(nodes.length<=260){
+    const text=document.createElementNS(NS,'text');text.setAttribute('x',9);
+    text.setAttribute('y',3);text.textContent=node.label.slice(0,38);group.appendChild(text);
+  }
+  const select=()=>showNode(node);
+  group.addEventListener('click',select);
+  group.addEventListener('keydown',event=>{
+    if(event.key==='Enter'||event.key===' '){event.preventDefault();select()}
+  });
+  node.el=group;nodeLayer.appendChild(group);
+});
+function showNode(node){
+  const connected=edges.filter(edge=>edge.source===node||edge.target===node);
+  const box=document.getElementById('details');box.textContent='';
+  const title=document.createElement('h3');title.textContent=node.label;box.appendChild(title);
+  const facts=[
+    ['Type',node._kind==='memory'?(node.kind||'memory'):(node.kind||node._kind)],
+    ['File',node.file||''],['Span',node.span||''],['Group',node.group||''],
+    ['Connections',String(connected.length)]
+  ];
+  facts.filter(item=>item[1]).forEach(([label,value])=>{
+    const p=document.createElement('p'),strong=document.createElement('strong');
+    strong.textContent=`${label}: `;p.append(strong,document.createTextNode(String(value)));
+    box.appendChild(p);
+  });
+  if(node.signature){
+    const pre=document.createElement('code');pre.textContent=node.signature;box.appendChild(pre);
+  }
+  if(node.docstring){
+    const p=document.createElement('p');p.textContent=node.docstring;box.appendChild(p);
+  }
+  connected.slice(0,20).forEach(edge=>{
+    const p=document.createElement('p');p.className='muted';
+    const other=edge.source===node?edge.target:edge.source;
+    p.textContent=`${edge.relation||'related'} → ${other.label}`;box.appendChild(p);
+  });
+}
+function applyFilters(){
+  const q=document.getElementById('filter').value.trim().toLowerCase();
+  const relation=relationSelect.value;
+  nodes.forEach(node=>{
+    const match=!q||[node.label,node.file,node.kind,node.docstring]
+      .some(value=>String(value||'').toLowerCase().includes(q));
+    node.el.classList.toggle('match',Boolean(q&&match));
+    node.el.style.opacity=match?'1':q?'.18':'1';
+  });
+  edges.forEach(edge=>{
+    const qMatch=!q||[edge.relation,edge.source.label,edge.target.label]
+      .some(value=>String(value||'').toLowerCase().includes(q));
+    edge.el.style.display=(!relation||edge.relation===relation)&&qMatch?'':'none';
+  });
+  rows.forEach(row=>{row.hidden=Boolean(q&&!row.textContent.toLowerCase().includes(q))});
+}
+document.getElementById('filter').addEventListener('input',applyFilters);
+relationSelect.addEventListener('change',applyFilters);
+let view={x:0,y:0,w:width,h:height},drag=null;
+function setView(){svg.setAttribute('viewBox',`${view.x} ${view.y} ${view.w} ${view.h}`)}
+svg.addEventListener('wheel',event=>{
+  event.preventDefault();const factor=event.deltaY>0?1.12:.88;
+  const rect=svg.getBoundingClientRect();
+  const px=view.x+(event.clientX-rect.left)/rect.width*view.w;
+  const py=view.y+(event.clientY-rect.top)/rect.height*view.h;
+  view.x=px-(px-view.x)*factor;view.y=py-(py-view.y)*factor;
+  view.w*=factor;view.h*=factor;setView();
+},{passive:false});
+svg.addEventListener('pointerdown',event=>{
+  drag={x:event.clientX,y:event.clientY,vx:view.x,vy:view.y};
+  svg.setPointerCapture(event.pointerId);
+});
+svg.addEventListener('pointermove',event=>{
+  if(!drag)return;const rect=svg.getBoundingClientRect();
+  view.x=drag.vx-(event.clientX-drag.x)/rect.width*view.w;
+  view.y=drag.vy-(event.clientY-drag.y)/rect.height*view.h;setView();
+});
+svg.addEventListener('pointerup',()=>{drag=null});
+document.getElementById('render-note').textContent=
+  `Rendered ${nodes.length}/${graph.nodes.length} nodes and `+
+  `${edges.length}/${graph.edges.length+graph.memory_links.length} edges.`;
+</script></main></body></html>"""
 
     # ── session passthrough (convenience) ──────────────────────────────────────
     def start_session(self, workspace_id: str, repo_id: Optional[str] = None, **kw) -> str:

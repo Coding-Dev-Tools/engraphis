@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass
-from typing import Any, Iterable, Literal, Optional
+from typing import Any, Iterable, Literal, Optional, Union
 
 from engraphis.core.interfaces import MemoryRecord
 from engraphis.core.textutil import jaccard, tokenize
@@ -88,7 +88,7 @@ class _Assertion:
 
 
 def detect_conflicts(
-    new_memory: MemoryRecord | str,
+    new_memory: Union[MemoryRecord, str],
     candidates: Iterable[MemoryRecord],
     *,
     duplicate_jaccard: float = _DUPLICATE_JACCARD,
@@ -171,7 +171,7 @@ def _issue(kind: ConflictType, severity: float, memory_id: str, reason: str,
                     suggested_resolution=suggested_resolution, evidence=evidence)
 
 
-def _text(memory: MemoryRecord | str) -> str:
+def _text(memory: Union[MemoryRecord, str]) -> str:
     if isinstance(memory, str):
         return memory
     return f"{memory.title}\n{memory.content}" if memory.title else memory.content
