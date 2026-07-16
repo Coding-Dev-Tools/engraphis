@@ -1,9 +1,9 @@
 """Team mode (multi-user auth) for the v2 dashboard — reuses the Inspector's AuthStore.
 
-ON by default; set ``ENGRAPHIS_TEAM_MODE=0`` (or false/no/off) to disable. With it on,
-``/api/auth/state`` reports ``{"enabled": true}`` and the dashboard requires per-user
-logins. Sessions are an HttpOnly, SameSite=Strict cookie; roles (viewer/member/admin)
-are enforced server-side.
+Team plumbing is ON by default; set ``ENGRAPHIS_TEAM_MODE=0`` (or false/no/off) to
+disable it. The login wall activates with a live Team entitlement and remains active
+once users exist, even if that entitlement later lapses. Sessions use an HttpOnly,
+SameSite=Strict cookie; roles (viewer/member/admin) are enforced server-side.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from engraphis import licensing
-from engraphis.config import settings
+from engraphis.config import canonicalize_relay_url, settings
 from engraphis.inspector.auth import (
     PBKDF2_ITERATIONS, SESSION_TTL_SECONDS, AuthError, AuthStore, role_at_least)
 
@@ -84,7 +84,8 @@ def _send_invite(u: dict, admin: dict) -> tuple:
     # The relay accepts (and now echoes into the email) only a key that verifies as
     # Team server-side, so a successful relay send means the member got the activation key.
     sent, reason = cloud_license.send_team_invite(
-        settings.relay_url, key, u["email"], u["name"], u["role"], admin["email"],
+        canonicalize_relay_url(settings.relay_url), key,
+        u["email"], u["name"], u["role"], admin["email"],
         dashboard_url=dashboard_url)
     return sent, reason, bool(sent)
 

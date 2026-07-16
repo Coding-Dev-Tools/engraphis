@@ -271,9 +271,9 @@ def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
     # revocation. The URL is ENGRAPHIS_KEY_CLOUD_URL if set, else the built-in vendor relay
     # (settings.relay_url) — so keys are cloud-enforced by DEFAULT now, not opt-in. The
     # claim rides inside the Ed25519-signed payload, so customers cannot strip it.
-    from engraphis.config import settings
-    enforce_url = (os.environ.get("ENGRAPHIS_KEY_CLOUD_URL", "").strip().rstrip("/")
-                   or (settings.relay_url or "").strip().rstrip("/"))
+    from engraphis.config import canonicalize_relay_url, settings
+    enforce_url = canonicalize_relay_url(
+        os.environ.get("ENGRAPHIS_KEY_CLOUD_URL", "") or settings.relay_url)
     if enforce_url:
         payload["enforce"] = "cloud"
         payload["cloud_url"] = enforce_url

@@ -728,8 +728,8 @@ def start_trial(*, email: str = "", now: Optional[float] = None) -> dict:
     if not email or not _TRIAL_EMAIL_RE.match(email):
         raise LicenseError("a valid email address is required to start a trial")
     from engraphis import cloud_license
-    from engraphis.config import settings
-    base = os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip() or settings.relay_url
+    from engraphis.config import resolve_license_server_url
+    base = resolve_license_server_url()
     key, reason, pending = cloud_license.request_trial_key(
         base, cloud_license.machine_id(), plan="pro", email=email)
     if pending:
@@ -741,16 +741,14 @@ def start_trial(*, email: str = "", now: Optional[float] = None) -> dict:
 
 
 def start_team_trial(*, email: str = "", now: Optional[float] = None) -> dict:
-    """Begin the one-time self-serve Team trial: unlike :func:`start_trial` (Pro,
-    fully local/offline), this requests a REAL signed ``team`` key from the vendor
-    relay exactly like a purchased key would be. The extra network round-trip is
-    required, not incidental: the resulting key is later presented to OTHER
-    server-side gates (the team-invite relay, ``/register``) that only accept a
-    genuinely vendor-signed credential, and an offline client-only claim (like the Pro
-    trial's used to be) can never satisfy those — see ``inspector.license_cloud.
-    start_team_trial`` for the full reasoning. Without this, a trialing user could
-    open Team mode locally but could never actually send a team invite, which defeats
-    the point of letting them trial Team at all.
+    """Begin the one-time self-serve Team trial by requesting a real, short-lived,
+    vendor-signed Team key from the license server. Pro and Team trials both use the
+    same server-authoritative issuance and verification path as purchased keys.
+
+    The network round-trip is required, not incidental: the resulting key is later
+    presented to other server-side gates (the team-invite relay and ``/register``)
+    that only accept a genuinely vendor-signed credential. Without it, a trialing user
+    could open Team mode locally but could never send an invite.
 
     Since 2026-07-14 *email* is required and the key is minted only once a one-time
     magic link sent to it is opened — see :func:`start_trial`'s docstring for the full
@@ -775,8 +773,8 @@ def start_team_trial(*, email: str = "", now: Optional[float] = None) -> dict:
     if not email or not _TRIAL_EMAIL_RE.match(email):
         raise LicenseError("a valid email address is required to start a trial")
     from engraphis import cloud_license
-    from engraphis.config import settings
-    base = os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip() or settings.relay_url
+    from engraphis.config import resolve_license_server_url
+    base = resolve_license_server_url()
     key, reason, pending = cloud_license.request_team_trial_key(
         base, cloud_license.machine_id(), email=email)
     if pending:

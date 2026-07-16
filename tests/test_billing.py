@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from engraphis import billing as B  # noqa: E402
 from engraphis.licensing import ed25519_public_key, parse_key  # noqa: E402
+from engraphis.config import DEFAULT_RELAY_URL  # noqa: E402
 
 # Ephemeral test keypair, generated per run. The REAL vendor seed must never live
 # in the repo (only in .secrets/ and the Railway env) — anyone with it could forge
@@ -46,8 +47,10 @@ def _isolate(monkeypatch, tmp_path):
     # Fresh per-test durable dedup DB + fallback dir under tmp_path.
     monkeypatch.setenv("ENGRAPHIS_WEBHOOK_STATE", str(tmp_path / "webhooks.db"))
     monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(tmp_path / "relay.db"))
-    for var in ("ENGRAPHIS_SIGNING_KEY", "ENGRAPHIS_SMTP_HOST", "ENGRAPHIS_SMTP_USER",
-                "ENGRAPHIS_SMTP_PASSWORD", "ENGRAPHIS_SMTP_FROM", "ENGRAPHIS_SMTP_PORT"):
+    for var in ("ENGRAPHIS_SIGNING_KEY", "ENGRAPHIS_KEY_CLOUD_URL",
+                "ENGRAPHIS_SMTP_HOST", "ENGRAPHIS_SMTP_USER",
+                "ENGRAPHIS_SMTP_PASSWORD", "ENGRAPHIS_SMTP_FROM",
+                "ENGRAPHIS_SMTP_PORT"):
         monkeypatch.delenv(var, raising=False)
     yield
 
@@ -123,6 +126,17 @@ def test_inline_hex_seed_issues_valid_key(monkeypatch):
     key = issue_key("buyer@example.com", product_name="Engraphis Team", seats=4, days=30)
     lic = parse_key(key)  # validates against the ephemeral test pubkey (see fixture)
     assert lic.plan == "team" and lic.seats == 4 and "team" in lic.features
+
+
+def test_issued_key_migrates_retired_relay_url(monkeypatch):
+    from engraphis.inspector.webhooks import issue_key
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
+    monkeypatch.setenv(
+        "ENGRAPHIS_KEY_CLOUD_URL",
+        "https://engraphis-production.up.railway.app/",
+    )
+    key = issue_key("buyer@example.com", product_name="Engraphis Pro", days=30)
+    assert parse_key(key).cloud_url == DEFAULT_RELAY_URL
 
 
 # ── fix 4: redelivered webhook-id does not mint a second key ───────────────────

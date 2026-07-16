@@ -1,7 +1,7 @@
 """Cloud license enforcement: registration issues a machine-bound signed lease; revoked/
-expired/seat-limited keys are refused; forged leases are rejected; the client gate fails
-closed in cloud mode. Also covers the salvaged local hardening (HMAC trial + monotonic
-clock). Runs on the numpy-only gate (stdlib + fastapi TestClient).
+expired/seat-limited keys are refused; forged leases are rejected; and every paid key fails
+closed without a valid lease. Also covers rejection of the retired local trial and monotonic
+clock hardening. Runs on the numpy-only gate (stdlib + fastapi TestClient).
 """
 import io
 import re
@@ -43,14 +43,6 @@ def _cloud_env(monkeypatch, tmp_path):
     monkeypatch.setattr(licensing, "_MONOTONIC_FILE", tmp_path / ".clock_anchor")
     monkeypatch.setattr(licensing, "_TRIAL_FILE", tmp_path / "trial.json")
     yield
-
-
-@pytest.fixture(autouse=True)
-def _reset_api_token():
-    """Ensure settings.api_token is clean for each test (prevents cross-test leakage)."""
-    original = settings.api_token
-    yield
-    settings.api_token = original
 
 
 def _key(plan="pro", email="buyer@example.com", *, seats=1, expires_in_days=30):
@@ -1273,3 +1265,28 @@ def test_licensing_start_trial_surfaces_pending_status(monkeypatch):
     assert out == {"pending": True,
                    "message": "check your email to confirm and activate the trial"}
     assert licensing.current_license(refresh=True).plan == "free"  # nothing activated yet
+
+
+@pytest.mark.parametrize(
+    ("starter", "client_name"),
+    [
+        (licensing.start_trial, "request_trial_key"),
+        (licensing.start_team_trial, "request_team_trial_key"),
+    ],
+)
+def test_trial_requests_migrate_retired_server_override(
+        monkeypatch, starter, client_name):
+    captured = {}
+
+    def pending(base, *args, **kwargs):
+        captured["base"] = base
+        return None, "check your email", True
+
+    monkeypatch.setenv(
+        "ENGRAPHIS_CLOUD_URL",
+        "https://engraphis-production.up.railway.app/",
+    )
+    monkeypatch.setattr(cloud_license, client_name, pending)
+
+    assert starter(email="me@example.com")["pending"] is True
+    assert captured["base"] == DEFAULT_RELAY_URL

@@ -57,8 +57,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
   and persist tombstones for previously unrecorded keys; transient failures may use only
   an unexpired lease; public license/trial bootstrap routes close after the first Team user;
   trial rate limits trust forwarded addresses only from configured proxies; managed
-  requests use explicit client headers; retired signed relay URLs migrate safely; and
-  configured keys that fall back to free after transient outages retry automatically.
+  requests use explicit client headers; retired managed relay URLs are canonicalized
+  across key issuance, license/trial, invite, and sync clients; and configured keys
+  that fall back to free after transient outages retry automatically.
 - **Billing fulfillment reliability:** Polar bodies are bounded while streaming, durable
   reservation failures remain retryable, seat baselines and completion claims commit
   atomically, trial seat updates cannot mint paid-period keys, and subscription replacements

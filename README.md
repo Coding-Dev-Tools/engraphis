@@ -52,7 +52,7 @@ Everything lives in a single SQLite file on your machine.
 | **Audit** | Full governance ledger — who did what, when, and why |
 | **Knowledge Graph** | Interactive force-directed graph of entities and their relationships — click any node to see every linked memory |
 | **Consolidate** | Run a consolidation sweep on demand — see what got distilled and what got pruned |
-| **Automation** *(Pro)* | Scheduled consolidation + retention policies on autopilot — plus **auto-dreaming**: a background consolidation + cross-cluster inference loop that fires when the store has accumulated enough new memories *and* gone idle. Configurable from the dashboard (cadence, dream trigger, idle threshold, inference toggle) or the `GET/POST /automation` API, and via `scripts/auto_maintain` for cron / Task Scheduler |
+| **Automation** *(Pro)* | Scheduled consolidation + retention policies on autopilot — plus **auto-dreaming**: a background consolidation + cross-cluster inference loop that fires when the store has accumulated enough new memories *and* gone idle. Configurable from the dashboard (cadence, dream trigger, idle threshold, inference toggle) or the `GET/POST /api/automation` API, and via `scripts/auto_maintain` for cron / Task Scheduler |
 | **Workspaces** | Create, rename, describe, copy, merge, and delete workspaces; import files & folders; drag-and-drop upload |
 | **Team** *(beta)* | Multi-user access with PBKDF2 logins, password reset, admin / member / viewer roles, seat management, and team audit log (Team) — **early-access beta** |
 | **Settings** | License activation (Pro/Team), cloud sync, LLM provider setup/test, Agent Connect token management, appearance, and engine/store info |
@@ -253,7 +253,7 @@ server-issued Pro or Team trial** after email confirmation — no card required.
 | Write | `engraphis_remember` | Store a fact; deterministically resolved (add/reinforce/supersede) |
 | Write | `engraphis_record_event` | Append a lightweight episodic log entry |
 | Write | `engraphis_link` | Explicitly connect two related memories |
-| Write | `engraphis_ingest` | Store raw text; Engraphis extracts the discrete facts worth keeping |
+| Write | `engraphis_ingest` | Apply the configured extractor (`chunk`, `llm`, or `llm_structured`); `none` stores one verbatim memory |
 | Write | `engraphis_consolidate` | Run a sleep-time sweep; optionally build entity profiles or schema-validated LLM facts |
 | Read | `engraphis_recall` | Hybrid vector + lexical + graph recall |
 | Read | `engraphis_recall_grounded` | Cited answer from retrieved memories — or abstain |
@@ -316,9 +316,11 @@ Drag-and-drop or server-side import, both member-gated and bounded:
 - **Dashboard upload** — the Workspaces tab's "Import files & folders" section accepts files
   directly from the browser.
 - **Server-side folder import** — `MemoryService.import_folder()` reads a directory on the
-  machine running Engraphis, one memory per file, with path-traversal guards.
-- **MCP ingest** — `engraphis_ingest` accepts raw text and extracts discrete facts when
-  `ENGRAPHIS_EXTRACTOR=llm` or `llm_structured` is configured; otherwise it stores verbatim.
+  machine running Engraphis, defaulting to one memory per file. With
+  `ENGRAPHIS_EXTRACTOR=chunk`, each file becomes retrieval-sized chunk memories.
+  Path-traversal guards still apply.
+- **MCP ingest** — `engraphis_ingest` accepts raw text and applies the configured extractor
+  (`chunk`, `llm`, or `llm_structured`); with `none` it stores one verbatim memory.
 - **Sub-file chunking** — set `ENGRAPHIS_EXTRACTOR=chunk` to split long, multi-topic
   documents into retrieval-sized, structure-aware pieces (headings start new chunks;
   ~256-token target with sentence-level overlap) *without an LLM*. Each chunk becomes
@@ -338,8 +340,9 @@ default; MCP ingest remains an authenticated agent write.
 
 ## Consolidation and automated maintenance
 
-Manual consolidation is free. The Pro **Automation** tab (and the `GET/POST /automation`
-plus `POST /maintenance/run` API) can keep the store clean without you clicking anything,
+Manual consolidation is free. The Pro **Automation** tab (and the
+`GET/POST /api/automation` plus `POST /api/maintenance/run` API) can keep the store
+clean without you clicking anything,
 using a maintenance **policy** with two modes that compose:
 
 - **Scheduled maintenance** — a consolidation + retention sweep on a fixed cadence
@@ -353,7 +356,7 @@ using a maintenance **policy** with two modes that compose:
   `dream_inference` memories (cross-cluster/entity profiles, marked untrusted and linked
   back to their sources) so inferred knowledge is auditable and never silently promoted.
 
-Knobs (dashboard Automation tab ↔ `/automation` API): `enabled`, `cadence_hours`,
+Knobs (dashboard Automation tab ↔ `/api/automation` API): `enabled`, `cadence_hours`,
 `consolidate`, `min_cluster`, `archive_below`, `dream`, `dream_min_new`,
 `dream_idle_minutes`, `infer`. Headless / no-dashboard-open: `python -m scripts.auto_maintain --apply`
 (via Task Scheduler or cron).
@@ -372,12 +375,12 @@ All via environment (or `.env`):
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
-| `ENGRAPHIS_DB_PATH` | `./engraphis.db` | SQLite database file |
+| `ENGRAPHIS_DB_PATH` | `<project/package root>/engraphis.db` | SQLite database file |
 | `ENGRAPHIS_HOST` | `127.0.0.1` | Server bind address |
 | `ENGRAPHIS_PORT` | `8700` | Dashboard port |
 | `ENGRAPHIS_API_TOKEN` | — | If set, REST API requires `Authorization: Bearer <token>` |
 | `ENGRAPHIS_DB_KEY` | — | Encrypt the database at rest (SQLCipher). Or use `ENGRAPHIS_DB_KEY_FILE` |
-| `ENGRAPHIS_EMBED_MODEL` | `all-MiniLM-L6-v2` | sentence-transformers model |
+| `ENGRAPHIS_EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | sentence-transformers model |
 | `ENGRAPHIS_EXTRACTOR` | `none` | `none` = verbatim; `chunk` = offline structure-aware chunks; `llm` = free-form LLM facts; `llm_structured` = schema-validated facts + graph metadata |
 | `ENGRAPHIS_GRAPH_EXTRACTOR` | `regex` | `regex` = offline heuristic NER; `none` = disable heuristic text extraction (validated `llm_structured` metadata still feeds the graph) |
 | `ENGRAPHIS_LLM_PROVIDER` | `openai` | `openai \| anthropic \| google \| openrouter \| custom` |
@@ -389,7 +392,7 @@ All via environment (or `.env`):
 | `ENGRAPHIS_LOOP_INTERVAL` | `60` | Background consolidation loop interval in seconds (0 = disabled) |
 | `ENGRAPHIS_DECAY_HALFLIFE_DAYS` | `7` | Ebbinghaus decay half-life (higher = memories persist longer) |
 | `ENGRAPHIS_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted reverse-proxy IPs for TLS termination (`*` = trust all) |
-| `ENGRAPHIS_RELAY_URL` | `https://team.engraphis.com` | Managed sync relay URL (Pro/Team) |
+| `ENGRAPHIS_RELAY_URL` | `https://team.engraphis.com` | Managed sync, license, trial, and invite relay (Pro/Team); the retired Railway URL is migrated automatically |
 | `ENGRAPHIS_AUTOSYNC_LOOP` | `1` | Kill switch for the in-process auto-sync loop (0 = off) |
 
 See `.env.example` for the full list including commercial/vendor, email delivery, and

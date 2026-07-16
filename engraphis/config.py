@@ -158,13 +158,15 @@ def _parse_csv(raw: str) -> list:
 settings = Settings()
 
 
+def canonicalize_relay_url(url: str) -> str:
+    """Normalize a relay URL and migrate known retired vendor hosts."""
+    normalized = (url or "").strip().rstrip("/")
+    return DEFAULT_RELAY_URL if normalized in RETIRED_RELAY_URLS else normalized
+
+
 def resolve_license_server_url(signed_url: str = "") -> str:
     """Resolve the license server, including known vendor-host migrations."""
-    def canonicalize(url: str) -> str:
-        normalized = (url or "").strip().rstrip("/")
-        return DEFAULT_RELAY_URL if normalized in RETIRED_RELAY_URLS else normalized
-
-    override = canonicalize(_env("ENGRAPHIS_CLOUD_URL", ""))
-    signed = canonicalize(signed_url)
-    relay = canonicalize(settings.relay_url)
+    override = canonicalize_relay_url(_env("ENGRAPHIS_CLOUD_URL", ""))
+    signed = canonicalize_relay_url(signed_url)
+    relay = canonicalize_relay_url(settings.relay_url)
     return override or signed or relay
