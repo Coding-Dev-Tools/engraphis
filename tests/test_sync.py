@@ -308,6 +308,101 @@ def test_cross_workspace_id_is_confined():
     assert store.get_memory("mem_secret").content == "salary is 100k"  # untouched
 
 
+def test_disallowed_workspace_cannot_be_exported_or_pushed(monkeypatch):
+    store = Store(":memory:")
+    disallowed = store.get_or_create_workspace("disallowed")
+    store.add_memory(MemoryRecord(id="mem_private", content="private",
+                                  workspace_id=disallowed, scope=Scope.WORKSPACE))
+    syncer = SyncEngine(store, allowed_workspaces=frozenset({"allowed"}))
+    local_calls = []
+    network_calls = []
+
+    def track_listing(*args, **kwargs):
+        local_calls.append("list")
+        return []
+
+    def track_serialization(record):
+        local_calls.append("serialize")
+        return record_to_dict(record)
+
+    class TrackingTransport:
+        def push(self, name, data):
+            network_calls.append(("push", name, data))
+
+        def pull(self):
+            network_calls.append(("pull",))
+            return []
+
+    monkeypatch.setattr(store, "list_memories", track_listing)
+    monkeypatch.setattr("engraphis.core.sync.record_to_dict", track_serialization)
+
+    with pytest.raises(SyncError, match="not authorized for sync"):
+        syncer.export_bundle(disallowed)
+    with pytest.raises(SyncError, match="not authorized for sync"):
+        syncer.sync(TrackingTransport(), disallowed)
+
+    assert local_calls == []
+    assert network_calls == []
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_repo_restricted_apply_rejects_forged_repo_for_existing_memory(dry_run):
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    allowed_repo = store.get_or_create_repo(workspace, "allowed")
+    other_repo = store.get_or_create_repo(workspace, "other")
+    store.add_memory(MemoryRecord(id="mem_other", content="original",
+                                  workspace_id=workspace, repo_id=other_repo,
+                                  scope=Scope.REPO, last_access=1.0))
+    bundle = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w",
+        "repos": {"remote_allowed": "allowed"},
+        "memories": [{"id": "mem_other", "content": "forged",
+                      "repo_id": "remote_allowed", "last_access": 100.0}],
+        "mem_links": [],
+    }
+
+    report = SyncEngine(store).apply_bundle(
+        bundle, only_repo_id=allowed_repo, dry_run=dry_run)
+
+    existing = store.get_memory("mem_other")
+    assert report["rejected"] == 1
+    assert report["updated"] == 0
+    assert existing.content == "original"
+    assert existing.repo_id == other_repo
+
+
+@pytest.mark.parametrize("outside_endpoint", ["a", "b"])
+def test_repo_restricted_links_reject_either_endpoint_outside_repo(outside_endpoint):
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    allowed_repo = store.get_or_create_repo(workspace, "allowed")
+    other_repo = store.get_or_create_repo(workspace, "other")
+    repo_by_id = {
+        "mem_a": other_repo if outside_endpoint == "a" else allowed_repo,
+        "mem_b": other_repo if outside_endpoint == "b" else allowed_repo,
+    }
+    for memory_id, repo_id in repo_by_id.items():
+        store.add_memory(MemoryRecord(id=memory_id, content=memory_id,
+                                      workspace_id=workspace, repo_id=repo_id,
+                                      scope=Scope.REPO))
+    bundle = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w",
+        "repos": {"remote_allowed": "allowed"},
+        "memories": [
+            {"id": "mem_a", "content": "mem_a", "repo_id": "remote_allowed"},
+            {"id": "mem_b", "content": "mem_b", "repo_id": "remote_allowed"},
+        ],
+        "mem_links": [{"a": "mem_a", "b": "mem_b", "relation": "forged"}],
+    }
+
+    report = SyncEngine(store).apply_bundle(bundle, only_repo_id=allowed_repo)
+
+    assert report["rejected"] == 1
+    assert report["links_added"] == 0
+    assert not store.has_link("mem_a", "mem_b", relation="forged")
+
+
 def test_hostile_infinity_bundle_does_not_crash_sync(tmp_path):
     """A JSON ``Infinity`` bundle is rejected without aborting the whole sync run."""
     a = MemoryEngine.create(":memory:")
