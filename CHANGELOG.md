@@ -10,7 +10,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
   retired Railway license host to `https://team.engraphis.com`; new defaults use the
   canonical domain for license leases and managed sync. License, trial, and invite
   requests now send an explicit Engraphis User-Agent so Cloudflare does not reject
-  Python's default `urllib` signature with error 1010.
+  Python's default `urllib` signature with error 1010. A configured key that falls back
+  to free during an outage now retries automatically, including from the dashboard's
+  background refresh loop, so service recovery no longer requires a restart or re-entry.
 
 ### Added
 - **Agent Connect (Team): connect agents to a hosted instance instead of running locally.**
