@@ -461,6 +461,13 @@ class ChunkingExtractor:
         cur_tokens = 0
         for sent in sentences:
             stokens = estimate_tokens(sent)
+            if stokens > self.target_tokens:
+                if cur:
+                    joined = " ".join(cur)
+                    groups.append(joined)
+                    cur, cur_tokens = [], 0
+                groups.extend(self._split_oversized_sentence(sent))
+                continue
             if cur and cur_tokens + stokens > self.target_tokens:
                 joined = " ".join(cur)
                 groups.append(joined)
@@ -472,6 +479,29 @@ class ChunkingExtractor:
         if cur:
             groups.append(" ".join(cur))
         return groups
+
+    def _split_oversized_sentence(self, sentence: str) -> list[str]:
+        """Last-resort split for minified/generated text with no sentence boundaries.
+
+        Normal prose is never cut mid-sentence. A single "sentence" larger than the
+        memory limit cannot be stored whole, so split near whitespace (or hard-cut a
+        single giant token) instead of silently truncating it in ``_defang``.
+        """
+        max_chars = max(64, self.target_tokens * 4)
+        remaining = sentence.strip()
+        parts: list[str] = []
+        while remaining:
+            if len(remaining) <= max_chars:
+                parts.append(remaining)
+                break
+            cut = remaining.rfind(" ", max_chars // 2, max_chars + 1)
+            if cut < 0:
+                cut = max_chars
+            part = remaining[:cut].strip()
+            if part:
+                parts.append(part)
+            remaining = remaining[cut:].strip()
+        return parts
 
     def _overlap_tail(self, text: str) -> str:
         """Trailing whole sentences of ``text`` up to ``overlap_tokens``."""
