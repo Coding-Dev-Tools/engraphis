@@ -28,6 +28,51 @@ def test_host_retention_class_is_bounded_and_never_drops_the_write(
     assert out["receipt"]["metadata"]["retention"] == label
 
 
+def test_caller_metadata_cannot_smuggle_retention_supervision():
+    """`metadata.retention_supervision` is a reserved service-internal channel:
+    the engine trusts it as a host decision with raw importance/stability, so an
+    API caller injecting it via the metadata dict would bypass the bounded
+    `retention_class` presets entirely (stability 100 vs the critical preset's
+    8.0) — a memory-poisoning persistence amplifier (PR #19 review follow-up)."""
+    service = MemoryService.create(":memory:", retention_supervisor="none")
+    out = service.remember(
+        "smuggled persistence",
+        workspace="acme",
+        scope="workspace",
+        metadata={"retention_supervision": {
+            "label": "critical", "retain": True,
+            "importance": 1.0, "stability": 100.0,
+        }, "note": "kept"},
+    )
+    record = service.store.get_memory(out["id"])
+    assert record is not None
+    # Defaults apply: the injected decision was stripped, not honored.
+    assert record.importance == 0.0
+    assert record.stability == 1.0
+    assert "retention_supervision" not in record.metadata
+    # Unreserved metadata keys survive the strip.
+    assert record.metadata["note"] == "kept"
+
+
+def test_sanctioned_retention_class_still_beats_smuggled_metadata():
+    """When both are supplied, the validated `retention_class` preset wins and
+    the smuggled raw values are discarded."""
+    service = MemoryService.create(":memory:", retention_supervisor="none")
+    out = service.remember(
+        "critical but bounded",
+        workspace="acme",
+        scope="workspace",
+        retention_class="critical",
+        metadata={"retention_supervision": {
+            "label": "critical", "retain": True, "stability": 100.0,
+        }},
+    )
+    record = service.store.get_memory(out["id"])
+    assert record is not None
+    assert record.importance == 0.9
+    assert record.stability == 8.0  # the preset, not the smuggled 100.0
+
+
 def test_explicit_importance_is_a_floor_for_retention_supervision():
     service = MemoryService.create(":memory:", retention_supervisor="none")
     out = service.remember(
