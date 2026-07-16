@@ -95,7 +95,7 @@ facts, and hybrid (vector + lexical + graph) recall. The engine is 100% local: S
 embeddings. You bring the LLM only for optional chat/synthesis.
 
 - **Local-first & private** — runs offline; the core depends only on `numpy`.
-- **MCP-native** — 18 tools for Claude Code, Cursor, Cline, Zed, Windsurf.
+- **MCP-native** — 20 tools for Claude Code, Cursor, Cline, Zed, Windsurf.
 - **Self-maintaining facts** — writes are deterministically conflict-resolved (no LLM required).
 - **Principled recall** — six-term score over retention, semantic, lexical, graph, importance, recency.
 - **Bi-temporal truth** — contradictions invalidate instead of overwriting (`engraphis_why` / `engraphis_timeline`).
@@ -189,9 +189,9 @@ engraphis-init                     # writes .env + prints config snippets
 claude mcp add engraphis -- engraphis-mcp
 ```
 
-Your agent now has 18 tools — remember, recall (grounded + proactive), why, timeline,
-forget, pin, correct, ingest, consolidate, index_repo, search_code, link, record_event,
-start/end_session, stats. See the [MCP tools table](#mcp-tools) below.
+Your agent now has 20 tools — remember, recall (grounded + proactive), proactive context,
+grounded answer alias, why, timeline, forget, pin, correct, ingest, consolidate, index_repo,
+search_code, link, record_event, start/end_session, stats. See the [MCP tools table](#mcp-tools) below.
 
 ---
 
@@ -227,7 +227,7 @@ and you can unlock every Pro feature with a **3-day free trial right in the dash
 | | Free (available now) | Pro — $10/mo or $100/yr | Team — $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
 | Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
-| Memory engine + 18 MCP tools | ✓ | ✓ | ✓ |
+| Memory engine + 20 MCP tools | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Cloud sync (folder + managed relay) | | ✓ | ✓ |
 | Auto-sync (hands-off cadence) | | ✓ | ✓ |
@@ -253,7 +253,9 @@ and you can unlock every Pro feature with a **3-day free trial right in the dash
 | Write | `engraphis_consolidate` | Run one sleep-time consolidation sweep: distill recurring episodes |
 | Read | `engraphis_recall` | Hybrid vector + lexical + graph recall |
 | Read | `engraphis_recall_grounded` | Cited answer from retrieved memories — or abstain |
+| Read | `engraphis_answer` | Backward-compatible grounded-answer alias |
 | Read | `engraphis_recall_proactive` | "What should I know right now" — no query needed |
+| Read | `engraphis_proactive_context` | Task-aware context packet with cited memories and session handoff |
 | Read | `engraphis_why` | Current answer + what it superseded |
 | Read | `engraphis_timeline` | Full bi-temporal history, oldest first |
 | Code | `engraphis_index_repo` | Parse a repo into the code symbol graph |
@@ -389,7 +391,7 @@ engraphis/
 │   ├── core/                # v2 engine — interfaces, store, recall, scoring, schema, sync
 │   ├── backends/            # pluggable embedder / vector index / reranker / codegraph / sync transports / encryption
 │   ├── service.py           # validated MemoryService facade
-│   ├── mcp_server.py        # MCP server — 18 tools
+│   ├── mcp_server.py        # MCP server — 20 tools
 │   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
 │   ├── autosync.py          # background auto-sync loop (Pro/Team)
 │   ├── licensing.py         # license verification (offline + cloud)
