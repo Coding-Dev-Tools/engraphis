@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from engraphis import cloud_license, licensing
-from engraphis.config import settings
+from engraphis.config import DEFAULT_RELAY_URL, settings
 from engraphis.inspector import license_cloud
 from engraphis.inspector import license_registry as reg
 from engraphis.licensing import LicenseError, ed25519_public_key, parse_key
@@ -227,6 +227,27 @@ def test_register_raises_revoked_on_server_denial(monkeypatch):
     def _urlopen_5xx(req, timeout=None): raise _HTTPError(503)
     monkeypatch.setattr(cloud_license.urllib.request, "urlopen", _urlopen_5xx)
     assert cloud_license.register("http://cloud.test", _key(), "m-1") is None
+
+
+def test_license_client_sets_cloudflare_safe_headers(monkeypatch):
+    captured = {}
+
+    class _Resp:
+        def read(self): return b'{"lease": null}'
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+
+    def fake_urlopen(req, timeout=None):
+        captured["user_agent"] = req.get_header("User-agent")
+        captured["accept"] = req.get_header("Accept")
+        return _Resp()
+
+    monkeypatch.setattr(cloud_license.urllib.request, "urlopen", fake_urlopen)
+    assert cloud_license.register("http://cloud.test", _key(), "m-1") is None
+    assert captured == {
+        "user_agent": "Engraphis/1.0 (+https://engraphis.com)",
+        "accept": "application/json",
+    }
 
 
 def test_revalidate_revoked_deletes_lease(monkeypatch):
@@ -626,6 +647,26 @@ def test_cloud_enforced_key_uses_baked_in_url(monkeypatch):
     assert got.plan == "pro" and got.has("sync")
 
 
+def test_retired_baked_in_url_migrates_to_current_relay(monkeypatch):
+    """Existing signed keys must survive the vendor's Railway-to-domain migration."""
+    key = _enforced_key(cloud_url="https://engraphis-production.up.railway.app")
+    lic_parsed = parse_key(key)
+    calls = {}
+
+    def fake_register(base, k, mid, **kw):
+        calls["base"] = base
+        payload = {"v": 1, "key_id": lic_parsed.key_id, "plan": lic_parsed.plan,
+                   "features": sorted(lic_parsed.features), "machine_id": mid,
+                   "issued": int(time.time()), "expires": int(time.time() + 3600)}
+        return cloud_license.compose_lease(payload, SECRET)
+
+    monkeypatch.setattr(cloud_license, "register", fake_register)
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
+    got = licensing.current_license(refresh=True)
+    assert calls["base"] == DEFAULT_RELAY_URL == "https://team.engraphis.com"
+    assert got.plan == "pro" and got.has("sync")
+
+
 def test_all_paid_keys_require_server_even_without_enforce_claim(monkeypatch):
     """Online-only (closes the offline-key bypass): even a key WITHOUT the enforce claim
     (old "offline" style) must obtain a live lease. Server unreachable → fail closed;
@@ -643,6 +684,26 @@ def test_all_paid_keys_require_server_even_without_enforce_claim(monkeypatch):
     monkeypatch.setattr(cloud_license, "register", ok_register)
     got = licensing.current_license(refresh=True)
     assert got.plan == "pro" and got.has("sync")
+
+
+def test_configured_key_retries_after_free_fallback_cache(monkeypatch):
+    """A transient outage must not pin a valid configured key to free forever."""
+    key = _key()
+    lic_parsed = parse_key(key)
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
+    monkeypatch.setattr(cloud_license, "register", lambda *a, **k: None)
+    assert licensing.current_license(refresh=True).plan == "free"
+    assert licensing._cache_recheck_at != float("inf")
+
+    def ok_register(base, k, mid, **kw):
+        payload = {"v": 1, "key_id": lic_parsed.key_id, "plan": lic_parsed.plan,
+                   "features": sorted(lic_parsed.features), "machine_id": mid,
+                   "issued": int(time.time()), "expires": int(time.time() + 3600)}
+        return cloud_license.compose_lease(payload, SECRET)
+
+    monkeypatch.setattr(cloud_license, "register", ok_register)
+    monkeypatch.setattr(licensing, "_cache_recheck_at", 0)
+    assert licensing.current_license().plan == "pro"
 
 
 # ── team-invite relay: self-hosted dashboards with no mail account of their own ────────
