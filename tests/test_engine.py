@@ -420,6 +420,31 @@ def test_complete_incremental_scan_removes_deleted_files(tmp_path):
     assert {row["name"] for row in eng.store.list_symbols(rid)} == {"alpha"}
 
 
+def test_incremental_scan_preserves_last_good_index_for_unreadable_file(
+        tmp_path, monkeypatch):
+    source = tmp_path / "a.py"
+    source.write_text("def alpha(): pass\n")
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    eng.index_repo(rid, str(tmp_path), prefer="regex")
+
+    original_read_bytes = type(source).read_bytes
+
+    def fail_target(path):
+        if path.resolve() == source.resolve():
+            raise OSError("temporary read failure")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(type(source), "read_bytes", fail_target)
+    report = eng.index_repo(rid, str(tmp_path), prefer="regex")
+
+    assert report["scan_complete"] is True
+    assert report["files_failed"] == 1
+    assert report["files_removed"] == 0
+    assert {row["name"] for row in eng.store.list_symbols(rid)} == {"alpha"}
+
+
 def test_code_path_and_impact_preserve_hidden_repo_paths(tmp_path):
     hidden = tmp_path / ".github"
     hidden.mkdir()

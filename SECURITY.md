@@ -24,6 +24,8 @@ Memories may originate from web pages, tool output, or other untrusted sources.
 - Provenance on every memory (`provenance.source`)
 - No destructive overwrite: contradictions resolved by bi-temporal invalidation
 - Governance is explicit, scope-checked, and audited
+- Optional LLM extraction and retention supervision send bounded content to the configured
+  provider only when explicitly enabled. Keep both disabled for a fully local write path.
 
 > Note: input validation reduces blast radius but cannot judge truthfulness. Treat recalled
 > memories as untrusted context, and prefer scoping to limit what any one agent sees.
@@ -61,6 +63,9 @@ In Team mode, filesystem indexing and folder imports require the admin role.
 ### 6. Local resource and database ingestion
 - Uploaded and folder-imported files are size/count bounded, marked `trusted:false`, and parsed
   as data. Missing optional PDF/OCR/transcription tools fail explicitly.
+- The import UI's `derive_facts` option is a separate explicit opt-in. If an LLM/custom
+  extractor is configured, selected file content may be sent to that provider; leave it off
+  for a strictly local import. The default and chunk extractors remain fully local.
 - Audio/video transcription runs only when `ENGRAPHIS_WHISPER_MODEL` is configured. Depending on
   the faster-whisper model name, the underlying library may download a model; use an absolute
   local model path when strictly offline operation is required.

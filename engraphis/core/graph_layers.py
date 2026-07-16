@@ -26,6 +26,17 @@ _ENTITY = {
     "works_at",
 }
 
+# Sync format v1 has no per-field clock for link metadata. This ordering is a stable
+# join for concurrent classifications: the generic semantic overlay yields to a more
+# specific entity/causal/temporal classification, and peers converge independent of
+# bundle arrival order.
+_MERGE_RANK = {
+    GraphLayer.SEMANTIC: 0,
+    GraphLayer.ENTITY: 1,
+    GraphLayer.CAUSAL: 2,
+    GraphLayer.TEMPORAL: 3,
+}
+
 
 def normalize_graph_layer(value: object, relation: str = "") -> GraphLayer:
     """Return an explicit layer or infer one from ``relation``."""
@@ -38,6 +49,13 @@ def normalize_graph_layer(value: object, relation: str = "") -> GraphLayer:
         except ValueError:
             pass
     return infer_graph_layer(relation)
+
+
+def merge_graph_layers(left: object, right: object, relation: str = "") -> GraphLayer:
+    """Deterministically merge concurrent graph-layer classifications."""
+    a = normalize_graph_layer(left, relation)
+    b = normalize_graph_layer(right, relation)
+    return max((a, b), key=lambda layer: (_MERGE_RANK[layer], layer.value))
 
 
 def infer_graph_layer(relation: Optional[str]) -> GraphLayer:

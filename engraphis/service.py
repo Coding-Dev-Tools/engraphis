@@ -20,6 +20,7 @@ import re
 import json
 import hashlib
 import contextvars
+import math
 from pathlib import Path
 from typing import Any, Optional
 
@@ -481,6 +482,8 @@ class MemoryService:
             importance = float(importance)
         except (TypeError, ValueError):
             raise ValidationError("importance must be a number")
+        if not math.isfinite(importance):
+            raise ValidationError("importance must be finite")
         importance = max(0.0, min(1.0, importance))
 
         wid = self.store.get_or_create_workspace(ws)
@@ -631,10 +634,10 @@ class MemoryService:
         When the configured extractor is the *offline* ``ChunkingExtractor``, a file is
         split into several retrieval-sized memories instead of one — each still untrusted,
         each stamped with ``provenance``/``metadata.chunk`` linking it to its file and
-        position. The LLM extractor is deliberately **never** applied here: it would ship
-        untrusted, disk-local file bytes to an external API on the one path whose whole
-        contract is local, one-memory-per-file, untrusted content (SECURITY.md §5). With
-        no extractor (the default) behaviour is byte-for-byte unchanged."""
+        position. An LLM/custom extractor is never applied by this base import pass.
+        Callers must explicitly opt into the separate ``derive_facts`` pass, which may
+        send content to the configured provider (SECURITY.md §6). With no extractor
+        (the default) behaviour is byte-for-byte unchanged."""
         if not content.strip():
             return {"file": name, "skipped": True}
         fallback = Path(name).stem or name
@@ -677,6 +680,41 @@ class MemoryService:
         except ValidationError as exc:
             return {"file": name, "error": str(exc)}
 
+    def _derive_import_facts(self, content: str, *, ws: str, mt: MemoryType,
+                             resource_name: str, resource_kind: str,
+                             resource_meta: dict) -> tuple[int, str]:
+        """Run the explicitly requested second-pass extractor without duplicating
+        deterministic chunking already performed by ``_import_one``."""
+        extractor = getattr(self.engine, "extractor", None)
+        if extractor is None:
+            return 0, "fact derivation requested but no extractor is configured"
+        if isinstance(extractor, ChunkingExtractor):
+            return 0, (
+                "fact derivation skipped because the configured chunk extractor "
+                "already ran during import"
+            )
+
+        inputs = [content]
+        if len(content) > MAX_CONTENT_CHARS:
+            inputs = [fact.content for fact in ChunkingExtractor().extract(content)]
+
+        created = 0
+        extracted = False
+        for chunk in inputs:
+            derived = self.ingest(
+                chunk, workspace=ws, mtype=mt.value, scope="workspace",
+                metadata={"derived_from_resource": resource_name, **resource_meta},
+                source="resource_extractor", trusted=False,
+                kind=f"{resource_kind}_facts",
+            )
+            extracted = extracted or bool(derived["extracted"])
+            created += sum(
+                1 for fact in derived["facts"] if fact.get("op") != "noop"
+            )
+        if not extracted or created == 0:
+            return created, "configured extractor produced no new discrete facts"
+        return created, ""
+
     def import_folder(self, *, workspace: str, path: str, file_pattern: str = "*.md",
                       memory_type: str = "semantic", actor: str = "user",
                       derive_facts: bool = False) -> dict:
@@ -712,7 +750,8 @@ class MemoryService:
         from engraphis.backends.resources import get_resource_extractor
         resource_extractor = get_resource_extractor()
 
-        imported, skipped, errors, details, warnings = 0, 0, 0, [], []
+        imported, skipped, errors, derived_facts = 0, 0, 0, 0
+        details, warnings = [], []
         for f in files:
             try:
                 if f.stat().st_size > MAX_IMPORT_RESOURCE_BYTES:
@@ -739,38 +778,44 @@ class MemoryService:
                 extra_provenance={"import_path": rel, **resource_meta},
                 resource_title=resource.title,
             )
-            if resource.warnings:
-                result["warnings"] = resource.warnings
-                warnings.append({"file": rel, "warnings": resource.warnings})
-            if derive_facts and getattr(self.engine, "extractor", None) is not None:
-                derived = self.ingest(
-                    resource.text, workspace=ws, mtype=mt.value, scope="workspace",
-                    metadata={"derived_from_resource": rel, **resource_meta},
-                    source="resource_extractor", trusted=False,
-                    kind=f"{resource.kind}_facts",
-                )
-                result["derived_facts"] = derived["count"]
             if result.get("skipped"):
                 skipped += 1
+                continue
             elif result.get("error"):
                 errors += 1
                 details.append(result)
+                continue
             else:
                 imported += 1
+            file_warnings = list(resource.warnings)
+            if derive_facts:
+                try:
+                    count, note = self._derive_import_facts(
+                        resource.text, ws=ws, mt=mt, resource_name=rel,
+                        resource_kind=resource.kind, resource_meta=resource_meta,
+                    )
+                    derived_facts += count
+                    if note:
+                        file_warnings.append(note)
+                except (OSError, ValueError) as exc:
+                    file_warnings.append(f"fact derivation failed: {exc}")
+            if file_warnings:
+                warnings.append({"file": rel, "warnings": file_warnings})
 
         self.store.audit(actor, "import_folder", wid,
                          f"{raw_path} ({imported} imported)")
         self.store.conn.commit()
         return {"workspace": ws, "path": str(folder), "scanned": len(files),
                 "imported": imported, "skipped": skipped, "errors": errors,
-                "details": details[:50], "warnings": warnings[:50]}
+                "derived_facts": derived_facts, "details": details[:50],
+                "warnings": warnings[:50]}
 
     def import_files(self, *, workspace: str, files: list, memory_type: str = "semantic",
                      actor: str = "user", derive_facts: bool = False) -> dict:
         """Drag-and-drop / picked-file counterpart to ``import_folder``: ingest
-        browser-uploaded file contents (already decoded to text by the caller — this
-        method has no transport dependency, matching the rest of this facade) as one
-        memory per file. Same untrusted-by-default marking as ``import_folder``."""
+        browser-uploaded file bytes through the local resource extractor. This method has
+        no transport dependency, matching the rest of the facade, and applies the same
+        untrusted-by-default marking as ``import_folder``."""
         ws = self._clean_ws(workspace)
         mt = _enum(memory_type, MemoryType, "memory_type")
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
@@ -798,7 +843,8 @@ class MemoryService:
         wid = self.store.get_or_create_workspace(ws)
         from engraphis.backends.resources import get_resource_extractor
         resource_extractor = get_resource_extractor()
-        imported, skipped, errors, details, warnings = 0, 0, 0, [], []
+        imported, skipped, errors, derived_facts = 0, 0, 0, 0
+        details, warnings = [], []
         for item in files:
             if not isinstance(item, dict):
                 errors += 1
@@ -836,30 +882,35 @@ class MemoryService:
                 name, resource.text, ws=ws, mt=mt, kind="file_upload",
                 extra_provenance=resource_meta, resource_title=resource.title,
             )
-            if resource.warnings:
-                result["warnings"] = resource.warnings
-                warnings.append({"file": name, "warnings": resource.warnings})
-            if derive_facts and getattr(self.engine, "extractor", None) is not None:
-                derived = self.ingest(
-                    resource.text, workspace=ws, mtype=mt.value, scope="workspace",
-                    metadata={"derived_from_resource": name, **resource_meta},
-                    source="resource_extractor", trusted=False,
-                    kind=f"{resource.kind}_facts",
-                )
-                result["derived_facts"] = derived["count"]
             if result.get("skipped"):
                 skipped += 1
+                continue
             elif result.get("error"):
                 errors += 1
                 details.append(result)
+                continue
             else:
                 imported += 1
+            file_warnings = list(resource.warnings)
+            if derive_facts:
+                try:
+                    count, note = self._derive_import_facts(
+                        resource.text, ws=ws, mt=mt, resource_name=name,
+                        resource_kind=resource.kind, resource_meta=resource_meta,
+                    )
+                    derived_facts += count
+                    if note:
+                        file_warnings.append(note)
+                except (OSError, ValueError) as exc:
+                    file_warnings.append(f"fact derivation failed: {exc}")
+            if file_warnings:
+                warnings.append({"file": name, "warnings": file_warnings})
 
         self.store.audit(actor, "import_files", wid, f"{imported} imported")
         self.store.conn.commit()
         return {"workspace": ws, "scanned": len(files), "imported": imported,
-                "skipped": skipped, "errors": errors, "details": details[:50],
-                "warnings": warnings[:50]}
+                "skipped": skipped, "errors": errors, "derived_facts": derived_facts,
+                "details": details[:50], "warnings": warnings[:50]}
 
     def import_postgres_schema(self, dsn: str, *, workspace: str,
                                repo: Optional[str] = None,
@@ -988,11 +1039,14 @@ class MemoryService:
         wid, rid = self._require_scope(workspace, repo)
         try:
             min_cluster = max(2, min(20, int(min_cluster)))
-            archive_below = max(0.0, min(0.5, float(archive_below)))
+            archive_below = float(archive_below)
             min_mentions = max(2, min(50, int(min_mentions)))
         except (TypeError, ValueError):
             raise ValidationError("min_cluster/min_mentions must be integers and "
                                   "archive_below a number")
+        if not math.isfinite(archive_below):
+            raise ValidationError("archive_below must be finite")
+        archive_below = max(0.0, min(0.5, archive_below))
         llm = None
         if structured:
             try:
@@ -1109,6 +1163,8 @@ class MemoryService:
                 min_support = float(min_support)
             except (TypeError, ValueError):
                 raise ValidationError("min_support must be a number")
+            if not math.isfinite(min_support):
+                raise ValidationError("min_support must be finite")
             min_support = max(0.0, min(1.0, min_support))
         mts = [_enum(m, MemoryType, "mtype") for m in mtypes] if mtypes else None
 

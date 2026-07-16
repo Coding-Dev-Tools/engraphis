@@ -46,7 +46,7 @@ import math
 import re
 from typing import Any, Optional
 
-from engraphis.core.graph_layers import normalize_graph_layer
+from engraphis.core.graph_layers import merge_graph_layers, normalize_graph_layer
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
 from engraphis.core.store import Store, now_ts
 
@@ -588,7 +588,9 @@ class SyncEngine:
             if existing_link:
                 # Link metadata has no clock in sync format v1. Resolve concurrent
                 # metadata deterministically so peers converge regardless of arrival.
-                merged_layer = max(existing_link["layer"] or "semantic", layer)
+                merged_layer = merge_graph_layers(
+                    existing_link["layer"], layer, rel
+                ).value
                 merged_reason = max(existing_link["reason"] or "", reason)
                 if (merged_layer, merged_reason) == (
                     existing_link["layer"] or "semantic",

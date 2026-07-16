@@ -11,6 +11,7 @@ backends for production.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 import time
 from collections import defaultdict, deque
@@ -42,6 +43,16 @@ _SENSITIVITY_RANK = {"normal": 0, "sensitive": 1, "secret": 2}
 # A-MEM-style evolution: how many related neighbors a new memory auto-links to on write.
 # Bounded so hub memories don't accrete unbounded link lists (link quality > quantity).
 EVOLVE_MAX_LINKS = 3
+
+
+def _bounded_finite(value, *, default: float, minimum: float, maximum: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(number):
+        return default
+    return max(minimum, min(maximum, number))
 
 
 class MemoryEngine:
@@ -256,21 +267,22 @@ class MemoryEngine:
         preset_stability = {"ephemeral": 0.25, "normal": 1.0, "critical": 8.0}[label]
         preset_importance = {"ephemeral": 0.1, "normal": 0.5, "critical": 0.9}[label]
         if decision.importance is not None:
-            try:
-                proposed_importance = max(0.0, min(1.0, float(decision.importance)))
-            except (TypeError, ValueError):
-                proposed_importance = preset_importance
+            proposed_importance = _bounded_finite(
+                decision.importance, default=preset_importance,
+                minimum=0.0, maximum=1.0,
+            )
         else:
             proposed_importance = preset_importance
         # An explicit caller-provided importance remains a floor; supervision cannot
         # silently downgrade a user-marked critical memory.
-        final_importance = max(float(importance or 0.0), proposed_importance)
-        try:
-            final_stability = max(0.05, min(100.0, float(
-                decision.stability if decision.stability is not None else preset_stability
-            )))
-        except (TypeError, ValueError):
-            final_stability = preset_stability
+        caller_importance = _bounded_finite(
+            importance, default=0.0, minimum=0.0, maximum=1.0
+        )
+        final_importance = max(caller_importance, proposed_importance)
+        final_stability = _bounded_finite(
+            decision.stability if decision.stability is not None else preset_stability,
+            default=preset_stability, minimum=0.05, maximum=100.0,
+        )
         signal = {
             "source": source,
             "label": label,
@@ -718,7 +730,7 @@ class MemoryEngine:
             row["file"]: row
             for row in self.store.list_code_files(repo_id, languages=languages)
         }
-        seen: set[str] = set()
+        present: set[str] = set()
         lang_counts: dict[str, int] = defaultdict(int)
         files_scanned = files_indexed = files_unchanged = files_failed = files_skipped = 0
         symbols_indexed = edges_indexed = 0
@@ -744,6 +756,11 @@ class MemoryEngine:
                     continue
                 files_scanned += 1
                 lang_counts[lang] += 1
+                # Presence and successful indexing are deliberately separate. A file
+                # that still exists but is temporarily unreadable, oversized, or fails
+                # parsing must not have its last known-good symbols deleted at the end
+                # of an otherwise complete scan.
+                present.add(rel)
                 try:
                     stat = p.stat()
                     if stat.st_size > max_file_bytes:
@@ -753,7 +770,6 @@ class MemoryEngine:
                 except OSError:
                     files_failed += 1
                     continue
-                seen.add(rel)
                 content_hash = hashlib.sha256(raw).hexdigest()
                 previous = existing.get(rel)
                 if previous and previous.get("content_hash") == content_hash:
@@ -793,7 +809,7 @@ class MemoryEngine:
 
         removed = 0
         if scan_complete:
-            for rel in sorted(set(existing) - seen):
+            for rel in sorted(set(existing) - present):
                 self.store.remove_code_file(repo_id, rel, commit=False)
                 removed += 1
         self.store.conn.commit()
