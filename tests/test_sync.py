@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from engraphis.backends import sync_folder
 from engraphis.backends.sync_folder import FolderTransport, get_transport
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
@@ -225,6 +226,15 @@ def test_folder_transport_is_a_valid_synctransport(tmp_path):
     names = t.list_names()
     assert names == ["bundle-x.json"]
     assert t.pull() == [("bundle-x.json", b"{}")]
+
+
+def test_folder_transport_rejects_a_bundle_it_would_skip_on_pull(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(sync_folder, "MAX_BUNDLE_BYTES", 3)
+    transport = FolderTransport(str(tmp_path / "share"))
+    with pytest.raises(ValueError, match="transport limit"):
+        transport.push("bundle-x.json", b"1234")
+    assert transport.list_names() == []
 
 
 def test_two_devices_converge(tmp_path):
@@ -524,6 +534,43 @@ def test_sync_auditing_for_adds_updates_and_links():
     assert link["reason"] == "same deployment path"
 
 
+def test_link_metadata_merge_converges_independent_of_bundle_order():
+    memories = [
+        {"id": "mem_a", "content": "one"},
+        {"id": "mem_b", "content": "two"},
+    ]
+    semantic = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
+        "memories": memories,
+        "mem_links": [{
+            "a": "mem_a", "b": "mem_b", "relation": "related",
+            "layer": "semantic", "reason": "zeta",
+        }],
+    }
+    causal = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
+        "memories": memories,
+        "mem_links": [{
+            "a": "mem_a", "b": "mem_b", "relation": "related",
+            "layer": "causal", "reason": "alpha",
+        }],
+    }
+
+    left = Store(":memory:")
+    right = Store(":memory:")
+    left_sync = SyncEngine(left)
+    right_sync = SyncEngine(right)
+    left_sync.apply_bundle(semantic)
+    left_sync.apply_bundle(causal)
+    right_sync.apply_bundle(causal)
+    right_sync.apply_bundle(semantic)
+
+    left_link = left.get_links("mem_a")[0]
+    right_link = right.get_links("mem_a")[0]
+    assert (left_link["layer"], left_link["reason"]) == ("causal", "zeta")
+    assert (right_link["layer"], right_link["reason"]) == ("causal", "zeta")
+
+
 def test_deeply_nested_json_does_not_crash_sync_decoding(tmp_path):
     a = MemoryEngine.create(":memory:")
     wa = a.store.get_or_create_workspace("acme")
@@ -539,4 +586,3 @@ def test_deeply_nested_json_does_not_crash_sync_decoding(tmp_path):
     report = sa.sync(get_transport("folder", root=str(root)), wa)
     assert report["totals"]["added"] == 0
     assert any(x.get("bundle") == "bundle-dev_nested.json" and x.get("error") == "unreadable" for x in report["applied"])
-

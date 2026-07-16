@@ -51,6 +51,48 @@ def test_import_files_chunks_when_chunker_configured():
     assert {"Auth", "Storage", "Deploy"} & titles
 
 
+def test_derive_facts_does_not_duplicate_chunk_imports():
+    svc = MemoryService.create(":memory:", extractor="chunk")
+    out = svc.import_files(
+        workspace="ws",
+        files=[{"name": "doc.md", "content": DOC}],
+        derive_facts=True,
+    )
+
+    mems = _mems(svc, "ws")
+    assert out["derived_facts"] == 0
+    assert len(mems) >= 3
+    assert any(
+        "already ran during import" in warning
+        for item in out["warnings"] for warning in item["warnings"]
+    )
+
+
+def test_explicit_derive_facts_reports_new_llm_facts():
+    class _FactLLM:
+        def chat(self, *args, **kwargs):
+            return (
+                '{"facts":[{"content":"Production support rotates weekly.",'
+                '"mtype":"semantic"}]}'
+            )
+
+    svc = MemoryService.create(":memory:", extractor="none")
+    svc.engine.extractor = LLMExtractor(_FactLLM())
+    out = svc.import_files(
+        workspace="ws",
+        files=[{"name": "doc.md", "content": DOC}],
+        derive_facts=True,
+    )
+
+    assert out["imported"] == 1
+    assert out["derived_facts"] == 1
+    assert any(
+        memory.content == "Production support rotates weekly."
+        and memory.provenance.get("trusted") is False
+        for memory in _mems(svc, "ws")
+    )
+
+
 def test_llm_extractor_never_chunks_imports():
     # A configured LLM extractor must not touch the import path (no external calls on
     # untrusted local files); the file stays one untrusted memory.

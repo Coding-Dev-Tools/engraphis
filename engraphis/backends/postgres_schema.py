@@ -6,6 +6,7 @@ returned, logged, or embedded in memory; provenance contains a one-way digest in
 from __future__ import annotations
 
 import hashlib
+import os
 from typing import Any, Optional
 
 from engraphis.core.interfaces import SchemaSnapshot
@@ -13,20 +14,37 @@ from engraphis.core.interfaces import SchemaSnapshot
 _SYSTEM_SCHEMAS = {"pg_catalog", "information_schema"}
 _MAX_ENTITIES = 20_000
 _MAX_RELATIONS = 50_000
+_DEFAULT_CONNECT_TIMEOUT_SECONDS = 10
+_MAX_CONNECT_TIMEOUT_SECONDS = 120
+_DEFAULT_STATEMENT_TIMEOUT_MS = 30_000
+_MAX_STATEMENT_TIMEOUT_MS = 300_000
 
 
 class PostgresIntrospectionError(ValueError):
     """Safe, actionable PostgreSQL inspection failure."""
 
 
+def _bounded_env_int(name: str, default: int, maximum: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(1, min(maximum, value))
+
+
 def _connect(dsn: str):
+    timeout = _bounded_env_int(
+        "ENGRAPHIS_POSTGRES_CONNECT_TIMEOUT",
+        _DEFAULT_CONNECT_TIMEOUT_SECONDS,
+        _MAX_CONNECT_TIMEOUT_SECONDS,
+    )
     try:
         import psycopg
-        return psycopg.connect(dsn)
+        return psycopg.connect(dsn, connect_timeout=timeout)
     except ImportError:
         try:
             import psycopg2
-            return psycopg2.connect(dsn)
+            return psycopg2.connect(dsn, connect_timeout=timeout)
         except ImportError as exc:
             raise PostgresIntrospectionError(
                 "PostgreSQL introspection needs psycopg: "
@@ -55,6 +73,15 @@ class PostgresSchemaIntrospector:
             conn = _connect(dsn)
             with conn:
                 with conn.cursor() as cursor:
+                    statement_timeout = _bounded_env_int(
+                        "ENGRAPHIS_POSTGRES_STATEMENT_TIMEOUT_MS",
+                        _DEFAULT_STATEMENT_TIMEOUT_MS,
+                        _MAX_STATEMENT_TIMEOUT_MS,
+                    )
+                    cursor.execute(
+                        "SELECT set_config('statement_timeout', %s, true)",
+                        (str(statement_timeout),),
+                    )
                     cursor.execute("SELECT current_database()")
                     database = str(cursor.fetchone()[0])
                     tables = _rows(cursor, f"""

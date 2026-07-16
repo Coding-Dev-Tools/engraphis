@@ -1,7 +1,8 @@
 import pytest
 
-from engraphis.backends.retention import get_retention_supervisor
+from engraphis.backends.retention import LLMRetentionSupervisor, get_retention_supervisor
 from engraphis.core.engine import MemoryEngine
+from engraphis.core.interfaces import MemoryType, RetentionDecision
 from engraphis.service import MemoryService, ValidationError
 
 
@@ -47,6 +48,12 @@ def test_invalid_retention_class_is_rejected():
         )
 
 
+def test_non_finite_importance_is_rejected():
+    service = MemoryService.create(":memory:", retention_supervisor="none")
+    with pytest.raises(ValidationError, match="finite"):
+        service.remember("candidate", workspace="acme", importance=float("nan"))
+
+
 def test_supervisor_failure_degrades_to_default_retention():
     class BrokenSupervisor:
         def decide(self, *args, **kwargs):
@@ -60,6 +67,37 @@ def test_supervisor_failure_degrades_to_default_retention():
     assert record.importance == 0.0
     assert record.stability == 1.0
     assert "retention_supervision" not in record.metadata
+
+
+def test_non_finite_supervisor_values_fall_back_to_label_presets():
+    class NonFiniteSupervisor:
+        def decide(self, *args, **kwargs):
+            return RetentionDecision(
+                label="critical", importance=float("nan"), stability=float("inf")
+            )
+
+    engine = MemoryEngine.create(":memory:", retention_supervisor="none")
+    engine.retention_supervisor = NonFiniteSupervisor()
+    wid = engine.store.get_or_create_workspace("acme")
+    mid = engine.remember("Critical policy.", workspace_id=wid)
+    record = engine.store.get_memory(mid)
+    assert record.importance == 0.9
+    assert record.stability == 8.0
+
+
+def test_llm_supervisor_rejects_non_finite_or_wrongly_typed_output():
+    class BadLLM:
+        def extract_json(self, *args, **kwargs):
+            return {
+                "label": "critical", "retain": "false",
+                "importance": float("nan"), "stability": float("inf"),
+                "reason": "unsafe\x1b[31m",
+            }
+
+    with pytest.raises(ValueError):
+        LLMRetentionSupervisor(BadLLM()).decide(
+            "candidate", mtype=MemoryType.SEMANTIC
+        )
 
 
 def test_unknown_retention_backend_is_actionable():
