@@ -17,7 +17,14 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 #: Vendor-hosted managed sync relay — the default target when ``ENGRAPHIS_RELAY_URL``
 #: isn't overridden. Single source of truth: the dashboard's one-click sync
 #: (``routes/v2_api.py``) imports this rather than re-declaring the literal.
-DEFAULT_RELAY_URL = "https://engraphis-production.up.railway.app"
+DEFAULT_RELAY_URL = "https://team.engraphis.com"
+
+# Keys issued before the custom domain migration carry this URL inside their signed
+# payload. Preserve the signature, but route that one retired vendor host to the current
+# managed service. Arbitrary signed URLs remain authoritative.
+RETIRED_RELAY_URLS = frozenset({
+    "https://engraphis-production.up.railway.app",
+})
 
 
 def _env(key: str, default: str = "") -> str:
@@ -153,3 +160,13 @@ def _parse_csv(raw: str) -> list:
 
 
 settings = Settings()
+
+
+def resolve_license_server_url(signed_url: str = "") -> str:
+    """Resolve the license server, including known vendor-host migrations."""
+    override = _env("ENGRAPHIS_CLOUD_URL", "").rstrip("/")
+    signed = (signed_url or "").strip().rstrip("/")
+    if signed in RETIRED_RELAY_URLS:
+        signed = ""
+    relay = (settings.relay_url or "").strip().rstrip("/")
+    return override or signed or relay
