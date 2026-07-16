@@ -29,9 +29,6 @@ def _icon_path(base: str) -> str:
     return str(Path(base) / "engraphis" / "static" / "engraphis.ico")
 
 
-def _python_exe() -> str:
-    return shutil.which("engraphis-dashboard") or sys.executable
-
 
 def _windows(desktop: Path, start_menu: Path, args: argparse.Namespace) -> None:
     ps_cmd = f"""

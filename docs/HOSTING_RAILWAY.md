@@ -75,8 +75,8 @@ the one-time bearer token into their agent config. Two transports (see
 
 - **HTTP** (always available): `POST https://team.engraphis.com/api/remember` and
   `GET https://team.engraphis.com/api/recall` with `Authorization: Bearer <token>`.
-- **MCP-over-HTTP** (once the `/mcp` mount lands): point an MCP client at
-  `https://team.engraphis.com/mcp` with the bearer header.
+- **MCP-over-HTTP:** point an MCP client at `https://team.engraphis.com/mcp` with the
+  bearer header.
 
 Writes land in the same v2 store the dashboard reads; the instance's Team license is what
 unlocks the write endpoints (`402` without it).
