@@ -56,9 +56,10 @@ class ValidationError(ValueError):
 # Set by the dashboard's team auth gate (engraphis/dashboard_app.py::_auth_gate) for the
 # duration of a request, and read at the workspace-authorization chokepoint below so a
 # *personal* folder is visible and usable only by its owner. Every other entry point —
-# the MCP server, the CLI, the sync loop, and the offline test/eval harnesses — leaves
-# this at its ``None`` default, so per-user enforcement is a no-op outside the multi-user
-# dashboard and single-tenant behaviour is completely unchanged. It lives here (not in a
+# standalone MCP server, the CLI, the sync loop, and the offline test/eval harnesses —
+# leaves this at its ``None`` default, so per-user enforcement is a no-op outside the
+# multi-user dashboard (including its mounted MCP endpoint) and single-tenant behaviour is
+# completely unchanged. It lives here (not in a
 # route module) so the service stays the single place workspace access is decided.
 _CURRENT_USER: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
     "engraphis_dashboard_user", default=None)
@@ -402,7 +403,7 @@ class MemoryService:
 
     def _enforce_personal_access(self, ws: str) -> None:
         """Block access to another user's personal folder. No current user (single-tenant,
-        MCP, CLI, sync, tests) → no restriction. A shared folder, or a personal folder the
+        standalone MCP, CLI, sync, tests) → no restriction. A shared folder, or a personal folder the
         current user owns → allowed. A personal folder owned by someone else → refused,
         with a message that neither confirms nor denies the folder's contents beyond the
         fact that it's private (the name is already known to the caller who supplied it)."""
@@ -1147,7 +1148,7 @@ class MemoryService:
         ``visibility`` is ``'shared'`` (default — the whole team can see and use it) or
         ``'personal'`` (visible and usable only by the creating user, enforced by
         ``_authorize_workspace``). Personal requires a signed-in dashboard user to own it;
-        if there is no current user (single-tenant / MCP / CLI) a ``personal`` request
+        if there is no current user (single-tenant / standalone MCP / CLI) a ``personal`` request
         degrades to ``shared`` rather than minting an owner-less folder nobody could ever
         reach."""
         ws = self._clean_ws(name)

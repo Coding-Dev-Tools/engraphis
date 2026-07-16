@@ -78,6 +78,29 @@ def _err(exc: Exception) -> str:
     return f"Error: {type(exc).__name__}: {exc}"
 
 
+_READ_ONLY_TOOLS = frozenset({
+    "engraphis_recall",
+    "engraphis_recall_grounded",
+    "engraphis_answer",
+    "engraphis_why",
+    "engraphis_timeline",
+    "engraphis_recall_proactive",
+    "engraphis_proactive_context",
+    "engraphis_search_code",
+    "engraphis_stats",
+})
+_ADMIN_TOOLS = frozenset({"engraphis_consolidate"})
+
+
+def minimum_role(tool_name: str) -> str:
+    """Dashboard role required for an MCP tool; unknown/new tools default to member."""
+    if tool_name in _ADMIN_TOOLS:
+        return "admin"
+    if tool_name in _READ_ONLY_TOOLS:
+        return "viewer"
+    return "member"
+
+
 @mcp.tool(
     name="engraphis_remember",
     annotations={"title": "Remember a fact", "readOnlyHint": False,

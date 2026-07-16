@@ -18,7 +18,10 @@ class SentenceTransformerEmbedder:
     def __init__(self, model_name: str) -> None:
         from sentence_transformers import SentenceTransformer  # lazy: optional dependency
         self.model = SentenceTransformer(model_name)
-        self._dim = int(self.model.get_sentence_embedding_dimension())
+        get_dimension = getattr(self.model, "get_embedding_dimension", None)
+        if get_dimension is None:
+            get_dimension = self.model.get_sentence_embedding_dimension
+        self._dim = int(get_dimension())
 
     @property
     def dim(self) -> int:

@@ -7,7 +7,9 @@ server (engraphis/app.py) untouched; run this with `python -m scripts.start_dash
 from __future__ import annotations
 
 import hmac
+import importlib.util
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import os as _os
 _os.environ["ENGRAPHIS_EMBED_MODEL"] = (
@@ -47,6 +49,31 @@ _PUBLIC = {"/", "/api/health", "/api/ready", "/api/auth/state", "/api/auth/login
            "/webhooks/polar"}
 
 
+def _mcp_transport_security(mcp):
+    """Keep the SDK's DNS-rebinding guard and add this deployment's public URL."""
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    current = mcp.settings.transport_security
+    allowed_hosts = set(current.allowed_hosts)
+    allowed_origins = set(current.allowed_origins)
+    dashboard_url = _os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
+    if dashboard_url:
+        parsed = urlsplit(dashboard_url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username:
+            raise ValueError("ENGRAPHIS_DASHBOARD_URL must be an http(s) URL without userinfo")
+        hostname = parsed.hostname
+        host = "[%s]" % hostname if ":" in hostname else hostname
+        if parsed.port is not None:
+            host = "%s:%d" % (host, parsed.port)
+        allowed_hosts.add(host)
+        allowed_origins.add("%s://%s" % (parsed.scheme, host))
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=sorted(allowed_hosts),
+        allowed_origins=sorted(allowed_origins),
+    )
+
+
 def create_app() -> FastAPI:
     # MCP-over-HTTP agent connect: build the streamable-http ASGI app up front so we can
     # give the dashboard a lifespan that initializes its session manager (a mounted
@@ -58,17 +85,9 @@ def create_app() -> FastAPI:
     _mcp_asgi = None
     _mcp_mgr = None
     try:
+        if importlib.util.find_spec("mcp") is None:
+            raise ImportError("the optional mcp package is not installed")
         import engraphis.mcp_server as _mcp_mod
-        from mcp.server.transport_security import TransportSecuritySettings
-        # The dashboard's own _auth_gate already enforces Team-license + member-token on
-        # /mcp, so MCP's DNS-rebinding host allowlist (default: localhost only) is both
-        # unnecessary here and harmful - it would 421 a real deployment domain
-        # (team.engraphis.com) and the test client. Disable it for the mounted instance;
-        # auth is the real boundary. Left set (not restored) because the route guard
-        # reads it per request; the standalone mcp_server_http.py runs in its own process
-        # where this mutation does not apply.
-        _mcp_mod.mcp.settings.transport_security = TransportSecuritySettings(
-            enable_dns_rebinding_protection=False)
         # The MCP session manager's run() is once-per-instance, but create_app() may be
         # called more than once in a process (tests, re-import). Reset the lazily-created
         # manager so each app gets a fresh, runnable one. No-op for the first call.
@@ -77,9 +96,17 @@ def create_app() -> FastAPI:
         except Exception:  # noqa: BLE001 - private attr; stay robust across mcp versions
             pass
         _prev_path = _mcp_mod.mcp.settings.streamable_http_path
-        _mcp_mod.mcp.settings.streamable_http_path = "/"
-        _mcp_asgi = _mcp_mod.mcp.streamable_http_app()
-        _mcp_mod.mcp.settings.streamable_http_path = _prev_path
+        _prev_security = _mcp_mod.mcp.settings.transport_security
+        try:
+            _mcp_mod.mcp.settings.streamable_http_path = "/"
+            _mcp_mod.mcp.settings.transport_security = _mcp_transport_security(_mcp_mod.mcp)
+            _mcp_asgi = _mcp_mod.mcp.streamable_http_app()
+        finally:
+            # streamable_http_app() captures these settings in its session manager. Restore
+            # the global FastMCP instance so importing the dashboard cannot alter the
+            # standalone MCP server in the same process.
+            _mcp_mod.mcp.settings.streamable_http_path = _prev_path
+            _mcp_mod.mcp.settings.transport_security = _prev_security
         _mcp_mgr = _mcp_mod.mcp.session_manager
     except (Exception, SystemExit) as _exc:  # noqa: BLE001 - MCP mount stays optional
         import sys as _sys
@@ -95,7 +122,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="Engraphis Dashboard", docs_url="/api/docs",
                   openapi_url="/api/openapi.json", lifespan=_lifespan)
-    app.state.mcp_over_http = _mcp_asgi is not None
+    app.state.mcp_over_http = False
 
     @app.exception_handler(licensing.LicenseError)
     async def _license_error(_request: Request, exc: licensing.LicenseError):
@@ -107,7 +134,6 @@ def create_app() -> FastAPI:
             "upgrade_url": licensing.upgrade_url(),
         }
         return JSONResponse({**body, "detail": body}, status_code=402)
-
     svc = MemoryService.create(
         settings.db_path, embed_model=settings.embed_model,
         embed_dim=settings.embed_dim or 256,
@@ -152,6 +178,10 @@ def create_app() -> FastAPI:
         team_enabled, auth_store = v2_team.attach(app, svc)
     except Exception:  # noqa: BLE001 - team stays optional
         pass
+    # Streamable HTTP sessions are process-local in the MCP SDK. Bind each one to the
+    # authenticated user that initialized it so another valid member cannot replay a
+    # stolen session id with their own bearer token.
+    _mcp_session_users: dict[str, str] = {}
 
     def _bearer_ok(request: Request) -> bool:
         token = settings.api_token
@@ -175,11 +205,9 @@ def create_app() -> FastAPI:
                 or path.startswith("/api/openapi"):
             return await call_next(request)
         # MCP-over-HTTP agent endpoint (/mcp) — Team-gated (402 without a Team license)
-        # and member-authenticated (per-user bearer token or cookie), so "a Team license
-        # is required to connect" holds for MCP agents exactly as it does for
-        # /api/remember. The MCP tools then reuse the dashboard's shared MemoryService.
+        # and authenticated with a per-user bearer token. Each MCP tool then enforces its
+        # own viewer/member/admin role while reusing the dashboard's shared MemoryService.
         if path == "/mcp" or path.startswith("/mcp/"):
-            from engraphis.routes.v2_team import _COOKIE
             if not (team_enabled and auth_store is not None
                     and licensing.has_feature("team")):
                 return JSONResponse({"error": "a Team license is required to connect agents",
@@ -187,17 +215,51 @@ def create_app() -> FastAPI:
             supplied = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
             mu = auth_store.resolve_api_token(supplied) if supplied else None
             if mu is None:
-                mu = auth_store.resolve_session(request.cookies.get(_COOKIE, ""))
-            if mu is None:
                 return JSONResponse({"error": "authentication required", "auth": "team"},
                                     status_code=401)
-            from engraphis.inspector.auth import role_at_least
-            if not role_at_least(mu["role"], "member"):
-                return JSONResponse({"error": "requires the member role"},
-                                    status_code=403)
+            if not app.state.mcp_over_http:
+                return JSONResponse({"error": "MCP-over-HTTP is unavailable"},
+                                    status_code=404)
+            session_id = (request.headers.get("Mcp-Session-Id") or "").strip()
+            if session_id:
+                owner_id = _mcp_session_users.get(session_id)
+                if owner_id is None:
+                    return JSONResponse({"error": "unknown MCP session"}, status_code=401)
+                if owner_id != mu["id"]:
+                    return JSONResponse({"error": "MCP session belongs to another user"},
+                                        status_code=403)
+
+            # Roles must be evaluated on every HTTP request, not captured when the MCP
+            # session starts: a token owner's role or disabled state can change while the
+            # session remains open. Reading the JSON body here is safe with Starlette's
+            # BaseHTTPMiddleware request wrapper; call_next receives the cached body.
+            if request.method == "POST":
+                try:
+                    payload = await request.json()
+                except Exception:  # noqa: BLE001 - the MCP SDK returns its protocol error
+                    payload = None
+                messages = payload if isinstance(payload, list) else [payload]
+                from engraphis.inspector.auth import role_at_least
+                for message in messages:
+                    if not isinstance(message, dict) or message.get("method") != "tools/call":
+                        continue
+                    params = message.get("params")
+                    tool_name = params.get("name", "") if isinstance(params, dict) else ""
+                    minimum = _mcp_mod.minimum_role(str(tool_name))
+                    if not role_at_least(mu.get("role", ""), minimum):
+                        return JSONResponse({"error": "requires the %s role" % minimum},
+                                            status_code=403)
             request.state.user = mu
             set_current_user(mu)
-            return await call_next(request)
+            response = await call_next(request)
+            response_session = (response.headers.get("Mcp-Session-Id") or "").strip()
+            if response_session:
+                existing = _mcp_session_users.setdefault(response_session, mu["id"])
+                if existing != mu["id"]:  # pragma: no cover - defensive collision guard
+                    return JSONResponse({"error": "MCP session collision"}, status_code=409)
+            if request.method == "DELETE" and session_id and response.status_code < 400:
+                _mcp_session_users.pop(session_id, None)
+            return response
         # Service-account bearer token bypass — skips team auth entirely,
         # allowing CI/CD scripts and automation to use the same ENGRAPHIS_API_TOKEN
         # regardless of whether team mode is enabled.
@@ -259,6 +321,7 @@ def create_app() -> FastAPI:
     if _mcp_asgi is not None:
         _mcp_mod.set_service(svc)
         app.mount("/mcp", _mcp_asgi)
+        app.state.mcp_over_http = True
 
     _maybe_start_autosync()
     _maybe_start_dreaming()

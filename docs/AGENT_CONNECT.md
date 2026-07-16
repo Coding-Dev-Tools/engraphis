@@ -117,8 +117,9 @@ to host team agents.”
 A streamable-HTTP MCP endpoint is mounted at `/mcp` on the dashboard, so an **MCP-native
 agent** (Claude Code, Cursor, ...) points one URL at the cloud instance and reuses the same
 v2 store the dashboard reads (the MCP tools share the dashboard's single `MemoryService` —
-no second SQLite writer). It is Team-gated and requires `member` or `admin`, exactly like
-`/api/remember` (`402` without Team, `401` without auth, `403` for a viewer).
+no second SQLite writer). It is Team-gated and requires a per-user bearer token; browser
+session cookies are deliberately not accepted. Responses are `402` without Team, `401`
+without a bearer token, and `403` when the token's role is below the requested tool's minimum.
 
 Agent config (streamable-http transport) — add to your MCP client:
 
@@ -135,8 +136,11 @@ The tools are the same as the local `engraphis-mcp` server (`engraphis_remember`
 `engraphis_recall`, `engraphis_start_session`, ...) — an agent gets identical semantics
 whether it writes locally or to the cloud.
 
-**Security note:** the dashboard's `_auth_gate` enforces the Team license and member/admin
-cookie or bearer token on `/mcp`. The mounted MCP app disables its localhost-only
-DNS-rebinding host allowlist; otherwise a real deployment domain such as
-`team.engraphis.com` would be rejected. The standalone `engraphis-mcp-http` launcher is
-unaffected because it runs in its own process on localhost.
+**Security note:** MCP's built-in DNS-rebinding protection remains enabled. Loopback hosts
+remain allowed by default; a hosted deployment must set `ENGRAPHIS_DASHBOARD_URL` to its
+canonical public URL (for example, `https://team.engraphis.com`) so that exact Host and
+Origin are added to the transport allowlist. Requests with any other Host are rejected.
+The per-user bearer token is checked on every request, and dashboard roles carry through to
+tools: viewers may use read tools, members may use mutating tools, and
+`engraphis_consolidate` requires admin. The standalone `engraphis-mcp-http` launcher keeps
+its own SDK defaults.
