@@ -28,13 +28,13 @@ All notable changes to Engraphis are documented here. Format loosely follows
   `mcp_server.set_service(svc)` injects the dashboard's `MemoryService` (one writer — no
   second SQLite connection, avoiding the WAL lock contention that `mcp_server_http.py`
   exists to prevent). The dashboard app gains a lifespan that initializes the MCP session
-  manager (a mounted sub-app's own lifespan does not run in Starlette), and `mcp.settings.transport_security`
-  DNS-rebinding protection is disabled on the mounted instance (the dashboard's `_auth_gate`
-  is the real boundary, and the default localhost-only allowlist would 421 a real domain).
-  `/mcp` is Team-gated (402) + member-authenticated (401) exactly like `/api/remember`.
+  manager (a mounted sub-app's own lifespan does not run in Starlette). MCP's DNS-rebinding
+  protection remains enabled: loopback stays allowed, and `ENGRAPHIS_DASHBOARD_URL` adds
+  the deployment's exact Host + Origin. `/mcp` is Team-gated (402), bearer-only (401),
+  and role-aware: viewers can read, members can mutate, and maintenance remains admin-only.
   The session manager is reset per `create_app()` so multiple apps in one process (tests)
-  each get a fresh, runnable instance. `tests/test_agent_connect_mcp.py` (4 tests: 401,
-  402, handshake+tools/list, write-shares-dashboard-store).
+  each get a fresh, runnable instance. Capability discovery reports the actual mount state,
+  not merely whether the optional package imports. `tests/test_agent_connect_mcp.py`.
 
 ## [0.9.5] - 2026-07-14
 

@@ -428,11 +428,9 @@ def attach(app: FastAPI, service):
         base = os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip().rstrip("/")
         if not base:
             base = str(request.base_url).rstrip("/")
-        try:  # /mcp is mounted only when the mcp extra is installed (see dashboard_app.create_app)
-            import engraphis.mcp_server  # noqa: F401
-            mcp_on = True
-        except Exception:
-            mcp_on = False
+        # Importability is not availability: the MCP package can be installed while app
+        # construction still refuses the mount (for example, an invalid public URL).
+        mcp_on = bool(getattr(request.app.state, "mcp_over_http", False))
         return {
             "user": {"id": u["id"], "email": u["email"], "name": u.get("name", ""),
                      "role": u["role"]},
