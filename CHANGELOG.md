@@ -56,8 +56,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - **License and Team enforcement:** authoritative revocations override cached entitlement
   and persist tombstones for previously unrecorded keys; transient failures may use only
   an unexpired lease; public license/trial bootstrap routes close after the first Team user;
-  trial rate limits trust forwarded addresses only from configured proxies; and managed
-  requests use explicit client headers while retired signed relay URLs migrate safely.
+  trial rate limits trust forwarded addresses only from configured proxies; managed
+  requests use explicit client headers; retired signed relay URLs migrate safely; and
+  configured keys that fall back to free after transient outages retry automatically.
 - **Python and packaging compatibility:** rate-limit buckets and audit exports use
   timezone-aware UTC APIs, package metadata uses the SPDX license format, and the
   deterministic fallback matches the default embedding model’s 384 dimensions.
