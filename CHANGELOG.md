@@ -18,8 +18,23 @@ All notable changes to Engraphis are documented here. Format loosely follows
   SHA-256 hashed at rest (raw token shown once). A free / lapsed instance returns `402`
   on `/api/remember`, so a Team license is required to host team agents. See
   `docs/AGENT_CONNECT.md`. (`tests/test_agent_connect.py`.)
-  *Note:* MCP-over-HTTP at `/mcp` is deferred to a follow-up (needs a service-injection
-  refactor of `mcp_server.py` to avoid a second SQLite writer); agents use the HTTP API.
+  *Note:* MCP-over-HTTP at `/mcp` is now mounted (see follow-up entry below), so MCP-native
+  agents point one URL at the cloud instance too. The HTTP API remains for non-MCP agents.
+
+### Added
+- **MCP-over-HTTP at `/mcp` (agent connect, stacked on the above).** The Engraphis MCP
+  server is mounted at `/mcp` on the dashboard so an MCP-native agent (Claude Code, Cursor)
+  points one URL at the cloud instance and reuses the same v2 store the dashboard reads.
+  `mcp_server.set_service(svc)` injects the dashboard's `MemoryService` (one writer — no
+  second SQLite connection, avoiding the WAL lock contention that `mcp_server_http.py`
+  exists to prevent). The dashboard app gains a lifespan that initializes the MCP session
+  manager (a mounted sub-app's own lifespan does not run in Starlette). MCP's DNS-rebinding
+  protection remains enabled: loopback stays allowed, and `ENGRAPHIS_DASHBOARD_URL` adds
+  the deployment's exact Host + Origin. `/mcp` is Team-gated (402), bearer-only (401),
+  and role-aware: viewers can read, members can mutate, and maintenance remains admin-only.
+  The session manager is reset per `create_app()` so multiple apps in one process (tests)
+  each get a fresh, runnable instance. Capability discovery reports the actual mount state,
+  not merely whether the optional package imports. `tests/test_agent_connect_mcp.py`.
 
 ## [0.9.5] - 2026-07-14
 
