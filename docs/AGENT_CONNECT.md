@@ -11,20 +11,26 @@ of each member running a local MCP server + syncing, one admin hosts a single in
 
 ## How it works
 
-1. **Admin** deploys one instance (see the Dockerfile / `docker compose up`) and activates
-   a **Team license** (Settings → License → paste key). The Team key sets the seat cap.
-2. **Admin** invites members (Add member → email + password). Each member is a seat.
+1. **Admin** deploys one instance and activates Team before first-admin setup: load a
+   purchased key with `ENGRAPHIS_LICENSE_KEY`, or start a Team trial and open its emailed
+   confirmation link.
+2. **Admin** creates the first account, then invites members (email + password + role).
+   Each active user consumes a seat.
 3. **Member** signs in at the dashboard URL (e.g. `https://team.engraphis.com/`) with
-   email + password — no key, no local install. (Login is never license-gated, so a lapsed
-   key never locks people out of the UI.)
-4. **Member** opens **Settings → API tokens → Create token**, copies the bearer token.
-5. **Member** configures their agent to call the instance's HTTP API with that token.
+   email + password — no key and no local install. If the license later lapses, the
+   authentication wall remains in place and existing users can still sign in.
+4. **Member** opens **Settings → Connect your agent → Create token** and copies the
+   one-time bearer token.
+5. **Member** configures their agent to call the instance with that token.
 
 ## Agent authentication
 
 Agents authenticate with a **per-user bearer token** (`Authorization: Bearer <token>`),
 minted from the dashboard. The token is bound to the member: their role, their personal
 folders, and their seat. Disabling the member instantly invalidates their token.
+
+Viewer tokens can call read routes, but write/governance routes return `403`;
+`/api/remember` and `/mcp` require the `member` or `admin` role.
 
 Token management (requires a browser session):
 
@@ -46,7 +52,7 @@ curl -H "Authorization: Bearer <token>" https://team.engraphis.com/api/auth/conn
 
 | Method | Path | Notes |
 |---|---|---|
-| `POST` | `/api/remember` | **Team-gated** (402 without a Team license). Same params as the local `engraphis_remember` MCP tool. |
+| `POST` | `/api/remember` | **Team-gated and member-only** (`402` without Team, `403` for viewers). Same params as local `engraphis_remember`. |
 | `GET`  | `/api/recall?q=…&workspace=…` | Read (not gated). |
 | `GET`  | `/api/memory/{id}?workspace=…` | One memory. |
 | `GET`  | `/api/why?q=…&workspace=…` / `/api/timeline?…` | Provenance / history. |
@@ -88,11 +94,12 @@ recall (subject to workspace / personal-folder scoping).
 
 ## "They need a Team license to connect"
 
-The Team license is the **instance's** (the admin activates one key; the relay enforces
-the seat cap server-side). Members never present a license to log in or connect — they
-present a **seat** (an account) and a **token**. The `402` on `POST /api/remember` fires
-only when the **instance** has no active Team key (or it has lapsed / been revoked), which
-is exactly "a Team license is required to host team agents."
+The Team license is the **instance's**: a purchased key is loaded before first-admin
+setup, or the admin starts with a confirmed Team trial and can replace the key later.
+Members never present a license to log in or connect — they present a **seat** (an account)
+and a **token**. `POST /api/remember` returns `402` only when the instance has no active
+Team entitlement (or it has lapsed/revoked), which is exactly “a Team license is required
+to host team agents.”
 
 ## Security notes
 
@@ -110,8 +117,8 @@ is exactly "a Team license is required to host team agents."
 A streamable-HTTP MCP endpoint is mounted at `/mcp` on the dashboard, so an **MCP-native
 agent** (Claude Code, Cursor, ...) points one URL at the cloud instance and reuses the same
 v2 store the dashboard reads (the MCP tools share the dashboard's single `MemoryService` —
-no second SQLite writer). It is Team-gated and member-authenticated exactly like
-`/api/remember` (402 without a Team license, 401 without a per-user bearer token).
+no second SQLite writer). It is Team-gated and requires `member` or `admin`, exactly like
+`/api/remember` (`402` without Team, `401` without auth, `403` for a viewer).
 
 Agent config (streamable-http transport) — add to your MCP client:
 
@@ -128,8 +135,8 @@ The tools are the same as the local `engraphis-mcp` server (`engraphis_remember`
 `engraphis_recall`, `engraphis_start_session`, ...) — an agent gets identical semantics
 whether it writes locally or to the cloud.
 
-**Security note:** the dashboard's own `_auth_gate` enforces the Team license + member token
-on `/mcp`, so MCP's built-in DNS-rebinding host allowlist (which defaults to localhost only)
-is disabled on the mounted instance — otherwise it would reject a real deployment domain
-like `team.engraphis.com`. Auth is the real boundary here. (The standalone
-`engraphis-mcp-http` launcher is unaffected — it runs in its own process on localhost.)
+**Security note:** the dashboard's `_auth_gate` enforces the Team license and member/admin
+cookie or bearer token on `/mcp`. The mounted MCP app disables its localhost-only
+DNS-rebinding host allowlist; otherwise a real deployment domain such as
+`team.engraphis.com` would be rejected. The standalone `engraphis-mcp-http` launcher is
+unaffected because it runs in its own process on localhost.

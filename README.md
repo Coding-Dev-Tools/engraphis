@@ -38,7 +38,7 @@ engraphis-dashboard
 Opens `http://127.0.0.1:8700` in your browser. No cloud, no signup, no API key for memory.
 Everything lives in a single SQLite file on your machine.
 
-**You'll see the full product** — a dark-themed (with multiple theme options in left sidebar), sidebar-navigated dashboard with 12 tabs:
+**You'll see the full product** — a dark-themed (with multiple theme options in left sidebar), sidebar-navigated dashboard with 14 tabs:
 
 | Tab | What you see |
 |-----|-------------|
@@ -55,7 +55,7 @@ Everything lives in a single SQLite file on your machine.
 | **Automation** *(Pro)* | Scheduled consolidation + retention policies on autopilot — plus **auto-dreaming**: a background consolidation + cross-cluster inference loop that fires when the store has accumulated enough new memories *and* gone idle. Configurable from the dashboard (cadence, dream trigger, idle threshold, inference toggle) or the `GET/POST /automation` API, and via `scripts/auto_maintain` for cron / Task Scheduler |
 | **Workspaces** | Create, rename, describe, copy, merge, and delete workspaces; import files & folders; drag-and-drop upload |
 | **Team** *(beta)* | Multi-user access with PBKDF2 logins, password reset, admin / member / viewer roles, seat management, and team audit log (Team) — **early-access beta** |
-| **Settings** | License activation (Pro/Team), cloud sync, appearance, and engine/store info |
+| **Settings** | License activation (Pro/Team), cloud sync, LLM provider setup/test, Agent Connect token management, appearance, and engine/store info |
 
 The dashboard is powered by the v2 engine — the same `MemoryService` that backs the MCP server
 and the Python library. What you see in the UI is what your agents get.
@@ -92,7 +92,8 @@ the codebase, forgetting why you chose PASETO over JWT. Engraphis gives agents d
 
 Under the hood: Ebbinghaus forgetting-curve decay, interaction-aware reinforcement, bi-temporal
 facts, and hybrid (vector + lexical + graph) recall. The engine is 100% local: SQLite + local
-embeddings. You bring the LLM only for optional chat/synthesis.
+embeddings. You bring an LLM only for optional chat, synthesis, structured extraction,
+or structured consolidation.
 
 - **Local-first & private** — runs offline; the core depends only on `numpy`.
 - **MCP-native** — 20 tools for Claude Code, Cursor, Cline, Zed, Windsurf.
@@ -100,6 +101,8 @@ embeddings. You bring the LLM only for optional chat/synthesis.
 - **Principled recall** — six-term score over retention, semantic, lexical, graph, importance, recency.
 - **Bi-temporal truth** — contradictions invalidate instead of overwriting (`engraphis_why` / `engraphis_timeline`).
 - **Grounded, not guessed** — cited answers or explicit abstain; provenance on every memory.
+- **Task-ready context** — bounded proactive packets combine task/agent state, cited memories, suggested follow-ups, and the last-session handoff; optional LLM prose is accepted only when its citations validate.
+- **Composable intelligence** — opt-in deterministic conflict triage (`duplicate` / `refinement` / `contradiction` / `obsolete`) and `UserModel` recall reranking helpers; neither changes default recall unless called.
 - **Code-aware** — AST-powered symbol graph: `engraphis_index_repo` → `engraphis_search_code`.
 - **Sleep-time consolidation** — scheduled job distills recurring episodes, reports its compaction.
 - **Scoped** — `workspace → repo → session` hierarchy.
@@ -131,8 +134,8 @@ The dashboard ships as a Docker image that defaults to the v2 **team** dashboard
 (multi-user logins, roles, seats, cloud-license revocation). Deploy one instance for
 your team; members sign in at your URL and connect their agents over HTTP/MCP — they
 never install Engraphis locally. See [`docs/HOSTING_RAILWAY.md`](docs/HOSTING_RAILWAY.md)
-for the 5-minute guide (volume, custom domain, activate a Team key, invite members,
-connect agents).
+for the 5-minute guide (volume, custom domain, bootstrap the Team entitlement, create the
+first admin, invite members, and connect agents).
 
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new?template=https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/railway.json)
 
@@ -212,12 +215,13 @@ The same `MemoryService` backs the dashboard and the MCP server.
 
 ## Free forever vs. Pro
 
-The engine, dashboard, MCP server, and governance tools are free and Apache-2.0,
-permanently. A license key unlocks the paid layer — **verified offline** (no phone-home)
-for self-hosted keys, or **cloud-enforced** (machine-bound lease, revocable) for
-commercial deployments. **Pro is $10/mo ($100/yr), Team is $20/seat/mo ($200/seat/yr)** —
-and you can unlock every Pro feature with a **3-day free trial right in the dashboard**
-(Settings → License), no key and no card.
+The core engine, single-user dashboard, standalone MCP server, and governance tools are
+free and Apache-2.0, permanently. Paid Pro/Team keys are **server-authoritative**: the
+vendor signature is checked locally, then the key must hold a current machine-bound lease
+from the configured/vendor relay. Revoked, expired, or seat-exceeded keys fail closed;
+an unexpired lease provides bounded grace for transient network failures. **Pro is $10/mo
+($100/yr), Team is $20/seat/mo ($200/seat/yr)**, and the dashboard offers a **3-day
+server-issued Pro or Team trial** after email confirmation — no card required.
 
 > **Team is early-access beta.** Multi-user logins, seats, roles, the team audit log,
 > team invite emails, and the cloud-sync relay are all in active development — expect
@@ -250,7 +254,7 @@ and you can unlock every Pro feature with a **3-day free trial right in the dash
 | Write | `engraphis_record_event` | Append a lightweight episodic log entry |
 | Write | `engraphis_link` | Explicitly connect two related memories |
 | Write | `engraphis_ingest` | Store raw text; Engraphis extracts the discrete facts worth keeping |
-| Write | `engraphis_consolidate` | Run one sleep-time consolidation sweep: distill recurring episodes |
+| Write | `engraphis_consolidate` | Run a sleep-time sweep; optionally build entity profiles or schema-validated LLM facts |
 | Read | `engraphis_recall` | Hybrid vector + lexical + graph recall |
 | Read | `engraphis_recall_grounded` | Cited answer from retrieved memories — or abstain |
 | Read | `engraphis_answer` | Backward-compatible grounded-answer alias |
@@ -313,8 +317,8 @@ Drag-and-drop or server-side import, both member-gated and bounded:
   directly from the browser.
 - **Server-side folder import** — `MemoryService.import_folder()` reads a directory on the
   machine running Engraphis, one memory per file, with path-traversal guards.
-- **MCP ingest** — `engraphis_ingest` accepts raw text and extracts discrete facts
-  (when `ENGRAPHIS_EXTRACTOR=llm` is configured; otherwise stores verbatim).
+- **MCP ingest** — `engraphis_ingest` accepts raw text and extracts discrete facts when
+  `ENGRAPHIS_EXTRACTOR=llm` or `llm_structured` is configured; otherwise it stores verbatim.
 - **Sub-file chunking** — set `ENGRAPHIS_EXTRACTOR=chunk` to split long, multi-topic
   documents into retrieval-sized, structure-aware pieces (headings start new chunks;
   ~256-token target with sentence-level overlap) *without an LLM*. Each chunk becomes
@@ -323,16 +327,20 @@ Drag-and-drop or server-side import, both member-gated and bounded:
   (dashboard upload, `import_folder`, and `engraphis_ingest`). Measure the payoff with
   the bundled eval: `python -m eval.chunking_eval --dataset eval/datasets/longdoc.jsonl --k 5`
   (whole-file vs. chunked, same recall pipeline, offline).
+- **Structured LLM extraction** — `ENGRAPHIS_EXTRACTOR=llm_structured` validates typed
+  facts, entities, relations, keywords, and confidence before storage. Its preserved
+  entity/relation metadata feeds the knowledge graph automatically.
 
-All imported memories are marked **untrusted** by default.
+Files imported through the dashboard or `import_folder()` are marked **untrusted** by
+default; MCP ingest remains an authenticated agent write.
 
 ---
 
-## Automated maintenance & auto-dreaming *(Pro)*
+## Consolidation and automated maintenance
 
-Engraphis can keep its own store clean without you clicking anything. The Automation
-tab (and the `GET/POST /automation` + `POST /maintenance/run` API) exposes a maintenance
-**policy** with two modes that compose:
+Manual consolidation is free. The Pro **Automation** tab (and the `GET/POST /automation`
+plus `POST /maintenance/run` API) can keep the store clean without you clicking anything,
+using a maintenance **policy** with two modes that compose:
 
 - **Scheduled maintenance** — a consolidation + retention sweep on a fixed cadence
   (`cadence_hours`). Recurring episodic memories are distilled into semantic digests,
@@ -350,6 +358,12 @@ Knobs (dashboard Automation tab ↔ `/automation` API): `enabled`, `cadence_hour
 `dream_idle_minutes`, `infer`. Headless / no-dashboard-open: `python -m scripts.auto_maintain --apply`
 (via Task Scheduler or cron).
 
+Manual consolidation can also use schema-validated LLM output through
+`MemoryService.consolidate`, `POST /api/consolidate`, `engraphis_consolidate`, or
+`python -m scripts.consolidate --structured`. Source memories remain live by default;
+`supersede_sources` / `--supersede-sources` closes them only after validated replacement
+facts are written.
+
 ---
 
 ## Configuration
@@ -364,14 +378,14 @@ All via environment (or `.env`):
 | `ENGRAPHIS_API_TOKEN` | — | If set, REST API requires `Authorization: Bearer <token>` |
 | `ENGRAPHIS_DB_KEY` | — | Encrypt the database at rest (SQLCipher). Or use `ENGRAPHIS_DB_KEY_FILE` |
 | `ENGRAPHIS_EMBED_MODEL` | `all-MiniLM-L6-v2` | sentence-transformers model |
-| `ENGRAPHIS_EXTRACTOR` | `none` | `none` = store verbatim; `chunk` = sub-file structure-aware chunking (offline, no LLM); `llm` = extract facts via LLM before storing |
-| `ENGRAPHIS_GRAPH_EXTRACTOR` | `regex` | `regex` = dependency-free NER (offline); `none` = disable graph population |
+| `ENGRAPHIS_EXTRACTOR` | `none` | `none` = verbatim; `chunk` = offline structure-aware chunks; `llm` = free-form LLM facts; `llm_structured` = schema-validated facts + graph metadata |
+| `ENGRAPHIS_GRAPH_EXTRACTOR` | `regex` | `regex` = offline heuristic NER; `none` = disable heuristic text extraction (validated `llm_structured` metadata still feeds the graph) |
 | `ENGRAPHIS_LLM_PROVIDER` | `openai` | `openai \| anthropic \| google \| openrouter \| custom` |
 | `ENGRAPHIS_LLM_MODEL` | `gpt-4o-mini` | Model name (provider-specific) |
-| `ENGRAPHIS_LLM_API_KEY` | — | LLM API key (only for chat/synthesis and `extractor=llm`) |
+| `ENGRAPHIS_LLM_API_KEY` | — | API key for chat/synthesis, `llm` / `llm_structured` extraction, and structured consolidation |
 | `ENGRAPHIS_LLM_BASE_URL` | — | Base URL for openrouter / custom OpenAI-compatible endpoints |
 | `ENGRAPHIS_LICENSE_KEY` | — | Pro/Team key (or `~/.engraphis/license.key`) |
-| `ENGRAPHIS_TEAM_MODE` | `1` | Team mode is ON by default (per-user logins + roles). Set `0` to disable |
+| `ENGRAPHIS_TEAM_MODE` | `1` | Mount Team features by default; the auth wall activates for a live Team license or an existing team. Set `0` to disable |
 | `ENGRAPHIS_LOOP_INTERVAL` | `60` | Background consolidation loop interval in seconds (0 = disabled) |
 | `ENGRAPHIS_DECAY_HALFLIFE_DAYS` | `7` | Ebbinghaus decay half-life (higher = memories persist longer) |
 | `ENGRAPHIS_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted reverse-proxy IPs for TLS termination (`*` = trust all) |

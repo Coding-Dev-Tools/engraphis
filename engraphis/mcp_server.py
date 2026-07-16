@@ -734,9 +734,9 @@ def engraphis_ingest(
     content: Annotated[str, Field(description="Raw, undistilled text: a conversation "
                                   "excerpt, meeting notes, a log, a long update. Engraphis "
                                   "extracts the discrete facts worth keeping (when an "
-                                  "extractor is configured via ENGRAPHIS_EXTRACTOR=llm) "
-                                  "and stores each one; otherwise stores the text as one "
-                                  "memory.", min_length=1, max_length=100_000)],
+                                  "extractor is configured via ENGRAPHIS_EXTRACTOR=llm or "
+                                  "llm_structured) and stores each one; otherwise stores "
+                                  "the text as one memory.", min_length=1, max_length=100_000)],
     workspace: Annotated[str, Field(description="Top-level scope, e.g. an org or product "
                                     "name ('acme').", min_length=1, max_length=200)],
     repo: Annotated[Optional[str], Field(description="Repository scope within the "
