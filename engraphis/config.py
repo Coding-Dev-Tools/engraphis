@@ -14,9 +14,8 @@ except Exception:
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-#: Vendor-hosted managed sync relay — the default target when ``ENGRAPHIS_RELAY_URL``
-#: isn't overridden. Single source of truth: the dashboard's one-click sync
-#: (``routes/v2_api.py``) imports this rather than re-declaring the literal.
+#: Vendor-hosted managed service for sync, leases, trials, and invite delivery. This is
+#: the default target when ``ENGRAPHIS_RELAY_URL`` is not overridden.
 DEFAULT_RELAY_URL = "https://team.engraphis.com"
 
 # Keys issued before the custom domain migration carry this URL inside their signed
@@ -64,20 +63,17 @@ class Settings:
     allowed_workspaces: list = field(
         default_factory=lambda: _parse_csv(_env("ENGRAPHIS_WORKSPACES", ""))
     )
-    # Team mode (Pro): multi-user Inspector logins/roles. ON by default (opt-out) —
-    # set ENGRAPHIS_TEAM_MODE=0/false/no/off to disable. Only takes effect with a
-    # license carrying the 'team' feature; without one the Inspector reports
-    # upgrade-required instead of enabling auth (engraphis/inspector/app.py).
+    # Team auth is ON by default (opt-out); set ENGRAPHIS_TEAM_MODE=0/false/no/off to
+    # disable it. A Team license gates paid capabilities and additional seats, while an
+    # existing user store keeps its login wall even if entitlement later lapses.
     team_mode: bool = field(
         default_factory=lambda: _env("ENGRAPHIS_TEAM_MODE", "").lower()
         not in ("0", "false", "no", "off")
     )
 
-    # Managed cloud-sync relay base URL (client side). When set, `python -m scripts.sync
-    # --relay` (or `--relay-url` omitted) targets this host instead of a shared folder.
-    # The relay is the headline Pro sync transport; the server half is mounted by
-    # `inspector/cloud_mount.py`. Empty = no default relay (use --remote folder sync or
-    # pass --relay-url explicitly). See docs/SYNC.md.
+    # Managed relay base URL. Client sync uses it when `--relay-url` is omitted, and paid
+    # license flows fall back to it when a signed key or explicit cloud override supplies
+    # no URL. Set an empty ENGRAPHIS_RELAY_URL to require an explicit target.
     relay_url: str = field(default_factory=lambda: _env(
         "ENGRAPHIS_RELAY_URL", DEFAULT_RELAY_URL))
 
@@ -96,7 +92,7 @@ class Settings:
     )
     embed_dim: int | None = field(
         default_factory=lambda: (
-            _env_int("ENGRAPHIS_EMBED_DIM", 0) or None
+            _env_int("ENGRAPHIS_EMBED_DIM", 384) or None
         )
     )
 
@@ -164,9 +160,11 @@ settings = Settings()
 
 def resolve_license_server_url(signed_url: str = "") -> str:
     """Resolve the license server, including known vendor-host migrations."""
-    override = _env("ENGRAPHIS_CLOUD_URL", "").rstrip("/")
-    signed = (signed_url or "").strip().rstrip("/")
-    if signed in RETIRED_RELAY_URLS:
-        signed = ""
-    relay = (settings.relay_url or "").strip().rstrip("/")
+    def canonicalize(url: str) -> str:
+        normalized = (url or "").strip().rstrip("/")
+        return DEFAULT_RELAY_URL if normalized in RETIRED_RELAY_URLS else normalized
+
+    override = canonicalize(_env("ENGRAPHIS_CLOUD_URL", ""))
+    signed = canonicalize(signed_url)
+    relay = canonicalize(settings.relay_url)
     return override or signed or relay

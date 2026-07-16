@@ -18,7 +18,7 @@ import numpy as np
 
 
 class DeterministicEmbedder:
-    def __init__(self, dim: int = 256) -> None:
+    def __init__(self, dim: int = 384) -> None:
         self._dim = dim
 
     @property

@@ -37,7 +37,7 @@ class SentenceTransformerEmbedder:
 LAST_EMBEDDER_ERROR = ""
 
 
-def get_embedder(model_name: Optional[str] = None, dim: int = 256):
+def get_embedder(model_name: Optional[str] = None, dim: int = 384):
     """A real model if available, else the deterministic offline embedder."""
     global LAST_EMBEDDER_ERROR
     if model_name:
