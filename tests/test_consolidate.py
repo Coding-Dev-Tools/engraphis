@@ -1,6 +1,8 @@
 import re
 import time
 
+import pytest
+
 from engraphis.core.consolidate import consolidate
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import MemoryType, SearchFilter
@@ -161,6 +163,7 @@ def _engine_with_auth_repeats():
 
 
 def test_structured_consolidation_writes_typed_fact_graph_and_can_supersede_sources():
+    pytest.importorskip("pydantic")
     eng, wid, rid = _engine_with_auth_repeats()
     llm = _StructuredConsolidationLLM()
     report = consolidate(eng, workspace_id=wid, repo_id=rid, structured=True,
@@ -385,8 +388,6 @@ def test_profiles_do_not_match_entity_names_inside_other_words():
 
 
 # ── scheduled report artifact (scripts/consolidate.py --report, Team-gated) ──────────
-
-import pytest  # noqa: E402
 
 from engraphis import licensing as _lic  # noqa: E402
 from engraphis.licensing import compose_key, ed25519_public_key  # noqa: E402

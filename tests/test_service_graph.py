@@ -8,6 +8,8 @@ main point of this file — lock in that graph() enforces the same
 workspace-binding isolation boundary as every other read (service.py's
 _clean_ws), which the dashboard-only implementation it replaced did not.
 """
+import pytest
+
 from engraphis.backends.extractor import StructuredLLMExtractor
 from engraphis.backends.graph_extractor import get_graph_extractor
 from engraphis.core.interfaces import Edge, MemoryRecord, MemoryType, Scope, SearchFilter
@@ -114,6 +116,7 @@ def test_remember_populates_graph_when_extractor_wired():
 def test_structured_extractor_metadata_populates_graph_without_regex_extractor():
     """llm_structured emits validated entity/relation hints; those should feed the
     graph directly even when the regex text graph extractor is disabled."""
+    pytest.importorskip("pydantic")
     svc = MemoryService.create(":memory:", graph_extractor="none")
     svc.engine.extractor = StructuredLLMExtractor(_StructuredGraphLLM())
     svc.ingest("raw transcript blob", workspace="acme", scope="workspace")
