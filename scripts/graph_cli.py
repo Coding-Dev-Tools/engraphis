@@ -32,6 +32,11 @@ def _json(value) -> None:
 def _git_files(root: str, revision: str) -> list[str]:
     cmd = ["git", "-C", str(Path(root).resolve()), "diff", "--name-only"]
     if revision:
+        # The revision sits BEFORE the ``--`` separator, so git would parse a
+        # leading-dash value as an option (e.g. ``--output=<file>`` writes an
+        # arbitrary file). No legitimate revision or range starts with ``-``.
+        if revision.startswith("-"):
+            raise ValidationError(f"invalid git revision {revision!r}")
         cmd.append(revision)
     cmd.append("--")
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -116,14 +121,22 @@ def _prs(args) -> None:
 
 def _export(args) -> None:
     result = _service().export_code_graph(workspace=args.workspace, repo=args.repo)
-    out = Path(args.output).expanduser().resolve()
+    out = Path(args.output).expanduser()
+    if out.is_symlink():
+        # A pre-planted symlink at the output directory would redirect the whole
+        # export elsewhere (e.g. a committed `engraphis-graph-out` link in a
+        # hostile checkout run with the default -o). Refuse rather than follow.
+        raise ValidationError(f"output path {out} is a symlink; refusing to export")
+    out = out.resolve()
     out.mkdir(parents=True, exist_ok=True)
-    (out / "graph.json").write_text(
+    # _atomic_write_text (temp + os.replace) never follows a pre-planted symlink
+    # at the destination, unlike Path.write_text — same discipline as _merge.
+    _atomic_write_text(
+        out / "graph.json",
         json.dumps(result["graph"], indent=2, ensure_ascii=False, default=str),
-        encoding="utf-8",
     )
-    (out / "GRAPH_REPORT.md").write_text(result["report_markdown"], encoding="utf-8")
-    (out / "graph.html").write_text(result["graph_html"], encoding="utf-8")
+    _atomic_write_text(out / "GRAPH_REPORT.md", result["report_markdown"])
+    _atomic_write_text(out / "graph.html", result["graph_html"])
     print(f"Exported graph.json, graph.html, and GRAPH_REPORT.md to {out}")
 
 
