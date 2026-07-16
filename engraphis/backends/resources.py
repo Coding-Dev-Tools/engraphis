@@ -51,6 +51,10 @@ MAX_DOCX_XML_BYTES = 20_000_000
 MAX_EXTRACTED_TEXT_CHARS = 200_000
 MAX_IMAGE_PIXELS = 50_000_000
 MAX_PDF_PAGES = 1_000
+# Defense in depth: the service layer already caps import sizes, but this module is
+# a reusable backend contract — bound raw input here too so a future direct caller
+# can't feed an unbounded blob into full in-memory decode/extraction.
+MAX_RESOURCE_BYTES = 100_000_000
 
 
 class ResourceExtractionError(ValueError):
@@ -271,6 +275,10 @@ class LocalResourceExtractor:
     def extract_bytes(self, name: str, data: bytes) -> ResourceDocument:
         if not isinstance(data, (bytes, bytearray)):
             raise ResourceExtractionError("resource data must be bytes")
+        if len(data) > MAX_RESOURCE_BYTES:
+            raise ResourceExtractionError(
+                f"resource exceeds the {MAX_RESOURCE_BYTES}-byte extraction limit"
+            )
         raw = bytes(data)
         suffix = Path(name).suffix.lower()
         fallback = Path(name).stem or "resource"

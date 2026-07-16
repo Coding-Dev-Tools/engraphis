@@ -23,6 +23,7 @@ from __future__ import annotations
 import heapq
 import os
 import re
+import secrets
 import stat
 from pathlib import Path
 from typing import Optional
@@ -59,7 +60,15 @@ class FolderTransport:
         self.root.mkdir(parents=True, exist_ok=True)
 
     def push(self, name: str, data: bytes) -> None:
-        """Atomically write ``data`` to ``root/<name>`` (temp + fsync + os.replace)."""
+        """Atomically write ``data`` to ``root/<name>`` (temp + fsync + os.replace).
+
+        The shared folder is untrusted on the *write* side too: a hostile peer can
+        pre-plant a symlink at a predictable temp path so our own write follows it
+        and clobbers an arbitrary local file. Defend by using an unpredictable temp
+        name and opening with ``O_CREAT|O_EXCL|O_NOFOLLOW`` so the temp file must be
+        a brand-new regular file we created ourselves. ``os.replace`` then swaps the
+        directory entry itself, which never follows a symlink at ``dest``.
+        """
         if len(data) > MAX_BUNDLE_BYTES:
             raise ValueError(
                 f"sync bundle exceeds the {MAX_BUNDLE_BYTES}-byte transport limit"
@@ -68,12 +77,27 @@ class FolderTransport:
         if not safe:
             raise ValueError("sync bundle name is invalid")
         dest = self.root / safe
-        tmp = self.root / (safe + ".tmp")
-        with open(tmp, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, dest)
+        tmp = self.root / f"{safe}.{secrets.token_hex(8)}.tmp"
+        flags = (
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        )
+        # 0o644 (pre-umask) keeps bundles readable by peer accounts on multi-user
+        # shares, matching the plain open() behavior this replaced; O_EXCL already
+        # guarantees we created the file ourselves.
+        fd = os.open(tmp, flags, 0o644)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, dest)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def pull(self) -> list[tuple[str, bytes]]:
         """Return ``(name, data)`` for every bundle currently in the folder.

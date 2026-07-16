@@ -664,7 +664,8 @@ class Store:
         return [dict(r) for r in rows]
 
     def edges_in_scope(self, flt: Optional[SearchFilter] = None,
-                       *, at: Optional[float] = None) -> list[Edge]:
+                       *, at: Optional[float] = None,
+                       limit: Optional[int] = None) -> list[Edge]:
         """Every edge valid at ``at`` within the filter's workspace/repo — the graph
         the PPR retrieval arm walks (edges outside their validity window are invisible,
         same bi-temporal rule as memories)."""
@@ -682,6 +683,9 @@ class Store:
             marks = ",".join("?" for _ in flt.graph_layers)
             sql += f" AND layer IN ({marks})"
             params.extend(_enum(layer) for layer in flt.graph_layers)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(0, int(limit)))
         rows = self.conn.execute(sql, params).fetchall()
         return [_row_to_edge(r) for r in rows]
 
@@ -703,17 +707,23 @@ class Store:
         rows = self.conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
-    def neighbors(self, node_ids: list[str], *, at: Optional[float] = None) -> list[Edge]:
+    def neighbors(self, node_ids: list[str], *, at: Optional[float] = None,
+                  layers: Optional[list[GraphLayer]] = None) -> list[Edge]:
         if not node_ids:
             return []
         t = at if at is not None else now_ts()
         marks = ",".join("?" for _ in node_ids)
-        rows = self.conn.execute(
+        sql = (
             f"SELECT * FROM edges WHERE (src IN ({marks}) OR dst IN ({marks})) "
             f"AND (valid_from IS NULL OR valid_from<=?) AND (valid_to IS NULL OR ?<valid_to) "
-            f"AND expired_at IS NULL",
-            (*node_ids, *node_ids, t, t),
-        ).fetchall()
+            f"AND expired_at IS NULL"
+        )
+        params: list[Any] = [*node_ids, *node_ids, t, t]
+        if layers:
+            layer_marks = ",".join("?" for _ in layers)
+            sql += f" AND layer IN ({layer_marks})"
+            params.extend(_enum(layer) for layer in layers)
+        rows = self.conn.execute(sql, params).fetchall()
         return [_row_to_edge(r) for r in rows]
 
     # ── code symbol graph ────────────────────────────────────────────────────────
@@ -820,15 +830,21 @@ class Store:
         )
         self.conn.commit()
 
-    def list_symbols(self, repo_id: str) -> list[dict]:
-        return [dict(r) for r in self.conn.execute(
-            "SELECT * FROM symbols WHERE repo_id=? ORDER BY file, fqname", (repo_id,)
-        ).fetchall()]
+    def list_symbols(self, repo_id: str, *, limit: Optional[int] = None) -> list[dict]:
+        sql = "SELECT * FROM symbols WHERE repo_id=? ORDER BY file, fqname"
+        params: list[Any] = [repo_id]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(0, int(limit)))  # never -1 == SQLite "unlimited"
+        return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
 
-    def list_code_edges(self, repo_id: str) -> list[dict]:
-        return [dict(r) for r in self.conn.execute(
-            "SELECT * FROM code_edges WHERE repo_id=? ORDER BY file, line, id", (repo_id,)
-        ).fetchall()]
+    def list_code_edges(self, repo_id: str, *, limit: Optional[int] = None) -> list[dict]:
+        sql = "SELECT * FROM code_edges WHERE repo_id=? ORDER BY file, line, id"
+        params: list[Any] = [repo_id]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(0, int(limit)))  # never -1 == SQLite "unlimited"
+        return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
 
     def symbols_for_files(self, repo_id: str, files: list[str]) -> list[dict]:
         if not files:
@@ -895,16 +911,21 @@ class Store:
         if commit:
             self.conn.commit()
 
-    def list_code_memory_links(self, repo_id: str) -> list[dict]:
-        rows = self.conn.execute(
+    def list_code_memory_links(self, repo_id: str, *,
+                               limit: Optional[int] = None) -> list[dict]:
+        sql = (
             "SELECT l.*, s.name, s.fqname, s.file, s.kind AS symbol_kind, "
             "m.title, m.mtype, m.valid_to, m.expired_at "
             "FROM code_memory_links l "
             "LEFT JOIN symbols s ON s.id=l.symbol_id "
             "LEFT JOIN memories m ON m.id=l.memory_id "
-            "WHERE l.repo_id=? ORDER BY l.created_at, l.id",
-            (repo_id,),
-        ).fetchall()
+            "WHERE l.repo_id=? ORDER BY l.created_at, l.id"
+        )
+        params: list[Any] = [repo_id]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(0, int(limit)))  # never -1 == SQLite "unlimited"
+        rows = self.conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
 
     def memories_for_symbol(self, repo_id: str, symbol_id: str, *,
