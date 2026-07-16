@@ -36,6 +36,22 @@ All notable changes to Engraphis are documented here. Format loosely follows
   each get a fresh, runnable instance. `tests/test_agent_connect_mcp.py` (4 tests: 401,
   402, handshake+tools/list, write-shares-dashboard-store).
 
+### Fixed
+- Hardened Team and Agent Connect end to end: Team setup now requires entitlement,
+  lapsed instances keep their authentication wall, viewer tokens remain read-only, and
+  `/mcp` enforces member access while sharing the dashboard store.
+- Made license and billing state fail safely: runtime public-key overrides are test-only,
+  revocations invalidate cached entitlement immediately, trial links survive signing
+  failures, webhook reservations recover after crashes, and initial subscription seat
+  baselines no longer suppress the first real update.
+- Preserved memory integrity across restart and retrieval: audit writes are durable,
+  sync dry-runs validate remote repository mappings, graph edge provenance is pruned
+  precisely, SQLite-vector distances are converted to cosine similarity, and entity
+  expansion matches complete names rather than substrings.
+- Bounded proactive-context and consolidation inputs, required cited LLM output before it
+  can replace deterministic context, and rejected structured consolidation that cites
+  source IDs outside the requested cluster.
+
 ## [0.9.5] - 2026-07-14
 
 ### Changed
