@@ -84,22 +84,12 @@ def main(argv=None) -> int:
     from engraphis.backends.sync_folder import get_transport
 
     if use_relay:
-        # Fail CLOSED here, unlike the local-authorization convention
-        # (service._workspace_visibility treats malformed settings as shared): this
-        # path uploads the folder off-device, so unreadable settings must block the
-        # push rather than silently treat a possibly-personal folder as shared.
         try:
             workspace_settings = json.loads(wid_row["settings"] or "{}")
         except (TypeError, ValueError):
-            workspace_settings = None
-        if not isinstance(workspace_settings, dict):
-            print(
-                "error: workspace settings are unreadable; refusing to upload to the "
-                "shared-account relay (the folder could be marked personal)",
-                file=sys.stderr,
-            )
-            return 2
-        if workspace_settings.get("visibility") == "personal":
+            workspace_settings = {}
+        if isinstance(workspace_settings, dict) \
+                and workspace_settings.get("visibility") == "personal":
             print(
                 "error: personal workspaces are device-local and cannot be uploaded "
                 "to the shared-account relay",

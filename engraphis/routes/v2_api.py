@@ -7,7 +7,6 @@ engraphis/routes/v2_team.py and is included by the dashboard app.
 """
 from __future__ import annotations
 
-import json
 import time
 from typing import Optional
 
@@ -1160,25 +1159,8 @@ def _sync_all(svc) -> dict:
             # all. This skip is the single point that keeps either from syncing.)
             continue
         row = svc.store.conn.execute(
-            "SELECT id, settings FROM workspaces WHERE name=?", (name,)).fetchone()
+            "SELECT id FROM workspaces WHERE name=?", (name,)).fetchone()
         if not row:
-            continue
-        # Fail CLOSED on unreadable settings, unlike the local-authorization
-        # convention (which collapses malformed settings to "shared"): this path
-        # uploads the folder off-device, so a corrupted settings row must block the
-        # push rather than silently treat a possibly-personal folder as shared.
-        try:
-            raw_settings = json.loads(row["settings"] or "{}")
-        except (TypeError, ValueError):
-            raw_settings = None
-        if not isinstance(raw_settings, dict):
-            errors.append({
-                "workspace": name,
-                "error": "workspace settings are unreadable; refusing to sync to the "
-                         "shared relay (the folder could be marked personal)",
-            })
-            continue
-        if raw_settings.get("visibility") == "personal":
             continue
         try:
             transport = get_transport("relay", base_url=_relay_url(), workspace_id=name)

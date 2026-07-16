@@ -257,9 +257,7 @@ class MemoryEngine:
             except Exception:
                 decision = None
         if decision is None:
-            # Same clamp as the decision path below, so direct engine callers get
-            # identical importance validation whether or not supervision applies.
-            return _bounded_finite(importance, default=0.0, minimum=0.0, maximum=1.0), 1.0, {}
+            return importance, 1.0, {}
 
         label = str(decision.label or "normal").lower()
         if label not in {"ephemeral", "normal", "critical"}:
