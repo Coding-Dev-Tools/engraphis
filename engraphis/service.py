@@ -24,7 +24,7 @@ from typing import Any, Optional
 
 from engraphis.backends.extractor import ChunkingExtractor
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.interfaces import MemoryType, Scope, SearchFilter
+from engraphis.core.interfaces import MemoryType, Scope
 from engraphis.graphdata import build_graph_payload, empty_graph
 
 # ── validation limits (memory-poisoning / resource-exhaustion guards) ──────────
@@ -35,8 +35,6 @@ MAX_KEYWORDS = 64
 MAX_KEYWORD_CHARS = 128
 MAX_METADATA_BYTES = 16_384
 MAX_K = 50
-MAX_CONTEXT_TASK_CHARS = 10_000
-MAX_AGENT_STATE_CHARS = 20_000
 # import_folder/import_files (SECURITY.md §5 — reads/accepts local-content by path or
 # upload; these bound resource use, not access scope, same framing as index_repo's
 # max_files/max_file_bytes).
@@ -56,10 +54,9 @@ class ValidationError(ValueError):
 # Set by the dashboard's team auth gate (engraphis/dashboard_app.py::_auth_gate) for the
 # duration of a request, and read at the workspace-authorization chokepoint below so a
 # *personal* folder is visible and usable only by its owner. Every other entry point —
-# standalone MCP server, the CLI, the sync loop, and the offline test/eval harnesses —
-# leaves this at its ``None`` default, so per-user enforcement is a no-op outside the
-# multi-user dashboard (including its mounted MCP endpoint) and single-tenant behaviour is
-# completely unchanged. It lives here (not in a
+# the MCP server, the CLI, the sync loop, and the offline test/eval harnesses — leaves
+# this at its ``None`` default, so per-user enforcement is a no-op outside the multi-user
+# dashboard and single-tenant behaviour is completely unchanged. It lives here (not in a
 # route module) so the service stays the single place workspace access is decided.
 _CURRENT_USER: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
     "engraphis_dashboard_user", default=None)
@@ -297,15 +294,15 @@ class MemoryService:
 
     @classmethod
     def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
-               embed_dim: int = 384, vector_backend: str = "auto",
+               embed_dim: int = 256, vector_backend: str = "auto",
                rerank_model: Optional[str] = None,
                allowed_workspaces: Optional[list] = None,
                extractor: Optional[str] = None,
                graph_extractor: Optional[str] = None) -> "MemoryService":
         # extractor / graph_extractor default to the configured backends
-        # (ENGRAPHIS_EXTRACTOR — "none" | "chunk" | "llm" | "llm_structured";
-        # ENGRAPHIS_GRAPH_EXTRACTOR — "regex" by default) so the dashboard,
-        # auto-maintenance, MCP server, and CLI all honor the same config knob. An
+        # (ENGRAPHIS_EXTRACTOR — "none" | "chunk" | "llm"; ENGRAPHIS_GRAPH_EXTRACTOR —
+        # "regex" by default) so every front end — dashboards, auto-maintenance, MCP
+        # server, CLI — honors the config knob without each call site opting in. An
         # explicit value (e.g. extractor="none") still overrides the environment.
         if extractor is None or graph_extractor is None:
             from engraphis.config import settings
@@ -403,7 +400,7 @@ class MemoryService:
 
     def _enforce_personal_access(self, ws: str) -> None:
         """Block access to another user's personal folder. No current user (single-tenant,
-        standalone MCP, CLI, sync, tests) → no restriction. A shared folder, or a personal folder the
+        MCP, CLI, sync, tests) → no restriction. A shared folder, or a personal folder the
         current user owns → allowed. A personal folder owned by someone else → refused,
         with a message that neither confirms nor denies the folder's contents beyond the
         fact that it's private (the name is already known to the caller who supplied it)."""
@@ -661,8 +658,7 @@ class MemoryService:
     def consolidate(self, *, workspace: str, repo: Optional[str] = None,
                     dry_run: bool = False, min_cluster: int = 3,
                     archive_below: float = 0.05, profiles: bool = False,
-                    min_mentions: int = 3, infer: bool = False,
-                    structured: bool = False, supersede_sources: bool = False) -> dict:
+                    min_mentions: int = 3, infer: bool = False) -> dict:
         """Sleep-time consolidation sweep (episodic→semantic distillation + decayed-
         transient archival). The report includes a ``compaction`` block with the tokens
         the sweep saved. With ``profiles=True`` a third pass rolls each entity's memories
@@ -677,14 +673,7 @@ class MemoryService:
         housekeeping action; the **inference pass is a paid ``automation`` capability**
         (the dream pass 4), so ``infer=True`` is gated here as defense in depth — every
         caller (the ``/api/consolidate`` route, ``run_maintenance``) funnels through
-        this, so the Pro-only pass can't be reached without a server-approved license.
-
-        ``structured=True`` asks a configured LLM to emit schema-validated consolidated
-        facts with graph hints; any provider/schema failure falls back to the deterministic
-        digest path. ``supersede_sources=True`` is intentionally opt-in: it bi-temporally
-        closes the source episodes only after validated structured facts are written."""
-        if supersede_sources and not structured:
-            raise ValidationError("supersede_sources requires structured=true")
+        this, so the Pro-only pass can't be reached without a server-approved license."""
         if infer:
             from engraphis.licensing import require_feature
             require_feature("automation")
@@ -696,26 +685,10 @@ class MemoryService:
         except (TypeError, ValueError):
             raise ValidationError("min_cluster/min_mentions must be integers and "
                                   "archive_below a number")
-        llm = None
-        if structured:
-            try:
-                from engraphis.llm.client import LLMClient
-                llm = LLMClient()
-            except Exception:
-                llm = None
-        try:
-            return self.engine.consolidate(
-                workspace_id=wid, repo_id=rid, dry_run=bool(dry_run),
-                min_cluster=min_cluster, archive_below=archive_below,
-                profiles=bool(profiles), min_mentions=min_mentions,
-                infer=bool(infer), structured=bool(structured),
-                supersede_sources=bool(supersede_sources), llm=llm)
-        finally:
-            if llm is not None and hasattr(llm, "close"):
-                try:
-                    llm.close()
-                except Exception:
-                    pass
+        return self.engine.consolidate(workspace_id=wid, repo_id=rid, dry_run=bool(dry_run),
+                                       min_cluster=min_cluster, archive_below=archive_below,
+                                       profiles=bool(profiles), min_mentions=min_mentions,
+                                       infer=bool(infer))
 
     # ── read ───────────────────────────────────────────────────────────────────
     def recall(self, query: str, *, workspace: Optional[str] = None,
@@ -763,7 +736,7 @@ class MemoryService:
                         repo: Optional[str] = None, mtypes: Optional[list] = None,
                         k: int = 8, as_of: Optional[float] = None,
                         min_support: Optional[float] = None,
-                        max_citations: int = 5, llm=None) -> dict:
+                        max_citations: int = 5) -> dict:
         """Grounded recall: an answer built strictly from retrieved memories, with
         ``[n]`` citations and an explicit abstain when evidence is insufficient
         (``core.grounded``). This path is offline/deterministic (extractive answer) — no
@@ -810,7 +783,7 @@ class MemoryService:
 
         ans = self.engine.grounded_recall(
             query, workspace_id=wid, repo_id=rid, mtypes=mts, as_of=as_of, k=k,
-            llm=llm, min_support=min_support, max_citations=max_citations,
+            min_support=min_support, max_citations=max_citations,
         )
         return {"query": query, **ans.to_dict()}
 
@@ -975,55 +948,6 @@ class MemoryService:
         return {"memories": [_mem_to_dict(r) for r in out["memories"]],
                "last_session": out["last_session"]}
 
-    def proactive_context(self, *, workspace: str, repo: Optional[str] = None,
-                          task: str = "", agent_state: str = "", k: int = 10,
-                          synthesize: bool = False) -> dict:
-        """Agent-ready proactive context packet.
-
-        Combines queryless proactive recall, optional task-specific recall, and the
-        last-session handoff into a cited context summary. Deterministic by default;
-        when ``synthesize`` is true and an LLM is configured, the model may rewrite the
-        summary, but only if it cites retrieved memories with ``[n]`` markers.
-        """
-        task = _clean_text(task, field="task", max_chars=MAX_CONTEXT_TASK_CHARS,
-                           required=False)
-        agent_state = _clean_text(agent_state, field="agent_state",
-                                  max_chars=MAX_AGENT_STATE_CHARS, required=False)
-        k = max(1, min(MAX_K, int(k)))
-        proactive = self.recall_proactive(workspace=workspace, repo=repo, k=k)
-        memories = list(proactive.get("memories") or [])
-        query = "\n".join(x for x in (task, agent_state) if x).strip()
-        if query:
-            try:
-                recalled = self.recall(query, workspace=workspace, repo=repo, k=k,
-                                       reinforce=False)
-                memories.extend(recalled.get("memories") or [])
-            except Exception:
-                pass
-        llm = None
-        if synthesize:
-            try:
-                from engraphis.config import settings
-                if settings.llm_api_key:
-                    from engraphis.llm.client import LLMClient
-                    llm = LLMClient()
-            except Exception:
-                llm = None
-        try:
-            from engraphis.ai_context import build_proactive_context
-            out = build_proactive_context(
-                task=task, agent_state=agent_state, memories=memories,
-                last_session=proactive.get("last_session") or {}, llm=llm,
-                synthesize=bool(synthesize),
-            )
-        finally:
-            if llm is not None:
-                try:
-                    llm.close()
-                except Exception:
-                    pass
-        return {"workspace": self._clean_ws(workspace), "repo": repo, **out}
-
     # ── linking & events (A-MEM-style) ───────────────────────────────────────────
     def record_event(self, kind: str, content: str, *, workspace: str,
                      repo: Optional[str] = None, session_id: Optional[str] = None,
@@ -1098,14 +1022,10 @@ class MemoryService:
         the current user is omitted entirely — you can't see, count, or select a folder
         that isn't yours — mirroring the access check in ``_authorize_workspace``. Outside
         team mode there is no current user, so every folder is listed as before."""
-        import time as _time
-        now = _time.time()
         rows = self.store.conn.execute(
             "SELECT w.id, w.name, w.settings AS settings, COUNT(m.id) AS n FROM workspaces w "
-            "LEFT JOIN memories m ON m.workspace_id = w.id "
-            "AND (m.valid_from IS NULL OR m.valid_from<=?) "
-            "AND (m.valid_to IS NULL OR ?<m.valid_to) AND m.expired_at IS NULL "
-            "GROUP BY w.id, w.name, w.settings ORDER BY w.name", (now, now)).fetchall()
+            "LEFT JOIN memories m ON m.workspace_id = w.id AND m.expired_at IS NULL "
+            "GROUP BY w.id, w.name, w.settings ORDER BY w.name").fetchall()
         user = current_user()
         my_email = (user or {}).get("email") or ""
         out = []
@@ -1148,7 +1068,7 @@ class MemoryService:
         ``visibility`` is ``'shared'`` (default — the whole team can see and use it) or
         ``'personal'`` (visible and usable only by the creating user, enforced by
         ``_authorize_workspace``). Personal requires a signed-in dashboard user to own it;
-        if there is no current user (single-tenant / standalone MCP / CLI) a ``personal`` request
+        if there is no current user (single-tenant / MCP / CLI) a ``personal`` request
         degrades to ``shared`` rather than minting an owner-less folder nobody could ever
         reach."""
         ws = self._clean_ws(name)
@@ -1658,12 +1578,14 @@ class MemoryService:
                 frontier.append(nxt)
         if len(members) == 1:
             return [rec]
-        return sorted(members.values(), key=lambda r: (
-            r.valid_from or r.ingested_at or 0,
-            r.valid_to is None,               # if timestamps tie, closed history precedes live
-            r.valid_to if r.valid_to is not None else float("inf"),
-            r.id,
-        ))
+        # Oldest→newest. The live (newest) record is the one with ``valid_to IS
+        # NULL``; every superseded record has ``valid_to`` set. Sort closed records
+        # first (by valid_from), then the live one last — deterministic even when two
+        # rapid writes collide on the same ``valid_from`` float (string-id tiebreak
+        # would otherwise intermittently put the live record first).
+        return sorted(members.values(),
+                      key=lambda r: (0 if r.valid_to is not None else 1,
+                                   r.valid_from or r.ingested_at or 0, r.id))
 
     def _successor_of(self, memory_id: str, seen: set):
         escaped = memory_id.replace("%", "\\%").replace("_", "\\_")
@@ -1734,44 +1656,18 @@ class MemoryService:
         ents = conn.execute(
             "SELECT id, name, etype FROM entities WHERE workspace_id=? LIMIT ?",
             (wid, limit)).fetchall()
-        # Lazy backfill: old memories can predate graph extraction or predate the
-        # structured-metadata graph bridge. On first Graph-tab open in a process, feed
-        # the missing graph state once; feed() de-dupes entities/edges.
-        if self._should_backfill_graph(wid, bool(ents)):
+        # Lazy backfill: a workspace whose memories predate graph extraction being
+        # enabled has memories but no entities. On first Graph-tab open, extract and
+        # persist its graph so existing installs light up on update without a manual
+        # migration. Idempotent (feed() de-dupes) and only runs when extraction is on.
+        if not ents and self.engine.graph_extractor is not None:
             self._lazy_backfill_graph(wid)
             ents = conn.execute(
                 "SELECT id, name, etype FROM entities WHERE workspace_id=? LIMIT ?",
                 (wid, limit)).fetchall()
-        node_ids = {r["id"] for r in ents}
-        edgs = [{"src": e.src, "dst": e.dst, "relation": e.relation}
-                for e in self.store.edges_in_scope(SearchFilter(workspace_id=wid))
-                if e.src in node_ids and e.dst in node_ids]
+        edgs = conn.execute(
+            "SELECT src, dst, relation FROM edges WHERE workspace_id=?", (wid,)).fetchall()
         return build_graph_payload(ws, ents, edgs)
-
-    def _should_backfill_graph(self, wid: str, has_entities: bool) -> bool:
-        if wid in self._graph_backfilled:
-            return False
-        if not has_entities and self.engine.graph_extractor is not None:
-            return True
-        return self._has_structured_graph_rows(wid)
-
-    def _has_structured_graph_rows(self, wid: str) -> bool:
-        import json as _json
-        import time as _time
-        now = _time.time()
-        rows = self.store.conn.execute(
-            "SELECT metadata FROM memories WHERE workspace_id=? "
-            "AND (valid_from IS NULL OR valid_from<=?) "
-            "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL "
-            "AND (metadata LIKE '%entities%' OR metadata LIKE '%relations%')", (wid, now, now))
-        for row in rows:
-            try:
-                meta = _json.loads(row["metadata"] or "{}")
-            except ValueError:
-                continue
-            if self.engine._has_structured_graph_metadata(meta):
-                return True
-        return False
 
     def _lazy_backfill_graph(self, wid: str) -> None:
         """One-time, on-demand knowledge-graph population for a workspace whose
@@ -1785,38 +1681,18 @@ class MemoryService:
         if wid in self._graph_backfilled:
             return
         self._graph_backfilled.add(wid)
-        from engraphis.backends.graph_extractor import (
-            StructuredMetadataGraphExtractor, feed as _graph_feed,
-        )
-        import json as _json
-        import time as _time
-        now = _time.time()
+        from engraphis.backends.graph_extractor import feed as _graph_feed
         rows = self.store.conn.execute(
-            "SELECT id, repo_id, title, content, metadata FROM memories "
-            "WHERE workspace_id=? AND (valid_from IS NULL OR valid_from<=?) "
-            "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL",
-            (wid, now, now)).fetchall()
+            "SELECT repo_id, title, content FROM memories "
+            "WHERE workspace_id=? AND expired_at IS NULL", (wid,)).fetchall()
         for r in rows:
             try:
-                meta = _json.loads(r["metadata"] or "{}")
-            except ValueError:
-                meta = {}
-            if self.engine._has_structured_graph_metadata(meta):
-                try:
-                    _graph_feed(self.store, r["content"] or "", workspace_id=wid,
-                                repo_id=r["repo_id"], title=r["title"] or "",
-                                extractor=StructuredMetadataGraphExtractor(meta),
-                                provenance={"source": "structured_backfill", "memory_id": r["id"]})
-                except Exception:
-                    pass
-            if self.engine.graph_extractor is not None:
-                try:
-                    _graph_feed(self.store, r["content"] or "", workspace_id=wid,
-                                repo_id=r["repo_id"], title=r["title"] or "",
-                                extractor=self.engine.graph_extractor,
-                                provenance={"source": "lazy_backfill", "memory_id": r["id"]})
-                except Exception:
-                    pass
+                _graph_feed(self.store, r["content"] or "", workspace_id=wid,
+                            repo_id=r["repo_id"], title=r["title"] or "",
+                            extractor=self.engine.graph_extractor,
+                            provenance={"source": "lazy_backfill"})
+            except Exception:
+                continue
 
     # ── introspection ───────────────────────────────────────────────────────────
     def stats(self, *, workspace: Optional[str] = None) -> dict:
