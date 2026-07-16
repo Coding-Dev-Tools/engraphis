@@ -255,7 +255,7 @@ def _invite_daily_cap() -> int:
 
 def _today() -> str:
     import datetime as _dt
-    return _dt.datetime.utcnow().strftime("%Y-%m-%d")
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
 
 
 def _bump_invite_count(key_id: str) -> bool:
@@ -432,7 +432,7 @@ def _trial_rate_limit_per_hour() -> int:
 def _hour_bucket(now: Optional[float] = None) -> str:
     import datetime as _dt
     ts = now if now is not None else time.time()
-    return _dt.datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d-%H")
+    return _dt.datetime.fromtimestamp(ts, tz=_dt.timezone.utc).strftime("%Y-%m-%d-%H")
 
 
 def _client_ip(request: Request) -> str:

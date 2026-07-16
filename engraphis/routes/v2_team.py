@@ -388,8 +388,8 @@ def attach(app: FastAPI, service):
         w.writerow(["ts", "iso_utc", "actor_id", "actor_email", "action",
                     "target", "detail", "ip"])
         for e in rows:
-            iso = _dt.datetime.utcfromtimestamp(e["ts"]).replace(
-                tzinfo=_dt.timezone.utc).isoformat()
+            iso = _dt.datetime.fromtimestamp(
+                e["ts"], tz=_dt.timezone.utc).isoformat()
             w.writerow([e["ts"], iso, _csv_cell(e.get("actor_id")),
                         _csv_cell(e.get("actor_email")), _csv_cell(e["action"]),
                         _csv_cell(e.get("target")), _csv_cell(e.get("detail")),
