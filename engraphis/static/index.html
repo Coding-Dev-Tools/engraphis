@@ -37,7 +37,6 @@ a{color:var(--accent);text-decoration:none}button{font-family:inherit;cursor:poi
 .chat-wrap{display:flex;flex-direction:column;height:calc(100vh - 84px)}.chat-msgs{flex:1;overflow-y:auto;padding:16px 24px}.chat-msg{margin-bottom:16px;max-width:760px}.chat-role{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px}.chat-role.user{color:var(--blue)}.chat-role.assistant{color:var(--accent)}.chat-bubble{padding:12px 16px;border-radius:var(--radius);font-size:16px;line-height:1.7;white-space:pre-wrap}.chat-bubble.user{background:var(--surface2);border:1px solid var(--border)}.chat-bubble.assistant{background:var(--surface);border:1px solid var(--border)}.chat-input-row{display:flex;gap:8px;padding:10px 24px 16px;border-top:1px solid var(--border);background:var(--surface)}.chat-input-row .textarea{min-height:48px;max-height:96px;flex:1}
 .thought{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:8px}.thought-meta{font-size:12px;color:var(--text-dim);margin-bottom:8px;display:flex;gap:6px;align-items:center}.thought-field{margin-bottom:6px}.thought-key{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--text-dim)}.thought-val{font-size:16px;line-height:1.6;margin-top:2px}
 .graph-wrap{display:flex;gap:12px;height:calc(100vh - 120px)}.graph-canvas{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);position:relative;overflow:hidden}.graph-sidebar{width:260px;flex-shrink:0;overflow-y:auto}.graph-stats{position:absolute;top:10px;right:10px;z-index:10;font-size:12px;color:var(--text-dim);background:var(--surface2);padding:5px 10px;border-radius:var(--radius-sm);border:1px solid var(--border)}
-.graph-layout{display:grid;grid-template-columns:minmax(0,1fr) 268px;gap:14px;align-items:start}.graph-main{min-width:0}.graph-network{position:relative;height:600px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}.graph-controls-column{min-width:0;display:flex;flex-direction:column;gap:12px}.graph-summary-row{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(240px,.85fr);gap:12px;margin-top:12px}.graph-summary-row .card,.graph-controls-column .card{margin-bottom:0}.graph-legend-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));column-gap:18px;row-gap:2px}.graph-stats-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:18px;row-gap:2px;font-size:12px}@media(max-width:900px){.graph-layout{grid-template-columns:1fr}.graph-controls-column{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.graph-network{height:520px}}@media(max-width:640px){.graph-summary-row,.graph-controls-column{grid-template-columns:1fr}.graph-network{height:440px}}
 .gtype-row{display:flex;align-items:center;gap:8px;padding:4px 2px;font-size:12px;border-radius:6px}.gtype-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0}.gtype-name{text-transform:capitalize;color:var(--text-muted)}.gtype-count{margin-left:auto;color:var(--text-dim);font-variant-numeric:tabular-nums;font-size:12px}
 .gtop-row{display:flex;align-items:center;gap:7px;padding:5px 4px;border-radius:6px;cursor:pointer;transition:background var(--transition)}.gtop-row:hover{background:var(--surface2)}.gtop-row:hover .gtop-name{color:var(--text)}.gtop-rank{width:13px;flex-shrink:0;font-size:12px;color:var(--text-dim);text-align:right;font-variant-numeric:tabular-nums}.gtop-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}.gtop-name{width:66px;font-size:12px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.gtop-bar{flex:1;height:5px;background:var(--surface2);border-radius:3px;overflow:hidden}.gtop-bar-fill{display:block;height:100%;border-radius:3px;transition:width .5s cubic-bezier(.4,0,.2,1)}.gtop-n{width:20px;text-align:right;font-size:12px;color:var(--text-dim);font-variant-numeric:tabular-nums}
 .tl-item{display:flex;gap:12px;padding:8px 0;border-bottom:1px solid var(--surface2)}.tl-time{font-size:12px;color:var(--text-dim);white-space:nowrap;min-width:120px;font-variant-numeric:tabular-nums}.tl-body{flex:1;font-size:16px;line-height:1.5}
@@ -221,18 +220,12 @@ body{background:radial-gradient(1000px 600px at 50% -30%,rgba(255,255,255,.014),
 
 <div class="view" id="view-graph">
 <div class="view-head"><div class="view-title">Knowledge Graph</div><div class="view-desc">Entity-relation network extracted from your memories.</div></div>
-<div class="graph-layout">
-<div class="graph-main">
-<div class="graph-network">
+<div style="display:flex;gap:14px;align-items:flex-start">
+<div style="flex:1;position:relative;height:600px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden">
 <div id="graph-net" style="position:absolute;inset:0"></div>
 <div id="graph-empty" class="empty" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:20px">Loading graph…</div>
 </div>
-<div class="graph-summary-row">
-<div class="card"><div class="card-head">Legend<span class="count" id="graph-legend-count"></span></div><div id="graph-legend" class="graph-legend-grid"></div></div>
-<div class="card"><div class="card-head">Stats</div><div id="graph-stats" class="graph-stats-grid"></div></div>
-</div>
-</div>
-<div class="graph-controls-column">
+<div style="width:268px;flex-shrink:0;display:flex;flex-direction:column;gap:12px">
 <div class="card"><div class="card-head">Controls</div>
 <div style="display:flex;gap:6px;margin-bottom:8px"><button class="btn btn-ghost btn-sm" style="flex:1" onclick="loadGraph()">Refresh</button><button class="btn btn-ghost btn-sm" style="flex:1" onclick="graphReheat()">Reheat</button><button class="btn btn-ghost btn-sm" style="flex:1" onclick="graphFit()">Fit</button></div>
 <div id="graph-layer-filters" style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:8px;font-size:12px">
@@ -255,6 +248,8 @@ body{background:radial-gradient(1000px 600px at 50% -30%,rgba(255,255,255,.014),
 <div class="gslider"><label>Center gravity</label><input type="range" min="0" max="40" value="14" oninput="graphSet('gravity',this.value)"></div>
 </div>
 <div class="card"><div class="card-head">Top connected<span class="count" id="graph-top-count"></span></div><div id="graph-top"></div></div>
+<div class="card"><div class="card-head">Legend<span class="count" id="graph-legend-count"></span></div><div id="graph-legend"></div></div>
+<div class="card"><div class="card-head">Stats</div><div id="graph-stats" style="font-size:12px"></div></div>
 </div>
 </div>
 </div>

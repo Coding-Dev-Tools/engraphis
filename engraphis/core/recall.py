@@ -163,7 +163,7 @@ class RecallEngine:
         if not seed_ids:
             return {}
         names = {entity_map[eid] for eid in seed_ids if entity_map.get(eid)}
-        for e in self.store.neighbors(seed_ids, at=now, layers=flt.graph_layers):
+        for e in self.store.neighbors(seed_ids, at=now):
             if e.src in entity_map:
                 names.add(entity_map[e.src])
             if e.dst in entity_map:

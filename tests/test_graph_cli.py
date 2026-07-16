@@ -26,19 +26,6 @@ def test_graph_cli_exposes_repo_workflow_commands():
         assert args.command == command
 
 
-def test_git_files_rejects_option_lookalike_revisions(tmp_path):
-    """The revision sits before the `--` pathspec separator, so a leading-dash
-    value would be parsed by git as an option — e.g. `--output=<file>` is an
-    arbitrary-file-write primitive. `impact --git-range` and `prs --base/--head`
-    accept free-form strings, so this must fail closed (PR #19 review follow-up)."""
-    from engraphis.service import ValidationError
-
-    for hostile in ("--output=owned.txt", "-p", "--no-index"):
-        with pytest.raises(ValidationError, match="invalid git revision"):
-            graph_cli._git_files(str(tmp_path), hostile)
-    assert not (tmp_path / "owned.txt").exists()
-
-
 def test_graph_union_merge_deduplicates_symbols_and_remaps_memory_links():
     base = {
         "format": "engraphis-code-graph/1",

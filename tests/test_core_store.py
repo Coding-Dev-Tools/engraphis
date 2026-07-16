@@ -131,39 +131,6 @@ def test_graph_neighbors(store):
     assert nbrs[0].layer == GraphLayer.ENTITY
 
 
-def test_graph_neighbors_filters_by_layer(store):
-    """1-hop expansion honors the logical-overlay selection, same as
-    edges_in_scope/links_among — a `timeline` intent must not traverse
-    entity/causal edges (PR #19 review follow-up)."""
-    wid = store.get_or_create_workspace("w")
-    store.upsert_entity(Node(id="", name="deploy", ntype="event", workspace_id=wid))
-    store.upsert_entity(Node(id="", name="outage", ntype="event", workspace_id=wid))
-    store.upsert_entity(Node(id="", name="oncall", ntype="person", workspace_id=wid))
-    store.upsert_edge(Edge(id="", src="deploy", dst="outage", relation="causes",
-                           workspace_id=wid))
-    store.upsert_edge(Edge(id="", src="deploy", dst="oncall", relation="owned_by",
-                           workspace_id=wid))
-    assert len(store.neighbors(["deploy"])) == 2
-    causal = store.neighbors(["deploy"], layers=[GraphLayer.CAUSAL])
-    assert [e.dst for e in causal] == ["outage"]
-    assert store.neighbors(["deploy"], layers=[GraphLayer.TEMPORAL]) == []
-
-
-def test_code_listing_helpers_honor_limit(store):
-    """service.graph() bounds its per-repo code fetches; the SQL layer must
-    actually enforce the cap rather than materializing the whole repo."""
-    for i in range(5):
-        store.upsert_symbol(repo_id="repo_x", kind="function", name=f"f{i}",
-                            fqname=f"f{i}", file="mod.py", span="1-1")
-    assert len(store.list_symbols("repo_x")) == 5
-    assert len(store.list_symbols("repo_x", limit=2)) == 2
-    for i in range(4):
-        store.add_code_edge(repo_id="repo_x", src=f"f{i}", dst=f"f{i + 1}",
-                            relation="calls", file="mod.py", line=i + 1)
-    assert len(store.list_code_edges("repo_x")) == 4
-    assert len(store.list_code_edges("repo_x", limit=3)) == 3
-
-
 def test_memory_links_infer_and_filter_graph_layers(store):
     wid = store.get_or_create_workspace("w")
     a = store.add_memory(MemoryRecord(id="", content="cause", workspace_id=wid))

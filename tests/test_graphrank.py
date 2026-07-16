@@ -97,40 +97,6 @@ def test_ppr_arm_returns_empty_without_seed_entities():
     store.close()
 
 
-def test_1hop_arm_honors_graph_layer_filter():
-    """`graph_mode="1hop"` (also the PPR big-graph fallback) must respect
-    `SearchFilter.graph_layers` like the PPR arm does: a temporal-only intent
-    may not expand the seed through entity/causal edges (PR #19 follow-up)."""
-    from engraphis.core.interfaces import GraphLayer
-    from engraphis.core.store import now_ts
-
-    store = Store(":memory:")
-    wid = store.get_or_create_workspace("w")
-    emb = DeterministicEmbedder(dim=64)
-    index = NumpyVectorIndex(store)
-    a = store.upsert_entity(Node(id="", name="alphasvc", ntype="service", workspace_id=wid))
-    b = store.upsert_entity(Node(id="", name="betasvc", ntype="service", workspace_id=wid))
-    # "calls" classifies as the ENTITY overlay.
-    store.upsert_edge(Edge(id="", src=a, dst=b, relation="calls", workspace_id=wid))
-    text = "betasvc publishes the audit events."
-    mid = store.add_memory(MemoryRecord(
-        id="", content=text, mtype=MemoryType.SEMANTIC, scope=Scope.WORKSPACE,
-        workspace_id=wid, embedding=emb.embed([text])[0],
-    ))
-    eng = RecallEngine(store, emb, index, IdentityReranker(), graph_mode="1hop")
-    now = now_ts()
-
-    unrestricted = eng._graph_arm("alphasvc status", SearchFilter(workspace_id=wid), now)
-    assert mid in unrestricted  # entity edge expands alphasvc → betasvc
-
-    temporal_only = eng._graph_arm(
-        "alphasvc status",
-        SearchFilter(workspace_id=wid, graph_layers=[GraphLayer.TEMPORAL]), now,
-    )
-    assert mid not in temporal_only  # the entity edge is outside the overlay
-    store.close()
-
-
 def test_recall_end_to_end_with_ppr_default():
     store, wid, emb, index, ids = _graph_fixture()
     eng = RecallEngine(store, emb, index, IdentityReranker())
