@@ -560,10 +560,8 @@ def _cloud_gate(lic: "License", material: str) -> tuple:
 
     The free tier never reaches here (it has no key), so offline free-tier use is
     unaffected — only Pro/Team features require the server."""
-    from engraphis.config import settings
-    base = (os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip()
-            or lic.cloud_url
-            or (settings.relay_url or "").strip())
+    from engraphis.config import resolve_license_server_url
+    base = resolve_license_server_url(lic.cloud_url)
     if not base:
         return False, ("server-side license verification is required for paid features "
                        "but no license server is configured (ENGRAPHIS_CLOUD_URL and the "

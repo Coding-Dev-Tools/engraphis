@@ -442,15 +442,14 @@ def _maybe_start_license_revalidation() -> None:
 
     def _loop() -> None:
         from engraphis import cloud_license, licensing
-        from engraphis.config import settings
+        from engraphis.config import resolve_license_server_url
         time.sleep(30)   # let startup settle (after the autosync/dreaming polls)
         while True:
             try:
                 material = licensing._read_key_material()
                 lic = licensing.current_license()
                 if material and lic.is_paid:
-                    base = (_os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip()
-                            or lic.cloud_url or (settings.relay_url or "").strip())
+                    base = resolve_license_server_url(lic.cloud_url)
                     if base:
                         cloud_license.revalidate(lic, material, base_url=base)
             except Exception:  # noqa: BLE001 — the loop must outlive any single failure

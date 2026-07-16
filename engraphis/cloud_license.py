@@ -34,6 +34,12 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 _LEASE_PREFIX = "ENGRLS1"
+_JSON_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    # Cloudflare rejects Python urllib's default signature with error 1010.
+    "User-Agent": "Engraphis/1.0 (+https://engraphis.com)",
+}
 
 
 class Revoked(Exception):
@@ -204,7 +210,7 @@ def register(base_url: str, key: str, mid: str, *, timeout: float = _REGISTER_TI
     url = base_url.rstrip("/") + "/license/v1/register"
     data = json.dumps({"key": key, "machine_id": mid}).encode("utf-8")
     req = urllib.request.Request(
-        url, data=data, method="POST", headers={"Content-Type": "application/json"})
+        url, data=data, method="POST", headers=_JSON_HEADERS)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = json.loads(resp.read().decode("utf-8"))
@@ -240,7 +246,7 @@ def send_team_invite(base_url: str, key: str, to: str, name: str, role: str,
                        "invited_by": invited_by, "dashboard_url": dashboard_url}
                       ).encode("utf-8")
     req = urllib.request.Request(
-        url, data=data, method="POST", headers={"Content-Type": "application/json"})
+        url, data=data, method="POST", headers=_JSON_HEADERS)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = json.loads(resp.read().decode("utf-8"))
@@ -275,7 +281,7 @@ def request_trial_key(base_url: str, mid: str, plan: str = "team", email: str = 
     url = base_url.rstrip("/") + "/license/v1/start-trial"
     data = json.dumps({"machine_id": mid, "email": email, "plan": plan}).encode("utf-8")
     req = urllib.request.Request(
-        url, data=data, method="POST", headers={"Content-Type": "application/json"})
+        url, data=data, method="POST", headers=_JSON_HEADERS)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = json.loads(resp.read().decode("utf-8"))

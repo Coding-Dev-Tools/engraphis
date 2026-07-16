@@ -163,8 +163,8 @@ def test_trial_key_denied_without_server(monkeypatch):
     assert not has_feature("analytics")
 
 
-def test_request_trial_key_posts_plan(monkeypatch):
-    """The client's trial request carries the plan so the relay mints the right tier."""
+def test_request_trial_key_posts_plan_with_client_headers(monkeypatch):
+    """The trial request carries the selected plan and explicit client identity."""
     captured = {}
 
     class _Resp:
@@ -175,6 +175,8 @@ def test_request_trial_key_posts_plan(monkeypatch):
     def _urlopen(req, timeout=None):
         captured["url"] = req.full_url
         captured.update(json.loads(req.data.decode()))
+        captured["user_agent"] = req.get_header("User-agent")
+        captured["accept"] = req.get_header("Accept")
         return _Resp()
 
     monkeypatch.setattr(cl.urllib.request, "urlopen", _urlopen)
@@ -183,6 +185,8 @@ def test_request_trial_key_posts_plan(monkeypatch):
     assert key == "ENGR1.fake" and pending is False
     assert captured["plan"] == "pro"
     assert captured["url"].endswith("/license/v1/start-trial")
+    assert captured["user_agent"].startswith("Engraphis/")
+    assert captured["accept"] == "application/json"
 
 
 # ── recheck cadence: every paid license re-validates against the server ───────────────
