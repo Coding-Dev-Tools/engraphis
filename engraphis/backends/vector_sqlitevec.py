@@ -118,7 +118,7 @@ class SqliteVecVectorIndex:
         self.store.conn.commit()
 
 
-def get_vector_index(store: Store, *, dim: int = 256, prefer: str = "auto"):
+def get_vector_index(store: Store, *, dim: int = 384, prefer: str = "auto"):
     """Return a sqlite-vec index if available, else the NumPy reference index.
 
     prefer: "auto" (try sqlite-vec, fall back), "sqlite-vec" (require it),

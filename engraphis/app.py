@@ -44,7 +44,7 @@ def _embedder_ready() -> bool:
     global _embedder_ok
     try:
         from engraphis.backends.embedder_st import get_embedder
-        emb = get_embedder(settings.embed_model or None, settings.embed_dim or 256)
+        emb = get_embedder(settings.embed_model or None, settings.embed_dim or 384)
         _embedder_ok = emb is not None and int(emb.dim) > 0
     except Exception as e:  # pragma: no cover - defensive; get_embedder falls back itself
         logger.warning("Readiness: embedder init failed: %s", e)
