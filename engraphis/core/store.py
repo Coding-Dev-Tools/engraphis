@@ -353,9 +353,13 @@ class Store:
         )
 
     def iter_vectors(self, flt: Optional[SearchFilter] = None,
-                     *, include_invalid: bool = False) -> Iterable[tuple[str, np.ndarray]]:
-        """Yield (id, normalized vector) for memories matching the filter."""
+                     *, include_invalid: bool = False,
+                     dim: Optional[int] = None) -> Iterable[tuple[str, np.ndarray]]:
+        """Yield normalized vectors matching the memory filter and optional dimension."""
         where, params = self._where(flt, include_invalid, alias="m")
+        if dim is not None:
+            where.append("v.dim=?")
+            params.append(int(dim))
         sql = ("SELECT v.id AS id, v.vector AS vector FROM mem_vectors v "
                "JOIN memories m ON m.id = v.id")
         if where:
