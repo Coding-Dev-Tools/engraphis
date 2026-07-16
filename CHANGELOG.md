@@ -53,19 +53,23 @@ All notable changes to Engraphis are documented here. Format loosely follows
   one-time token visibility, made `/mcp` bearer-only, bound MCP sessions to their initiating
   user, rechecked tool roles on every call, retained DNS-rebinding protection, closed
   previously injected stores, and made connect-info reflect the real optional MCP mount.
-- **License and billing enforcement:** authoritative revocations override cached
-  entitlement immediately while transient failures may use an unexpired lease; runtime
-  public-key replacement is test-only; trial verification links survive signing failures;
-  webhook reservations are retry-safe after crashes; subscription seat baselines no
-  longer suppress the first real update; registry writes no longer occur inside the SQLite
-  trial transaction; and managed license requests use Cloudflare-compatible client headers
-  while signed keys for the retired Railway host migrate to the canonical relay.
+- **License and Team enforcement:** authoritative revocations override cached entitlement
+  and persist tombstones for previously unrecorded keys; transient failures may use only
+  an unexpired lease; public license/trial bootstrap routes close after the first Team user;
+  trial rate limits trust forwarded addresses only from configured proxies; and managed
+  requests use explicit client headers while retired signed relay URLs migrate safely.
+- **Billing fulfillment reliability:** Polar bodies are bounded while streaming, durable
+  reservation failures remain retryable, seat baselines and completion claims commit
+  atomically, trial seat updates cannot mint paid-period keys, and subscription replacements
+  revoke superseded keys only after the new key is registered.
 - **Python and packaging compatibility:** rate-limit buckets and audit exports use
-  timezone-aware UTC APIs, and package metadata uses the SPDX license format.
+  timezone-aware UTC APIs, package metadata uses the SPDX license format, and the
+  deterministic fallback matches the default embedding model’s 384 dimensions.
 - **Memory and retrieval integrity:** audit writes are committed durably, recall excludes
-  non-live rows, sync dry-runs validate remote repository mappings, graph provenance is
-  pruned per memory instead of deleting shared edges, SQLite-vector distances are
-  converted to cosine similarity, entity expansion matches complete names, and the
+  non-live rows, mixed embedding dimensions no longer crash recall and have a backed-up
+  repair path, sync enforces workspace/repository boundaries in both directions, graph
+  provenance is pruned per memory instead of deleting shared edges, SQLite-vector distances
+  are converted to cosine similarity, entity expansion matches complete names, and the
   sentence-transformers adapters support both legacy and renamed dimension APIs.
 - **Structured-data safety:** extraction metadata survives ingest unchanged, proactive and
   consolidation inputs are bounded, structured consolidation rejects source IDs outside
