@@ -122,13 +122,11 @@ def test_mcp_rejects_browser_cookie_without_bearer(monkeypatch, tmp_path):
 def test_mcp_requires_team_license_402(monkeypatch, tmp_path):
     # team mode ON but no Team license -> /mcp gates to 402
     with _client(monkeypatch, tmp_path, key=None) as c:
-        _setup_admin(c)  # bootstrap admin is exempt from the license gate
-        token = _mint(c)
-        c.cookies.clear()
+        # Entitlement is checked before authentication, so this test needs no licensed
+        # bootstrap user or valid token (and must not depend on a developer's local key).
         r = c.post("/mcp/", json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
                   "params": {"protocolVersion": _PROTO, "capabilities": {},
-                             "clientInfo": {"name": "t", "version": "1"}}},
-                   headers=_h(token))
+                             "clientInfo": {"name": "t", "version": "1"}}})
         assert r.status_code == 402
         assert r.json()["feature"] == "team"
 
