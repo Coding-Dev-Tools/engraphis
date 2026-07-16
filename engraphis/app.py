@@ -9,6 +9,7 @@ import uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,7 +34,7 @@ def _const_time_eq(a: str, b: str) -> bool:
     return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
-_background_task: asyncio.Task | None = None
+_background_task: Optional[asyncio.Task] = None
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 # Readiness cache: only a *successful* embedder init is cached, so a transient
 # failure is re-checked on the next probe instead of wedging the pod NotReady.

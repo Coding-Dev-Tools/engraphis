@@ -46,6 +46,7 @@ import math
 import re
 from typing import Any, Optional
 
+from engraphis.core.graph_layers import normalize_graph_layer
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
 from engraphis.core.store import Store, now_ts
 
@@ -419,8 +420,14 @@ class SyncEngine:
             "workspace_name": ws_name,
             "repos": {r["id"]: r["name"] for r in repo_rows},
             "memories": [record_to_dict(m) for m in mems],
-            "mem_links": [{"a": ln["a"], "b": ln["b"], "relation": ln["relation"]}
-                          for ln in links],
+            "mem_links": [
+                {
+                    "a": ln["a"], "b": ln["b"], "relation": ln["relation"],
+                    "layer": ln.get("layer") or "semantic",
+                    "reason": ln.get("reason") or "",
+                }
+                for ln in links
+            ],
         }
 
     # ── apply (the trust boundary) ──────────────────────────────────────────────
@@ -457,7 +464,8 @@ class SyncEngine:
         if self.allowed_workspaces is not None and ws_name not in self.allowed_workspaces:
             raise SyncError("workspace %r is not authorized for sync" % ws_name)
         report = {"added": 0, "updated": 0, "unchanged": 0, "rejected": 0,
-                  "links_added": 0, "workspace": ws_name, "dry_run": bool(dry_run)}
+                  "links_added": 0, "links_updated": 0,
+                  "workspace": ws_name, "dry_run": bool(dry_run)}
 
         # Resolve scope by NAME (per-device ids differ; names are the sync key). A
         # dry run must not mutate, so it resolves existing ids only and never creates.
@@ -559,6 +567,8 @@ class SyncEngine:
                 continue
             a, b = ln.get("a"), ln.get("b")
             rel = _clamp_str(ln.get("relation") or "related", 64) or "related"
+            layer = normalize_graph_layer(ln.get("layer"), rel).value
+            reason = _clamp_str(ln.get("reason") or "", MAX_TITLE_CHARS)
             if not isinstance(a, str) or not isinstance(b, str) or a == b:
                 continue
             if a not in accepted or b not in accepted:
@@ -570,10 +580,29 @@ class SyncEngine:
             if (only_repo_id is not None
                     and (ma.repo_id != only_repo_id or mb.repo_id != only_repo_id)):
                 continue
-            if self.store.has_link(a, b, relation=rel):
+            existing_link = self.store.conn.execute(
+                "SELECT layer, reason FROM mem_links "
+                "WHERE ((a=? AND b=?) OR (a=? AND b=?)) AND relation=? LIMIT 1",
+                (a, b, b, a, rel),
+            ).fetchone()
+            if existing_link:
+                # Link metadata has no clock in sync format v1. Resolve concurrent
+                # metadata deterministically so peers converge regardless of arrival.
+                merged_layer = max(existing_link["layer"] or "semantic", layer)
+                merged_reason = max(existing_link["reason"] or "", reason)
+                if (merged_layer, merged_reason) == (
+                    existing_link["layer"] or "semantic",
+                    existing_link["reason"] or "",
+                ):
+                    continue
+                if not dry_run:
+                    self.store.add_link(
+                        a, b, rel, layer=merged_layer, reason=merged_reason
+                    )
+                report["links_updated"] += 1
                 continue
             if not dry_run:
-                self.store.add_link(a, b, rel)
+                self.store.add_link(a, b, rel, layer=layer, reason=reason)
                 self.store.audit(
                     "sync:%s" % _clamp_str(src_device or "peer", 128),
                     "sync_link", a,
@@ -615,7 +644,10 @@ class SyncEngine:
             pushed = True
 
         applied: list[dict] = []
-        totals = {"added": 0, "updated": 0, "unchanged": 0, "rejected": 0, "links_added": 0}
+        totals = {
+            "added": 0, "updated": 0, "unchanged": 0, "rejected": 0,
+            "links_added": 0, "links_updated": 0,
+        }
         for name, data in transport.pull():
             if name == own_name:
                 continue

@@ -352,7 +352,32 @@ def test_index_repo_is_idempotent_per_file(tmp_path):
     first = eng.index_repo(rid, str(tmp_path))
     second = eng.index_repo(rid, str(tmp_path))
     assert first["symbols"] == second["symbols"]   # replaced, not accumulated
+    assert second["files_indexed"] == 0
+    assert second["files_unchanged"] == 1
     assert eng.store.count_symbols(rid) == first["symbols"]
+
+
+def test_truncated_directory_walk_never_removes_unvisited_index_state(
+        tmp_path, monkeypatch):
+    from engraphis.backends import codegraph
+
+    (tmp_path / "a.py").write_text("def root_symbol():\n    pass\n", encoding="utf-8")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "b.py").write_text("def nested_symbol():\n    pass\n", encoding="utf-8")
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    assert eng.index_repo(rid, str(tmp_path), prefer="regex")["symbols"] == 2
+
+    monkeypatch.setattr(codegraph, "_MAX_WALK_DIRS", 1)
+    report = eng.index_repo(rid, str(tmp_path), prefer="regex")
+
+    assert report["scan_complete"] is False
+    assert report["files_removed"] == 0
+    assert {symbol["name"] for symbol in eng.store.list_symbols(rid)} == {
+        "root_symbol", "nested_symbol",
+    }
 
 
 def test_index_repo_skips_unsupported_files(tmp_path):
@@ -362,3 +387,89 @@ def test_index_repo_skips_unsupported_files(tmp_path):
     rid = eng.store.get_or_create_repo(wid, "sample")
     report = eng.index_repo(rid, str(tmp_path))
     assert report["files_indexed"] == 0
+
+
+def test_truncated_incremental_scan_does_not_delete_unseen_files(tmp_path):
+    (tmp_path / "a.py").write_text("def alpha(): pass\n")
+    (tmp_path / "b.py").write_text("def beta(): pass\n")
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    first = eng.index_repo(rid, str(tmp_path), prefer="regex")
+    assert first["symbols"] == 2
+
+    limited = eng.index_repo(rid, str(tmp_path), prefer="regex", max_files=1)
+    assert limited["scan_complete"] is False
+    assert limited["files_removed"] == 0
+    assert eng.store.count_symbols(rid) == 2
+
+
+def test_complete_incremental_scan_removes_deleted_files(tmp_path):
+    (tmp_path / "a.py").write_text("def alpha(): pass\n")
+    doomed = tmp_path / "b.py"
+    doomed.write_text("def beta(): pass\n")
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    eng.index_repo(rid, str(tmp_path), prefer="regex")
+
+    doomed.unlink()
+    report = eng.index_repo(rid, str(tmp_path), prefer="regex")
+    assert report["scan_complete"] is True
+    assert report["files_removed"] == 1
+    assert {row["name"] for row in eng.store.list_symbols(rid)} == {"alpha"}
+
+
+def test_code_path_and_impact_preserve_hidden_repo_paths(tmp_path):
+    hidden = tmp_path / ".github"
+    hidden.mkdir()
+    (hidden / "workflow.py").write_text("def deploy(): pass\n")
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    eng.index_repo(rid, str(tmp_path), prefer="regex")
+
+    path = eng.code_path(".github/workflow.py", "deploy", repo_id=rid)
+    assert path["found"] is True and path["hops"] == 1
+    impact = eng.analyze_impact([".github/workflow.py"], repo_id=rid)
+    assert impact["changed_files"] == [".github/workflow.py"]
+    assert {row["name"] for row in impact["symbols"]} == {"deploy"}
+
+
+def test_code_memory_paths_hide_forgotten_memories(tmp_path):
+    (tmp_path / "deploy.py").write_text("def deploy(): pass\n")
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    eng.index_repo(rid, str(tmp_path), prefer="regex")
+    mid = eng.remember(
+        "The deploy procedure requires a signed release tag.",
+        workspace_id=wid,
+        repo_id=rid,
+    )
+    assert eng.code_path("deploy", mid, repo_id=rid)["found"] is True
+    assert eng.analyze_impact(["deploy.py"], repo_id=rid)["memory_mentions"]
+
+    eng.forget(mid)
+    assert eng.code_path("deploy", mid, repo_id=rid)["found"] is False
+    assert eng.analyze_impact(["deploy.py"], repo_id=rid)["memory_mentions"] == []
+
+
+def test_code_graph_html_escapes_embedded_graph_data():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    eng.store.upsert_symbol(
+        repo_id=rid,
+        kind="function",
+        name="run",
+        fqname="run",
+        file="</script><script>alert(1)</script>.py",
+        span="1-1",
+    )
+    html = eng.code_graph_html(repo_id=rid)
+    assert '<svg id="graph"' in html
+    assert "Scroll to zoom" in html
+    assert "</script><script>alert(1)</script>.py" not in html
+    assert "\\u003c/script>" in html
+    assert "&lt;/script&gt;&lt;script&gt;alert(1)&lt;/script&gt;.py" in html

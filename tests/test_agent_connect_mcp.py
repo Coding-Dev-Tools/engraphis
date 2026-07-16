@@ -233,6 +233,24 @@ def test_mcp_tools_enforce_team_roles(monkeypatch, tmp_path):
             status_code=403,
         )
         assert "requires the admin role" in admin_only.text
+        index_admin_only = _rpc(
+            c, h, "tools/call",
+            {"name": "engraphis_index_repo",
+             "arguments": {"workspace": "demo", "repo": "sample",
+                           "root_path": str(tmp_path)}},
+            id=27,
+            status_code=403,
+        )
+        assert "requires the admin role" in index_admin_only.text
+        postgres_admin_only = _rpc(
+            c, h, "tools/call",
+            {"name": "engraphis_ingest_postgres_schema",
+             "arguments": {"dsn": "postgresql://db.invalid/app",
+                           "workspace": "demo"}},
+            id=28,
+            status_code=403,
+        )
+        assert "requires the admin role" in postgres_admin_only.text
 
 
 def test_mcp_write_shares_the_dashboard_store(monkeypatch, tmp_path):

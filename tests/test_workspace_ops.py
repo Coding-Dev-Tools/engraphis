@@ -150,7 +150,10 @@ def test_copy_clones_vectors_fts_links_entities_and_edges():
                       repo="infra", scope="repo")["id"]
     m2 = svc.remember("Deploys run Fridays at noon.", workspace="a",
                       repo="infra", scope="repo")["id"]
-    svc.link(m1, m2, workspace="a", relation="related")
+    svc.link(
+        m1, m2, workspace="a", relation="related",
+        layer="causal", reason="deployment depends on the database",
+    )
 
     svc.copy_workspace("a", new_name="a2")
     wid_dst = _wsid(svc, "a2")
@@ -187,9 +190,11 @@ def test_copy_clones_vectors_fts_links_entities_and_edges():
     id_map = {r["content"]: r["id"] for r in new_mem}
     new_a, new_b = id_map["Postgres 16 is the primary database."], id_map["Deploys run Fridays at noon."]
     linked = c.execute(
-        "SELECT 1 FROM mem_links WHERE (a=? AND b=?) OR (a=? AND b=?)",
+        "SELECT layer, reason FROM mem_links WHERE (a=? AND b=?) OR (a=? AND b=?)",
         (new_a, new_b, new_b, new_a)).fetchone()
     assert linked is not None
+    assert linked["layer"] == "causal"
+    assert linked["reason"] == "deployment depends on the database"
 
 
 def test_copy_rejects_missing_source_and_colliding_new_name():

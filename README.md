@@ -96,19 +96,21 @@ embeddings. You bring an LLM only for optional chat, synthesis, structured extra
 or structured consolidation.
 
 - **Local-first & private** — runs offline; the core depends only on `numpy`.
-- **MCP-native** — 20 tools for Claude Code, Cursor, Cline, Zed, Windsurf.
+- **MCP-native** — 27 tools for Claude Code, Cursor, Cline, Zed, Windsurf.
 - **Self-maintaining facts** — writes are deterministically conflict-resolved (no LLM required).
 - **Principled recall** — six-term score over retention, semantic, lexical, graph, importance, recency.
 - **Bi-temporal truth** — contradictions invalidate instead of overwriting (`engraphis_why` / `engraphis_timeline`).
 - **Grounded, not guessed** — cited answers or explicit abstain; provenance on every memory.
 - **Task-ready context** — bounded proactive packets combine task/agent state, cited memories, suggested follow-ups, and the last-session handoff; optional LLM prose is accepted only when its citations validate.
 - **Composable intelligence** — opt-in deterministic conflict triage (`duplicate` / `refinement` / `contradiction` / `obsolete`) and `UserModel` recall reranking helpers; neither changes default recall unless called.
-- **Code-aware** — AST-powered symbol graph: `engraphis_index_repo` → `engraphis_search_code`.
+- **Code-aware** — incremental multi-language symbol/call/import graph, code↔memory links,
+  path queries, communities/hotspots, git/PR impact analysis, and portable graph exports.
 - **Sleep-time consolidation** — scheduled job distills recurring episodes, reports its compaction.
 - **Scoped** — `workspace → repo → session` hierarchy.
 - **Encryption at rest** — optional SQLCipher (AES-256) whole-database encryption via `ENGRAPHIS_DB_KEY`. No plaintext fallback when a key is set.
 - **Cloud sync** — cross-device and cross-team memory sync with deterministic CRDT merge (folder transport for self-hosting, managed relay for zero-setup). One-click "Sync now" or automatic cadence in the dashboard.
-- **Import & ingest** — drag-and-drop file upload, server-side folder import, and LLM-powered fact extraction from raw text.
+- **Import & ingest** — local documents/code/DOCX plus optional PDF OCR, image OCR,
+  audio/video transcription, and live PostgreSQL schema introspection.
 
 ---
 
@@ -150,6 +152,9 @@ first admin, invite members, and connect agents).
 pip install "engraphis[all]"        # dashboard + MCP server + code graph + encryption + everything
 pip install "engraphis[server]"     # dashboard + REST API
 pip install "engraphis[mcp]"        # MCP server only
+pip install "engraphis[documents]"  # PDF + image OCR bindings
+pip install "engraphis[transcription]" # faster-whisper audio/video
+pip install "engraphis[postgres]"   # PostgreSQL schema introspection
 pip install "engraphis[encryption]" # SQLCipher encryption-at-rest extra
 pip install engraphis               # core library — numpy only, fully offline
 ```
@@ -192,9 +197,25 @@ engraphis-init                     # writes .env + prints config snippets
 claude mcp add engraphis -- engraphis-mcp
 ```
 
-Your agent now has 20 tools — remember, recall (grounded + proactive), proactive context,
+Your agent now has 27 tools — remember, recall (grounded + proactive), proactive context,
 grounded answer alias, why, timeline, forget, pin, correct, ingest, consolidate, index_repo,
-search_code, link, record_event, start/end_session, stats. See the [MCP tools table](#mcp-tools) below.
+search/code path/impact/export, privacy receipts, PostgreSQL schema ingestion, link,
+record_event, start/end_session, and stats. See the [MCP tools table](#mcp-tools) below.
+
+## Quickstart — repository graph
+
+```bash
+pip install "engraphis[code]"
+engraphis-graph index -w acme -r api --root .
+engraphis-graph query -w acme -r api "where is token rotation implemented?"
+engraphis-graph explain -w acme -r api "why does deploy depend on approval?"
+engraphis-graph path -w acme -r api UserService DatabasePool
+engraphis-graph impact -w acme -r api --root . --git-range origin/main...HEAD
+engraphis-graph export -w acme -r api -o engraphis-graph-out
+```
+
+The export contains `graph.json`, a self-contained `graph.html`, and `GRAPH_REPORT.md`.
+See [the v3 architecture/design document](docs/ARCHITECTURE_V3.md).
 
 ---
 
@@ -231,7 +252,7 @@ server-issued Pro or Team trial** after email confirmation — no card required.
 | | Free (available now) | Pro — $10/mo or $100/yr | Team — $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
 | Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
-| Memory engine + 20 MCP tools | ✓ | ✓ | ✓ |
+| Memory engine + 27 MCP tools | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Cloud sync (folder + managed relay) | | ✓ | ✓ |
 | Auto-sync (hands-off cadence) | | ✓ | ✓ |
@@ -254,6 +275,7 @@ server-issued Pro or Team trial** after email confirmation — no card required.
 | Write | `engraphis_record_event` | Append a lightweight episodic log entry |
 | Write | `engraphis_link` | Explicitly connect two related memories |
 | Write | `engraphis_ingest` | Apply the configured extractor (`chunk`, `llm`, or `llm_structured`); `none` stores one verbatim memory |
+| Write | `engraphis_ingest_postgres_schema` | Introspect a live PostgreSQL catalog into memory + typed graph nodes; DSN is never stored |
 | Write | `engraphis_consolidate` | Run a sleep-time sweep; optionally build entity profiles or schema-validated LLM facts |
 | Read | `engraphis_recall` | Hybrid vector + lexical + graph recall |
 | Read | `engraphis_recall_grounded` | Cited answer from retrieved memories — or abstain |
@@ -262,8 +284,14 @@ server-issued Pro or Team trial** after email confirmation — no card required.
 | Read | `engraphis_proactive_context` | Task-aware context packet with cited memories and session handoff |
 | Read | `engraphis_why` | Current answer + what it superseded |
 | Read | `engraphis_timeline` | Full bi-temporal history, oldest first |
-| Code | `engraphis_index_repo` | Parse a repo into the code symbol graph |
-| Code | `engraphis_search_code` | Find symbols by name, with callers |
+| Code | `engraphis_index_repo` | Incrementally parse a repo into the code/memory graph |
+| Code | `engraphis_search_code` | Find symbols by name, callers, and linked memories |
+| Code | `engraphis_code_path` | Shortest path across definitions, calls, imports, and memories |
+| Code | `engraphis_code_impact` | Rank changed files by symbols, dependents, communities, memories, and hotspots |
+| Code | `engraphis_export_code_graph` | Portable graph JSON + Markdown + HTML report |
+| Audit | `engraphis_receipts` | List content-free hashed operation receipts |
+| Audit | `engraphis_verify_receipts` | Verify the receipt chain |
+| Audit | `engraphis_export_receipts` | Export the shareable receipt-only audit bundle |
 | Governance | `engraphis_forget` | Retire a memory — bi-temporal close, never deleted |
 | Governance | `engraphis_pin` | Exempt from future automatic decay/pruning |
 | Governance | `engraphis_correct` | Replace content without losing history |
@@ -311,14 +339,18 @@ python -c "import secrets; print(secrets.token_hex(32))"
 
 ## Import files & folders
 
-Drag-and-drop or server-side import, both member-gated and bounded:
+Drag-and-drop or server-side import, role-gated and bounded:
 
-- **Dashboard upload** — the Workspaces tab's "Import files & folders" section accepts files
-  directly from the browser.
+- **Dashboard upload** — accepts text, Markdown, code, JSON/CSV/HTML, DOCX, and exported
+  Google Workspace documents directly; optional adapters add PDF text extraction, image OCR,
+  and audio/video transcription. Native `.gdoc` pointer files contain no document body, so
+  export them as DOCX, PDF, HTML, or plain text before local ingestion.
 - **Server-side folder import** — `MemoryService.import_folder()` reads a directory on the
-  machine running Engraphis, defaulting to one memory per file. With
-  `ENGRAPHIS_EXTRACTOR=chunk`, each file becomes retrieval-sized chunk memories.
-  Path-traversal guards still apply.
+  machine running Engraphis. Large resources are chunked deterministically even when the
+  configured extractor is `none`; path-traversal guards still apply.
+- **PostgreSQL** — `engraphis_ingest_postgres_schema`, `POST /api/resources/postgres`, or
+  `engraphis-graph postgres` converts tables, columns, constraints, and foreign keys into a
+  schema memory and entity graph. The DSN is never persisted.
 - **MCP ingest** — `engraphis_ingest` accepts raw text and applies the configured extractor
   (`chunk`, `llm`, or `llm_structured`); with `none` it stores one verbatim memory.
 - **Sub-file chunking** — set `ENGRAPHIS_EXTRACTOR=chunk` to split long, multi-topic
@@ -383,6 +415,10 @@ All via environment (or `.env`):
 | `ENGRAPHIS_EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | sentence-transformers model |
 | `ENGRAPHIS_EXTRACTOR` | `none` | `none` = verbatim; `chunk` = offline structure-aware chunks; `llm` = free-form LLM facts; `llm_structured` = schema-validated facts + graph metadata |
 | `ENGRAPHIS_GRAPH_EXTRACTOR` | `regex` | `regex` = offline heuristic NER; `none` = disable heuristic text extraction (validated `llm_structured` metadata still feeds the graph) |
+| `ENGRAPHIS_RETENTION_SUPERVISOR` | `none` | `none` = deterministic only; `llm` = optional bounded ephemeral/normal/critical classification |
+| `ENGRAPHIS_WHISPER_MODEL` | — | Enables local faster-whisper audio/video transcription |
+| `ENGRAPHIS_POSTGRES_DSN` | — | CLI-only PostgreSQL source; used for the connection and never stored |
+| `ENGRAPHIS_GRAPH_TOKEN` | — | Bearer token for `engraphis-graph-server`; required off-loopback |
 | `ENGRAPHIS_LLM_PROVIDER` | `openai` | `openai \| anthropic \| google \| openrouter \| custom` |
 | `ENGRAPHIS_LLM_MODEL` | `gpt-4o-mini` | Model name (provider-specific) |
 | `ENGRAPHIS_LLM_API_KEY` | — | API key for chat/synthesis, `llm` / `llm_structured` extraction, and structured consolidation |
@@ -408,7 +444,7 @@ engraphis/
 │   ├── core/                # v2 engine — interfaces, store, recall, scoring, schema, sync
 │   ├── backends/            # pluggable embedder / vector index / reranker / codegraph / sync transports / encryption
 │   ├── service.py           # validated MemoryService facade
-│   ├── mcp_server.py        # MCP server — 20 tools
+│   ├── mcp_server.py        # MCP server — 27 tools
 │   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
 │   ├── autosync.py          # background auto-sync loop (Pro/Team)
 │   ├── licensing.py         # license verification (offline + cloud)

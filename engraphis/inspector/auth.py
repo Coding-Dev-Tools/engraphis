@@ -118,6 +118,14 @@ def min_role(method: str, path: str) -> str:
         return "admin" if method != "GET" else "viewer"
     if method == "POST" and path == "/api/auth/token":
         return "viewer"
+    if path in ("/api/intent/recall", "/api/code/path", "/api/code/impact"):
+        return "viewer"
+    if path in (
+        "/api/code/index", "/api/workspaces/import-folder", "/api/resources/postgres",
+    ):
+        # These operations read server-local files or make a caller-selected outbound
+        # database connection. Only an administrator may choose those sources.
+        return "admin"
     if path.startswith("/api/auth/users") or path.startswith("/api/auth/audit") \
             or path == "/api/auth/overview" or path in (
             "/api/license/activate", "/api/license/trial", "/api/license/team-trial",

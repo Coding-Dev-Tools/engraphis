@@ -73,6 +73,11 @@ def test_sync_auto_toggle_is_admin_only_but_members_still_write():
     # Changing team auto-sync is admin-only; reading it stays viewer-visible.
     assert min_role("POST", "/api/sync/auto") == "admin"
     assert min_role("GET", "/api/sync/auto") == "viewer"
+    # Choosing a server-local repository path is an admin operation; graph reads are not.
+    assert min_role("POST", "/api/code/index") == "admin"
+    assert min_role("POST", "/api/workspaces/import-folder") == "admin"
+    assert min_role("POST", "/api/resources/postgres") == "admin"
+    assert min_role("POST", "/api/code/path") == "viewer"
     # Members keep "store + view": they can write memories; viewers only read.
     assert min_role("POST", "/api/correct") == "member"
     assert min_role("GET", "/api/memories") == "viewer"

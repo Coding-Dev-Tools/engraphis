@@ -32,6 +32,14 @@ class Scope(str, Enum):
     USER = "user"
 
 
+class GraphLayer(str, Enum):
+    """Logical graph overlays kept inside the same local SQLite database."""
+    TEMPORAL = "temporal"
+    ENTITY = "entity"
+    CAUSAL = "causal"
+    SEMANTIC = "semantic"
+
+
 # ── Records ──────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -71,6 +79,7 @@ class SearchFilter:
     session_id: Optional[str] = None
     scopes: Optional[list[Scope]] = None
     mtypes: Optional[list[MemoryType]] = None
+    graph_layers: Optional[list[GraphLayer]] = None
     as_of: Optional[float] = None    # bi-temporal time anchor; None = now
 
 
@@ -101,6 +110,7 @@ class Edge:
     src: str
     dst: str
     relation: str
+    layer: Optional[GraphLayer] = None
     weight: float = 1.0
     workspace_id: Optional[str] = None
     repo_id: Optional[str] = None
@@ -125,6 +135,42 @@ class ExtractedFact:
     mtype: Optional[MemoryType] = None
     importance: float = 0.0
     keywords: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RetentionDecision:
+    """Optional host/LLM supervision signal for a new memory.
+
+    ``retain=False`` never hard-deletes or silently drops a write. The engine records
+    the recommendation and applies a short-lived stability preset so normal local
+    retention/consolidation policy can make the eventual governed decision.
+    """
+    label: str = "normal"
+    retain: bool = True
+    importance: Optional[float] = None
+    stability: Optional[float] = None
+    reason: str = ""
+
+
+@dataclass
+class ResourceDocument:
+    """Text and provenance extracted from a local file/media resource."""
+    text: str
+    title: str = ""
+    kind: str = "document"
+    media_type: str = "text/plain"
+    metadata: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SchemaSnapshot:
+    """Portable database-schema graph produced by an optional introspector."""
+    title: str
+    text: str
+    entities: list[dict[str, Any]] = field(default_factory=list)
+    relations: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -184,6 +230,26 @@ class Extractor(Protocol):
     configuration — never a hard dependency of ``core/`` (AGENTS.md §3.8).
     """
     def extract(self, text: str, *, context: str = "") -> list[ExtractedFact]: ...
+
+
+@runtime_checkable
+class RetentionSupervisor(Protocol):
+    """Optional host-controlled importance/retention classifier."""
+    def decide(self, content: str, *, title: str = "", mtype: MemoryType,
+               metadata: Optional[dict] = None) -> RetentionDecision: ...
+
+
+@runtime_checkable
+class ResourceExtractor(Protocol):
+    """Turns local document/media bytes into text without changing memory semantics."""
+    def extract_bytes(self, name: str, data: bytes) -> ResourceDocument: ...
+    def extract_path(self, path: str) -> ResourceDocument: ...
+
+
+@runtime_checkable
+class SchemaIntrospector(Protocol):
+    """Reads a live database catalog and returns a transport-neutral schema graph."""
+    def inspect(self, dsn: str, *, schemas: Optional[list[str]] = None) -> SchemaSnapshot: ...
 
 
 @runtime_checkable
