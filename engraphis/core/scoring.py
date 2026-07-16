@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Optional
 
 from engraphis.core.interfaces import MemoryRecord, MemoryType
 
@@ -48,14 +49,14 @@ def weights_for(mtype: MemoryType) -> Weights:
     return DEFAULT_WEIGHTS.get(mtype, Weights())
 
 
-def retention(stability: float, last_access: float | None, now: float) -> float:
+def retention(stability: float, last_access: Optional[float], now: float) -> float:
     """Ebbinghaus R(t) = exp(-Δt_days / S)."""
     S = max(stability or 1.0, 1e-3)
     dt_days = max((now - (last_access if last_access is not None else now)) / 86400.0, 0.0)
     return math.exp(-dt_days / S)
 
 
-def recency(t_ref: float | None, now: float, tau_days: float = 30.0) -> float:
+def recency(t_ref: Optional[float], now: float, tau_days: float = 30.0) -> float:
     """Exponential recency on world-time, for tie-breaking and temporal queries."""
     if t_ref is None:
         return 0.0
@@ -63,7 +64,8 @@ def recency(t_ref: float | None, now: float, tau_days: float = 30.0) -> float:
     return math.exp(-dt_days / max(tau_days, 1e-6))
 
 
-def staleness_penalty(valid_to: float | None, now: float, ramp_days: float = 7.0) -> float:
+def staleness_penalty(valid_to: Optional[float], now: float,
+                      ramp_days: float = 7.0) -> float:
     """1.0 once a fact is past its validity; ramps up in the ``ramp_days`` before."""
     if valid_to is None:
         return 0.0

@@ -6,8 +6,12 @@ hashing embedder + NumPy index, per AGENTS.md §7).
 """
 from __future__ import annotations
 
+import os
+import time
+
 import pytest
 
+from engraphis.backends import sync_folder
 from engraphis.backends.sync_folder import FolderTransport, get_transport
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
@@ -221,10 +225,64 @@ def test_folder_transport_is_a_valid_synctransport(tmp_path):
     t = get_transport("folder", root=str(tmp_path / "share"))
     assert isinstance(t, FolderTransport)
     t.push("bundle-x.json", b"{}")
-    t.push("README.txt", b"ignore me")           # non-json ignored
+    (tmp_path / "share" / "README.txt").write_bytes(b"ignore me")  # non-json ignored
     names = t.list_names()
     assert names == ["bundle-x.json"]
     assert t.pull() == [("bundle-x.json", b"{}")]
+    with pytest.raises(ValueError, match="name is invalid"):
+        t.push("../escape.json", b"{}")
+
+
+def test_folder_transport_rejects_a_bundle_it_would_skip_on_pull(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(sync_folder, "MAX_BUNDLE_BYTES", 3)
+    transport = FolderTransport(str(tmp_path / "share"))
+    with pytest.raises(ValueError, match="transport limit"):
+        transport.push("bundle-x.json", b"1234")
+    assert transport.list_names() == []
+
+
+def test_folder_transport_bounds_count_total_and_ignores_symlinks(tmp_path, monkeypatch):
+    root = tmp_path / "share"
+    root.mkdir()
+    for name in ("bundle-a.json", "bundle-b.json", "bundle-c.json"):
+        (root / name).write_bytes(b"12")
+    monkeypatch.setattr(sync_folder, "MAX_BUNDLES", 2)
+    monkeypatch.setattr(sync_folder, "MAX_TOTAL_PULL_BYTES", 3)
+    transport = FolderTransport(str(root))
+    assert transport.list_names() == ["bundle-a.json", "bundle-b.json"]
+    assert transport.pull() == [("bundle-a.json", b"12")]
+
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(b'{"secret":true}')
+    link = root / "bundle-0-link.json"
+    try:
+        os.symlink(outside, link)
+    except (OSError, NotImplementedError):
+        return
+    assert "bundle-0-link.json" not in transport.list_names()
+
+
+def test_folder_transport_rejects_file_swapped_after_enumeration(tmp_path, monkeypatch):
+    root = tmp_path / "share"
+    root.mkdir()
+    target = root / "bundle-a.json"
+    target.write_bytes(b'{"safe":true}')
+    replacement = root / "replacement.tmp"
+    replacement.write_bytes(b'{"outside":true}')
+    original_open = os.open
+    swapped = False
+
+    def swap_then_open(path, flags):
+        nonlocal swapped
+        if not swapped and os.path.abspath(path) == os.path.abspath(target):
+            os.replace(replacement, target)
+            swapped = True
+        return original_open(path, flags)
+
+    monkeypatch.setattr(sync_folder.os, "open", swap_then_open)
+    assert FolderTransport(str(root)).pull() == []
+    assert swapped is True
 
 
 def test_two_devices_converge(tmp_path):
@@ -459,6 +517,38 @@ def test_secret_memories_are_not_exported():
     assert "mem_pub" in ids and "mem_sec" not in ids
 
 
+def test_remote_bundle_cannot_overwrite_or_downgrade_local_secret():
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    store.add_memory(MemoryRecord(
+        id="mem_secret", content="local-only credential rotation note",
+        workspace_id=workspace, scope=Scope.WORKSPACE,
+        sensitivity="secret", last_access=1.0,
+    ))
+    bundle = {
+        "format": SYNC_FORMAT,
+        "version": 1,
+        "workspace_name": "w",
+        "device_id": "dev_hostile",
+        "repos": {},
+        "memories": [{
+            "id": "mem_secret",
+            "content": "remote overwrite",
+            "sensitivity": "normal",
+            "last_access": time.time() + 86_400,
+        }],
+        "mem_links": [],
+    }
+
+    report = SyncEngine(store).apply_bundle(bundle)
+
+    assert report["rejected"] == 1 and report["updated"] == 0
+    memory = store.get_memory("mem_secret")
+    assert memory.content == "local-only credential rotation note"
+    assert memory.sensitivity == "secret"
+    assert SyncEngine(store).export_bundle(workspace)["memories"] == []
+
+
 def test_allowed_workspaces_enforcement():
     store = Store(":memory:")
     se = SyncEngine(store, allowed_workspaces=frozenset(["allowed_ws"]))
@@ -507,7 +597,10 @@ def test_sync_auditing_for_adds_updates_and_links():
         # legitimate, while mem_b is newly added.
         "memories": [{"id": "mem_a", "content": "hello updated", "last_access": 200.0},
                      {"id": "mem_b", "content": "another fact"}],
-        "mem_links": [{"a": "mem_a", "b": "mem_b", "relation": "related"}]
+        "mem_links": [{
+            "a": "mem_a", "b": "mem_b", "relation": "related",
+            "layer": "causal", "reason": "same deployment path",
+        }]
     }
     se.apply_bundle(bundle_link)
     audits = store.conn.execute("SELECT action, target FROM audit ORDER BY ts ASC").fetchall()
@@ -516,6 +609,46 @@ def test_sync_auditing_for_adds_updates_and_links():
     assert audits[2]["target"] == "mem_b"
     assert audits[3]["action"] == "sync_link"
     assert audits[3]["target"] == "mem_a"
+    link = store.get_links("mem_a")[0]
+    assert link["layer"] == "causal"
+    assert link["reason"] == "same deployment path"
+
+
+def test_link_metadata_merge_converges_independent_of_bundle_order():
+    memories = [
+        {"id": "mem_a", "content": "one"},
+        {"id": "mem_b", "content": "two"},
+    ]
+    semantic = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
+        "memories": memories,
+        "mem_links": [{
+            "a": "mem_a", "b": "mem_b", "relation": "related",
+            "layer": "semantic", "reason": "zeta",
+        }],
+    }
+    causal = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
+        "memories": memories,
+        "mem_links": [{
+            "a": "mem_a", "b": "mem_b", "relation": "related",
+            "layer": "causal", "reason": "alpha",
+        }],
+    }
+
+    left = Store(":memory:")
+    right = Store(":memory:")
+    left_sync = SyncEngine(left)
+    right_sync = SyncEngine(right)
+    left_sync.apply_bundle(semantic)
+    left_sync.apply_bundle(causal)
+    right_sync.apply_bundle(causal)
+    right_sync.apply_bundle(semantic)
+
+    left_link = left.get_links("mem_a")[0]
+    right_link = right.get_links("mem_a")[0]
+    assert (left_link["layer"], left_link["reason"]) == ("causal", "zeta")
+    assert (right_link["layer"], right_link["reason"]) == ("causal", "zeta")
 
 
 def test_deeply_nested_json_does_not_crash_sync_decoding(tmp_path):
@@ -533,5 +666,3 @@ def test_deeply_nested_json_does_not_crash_sync_decoding(tmp_path):
     report = sa.sync(get_transport("folder", root=str(root)), wa)
     assert report["totals"]["added"] == 0
     assert any(x.get("bundle") == "bundle-dev_nested.json" and x.get("error") == "unreadable" for x in report["applied"])
-
-

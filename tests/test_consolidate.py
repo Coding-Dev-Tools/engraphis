@@ -6,6 +6,7 @@ import pytest
 from engraphis.core.consolidate import consolidate
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import MemoryType, SearchFilter
+from engraphis.service import MemoryService, ValidationError
 
 
 def _engine_with_repeats():
@@ -22,6 +23,13 @@ def _engine_with_repeats():
         eng.remember(t, workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC,
                      resolve_conflicts=False)
     return eng, wid, rid
+
+
+def test_service_rejects_non_finite_archive_threshold():
+    service = MemoryService.create(":memory:")
+    service.create_workspace("w")
+    with pytest.raises(ValidationError, match="finite"):
+        service.consolidate(workspace="w", archive_below=float("nan"), dry_run=True)
 
 
 def test_consolidate_distills_recurring_episodes_into_semantic_digest():

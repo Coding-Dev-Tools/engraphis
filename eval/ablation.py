@@ -20,6 +20,30 @@ from eval import metrics
 from eval.harness import load_dataset
 
 
+def _seed_graph(store: Store, *, workspace_id: str, repo_id: str, case: dict) -> None:
+    """Persist readable dataset edges with the entity IDs returned by the store."""
+    entity_ids: dict[str, str] = {}
+    for entity in case.get("entities", []):
+        name = entity[0]
+        entity_ids[name] = store.upsert_entity(Node(
+            id="", name=name,
+            ntype=(entity[1] if len(entity) > 1 else "concept"),
+            workspace_id=workspace_id, repo_id=repo_id,
+        ))
+    for edge in case.get("edges", []):
+        src = entity_ids.get(edge[0])
+        dst = entity_ids.get(edge[1])
+        if src is None or dst is None:
+            raise ValueError(
+                f"eval edge references an unknown entity: {edge[0]!r} -> {edge[1]!r}"
+            )
+        store.upsert_edge(Edge(
+            id="", src=src, dst=dst,
+            relation=(edge[2] if len(edge) > 2 else "rel"),
+            workspace_id=workspace_id, repo_id=repo_id,
+        ))
+
+
 def _score(dataset: list[dict], *, k: int, hybrid: bool, graph_mode: str = "ppr") -> float:
     emb = DeterministicEmbedder(256)
     per = []
@@ -30,14 +54,7 @@ def _score(dataset: list[dict], *, k: int, hybrid: bool, graph_mode: str = "ppr"
         index = NumpyVectorIndex(store)
         # Seed the entity graph when the case provides one (optional keys), so the graph
         # arm has something to walk — mirrors what production extraction populates.
-        for _ent in case.get("entities", []):
-            store.upsert_entity(Node(id="", name=_ent[0],
-                                     ntype=(_ent[1] if len(_ent) > 1 else "concept"),
-                                     workspace_id=wid, repo_id=rid))
-        for _e in case.get("edges", []):
-            store.upsert_edge(Edge(id="", src=_e[0], dst=_e[1],
-                                   relation=(_e[2] if len(_e) > 2 else "rel"),
-                                   workspace_id=wid, repo_id=rid))
+        _seed_graph(store, workspace_id=wid, repo_id=rid, case=case)
         engine = RecallEngine(store, emb, index, IdentityReranker(), graph_mode=graph_mode)
         tag_by_id = {}
         for m in case["memories"]:
@@ -72,14 +89,7 @@ def _arm_recall(dataset: list[dict], *, k: int, arm: str) -> float:
         wid = store.get_or_create_workspace("eval")
         rid = store.get_or_create_repo(wid, case.get("id", "c"))
         index = NumpyVectorIndex(store)
-        for _ent in case.get("entities", []):
-            store.upsert_entity(Node(id="", name=_ent[0],
-                                     ntype=(_ent[1] if len(_ent) > 1 else "concept"),
-                                     workspace_id=wid, repo_id=rid))
-        for _e in case.get("edges", []):
-            store.upsert_edge(Edge(id="", src=_e[0], dst=_e[1],
-                                   relation=(_e[2] if len(_e) > 2 else "rel"),
-                                   workspace_id=wid, repo_id=rid))
+        _seed_graph(store, workspace_id=wid, repo_id=rid, case=case)
         mode = "1hop" if arm == "graph1hop" else "ppr"
         engine = RecallEngine(store, emb, index, IdentityReranker(), graph_mode=mode)
         tag_by_id = {}

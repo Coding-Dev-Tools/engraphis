@@ -8,7 +8,7 @@ description: 'Give the agent durable, scoped, explainable memory across sessions
 Engraphis is a local-first memory engine exposed to agents over MCP. This skill is the
 *discipline* for using it well: what to store, how to scope it, and which tool answers which
 question. It assumes the Engraphis MCP server is connected, so tools are named `engraphis_*`
-(18 of them). If those tools are absent, see [Setup](#setup) — do not fall back to ad-hoc notes.
+(27 of them). If those tools are absent, see [Setup](#setup) — do not fall back to ad-hoc notes.
 
 Memory here is **scoped, typed, bi-temporal, and self-maintaining**: writes are deduplicated and
 contradictions supersede (never silently overwrite), and forgetting lowers priority instead of
@@ -73,7 +73,12 @@ promotion: [SCOPING.md](references/SCOPING.md).
 | Distill & tidy periodically | `engraphis_consolidate` | Sleep-time sweep: recurring episodes → semantic digest; decayed transients archived. Dry-run by default. |
 | Group/resume work | `engraphis_start_session` / `engraphis_end_session` | Handoff via summary + `open_threads`. |
 | Map a repo's code | `engraphis_index_repo` | Parse defs + call/import edges once per repo (safe to re-run). |
-| "What calls this?" | `engraphis_search_code` | Structural search — far cheaper than grepping/dumping files. |
+| "What calls this?" | `engraphis_search_code` | Structural search plus linked decisions/incidents/procedures. |
+| "How are these connected?" | `engraphis_code_path` | Traverse definitions, calls, imports, and code↔memory links. |
+| "What will this PR affect?" | `engraphis_code_impact` | Touched symbols, dependents, communities, memories, hotspots. |
+| Share the repo graph | `engraphis_export_code_graph` | Portable JSON + Markdown + self-contained HTML. |
+| Import a live DB schema | `engraphis_ingest_postgres_schema` | PostgreSQL tables/columns/constraints → memory + graph; DSN not stored. |
+| Privacy-safe audit | `engraphis_receipts` / `engraphis_verify_receipts` | Content-free hash chain; export with `engraphis_export_receipts`. |
 | Store health | `engraphis_stats` | Counts by type/workspace; good for onboarding checks. |
 
 Full signatures, parameters, defaults, and return shapes: [TOOLS.md](references/TOOLS.md).
@@ -122,6 +127,6 @@ is needed for the memory layer. Details: the repo `README.md` "Quickstart A — 
 
 ## References
 
-- [TOOLS.md](references/TOOLS.md) — all 20 tools: parameters, defaults, returns, when to reach for each.
+- [TOOLS.md](references/TOOLS.md) — all 27 tools: parameters, defaults, returns, when to reach for each.
 - [SCOPING.md](references/SCOPING.md) — the `workspace → repo → session → memory` model, scope vs. type, and promotion.
 - [CONVENTIONS.md](references/CONVENTIONS.md) — memory types, provenance, importance, dedup/resolution, governance, and anti-patterns

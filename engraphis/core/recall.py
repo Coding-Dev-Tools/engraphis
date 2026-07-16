@@ -142,7 +142,9 @@ class RecallEngine:
             for eid, pattern in patterns.items():
                 if pattern.search(hay):
                     connect(rec.id, ent(eid), 1.0)
-        for link in self.store.links_among([r.id for r in recs]):
+        for link in self.store.links_among(
+            [r.id for r in recs], layers=flt.graph_layers
+        ):
             connect(link["a"], link["b"], 1.0)
 
         # Dense power iteration is O(n^2) memory: past this cap (far beyond any sane

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import secrets
 import time
+from typing import Optional
 
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # excludes I, L, O, U
 
@@ -27,6 +28,7 @@ PREFIXES = {
     "job": "job",
     "audit": "aud",
     "device": "dev",
+    "receipt": "rcpt",
 }
 
 
@@ -38,7 +40,7 @@ def _encode(value: int, length: int) -> str:
     return "".join(reversed(chars))
 
 
-def ulid(timestamp_ms: int | None = None) -> str:
+def ulid(timestamp_ms: Optional[int] = None) -> str:
     """Return a 26-char, lexicographically sortable ULID."""
     ts = int(time.time() * 1000) if timestamp_ms is None else int(timestamp_ms)
     rand = secrets.randbits(80)

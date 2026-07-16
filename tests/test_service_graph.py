@@ -12,6 +12,7 @@ import pytest
 
 from engraphis.backends.extractor import StructuredLLMExtractor
 from engraphis.backends.graph_extractor import get_graph_extractor
+from engraphis.core.graph_layers import infer_graph_layer
 from engraphis.core.interfaces import Edge, MemoryRecord, MemoryType, Scope, SearchFilter
 from engraphis.service import MemoryService, ValidationError
 
@@ -42,8 +43,10 @@ def _seed_entities(svc, workspace, rows, edges):
             "VALUES (?,?,?,?,?,0)", (eid, wid, None, name, etype))
     for i, (src, dst, rel) in enumerate(edges):
         conn.execute(
-            "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation) "
-            "VALUES (?,?,?,?,?,?)", (f"edge{i}", wid, None, id_of[src], id_of[dst], rel))
+            "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation, layer) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (f"edge{i}", wid, None, id_of[src], id_of[dst], rel,
+             infer_graph_layer(rel).value))
     conn.commit()
     return wid, id_of
 
@@ -57,7 +60,10 @@ def test_graph_returns_seeded_nodes_and_edges():
     g = svc.graph(workspace="acme")
     assert {n["id"] for n in g["nodes"]} == {id_of["Alice"], id_of["Acme Corp"]}
     assert {n["label"] for n in g["nodes"]} == {"Alice", "Acme Corp"}
-    assert g["edges"] == [{"from": id_of["Alice"], "to": id_of["Acme Corp"], "label": "works_at"}]
+    assert g["edges"] == [{
+        "from": id_of["Alice"], "to": id_of["Acme Corp"],
+        "label": "works_at", "layer": "entity",
+    }]
     assert g["stats"] == {"entities": 2, "edges": 1, "connected": 2, "isolated": 0}
 
 
@@ -125,7 +131,7 @@ def test_structured_extractor_metadata_populates_graph_without_regex_extractor()
     id_by_label = {n["label"]: n["id"] for n in g["nodes"]}
     assert {"Engraphis", "SQLite"} <= set(id_by_label)
     assert {"from": id_by_label["Engraphis"], "to": id_by_label["SQLite"],
-            "label": "stores_in"} in g["edges"]
+            "label": "stores_in", "layer": "semantic"} in g["edges"]
 
 
 def test_graph_hides_edges_from_forgotten_memory():
@@ -152,7 +158,7 @@ def test_graph_lazy_backfills_structured_metadata_without_regex_extractor():
     id_by_label = {n["label"]: n["id"] for n in g["nodes"]}
     assert {"Engraphis", "SQLite"} <= set(id_by_label)
     assert {"from": id_by_label["Engraphis"], "to": id_by_label["SQLite"],
-            "label": "stores_in"} in g["edges"]
+            "label": "stores_in", "layer": "semantic"} in g["edges"]
 
 
 def test_graph_lazy_backfills_preexisting_memories():

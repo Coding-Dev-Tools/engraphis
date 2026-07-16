@@ -87,9 +87,19 @@ _READ_ONLY_TOOLS = frozenset({
     "engraphis_recall_proactive",
     "engraphis_proactive_context",
     "engraphis_search_code",
+    "engraphis_code_path",
+    "engraphis_code_impact",
+    "engraphis_export_code_graph",
+    "engraphis_receipts",
+    "engraphis_verify_receipts",
+    "engraphis_export_receipts",
     "engraphis_stats",
 })
-_ADMIN_TOOLS = frozenset({"engraphis_consolidate"})
+_ADMIN_TOOLS = frozenset({
+    "engraphis_consolidate",
+    "engraphis_index_repo",
+    "engraphis_ingest_postgres_schema",
+})
 
 
 def minimum_role(tool_name: str) -> str:
@@ -144,6 +154,13 @@ def engraphis_remember(
     kind: Annotated[Optional[str], Field(description="Optional artifact kind for filtering: "
                     "'plan', 'diff', 'review', 'task_summary', 'council_verdict', ...",
                     max_length=100)] = None,
+    retention_class: Annotated[Optional[str], Field(
+        description="Optional host-LLM retention decision: ephemeral, normal, or critical. "
+                    "The write is never silently discarded; this adjusts bounded importance/"
+                    "stability and records the supervision signal.")] = None,
+    retention_reason: Annotated[str, Field(
+        description="Short explanation for the retention classification; do not repeat "
+                    "sensitive memory contents.", max_length=1_000)] = "",
 ) -> str:
     """Store a memory so it can be recalled in later turns, sessions, or repos.
 
@@ -162,6 +179,7 @@ def engraphis_remember(
             content, workspace=workspace, repo=repo, session_id=session_id,
             mtype=mtype, scope=scope, title=title, importance=importance, keywords=keywords,
             source=source, trusted=trusted, kind=kind,
+            retention_class=retention_class, retention_reason=retention_reason,
             resolve_conflicts=dedupe,
         ))
     except Exception as exc:  # noqa: BLE001 - surface a safe, actionable message
@@ -532,17 +550,27 @@ def engraphis_link(
                                          max_length=200)] = None,
     relation: Annotated[str, Field(description="Relationship label, e.g. 'related', "
                         "'caused_by', 'fixed_by'.", max_length=200)] = "related",
+    layer: Annotated[Optional[str], Field(
+        description="Optional logical graph layer: temporal, entity, causal, or semantic. "
+                    "Omit to infer it from the relationship label.")] = None,
+    reason: Annotated[str, Field(
+        description="Optional rationale or context for why this relationship exists.",
+        max_length=500)] = "",
 ) -> str:
     """Explicitly connect two memories (A-MEM-style linking) — use when you notice two
     stored facts are related but a plain recall wouldn't surface that connection, e.g. a
     bug report and the memory describing its fix.
 
     Returns:
-        str: JSON ``{"a","b","relation","linked":true}`` or an actionable error if either
-        id is unknown or doesn't belong to ``workspace``/``repo``.
+        str: JSON ``{"a","b","relation","layer","reason","linked":true,"receipt":...}``
+        or an actionable error if either id is unknown or doesn't belong to
+        ``workspace``/``repo``.
     """
     try:
-        return _ok(service().link(a, b, workspace=workspace, repo=repo, relation=relation))
+        return _ok(service().link(
+            a, b, workspace=workspace, repo=repo, relation=relation, layer=layer,
+            reason=reason,
+        ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -656,6 +684,79 @@ def engraphis_search_code(
 
 
 @mcp.tool(
+    name="engraphis_code_path",
+    annotations={"title": "Find a path through the code graph", "readOnlyHint": True,
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def engraphis_code_path(
+    source: Annotated[str, Field(description="Source symbol, qualified name, or indexed file.",
+                                 min_length=1, max_length=500)],
+    target: Annotated[str, Field(description="Target symbol, qualified name, or indexed file.",
+                                 min_length=1, max_length=500)],
+    workspace: Annotated[str, Field(description="Workspace the repo belongs to.",
+                                    min_length=1, max_length=200)],
+    repo: Annotated[str, Field(description="Indexed repo to traverse.",
+                               min_length=1, max_length=200)],
+    max_depth: Annotated[int, Field(description="Maximum graph hops (1-32).",
+                                    ge=1, le=32)] = 8,
+) -> str:
+    """Return the shortest best-effort path between two code nodes.
+
+    The path can cross definition, call, import, and symbol-alias edges. It is structural
+    and name-based rather than type-resolved, so treat it as impact evidence rather than
+    a compiler proof.
+    """
+    try:
+        return _ok(service().code_path(
+            source, target, workspace=workspace, repo=repo, max_depth=max_depth,
+        ))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_code_impact",
+    annotations={"title": "Estimate change impact from the code graph", "readOnlyHint": True,
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def engraphis_code_impact(
+    changed_files: Annotated[List[str], Field(
+        description="Repo-relative files changed by a diff or pull request.",
+        min_length=1, max_length=2_000,
+    )],
+    workspace: Annotated[str, Field(description="Workspace the repo belongs to.",
+                                    min_length=1, max_length=200)],
+    repo: Annotated[str, Field(description="Indexed repo to analyze.",
+                               min_length=1, max_length=200)],
+) -> str:
+    """Estimate affected symbols, callers, memories, graph communities, and risk."""
+    try:
+        return _ok(service().code_impact(
+            changed_files, workspace=workspace, repo=repo,
+        ))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_export_code_graph",
+    annotations={"title": "Export the indexed code graph", "readOnlyHint": True,
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def engraphis_export_code_graph(
+    workspace: Annotated[str, Field(description="Workspace the repo belongs to.",
+                                    min_length=1, max_length=200)],
+    repo: Annotated[str, Field(description="Indexed repo to export.",
+                               min_length=1, max_length=200)],
+) -> str:
+    """Export portable graph JSON plus a human-readable Markdown report."""
+    try:
+        return _ok(service().export_code_graph(workspace=workspace, repo=repo))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
     name="engraphis_start_session",
     annotations={"title": "Start a memory session", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -729,6 +830,69 @@ def engraphis_end_session(
 
 
 @mcp.tool(
+    name="engraphis_receipts",
+    annotations={"title": "List privacy-safe operation receipts", "readOnlyHint": True,
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def engraphis_receipts(
+    workspace: Annotated[str, Field(description="Workspace whose receipt chain to inspect.",
+                                    min_length=1, max_length=200)],
+    limit: Annotated[int, Field(description="Maximum receipts to return (1-10000).",
+                                ge=1, le=10_000)] = 100,
+) -> str:
+    """List content-free, hash-chained remember/recall/link/index receipts."""
+    try:
+        return _ok(service().receipt_log(workspace=workspace, limit=limit))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_verify_receipts",
+    annotations={"title": "Verify an operation receipt chain", "readOnlyHint": True,
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def engraphis_verify_receipts(
+    workspace: Annotated[str, Field(description="Workspace whose receipt chain to verify.",
+                                    min_length=1, max_length=200)],
+    expected_head: Annotated[Optional[str], Field(
+        description="Previously saved chain head to compare against (detects replacement "
+                    "or truncation even if the local anchor was also altered).",
+        max_length=128,
+    )] = None,
+    expected_count: Annotated[Optional[int], Field(
+        description="Previously saved receipt count to compare against.",
+        ge=0,
+    )] = None,
+) -> str:
+    """Verify hashes, predecessor links, the local anchor, and optional external anchor."""
+    try:
+        return _ok(service().verify_receipts(
+            workspace=workspace,
+            expected_head=expected_head or "",
+            expected_count=expected_count,
+        ))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_export_receipts",
+    annotations={"title": "Export operation receipts", "readOnlyHint": True,
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def engraphis_export_receipts(
+    workspace: Annotated[str, Field(description="Workspace whose receipts to export.",
+                                    min_length=1, max_length=200)],
+) -> str:
+    """Export the complete public receipt payload and its verification result."""
+    try:
+        return _ok(service().export_receipts(workspace=workspace))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
     name="engraphis_stats",
     annotations={"title": "Memory store stats", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -786,6 +950,34 @@ def engraphis_ingest(
         return _ok(service().ingest(
             content, workspace=workspace, repo=repo, session_id=session_id,
             mtype=mtype, scope=scope,
+        ))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_ingest_postgres_schema",
+    annotations={"title": "Ingest a live PostgreSQL schema", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+)
+def engraphis_ingest_postgres_schema(
+    dsn: Annotated[str, Field(
+        description="PostgreSQL connection string. It is used for this connection only "
+                    "and is never stored or returned.", min_length=1, max_length=4_000)],
+    workspace: Annotated[str, Field(description="Workspace for the schema memory.",
+                                    min_length=1, max_length=200)],
+    repo: Annotated[Optional[str], Field(
+        description="Optional repository scope for an application-owned database.",
+        max_length=200)] = None,
+    schemas: Annotated[Optional[List[str]], Field(
+        description="Optional schema allow-list; omit to inspect all non-system schemas."
+    )] = None,
+) -> str:
+    """Convert tables, columns, constraints, and foreign keys into a schema memory and
+    entity graph. Requires the optional psycopg backend."""
+    try:
+        return _ok(service().import_postgres_schema(
+            dsn, workspace=workspace, repo=repo, schemas=schemas, actor="agent",
         ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)

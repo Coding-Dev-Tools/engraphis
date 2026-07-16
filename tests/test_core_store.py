@@ -1,6 +1,14 @@
 import pytest
 
-from engraphis.core.interfaces import Edge, MemoryRecord, MemoryType, Node, Scope, SearchFilter
+from engraphis.core.interfaces import (
+    Edge,
+    GraphLayer,
+    MemoryRecord,
+    MemoryType,
+    Node,
+    Scope,
+    SearchFilter,
+)
 from engraphis.core.store import Store
 
 
@@ -12,7 +20,41 @@ def store():
 
 
 def test_schema_version(store):
-    assert store.schema_version == 2
+    assert store.schema_version == 3
+
+
+def test_v3_migration_classifies_existing_graph_layers_once(tmp_path):
+    db = tmp_path / "v2.db"
+    original = Store(str(db))
+    wid = original.get_or_create_workspace("acme")
+    original.conn.execute(
+        "INSERT INTO edges(id, workspace_id, src, dst, relation, layer) "
+        "VALUES ('edge_old', ?, 'a', 'b', 'works_at', 'semantic')",
+        (wid,),
+    )
+    original.conn.execute("DELETE FROM schema_migrations")
+    original.conn.execute(
+        "INSERT INTO schema_migrations(version, applied_at) VALUES (2, 0)"
+    )
+    original.conn.commit()
+    original.close()
+
+    migrated = Store(str(db))
+    row = migrated.conn.execute(
+        "SELECT layer FROM edges WHERE id='edge_old'"
+    ).fetchone()
+    assert migrated.schema_version == 3
+    assert row["layer"] == "entity"
+    migrated.conn.execute(
+        "UPDATE edges SET layer='causal' WHERE id='edge_old'"
+    )
+    migrated.conn.commit()
+    migrated.close()
+
+    reopened = Store(str(db))
+    assert reopened.conn.execute(
+        "SELECT layer FROM edges WHERE id='edge_old'"
+    ).fetchone()["layer"] == "causal"
 
 
 def test_workspace_repo_session(store):
@@ -86,6 +128,17 @@ def test_graph_neighbors(store):
                            workspace_id=wid, repo_id=rid))
     nbrs = store.neighbors(["auth.py"])
     assert any(e.dst == "PASETO" and e.relation == "uses" for e in nbrs)
+    assert nbrs[0].layer == GraphLayer.ENTITY
+
+
+def test_memory_links_infer_and_filter_graph_layers(store):
+    wid = store.get_or_create_workspace("w")
+    a = store.add_memory(MemoryRecord(id="", content="cause", workspace_id=wid))
+    b = store.add_memory(MemoryRecord(id="", content="effect", workspace_id=wid))
+    store.add_link(a, b, relation="causes")
+    assert store.get_links(a)[0]["layer"] == "causal"
+    assert store.links_among([a, b], layers=[GraphLayer.CAUSAL])
+    assert store.links_among([a, b], layers=[GraphLayer.TEMPORAL]) == []
 
 
 def test_reinforce_increases_stability_and_count(store):

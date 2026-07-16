@@ -16,7 +16,8 @@ from engraphis.graphdata import build_graph_payload, empty_graph
 
 def test_empty_graph_shape():
     g = empty_graph("acme")
-    assert g == {"workspace": "acme", "nodes": [], "edges": [], "types": [], "top": [],
+    assert g == {"workspace": "acme", "nodes": [], "edges": [], "types": [],
+                 "layers": [], "top": [],
                  "stats": {"entities": 0, "edges": 0, "connected": 0, "isolated": 0}}
 
 
@@ -24,13 +25,16 @@ def test_build_graph_payload_basic_shape():
     ents = [{"id": "e1", "name": "Alice", "etype": "person_or_concept"},
             {"id": "e2", "name": "Acme Corp", "etype": "organization"},
             {"id": "e3", "name": "Isolated Co", "etype": "organization"}]
-    edges = [{"src": "e1", "dst": "e2", "relation": "works_at"}]
+    edges = [{"src": "e1", "dst": "e2", "relation": "works_at", "layer": "entity"}]
     g = build_graph_payload("acme", ents, edges)
 
     # node identity is the entity id, not the display name
     ids = {n["id"] for n in g["nodes"]}
     assert ids == {"e1", "e2", "e3"}
-    assert g["edges"] == [{"from": "e1", "to": "e2", "label": "works_at"}]
+    assert g["edges"] == [
+        {"from": "e1", "to": "e2", "label": "works_at", "layer": "entity"}
+    ]
+    assert g["layers"] == [{"layer": "entity", "count": 1}]
 
     by_id = {n["id"]: n for n in g["nodes"]}
     assert by_id["e1"]["label"] == "Alice" and by_id["e1"]["degree"] == 1
@@ -81,6 +85,7 @@ def test_build_graph_payload_falls_back_to_id_when_entity_row_missing():
     g = build_graph_payload("acme", [], edges)
     labels = {n["id"]: n["label"] for n in g["nodes"]}
     assert labels == {"e1": "e1", "e2": "e2"}
+    assert g["edges"][0]["layer"] == "semantic"
 
 
 def test_build_graph_payload_top_connected_capped_at_twelve():
