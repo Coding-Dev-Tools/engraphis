@@ -122,6 +122,6 @@ is needed for the memory layer. Details: the repo `README.md` "Quickstart A — 
 
 ## References
 
-- [TOOLS.md](references/TOOLS.md) — all 18 tools: parameters, defaults, returns, when to reach for each.
+- [TOOLS.md](references/TOOLS.md) — all 20 tools: parameters, defaults, returns, when to reach for each.
 - [SCOPING.md](references/SCOPING.md) — the `workspace → repo → session → memory` model, scope vs. type, and promotion.
 - [CONVENTIONS.md](references/CONVENTIONS.md) — memory types, provenance, importance, dedup/resolution, governance, and anti-patterns
