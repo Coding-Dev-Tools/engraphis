@@ -14,8 +14,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - **Authenticated MCP-over-HTTP at `/mcp`.** When the MCP extra is installed, the
   dashboard mounts the same 20 tools as the standalone server and injects its existing
   `MemoryService`, avoiding a second SQLite writer. The endpoint requires an active Team
-  entitlement plus a member/admin cookie or bearer token; connect-info reports whether
-  the mount is actually available.
+  entitlement and per-user bearer token, enforces viewer/member/admin roles per tool, and
+  reports actual mount availability through connect-info.
 - **One-click Railway hosting.** Added `railway.json`, the README deploy button, and
   `docs/HOSTING_RAILWAY.md` for persistent volumes, forwarded HTTPS headers, Team
   entitlement bootstrap, member invites, and HTTP/MCP agent connection.
