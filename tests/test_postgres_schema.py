@@ -120,7 +120,7 @@ def test_postgres_introspection_is_filtered_bounded_and_cross_schema_safe(monkey
     constraint_query, params = connection.cursor_obj.calls[-1]
     assert "tc.constraint_schema=ccu.constraint_schema" in constraint_query
     assert "tc.table_schema=ccu.table_schema" not in constraint_query
-    assert params[:2] == ("auth", "public")
+    assert params[:2] == (["auth", "public"], ["auth", "public"])
 
 
 def test_service_never_persists_postgres_dsn(monkeypatch):

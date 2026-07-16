@@ -79,19 +79,30 @@ In Team mode, filesystem indexing and folder imports require the admin role.
 and refuses non-loopback binding unless `ENGRAPHIS_GRAPH_TOKEN` (or `ENGRAPHIS_API_TOKEN`) is set.
 The token protects access, not transport confidentiality; use TLS at a reverse proxy off-host.
 
-### 8. Supply chain
+### 8. Privacy receipts
+Operation receipts exclude raw memory/query content, workspace/repo names, raw IDs, and actor
+identities. Each workspace chain has a separately maintained local count/head anchor, so ordinary
+row modification, reordering, interior deletion, and tail truncation are detected. The actor/scope
+digests are pseudonymous, not anonymous: predictable values may be guessable. The chain is
+unkeyed and its local anchor lives in the same database, so an attacker able to rewrite the whole
+database can recompute both. Preserve an exported `head` + `count` outside the database and pass
+them back as `expected_head` / `expected_count` when independent evidence is required.
+
+### 9. Supply chain
 - Core runs on `numpy` alone; heavy components gated behind extras
 - Code-graph backend falls back to regex indexer on any failure
 - Pin versions and run `pip audit` in your environment
 
-### 9. Team mode & license keys (commercial layer)
+### 10. Team mode & license keys (commercial layer)
 
 Team mode (`ENGRAPHIS_TEAM_MODE`, ON by default unless set to `0` + a `team` license) adds per-user sessions:
 
 - **Passwords:** PBKDF2-HMAC-SHA256, 600k iterations, ≥10 chars; constant-time verification;
   no user-enumeration timing oracle
 - **Sessions:** 32-byte tokens, `HttpOnly; SameSite=Strict`, stored hashed (SHA-256), 12h TTL;
-  revoked on logout/disable/demotion
+  revoked on logout/disable; role changes are enforced on the next request
+- **Agent API tokens:** stored hashed, capped per user, and permanently revoked on account
+  disable or password reset
 - **Roles** enforced in HTTP layer (viewer < member < admin); last active admin protected
 - **Login throttle:** 5 failures/15 min → 60s lockout
 - **License keys:** Ed25519-signed, verified against pinned vendor public key
@@ -106,6 +117,9 @@ Team mode (`ENGRAPHIS_TEAM_MODE`, ON by default unless set to `0` + a `team` lic
   use reverse proxy for multi-process/distributed
 - Encryption at rest is opt-in (SQLCipher via `ENGRAPHIS_DB_KEY`); separate users/sessions
   DB and relay DB not yet SQLCipher-encrypted
+- Managed relay bundles are HTTPS-protected in transit but remain plaintext at rest until
+  client-side end-to-end encryption ships. Team personal folders and `secret` memories are never
+  uploaded to the shared-account relay.
 - Per-token scope/tenant authorization is partial: isolate distinct tenants by running
   one instance each
 - Legacy v1 REST server/dashboard is a compatibility surface; prefer v2/MCP path

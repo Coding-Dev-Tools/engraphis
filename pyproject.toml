@@ -59,6 +59,9 @@ documents = [
 ]
 transcription = [
     "faster-whisper>=1.0",
+    # onnxruntime 1.24+ dropped CPython 3.10 wheels; keep the advertised 3.10
+    # install path resolvable while faster-whisper still supports it.
+    "onnxruntime<1.24; python_version < '3.11'",
 ]
 postgres = [
     "psycopg[binary]>=3.1",
@@ -85,6 +88,7 @@ all = [
     "Pillow>=10.0",
     "pytesseract>=0.3.10",
     "faster-whisper>=1.0",
+    "onnxruntime<1.24; python_version < '3.11'",
     "psycopg[binary]>=3.1",
     "sqlcipher3-binary>=0.5.0; platform_system != 'Windows'",
 ]
@@ -104,6 +108,7 @@ test = [
     "Pillow>=10.0",
     "pytesseract>=0.3.10",
     "faster-whisper>=1.0",
+    "onnxruntime<1.24; python_version < '3.11'",
     "psycopg[binary]>=3.1",
     "sqlcipher3-binary>=0.5.0; platform_system != 'Windows'",
 ]

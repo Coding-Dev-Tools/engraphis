@@ -528,6 +528,13 @@ class SyncEngine:
                 # across the scope boundary (SECURITY.md §3 confinement).
                 report["rejected"] += 1
                 continue
+            if existing is not None and existing.sensitivity == "secret":
+                # ``secret`` is device-local by contract. A peer may know this id from an
+                # older sync that happened before the memory was classified secret, but it
+                # must never be able to overwrite, invalidate, or downgrade the local row
+                # back to an exportable sensitivity.
+                report["rejected"] += 1
+                continue
             if (existing is not None and only_repo_id is not None
                     and existing.repo_id != only_repo_id):
                 # The incoming row's claimed repo cannot re-home an existing memory from

@@ -56,8 +56,10 @@ flowchart LR
    `ephemeral`, `normal`, or `critical`. The engine clamps importance/stability and records the
    decision; it never silently discards or hard-deletes a memory.
 9. **Privacy-safe receipts.** Remember/link/recall and indexing operations append content-free,
-   SHA-256-chained receipts. Raw memory/query text, workspace names, IDs, and actor identities are
-   excluded from the exported payload.
+   SHA-256-chained receipts with an independently maintained local head/count anchor. Raw
+   memory/query text, workspace names, IDs, and actor identities are excluded from the exported
+   payload. A previously exported head/count can be supplied during verification to anchor the
+   chain outside the database.
 10. **Team-safe exposure.** The full dashboard retains its existing auth/role controls. The
     optional `engraphis-graph-server` exposes only read operations and refuses a non-loopback bind
     without a bearer token.
@@ -67,7 +69,7 @@ flowchart LR
 - Layer columns on `edges`, `mem_links`, and `code_edges`; durable rationale on `mem_links`.
 - `code_files` for incremental indexing.
 - `code_memory_links` for code/experience traversal.
-- `operation_receipts` for the privacy-safe hash chain.
+- `operation_receipts` plus `receipt_chain_heads` for the privacy-safe hash chain and tail anchor.
 - `symbols.docstring` for extracted documentation.
 
 Migration is additive and idempotent. Pre-v3 edge layers are inferred exactly once; explicitly
