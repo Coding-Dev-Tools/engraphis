@@ -20,29 +20,6 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - `engraphis-graph` workflow CLI and token-protected `engraphis-graph-server` read-only HTTP
   surface.
 
-### Fixed
-- 1-hop graph recall (and the PPR large-graph fallback) now honors `graph_layers`, matching
-  the PPR arm — `Store.neighbors()` gained a `layers` filter.
-- `FolderTransport.push()` no longer follows peer-planted symlinks in the shared sync folder
-  (unpredictable temp name + `O_CREAT|O_EXCL|O_NOFOLLOW`), closing an arbitrary-file-write
-  vector that mirrored the already-hardened read side.
-- `engraphis-graph-server` treats an empty `--host`/`ENGRAPHIS_GRAPH_HOST` as non-loopback
-  (it binds all interfaces), so the bearer-token requirement can no longer be skipped.
-- Caller-supplied `metadata.retention_supervision` is stripped at the service boundary; only
-  the validated `retention_class` presets can influence importance/stability.
-- `merge_workspaces()` no longer duplicates symbols/code edges when both workspaces indexed
-  the same file in a same-named repo — the losing snapshot's rows are cleared, and its
-  memory↔code links are re-pointed at the surviving same-fqname symbols.
-- `engraphis-graph impact/prs` reject leading-dash git revisions (git option injection), and
-  graph exports refuse a symlinked output directory and are written atomically without
-  following pre-planted symlinks.
-- The unified graph endpoint bounds entity edges and code edges/links per request
-  (`limit`-derived cap) so a large workspace graph or indexed repo can't produce unbounded
-  viewer-role responses.
-- Relay sync fails closed when a workspace's settings are unreadable rather than treating a
-  possibly-personal folder as shared — in the sync CLI and in the dashboard/background
-  `_sync_all` path; resource extraction enforces its own raw-size cap.
-
 ## [0.9.6] - 2026-07-16
 
 ### Added
