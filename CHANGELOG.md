@@ -5,6 +5,13 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+- Existing paid keys signed before the managed-service domain migration now route the
+  retired Railway license host to `https://team.engraphis.com`; new defaults use the
+  canonical domain for license leases and managed sync. License, trial, and invite
+  requests now send an explicit Engraphis User-Agent so Cloudflare does not reject
+  Python's default `urllib` signature with error 1010.
+
 ### Added
 - **Agent Connect (Team): connect agents to a hosted instance instead of running locally.**
   Team members mint a per-user API token from the dashboard and point their agent at the
