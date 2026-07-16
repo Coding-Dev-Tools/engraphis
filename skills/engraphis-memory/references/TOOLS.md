@@ -283,7 +283,9 @@ List content-free, SHA-256-chained operation receipts for a workspace.
 - `workspace (str)`, `limit (int, 100)`.
 
 ### `engraphis_verify_receipts`
-Recompute hashes and validate chain order. Returns `{valid, count, head, errors}`.
+Recompute hashes and validate chain order plus the independently stored local head/count anchor.
+Optionally pass a previously exported `expected_head` / `expected_count` for verification against
+an anchor kept outside the database. Returns `{valid, count, head, anchored, errors}`.
 
 ### `engraphis_export_receipts`
 Return the receipt-only export bundle plus verification result; raw memory/query contents and

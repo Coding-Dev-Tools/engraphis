@@ -61,13 +61,6 @@ class PostgresSchemaIntrospector:
     def inspect(self, dsn: str, *, schemas: Optional[list[str]] = None) -> SchemaSnapshot:
         allow = {str(name).strip() for name in (schemas or []) if str(name).strip()}
         selected = sorted(allow)
-        placeholders = ",".join("%s" for _ in selected)
-        table_filter = (
-            f" AND table_schema IN ({placeholders})" if selected else ""
-        )
-        constraint_filter = (
-            f" AND tc.table_schema IN ({placeholders})" if selected else ""
-        )
         conn = None
         try:
             conn = _connect(dsn)
@@ -84,24 +77,30 @@ class PostgresSchemaIntrospector:
                     )
                     cursor.execute("SELECT current_database()")
                     database = str(cursor.fetchone()[0])
-                    tables = _rows(cursor, f"""
+                    tables = _rows(cursor, """
                         SELECT table_schema, table_name, table_type
                         FROM information_schema.tables
                         WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-                        {table_filter}
+                          AND (
+                            cardinality(%s::text[]) = 0
+                            OR table_schema = ANY(%s::text[])
+                          )
                         ORDER BY table_schema, table_name
                         LIMIT %s
-                    """, (*selected, _MAX_ENTITIES + 1))
-                    columns = _rows(cursor, f"""
+                    """, (selected, selected, _MAX_ENTITIES + 1))
+                    columns = _rows(cursor, """
                         SELECT table_schema, table_name, column_name, ordinal_position,
                                data_type, is_nullable, column_default
                         FROM information_schema.columns
                         WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-                        {table_filter}
+                          AND (
+                            cardinality(%s::text[]) = 0
+                            OR table_schema = ANY(%s::text[])
+                          )
                         ORDER BY table_schema, table_name, ordinal_position
                         LIMIT %s
-                    """, (*selected, _MAX_ENTITIES + 1))
-                    constraints = _rows(cursor, f"""
+                    """, (selected, selected, _MAX_ENTITIES + 1))
+                    constraints = _rows(cursor, """
                         SELECT tc.constraint_type, tc.table_schema, tc.table_name,
                                kcu.column_name, ccu.table_schema, ccu.table_name,
                                ccu.column_name, tc.constraint_name
@@ -116,10 +115,13 @@ class PostgresSchemaIntrospector:
                          AND tc.constraint_schema=ccu.constraint_schema
                          AND tc.constraint_name=ccu.constraint_name
                         WHERE tc.table_schema NOT IN ('pg_catalog', 'information_schema')
-                        {constraint_filter}
+                          AND (
+                            cardinality(%s::text[]) = 0
+                            OR tc.table_schema = ANY(%s::text[])
+                          )
                         ORDER BY tc.table_schema, tc.table_name, tc.constraint_name
                         LIMIT %s
-                    """, (*selected, _MAX_RELATIONS + 1))
+                    """, (selected, selected, _MAX_RELATIONS + 1))
         except PostgresIntrospectionError:
             raise
         except Exception as exc:

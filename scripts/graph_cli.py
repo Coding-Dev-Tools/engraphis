@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+from typing import Iterable, Optional
 
 from engraphis.config import settings
 from engraphis.service import MemoryService, ValidationError
@@ -142,15 +146,17 @@ def _natural_node(node: dict) -> tuple:
 
 def _stable_json(value: dict) -> str:
     return json.dumps(
-        value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str
+        value, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+        default=str, allow_nan=False,
     )
 
 
 def _timestamp(value) -> float:
     try:
-        return float(value or 0)
-    except (TypeError, ValueError):
+        result = float(value or 0)
+    except (TypeError, ValueError, OverflowError):
         return 0.0
+    return result if math.isfinite(result) else 0.0
 
 
 def _candidate_key(value: dict, parent_timestamp: float = 0.0) -> tuple[float, str]:
@@ -158,8 +164,37 @@ def _candidate_key(value: dict, parent_timestamp: float = 0.0) -> tuple[float, s
     return updated_at, _stable_json(value)
 
 
+MAX_MERGE_EXPORT_BYTES = 64 * 1024 * 1024
+MAX_MERGE_TOTAL_BYTES = 128 * 1024 * 1024
+MAX_MERGE_FILES = 20_000
+MAX_MERGE_NODES = 250_000
+MAX_MERGE_EDGES = 500_000
+MAX_MERGE_LINKS = 500_000
+MAX_MERGE_JSON_DEPTH = 200
+
+
+def _dict_items(value, limit: int) -> Iterable[dict]:
+    if not isinstance(value, list):
+        return
+    for item in value[:limit]:
+        if isinstance(item, dict):
+            yield item
+
+
+def _line_number(value) -> int:
+    try:
+        line = int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    return max(0, min(2_147_483_647, line))
+
+
 def _merge_payloads(payloads: list[dict]) -> dict:
-    payloads = [payload for payload in payloads if isinstance(payload, dict)]
+    payloads = [
+        payload for payload in payloads
+        if isinstance(payload, dict)
+        and payload.get("format") in (None, "engraphis-code-graph/1")
+    ]
     if not payloads:
         return {"format": "engraphis-code-graph/1", "files": [], "nodes": [],
                 "edges": [], "memory_links": [], "analysis": {}}
@@ -168,45 +203,74 @@ def _merge_payloads(payloads: list[dict]) -> dict:
     old_to_new = {}
     for payload in payloads:
         generated_at = _timestamp(payload.get("generated_at"))
-        for item in payload.get("files") or []:
+        for item in _dict_items(payload.get("files"), MAX_MERGE_FILES):
             key = str(item.get("file") or "")
+            if not key:
+                continue
             chosen = files.get(key)
+            if chosen is None and len(files) >= MAX_MERGE_FILES:
+                continue
             if chosen is None or _candidate_key(item, generated_at) > chosen[0]:
                 files[key] = (_candidate_key(item, generated_at), item)
-        for node in payload.get("nodes") or []:
+        for node in _dict_items(payload.get("nodes"), MAX_MERGE_NODES):
             key = _natural_node(node)
+            if not any(key):
+                continue
             chosen = nodes.get(key)
+            if chosen is None and len(nodes) >= MAX_MERGE_NODES:
+                continue
             if chosen is None or _candidate_key(node, generated_at) > chosen[0]:
                 nodes[key] = (_candidate_key(node, generated_at), node)
     for payload in payloads:
-        for node in payload.get("nodes") or []:
+        for node in _dict_items(payload.get("nodes"), MAX_MERGE_NODES):
             chosen_entry = nodes.get(_natural_node(node))
             chosen = chosen_entry[1] if chosen_entry else None
             if node.get("id") and chosen and chosen.get("id"):
-                old_to_new[node["id"]] = chosen["id"]
+                if len(old_to_new) >= MAX_MERGE_NODES * 2:
+                    continue
+                old_to_new[str(node["id"])] = str(chosen["id"])
     edges = {}
     links = {}
     for payload in payloads:
         generated_at = _timestamp(payload.get("generated_at"))
-        for edge in payload.get("edges") or []:
+        for edge in _dict_items(payload.get("edges"), MAX_MERGE_EDGES):
             item = dict(edge)
-            item["src"] = old_to_new.get(item.get("src"), item.get("src"))
-            item["dst"] = old_to_new.get(item.get("dst"), item.get("dst"))
+            src = str(item.get("src") or "")
+            dst = str(item.get("dst") or "")
+            if not src or not dst:
+                continue
+            item["src"] = old_to_new.get(src, src)
+            item["dst"] = old_to_new.get(dst, dst)
+            item["line"] = _line_number(item.get("line"))
+            item["relation"] = str(item.get("relation") or "")
+            item["file"] = str(item.get("file") or "")
+            item["layer"] = str(item.get("layer") or "")
             key = (
                 item.get("src"), item.get("dst"), item.get("relation"),
-                item.get("file"), item.get("line"),
+                item.get("file"), item.get("line"), item.get("layer"),
             )
             chosen = edges.get(key)
+            if chosen is None and len(edges) >= MAX_MERGE_EDGES:
+                continue
             if chosen is None or _candidate_key(item, generated_at) > chosen[0]:
                 edges[key] = (_candidate_key(item, generated_at), item)
-        for link in payload.get("memory_links") or []:
+        for link in _dict_items(payload.get("memory_links"), MAX_MERGE_LINKS):
             item = dict(link)
-            item["symbol_id"] = old_to_new.get(item.get("symbol_id"), item.get("symbol_id"))
+            symbol_id = str(item.get("symbol_id") or "")
+            memory_id = str(item.get("memory_id") or "")
+            if not symbol_id or not memory_id:
+                continue
+            item["symbol_id"] = old_to_new.get(symbol_id, symbol_id)
+            item["memory_id"] = memory_id
+            item["repo_id"] = str(item.get("repo_id") or "")
+            item["relation"] = str(item.get("relation") or "")
             key = (
                 item.get("repo_id"), item.get("symbol_id"),
                 item.get("memory_id"), item.get("relation"),
             )
             chosen = links.get(key)
+            if chosen is None and len(links) >= MAX_MERGE_LINKS:
+                continue
             if chosen is None or _candidate_key(item, generated_at) > chosen[0]:
                 links[key] = (_candidate_key(item, generated_at), item)
     latest = max(
@@ -218,7 +282,7 @@ def _merge_payloads(payloads: list[dict]) -> dict:
     )
     return {
         "format": "engraphis-code-graph/1",
-        "generated_at": latest.get("generated_at"),
+        "generated_at": _timestamp(latest.get("generated_at")),
         "repo_id": latest.get("repo_id"),
         "files": sorted(
             (entry[1] for entry in files.values()),
@@ -230,7 +294,7 @@ def _merge_payloads(payloads: list[dict]) -> dict:
             key=lambda item: (
                 str(item.get("src") or ""), str(item.get("dst") or ""),
                 str(item.get("relation") or ""), str(item.get("file") or ""),
-                int(item.get("line") or 0),
+                _line_number(item.get("line")), str(item.get("layer") or ""),
             ),
         ),
         "memory_links": sorted(
@@ -240,39 +304,155 @@ def _merge_payloads(payloads: list[dict]) -> dict:
                 str(item.get("memory_id") or ""), str(item.get("relation") or ""),
             ),
         ),
-        "analysis": latest.get("analysis") or {},
+        "analysis": latest.get("analysis")
+        if isinstance(latest.get("analysis"), dict) else {},
     }
 
 
-def _merge(args) -> None:
-    payloads = []
-    for path in (args.base, args.current, args.other):
-        try:
-            payloads.append(json.loads(Path(path).read_text(encoding="utf-8")))
-        except (OSError, json.JSONDecodeError):
+def _scan_json_depth(text: str) -> int:
+    depth = maximum = 0
+    in_string = escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
             continue
-    Path(args.current).write_text(
-        json.dumps(_merge_payloads(payloads), indent=2, ensure_ascii=False, default=str),
-        encoding="utf-8",
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            maximum = max(maximum, depth)
+        elif char in "]}":
+            depth = max(0, depth - 1)
+    return maximum
+
+
+def _reject_json_constant(value: str):
+    raise ValueError("non-finite JSON constant: %s" % value)
+
+
+def _load_merge_payload(path: str) -> Optional[dict]:
+    source = Path(path)
+    try:
+        if source.stat().st_size > MAX_MERGE_EXPORT_BYTES:
+            return None
+        text = source.read_text(encoding="utf-8")
+        if _scan_json_depth(text) > MAX_MERGE_JSON_DEPTH:
+            return None
+        payload = json.loads(text, parse_constant=_reject_json_constant)
+    except (OSError, UnicodeError, ValueError, RecursionError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload if payload.get("format") in (None, "engraphis-code-graph/1") else None
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    fd, temp_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".engraphis.tmp", dir=path.parent
     )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fd = -1
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+
+
+def _read_regular_text(path: Path, *, max_bytes: int = 1024 * 1024) -> str:
+    if not path.exists():
+        return ""
+    fd = -1
+    try:
+        before = os.lstat(path)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValidationError(f"{path.name} must be a regular file")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+            or opened.st_size > max_bytes
+        ):
+            raise ValidationError(f"{path.name} is unsafe or too large")
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            fd = -1
+            text = fh.read(max_bytes + 1)
+        if len(text.encode("utf-8")) > max_bytes:
+            raise ValidationError(f"{path.name} is unsafe or too large")
+        return text
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _merge(args) -> None:
+    paths = [Path(args.base), Path(args.current), Path(args.other)]
+    try:
+        total_bytes = sum(path.stat().st_size for path in paths)
+    except OSError as exc:
+        raise ValidationError("merge inputs must all be readable files") from exc
+    if total_bytes > MAX_MERGE_TOTAL_BYTES:
+        raise ValidationError("combined graph merge inputs exceed the safety limit")
+    base = _load_merge_payload(args.base)
+    current_payload = _load_merge_payload(args.current)
+    other = _load_merge_payload(args.other)
+    if current_payload is None or other is None:
+        raise ValidationError(
+            "current and incoming graph exports must be valid bounded graph JSON"
+        )
+    payloads = [payload for payload in (base, current_payload, other) if payload is not None]
+    current = Path(args.current)
+    serialized = json.dumps(
+        _merge_payloads(payloads), indent=2, ensure_ascii=False,
+        default=str, allow_nan=False,
+    )
+    _atomic_write_text(current, serialized)
 
 
 def _install_merge_driver(args) -> None:
     root = Path(args.root).expanduser().resolve()
+    attributes = root / ".gitattributes"
+    current = _read_regular_text(attributes)
+    graph_path = str(args.graph_path or "").strip()
+    if (
+        not graph_path
+        or graph_path.startswith("!")
+        or any(char in graph_path for char in "\x00\r\n")
+    ):
+        raise ValidationError("graph path must be a non-empty single-line path")
+    pattern = (
+        json.dumps(graph_path)
+        if graph_path.startswith("#") or any(char.isspace() for char in graph_path)
+        else graph_path
+    )
+    rule = f"{pattern} merge=engraphis-graph"
     subprocess.run([
         "git", "-C", str(root), "config", "merge.engraphis-graph.name",
         "Engraphis code graph union merge",
     ], check=True)
     subprocess.run([
         "git", "-C", str(root), "config", "merge.engraphis-graph.driver",
-        f'"{sys.executable}" -m scripts.graph_cli merge %O %A %B',
+        f'"{sys.executable}" -m scripts.graph_cli merge "%O" "%A" "%B"',
     ], check=True)
-    attributes = root / ".gitattributes"
-    current = attributes.read_text(encoding="utf-8") if attributes.exists() else ""
-    rule = f"{args.graph_path} merge=engraphis-graph"
     if rule not in current.splitlines():
-        attributes.write_text(current.rstrip() + ("\n" if current.strip() else "") + rule + "\n",
-                              encoding="utf-8")
+        _atomic_write_text(
+            attributes,
+            current.rstrip() + ("\n" if current.strip() else "") + rule + "\n",
+        )
     print(f"Installed union merge driver for {args.graph_path}")
 
 

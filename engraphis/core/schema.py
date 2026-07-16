@@ -234,6 +234,16 @@ CREATE INDEX IF NOT EXISTS idx_receipt_scope
 CREATE INDEX IF NOT EXISTS idx_receipt_operation
     ON operation_receipts(operation, ts);
 
+-- Independent chain anchor maintained atomically with each receipt. It detects tail
+-- truncation (which predecessor hashes alone cannot detect without an expected head).
+CREATE TABLE IF NOT EXISTS receipt_chain_heads (
+    workspace_id  TEXT PRIMARY KEY,
+    receipt_count INTEGER NOT NULL,
+    head_hash     TEXT NOT NULL,
+    integrity_error TEXT NOT NULL DEFAULT '',
+    updated_at    REAL NOT NULL
+);
+
 -- ── Sync state (device identity + per-peer cursors) ─────────────────────────
 -- Additive, local-only bookkeeping for the cloud-sync layer (core/sync.py).
 -- A tiny KV: 'device_id' (this database's stable origin id) and, later,
