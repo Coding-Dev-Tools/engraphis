@@ -110,17 +110,40 @@ def test_mcp_requires_auth_401(monkeypatch, tmp_path):
 
 
 def test_mcp_requires_team_license_402(monkeypatch, tmp_path):
-    # team mode ON but no Team license -> /mcp gates to 402
     with _client(monkeypatch, tmp_path, key=None) as c:
-        _setup_admin(c)  # bootstrap admin is exempt from the license gate
-        token = _mint(c)
-        c.cookies.clear()
-        r = c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
-                  "params": {"protocolVersion": _PROTO, "capabilities": {},
-                             "clientInfo": {"name": "t", "version": "1"}}},
-                   headers=_h(token))
+        r = c.post("/mcp", json={
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": _PROTO, "capabilities": {},
+                       "clientInfo": {"name": "t", "version": "1"}},
+        })
         assert r.status_code == 402
         assert r.json()["feature"] == "team"
+
+
+def test_mcp_rejects_viewers(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path, key=_team_key()) as c:
+        _setup_admin(c)
+        assert c.post("/api/auth/users", json={
+            "email": "viewer@x.co", "name": "Viewer", "role": "viewer",
+            "password": "viewerpass12",
+        }).status_code == 200
+        c.cookies.clear()
+        assert c.post("/api/auth/login", json={
+            "email": "viewer@x.co", "password": "viewerpass12",
+        }).status_code == 200
+
+        # Viewers may mint generic dashboard API tokens, but /mcp itself requires
+        # member+ because MCP tools can write and govern memories.
+        token = _mint(c)
+        c.cookies.clear()
+        r = c.post("/mcp", json={
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": _PROTO, "capabilities": {},
+                       "clientInfo": {"name": "t", "version": "1"}},
+        }, headers=_h(token))
+
+        assert r.status_code == 403
+        assert "member" in r.json()["error"]
 
 
 def test_mcp_handshake_lists_engraphis_tools(monkeypatch, tmp_path):

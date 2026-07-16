@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from engraphis import licensing
 from engraphis.config import settings
 from engraphis.inspector.auth import (
-    SESSION_TTL_SECONDS, AuthError, AuthStore, role_at_least)
+    PBKDF2_ITERATIONS, SESSION_TTL_SECONDS, AuthError, AuthStore, role_at_least)
 
 logger = logging.getLogger("engraphis.team")
 
@@ -55,6 +55,10 @@ def _send_invite(u: dict, admin: dict) -> tuple:
     feature server-side; the relay echoes that same verified key into the email —
     so self-hosters get a working, license-bearing "Add member" out of the box
     without setting up their own mail account."""
+    if os.environ.get("ENGRAPHIS_TEAM_INVITES", "1").strip().lower() in (
+            "0", "false", "no", "off"):
+        return False, "team invite delivery is disabled", False
+
     from engraphis.inspector import webhooks
     from engraphis.licensing import _read_key_material
 
@@ -128,7 +132,8 @@ class TokenReq(BaseModel):
 
 
 def _enabled() -> bool:
-    return os.environ.get("ENGRAPHIS_TEAM_MODE", "").lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("ENGRAPHIS_TEAM_MODE", "1").strip().lower() not in (
+        "0", "false", "no", "off")
 
 
 def _users_db_path(db_path: str) -> str:
@@ -137,6 +142,24 @@ def _users_db_path(db_path: str) -> str:
     two would put password/session-token hashes inside the same file that
     ``/api/export`` and ordinary DB backups copy around."""
     return ":memory:" if db_path == ":memory:" else db_path + ".users.db"
+
+
+def _auth_iterations() -> int:
+    """PBKDF2 cost for dashboard team auth.
+
+    Production always uses the compiled-in security cost. Tests may opt into a lower
+    cost with ``ENGRAPHIS_TEST_AUTH_ITERATIONS`` so full-stack dashboard coverage does
+    not spend minutes hashing throwaway passwords. The override is deliberately ignored
+    outside pytest to avoid accidental weak production configuration.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        raw = os.environ.get("ENGRAPHIS_TEST_AUTH_ITERATIONS", "").strip()
+        if raw:
+            try:
+                return max(1, int(raw))
+            except ValueError:
+                pass
+    return PBKDF2_ITERATIONS
 
 
 def _set_cookie(response: Response, token: str, *, secure: bool = False) -> None:
@@ -163,14 +186,11 @@ def attach(app: FastAPI, service):
         app.include_router(router)
         return False, None
 
-    # Team mode is ON by default, but the login wall only activates with a real
-    # ``team`` license present. Solo/no-license installs stay fully open — no forced
-    # sign-in — until a team license key is added (mirrors the Inspector's
-    # team_active()). ``attach`` mounts the auth plumbing whenever mode is on and
-    # returns ``(True, store)``; the live entitlement check lives in the dashboard's
-    # request gate (licensing.has_feature("team")) and in /api/auth/state below, so the
-    # wall appears the instant a license is present — even added at runtime via the UI.
-    store = AuthStore(_users_db_path(settings.db_path))
+    # Team mode is ON by default. A new unlicensed install remains open for solo use,
+    # but setup requires a Team license. Once users exist, the dashboard keeps the login
+    # wall active even if the license lapses so private team data never becomes public.
+    # Paid operations and seat growth continue to enforce the live entitlement.
+    store = AuthStore(_users_db_path(settings.db_path), iterations=_auth_iterations())
 
     def _user(request: Request) -> Optional[dict]:
         tok = request.cookies.get(_COOKIE)
@@ -186,15 +206,23 @@ def attach(app: FastAPI, service):
 
     @router.get("/state")
     def state(request: Request):
-        # `enabled` reflects whether the login wall is actually active (needs a team
-        # license, checked live), so the UI shows the open/solo experience until a
-        # license is added and the enforced mode the moment one is present.
-        return {"enabled": licensing.has_feature("team"),
-                "needs_setup": store.count_users() == 0,
+        users = store.count_users()
+        licensed = licensing.has_feature("team")
+        return {"enabled": bool(licensed or users),
+                "needs_setup": bool(licensed and users == 0),
+                "licensed": licensed,
+                "team_locked": bool(users and not licensed),
                 "user": _user(request)}
 
     @router.post("/setup")
     def setup(body: SetupReq, request: Request, response: Response):
+        if not licensing.has_feature("team"):
+            raise HTTPException(status_code=402, detail={
+                "error": "Team setup requires an active Team license",
+                "feature": "team",
+                "tier_required": licensing.required_plan("team"),
+                "upgrade_url": licensing.upgrade_url(),
+            })
         if store.count_users() > 0:
             raise HTTPException(status_code=400, detail={"error": "team already set up"})
         try:

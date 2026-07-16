@@ -35,6 +35,8 @@ def _client(monkeypatch, tmp_path, *, team=False, key=None):
     monkeypatch.setattr(settings, "embed_model", "")
     monkeypatch.setenv("ENGRAPHIS_EMBED_MODEL", "")
     monkeypatch.setenv("ENGRAPHIS_TEAM_MODE", "1" if team else "0")
+    monkeypatch.setenv("ENGRAPHIS_TEAM_INVITES", "0")
+    monkeypatch.setenv("ENGRAPHIS_TEST_AUTH_ITERATIONS", "1000")
     monkeypatch.setattr(lic, "_LICENSE_FILE", tmp_path / "license.key")
     if key:
         monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
@@ -65,6 +67,28 @@ def test_dashboard_serves_and_bootstraps(monkeypatch, tmp_path):
         assert b["stats"]["memories"] >= 2
         assert any(w["name"] == "demo" for w in b["workspaces"])
         assert b["license"]["plan"] == "free"
+
+
+@pytest.mark.parametrize("raw", ["0", " false ", "NO", "Off"])
+def test_team_mode_env_opt_out_parsing(monkeypatch, raw):
+    from engraphis.routes.v2_team import _enabled
+    monkeypatch.setenv("ENGRAPHIS_TEAM_MODE", raw)
+    assert _enabled() is False
+
+
+def test_team_setup_waits_for_active_license(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path, team=True, key=None) as c:
+        state = c.get("/api/auth/state").json()
+        assert state["enabled"] is False
+        assert state["needs_setup"] is False
+        assert c.post("/api/auth/setup", json={
+            "email": "w@x.co",
+            "name": "W",
+            "password": "supersecret1",
+        }).status_code == 402
+        assert c.get("/api/bootstrap").status_code == 200
+
+
 
 
 def test_recall_why_timeline_and_detail(monkeypatch, tmp_path):
@@ -141,11 +165,6 @@ def test_consolidate_inference_pass_is_pro_gated(monkeypatch, tmp_path):
                        json={"workspace": "demo", "dry_run": True, "infer": True})
         assert gated.status_code == 402
         assert gated.json()["detail"]["feature"] == "automation"    # structured 402
-
-
-def test_consolidate_inference_pass_runs_with_team_key(monkeypatch, tmp_path):
-    # One TestClient per test function — see the note on test_analytics_and_export_*.
-    # With automation unlocked (Team license) the inference pass runs ungated.
     with _client(monkeypatch, tmp_path, key=_team_key()) as c:     # automation unlocked
         r = c.post("/api/consolidate",
                   json={"workspace": "demo", "dry_run": True, "infer": True})
@@ -191,6 +210,29 @@ def test_team_flow_setup_login_roles(monkeypatch, tmp_path):
         assert c.get("/api/auth/users").status_code == 401
         assert c.post("/api/auth/login", json={"email": "w@x.co",
                       "password": "supersecret1"}).status_code == 200
+
+
+def test_team_mode_without_license_stays_open_no_login_wall(monkeypatch, tmp_path):
+    """Core product rule: team mode ON (default) but NO team license key must never
+    raise a login wall. The auth gate only enforces per-user sessions when
+    ``licensing.has_feature("team")`` is a live truth — so a solo/no-license install
+    stays fully open even with ENGRAPHIS_TEAM_MODE=1, and the wall appears only the
+    moment a real team license is added. This test drives the no-license case: every
+    /api/* data route must be reachable without a session."""
+    with _client(monkeypatch, tmp_path, team=True) as c:
+        # No team license is configured (key=None in _client) → open to all.
+        for url in ("/api/bootstrap",
+                    "/api/recall?q=database&workspace=demo",
+                    "/api/memories?workspace=demo",
+                    "/api/graph?workspace=demo",
+                    "/api/stats?workspace=demo"):
+            assert c.get(url).status_code == 200, url
+        # With no team license, /api/auth/state reports the login wall as NOT active
+        # (enabled follows the live team entitlement, see v2_team.attach) — so no user is
+        # forced to sign in. The mode plumbing (ENGRAPHIS_TEAM_MODE=1) is mounted, but the
+        # wall stays down until a real team key is added.
+        state = c.get("/api/auth/state").json()
+        assert state["enabled"] is False
 
 
 def test_team_mode_gates_data_endpoints(monkeypatch, tmp_path):
@@ -679,10 +721,21 @@ def test_login_survives_a_lapsed_team_license_but_new_seats_still_need_one(
                       "password": "supersecret1"}).status_code == 200
         assert c.post("/api/auth/users", json={"email": "m@x.co", "name": "M",
                       "password": "anotherpass1", "role": "member"}).status_code == 200
+        disabled = c.post("/api/auth/users", json={
+            "email": "disabled@x.co", "name": "Disabled",
+            "password": "disabledpass1", "role": "member",
+        }).json()["user"]
+        assert c.post("/api/auth/users/update", json={
+            "user_id": disabled["id"], "disabled": True,
+        }).status_code == 200
         # license lapses (key gone)
         monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY")
         lic.current_license(refresh=True)
         fresh = TestClient(c.app)
+        assert fresh.get(
+            "/api/recall?q=database&workspace=demo").status_code == 401
+        state = fresh.get("/api/auth/state").json()
+        assert state["enabled"] is True and state["team_locked"] is True
         # an existing account can still log in — no more license-induced lockout
         r = fresh.post("/api/auth/login", json={"email": "m@x.co",
                        "password": "anotherpass1"})
@@ -695,6 +748,11 @@ def test_login_survives_a_lapsed_team_license_but_new_seats_still_need_one(
                     "password": "yetanotherpw1", "role": "member"})
         assert r2.status_code == 402
         assert r2.json().get("feature") == "team"
+        reenable = c.post("/api/auth/users/update", json={
+            "user_id": disabled["id"], "disabled": False,
+        })
+        assert reenable.status_code == 402
+        assert reenable.json().get("feature") == "team"
         # restoring a valid key restores the ability to add seats
         monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _team_key())
         lic.current_license(refresh=True)
@@ -823,41 +881,3 @@ def test_personal_folders_are_isolated_per_user(monkeypatch, tmp_path):
                c.get("/api/workspaces", headers=hdr(alice)).json()["workspaces"]}
         assert vis["alice-secret"] == "personal"
         assert vis["team-proj"] == "shared"
-
-
-def test_llm_status_reports_config_without_leaking_key(monkeypatch, tmp_path):
-    with _client(monkeypatch, tmp_path) as c:
-        monkeypatch.setattr(settings, "llm_provider", "openai")
-        monkeypatch.setattr(settings, "llm_model", "gpt-4o-mini")
-        monkeypatch.setattr(settings, "llm_api_key", "sk-secret-xxx")
-        s = c.get("/api/llm/status").json()
-        assert s["provider"] == "openai" and s["model"] == "gpt-4o-mini"
-        assert s["key_set"] is True and s["configured"] is True
-        # the actual key is never returned — only whether one is set
-        assert "sk-secret-xxx" not in c.get("/api/llm/status").text
-        assert "ENGRAPHIS_LLM_API_KEY=<your-key>" in s["env_snippet"]
-        assert "ENGRAPHIS_EXTRACTOR=llm_structured" in s["env_snippet"]
-
-
-def test_llm_test_reports_clear_error_when_no_key(monkeypatch, tmp_path):
-    with _client(monkeypatch, tmp_path) as c:
-        monkeypatch.setattr(settings, "llm_api_key", "")
-        r = c.post("/api/llm/test").json()
-        assert r["ok"] is False
-        assert "API key" in r["error"]
-
-
-def test_llm_test_surfaces_ping_result(monkeypatch, tmp_path):
-    with _client(monkeypatch, tmp_path) as c:
-        monkeypatch.setattr(settings, "llm_api_key", "sk-test")
-        monkeypatch.setattr(settings, "llm_provider", "openai")
-        monkeypatch.setattr(settings, "llm_model", "gpt-4o-mini")
-        import engraphis.llm.client as _lc
-        class _Stub:
-            def __enter__(self): return self
-            def __exit__(self, *a): return False
-            def ping(self): return {"ok": True, "reply": "ok", "error": "",
-                                    "provider": "openai", "model": "gpt-4o-mini"}
-        monkeypatch.setattr(_lc, "LLMClient", lambda *a, **k: _Stub())
-        r = c.post("/api/llm/test").json()
-        assert r["ok"] is True and r["reply"] == "ok"

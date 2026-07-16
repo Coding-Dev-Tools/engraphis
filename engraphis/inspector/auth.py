@@ -116,6 +116,8 @@ def min_role(method: str, path: str) -> str:
         # get more options"); anyone signed in may READ the current state (the dashboard
         # renders the toggle disabled for non-admins). GET stays viewer, writes are admin.
         return "admin" if method != "GET" else "viewer"
+    if method == "POST" and path == "/api/auth/token":
+        return "viewer"
     if path.startswith("/api/auth/users") or path.startswith("/api/auth/audit") \
             or path == "/api/auth/overview" or path in (
             "/api/license/activate", "/api/export", "/api/consolidate"):
@@ -280,6 +282,9 @@ class AuthStore:
         # disable → add a replacement → re-enable the original — a path create_user's own
         # seat check can't see.
         reenabling = disabled is False and bool(user["disabled"])
+        if reenabling:
+            from engraphis.licensing import require_feature
+            require_feature("team")
         if reenabling and seat_limit is not None and self.count_active_users() >= seat_limit:
             raise AuthError(
                 "seat limit reached (%d) — upgrade your Team license for more seats"
