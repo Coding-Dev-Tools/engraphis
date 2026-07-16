@@ -53,7 +53,7 @@ class MemoryEngine:
 
     @classmethod
     def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
-               embed_dim: int = 256, vector_backend: str = "auto",
+               embed_dim: int = 384, vector_backend: str = "auto",
                rerank_model: Optional[str] = None, extractor: str = "none",
                graph_extractor: str = "none",
                auto_evolve: bool = True, connect=None) -> "MemoryEngine":
