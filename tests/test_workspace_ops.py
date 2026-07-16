@@ -7,6 +7,7 @@ corrupts or leaks data.
 """
 import pytest
 
+from engraphis.core.interfaces import Edge, GraphLayer, Node
 from engraphis.service import MemoryService, ValidationError
 
 
@@ -74,6 +75,33 @@ def test_create_respects_workspace_binding():
 
 
 # ── merge_workspaces ────────────────────────────────────────────────────────
+def test_delete_removes_code_file_state_and_memory_bridges():
+    svc = _svc()
+    memory_id = svc.remember(
+        "The deploy helper ships releases.", workspace="a", repo="web", scope="repo"
+    )["id"]
+    c = svc.store.conn
+    repo_id = c.execute(
+        "SELECT id FROM repos WHERE workspace_id=? AND name='web'", (_wsid(svc, "a"),)
+    ).fetchone()["id"]
+    symbol_id = svc.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="deploy", fqname="deploy",
+        file="deploy.py", span="1:1-2:1", lang="python",
+    )
+    svc.store.upsert_code_file(
+        repo_id=repo_id, file="deploy.py", lang="python",
+        content_hash="file-hash", size_bytes=20, mtime_ns=20, backend="regex",
+    )
+    svc.store.link_memory_symbol(
+        repo_id=repo_id, symbol_id=symbol_id, memory_id=memory_id,
+    )
+
+    svc.delete_workspace("a")
+
+    for table in ("code_memory_links", "code_files", "symbols", "repos"):
+        assert c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+
+
 def test_merge_folds_memories_and_removes_source():
     svc = _svc()
     a1 = svc.remember("Alpha one fact.", workspace="a", scope="workspace")["id"]
@@ -106,6 +134,74 @@ def test_merge_folds_colliding_repos_without_duplicating():
     assert _wsid(svc, "a") is None
     assert svc.store.conn.execute(
         "SELECT COUNT(*) AS n FROM memories WHERE workspace_id IS NULL").fetchone()["n"] == 0
+
+
+def test_merge_remaps_code_files_and_memory_links_for_colliding_repos():
+    svc = _svc()
+    source_memory = svc.remember(
+        "Source deploy helper.", workspace="a", repo="web", scope="repo"
+    )["id"]
+    svc.remember("Target deploy helper.", workspace="b", repo="web", scope="repo")
+    c = svc.store.conn
+    src_repo = c.execute(
+        "SELECT id FROM repos WHERE workspace_id=? AND name='web'", (_wsid(svc, "a"),)
+    ).fetchone()["id"]
+    dst_repo = c.execute(
+        "SELECT id FROM repos WHERE workspace_id=? AND name='web'", (_wsid(svc, "b"),)
+    ).fetchone()["id"]
+    symbol = svc.store.upsert_symbol(
+        repo_id=src_repo, kind="function", name="deploy", fqname="deploy",
+        file="deploy.py", span="1:1-2:1", docstring="Deploy the application.",
+        lang="python", content_hash="source-symbol",
+    )
+    svc.store.upsert_code_file(
+        repo_id=src_repo, file="deploy.py", lang="python",
+        content_hash="newer-source", size_bytes=20, mtime_ns=20,
+        backend="regex",
+    )
+    svc.store.upsert_code_file(
+        repo_id=dst_repo, file="deploy.py", lang="python",
+        content_hash="older-target", size_bytes=10, mtime_ns=10,
+        backend="regex",
+    )
+    c.execute(
+        "UPDATE code_files SET indexed_at=20 WHERE repo_id=? AND file='deploy.py'",
+        (src_repo,),
+    )
+    c.execute(
+        "UPDATE code_files SET indexed_at=10 WHERE repo_id=? AND file='deploy.py'",
+        (dst_repo,),
+    )
+    svc.store.link_memory_symbol(
+        repo_id=src_repo, symbol_id=symbol, memory_id=source_memory,
+        relation="implements", confidence=0.8,
+    )
+
+    svc.merge_workspaces("a", "b")
+
+    assert c.execute("SELECT 1 FROM repos WHERE id=?", (src_repo,)).fetchone() is None
+    file_row = c.execute(
+        "SELECT content_hash FROM code_files WHERE repo_id=? AND file='deploy.py'",
+        (dst_repo,),
+    ).fetchone()
+    assert file_row["content_hash"] == "newer-source"
+    assert c.execute(
+        "SELECT COUNT(*) FROM code_files WHERE repo_id=?", (src_repo,)
+    ).fetchone()[0] == 0
+    link = c.execute(
+        "SELECT repo_id, symbol_id, memory_id, relation FROM code_memory_links "
+        "WHERE memory_id=?",
+        (source_memory,),
+    ).fetchone()
+    assert dict(link) == {
+        "repo_id": dst_repo,
+        "symbol_id": symbol,
+        "memory_id": source_memory,
+        "relation": "implements",
+    }
+    graph = svc.export_code_graph(workspace="b", repo="web")["graph"]
+    assert len(graph["files"]) == 1
+    assert len(graph["memory_links"]) == 1
 
 
 def test_merge_rejects_same_and_missing_workspaces():
@@ -154,6 +250,41 @@ def test_copy_clones_vectors_fts_links_entities_and_edges():
         m1, m2, workspace="a", relation="related",
         layer="causal", reason="deployment depends on the database",
     )
+    src_repo_id = svc.store.conn.execute(
+        "SELECT id FROM repos WHERE workspace_id=?", (_wsid(svc, "a"),)
+    ).fetchone()["id"]
+    svc.store.upsert_code_file(
+        repo_id=src_repo_id, file="deploy.py", lang="python",
+        content_hash="file-hash", size_bytes=128, mtime_ns=123,
+        backend="regex",
+    )
+    src_symbol = svc.store.upsert_symbol(
+        repo_id=src_repo_id, kind="function", name="deploy", fqname="deploy",
+        file="deploy.py", span="1:1-3:1", signature="deploy()",
+        docstring="Deploy the application.", lang="python",
+        content_hash="symbol-hash",
+    )
+    svc.store.add_code_edge(
+        repo_id=src_repo_id, src=src_symbol, dst="helper",
+        relation="calls", layer=GraphLayer.CAUSAL, file="deploy.py", line=2,
+    )
+    svc.store.link_memory_symbol(
+        repo_id=src_repo_id, symbol_id=src_symbol, memory_id=m1,
+        relation="implements", confidence=0.75,
+    )
+    wid_src = _wsid(svc, "a")
+    database = svc.store.upsert_entity(Node(
+        id="", name="Postgres", ntype="database",
+        workspace_id=wid_src, repo_id=src_repo_id,
+    ))
+    deploy = svc.store.upsert_entity(Node(
+        id="", name="Deploy", ntype="process",
+        workspace_id=wid_src, repo_id=src_repo_id,
+    ))
+    svc.store.upsert_edge(Edge(
+        id="", src=deploy, dst=database, relation="depends_on",
+        layer=GraphLayer.CAUSAL, workspace_id=wid_src, repo_id=src_repo_id,
+    ))
 
     svc.copy_workspace("a", new_name="a2")
     wid_dst = _wsid(svc, "a2")
@@ -178,8 +309,6 @@ def test_copy_clones_vectors_fts_links_entities_and_edges():
     repos = [dict(r) for r in c.execute(
         "SELECT id, name FROM repos WHERE workspace_id=?", (wid_dst,))]
     assert [r["name"] for r in repos] == ["infra"]
-    src_repo_id = c.execute(
-        "SELECT id FROM repos WHERE workspace_id=?", (_wsid(svc, "a"),)).fetchone()["id"]
     assert repos[0]["id"] != src_repo_id
     # every copied memory points at the cloned repo, not the source repo
     repo_ids = {c.execute("SELECT repo_id FROM memories WHERE id=?", (r["id"],)).fetchone()["repo_id"]
@@ -195,6 +324,70 @@ def test_copy_clones_vectors_fts_links_entities_and_edges():
     assert linked is not None
     assert linked["layer"] == "causal"
     assert linked["reason"] == "deployment depends on the database"
+
+    copied_entities = {
+        (row["name"], row["etype"]): row["id"] for row in c.execute(
+            "SELECT id, name, etype FROM entities WHERE workspace_id=?", (wid_dst,)
+        )
+    }
+    assert {("Postgres", "database"), ("Deploy", "process")} <= copied_entities.keys()
+    assert set(copied_entities.values()).isdisjoint({database, deploy})
+    copied_graph_edge = c.execute(
+        "SELECT src, dst, relation, layer FROM edges "
+        "WHERE workspace_id=? AND relation='depends_on'",
+        (wid_dst,),
+    ).fetchone()
+    assert dict(copied_graph_edge) == {
+        "src": copied_entities[("Deploy", "process")],
+        "dst": copied_entities[("Postgres", "database")],
+        "relation": "depends_on",
+        "layer": "causal",
+    }
+
+    # Incremental file state, symbol documentation, layered code edges, and the
+    # memory↔symbol bridge all point exclusively at copied ids.
+    copied_repo = repos[0]["id"]
+    code_file = c.execute(
+        "SELECT file, content_hash, size_bytes, mtime_ns, backend FROM code_files "
+        "WHERE repo_id=?",
+        (copied_repo,),
+    ).fetchone()
+    assert dict(code_file) == {
+        "file": "deploy.py",
+        "content_hash": "file-hash",
+        "size_bytes": 128,
+        "mtime_ns": 123,
+        "backend": "regex",
+    }
+    copied_symbol = c.execute(
+        "SELECT id, docstring FROM symbols WHERE repo_id=? AND fqname='deploy'",
+        (copied_repo,),
+    ).fetchone()
+    assert copied_symbol["id"] != src_symbol
+    assert copied_symbol["docstring"] == "Deploy the application."
+    copied_edge = c.execute(
+        "SELECT src, relation, layer FROM code_edges WHERE repo_id=?",
+        (copied_repo,),
+    ).fetchone()
+    assert dict(copied_edge) == {
+        "src": copied_symbol["id"],
+        "relation": "calls",
+        "layer": "causal",
+    }
+    copied_bridge = c.execute(
+        "SELECT symbol_id, memory_id, relation, confidence FROM code_memory_links "
+        "WHERE repo_id=?",
+        (copied_repo,),
+    ).fetchone()
+    assert copied_bridge["symbol_id"] == copied_symbol["id"]
+    assert copied_bridge["memory_id"] == id_map[
+        "Postgres 16 is the primary database."
+    ]
+    assert copied_bridge["relation"] == "implements"
+    assert copied_bridge["confidence"] == pytest.approx(0.75)
+    graph = svc.export_code_graph(workspace="a2", repo="infra")["graph"]
+    assert len(graph["files"]) == 1
+    assert len(graph["memory_links"]) == 1
 
 
 def test_copy_rejects_missing_source_and_colliding_new_name():
