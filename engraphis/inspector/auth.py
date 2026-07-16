@@ -120,7 +120,8 @@ def min_role(method: str, path: str) -> str:
         return "viewer"
     if path.startswith("/api/auth/users") or path.startswith("/api/auth/audit") \
             or path == "/api/auth/overview" or path in (
-            "/api/license/activate", "/api/export", "/api/consolidate"):
+            "/api/license/activate", "/api/license/trial", "/api/license/team-trial",
+            "/api/export", "/api/consolidate"):
         return "admin"
     if method == "POST":            # pin / forget / correct — audited governance (member+)
         return "member"

@@ -603,17 +603,8 @@ def test_team_trial_route_activates_relay_issued_key(monkeypatch, tmp_path):
         assert c.get("/api/license").json()["plan"] == "team"
 
 
-def test_team_trial_reachable_with_zero_users_and_no_session(monkeypatch, tmp_path):
-    """Regression: a brand-new team-mode instance (ENGRAPHIS_TEAM_MODE=1, zero users, no
-    license) was a hard deadlock. create_user() (called by /api/auth/setup) requires
-    require_feature("team"), so you can't create the first admin without a license — but
-    /api/license, /api/license/trial and /api/license/team-trial all required an
-    authenticated team session, which is impossible before any admin exists. Every visitor
-    got a 401 the instant they touched Settings -> License or clicked "Start trial," with
-    no way to ever bootstrap. These three routes are now in dashboard_app.py's _PUBLIC set;
-    this test drives the exact recovery path end to end: read license (no session) -> start
-    Team trial (no session) -> the resulting license unblocks /api/auth/setup -> the new
-    admin can log in normally afterward."""
+def test_team_license_routes_are_public_only_during_zero_user_bootstrap(monkeypatch, tmp_path):
+    """Zero users may acquire Team, but provisioned teams keep the login wall after lapse."""
     from engraphis import cloud_license
     monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(_SECRET).hex())
@@ -623,30 +614,50 @@ def test_team_trial_reachable_with_zero_users_and_no_session(monkeypatch, tmp_pa
     monkeypatch.setattr(
         cloud_license, "request_team_trial_key",
         lambda base, mid, email="": (trial_key, "", False))
-    # team=True, key=None: team mode is on but there is no license and no user yet.
-    with _client(monkeypatch, tmp_path, team=True) as c:
-        # reading license state pre-login must not 401
-        r0 = c.get("/api/license")
-        assert r0.status_code == 200 and r0.json()["plan"] == "free"
-        # first-admin setup stays closed until Team is active, even though the route is public
-        locked = c.post("/api/auth/setup", json={"email": "w@x.co", "name": "W",
-                        "password": "supersecret1"})
-        assert locked.status_code == 402
-        # starting the Team trial pre-login must not 401 either
-        r1 = c.post("/api/license/team-trial", json={"email": "w@x.co"})
-        assert r1.status_code == 200 and r1.json()["plan"] == "team"
-        # the trial key is now active -> the first admin can be created and signed in
-        r2 = c.post("/api/auth/setup", json={"email": "w@x.co", "name": "W",
-                    "password": "supersecret1"})
-        assert r2.status_code == 200
-        fresh = TestClient(c.app)
-        assert fresh.post("/api/auth/login", json={"email": "w@x.co",
-                          "password": "supersecret1"}).status_code == 200
+
+    with _client(monkeypatch, tmp_path, team=True) as admin:
+        # The zero-user bootstrap can inspect status and reach both trial routes logged out.
+        status = admin.get("/api/license")
+        assert status.status_code == 200 and status.json()["plan"] == "free"
+        pro_trial = admin.post("/api/license/trial", json={})
+        assert pro_trial.status_code == 400 and "email" in pro_trial.text.lower()
+        team_trial = admin.post("/api/license/team-trial", json={"email": "w@x.co"})
+        assert team_trial.status_code == 200 and team_trial.json()["plan"] == "team"
+
+        assert admin.post("/api/auth/setup", json={
+            "email": "w@x.co", "name": "W", "password": "supersecret1",
+        }).status_code == 200
+        assert admin.post("/api/auth/users", json={
+            "email": "v@x.co", "name": "V", "password": "anotherpass1", "role": "viewer",
+        }).status_code == 200
+
+        viewer = TestClient(admin.app)
+        assert viewer.post("/api/auth/login", json={
+            "email": "v@x.co", "password": "anotherpass1",
+        }).status_code == 200
+
+        # Simulate expiry/removal: users keep Team auth sticky even without entitlement.
+        lic._LICENSE_FILE.unlink()
+        assert lic.current_license(refresh=True).plan == "free"
+
+        anonymous = TestClient(admin.app)
+        blocked_status = anonymous.get("/api/license")
+        assert blocked_status.status_code == 401
+        assert "email" not in blocked_status.json() and "key_id" not in blocked_status.json()
+        assert anonymous.post("/api/license/trial", json={"email": "a@x.co"}).status_code == 401
+        assert anonymous.post(
+            "/api/license/team-trial", json={"email": "a@x.co"},
+        ).status_code == 401
+
+        assert viewer.get("/api/license").status_code == 200
+        assert viewer.post("/api/license/trial", json={"email": "v@x.co"}).status_code == 403
+        assert viewer.post(
+            "/api/license/team-trial", json={"email": "v@x.co"},
+        ).status_code == 403
 
 
 def test_license_activate_still_requires_admin_session(monkeypatch, tmp_path):
-    """/api/license/activate is deliberately NOT in _PUBLIC (unlike /api/license and the
-    trial routes) — pasting an arbitrary key changes the whole team's plan, so it stays
+    """Pasting an arbitrary key changes the whole team's plan, so activation is always
     behind the normal session + min_role('admin') gate."""
     with _client(monkeypatch, tmp_path, team=True, key=_team_key()) as c:
         assert c.post("/api/auth/setup", json={"email": "w@x.co", "name": "W",

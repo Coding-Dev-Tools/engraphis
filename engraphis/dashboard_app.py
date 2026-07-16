@@ -31,22 +31,15 @@ _INDEX = _STATIC / "index.html"
 # Reachable without any session/token in every mode: the page shell, liveness, and
 # auth bootstrap endpoints (state/login/setup must be reachable while logged out;
 # setup still refuses to create the first admin until Team is active).
-#
-# The /api/license and /api/license/*-trial entries close a real deadlock:
-# /api/auth/setup requires an active Team entitlement, so a new instance cannot create
-# its first admin before installing a Team key or starting a trial. Those license paths
-# must therefore remain reachable without an authenticated session.
-# Without those exceptions, every visitor would hit 401 in Settings → License or after
-# clicking "Start trial." These paths are safe to expose pre-login: GET /api/license
-# returns instance-level plan info, and trial endpoints are self-limited server-side
-# (one trial per device; refused if a paid key is already active).
-# /api/license/activate remains admin-only because it changes entitlement for the whole
-# team. A new self-hosted instance bootstraps a purchased key through
-# ENGRAPHIS_LICENSE_KEY or ~/.engraphis/license.key instead.
 _PUBLIC = {"/", "/api/health", "/api/ready", "/api/auth/state", "/api/auth/login",
            "/api/auth/setup", "/api/auth/logout", "/api/auth/forgot", "/api/auth/reset",
-           "/api/license", "/api/license/trial", "/api/license/team-trial",
            "/webhooks/polar"}
+
+# A zero-user Team install must be able to inspect entitlement and start a trial before
+# its first admin exists. These routes stop being public as soon as any user is created.
+_TEAM_BOOTSTRAP_PUBLIC = {
+    "/api/license", "/api/license/trial", "/api/license/team-trial",
+}
 
 
 def _mcp_transport_security(mcp):
@@ -136,12 +129,13 @@ def create_app() -> FastAPI:
         return JSONResponse({**body, "detail": body}, status_code=402)
     svc = MemoryService.create(
         settings.db_path, embed_model=settings.embed_model,
-        embed_dim=settings.embed_dim or 256,
+        embed_dim=settings.embed_dim or 384,
         allowed_workspaces=settings.allowed_workspaces)
     try:
         import sys as _sys
+        from engraphis.backends.embedder_deterministic import DeterministicEmbedder
         _ed = svc.engine.embedder
-        _ok = getattr(_ed, "dim", 0) >= 384
+        _ok = not isinstance(_ed, DeterministicEmbedder)
         print("[engraphis] embedder: %s dim=%s %s" % (
             type(_ed).__name__, getattr(_ed, "dim", "?"),
             "(semantic search ready)" if _ok else
@@ -200,8 +194,14 @@ def create_app() -> FastAPI:
         # is exactly "no per-user restriction".
         set_current_user(None)
         path = request.url.path
+        team_bootstrap_public = (
+            path in _TEAM_BOOTSTRAP_PUBLIC
+            and team_enabled
+            and auth_store is not None
+            and auth_store.count_users() == 0
+        )
         if (not path.startswith("/api/") and not (path == "/mcp" or path.startswith("/mcp/"))) \
-                or path in _PUBLIC or path.startswith("/api/docs") \
+                or path in _PUBLIC or team_bootstrap_public or path.startswith("/api/docs") \
                 or path.startswith("/api/openapi"):
             return await call_next(request)
         # MCP-over-HTTP agent endpoint (/mcp) — Team-gated (402 without a Team license)
@@ -414,20 +414,24 @@ def _maybe_start_dreaming() -> None:
     _DREAMING_STARTED = True
 
 
+def _refresh_configured_license() -> None:
+    """Refresh a configured key even when its cached fallback is currently free."""
+    from engraphis import licensing
+    if licensing._read_key_material():
+        licensing.current_license(refresh=True)
+
+
 def _maybe_start_license_revalidation() -> None:
-    """Launch a background loop that periodically re-checks an active paid license
+    """Launch a background loop that periodically refreshes a configured license
     against the vendor relay — unless disabled or under pytest.
 
     ``gate()`` only re-registers when the cached lease actually expires, which means a
     revoked/refunded key can keep working locally for up to the full lease TTL before
-    the next natural gate check catches it. This loop closes that latency gap: it calls
-    :func:`cloud_license.revalidate` on a cadence far shorter than the lease TTL, and
-    ``revalidate`` itself deletes the cached lease the moment the server denies the key
-    — so the very next feature check (``gate()``/``current_license(refresh=True)``)
-    fails closed immediately instead of waiting out the lease. A no-op when there is no
-    key configured or the key is a local-only construct (nothing to revalidate against).
-    Same safety envelope as the other background loops: fully fault-isolated, skipped
-    under pytest, switch-offable with ``ENGRAPHIS_REVALIDATE_LOOP=0``."""
+    the next natural gate check catches it. Calling
+    ``current_license(refresh=True)`` both propagates revocation and recovers a valid key
+    after a transient service outage. A no-op when there is no configured key. Same
+    safety envelope as the other background loops: fully fault-isolated, skipped under
+    pytest, switch-offable with ``ENGRAPHIS_REVALIDATE_LOOP=0``."""
     global _REVALIDATE_STARTED
     if _REVALIDATE_STARTED:
         return
@@ -441,17 +445,10 @@ def _maybe_start_license_revalidation() -> None:
     import time
 
     def _loop() -> None:
-        from engraphis import cloud_license, licensing
-        from engraphis.config import resolve_license_server_url
         time.sleep(30)   # let startup settle (after the autosync/dreaming polls)
         while True:
             try:
-                material = licensing._read_key_material()
-                lic = licensing.current_license()
-                if material and lic.is_paid:
-                    base = resolve_license_server_url(lic.cloud_url)
-                    if base:
-                        cloud_license.revalidate(lic, material, base_url=base)
+                _refresh_configured_license()
             except Exception:  # noqa: BLE001 — the loop must outlive any single failure
                 pass
             time.sleep(600)
