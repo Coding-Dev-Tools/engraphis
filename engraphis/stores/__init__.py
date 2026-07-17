@@ -157,6 +157,13 @@ def init_db() -> None:
     Path(settings.db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = get_conn()
     conn.executescript(_SCHEMA)
+    # Additive column for DBs created before it existed (SQLite has no "ADD COLUMN IF NOT
+    # EXISTS"). ``last_decay`` is the anchor the background decay pass advances each run so
+    # elapsed time is counted exactly once — without it, decay compounded on every tick.
+    try:
+        conn.execute("ALTER TABLE memories ADD COLUMN last_decay REAL")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.commit()
     # Ensure a default vault exists
     from engraphis.stores.vaults import ensure_default_vault

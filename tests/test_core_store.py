@@ -23,6 +23,46 @@ def test_schema_version(store):
     assert store.schema_version == 3
 
 
+def test_concurrent_writes_do_not_corrupt_or_lose_data(tmp_path):
+    # The shared connection is serialized (_SerializedConnection): concurrent threadpool
+    # writers must not interleave transactions on it. Every write from every thread must
+    # land, with no "database is locked"/cursor-corruption errors.
+    import threading
+
+    store = Store(str(tmp_path / "concurrent.db"))
+    errors: list = []
+    n_threads, per = 8, 25
+
+    def worker(t: int) -> None:
+        try:
+            for i in range(per):
+                store.create_workspace("ws-%d-%d" % (t, i))
+        except Exception as exc:  # noqa: BLE001 — surface for the assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(t,)) for t in range(n_threads)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    count = store.conn.execute("SELECT COUNT(*) AS n FROM workspaces").fetchone()["n"]
+    store.close()
+    assert not errors, errors
+    assert count == n_threads * per
+
+
+def test_wrapper_releases_lock_after_a_failing_statement(tmp_path):
+    # A statement that raises mid-transaction must roll back and free the write lock, or
+    # the next writer would deadlock on the shared connection.
+    store = Store(str(tmp_path / "recover.db"))
+    with pytest.raises(Exception):
+        store.conn.execute("INSERT INTO does_not_exist(x) VALUES (1)")
+    # The lock is free again: a normal write still succeeds.
+    assert store.create_workspace("after-error")
+    store.close()
+
+
 def test_v3_migration_classifies_existing_graph_layers_once(tmp_path):
     db = tmp_path / "v2.db"
     original = Store(str(db))
