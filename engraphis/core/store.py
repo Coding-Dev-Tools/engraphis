@@ -166,6 +166,115 @@ def memory_matches_filter(rec: MemoryRecord, flt: Optional[SearchFilter], *,
     return True
 
 
+class _SerializedConnection:
+    """Serializes access to one sqlite3 connection shared across threads.
+
+    The Store opens a SINGLE connection with ``check_same_thread=False`` and shares it
+    across the threadpool FastAPI runs sync handlers on. A bare sqlite3 connection is not
+    safe for concurrent multi-thread use: interleaved statements corrupt cursors, and —
+    because a connection has ONE transaction — one thread's ``commit()``/``rollback()``
+    lands on another thread's uncommitted writes, so a rollback can silently discard them.
+    (Per-thread connections are not an option: the sqlite-vec extension and FTS state are
+    loaded into THIS connection, and a ``:memory:`` DB can't be shared across connections
+    at all.)
+
+    This wrapper holds a reentrant lock for the DURATION of each write transaction —
+    pinned on the first statement that opens one (detected via ``in_transaction``) and
+    released on commit/rollback — so transactions never interleave. Read-only statements
+    lock only for the individual call. Two safety nets keep a stuck transaction from
+    deadlocking the process: a statement that raises while a transaction is open rolls it
+    back and frees the pin, and lock acquisition times out (raising, not blocking forever).
+    Non-statement attributes/methods (``in_transaction``, ``enable_load_extension`` at
+    setup, ...) pass straight through.
+    """
+
+    _ACQUIRE_TIMEOUT = 60.0
+
+    def __init__(self, raw) -> None:
+        object.__setattr__(self, "_raw", raw)
+        object.__setattr__(self, "_lock", threading.RLock())
+        object.__setattr__(self, "_pin", threading.local())
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._raw, name, value)
+
+    def _pinned(self) -> bool:
+        return getattr(self._pin, "held", False)
+
+    def _acquire(self) -> None:
+        if not self._lock.acquire(timeout=self._ACQUIRE_TIMEOUT):
+            raise sqlite3.OperationalError(
+                "store write lock timeout — a transaction appears stuck")
+
+    def _run(self, fn, *a, **k):
+        self._acquire()
+        try:
+            result = fn(*a, **k)
+        except BaseException:
+            # Do NOT roll back here: a failed statement in sqlite leaves any open
+            # transaction intact, and callers depend on that — e.g. probing an optional
+            # table inside a larger write transaction, catching the error, and continuing.
+            # Only manage the lock (identically to the success path); the pin is released
+            # by the eventual commit/rollback, or by the acquire timeout as a backstop.
+            self._settle()
+            raise
+        self._settle()
+        return result
+
+    def _settle(self) -> None:
+        """After a statement, hold exactly one pinned lock acquire for this thread while a
+        write transaction is open (released on commit/rollback); otherwise release this
+        call's acquire so read-only statements don't hold the lock."""
+        if self._raw.in_transaction:
+            if self._pinned():
+                self._lock.release()          # already pinned; drop this call's acquire
+            else:
+                self._pin.held = True         # keep this acquire as the transaction pin
+        else:
+            self._lock.release()              # no open transaction; release now
+
+    def _finish(self, fn):
+        self._acquire()
+        try:
+            fn()
+        finally:
+            if self._pinned():
+                self._pin.held = False
+                self._lock.release()          # release the transaction pin
+            self._lock.release()              # release this call's acquire
+
+    def execute(self, *a, **k):
+        return self._run(self._raw.execute, *a, **k)
+
+    def executemany(self, *a, **k):
+        return self._run(self._raw.executemany, *a, **k)
+
+    def executescript(self, *a, **k):
+        return self._run(self._raw.executescript, *a, **k)
+
+    def commit(self):
+        self._finish(self._raw.commit)
+
+    def rollback(self):
+        self._finish(self._raw.rollback)
+
+    def close(self):
+        self._raw.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is None:
+            self.commit()
+        else:
+            self.rollback()
+        return False
+
+
 class Store:
     """A connection to one Engraphis v2 database (one file, or ``:memory:``)."""
 
@@ -178,10 +287,14 @@ class Store:
         if connect is not None:
             # Injected connection factory (e.g. the SQLCipher encrypted backend). It owns
             # opening + keying + row_factory; the core never imports the concrete driver.
-            self.conn = connect(path)
+            raw_conn = connect(path)
         else:
-            self.conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
-            self.conn.row_factory = sqlite3.Row
+            raw_conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
+            raw_conn.row_factory = sqlite3.Row
+        # Serialize the shared connection so concurrent threadpool handlers can't interleave
+        # transactions on it (see _SerializedConnection). All Store/service/backend access
+        # goes through self.conn, so wrapping here covers every writer.
+        self.conn = _SerializedConnection(raw_conn)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.execute("PRAGMA synchronous=NORMAL")
