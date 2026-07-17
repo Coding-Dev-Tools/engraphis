@@ -321,3 +321,42 @@ def test_login_burst_cannot_beat_lockout_via_offlock_hash(monkeypatch, tmp_path)
         "SELECT COUNT(*) FROM auth_sessions WHERE user_id IN "
         "(SELECT id FROM users WHERE email='member@example.com')"
     ).fetchone()[0] == 0
+
+
+def test_login_does_not_hold_store_lock_during_password_hash(monkeypatch, tmp_path):
+    """PBKDF2 (~100ms) must run OUTSIDE ``AuthStore._lock`` (commit e8d4ac9): the async auth
+    middleware resolves every request's session under that SAME lock, so holding it across the
+    hash serialized the whole dashboard behind one in-flight login. Prove a login parked in the
+    hash does NOT block another lock-taking operation — the coverage e8d4ac9 shipped without."""
+    _allow_team(monkeypatch)
+    import engraphis.inspector.auth as auth_mod
+
+    store = AuthStore(str(tmp_path / "users.db"), iterations=1)
+    store.create_user("admin@example.com", "Admin", PASSWORD, "admin")
+
+    in_hash = threading.Event()
+    release_hash = threading.Event()
+    real_verify = auth_mod._verify_password
+
+    def slow_verify(password, encoded):
+        in_hash.set()                       # entered the hash phase...
+        release_hash.wait(5)                # ...and park here, NOT holding the store lock
+        return real_verify(password, encoded)
+
+    monkeypatch.setattr(auth_mod, "_verify_password", slow_verify)
+
+    login_thread = threading.Thread(
+        target=lambda: store.login("admin@example.com", PASSWORD))
+    login_thread.start()
+    assert in_hash.wait(5), "login never reached the password-hash phase"
+
+    # The hash is parked. A different lock-taking op must finish promptly; if the lock were
+    # held across the hash, count_users() would block until release_hash is set.
+    other_done = threading.Event()
+    threading.Thread(target=lambda: (store.count_users(), other_done.set())).start()
+    try:
+        assert other_done.wait(1.5), \
+            "AuthStore._lock was held during PBKDF2 — a concurrent op blocked on the hash"
+    finally:
+        release_hash.set()
+        login_thread.join(5)

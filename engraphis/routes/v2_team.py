@@ -177,7 +177,16 @@ def _cookie_secure(request: Request) -> bool:
     https``. Trusting ``request.url.scheme`` alone dropped Secure for every proxied
     deployment, letting the session cookie ride over cleartext HTTP. (Honouring the
     forwarded proto can only ADD Secure — making the cookie more restrictive — so a forged
-    header cannot downgrade cookie security.)"""
+    header cannot downgrade cookie security.)
+
+    Caveat (non-proxied plain-HTTP deployments): the forwarded proto is trusted from ANY
+    caller, so on a deployment that terminates NO TLS and sits behind NO proxy, an
+    intermediary — or the client itself — that injects ``X-Forwarded-Proto: https`` makes
+    this cookie Secure and therefore undeliverable over HTTP. That is a self-inflicted
+    lockout of that one caller (a client can only set the header on its OWN request), never
+    a cross-user risk and never a way to leak or downgrade a session. The supported topology
+    (TLS terminated at the app or a fronting proxy) is unaffected; if you must serve cleartext
+    HTTP with no proxy, do not front the app with anything that sets that header."""
     if request.url.scheme == "https":
         return True
     xfp = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
