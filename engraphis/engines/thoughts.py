@@ -27,7 +27,10 @@ def synthesize_thoughts(
     thought_prompt: Optional[str] = None,
 ) -> dict[str, Any]:
     """Recall recent high-salience memories, synthesize a thought via LLM, optionally persist."""
-    ctx = recall_engine.recall_master(namespace=namespace or "_global", max_chunks=max_chunks)
+    # Pass the namespace through as-is: ``None`` recalls across ALL namespaces (the
+    # consciousness loop calls this with namespace=None). Coercing to a nonexistent
+    # "_global" namespace made every global synthesis silently recall nothing and no-op.
+    ctx = recall_engine.recall_master(namespace=namespace, max_chunks=max_chunks)
     chunks = ctx.get("chunks", [])
     if not chunks:
         return {"thought": None, "source_count": 0, "persisted": False, "reason": "no_memories"}
