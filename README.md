@@ -497,6 +497,10 @@ default; MCP ingest remains an authenticated agent write.
 
 ## Consolidation and automated maintenance
 
+<p align="center">
+  <img src="docs/images/automation.png" alt="Engraphis Automated maintenance policy and scheduling dashboard" width="100%">
+</p>
+
 Manual consolidation is free. The Pro **Automation** tab (and the
 `GET/POST /api/automation` plus `POST /api/maintenance/run` API) can keep the store
 clean without you clicking anything,
