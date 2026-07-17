@@ -341,6 +341,16 @@ def _subscription_id(data: dict) -> str:
         raw = subscription.get("id") if isinstance(subscription, dict) else subscription
     return str(raw or "").strip()[:128]
 
+def _order_id(data: dict) -> str:
+    from engraphis.inspector.webhooks import _extract_order_id
+    order_id = _extract_order_id(data)
+    if order_id:
+        return order_id
+    order = data.get("order") or {}
+    if isinstance(order, dict):
+        return _extract_order_id(order)
+    return ""
+
 
 def _event_modified_at(data: dict) -> Optional[float]:
     """Epoch of the event object's own last-modification time, if the payload carries
@@ -481,26 +491,37 @@ async def polar_webhook(request: Request):
         logger.warning("polar webhook: organization id mismatch — rejecting")
         return JSONResponse({"error": "organization mismatch"}, status_code=403)
 
-    # Negative lifecycle: refund / chargeback / hard cancellation revokes every key for
-    # the subscription. Keys are cloud-enforced, so revocation bites at the next lease
-    # renewal (~24h). revoke_by_subscription is idempotent, so a redelivery is harmless.
+    # Negative lifecycle. Refunds revoke immediately; ordinary cancel-at-period-end
+    # intentionally does NOT revoke because the customer keeps the paid period.
+    if event_type in ("subscription.canceled", "subscription.cancelled"):
+        return JSONResponse({"status": "ignored", "reason": "paid period honored",
+                             "type": event_type}, status_code=202)
     if event_type in _REVOKING_EVENTS:
         sub_id = _subscription_id(data)
         if not sub_id and event_type.startswith("subscription."):
             sub_id = str(data.get("id") or "").strip()[:128]
-        if not sub_id:
-            return JSONResponse({"status": "ignored", "reason": "no subscription id",
+        order_id = _order_id(data)
+        if not order_id and event_type.startswith("order."):
+            order_id = str(data.get("id") or "").strip()[:128]
+        if not sub_id and not order_id:
+            return JSONResponse({"status": "ignored", "reason": "missing revoke target",
                                  "type": event_type}, status_code=202)
         try:
             from engraphis.inspector import license_registry as _reg
-            revoked = await asyncio.to_thread(_reg.revoke_by_subscription, sub_id)
+            if sub_id:
+                revoked = await asyncio.to_thread(_reg.revoke_by_subscription, sub_id)
+                target = {"subscription_id": sub_id}
+            else:
+                revoked = await asyncio.to_thread(_reg.revoke_by_order, order_id)
+                target = {"order_id": order_id}
         except Exception:  # noqa: BLE001 — retryable: let Polar redeliver the revoke
-            logger.exception("polar webhook: revocation failed for %s", sub_id)
+            logger.exception("polar webhook: revocation failed for %s", sub_id or order_id)
             return JSONResponse({"error": "revocation failed"}, status_code=503)
-        logger.info("polar webhook: %s revoked %d key(s) for subscription %s",
-                    event_type, revoked, sub_id)
-        return JSONResponse({"status": "revoked", "keys_revoked": revoked,
-                             "type": event_type}, status_code=202)
+        reason = "refund" if event_type == "order.refunded" else "subscription_revoked"
+        logger.info("polar webhook: %s revoked %d key(s) for %s",
+                    event_type, revoked, target)
+        return JSONResponse({"status": "revoked", "reason": reason, "revoked": revoked,
+                             "keys_revoked": revoked, **target}, status_code=202)
 
     # Route by event type and derive a stable per-fulfillment key so we issue exactly
     # ONE key per order and ONE per trial, no matter which/how many events fire:
@@ -539,6 +560,16 @@ async def polar_webhook(request: Request):
     elif event_type == "subscription.updated":
         status = str(data.get("status", "")).strip().lower()
         sub_id = str(data.get("id") or "").strip()[:128]
+        if status == "revoked":
+            try:
+                from engraphis.inspector import license_registry as _reg
+                revoked = await asyncio.to_thread(_reg.revoke_by_subscription, sub_id)
+            except Exception:  # noqa: BLE001 — retryable: let Polar redeliver the revoke
+                logger.exception("polar webhook: revocation failed for %s", sub_id)
+                return JSONResponse({"error": "revocation failed"}, status_code=503)
+            return JSONResponse({"status": "revoked", "reason": "subscription_revoked",
+                                 "revoked": revoked, "subscription_id": sub_id},
+                                status_code=202)
         if status != "active" or not sub_id:
             return JSONResponse({"status": "ignored", "reason": "not an active "
                                  "subscription", "type": event_type}, status_code=202)

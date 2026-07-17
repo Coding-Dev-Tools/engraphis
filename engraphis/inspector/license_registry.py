@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS issued_licenses (
     issued     REAL,
     expires    REAL,
     subscription_id TEXT,
+    order_id   TEXT,
     status     TEXT NOT NULL DEFAULT 'active',   -- 'active' | 'revoked'
     created_at REAL NOT NULL,
     revoked_at REAL
@@ -100,9 +101,14 @@ def connect(db_path: Optional[str] = None) -> sqlite3.Connection:
         row[1] for row in conn.execute("PRAGMA table_info(issued_licenses)").fetchall()}
     if "subscription_id" not in columns:
         conn.execute("ALTER TABLE issued_licenses ADD COLUMN subscription_id TEXT")
+    if "order_id" not in columns:
+        conn.execute("ALTER TABLE issued_licenses ADD COLUMN order_id TEXT")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_issued_subscription "
         "ON issued_licenses(subscription_id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_issued_order "
+        "ON issued_licenses(order_id)")
     return conn
 
 
@@ -127,15 +133,15 @@ def record_issued(key: str, *, db_path: Optional[str] = None) -> str:
     try:
         conn.execute(
             "INSERT INTO issued_licenses "
-            "  (key_id, email, plan, seats, issued, expires, subscription_id, status, "
-            "   created_at) "
-            "VALUES (?,?,?,?,?,?,?, 'active', ?) "
+            "  (key_id, email, plan, seats, issued, expires, subscription_id, order_id, "
+            "   status, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?, 'active', ?) "
             "ON CONFLICT(key_id) DO UPDATE SET "
             "  email=excluded.email, plan=excluded.plan, seats=excluded.seats, "
             "  issued=excluded.issued, expires=excluded.expires, "
-            "  subscription_id=excluded.subscription_id",
+            "  subscription_id=excluded.subscription_id, order_id=excluded.order_id",
             (lic.key_id, lic.email, lic.plan, lic.seats, lic.issued, lic.expires,
-             lic.subscription_id or None, time.time()),
+             lic.subscription_id or None, lic.order_id or None, time.time()),
         )
         conn.commit()
     finally:
@@ -223,6 +229,24 @@ def revoke_by_subscription(subscription_id: str, *,
     finally:
         conn.close()
 
+
+def revoke_by_order(order_id: str, *,
+                    db_path: Optional[str] = None) -> int:
+    """Revoke every active key issued for a Polar order. Returns keys changed."""
+    order_id = (order_id or "").strip()[:128]
+    if not order_id:
+        return 0
+    conn = connect(db_path)
+    try:
+        with conn:
+            cur = conn.execute(
+                "UPDATE issued_licenses SET status='revoked', revoked_at=? "
+                "WHERE order_id=? AND status!='revoked'",
+                (time.time(), order_id),
+            )
+        return cur.rowcount
+    finally:
+        conn.close()
 
 def is_revoked(key_id: str, *, db_path: Optional[str] = None) -> bool:
     """True only if the key is present AND explicitly revoked.

@@ -478,21 +478,38 @@ class AuthStore:
         # emails, to keep timing constant (no user enumeration).
         encoded = row["pw_hash"] if row else _hash_password("x", iterations=self.iterations)
         ok = _verify_password(password or "", encoded)
-        # Phase 3 (locked): record the outcome and mint the session.
+        # Phase 3 (locked): re-read state under the lock, then record the outcome and mint
+        # the session. The phase-1 `row` is a STALE snapshot across the off-lock PBKDF2, so:
+        #   • a disable or password reset committed during the hash must not be overwritten
+        #     by a session minted from the old row — re-fetch `fresh` and reject if the
+        #     account is now disabled/deleted, or if pw_hash rotated out from under the
+        #     password we just verified (a reset the old password must no longer satisfy);
+        #   • a lockout that engaged from concurrent attempts during the hash must be
+        #     honored before we mint, so a burst can't convert a hit into a session past
+        #     the throttle (PBKDF2 runs off-lock, so N parallel attempts all clear phase 1
+        #     before any failure is recorded — the re-check bounds session-minting to the
+        #     lockout threshold).
         with self._lock:
-            if not ok or row is None or row["disabled"]:
+            fresh = self.conn.execute(
+                "SELECT id, pw_hash, disabled FROM users WHERE email=?", (email,)).fetchone()
+            pw_rotated = row is not None and (
+                fresh is None or fresh["pw_hash"] != row["pw_hash"])
+            if not ok or fresh is None or fresh["disabled"] or pw_rotated:
                 fails = self._failures.pop(email, [])
                 fails.append(time.time())
                 self._failures[email] = fails
                 self._prune_throttle_maps(time.time())
                 self.record_event("login.failed", actor_email=email, ip=ip,
-                                  detail=("account_disabled" if row and row["disabled"]
+                                  detail=("account_disabled" if fresh and fresh["disabled"]
                                           else "bad_credentials"))
                 raise AuthError("invalid email or password")
+            if self._locked_until(email) > time.time():
+                self.record_event("login.locked", actor_email=email, ip=ip)
+                raise AuthError("too many failed attempts — try again in a minute")
             self._failures.pop(email, None)
-            token = self.create_session(row["id"])
-            user = self.get_user(row["id"])
-            self.record_event("login.success", actor_id=row["id"], actor_email=email, ip=ip)
+            token = self.create_session(fresh["id"])
+            user = self.get_user(fresh["id"])
+            self.record_event("login.success", actor_id=fresh["id"], actor_email=email, ip=ip)
         user["token"] = token
         return user
 

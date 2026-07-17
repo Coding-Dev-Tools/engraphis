@@ -214,6 +214,10 @@ def _extract_subscription_id(data: dict, *, object_is_subscription: bool = False
         raw = data.get("id")
     return str(raw or "").strip()[:128]
 
+def _extract_order_id(data: dict) -> str:
+    """Normalized Polar order id from an order-shaped payload."""
+    return str(data.get("id") or data.get("order_id") or "").strip()[:128]
+
 
 def _extract_product_name(data: dict) -> str:
     product = data.get("product") or {}
@@ -289,14 +293,14 @@ def _trial_days(period_end, *, now: Optional[float] = None) -> int:
 def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
               days: Optional[int] = None, metadata: Optional[dict] = None,
               *, trial: bool = False, record: bool = True,
-              subscription_id: str = "") -> str:
+              subscription_id: str = "", order_id: str = "") -> str:
     """Generate a signed ``ENGR1.xxx.yyy`` key for *email_addr*.
 
     Uses the pinned vendor signing key (``.secrets/vendor_signing.key`` or
     ``ENGRAPHIS_SIGNING_KEY`` env). ``product_name`` maps to a plan tier; ``days``
-    (or product/metadata inference via :func:`_key_days`) sets validity. ``record=False``
-    is for callers already holding the relay DB write lock; they should call
-    ``license_registry.record_issued`` after committing.
+    (or product/metadata inference via :func:`_key_days`) sets validity. Polar ids
+    are signed into auto-issued keys so refund webhooks can revoke exactly the
+    affected order/subscription without touching unrelated purchases.
     """
     secret = _load_signing_secret()
     pub = ed25519_public_key(secret).hex()
@@ -313,6 +317,7 @@ def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
         days = _key_days(product_name, metadata or {})
 
     subscription_id = str(subscription_id or "").strip()[:128]
+    order_id = str(order_id or "").strip()[:128]
     now = time.time()
     payload = {
         "v": 1,
@@ -321,8 +326,11 @@ def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
         "seats": max(1, int(seats)),
         "issued": int(now),
         "expires": int(now + days * 86400),
-        **({"subscription_id": subscription_id} if subscription_id else {}),
     }
+    if subscription_id:
+        payload["subscription_id"] = subscription_id
+    if order_id:
+        payload["order_id"] = order_id
     if trial:
         payload["trial"] = 1               # signed trial marker -> License.is_trial (UI)
     # Server-side enforcement (online-only): every minted key carries a signed
@@ -742,13 +750,13 @@ def _persist_fallback_key(email_addr: str, key: str, product_name: str) -> Optio
 
 def _issue_and_email(email_addr: str, product_name: str, seats: int,
                      days: Optional[int], *, is_trial: bool = False,
-                     subscription_id: str = "") -> str:
+                     subscription_id: str = "", order_id: str = "") -> str:
     """Mint a signed key and email it. On ANY delivery failure, persist the key to
     the 0600 fallback file (never the log) and still return it, so a paid or trial
     key is never lost and the webhook can 202 without a Polar retry-storm."""
     key = issue_key(
         email_addr, product_name=product_name, seats=seats, days=days,
-        trial=is_trial, subscription_id=subscription_id)
+        trial=is_trial, subscription_id=subscription_id, order_id=order_id)
     label = _plan_label(product_name)
     try:
         send_license_email(email_addr, key, product_name=label, is_trial=is_trial)
@@ -783,7 +791,8 @@ def handle_order_paid(payload: dict) -> Optional[str]:
     days = _key_days(product_name, product.get("metadata") or {})
     return _issue_and_email(
         email_addr, product_name, seats, days,
-        subscription_id=_extract_subscription_id(payload))
+        subscription_id=_extract_subscription_id(payload),
+        order_id=_extract_order_id(payload))
 
 
 def handle_subscription_updated(payload: dict) -> Optional[str]:

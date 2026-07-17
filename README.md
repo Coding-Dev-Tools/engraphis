@@ -142,8 +142,10 @@ roles, seats, cloud-license revocation). Deploy one instance on Railway and acce
 memories from any browser. Two paths, same button:
 
 - **Pro solo** — a Pro member deploys a single-admin cloud instance: browser dashboard
-  (analytics, automation, export) + a self-hosted sync relay. Local agents sync through
-  your own Railway instance. One admin, no member seats.
+  (analytics, automation, export) + a self-hosted sync relay. Activate the same Pro key
+  on each local instance, set `ENGRAPHIS_RELAY_URL=https://team.engraphis.com` on both
+  the hosted service and local instances, then enable auto-sync (or run **Sync now**).
+  One admin, no member seats.
 - **Team admin** — a Team administrator deploys one instance and invites members (email +
   password + role). Members sign in at your URL and connect their agents over HTTP/MCP —
   no local install for members.
@@ -206,9 +208,15 @@ engraphis-dashboard --install-shortcuts   # → Desktop + Start Menu icons
 docker compose up                     # → http://127.0.0.1:8700
 ```
 
-The default entrypoint is `engraphis-dashboard --no-open`. Set `ENGRAPHIS_API_TOKEN` to require
-authentication, `ENGRAPHIS_DB_KEY` to encrypt the database at rest, and `ENGRAPHIS_LICENSE_KEY`
-to unlock Pro/Team features. See `docker-compose.yml` for all options.
+A fresh clone needs no `.env`: the default service runs `engraphis-dashboard --no-open`,
+stores the v2 database plus license state on a named volume mounted at `/data`, and accepts
+overrides from `.env` or the shell. The legacy v1 API is opt-in with
+`docker compose --profile api up engraphis-api` and uses a separate database so its
+incompatible schema cannot collide with the dashboard.
+
+Set `ENGRAPHIS_API_TOKEN` to require API authentication, `ENGRAPHIS_DB_KEY` to encrypt
+the database at rest, and `ENGRAPHIS_LICENSE_KEY` to unlock Pro/Team features. See
+`docker-compose.yml` for all options.
 
 ---
 
@@ -224,6 +232,9 @@ Your agent now has 28 tools — remember, recall (grounded + proactive), proacti
 grounded answer alias, why, timeline, forget, pin, correct, promote, ingest, consolidate, index_repo,
 search/code path/impact/export, privacy receipts, PostgreSQL schema ingestion, link,
 record_event, start/end_session, and stats. See the [MCP tools table](#mcp-tools) below.
+
+For unattended jobs, `engraphis_start_session`, `engraphis_remember`, and
+`engraphis_record_event` use workspace `default` when `workspace` is omitted.
 
 ## Quickstart — repository graph
 
@@ -311,7 +322,7 @@ pinned. The full multi-predecessor chain remains visible through inspection, Why
 
 ---
 
-## Free forever vs. Pro
+## Free forever vs. Pro vs. Team
 
 The core engine, single-user dashboard, standalone MCP server, and governance tools are
 free and Apache-2.0, permanently. Paid Pro/Team keys are **server-authoritative**: the
@@ -425,27 +436,37 @@ See [`docs/SYNC.md`](docs/SYNC.md) for architecture, security model, and CLI usa
 
 ---
 
-## Security and trust boundaries
+## Security, reliability, and trust boundaries
 
-[PR #19](https://github.com/Coding-Dev-Tools/engraphis/pull/19) hardened the shared and
-commercial surfaces as well as adding features:
+The current shared and commercial surfaces enforce:
 
-- **Team authentication** — concurrent seat/admin/password-reset changes are serialized and
-  enforced server-side; sessions and agent-token history are bounded, and disable/reset events
-  revoke long-lived tokens.
-- **Relay isolation** — workspace scope is rechecked in both directions, personal Team folders
-  cannot enter the shared-account relay, and device-local `secret` memories cannot be remotely
-  overwritten, invalidated, or downgraded. Relay bundle size, count, and per-workspace storage
-  are bounded.
-- **Hostile-input handling** — sync-folder peers, graph merge inputs, repository walks, resource
-  files, and PostgreSQL selectors are treated as untrusted; traversal, symlink/replace races,
-  oversized/deep payloads, malformed rows, and non-finite JSON are rejected.
-- **Fail-closed networking** — managed service clients reject insecure or malformed endpoints;
-  relay clients do not forward bearer credentials across HTTP redirects. The read-only graph
-  server also refuses a non-loopback bind without a token.
+- **Team authentication and RBAC** — first-admin setup is atomic; login PBKDF2 verification
+  runs outside the shared store lock; sessions and agent-token history are bounded;
+  disable/reset events revoke long-lived tokens. Viewers read and members perform ordinary
+  writes. Only admins can change account-wide sync policy, import/index server-side
+  resources, or delete/merge workspaces.
+- **License and billing lifecycle** — paid features require a current machine-bound lease;
+  process cache and device-id creation are serialized. Billing webhook fulfillment is
+  bounded, durable, retry-safe, and idempotent.
+- **SQLite transaction safety** — shared v2 connections serialize complete write transactions;
+  a failed statement that opened a transaction rolls it back and releases its lock. Legacy
+  decay is frequency-independent, and sync preserves future bi-temporal validity horizons.
+- **Relay isolation** — workspace allow-lists are enforced while applying fetched data,
+  personal Team folders cannot enter the shared-account relay, and device-local `secret`
+  memories cannot be remotely overwritten, invalidated, or downgraded. Bundle size, count,
+  and per-workspace storage are bounded.
+- **Hostile-input handling** — sync-folder peers, graph merge inputs, repository walks,
+  resource files, and PostgreSQL selectors are treated as untrusted; traversal,
+  symlink/replace races, oversized/deep payloads, malformed rows, and non-finite JSON are
+  rejected.
+- **Proxy and network hardening** — default loopback CORS follows `ENGRAPHIS_PORT`;
+  proxy-reported HTTPS produces Secure session cookies, and redirects use the configured
+  dashboard URL rather than a caller-controlled Host header. Managed-service clients reject
+  insecure or malformed endpoints and never forward bearer credentials across HTTP
+  redirects.
 
-See [SECURITY.md](SECURITY.md) for supported versions, deployment requirements, known gaps, and
-the vulnerability-reporting process.
+See [SECURITY.md](SECURITY.md) for supported versions, deployment requirements, known gaps,
+and the vulnerability-reporting process.
 
 ---
 
@@ -548,7 +569,7 @@ All via environment (or `.env`):
 | `ENGRAPHIS_HOST` | `127.0.0.1` | Server bind address |
 | `ENGRAPHIS_PORT` | `8700` | Dashboard port |
 | `ENGRAPHIS_API_TOKEN` | — | If set, REST API requires `Authorization: Bearer <token>` |
-| `ENGRAPHIS_CORS_ORIGINS` | loopback origins | Comma-separated REST CORS allow-list |
+| `ENGRAPHIS_CORS_ORIGINS` | loopback on `ENGRAPHIS_PORT` | Comma-separated REST CORS allow-list; defaults to `127.0.0.1` and `localhost` on the configured port |
 | `ENGRAPHIS_WORKSPACES` | — | Optional comma-separated server-side workspace allow-list |
 | `ENGRAPHIS_DB_KEY` | — | Encrypt the database at rest (SQLCipher). Or use `ENGRAPHIS_DB_KEY_FILE` |
 | `ENGRAPHIS_EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | sentence-transformers model |
@@ -566,11 +587,11 @@ All via environment (or `.env`):
 | `ENGRAPHIS_LLM_API_KEY` | — | API key for chat/synthesis, `llm` / `llm_structured` extraction, and structured consolidation |
 | `ENGRAPHIS_LLM_BASE_URL` | — | Base URL for openrouter / custom OpenAI-compatible endpoints |
 | `ENGRAPHIS_LICENSE_KEY` | — | Pro/Team key (or `~/.engraphis/license.key`) |
-| `ENGRAPHIS_TEAM_MODE` | `1` | Mount Team features by default; the auth wall activates for a live Team license or an existing team. Set `0` to disable |
-| `ENGRAPHIS_DASHBOARD_URL` | — | Canonical public Team URL used in invites and the hosted MCP Host/Origin allow-list |
+| `ENGRAPHIS_TEAM_MODE` | `1` | Mount hosted auth/team plumbing; any active Pro/Team license activates the login wall and first-admin setup, and existing users keep the wall active after lapse. Set `0` to disable hosted user auth for single-user mode |
+| `ENGRAPHIS_DASHBOARD_URL` | — | Canonical public dashboard URL used in invites, reset links, redirects, and the hosted MCP Host/Origin allow-list |
 | `ENGRAPHIS_LOOP_INTERVAL` | `60` | Background consolidation loop interval in seconds (0 = disabled) |
 | `ENGRAPHIS_DECAY_HALFLIFE_DAYS` | `7` | Ebbinghaus decay half-life (higher = memories persist longer) |
-| `ENGRAPHIS_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted reverse-proxy IPs for TLS termination (`*` = trust all) |
+| `ENGRAPHIS_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Proxies trusted for forwarded client/TLS headers (`*` only when the service is reachable exclusively through that proxy) |
 | `ENGRAPHIS_RELAY_URL` | `https://team.engraphis.com` | Managed sync, license, trial, and invite relay (Pro/Team); the retired Railway URL is migrated automatically |
 | `ENGRAPHIS_AUTOSYNC_LOOP` | `1` | Kill switch for the in-process auto-sync loop (0 = off) |
 
@@ -591,7 +612,7 @@ engraphis/
 │   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
 │   ├── read_only_api.py     # token-protected recall/repository-graph HTTP surface
 │   ├── autosync.py          # background auto-sync loop (Pro/Team)
-│   ├── licensing.py         # license verification (offline + cloud)
+│   ├── licensing.py         # signed-key + live machine-bound lease verification
 │   ├── analytics.py         # Pro analytics engine
 │   ├── automation.py        # scheduled maintenance policies (Pro)
 │   ├── billing.py           # Polar webhook fulfillment

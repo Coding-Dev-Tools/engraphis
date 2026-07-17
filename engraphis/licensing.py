@@ -369,9 +369,11 @@ class License:
     enforce: str = ""
     #: License-server URL baked into the key at issuance — also signed/unforgeable.
     cloud_url: str = ""
-    #: Vendor-side subscription identity used only to supersede older keys for the same
-    #: subscription. Signed into the key, but deliberately omitted from public UI data.
+    #: Optional vendor-side identifiers used only for server revocation lookups. They are
+    #: signed into auto-issued keys so refund webhooks can revoke exactly the affected
+    #: order/subscription without touching unrelated purchases.
     subscription_id: str = ""
+    order_id: str = ""
 
     @classmethod
     def free(cls) -> "License":
@@ -508,6 +510,7 @@ def parse_key(key: str, *, now: Optional[float] = None) -> License:
         enforce=str(payload.get("enforce", "") or "").strip().lower(),
         cloud_url=str(payload.get("cloud_url", "") or "").strip().rstrip("/"),
         subscription_id=str(payload.get("subscription_id", "") or "").strip()[:128],
+        order_id=str(payload.get("order_id", "") or "").strip()[:128],
     )
 
 
@@ -521,6 +524,13 @@ _cache_recheck_at: float = float("inf")  # wall-clock time after which the cache
 # can be called from a context that already holds it. Without this, a concurrent
 # invalidate_cache() between the "is not None" check and the return could return None.
 _cache_lock = threading.RLock()
+#: Monotonic counter bumped on every cache invalidation or authoritative denial. A
+#: current_license() call snapshots it before its (unlocked, network) cloud gate and, when
+#: that gate comes back ALLOWED, only stores the paid result if the counter is unchanged.
+#: This closes a lost-update race: without it, an older "allowed" computed against
+#: pre-revocation state could land in the cache AFTER a newer denial / invalidate_cache()
+#: and resurrect a revoked key until the next recheck — defeating immediate fail-closed.
+_cache_generation: int = 0
 
 #: Cloud-mode cache lifetime. Each refresh contacts the license server; an authoritative
 #: denial fails closed immediately, while a transient network failure may continue using
@@ -589,10 +599,11 @@ def invalidate_cache() -> None:
     /refunded/seat-limit), so a paying customer's revoked entitlement stops working
     immediately instead of lingering until the lease TTL — without forcing the test
     suite to reach into private module state."""
-    global _cached, _cache_recheck_at
+    global _cached, _cache_recheck_at, _cache_generation
     with _cache_lock:
         _cached = None
         _cache_recheck_at = float("inf")
+        _cache_generation += 1  # supersede any allow still in flight (fail closed)
 
 
 def current_license(*, refresh: bool = False) -> License:
@@ -601,12 +612,15 @@ def current_license(*, refresh: bool = False) -> License:
     Never raises: a bad, revoked, expired, or currently unverifiable key degrades to the
     free tier and the reason is kept in :func:`license_error`.
     """
-    global _cached, _cache_error, _cache_recheck_at
+    global _cached, _cache_error, _cache_recheck_at, _cache_generation
     # Fast path under the lock: a valid, unexpired cache entry is returned atomically so a
     # concurrent invalidate_cache() can't null it out between the check and the return.
     with _cache_lock:
         if _cached is not None and not refresh and time.time() < _cache_recheck_at:
             return _cached
+        # Snapshot the generation for the staleness check below, taken while we still hold
+        # the lock so it's consistent with the cache state we're about to (re)compute from.
+        gen_at_start = _cache_generation
     # The cloud gate does network I/O, so run it OUTSIDE the lock (two threads racing a
     # cache miss just do redundant, idempotent work — last store wins). Online-only:
     # entitlement comes ONLY from a signature-valid key that ALSO passes the server-side
@@ -624,10 +638,12 @@ def current_license(*, refresh: bool = False) -> License:
             if not allowed:
                 lic, reason = None, gate_reason  # cloud denied (revoked/unregistered) → free
     with _cache_lock:
-        if lic is not None:
-            _cached, _cache_error = lic, ""
-            _cache_recheck_at = _license_recheck_at(lic)
-        else:
+        if lic is None:
+            # A denial / free fallback is authoritative and must win over any concurrently
+            # in-flight allow: bump the generation FIRST so a slower "allowed" result
+            # computed against older (pre-revocation) state is discarded by the staleness
+            # check below instead of resurrecting a revoked key until the next recheck.
+            _cache_generation += 1
             _cache_error = reason
             _cached = License.free()
             # A configured key that temporarily failed its cloud gate must retry
@@ -637,6 +653,14 @@ def current_license(*, refresh: bool = False) -> License:
                 time.time() + _CLOUD_RECHECK_SECONDS
                 if material else _license_recheck_at(_cached)
             )
+        elif _cache_generation != gen_at_start:
+            # An invalidate_cache() or a denial landed while our cloud gate was in flight,
+            # so this "allowed" result may already be stale. Fail closed: don't overwrite
+            # the current (fail-closed) state — the next refresh re-verifies with the server.
+            return _cached if _cached is not None else License.free()
+        else:
+            _cached, _cache_error = lic, ""
+            _cache_recheck_at = _license_recheck_at(lic)
         return _cached
 
 

@@ -199,3 +199,125 @@ def test_disabling_user_permanently_revokes_api_tokens(monkeypatch, tmp_path):
     store.update_user(member["id"], disabled=False, seat_limit=2)
 
     assert store.resolve_api_token(token) is None
+
+
+def _park_first_hash(monkeypatch):
+    """Make the FIRST PBKDF2 verification block until released, so a test can inject a
+    concurrent disable / reset / lockout into the window where ``login`` runs the hash
+    OFF the lock (between phase 1 and phase 3). Later verifications — e.g. the failed
+    logins that drive a lockout — run normally. Returns ``(in_hash, release)`` events."""
+    import engraphis.inspector.auth as authmod
+
+    in_hash = threading.Event()
+    release = threading.Event()
+    real_verify = authmod._verify_password
+    state = {"n": 0}
+
+    def blocking_verify(password, encoded):
+        n = state["n"]
+        state["n"] += 1
+        result = real_verify(password, encoded)
+        if n == 0:
+            in_hash.set()
+            release.wait(5)
+        return result
+
+    monkeypatch.setattr(authmod, "_verify_password", blocking_verify)
+    return in_hash, release
+
+
+def test_login_denied_when_user_disabled_during_hash(monkeypatch, tmp_path):
+    """A disable committed while a login is mid-hash must not be overwritten by a session
+    minted from the stale phase-1 row."""
+    _allow_team(monkeypatch)
+    store = AuthStore(str(tmp_path / "users.db"), iterations=1)
+    store.create_user("admin@example.com", "Admin", PASSWORD, "admin")
+    member = store.create_user(
+        "member@example.com", "Member", PASSWORD, "member", seat_limit=5)
+    in_hash, release = _park_first_hash(monkeypatch)
+
+    result = {}
+
+    def do_login():
+        try:
+            result["user"] = store.login("member@example.com", PASSWORD)
+        except AuthError as exc:
+            result["error"] = str(exc)
+
+    thread = threading.Thread(target=do_login)
+    thread.start()
+    assert in_hash.wait(5)                               # parked mid-hash (phase 2)
+    store.update_user(member["id"], disabled=True)        # disable lands during the hash
+    release.set()
+    thread.join(5)
+
+    assert "user" not in result                           # no session for a disabled user
+    assert "error" in result
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM auth_sessions WHERE user_id=?", (member["id"],)
+    ).fetchone()[0] == 0
+
+
+def test_login_rejected_when_password_reset_during_hash(monkeypatch, tmp_path):
+    """The OLD password, verified against the pre-reset hash off the lock, must not mint a
+    session once a reset rotates ``pw_hash`` during the hash window."""
+    _allow_team(monkeypatch)
+    store = AuthStore(str(tmp_path / "users.db"), iterations=1)
+    store.create_user("admin@example.com", "Admin", PASSWORD, "admin")
+    store.create_user("member@example.com", "Member", PASSWORD, "member", seat_limit=5)
+    in_hash, release = _park_first_hash(monkeypatch)
+
+    result = {}
+
+    def do_login():
+        try:
+            result["user"] = store.login("member@example.com", PASSWORD)   # the OLD password
+        except AuthError as exc:
+            result["error"] = str(exc)
+
+    thread = threading.Thread(target=do_login)
+    thread.start()
+    assert in_hash.wait(5)
+    reset = store.request_password_reset("member@example.com")
+    store.reset_password(reset["token"], "BrandNewPassword9!")             # rotates pw_hash
+    release.set()
+    thread.join(5)
+
+    assert "user" not in result        # the old password must not sign in after the reset
+    assert "error" in result
+
+
+def test_login_burst_cannot_beat_lockout_via_offlock_hash(monkeypatch, tmp_path):
+    """Because PBKDF2 runs off the lock, a burst of attempts all clear the phase-1 throttle
+    gate before any failure is recorded. Phase 3 must re-check the lockout so a correct
+    guess inside the burst can't be converted into a session past the threshold."""
+    _allow_team(monkeypatch)
+    from engraphis.inspector.auth import LOCKOUT_FAILS
+    store = AuthStore(str(tmp_path / "users.db"), iterations=1)
+    store.create_user("admin@example.com", "Admin", PASSWORD, "admin")
+    store.create_user("member@example.com", "Member", PASSWORD, "member", seat_limit=5)
+    in_hash, release = _park_first_hash(monkeypatch)
+
+    result = {}
+
+    def do_login():
+        try:
+            result["user"] = store.login("member@example.com", PASSWORD)   # correct password
+        except AuthError as exc:
+            result["error"] = str(exc)
+
+    thread = threading.Thread(target=do_login)
+    thread.start()
+    assert in_hash.wait(5)                       # correct login parked mid-hash, past phase 1
+    for _ in range(LOCKOUT_FAILS):               # drive the account into lockout meanwhile
+        with pytest.raises(AuthError):
+            store.login("member@example.com", "WrongPassword0!")
+    release.set()
+    thread.join(5)
+
+    assert "user" not in result                  # a hit can't be minted while locked out
+    assert "too many failed attempts" in result.get("error", "")
+    assert store.conn.execute(
+        "SELECT COUNT(*) FROM auth_sessions WHERE user_id IN "
+        "(SELECT id FROM users WHERE email='member@example.com')"
+    ).fetchone()[0] == 0

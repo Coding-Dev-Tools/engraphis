@@ -13,6 +13,7 @@ These are pure-stdlib (like tests/test_licensing.py), stubbing the vendor server
 monkeypatched ``cloud_license.register`` so no network is touched.
 """
 import json
+import threading
 import time
 
 import pytest
@@ -198,3 +199,49 @@ def test_every_paid_license_gets_rolling_recheck():
         License(plan="pro"), now=now) == now + lic._CLOUD_RECHECK_SECONDS
     assert lic._license_recheck_at(
         License(plan="team", expires=now + 30), now=now) == now + 30
+
+
+# ── concurrency: a stale ALLOW must never resurrect a revoked key (lost-update race) ──
+
+def test_stale_allow_does_not_override_newer_denial(monkeypatch):
+    """Lost-update race on the process license cache: two overlapping ``refresh=True``
+    calls straddle a revocation. The OLDER call's cloud gate returns ALLOWED (checked
+    just before the key was revoked) but is slow to store; the NEWER call returns DENIED
+    and stores the free tier first. The older allow must NOT then overwrite it and
+    re-enable the revoked key until the next recheck — the cache carries a generation that
+    the older store detects has moved, and fails closed."""
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _key())
+    lic.invalidate_cache()
+
+    started = threading.Event()
+    release = threading.Event()
+    calls = {"n": 0}
+
+    def fake_gate(license_obj, material):
+        n = calls["n"]
+        calls["n"] += 1
+        if n == 0:  # older refresh: server still says ALLOWED, but this thread stores late
+            started.set()
+            release.wait(5)
+            return True, ""
+        return False, "revoked"  # newer refresh: key has been revoked → DENIED
+
+    monkeypatch.setattr(lic, "_cloud_gate", fake_gate)
+
+    older = {}
+
+    def older_refresh():
+        older["lic"] = lic.current_license(refresh=True)
+
+    thread = threading.Thread(target=older_refresh)
+    thread.start()
+    assert started.wait(5)                          # older refresh is in-flight, pre-store
+    newer = lic.current_license(refresh=True)        # completes first: denial → free tier
+    assert not newer.is_paid
+    release.set()
+    thread.join(5)
+
+    # The older, now-stale allow must have been discarded — not written over the denial.
+    assert not older["lic"].is_paid
+    assert not lic.current_license().is_paid
+    assert not lic.has_feature("analytics")
