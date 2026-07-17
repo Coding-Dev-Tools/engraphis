@@ -168,9 +168,24 @@ def _auth_iterations() -> int:
     return PBKDF2_ITERATIONS
 
 
+def _cookie_secure(request: Request) -> bool:
+    """Whether the session cookie should carry the Secure flag.
+
+    True when the EXTERNAL connection is HTTPS — including behind a TLS-terminating proxy
+    (Railway et al.) that forwards plain HTTP internally but sets ``X-Forwarded-Proto:
+    https``. Trusting ``request.url.scheme`` alone dropped Secure for every proxied
+    deployment, letting the session cookie ride over cleartext HTTP. (Honouring the
+    forwarded proto can only ADD Secure — making the cookie more restrictive — so a forged
+    header cannot downgrade cookie security.)"""
+    if request.url.scheme == "https":
+        return True
+    xfp = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+    return xfp == "https"
+
+
 def _set_cookie(response: Response, token: str, *, secure: bool = False) -> None:
-    """Set the dashboard session cookie. Secure flag mirrors the Inspector pattern:
-    True when the request arrived over HTTPS, so the cookie is never sent cleartext.
+    """Set the dashboard session cookie. Secure flag comes from :func:`_cookie_secure`
+    (HTTPS, including via a TLS-terminating proxy), so the cookie is never sent cleartext.
     TTL matches the server-side session expiry (SESSION_TTL_SECONDS) — the browser
     drops the cookie exactly when the server stops honouring it."""
     response.set_cookie(_COOKIE, token, httponly=True, samesite="strict",
@@ -236,14 +251,18 @@ def attach(app: FastAPI, service):
         if store.count_users() > 0:
             raise HTTPException(status_code=400, detail={"error": "team already set up"})
         try:
-            admin = store.create_user(body.email, body.name, body.password, "admin")
+            # require_empty closes the TOCTOU: the zero-user check and the INSERT are atomic
+            # inside create_user's write transaction, so concurrent setups can't both create
+            # an admin (the router check above is just a fast-path).
+            admin = store.create_user(body.email, body.name, body.password, "admin",
+                                      require_empty=True)
             store.record_event("team.setup", actor_id=admin["id"], actor_email=admin["email"],
                                detail="initial admin created")
             u = store.login(body.email, body.password,
                             ip=request.client.host if request.client else None)
         except AuthError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)})
-        _set_cookie(response, u.pop("token"), secure=request.url.scheme == "https")
+        _set_cookie(response, u.pop("token"), secure=_cookie_secure(request))
         return {"user": u}
 
     @router.post("/login")
@@ -253,7 +272,7 @@ def attach(app: FastAPI, service):
             u = store.login(body.email, body.password, ip=ip)
         except AuthError as exc:
             raise HTTPException(status_code=401, detail={"error": str(exc)})
-        _set_cookie(response, u.pop("token"), secure=request.url.scheme == "https")
+        _set_cookie(response, u.pop("token"), secure=_cookie_secure(request))
         return {"user": u}
 
     @router.post("/forgot")
@@ -291,7 +310,7 @@ def attach(app: FastAPI, service):
             u = store.reset_password(body.token, body.password)
         except AuthError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)})
-        _set_cookie(response, u.pop("token"), secure=request.url.scheme == "https")
+        _set_cookie(response, u.pop("token"), secure=_cookie_secure(request))
         return {"user": u}
 
     @router.post("/logout")

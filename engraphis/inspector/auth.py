@@ -225,7 +225,8 @@ class AuthStore:
 
     @_serialized
     def create_user(self, email: str, name: str, password: str, role: str,
-                    *, seat_limit: Optional[int] = None) -> dict:
+                    *, seat_limit: Optional[int] = None,
+                    require_empty: bool = False) -> dict:
         # The very first user (bootstrap admin, called from /api/auth/setup on a
         # zero-user store) is exempt from the license gate. Every user after that
         # still requires an active Team license — this only closes the chicken-and-egg
@@ -258,6 +259,12 @@ class AuthStore:
                 conn.execute("BEGIN IMMEDIATE")
                 started = True
             if int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]) > 0:
+                # require_empty makes /api/auth/setup atomic: the first-admin bootstrap must
+                # create EXACTLY ONE user, so if any exists by the time we hold the write
+                # lock, refuse — this closes the setup TOCTOU where two concurrent requests
+                # both passed the router's count check and both created an admin.
+                if require_empty:
+                    raise AuthError("team already set up")
                 from engraphis.licensing import require_feature
                 require_feature("team")
             if seat_limit is not None and int(conn.execute(
