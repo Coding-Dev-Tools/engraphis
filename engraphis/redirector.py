@@ -11,18 +11,31 @@ from fastapi.responses import RedirectResponse
 import uvicorn
 
 
+def _redirect_base() -> str:
+    """Canonical dashboard base URL to redirect to, taken from CONFIGURATION rather than
+    the request's Host / X-Forwarded-Host headers. Reflecting those untrusted headers into
+    the redirect target made this an open redirect (a spoofed header could send a victim to
+    an attacker-controlled origin). ``ENGRAPHIS_DASHBOARD_URL`` wins; otherwise fall back to
+    the local dashboard on :8700."""
+    base = os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip().rstrip("/")
+    if base:
+        return base
+    host = os.environ.get("ENGRAPHIS_HOST", "127.0.0.1")
+    return "http://%s:8700" % host
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Engraphis Redirect", docs_url=None, redoc_url=None)
+    base = _redirect_base()
 
     @app.get("/{path:path}", include_in_schema=False)
     async def redirect(request: Request, path: str):
-        scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-        host = request.headers.get("x-forwarded-host", request.headers.get("host", ""))
-        host = host.partition(":")[0]
+        # Only the PATH and query from the request are preserved; the destination origin is
+        # fixed by config, so this can't be turned into an open redirect.
+        target = base + "/" + path
         qs = request.url.query
-        target = f"{scheme}://{host}:8700/{path}"
         if qs:
-            target += f"?{qs}"
+            target += "?" + qs
         return RedirectResponse(target, status_code=301)
 
     return app
