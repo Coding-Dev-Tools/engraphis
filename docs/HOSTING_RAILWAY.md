@@ -41,12 +41,19 @@ on every redeploy. In Railway: **service → Settings → Volumes → New Volume
 `/data`** (1 GB is plenty). The Dockerfile already writes the DB and license state
 under `/data`.
 
-### 3. Set the forwarded-proxy env (required for logins over HTTPS)
+### 3. Trust Railway's proxy and set the public URL
 Railway fronts the container with a TLS proxy. In Railway: **service → Variables → add**:
 
 ```
 ENGRAPHIS_FORWARDED_ALLOW_IPS=*
+ENGRAPHIS_DASHBOARD_URL=https://team.engraphis.com
+ENGRAPHIS_RELAY_URL=https://team.engraphis.com
 ```
+
+`https://team.engraphis.com` is the canonical public URL. Configure that custom domain
+in step 7 before using the deployment. `ENGRAPHIS_DASHBOARD_URL` drives reset links,
+redirects, and hosted MCP Host/Origin checks. `ENGRAPHIS_RELAY_URL` makes the cloud
+dashboard exchange data through the relay mounted on this same instance.
 
 ### 4. Activate Pro
 Add `ENGRAPHIS_LICENSE_KEY=<your-pro-key>` in Railway Variables and redeploy. The key is
@@ -60,20 +67,23 @@ Team). The admin account gives you a browser session (session cookie) and the ab
 mint a per-user bearer token for API access.
 
 ### 6. Use it
-- **Browser dashboard:** sign in at your Railway URL with email + password. All Pro
-  features are unlocked: analytics, export, automation, cloud sync.
-- **Sync relay:** activate the same Pro key on each local instance, then set
-  `ENGRAPHIS_RELAY_URL` to your Railway URL (e.g.
-  `https://your-app.up.railway.app`). Your local agents write locally and sync to your
-  Railway instance — the dashboard reflects synced memories in real time.
+- **Browser dashboard:** sign in at `https://team.engraphis.com` with email + password.
+  All Pro features are unlocked: analytics, export, automation, cloud sync.
+- **Sync relay:** enable auto-sync in the cloud dashboard (or use **Sync now**). Activate
+  the same Pro key on each local instance, then set
+  `ENGRAPHIS_RELAY_URL=https://team.engraphis.com`. Your local agents write locally;
+  each sync pass exchanges changes through the hosted relay, and the cloud dashboard
+  shows them after its next sync pass.
 - **API access:** sign in, open **Settings → Connect your agent → Create token**, and use
   the bearer token for HTTP API access (`GET /api/recall` is read-enabled; write
   endpoints like `POST /api/remember` require a Team license — Pro solo uses cloud sync
   for writes, not direct agent-connect).
 
-### 7. (Optional) Custom domain
-Same as the Team path (see below). Set `ENGRAPHIS_DASHBOARD_URL=https://your-domain` so
-sync links and password-reset emails point at your domain.
+### 7. Configure the canonical domain
+Follow the Team custom-domain steps below. Set both
+`ENGRAPHIS_DASHBOARD_URL=https://team.engraphis.com` and
+`ENGRAPHIS_RELAY_URL=https://team.engraphis.com`, then update local instances to use
+that relay URL so links, password resets, and sync all use the canonical domain.
 
 ---
 
@@ -95,9 +105,11 @@ Deploy from GitHub repo → select `Coding-Dev-Tools/engraphis`**). Railway buil
 Dockerfile, which defaults to the v2 **team** dashboard on port `8700` and runs as a
 non-root user. (`railway.json` tells Railway the healthcheck at `/api/health`.)
 
-Railway gives the service a public URL like `https://engraphis-production.up.railway.app`.
-**Do not** set `ENGRAPHIS_DASHBOARD_URL` to that built-in relay-style URL — it's *your
-service's* URL, not the cloud-sync relay. (See step 4 for the right value.)
+The canonical public URL is `https://team.engraphis.com`. Add
+`ENGRAPHIS_DASHBOARD_URL=https://team.engraphis.com` in Railway Variables so invites,
+password resets, redirects, and hosted MCP checks use that domain. Configure the custom
+domain in step 4 before inviting members. Leave `ENGRAPHIS_RELAY_URL` at its
+`https://team.engraphis.com` managed-service default unless operating a separate relay.
 
 ### 2. Add a persistent volume (required)
 Without this, activated license keys, the one-time trial, and **all memories** are lost
@@ -105,9 +117,9 @@ on every redeploy. In Railway: **service → Settings → Volumes → New Volume
 `/data`** (1 GB is plenty for a small team). The Dockerfile already writes the DB and
 license state under `/data`.
 
-### 3. Set the forwarded-proxy env (required for logins over HTTPS)
-Railway fronts the container with a TLS proxy that isn't at `127.0.0.1`, so uvicorn won't
-mark the session cookie `Secure` unless you allow its forwarded headers. In Railway:
+### 3. Trust Railway's forwarded headers
+Railway fronts the container with a TLS proxy that isn't at `127.0.0.1`. Trust that proxy
+so the application interprets the external scheme and client address correctly. In Railway:
 **service → Variables → add**:
 
 ```
@@ -119,14 +131,14 @@ ENGRAPHIS_FORWARDED_ALLOW_IPS=*
 > **Port:** Railway auto-detects `8700` from the Dockerfile's `EXPOSE`. If the deploy
 > shows a port mismatch / 502, set the service's **Port** to `8700`.
 
-### 4. (Optional) Custom domain
+### 4. Configure the canonical custom domain
 For `https://team.engraphis.com`:
 1. **Railway → service → Settings → Networking → Custom Domain →** add
    `team.engraphis.com`; Railway shows a CNAME target.
 2. In your DNS, add `team.engraphis.com CNAME → <railway target>`. Railway auto-issues the
-   TLS cert.
-3. **Variables → add:** `ENGRAPHIS_DASHBOARD_URL=https://team.engraphis.com`
-   (with `https://`, no trailing slash) — this is what invite/password-reset emails link to.
+   TLS certificate.
+3. **Variables → update:** `ENGRAPHIS_DASHBOARD_URL=https://team.engraphis.com`
+   (with `https://`, no trailing slash).
 
 ### 5. Activate Team, then bootstrap the admin
 `POST /api/auth/setup` deliberately refuses to create the first admin until a paid
