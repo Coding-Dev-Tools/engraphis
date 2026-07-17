@@ -91,10 +91,30 @@ def list_documents(
         sql += " LIMIT ?"
         params.append(limit)
     if offset:
+        # SQLite requires LIMIT before OFFSET; without an explicit limit, LIMIT -1 means
+        # "no limit" so an offset alone stays valid SQL instead of a syntax error (500).
+        if not limit:
+            sql += " LIMIT -1"
         sql += " OFFSET ?"
         params.append(offset)
     rows = conn.execute(sql, params).fetchall()
     return [_row_to_mem(r) for r in rows]
+
+
+def find_document(document_id: str, namespace: Optional[str] = None) -> Optional[dict[str, Any]]:
+    """Fetch a memory by ``document_id``. With a namespace, scope to it; without one, return
+    the most recently updated match across all namespaces (document_id is only unique
+    per-namespace, so a bare lookup picks the newest rather than always missing)."""
+    conn = get_conn()
+    if namespace:
+        row = conn.execute(
+            "SELECT * FROM memories WHERE namespace=? AND document_id=?",
+            (namespace, document_id)).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM memories WHERE document_id=? ORDER BY updated_at DESC LIMIT 1",
+            (document_id,)).fetchone()
+    return _row_to_mem(row) if row else None
 
 
 def delete_memory_document(document_id: str, namespace: str) -> int:

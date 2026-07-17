@@ -171,8 +171,10 @@ async def list_documents(namespace: Optional[str] = None, limit: Optional[int] =
 
 @router.get("/documents/{document_id}")
 async def get_document(document_id: str, namespace: Optional[str] = None):
-    """GET /memory/documents/{documentId} — get a single document."""
-    doc = mem_store.get_memory(namespace or "_global", document_id)
+    """GET /memory/documents/{documentId} — get a single document. Without ``namespace``,
+    look it up across all namespaces instead of a nonexistent ``_global`` one (which made
+    the query always 404)."""
+    doc = mem_store.find_document(document_id, namespace)
     if not doc:
         raise HTTPException(404, f"Document {document_id} not found")
     return _ok(doc)
@@ -218,11 +220,14 @@ async def chat_memory_context(req: ChatRequest):
     user_msg = next((m for m in reversed(req.messages) if m.get("role") == "user"), None)
     if not user_msg:
         raise HTTPException(400, "At least one user message is required")
-    ctx = recall_engine.recall(namespace=None, prompt=user_msg["content"], num_chunks=10)
+    user_content = user_msg.get("content")
+    if not user_content or not str(user_content).strip():
+        raise HTTPException(400, "The latest user message must have non-empty 'content'")
+    ctx = recall_engine.recall(namespace=None, prompt=user_content, num_chunks=10)
     try:
         with LLMClient() as llm:
             answer = llm.chat_with_context(
-                user_prompt=user_msg["content"],
+                user_prompt=user_content,
                 context=ctx.get("llmContextMessage", ""),
                 temperature=req.temperature,
                 max_tokens=req.maxTokens or req.max_tokens,
@@ -243,6 +248,7 @@ async def record_interactions(req: InteractionRequest):
         raise HTTPException(400, "entityNames is required")
     levels = req.interactionLevels or req.interaction_levels
     level = req.interactionLevel or req.interaction_level or (levels[0] if levels else "view")
+    reinforced = 0
     for name in names:
         ledger_store.record_interaction(
             namespace=req.namespace,
@@ -251,7 +257,11 @@ async def record_interactions(req: InteractionRequest):
             description=req.description,
             timestamp=req.timestamp,
         )
-    return _ok({"recorded": len(names), "namespace": req.namespace, "level": level})
+        # Actually reinforce memories mentioning the entity — otherwise the signal is only
+        # logged and never affects retention.
+        reinforced += reweight.boost_entity_memories(req.namespace, name, level)
+    return _ok({"recorded": len(names), "namespace": req.namespace, "level": level,
+                "memories_reinforced": reinforced})
 
 
 @router.post("/interact")
@@ -287,7 +297,15 @@ async def prune_memory(req: PruneRequest):
     """
     from engraphis.engines.reweight import retention_score
 
-    threshold = req.min_retention if req.min_retention is not None else (req.minRetention or 0.05)
+    # Prefer snake_case, then camelCase, then the default — but honor an explicit 0.0
+    # (``req.minRetention or 0.05`` wrongly treated 0.0 as unset and deleted memories the
+    # caller asked to keep by requesting a zero threshold).
+    if req.min_retention is not None:
+        threshold = req.min_retention
+    elif req.minRetention is not None:
+        threshold = req.minRetention
+    else:
+        threshold = 0.05
     dry_run = req.dry_run if req.dry_run is not None else bool(req.dryRun)
     keep_pinned = req.keepPinned if req.keepPinned is not None else True
     max_delete = max(1, min(req.maxDelete or 500, 10000))
@@ -352,8 +370,9 @@ async def recall_memories(req: RecallMemoriesRequest):
 
 @router.post("/memories/context")
 async def memories_context(namespace: Optional[str] = None, maxChunks: Optional[int] = 10):
-    """POST /memory/memories/context — recall context."""
-    result = recall_engine.recall_master(namespace=namespace or "_global", max_chunks=maxChunks or 10)
+    """POST /memory/memories/context — recall context. Without a namespace, recall across
+    all of them (not a nonexistent '_global', which always returned nothing)."""
+    result = recall_engine.recall_master(namespace=namespace, max_chunks=maxChunks or 10)
     return _ok(result)
 
 
