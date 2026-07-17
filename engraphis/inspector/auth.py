@@ -137,11 +137,12 @@ def min_role(method: str, path: str) -> str:
         return "viewer"
     if path in (
         "/api/code/index", "/api/workspaces/import-folder", "/api/resources/postgres",
-        "/api/sync/run",
+        "/api/sync/run", "/api/workspaces/delete", "/api/workspaces/merge",
     ):
         # These operations read server-local files or make a caller-selected outbound
-        # connection, or mutate every shared workspace through the account-wide relay.
-        # Only an administrator may choose those sources/actions.
+        # connection, mutate every shared workspace through the account-wide relay, or
+        # IRREVERSIBLY destroy/combine a whole shared workspace (delete/merge). Those are
+        # not ordinary member governance actions — only an administrator may choose them.
         return "admin"
     if path.startswith("/api/auth/users") or path.startswith("/api/auth/audit") \
             or path == "/api/auth/overview" or path in (

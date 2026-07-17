@@ -79,6 +79,11 @@ def test_sync_auto_toggle_is_admin_only_but_members_still_write():
     assert min_role("POST", "/api/resources/postgres") == "admin"
     assert min_role("POST", "/api/sync/run") == "admin"
     assert min_role("POST", "/api/code/path") == "viewer"
+    # Irreversibly destroying/combining a whole shared workspace is admin-only, not an
+    # ordinary member action (a plain member must not be able to delete/merge everyone's
+    # workspace).
+    assert min_role("POST", "/api/workspaces/delete") == "admin"
+    assert min_role("POST", "/api/workspaces/merge") == "admin"
     # Members keep "store + view": they can write memories; viewers only read.
     assert min_role("POST", "/api/correct") == "member"
     assert min_role("GET", "/api/memories") == "viewer"
