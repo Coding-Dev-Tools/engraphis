@@ -4,13 +4,7 @@ FROM python:3.11-slim AS base
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    # Bind IPv6 dual-stack (``::``), NOT ``0.0.0.0``. Railway's deploy healthcheck and
-    # private networking reach the container over IPv6; an IPv4-only bind makes every
-    # ``/api/health`` probe miss, so the deploy is marked unhealthy and rolled back to a
-    # 502 even though the app started fine. ``::`` accepts IPv4 too (dual-stack). This is
-    # the config-as-code form of the ENGRAPHIS_HOST=:: service var that fixed the
-    # 2026-07-16 outage — keep it here so a GitHub auto-deploy can't regress.
-    ENGRAPHIS_HOST=:: \
+    ENGRAPHIS_HOST=0.0.0.0 \
     ENGRAPHIS_PORT=8700 \
     ENGRAPHIS_DB_PATH=/data/engraphis.db \
     # Cache the sentence-transformers model on the persistent /data volume so it downloads
@@ -51,10 +45,10 @@ EXPOSE 8700
 # /api/health is served by BOTH entrypoints (engraphis-server AND engraphis-dashboard),
 # so this check is correct regardless of which one a service runs.
 # start-period is generous: the first cold boot downloads the embedding model (cached to
-# the /data volume via HF_HOME thereafter). Uses ``localhost`` (resolves to ::1 + 127.0.0.1,
-# matching the IPv6 bind) and honors $PORT so it stays correct if the platform overrides it.
+# the /data volume via HF_HOME thereafter). The app listens on IPv4 so this matches the
+# GitHub smoke test as well as platform routing; it also honors $PORT if the platform overrides it.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --retries=3 \
-    CMD python -c "import os,urllib.request,sys; p=os.environ.get('PORT') or os.environ.get('ENGRAPHIS_PORT','8700'); sys.exit(0 if urllib.request.urlopen('http://localhost:%s/api/health' % p).status==200 else 1)"
+    CMD python -c "import os,urllib.request,sys; p=os.environ.get('PORT') or os.environ.get('ENGRAPHIS_PORT','8700'); sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:%s/api/health' % p).status==200 else 1)"
 
 # The entrypoint fixes volume ownership then drops to the non-root `engraphis` user before
 # running the CMD (or any Railway/compose start-command override, which becomes its args).
