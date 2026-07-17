@@ -3,7 +3,7 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
-## [Unreleased]
+## [0.9.7] - 2026-07-17
 
 ### Security
 - Vendor-wide license administration on the shared relay (`/license/v1` revoke /
