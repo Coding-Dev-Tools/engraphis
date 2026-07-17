@@ -385,14 +385,19 @@ def _organization_mismatch(event: dict, data: dict) -> bool:
     return not hmac.compare_digest(found, expected)
 
 
-# Subscription/order lifecycle events that END entitlement. A signed delivery of any of
-# these revokes every key for the subscription (keys are cloud-enforced, so revocation
-# takes effect at the next lease renewal). "canceled" here means a hard cancel/expiry;
-# a mere cancel-at-period-end flag arrives as subscription.updated with status still
-# active and is intentionally NOT in this set — that key should live out the paid period.
+# Events that END entitlement IMMEDIATELY -> revoke every key for the subscription (keys
+# are cloud-enforced, so revocation takes effect at the next lease renewal, ~24h).
+#
+# A plain cancel-at-period-end (``subscription.canceled``) is deliberately NOT here: the
+# customer paid for the current period and keeps their plan until it ends — their
+# period-bounded key simply expires (Polar later fires ``subscription.revoked`` when access
+# actually ends). Only a REFUND (or an explicit access revocation) removes access now:
+#   order.refunded       -> the money was returned, so pull the license immediately.
+#   subscription.revoked -> Polar has revoked access (refund-driven, admin action, or the
+#                           end of a cancel-at-period-end period).
 _REVOKING_EVENTS = frozenset({
-    "order.refunded", "order.refund.created",
-    "subscription.revoked", "subscription.canceled", "subscription.cancelled",
+    "order.refunded",
+    "subscription.revoked",
 })
 
 

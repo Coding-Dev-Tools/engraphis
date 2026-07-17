@@ -963,22 +963,41 @@ def test_order_refunded_revokes_subscription_keys(monkeypatch):
     assert LR.is_revoked(kid) is True
 
 
-def test_subscription_canceled_revokes_by_top_level_id(monkeypatch):
+def test_subscription_revoked_removes_access_by_top_level_id(monkeypatch):
     # subscription.* payloads ARE a Subscription object, so the id is top-level (not
-    # subscription_id). Revocation must still find and revoke the key.
+    # subscription_id). An explicit access revocation must still find and revoke the key.
     from engraphis.inspector import license_registry as LR
     from engraphis.inspector import webhooks as WH
     monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
     key = WH.issue_key("buyer@example.com", product_name="Engraphis Pro", seats=1,
-                       days=395, subscription_id="sub_cancel")
+                       days=395, subscription_id="sub_revoked")
     kid = parse_key(key).key_id
     client = _inspector_client(monkeypatch)
     body = _body({"type": "subscription.revoked", "data": {
-        "id": "sub_cancel", "status": "canceled",
+        "id": "sub_revoked", "status": "canceled",
         "customer": {"email": "buyer@example.com"}}})
-    r = _post(client, WHSEC, "evt_cancel", body)
+    r = _post(client, WHSEC, "evt_revoked", body)
     assert r.status_code == 202 and r.json()["status"] == "revoked"
     assert LR.is_revoked(kid) is True
+
+
+def test_subscription_canceled_keeps_plan_until_period_end(monkeypatch):
+    # Cancel-at-period-end must NOT revoke: the buyer paid for the period and keeps their
+    # plan until their period-bounded key naturally expires. Only refund / revoked pulls
+    # access immediately.
+    from engraphis.inspector import license_registry as LR
+    from engraphis.inspector import webhooks as WH
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
+    key = WH.issue_key("buyer@example.com", product_name="Engraphis Team", seats=3,
+                       days=395, subscription_id="sub_keep")
+    kid = parse_key(key).key_id
+    client = _inspector_client(monkeypatch)
+    body = _body({"type": "subscription.canceled", "data": {
+        "id": "sub_keep", "status": "active",
+        "customer": {"email": "buyer@example.com"}}})
+    r = _post(client, WHSEC, "evt_keep", body)
+    assert r.status_code == 202 and r.json()["status"] == "ignored"
+    assert LR.is_revoked(kid) is False          # key stays valid until it expires
 
 
 # ── #4: a mid-cycle reissue is bounded to the paid period, not a full new window ─
