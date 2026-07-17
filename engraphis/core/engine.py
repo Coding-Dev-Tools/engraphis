@@ -11,6 +11,7 @@ backends for production.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 import time
@@ -39,6 +40,12 @@ from engraphis.core.textutil import estimate_tokens, jaccard, tokenize
 # Sensitivity lattice: a merge keeps the *most restrictive* label of its sources, so
 # secret/sensitive content can never be laundered into a lower-sensitivity merged fact.
 _SENSITIVITY_RANK = {"normal": 0, "sensitive": 1, "secret": 2}
+_SCOPE_RANK = {
+    Scope.SESSION: 0,
+    Scope.REPO: 1,
+    Scope.WORKSPACE: 2,
+    Scope.USER: 3,
+}
 
 # A-MEM-style evolution: how many related neighbors a new memory auto-links to on write.
 # Bounded so hub memories don't accrete unbounded link lists (link quality > quantity).
@@ -99,7 +106,7 @@ class MemoryEngine:
     # ── write ─────────────────────────────────────────────────────────────────
     def remember(self, content: str, *, workspace_id: str, repo_id: Optional[str] = None,
                  session_id: Optional[str] = None, mtype: MemoryType = MemoryType.SEMANTIC,
-                 scope: Scope = Scope.REPO, title: str = "", importance: float = 0.0,
+                 scope: Optional[Scope] = None, title: str = "", importance: float = 0.0,
                  keywords: Optional[list] = None, metadata: Optional[dict] = None,
                  valid_from: Optional[float] = None, resolve_conflicts: bool = True,
                  candidate_k: int = 5) -> str:
@@ -116,7 +123,7 @@ class MemoryEngine:
 
     def remember_with_resolution(self, content: str, *, workspace_id: str,
                  repo_id: Optional[str] = None, session_id: Optional[str] = None,
-                 mtype: MemoryType = MemoryType.SEMANTIC, scope: Scope = Scope.REPO,
+                 mtype: MemoryType = MemoryType.SEMANTIC, scope: Optional[Scope] = None,
                  title: str = "", importance: float = 0.0, keywords: Optional[list] = None,
                  metadata: Optional[dict] = None, valid_from: Optional[float] = None,
                  resolve_conflicts: bool = True, candidate_k: int = 5) -> dict:
@@ -131,14 +138,37 @@ class MemoryEngine:
           one's validity was closed (never deleted) and this was inserted. ``superseded``
           lists the closed id(s).
         """
+        scope_was_omitted = scope is None
+        scope = (
+            Scope.REPO if (repo_id or session_id) else Scope.WORKSPACE
+        ) if scope is None else Scope(scope)
+        if session_id:
+            session = self.store.get_session(session_id)
+            if session is None:
+                raise ValueError(f"no session with id '{session_id}'")
+            if session["workspace_id"] != workspace_id or (
+                    repo_id is not None and session.get("repo_id") != repo_id):
+                raise ValueError("session_id does not belong to that workspace/repo")
+            if scope in (Scope.SESSION, Scope.REPO) and repo_id is None:
+                repo_id = session.get("repo_id")
+        if scope == Scope.SESSION and not session_id:
+            raise ValueError("session scope requires session_id")
+        if scope == Scope.REPO and not repo_id:
+            if scope_was_omitted:
+                scope = Scope.WORKSPACE
+            else:
+                raise ValueError("repo scope requires repo_id")
+        if scope in (Scope.WORKSPACE, Scope.USER) and repo_id:
+            raise ValueError(f"{scope.value} scope requires repo_id to be omitted")
         text = f"{title}\n{content}" if title else content
         vec = self.embedder.embed([text])[0]
 
         decision, neighbors = None, []
         if resolve_conflicts:
             decision, neighbors = self._resolve_against_neighbors(
-                text, vec, workspace_id=workspace_id, repo_id=repo_id, scope=scope,
-                mtype=mtype, candidate_k=candidate_k,
+                text, vec, workspace_id=workspace_id, repo_id=repo_id,
+                session_id=session_id, scope=scope, mtype=mtype,
+                candidate_k=candidate_k,
             )
 
         if decision is not None and decision.op == ResolutionOp.NOOP:
@@ -336,14 +366,17 @@ class MemoryEngine:
         return linked
 
     def _resolve_against_neighbors(self, text: str, vec: np.ndarray, *, workspace_id: str,
-                                   repo_id: Optional[str], scope: Scope, mtype: MemoryType,
-                                   candidate_k: int):
+                                   repo_id: Optional[str], session_id: Optional[str],
+                                   scope: Scope, mtype: MemoryType, candidate_k: int):
         """Fetch same-scope neighbors via the vector index and run the deterministic
         resolver (``core.resolve``). Returns ``(decision, neighbors)`` so the caller can
         also evolve the neighborhood. Never raises — a broken/missing index degrades to
         "no neighbors found" (ADD), not a write failure."""
-        flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id, scopes=[scope],
-                           mtypes=[mtype])
+        flt = SearchFilter(
+            workspace_id=workspace_id, repo_id=repo_id,
+            session_id=session_id if scope == Scope.SESSION else None,
+            scopes=[scope], mtypes=[mtype],
+        )
         try:
             hits = self.index.search(vec, candidate_k, filter=flt)
         except Exception:
@@ -354,6 +387,7 @@ class MemoryEngine:
             nrec = self.store.get_memory(nid)
             if (nrec and nrec.workspace_id == workspace_id and nrec.repo_id == repo_id
                     and nrec.scope == scope and nrec.mtype == mtype
+                    and (scope != Scope.SESSION or nrec.session_id == session_id)
                     and nrec.expired_at is None
                     and (nrec.valid_to is None or nrec.valid_to > now)):
                 neighbors.append((sim, nrec))
@@ -361,7 +395,7 @@ class MemoryEngine:
 
     # ── ingest: extract-then-remember ───────────────────────────────────────────
     def ingest(self, text: str, *, workspace_id: str, repo_id: Optional[str] = None,
-               session_id: Optional[str] = None, scope: Scope = Scope.REPO,
+               session_id: Optional[str] = None, scope: Optional[Scope] = None,
                default_mtype: MemoryType = MemoryType.SEMANTIC,
                metadata: Optional[dict] = None, resolve_conflicts: bool = True) -> dict:
         """Store raw, undistilled text. When an ``Extractor`` is configured, the text is
@@ -404,16 +438,43 @@ class MemoryEngine:
                             dry_run=dry_run, llm=llm, **kw)
 
     # ── read ──────────────────────────────────────────────────────────────────
+    def _recall_filter(self, *, workspace_id: Optional[str], repo_id: Optional[str],
+                       session_id: Optional[str], scopes: Optional[list],
+                       mtypes: Optional[list], as_of: Optional[float]) -> SearchFilter:
+        """Build an ancestor-aware filter, resolving a session's parent repo in core.
+
+        The service performs the same validation for friendly error payloads, but direct
+        ``MemoryEngine`` callers must get identical hierarchy semantics.
+        """
+        if session_id:
+            session = self.store.get_session(session_id)
+            if session is None:
+                raise ValueError(f"no session with id '{session_id}'")
+            if workspace_id is not None and session["workspace_id"] != workspace_id:
+                raise ValueError("session_id does not belong to that workspace")
+            if repo_id is not None and session.get("repo_id") != repo_id:
+                raise ValueError("session_id does not belong to that repo")
+            workspace_id = workspace_id or session["workspace_id"]
+            repo_id = repo_id or session.get("repo_id")
+        return SearchFilter(
+            workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
+            scopes=scopes, mtypes=mtypes, as_of=as_of, include_ancestors=True,
+        )
+
     def recall(self, query: str, *, workspace_id: Optional[str] = None,
-               repo_id: Optional[str] = None, scopes: Optional[list] = None,
+               repo_id: Optional[str] = None, session_id: Optional[str] = None,
+               scopes: Optional[list] = None,
                mtypes: Optional[list] = None, as_of: Optional[float] = None,
                k: int = 8) -> RecallResult:
-        flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id, scopes=scopes,
-                           mtypes=mtypes, as_of=as_of)
+        flt = self._recall_filter(
+            workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
+            scopes=scopes, mtypes=mtypes, as_of=as_of,
+        )
         return self.recall_engine.recall(query, flt, k=k)
 
     def grounded_recall(self, query: str, *, workspace_id: Optional[str] = None,
-                        repo_id: Optional[str] = None, scopes: Optional[list] = None,
+                        repo_id: Optional[str] = None, session_id: Optional[str] = None,
+                        scopes: Optional[list] = None,
                         mtypes: Optional[list] = None, as_of: Optional[float] = None,
                         k: int = 8, llm=None, min_support: Optional[float] = None,
                         max_citations: int = 5, reinforce: bool = True):
@@ -427,8 +488,10 @@ class MemoryEngine:
         abstains. See ``core.grounded`` for the support signal and the security note.
         """
         from engraphis.core import grounded as _grounded
-        flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id, scopes=scopes,
-                           mtypes=mtypes, as_of=as_of)
+        flt = self._recall_filter(
+            workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
+            scopes=scopes, mtypes=mtypes, as_of=as_of,
+        )
         # Recall without reinforcing here: a grounded read should reward only the memories
         # it actually cites, and an abstain should reward nothing — don't reinforce the
         # irrelevant nearest-neighbours an off-topic query happened to surface.
@@ -449,7 +512,9 @@ class MemoryEngine:
         that a flat-namespace store (or a plain vector store) cannot answer — the
         superseded fact still exists, just outside the default visibility window.
         """
-        flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id)
+        flt = SearchFilter(
+            workspace_id=workspace_id, repo_id=repo_id, include_ancestors=True,
+        )
         live = [r for _, r in self._relatedness(query, flt, include_invalid=False)[:k]]
         history: list[MemoryRecord] = []
         if live:
@@ -469,7 +534,9 @@ class MemoryEngine:
         """Chronological, bi-temporal history of a fact: what we believed and when.
         Includes invalidated versions; sorted by ``valid_from``.
         """
-        flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id)
+        flt = SearchFilter(
+            workspace_id=workspace_id, repo_id=repo_id, include_ancestors=True,
+        )
         recs = [r for _, r in self._relatedness(query, flt, include_invalid=True)[:limit]]
         recs.sort(key=lambda r: r.valid_from or r.ingested_at or 0.0)
         return recs
@@ -504,7 +571,9 @@ class MemoryEngine:
         recall: importance + recency + retention, no semantic arm,
         plus the repo's last-session handoff (open threads / summary) if there is one.
         """
-        flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id)
+        flt = SearchFilter(
+            workspace_id=workspace_id, repo_id=repo_id, include_ancestors=True,
+        )
         now = now_ts()
         scored = []
         for rec in self.store.list_memories(flt, limit=500):
@@ -578,6 +647,134 @@ class MemoryEngine:
         if old.pinned:
             self.store.set_pinned(new_id, True)
         return {"id": new_id, "superseded": [memory_id], "reason": reason}
+
+    def promote(self, memory_id: str, target_scope: Scope, *, reason: str = "",
+                actor: str = "user") -> dict:
+        """Widen one live memory's scope without rewriting it in place.
+
+        Promotion creates (or deduplicates into) a wider-scoped record first, then
+        bi-temporally closes the narrow source and links the two. This preserves the
+        provenance/history contract while preventing duplicate recall in the source
+        context. Protection, confidentiality, and learned stability never decrease.
+        """
+        old = self.store.get_memory(memory_id)
+        if old is None:
+            raise KeyError(f"no memory with id '{memory_id}'")
+        now = now_ts()
+        if (old.expired_at is not None
+                or (old.valid_from is not None and old.valid_from > now)
+                or (old.valid_to is not None and old.valid_to <= now)):
+            raise ValueError("only a live memory can be promoted")
+        target_scope = Scope(target_scope)
+        if target_scope == Scope.USER:
+            raise ValueError(
+                "promotion to user scope is not supported by workspace-bound records"
+            )
+        if _SCOPE_RANK[target_scope] <= _SCOPE_RANK[old.scope]:
+            raise ValueError(
+                f"promotion must widen scope beyond '{old.scope.value}' "
+                f"(got '{target_scope.value}')"
+            )
+        target_repo_id = old.repo_id if target_scope == Scope.REPO else None
+        if target_scope == Scope.REPO and not target_repo_id:
+            raise ValueError("cannot promote to repo scope: source has no repo")
+
+        metadata = dict(old.metadata)
+        raw_promoted_from = metadata.get("promoted_from")
+        promoted_from = list(raw_promoted_from) if isinstance(raw_promoted_from, list) else []
+        if old.id not in promoted_from:
+            promoted_from.append(old.id)
+        metadata["promoted_from"] = promoted_from
+        metadata["promotion"] = {
+            "from_scope": old.scope.value,
+            "to_scope": target_scope.value,
+            "reason": reason[:500],
+        }
+        if old.provenance:
+            metadata["provenance"] = dict(old.provenance)
+
+        result = self.remember_with_resolution(
+            old.content,
+            workspace_id=old.workspace_id,
+            repo_id=target_repo_id,
+            session_id=None,
+            mtype=old.mtype,
+            scope=target_scope,
+            title=old.title,
+            importance=old.importance,
+            keywords=old.keywords,
+            metadata=metadata,
+            valid_from=old.valid_from,
+            resolve_conflicts=True,
+        )
+        promoted_id = result["id"]
+        promoted = self.store.get_memory(promoted_id)
+        if promoted is None:  # defensive: the write path must return a durable record
+            raise RuntimeError("promotion target was not stored")
+
+        sensitivity = max(
+            (old.sensitivity, promoted.sensitivity),
+            key=lambda value: _SENSITIVITY_RANK.get(value, 0),
+        )
+        promoted_metadata = dict(promoted.metadata)
+        inherited_from = promoted_metadata.get("promoted_from")
+        inherited_from = list(inherited_from) if isinstance(inherited_from, list) else []
+        old_chain = old.metadata.get("promoted_from")
+        for source_id in [*(old_chain if isinstance(old_chain, list) else []), old.id]:
+            if source_id not in inherited_from:
+                inherited_from.append(source_id)
+        promoted_metadata["promoted_from"] = inherited_from
+        promoted_metadata["promotion"] = {
+            "from_scope": old.scope.value,
+            "to_scope": target_scope.value,
+            "reason": reason[:500],
+        }
+        promoted_provenance = dict(promoted.provenance)
+        trusted = all(bool((record.provenance or {}).get("trusted", True))
+                      for record in (old, promoted))
+        if not trusted:
+            promoted_provenance["trusted"] = False
+        promoted_metadata["provenance"] = promoted_provenance
+        self.store.conn.execute(
+            "UPDATE memories SET pinned=?, sensitivity=?, stability=?, access_count=?, "
+            "last_access=?, metadata=?, provenance=? WHERE id=?",
+            (
+                int(old.pinned or promoted.pinned),
+                sensitivity,
+                max(old.stability, promoted.stability),
+                max(old.access_count, promoted.access_count),
+                max(old.last_access or 0.0, promoted.last_access or 0.0) or None,
+                json.dumps(promoted_metadata, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(promoted_provenance, ensure_ascii=False, separators=(",", ":")),
+                promoted_id,
+            ),
+        )
+        self.store.conn.commit()
+
+        self.store.close_validity(
+            old.id, actor=actor,
+            reason=reason or f"promoted from {old.scope.value} to {target_scope.value}",
+        )
+        try:
+            self.index.delete([old.id])
+        except Exception:
+            pass
+        if not self.store.has_link(promoted_id, old.id, relation="promotes"):
+            self.store.add_link(
+                promoted_id, old.id, "promotes", reason=reason or "scope promotion"
+            )
+        self.store.audit(
+            actor, "promote", promoted_id,
+            f"from {old.id} ({old.scope.value}->{target_scope.value}): {reason}"[:1000],
+        )
+        return {
+            "id": promoted_id,
+            "promoted_from": old.id,
+            "from_scope": old.scope.value,
+            "scope": target_scope.value,
+            "op": result["op"],
+            "reason": reason,
+        }
 
     def merge(self, source_ids: list, merged_content: str, *,
               title: Optional[str] = None, mtype: Optional[MemoryType] = None,

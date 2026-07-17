@@ -67,19 +67,24 @@ where you stopped.
 
 ## Promotion (widening scope)
 
-A learning often starts narrow (a session observation) and proves durable. There is no separate
-"promote" call in the current tool set — **promotion is re-`remember` at the wider scope**:
+A learning often starts narrow (a session observation) and proves durable. Promote the existing
+memory with `engraphis_promote(memory_id, target_scope, workspace, repo?, reason?)`:
 
-- Session note that turns out to be a real repo convention → `remember(..., scope="repo")`.
-  Dedup will reconcile it with anything similar already stored.
-- Repo fact that turns out to hold org-wide → `remember(..., scope="workspace", repo=None)`.
+- Session note that turns out to be a real repo convention → `target_scope="repo"`.
+- Repo fact that turns out to hold org-wide → `target_scope="workspace"`.
 
-Automatic consolidation (episodic→semantic distillation, auto-promotion) is a planned engine
-feature, not something the agent should assume happens — promote deliberately when you notice it.
+Promotion must be strictly wider. Engraphis writes/deduplicates the wider record first, then
+bi-temporally closes the narrow source and links them with `promotes`; pinning, sensitivity,
+provenance, and learned stability are inherited. Automatic promotion is not assumed — promote
+deliberately when evidence shows the learning applies more broadly.
+
+Promotion to `user` is not yet supported: current records remain workspace-bound, so calling it
+"wider" would be misleading until user-principal ownership exists in the schema.
 
 ## Reads are scoped too
 
-`engraphis_recall` / `why` / `timeline` take `workspace` (and optional `repo`) and only search
-within them. A `repo` filter requires a `workspace`. If you recall with no results and a `note`
-that the workspace/repo is unknown, you simply haven't written there yet — create memories first
-(any write auto-creates the workspace/repo).
+`engraphis_recall` is hierarchy-aware. A repo context sees that repo plus its workspace/user
+ancestors; a session context sees that exact session plus its repo/workspace/user ancestors.
+Other sessions never leak into repo/workspace recall. A `repo` or `session_id` filter requires a
+`workspace`. If recall returns no results and a `note` says the workspace/repo/session is unknown,
+you simply have not written there yet.

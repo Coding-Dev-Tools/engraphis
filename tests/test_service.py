@@ -37,6 +37,90 @@ def test_scope_isolation_by_workspace():
     assert all(m["content"] != "Secret beta fact about gadgets." for m in r["memories"])
 
 
+def test_repo_recall_inherits_workspace_memories():
+    s = _svc()
+    workspace = s.remember(
+        "Scopeprobe: every repository must use signed commits.",
+        workspace="acme", scope="workspace",
+    )
+    repo = s.remember(
+        "Scopeprobe: the web repository deploys on tags.",
+        workspace="acme", repo="web", scope="repo",
+    )
+
+    recalled = s.recall("scopeprobe", workspace="acme", repo="web", k=10)
+    ids = {memory["id"] for memory in recalled["memories"]}
+
+    assert {workspace["id"], repo["id"]} <= ids
+
+
+def test_session_recall_is_exact_and_inherits_ancestors():
+    s = _svc()
+    workspace = s.remember(
+        "Scopeprobe workspace convention.", workspace="acme", scope="workspace"
+    )
+    repo = s.remember(
+        "Scopeprobe repo convention.", workspace="acme", repo="web", scope="repo"
+    )
+    first_session = s.start_session("acme", repo="web", goal="first", force_new=True)
+    second_session = s.start_session("acme", repo="web", goal="second", force_new=True)
+    first = s.remember(
+        "Scopeprobe private first-session state.", workspace="acme", repo="web",
+        session_id=first_session["session_id"], scope="session",
+    )
+    second = s.remember(
+        "Scopeprobe private second-session state.", workspace="acme", repo="web",
+        session_id=second_session["session_id"], scope="session",
+    )
+
+    repo_recall = s.recall("scopeprobe", workspace="acme", repo="web", k=10)
+    repo_ids = {memory["id"] for memory in repo_recall["memories"]}
+    assert {workspace["id"], repo["id"]} <= repo_ids
+    assert first["id"] not in repo_ids and second["id"] not in repo_ids
+
+    session_recall = s.recall(
+        "scopeprobe", workspace="acme", repo="web",
+        session_id=first_session["session_id"], k=10,
+    )
+    session_ids = {memory["id"] for memory in session_recall["memories"]}
+    assert {workspace["id"], repo["id"], first["id"]} <= session_ids
+    assert second["id"] not in session_ids
+
+
+def test_write_scope_defaults_and_parent_validation():
+    s = _svc()
+    workspace = s.remember("Workspace default.", workspace="acme")
+    repo = s.remember("Repo default.", workspace="acme", repo="web")
+    assert workspace["scope"] == "workspace"
+    assert repo["scope"] == "repo"
+
+    session = s.start_session("acme", repo="web", force_new=True)
+    session_grouped_repo = s.remember(
+        "Session-grouped durable repo fact.", workspace="acme", repo="web",
+        session_id=session["session_id"],
+    )
+    session_private = s.remember(
+        "Session-private working state.", workspace="acme", repo="web",
+        session_id=session["session_id"], scope="session",
+    )
+    assert session_grouped_repo["scope"] == "repo"
+    assert session_private["scope"] == "session"
+
+    workspace_session = s.start_session("acme", force_new=True)
+    workspace_session_default = s.remember(
+        "Workspace-session grouped fact.", workspace="acme",
+        session_id=workspace_session["session_id"],
+    )
+    assert workspace_session_default["scope"] == "workspace"
+
+    with pytest.raises(ValidationError, match="repo scope requires"):
+        s.remember("broken", workspace="acme", scope="repo")
+    with pytest.raises(ValidationError, match="session scope requires"):
+        s.remember("broken", workspace="acme", repo="web", scope="session")
+    with pytest.raises(ValidationError, match="workspace scope requires repo"):
+        s.remember("broken", workspace="acme", repo="web", scope="workspace")
+
+
 def test_recall_unknown_workspace_is_empty_not_error():
     s = _svc()
     r = s.recall("anything", workspace="does-not-exist")
@@ -215,6 +299,51 @@ def test_correct_wrong_workspace_raises_validation_error():
     s.remember("anchor", workspace="beta")
     with pytest.raises(ValidationError):
         s.correct(out["id"], "tampered", workspace="beta")
+
+
+def test_promote_repo_memory_to_workspace():
+    s = _svc()
+    source = s.remember(
+        "Every service uses structured JSON logs.",
+        workspace="acme", repo="api", scope="repo",
+    )
+
+    promoted = s.promote(
+        source["id"], "workspace", workspace="acme", repo="api",
+        reason="confirmed across repositories",
+    )
+
+    assert promoted["scope"] == "workspace"
+    assert promoted["promoted_from"] == source["id"]
+    assert promoted["receipt"]["operation"] == "promote"
+    rec = s.store.get_memory(promoted["id"])
+    assert rec.repo_id is None
+    assert s.store.get_memory(source["id"]).valid_to is not None
+
+
+def test_promote_rejects_wrong_workspace_and_non_widening_scope():
+    s = _svc()
+    source = s.remember("Alpha convention.", workspace="alpha", repo="api")
+    s.remember("Beta anchor.", workspace="beta")
+
+    with pytest.raises(ValidationError):
+        s.promote(source["id"], "workspace", workspace="beta")
+    with pytest.raises(ValidationError, match="must widen"):
+        s.promote(source["id"], "repo", workspace="alpha", repo="api")
+
+
+def test_promote_session_to_repo_infers_repo_name():
+    s = _svc()
+    session = s.start_session("acme", repo="api", force_new=True)
+    source = s.remember(
+        "This session finding is now a repo convention.",
+        workspace="acme", repo="api", session_id=session["session_id"],
+        scope="session",
+    )
+
+    promoted = s.promote(source["id"], "repo", workspace="acme")
+
+    assert promoted["scope"] == "repo" and promoted["repo"] == "api"
 
 
 # ── bi-temporal: why / timeline / recall_proactive ───────────────────────────────
