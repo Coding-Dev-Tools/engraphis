@@ -96,13 +96,18 @@ embeddings. You bring an LLM only for optional chat, synthesis, structured extra
 or structured consolidation.
 
 - **Local-first & private** — runs offline; the core depends only on `numpy`.
-- **MCP-native** — 27 tools for Claude Code, Cursor, Cline, Zed, Windsurf.
+- **MCP-native** — 28 tools for Claude Code, Cursor, Cline, Zed, Windsurf.
 - **Self-maintaining facts** — writes are deterministically conflict-resolved (no LLM required).
+- **Advisory retention supervision** — an optional LLM can label writes as ephemeral, normal,
+  or critical; outputs are bounded, clamped, audited, and can never silently drop a write.
 - **Principled recall** — six-term score over retention, semantic, lexical, graph, importance, recency.
 - **Bi-temporal truth** — contradictions invalidate instead of overwriting (`engraphis_why` / `engraphis_timeline`).
 - **Grounded, not guessed** — cited answers or explicit abstain; provenance on every memory.
 - **Task-ready context** — bounded proactive packets combine task/agent state, cited memories, suggested follow-ups, and the last-session handoff; optional LLM prose is accepted only when its citations validate.
 - **Composable intelligence** — opt-in deterministic conflict triage (`duplicate` / `refinement` / `contradiction` / `obsolete`) and `UserModel` recall reranking helpers; neither changes default recall unless called.
+- **Human-governed lifecycle** — pin, forget, correct, promote to a wider scope, and manually merge several memories into one without deleting their history; every change is audited.
+- **One layered graph** — temporal, entity, causal, and semantic overlays share the same database, with persistent code↔memory links and intent-aware recall.
+- **Privacy-safe receipts** — remember, link, recall, and indexing operations can be verified through a content-free SHA-256 receipt chain without exporting memory or query text.
 - **Code-aware** — incremental multi-language symbol/call/import graph, code↔memory links,
   path queries, communities/hotspots, git/PR impact analysis, and portable graph exports.
 - **Sleep-time consolidation** — scheduled job distills recurring episodes, reports its compaction.
@@ -145,6 +150,11 @@ first admin, invite members, and connect agents).
 > a persistent `/data` volume (so activated keys + memories survive redeploys) and set
 > `ENGRAPHIS_FORWARDED_ALLOW_IPS=*` — both one-click steps in the Railway dashboard;
 > full walk-through in the hosting guide.
+
+Hosted **Agent Connect** tokens are per-user, shown only once, and stored only as SHA-256
+digests. Roles are rechecked on every HTTP/MCP call; disabling a member or resetting their
+password permanently revokes existing agent tokens. The hosted `/mcp` endpoint exposes the same
+28-tool service as local `engraphis-mcp`. See [the Agent Connect guide](docs/AGENT_CONNECT.md).
 
 ## Install
 
@@ -202,8 +212,8 @@ engraphis-init                     # writes .env + prints config snippets
 claude mcp add engraphis -- engraphis-mcp
 ```
 
-Your agent now has 27 tools — remember, recall (grounded + proactive), proactive context,
-grounded answer alias, why, timeline, forget, pin, correct, ingest, consolidate, index_repo,
+Your agent now has 28 tools — remember, recall (grounded + proactive), proactive context,
+grounded answer alias, why, timeline, forget, pin, correct, promote, ingest, consolidate, index_repo,
 search/code path/impact/export, privacy receipts, PostgreSQL schema ingestion, link,
 record_event, start/end_session, and stats. See the [MCP tools table](#mcp-tools) below.
 
@@ -212,15 +222,35 @@ record_event, start/end_session, and stats. See the [MCP tools table](#mcp-tools
 ```bash
 pip install "engraphis[code]"
 engraphis-graph index -w acme -r api --root .
+engraphis-graph search -w acme -r api "UserService"
 engraphis-graph query -w acme -r api "where is token rotation implemented?"
 engraphis-graph explain -w acme -r api "why does deploy depend on approval?"
 engraphis-graph path -w acme -r api UserService DatabasePool
 engraphis-graph impact -w acme -r api --root . --git-range origin/main...HEAD
+engraphis-graph prs -w acme -r api --base main --head HEAD
 engraphis-graph export -w acme -r api -o engraphis-graph-out
+engraphis-graph install-merge-driver --root .
 ```
 
 The export contains `graph.json`, a self-contained `graph.html`, and `GRAPH_REPORT.md`.
-See [the v3 architecture/design document](docs/ARCHITECTURE_V3.md).
+Indexing supports Python, JavaScript, TypeScript, Go, Rust, Java, C#, C, C++, SQL, and
+Terraform. Tree-sitter is used when available; the dependency-free regex backend remains a
+functional fallback. Definitions, methods, calls, imports, ownership, variables,
+inheritance/implementation, and docstrings/comments are indexed. Indexing is incremental by
+content hash, honors `.engraphisignore`, and does not follow file symlinks outside the repository
+root. Call edges are name-based and best-effort rather than type-resolved. The optional Git merge
+driver validates bounded graph JSON and deterministically unions nodes and edges instead of
+choosing one export side.
+
+For a read-only recall and graph API that can be shared without exposing write operations:
+
+```bash
+pip install "engraphis[server]"
+engraphis-graph-server                 # http://127.0.0.1:8720/docs
+```
+
+A non-loopback bind fails closed unless `ENGRAPHIS_GRAPH_TOKEN` (or
+`ENGRAPHIS_API_TOKEN`) is set. See [the v3 architecture/design document](docs/ARCHITECTURE_V3.md).
 
 ---
 
@@ -236,6 +266,40 @@ print(hit["context"])
 ```
 
 The same `MemoryService` backs the dashboard and the MCP server.
+
+---
+
+## Govern memories without losing history
+
+Engraphis separates automatic write resolution from explicit human governance:
+
+| Operation | Use it when | What happens to history |
+|---|---|---|
+| `remember` | Adding or restating one fact | Deterministically adds, reinforces, or supersedes a same-scope memory |
+| `correct` | Replacing one known-wrong memory | Closes the old validity window and links the replacement |
+| `promote` | A narrow learning now applies more broadly | Writes a wider-scope successor and closes/links the source instead of editing scope in place |
+| `merge` | Combining two or more overlapping memories | Retires every source and creates one memory that supersedes all of them |
+| `forget` | Removing a memory from live recall | Bi-temporally closes it; the audit/history record remains |
+| `consolidate` | Distilling recurring episodic memories automatically | Creates linked semantic digests; sources stay live unless explicit supersession is requested |
+
+Manual N→1 merge is available through `MemoryService.merge()` and `POST /api/merge`:
+
+```python
+a = mem.remember("Deploys happen Friday at 3pm.", workspace="acme")
+b = mem.remember("We deploy Fridays around 15:00.", workspace="acme")
+
+merged = mem.merge(
+    [a["id"], b["id"]],
+    "Deploys ship every Friday at approximately 15:00.",
+    workspace="acme",
+    reason="deduplicate the deployment schedule",
+)
+print(merged["compaction"])
+```
+
+All sources must belong to the named workspace. The result inherits the strictest source
+sensitivity, remains untrusted if any source was untrusted, and stays pinned if any source was
+pinned. The full multi-predecessor chain remains visible through inspection, Why, and Timeline.
 
 ---
 
@@ -257,7 +321,7 @@ server-issued Pro or Team trial** after email confirmation — no card required.
 | | Free (available now) | Pro — $10/mo or $100/yr | Team — $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
 | Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
-| Memory engine + 27 MCP tools | ✓ | ✓ | ✓ |
+| Memory engine + 28 MCP tools | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Cloud sync (folder + managed relay) | | ✓ | ✓ |
 | Auto-sync (hands-off cadence) | | ✓ | ✓ |
@@ -300,8 +364,36 @@ server-issued Pro or Team trial** after email confirmation — no card required.
 | Governance | `engraphis_forget` | Retire a memory — bi-temporal close, never deleted |
 | Governance | `engraphis_pin` | Exempt from future automatic decay/pruning |
 | Governance | `engraphis_correct` | Replace content without losing history |
+| Governance | `engraphis_promote` | Widen scope while preserving and linking narrow-scope history |
 | Session | `engraphis_start_session` / `engraphis_end_session` | Session lifecycle with cross-session handoff |
 | Ops | `engraphis_stats` | Memory counts for health checks |
+
+---
+
+## Layered graph and privacy receipts
+
+Memory relationships, extracted entities, and code structure stay normalized in one SQLite
+database. Edges are tagged as `temporal`, `entity`, `causal`, or `semantic`, so callers can
+select a logical overlay without maintaining separate graphs. Schema-v3 migration is additive
+and idempotent: existing memories and bi-temporal history remain in place, while legacy edge
+layers are inferred once.
+
+`MemoryService.intent_remember()`, `intent_link()`, and `intent_recall()` provide a
+transport-neutral agent protocol while the existing `engraphis_remember`, `engraphis_link`, and
+`engraphis_recall` tools remain the canonical MCP vocabulary. Explicit links can persist both a
+layer and a durable rationale. Intent recall maps `explain`, `summarize_history`, and
+`locate_code` to appropriate layer filters; code intents also return matching symbols when a
+repository is supplied.
+
+The operation-receipt chain is deliberately content-free. It records bounded operation metadata
+and chained hashes, while excluding raw memory/query text, workspace names, memory IDs, and actor
+identities from exported receipt payloads. Use `engraphis_receipts`,
+`engraphis_verify_receipts`, and `engraphis_export_receipts` to inspect the chain or compare it
+with a previously saved head/count anchor. A separately maintained local count/head anchor and
+persistent integrity marker make interior edits, reordering, and tail truncation detectable.
+
+See [the v3 architecture document](docs/ARCHITECTURE_V3.md) for the data flow and
+[SECURITY.md](SECURITY.md) for the trust boundaries.
 
 ---
 
@@ -317,7 +409,35 @@ tier, across a group — without giving up local-first ownership. It ships two t
 
 Sync is a **state-based CRDT**: deterministic merge, no conflict copies, no data loss.
 Every field resolves by a commutative, idempotent rule so `merge(A, B) == merge(B, A)`.
+The current sync format carries memories and their memory-to-memory links; entity/code graph
+reconciliation is not yet part of sync. `secret` memories are never exported, and Team personal
+folders are never uploaded to a shared-account relay. Managed-relay traffic uses HTTPS, but
+bundles are not yet client-side end-to-end encrypted or zero-knowledge.
 See [`docs/SYNC.md`](docs/SYNC.md) for architecture, security model, and CLI usage.
+
+---
+
+## Security and trust boundaries
+
+[PR #19](https://github.com/Coding-Dev-Tools/engraphis/pull/19) hardened the shared and
+commercial surfaces as well as adding features:
+
+- **Team authentication** — concurrent seat/admin/password-reset changes are serialized and
+  enforced server-side; sessions and agent-token history are bounded, and disable/reset events
+  revoke long-lived tokens.
+- **Relay isolation** — workspace scope is rechecked in both directions, personal Team folders
+  cannot enter the shared-account relay, and device-local `secret` memories cannot be remotely
+  overwritten, invalidated, or downgraded. Relay bundle size, count, and per-workspace storage
+  are bounded.
+- **Hostile-input handling** — sync-folder peers, graph merge inputs, repository walks, resource
+  files, and PostgreSQL selectors are treated as untrusted; traversal, symlink/replace races,
+  oversized/deep payloads, malformed rows, and non-finite JSON are rejected.
+- **Fail-closed networking** — managed service clients reject insecure or malformed endpoints;
+  relay clients do not forward bearer credentials across HTTP redirects. The read-only graph
+  server also refuses a non-loopback bind without a token.
+
+See [SECURITY.md](SECURITY.md) for supported versions, deployment requirements, known gaps, and
+the vulnerability-reporting process.
 
 ---
 
@@ -416,6 +536,8 @@ All via environment (or `.env`):
 | `ENGRAPHIS_HOST` | `127.0.0.1` | Server bind address |
 | `ENGRAPHIS_PORT` | `8700` | Dashboard port |
 | `ENGRAPHIS_API_TOKEN` | — | If set, REST API requires `Authorization: Bearer <token>` |
+| `ENGRAPHIS_CORS_ORIGINS` | loopback origins | Comma-separated REST CORS allow-list |
+| `ENGRAPHIS_WORKSPACES` | — | Optional comma-separated server-side workspace allow-list |
 | `ENGRAPHIS_DB_KEY` | — | Encrypt the database at rest (SQLCipher). Or use `ENGRAPHIS_DB_KEY_FILE` |
 | `ENGRAPHIS_EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | sentence-transformers model |
 | `ENGRAPHIS_EXTRACTOR` | `none` | `none` = verbatim; `chunk` = offline structure-aware chunks; `llm` = free-form LLM facts; `llm_structured` = schema-validated facts + graph metadata |
@@ -426,12 +548,14 @@ All via environment (or `.env`):
 | `ENGRAPHIS_POSTGRES_CONNECT_TIMEOUT` | `10` | PostgreSQL introspection connection timeout in seconds (bounded to 1–120) |
 | `ENGRAPHIS_POSTGRES_STATEMENT_TIMEOUT_MS` | `30000` | Per-introspection PostgreSQL statement timeout in milliseconds (bounded to 1–300000) |
 | `ENGRAPHIS_GRAPH_TOKEN` | — | Bearer token for `engraphis-graph-server`; required off-loopback |
+| `ENGRAPHIS_GRAPH_HOST` / `ENGRAPHIS_GRAPH_PORT` | `127.0.0.1` / `8720` | Read-only graph/recall server bind address |
 | `ENGRAPHIS_LLM_PROVIDER` | `openai` | `openai \| anthropic \| google \| openrouter \| custom` |
 | `ENGRAPHIS_LLM_MODEL` | `gpt-4o-mini` | Model name (provider-specific) |
 | `ENGRAPHIS_LLM_API_KEY` | — | API key for chat/synthesis, `llm` / `llm_structured` extraction, and structured consolidation |
 | `ENGRAPHIS_LLM_BASE_URL` | — | Base URL for openrouter / custom OpenAI-compatible endpoints |
 | `ENGRAPHIS_LICENSE_KEY` | — | Pro/Team key (or `~/.engraphis/license.key`) |
 | `ENGRAPHIS_TEAM_MODE` | `1` | Mount Team features by default; the auth wall activates for a live Team license or an existing team. Set `0` to disable |
+| `ENGRAPHIS_DASHBOARD_URL` | — | Canonical public Team URL used in invites and the hosted MCP Host/Origin allow-list |
 | `ENGRAPHIS_LOOP_INTERVAL` | `60` | Background consolidation loop interval in seconds (0 = disabled) |
 | `ENGRAPHIS_DECAY_HALFLIFE_DAYS` | `7` | Ebbinghaus decay half-life (higher = memories persist longer) |
 | `ENGRAPHIS_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted reverse-proxy IPs for TLS termination (`*` = trust all) |
@@ -451,8 +575,9 @@ engraphis/
 │   ├── core/                # v2 engine — interfaces, store, recall, scoring, schema, sync
 │   ├── backends/            # pluggable embedder / vector index / reranker / codegraph / sync transports / encryption
 │   ├── service.py           # validated MemoryService facade
-│   ├── mcp_server.py        # MCP server — 27 tools
+│   ├── mcp_server.py        # MCP server — 28 tools
 │   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
+│   ├── read_only_api.py     # token-protected recall/repository-graph HTTP surface
 │   ├── autosync.py          # background auto-sync loop (Pro/Team)
 │   ├── licensing.py         # license verification (offline + cloud)
 │   ├── analytics.py         # Pro analytics engine
@@ -467,6 +592,11 @@ engraphis/
 ├── Dockerfile / docker-compose.yml
 └── pyproject.toml
 ```
+
+New capability belongs in the v2 path (`engraphis/core/`, `engraphis/backends/`, and
+`MemoryService`) behind the interfaces in `core/interfaces.py`. The flat-namespace v1 server
+under `engraphis/app.py`, `routes/`, `stores/`, and `engines/` remains a compatibility/reference
+surface; `engraphis-dashboard`, the MCP server, and the Python quickstart above use v2.
 
 ---
 
