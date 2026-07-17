@@ -917,3 +917,61 @@ def test_personal_folders_are_isolated_per_user(monkeypatch, tmp_path):
                c.get("/api/workspaces", headers=hdr(alice)).json()["workspaces"]}
         assert vis["alice-secret"] == "personal"
         assert vis["team-proj"] == "shared"
+
+# ── Pro solo Railway path ──────────────────────────────────────────────────────
+# A Pro license (no team feature) bootstraps a single-admin instance for a cloud
+# dashboard + sync relay. Adding seats still requires Team (enforced in
+# AuthStore.create_user). The auth wall activates on any paid license, closing the
+# pre-bootstrap exposure window on Railway.
+
+
+def _pro_key():
+    return compose_key({"v": 1, "plan": "pro", "email": "solo@x.co", "seats": 1,
+                        "issued": int(time.time()),
+                        "expires": int(time.time() + 365 * 86400)}, _SECRET)
+
+
+def test_pro_license_needs_setup_and_bootstraps_admin(monkeypatch, tmp_path):
+    """A Pro license (no team feature) shows needs_setup and bootstraps a single
+    admin — the cloud-dashboard / sync-relay path for a solo Pro member on Railway."""
+    with _client(monkeypatch, tmp_path, team=True, key=_pro_key()) as c:
+        state = c.get("/api/auth/state").json()
+        assert state["enabled"] is True
+        assert state["needs_setup"] is True
+        assert state["licensed"] is False          # not Team-licensed
+        assert state["team_locked"] is False
+        r = c.post("/api/auth/setup", json={"email": "solo@x.co", "name": "Solo",
+                                            "password": "supersecret1"})
+        assert r.status_code == 200, r.text
+        assert r.json()["user"]["role"] == "admin"
+        after = c.get("/api/auth/state").json()
+        assert after["needs_setup"] is False
+        assert after["team_locked"] is False
+
+
+def test_pro_license_cannot_add_seats(monkeypatch, tmp_path):
+    """A Pro instance can't invite members — adding users beyond the first admin
+    still requires Team (enforced in AuthStore.create_user)."""
+    with _client(monkeypatch, tmp_path, team=True, key=_pro_key()) as c:
+        c.post("/api/auth/setup", json={"email": "solo@x.co", "name": "Solo",
+                                        "password": "supersecret1"})
+        r = c.post("/api/auth/users", json={"email": "buddy@x.co", "name": "Buddy",
+                                            "password": "anotherpass1", "role": "member"})
+        # 402 (not 400): AuthStore.create_user calls require_feature("team") which
+        # raises LicenseError (not AuthError) → app-level LicenseError handler → 402.
+        assert r.status_code == 402
+        body = r.json()
+        assert body.get("feature") == "team" or "team" in str(body.get("error", "")).lower()
+
+
+def test_pro_license_activates_auth_wall_pre_bootstrap(monkeypatch, tmp_path):
+    """A paid license (Pro) activates the auth wall BEFORE the first admin exists,
+    closing the pre-bootstrap exposure window on Railway. /api/bootstrap returns
+    401; /api/auth/state and /api/auth/setup remain public."""
+    with _client(monkeypatch, tmp_path, team=True, key=_pro_key()) as c:
+        assert c.get("/api/bootstrap").status_code == 401
+        assert c.get("/api/auth/state").status_code == 200
+        assert c.post("/api/auth/setup", json={"email": "solo@x.co", "name": "Solo",
+                                               "password": "supersecret1"
+                                               }).status_code == 200
+        assert c.get("/api/bootstrap").status_code == 200
