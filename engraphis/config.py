@@ -17,13 +17,13 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 #: Vendor-hosted managed service for sync, leases, trials, and invite delivery. This is
 #: the default target when ``ENGRAPHIS_RELAY_URL`` is not overridden.
-DEFAULT_RELAY_URL = "https://engraphis-production.up.railway.app"
+DEFAULT_RELAY_URL = "https://team.engraphis.com"
 
-# Keys issued while the Cloudflare custom domain was the default carry that URL inside
-# their signed payload. Preserve the signature, but route that unavailable host to the
-# live Railway service. Arbitrary signed URLs remain authoritative.
+# Keys issued before the custom domain migration carry this URL inside their signed
+# payload. Preserve the signature, but route that one retired vendor host to the current
+# managed service. Arbitrary signed URLs remain authoritative.
 RETIRED_RELAY_URLS = frozenset({
-    "https://team.engraphis.com",
+    "https://engraphis-production.up.railway.app",
 })
 
 
