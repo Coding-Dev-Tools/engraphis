@@ -63,6 +63,26 @@ def test_wrapper_releases_lock_after_a_failing_statement(tmp_path):
     store.close()
 
 
+def test_wrapper_rolls_back_and_releases_on_constraint_violation(tmp_path):
+    # A failed single write that OPENED a transaction (e.g. a PK/UNIQUE violation) must roll
+    # back and release the lock — otherwise the pin leaks: other threads stall and this
+    # thread's next request inherits a stale open transaction that could commit the reject.
+    import sqlite3
+    store = Store(str(tmp_path / "constraint.db"))
+    store.create_workspace("ws1")
+    wid = store.conn.execute(
+        "SELECT id FROM workspaces WHERE name='ws1'").fetchone()["id"]
+    with pytest.raises(sqlite3.IntegrityError):
+        store.conn.execute(
+            "INSERT INTO workspaces(id, name, created_at, settings) VALUES (?,?,?,?)",
+            (wid, "dup", 0.0, "{}"))          # duplicate primary key
+    # Lock released + failed row rolled back: the next write works and 'dup' never landed.
+    assert store.create_workspace("ws2")
+    names = {r["name"] for r in store.conn.execute("SELECT name FROM workspaces")}
+    assert names == {"ws1", "ws2"}
+    store.close()
+
+
 def test_v3_migration_classifies_existing_graph_layers_once(tmp_path):
     db = tmp_path / "v2.db"
     original = Store(str(db))

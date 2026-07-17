@@ -210,16 +210,27 @@ class _SerializedConnection:
                 "store write lock timeout — a transaction appears stuck")
 
     def _run(self, fn, *a, **k):
+        was_pinned = self._pinned()           # already inside an ongoing transaction?
         self._acquire()
         try:
             result = fn(*a, **k)
         except BaseException:
-            # Do NOT roll back here: a failed statement in sqlite leaves any open
-            # transaction intact, and callers depend on that — e.g. probing an optional
-            # table inside a larger write transaction, catching the error, and continuing.
-            # Only manage the lock (identically to the success path); the pin is released
-            # by the eventual commit/rollback, or by the acquire timeout as a backstop.
-            self._settle()
+            if not was_pinned and self._raw.in_transaction:
+                # This statement OPENED a transaction and then failed (e.g. a single write
+                # that hit a UNIQUE violation). Nothing else is in that transaction, so roll
+                # it back and release cleanly. Leaving it open would pin the lock forever —
+                # stalling every other thread and handing this thread's NEXT request a stale
+                # open transaction.
+                try:
+                    self._raw.rollback()
+                except Exception:  # noqa: BLE001 — best-effort cleanup
+                    pass
+                self._lock.release()          # this call's acquire; no pin was established
+            else:
+                # A transaction was already open before this call (multi-statement: the
+                # caller may catch this and continue — e.g. probing an optional table).
+                # Preserve it; sqlite keeps a failed statement's transaction intact.
+                self._settle()
             raise
         self._settle()
         return result
@@ -233,6 +244,13 @@ class _SerializedConnection:
                 self._lock.release()          # already pinned; drop this call's acquire
             else:
                 self._pin.held = True         # keep this acquire as the transaction pin
+        elif self._pinned():
+            # A statement closed the pinned transaction WITHOUT going through commit()/
+            # rollback() — e.g. executescript's implicit commit, or a raw COMMIT/END. Clear
+            # the pin and release both its acquire and this call's, so it can't leak.
+            self._pin.held = False
+            self._lock.release()              # release the pin's acquire
+            self._lock.release()              # release this call's acquire
         else:
             self._lock.release()              # no open transaction; release now
 
