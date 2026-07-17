@@ -443,10 +443,15 @@ class AuthStore:
             return fails[-1] + LOCKOUT_SECONDS
         return 0.0
 
-    @_serialized
     def login(self, email: str, password: str, *, ip: Optional[str] = None) -> dict:
         """Verify credentials → new session. Raises :class:`AuthError` (generic message —
         never reveals which of email/password was wrong) or the lockout notice.
+
+        NOT ``@_serialized`` as a whole: PBKDF2 password verification is CPU-bound (~100ms)
+        and must NOT hold the AuthStore lock, because the async auth middleware resolves
+        sessions/tokens under that SAME lock — holding it across the hash blocked the whole
+        event loop for the hash duration, so a burst of logins stalled every request
+        (an unauthenticated DoS). The lock is taken only for the fast DB / throttle steps.
 
         Deliberately does NOT gate on a live Team license (see ``licensing.require_feature
         ("team")``, still enforced by :meth:`create_user`). It used to — 2026-07-12 incident:
@@ -461,28 +466,33 @@ class AuthStore:
         refused — this only stops a license hiccup from locking out people who already have
         an account. Existing sessions still cap out at ``SESSION_TTL_SECONDS``."""
         email = self._clean_email(email)
-        until = self._locked_until(email)
-        if until > time.time():
-            self.record_event("login.locked", actor_email=email, ip=ip)
-            raise AuthError("too many failed attempts — try again in a minute")
-        row = self.conn.execute(
-            "SELECT id, pw_hash, disabled FROM users WHERE email=?", (email,)).fetchone()
-        # Always run one PBKDF2 even for unknown emails (no user-enumeration timing).
+        # Phase 1 (locked): throttle gate + fetch the row.
+        with self._lock:
+            until = self._locked_until(email)
+            if until > time.time():
+                self.record_event("login.locked", actor_email=email, ip=ip)
+                raise AuthError("too many failed attempts — try again in a minute")
+            row = self.conn.execute(
+                "SELECT id, pw_hash, disabled FROM users WHERE email=?", (email,)).fetchone()
+        # Phase 2 (UNLOCKED): the expensive PBKDF2. Always hash once, even for unknown
+        # emails, to keep timing constant (no user enumeration).
         encoded = row["pw_hash"] if row else _hash_password("x", iterations=self.iterations)
         ok = _verify_password(password or "", encoded)
-        if not ok or row is None or row["disabled"]:
-            fails = self._failures.pop(email, [])
-            fails.append(time.time())
-            self._failures[email] = fails
-            self._prune_throttle_maps(time.time())
-            self.record_event("login.failed", actor_email=email, ip=ip,
-                              detail=("account_disabled" if row and row["disabled"]
-                                      else "bad_credentials"))
-            raise AuthError("invalid email or password")
-        self._failures.pop(email, None)
-        token = self.create_session(row["id"])
-        user = self.get_user(row["id"])
-        self.record_event("login.success", actor_id=row["id"], actor_email=email, ip=ip)
+        # Phase 3 (locked): record the outcome and mint the session.
+        with self._lock:
+            if not ok or row is None or row["disabled"]:
+                fails = self._failures.pop(email, [])
+                fails.append(time.time())
+                self._failures[email] = fails
+                self._prune_throttle_maps(time.time())
+                self.record_event("login.failed", actor_email=email, ip=ip,
+                                  detail=("account_disabled" if row and row["disabled"]
+                                          else "bad_credentials"))
+                raise AuthError("invalid email or password")
+            self._failures.pop(email, None)
+            token = self.create_session(row["id"])
+            user = self.get_user(row["id"])
+            self.record_event("login.success", actor_id=row["id"], actor_email=email, ip=ip)
         user["token"] = token
         return user
 
