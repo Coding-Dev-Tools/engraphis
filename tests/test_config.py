@@ -17,6 +17,23 @@ def test_rerank_model_defaults_to_empty(monkeypatch):
     assert Settings().rerank_model == ""
 
 
+def test_cors_default_origins_follow_configured_port():
+    # The empty-CORS default derives loopback origins from the port, so running on a
+    # non-default ENGRAPHIS_PORT doesn't lock the dashboard's own origin out.
+    assert config._parse_origins("", 9000) == [
+        "http://127.0.0.1:9000", "http://localhost:9000"]
+    # Explicit origins pass through unchanged.
+    assert config._parse_origins("https://app.example.com", 9000) == [
+        "https://app.example.com"]
+
+
+def test_cors_origins_use_engraphis_port_env(monkeypatch):
+    monkeypatch.delenv("ENGRAPHIS_CORS_ORIGINS", raising=False)
+    monkeypatch.setenv("ENGRAPHIS_PORT", "9100")
+    assert Settings().cors_origins == [
+        "http://127.0.0.1:9100", "http://localhost:9100"]
+
+
 def test_rerank_model_read_from_env(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
     assert Settings().rerank_model == "cross-encoder/ms-marco-MiniLM-L-6-v2"
