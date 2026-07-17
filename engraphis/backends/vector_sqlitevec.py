@@ -75,10 +75,17 @@ class SqliteVecVectorIndex:
                 return []
         limit = min(k, total)
         while True:
+            # The KNN cap uses vec0's explicit ``k = ?`` constraint, NOT ``LIMIT ?``:
+            # SQLite < 3.41 never passes a LIMIT down to a virtual table's xBestIndex,
+            # so vec0 raises "A LIMIT or 'k = ?' constraint is required on vec0 knn
+            # queries" — which the resolve path swallows, silently degrading every
+            # near-duplicate write to ADD on those systems. ``k = ?`` is the syntax
+            # sqlite-vec documents for exactly this reason and works on every
+            # supported SQLite/sqlite-vec combination.
             rows = self.store.conn.execute(
                 "SELECT id, distance FROM mem_vec_ann WHERE embedding MATCH ? "
-                "ORDER BY distance LIMIT ?",
-                (v.tobytes(), limit),
+                "AND k = ? ORDER BY distance",
+                (v.tobytes(), int(limit)),
             ).fetchall()
             out: list[tuple[str, float]] = []
             for row in rows:
@@ -91,7 +98,12 @@ class SqliteVecVectorIndex:
                     return out
             if filter is None or len(rows) < limit or limit >= total:
                 return out
-            limit = min(limit * 2, total)
+            # Filtered search widens geometrically until k visible hits are found. Once
+            # the next doubling would already cover a quarter of the index, jump straight
+            # to a single full scan: on a workspace dense with invisible rows (expired/
+            # out-of-scope), the geometric tail otherwise re-runs several near-full ANN
+            # scans back to back for one query.
+            limit = total if limit * 2 >= total // 4 else limit * 2
 
     def delete(self, ids: list[str]) -> None:
         if not ids:
