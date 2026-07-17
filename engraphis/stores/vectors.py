@@ -235,29 +235,47 @@ def set_retention(mem_id: int, stability: float, surprise: float) -> None:
 
 def apply_decay_to_all(namespace: Optional[str], halflife_days: float) -> int:
     """Ebbinghaus decay pass: reduce stability for memories not recently accessed.
-    Returns the number of rows touched."""
+    Returns the number of memories whose stability was reduced.
+
+    Decay is anchored on ``last_decay`` (advanced every pass) rather than recomputed from
+    ``last_access`` each run, so a given interval of not-being-accessed is decayed exactly
+    ONCE. This makes the pass idempotent and FREQUENCY-INDEPENDENT: the per-interval
+    factors multiply to ``0.5 ** (total_elapsed / halflife)``, so running it every 60s or
+    once a day converges to the same stability. The old formula reapplied a fixed
+    days-since-access factor to the already-decayed value on every tick, which — on the
+    ~60s consciousness loop — collapsed every memory's stability to the floor within
+    minutes. Memories reinforced since the last pass keep their boosted stability and just
+    have their anchor moved forward (subconscious forgetting targets the un-recalled)."""
     conn = get_conn()
     now = now_ts()
+    halflife = max(halflife_days, 0.1)
     rows = conn.execute(
-        "SELECT id, stability, last_access, access_count FROM memories"
+        "SELECT id, stability, last_access, last_decay FROM memories"
         + (" WHERE namespace=?" if namespace else ""),
         ([namespace] if namespace else []),
     ).fetchall()
     touched = 0
     for r in rows:
-        days_since = (now - r["last_access"]) / 86400.0
-        if days_since < 1e-6:
+        anchor = r["last_decay"] if r["last_decay"] is not None else r["last_access"]
+        # Reinforced since the last decay: keep the boosted stability, reset the anchor.
+        if r["last_access"] > anchor:
+            conn.execute("UPDATE memories SET last_decay=? WHERE id=?", (now, r["id"]))
             continue
-        decay_factor = 0.5 ** (days_since / max(halflife_days, 0.1))
-        new_stab = max(r["stability"] * (0.5 + 0.5 * decay_factor), 0.01)
-        if abs(new_stab - r["stability"]) > 1e-6:
+        delta_days = (now - anchor) / 86400.0
+        if delta_days <= 1e-6:
+            continue
+        new_stab = max(r["stability"] * (0.5 ** (delta_days / halflife)), 0.01)
+        if abs(new_stab - r["stability"]) > 1e-9:
             conn.execute(
-                "UPDATE memories SET stability=? WHERE id=?",
-                (new_stab, r["id"]),
+                "UPDATE memories SET stability=?, last_decay=? WHERE id=?",
+                (new_stab, now, r["id"]),
             )
             touched += 1
-    if touched:
-        conn.commit()
+        else:
+            # Already at the floor (or no measurable change): still advance the anchor so
+            # the elapsed interval isn't recounted next pass.
+            conn.execute("UPDATE memories SET last_decay=? WHERE id=?", (now, r["id"]))
+    conn.commit()
     return touched
 
 
