@@ -74,8 +74,10 @@ def recall(
     }
 
 
-def recall_master(*, namespace: str, max_chunks: int = 10) -> dict[str, Any]:
-    """Recall the highest-retention memories in a namespace (no prompt needed)."""
+def recall_master(*, namespace: Optional[str] = None, max_chunks: int = 10) -> dict[str, Any]:
+    """Recall the highest-retention memories in a namespace (no prompt needed). A ``None``
+    namespace recalls across ALL namespaces — used by the consciousness loop, which has no
+    single namespace to anchor to."""
     candidates = mem_store.all_vectors(namespace=namespace)
     if not candidates:
         return {"context": [], "chunks": [], "count": 0, "llmContextMessage": ""}
