@@ -131,7 +131,18 @@ def due(policy: dict, *, now: Optional[float] = None) -> bool:
 def _record(summary: dict, *, now: Optional[float] = None) -> None:
     """Stamp last_run + a compact last_result onto the persisted policy (best-effort)."""
     now = time.time() if now is None else now
-    existing = _read()
+    # Best-effort telemetry must NEVER clobber the policy. Distinguish a fresh install (no
+    # file — safe to create with the default) from a TRANSIENT read failure of an existing
+    # file: normalize_policy({}) is the DISABLED default, so blindly writing it back after a
+    # read hiccup would silently turn auto-sync off (this runs after every pass).
+    path = policy_path()
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return  # exists but unreadable → preserve the saved policy, skip this record
+    else:
+        existing = {}
     try:
         _write({"policy": normalize_policy(existing.get("policy", existing)),
                 "last_run": float(now),

@@ -232,6 +232,24 @@ def _clamp_ts(v: Any, now: float) -> Optional[float]:
     return max(0.0, min(f, now + TS_FUTURE_SKEW))
 
 
+# World-time validity ceiling (year ~2100). ``valid_from``/``valid_to`` are WORLD time —
+# a fact may legitimately be true until a future date — and, unlike the system timestamps,
+# do NOT feed the LWW version key (see _version_key), so a future value can't pin content.
+# Bound only to a sane far-future ceiling to reject absurd/overflow values.
+_WORLD_TS_MAX = 4_102_444_800.0
+
+
+def _clamp_world_ts(v: Any) -> Optional[float]:
+    """Coerce a world-time validity timestamp, allowing legitimate FUTURE values (bounded
+    to a far-future ceiling). Clamping these to ``now + skew`` like the system timestamps
+    truncated real future validity, and the earliest-wins merge then spread the truncation
+    to every device."""
+    f = _as_float(v, None)
+    if f is None:
+        return None
+    return max(0.0, min(f, _WORLD_TS_MAX))
+
+
 def _clamp_str(v: Any, n: int) -> str:
     s = v if isinstance(v, str) else ("" if v is None else str(v))
     return _CONTROL_RE.sub("", s)[:n]
@@ -345,8 +363,10 @@ def dict_to_record(d: dict) -> Optional[MemoryRecord]:
         stability=_clamp_num(d.get("stability"), 0.0, MAX_STABILITY, 1.0),
         access_count=min(MAX_ACCESS_COUNT, max(0, _as_int(d.get("access_count"), 0))),
         last_access=_clamp_ts(d.get("last_access"), now),
-        valid_from=_clamp_ts(d.get("valid_from"), now),
-        valid_to=_clamp_ts(d.get("valid_to"), now),
+        # World-time validity may be in the future; system timestamps may not (they feed
+        # the version key / anti-poison defense).
+        valid_from=_clamp_world_ts(d.get("valid_from")),
+        valid_to=_clamp_world_ts(d.get("valid_to")),
         ingested_at=_clamp_ts(d.get("ingested_at"), now),
         expired_at=_clamp_ts(d.get("expired_at"), now),
         pinned=bool(d.get("pinned")), sensitivity=sens,
