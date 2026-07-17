@@ -28,6 +28,7 @@ import ipaddress
 import json
 import logging
 import os
+import threading
 import urllib.error
 import urllib.request
 import uuid
@@ -106,6 +107,8 @@ def validate_cloud_base_url(value: str) -> str:
 #: call within a run returns the SAME id — so the trial HMAC verifies and leases
 #: bind consistently instead of churning a fresh uuid on every call.
 _machine_id_cache: dict = {}
+# Serializes first-run id generation so concurrent threads don't each mint a device id.
+_machine_id_lock = threading.Lock()
 
 
 def cloud_url() -> str:
@@ -124,29 +127,47 @@ def machine_id() -> str:
     cached = _machine_id_cache.get(key)
     if cached:
         return cached
-    try:
-        mid = _MACHINE_ID_FILE.read_text(encoding="utf-8").strip()
-        if mid:
-            _machine_id_cache[key] = mid
-            return mid
-    except OSError:
-        pass
-    mid = uuid.uuid4().hex
-    try:
-        _MACHINE_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _MACHINE_ID_FILE.write_text(mid, encoding="utf-8")
+    with _machine_id_lock:
+        # Re-check under the lock: another thread may have generated + cached the id while
+        # we waited, so we don't mint a second one (which would burn an extra Team seat).
+        cached = _machine_id_cache.get(key)
+        if cached:
+            return cached
         try:
-            os.chmod(_MACHINE_ID_FILE, 0o600)
+            mid = _MACHINE_ID_FILE.read_text(encoding="utf-8").strip()
+            if mid:
+                _machine_id_cache[key] = mid
+                return mid
         except OSError:
             pass
-    except OSError as exc:
-        logger.warning(
-            "machine_id: could not persist device id to %s (%s); using an in-process id "
-            "for this run. Trial and cloud-lease binding need a writable home directory "
-            "— mount a persistent volume for %s (or set HOME to a writable path).",
-            _MACHINE_ID_FILE, exc, _MACHINE_ID_FILE.parent)
-    _machine_id_cache[key] = mid   # stable for the rest of the process regardless
-    return mid
+        mid = uuid.uuid4().hex
+        try:
+            _MACHINE_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
+            # Atomic create-if-absent so two PROCESSES racing a first run don't each persist
+            # a DIFFERENT id (registering the same device twice and burning a seat). The
+            # exclusive create fails if another process already wrote one; adopt that value.
+            try:
+                fd = os.open(str(_MACHINE_ID_FILE),
+                             os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(mid)
+            except FileExistsError:
+                existing = _MACHINE_ID_FILE.read_text(encoding="utf-8").strip()
+                if existing:
+                    mid = existing
+            try:
+                os.chmod(_MACHINE_ID_FILE, 0o600)
+            except OSError:
+                pass
+        except OSError as exc:
+            logger.warning(
+                "machine_id: could not persist device id to %s (%s); using an in-process "
+                "id for this run. Trial and cloud-lease binding need a writable home "
+                "directory — mount a persistent volume for %s (or set HOME to a writable "
+                "path).",
+                _MACHINE_ID_FILE, exc, _MACHINE_ID_FILE.parent)
+        _machine_id_cache[key] = mid   # stable for the rest of the process regardless
+        return mid
 
 
 # ── lease token (same ENGR1-style envelope, distinct prefix) ─────────────────────────

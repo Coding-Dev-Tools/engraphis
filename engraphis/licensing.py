@@ -21,6 +21,7 @@ import hmac
 import json
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -515,6 +516,11 @@ def parse_key(key: str, *, now: Optional[float] = None) -> License:
 _cached: Optional[License] = None
 _cache_error: str = ""
 _cache_recheck_at: float = float("inf")  # wall-clock time after which the cache is stale
+# The cache globals above are read + mutated from FastAPI's threadpool AND invalidated
+# by cloud_license on denial, so all access is serialized. Reentrant so current_license
+# can be called from a context that already holds it. Without this, a concurrent
+# invalidate_cache() between the "is not None" check and the return could return None.
+_cache_lock = threading.RLock()
 
 #: Cloud-mode cache lifetime. Each refresh contacts the license server; an authoritative
 #: denial fails closed immediately, while a transient network failure may continue using
@@ -584,8 +590,9 @@ def invalidate_cache() -> None:
     immediately instead of lingering until the lease TTL — without forcing the test
     suite to reach into private module state."""
     global _cached, _cache_recheck_at
-    _cached = None
-    _cache_recheck_at = float("inf")
+    with _cache_lock:
+        _cached = None
+        _cache_recheck_at = float("inf")
 
 
 def current_license(*, refresh: bool = False) -> License:
@@ -595,36 +602,42 @@ def current_license(*, refresh: bool = False) -> License:
     free tier and the reason is kept in :func:`license_error`.
     """
     global _cached, _cache_error, _cache_recheck_at
-    if _cached is not None and not refresh and time.time() < _cache_recheck_at:
-        return _cached
+    # Fast path under the lock: a valid, unexpired cache entry is returned atomically so a
+    # concurrent invalidate_cache() can't null it out between the check and the return.
+    with _cache_lock:
+        if _cached is not None and not refresh and time.time() < _cache_recheck_at:
+            return _cached
+    # The cloud gate does network I/O, so run it OUTSIDE the lock (two threads racing a
+    # cache miss just do redundant, idempotent work — last store wins). Online-only:
+    # entitlement comes ONLY from a signature-valid key that ALSO passes the server-side
+    # cloud gate. No key, or a server-denied key ⇒ the free tier.
     material = _read_key_material()
+    lic: Optional[License] = None
+    reason = ""
     if material:
         try:
             lic = parse_key(material)
         except LicenseError as exc:
-            _cache_error = str(exc)  # bad key → fall through to trial/free
+            lic, reason = None, str(exc)     # bad key → free
         else:
-            allowed, reason = _cloud_gate(lic, material)
-            if allowed:
-                _cached, _cache_error = lic, ""
-                _cache_recheck_at = _license_recheck_at(lic)
-                return _cached
-            _cache_error = reason    # cloud denied (revoked/unregistered) → trial/free
-    else:
-        _cache_error = ""
-    # Online-only: entitlement comes ONLY from a signature-valid key that ALSO passes the
-    # server-side cloud gate above. There is no local/offline trial grant anymore — the
-    # free trial is a real, short-lived, server-issued key (see start_trial) that flows
-    # through the exact same gate. No key, or a server-denied key ⇒ the free tier.
-    _cached = License.free()
-    # A configured key that temporarily failed its cloud gate must retry automatically.
-    # Caching the free fallback forever forced users to restart or paste the same key
-    # again after an outage. No-key free installs remain permanently cached.
-    _cache_recheck_at = (
-        time.time() + _CLOUD_RECHECK_SECONDS
-        if material else _license_recheck_at(_cached)
-    )
-    return _cached
+            allowed, gate_reason = _cloud_gate(lic, material)
+            if not allowed:
+                lic, reason = None, gate_reason  # cloud denied (revoked/unregistered) → free
+    with _cache_lock:
+        if lic is not None:
+            _cached, _cache_error = lic, ""
+            _cache_recheck_at = _license_recheck_at(lic)
+        else:
+            _cache_error = reason
+            _cached = License.free()
+            # A configured key that temporarily failed its cloud gate must retry
+            # automatically. Caching the free fallback forever forced users to restart or
+            # paste the same key again after an outage. No-key free installs stay cached.
+            _cache_recheck_at = (
+                time.time() + _CLOUD_RECHECK_SECONDS
+                if material else _license_recheck_at(_cached)
+            )
+        return _cached
 
 
 # ── one-time local free trial (grants Pro features, no key, no phone-home) ────────────
