@@ -1,6 +1,8 @@
 """Typed lockout errors, the per-IP login throttle, and the shared bearer helper."""
 import pytest
 
+pytest.importorskip("fastapi")
+
 from engraphis.inspector.auth import (
     IP_LOCKOUT_FAILS, LOCKOUT_FAILS, AccountLockedError, AuthError, AuthStore, bearer_ok,
 )
