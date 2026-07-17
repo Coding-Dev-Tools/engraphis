@@ -410,6 +410,11 @@ class Store:
         return wid
 
     def get_or_create_workspace(self, name: str) -> str:
+        # Authorize on the RETRIEVE path too, not just create — otherwise a workspace
+        # outside ENGRAPHIS_WORKSPACES that already exists in the DB (e.g. predating the
+        # allow-list, or arriving via sync) could be handed back, silently bypassing the
+        # isolation boundary _authorize_workspace is meant to enforce ("create or retrieve").
+        self._authorize_workspace(name)
         row = self.conn.execute("SELECT id FROM workspaces WHERE name=?", (name,)).fetchone()
         if row:
             return row["id"]
