@@ -124,6 +124,22 @@ def test_governance_endpoints_pin_and_forget(client):
     assert c.get("/api/stats", params={"workspace": "acme"}).json()["memories"] == 0
 
 
+def test_promote_endpoint_widens_scope(client):
+    c, out = client
+    response = c.post("/api/promote", json={
+        "memory_id": out["id"],
+        "target_scope": "workspace",
+        "workspace": "acme",
+        "repo": "backend",
+        "reason": "shared convention",
+    })
+
+    assert response.status_code == 200
+    promoted = response.json()
+    assert promoted["scope"] == "workspace"
+    assert promoted["promoted_from"] == out["id"]
+
+
 def test_validation_errors_are_400_not_500(client):
     c, _ = client
     r = c.get("/api/why", params={"q": "x", "workspace": "no-such-ws"})

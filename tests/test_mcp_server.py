@@ -18,7 +18,7 @@ def _module_with_memory_db(monkeypatch):
 _ALL_TOOLS = {
     "engraphis_remember", "engraphis_recall", "engraphis_why", "engraphis_timeline",
     "engraphis_recall_proactive", "engraphis_forget", "engraphis_pin", "engraphis_correct",
-    "engraphis_link", "engraphis_record_event", "engraphis_index_repo",
+    "engraphis_promote", "engraphis_link", "engraphis_record_event", "engraphis_index_repo",
     "engraphis_search_code", "engraphis_code_path", "engraphis_code_impact",
     "engraphis_export_code_graph", "engraphis_start_session", "engraphis_end_session",
     "engraphis_stats", "engraphis_proactive_context", "engraphis_recall_grounded",
@@ -61,6 +61,20 @@ def test_remember_reports_resolution_op(monkeypatch):
     assert first["op"] == "add"
     assert second["op"] == "noop"
     assert second["id"] == first["id"]
+
+
+def test_remember_session_id_keeps_repo_default_scope(monkeypatch):
+    srv = _module_with_memory_db(monkeypatch)
+    session = json.loads(srv.engraphis_start_session(
+        workspace="acme", repo="web", force_new=True
+    ))
+
+    stored = json.loads(srv.engraphis_remember(
+        content="Durable repo fact learned during this session.",
+        workspace="acme", repo="web", session_id=session["session_id"],
+    ))
+
+    assert stored["scope"] == "repo"
 
 
 def test_grounded_recall_tool_returns_flat_answer_payload(monkeypatch):
@@ -141,6 +155,22 @@ def test_governance_tools_forget_pin_correct(monkeypatch):
 
     err = srv.engraphis_forget(memory_id="mem_does_not_exist", workspace="acme")
     assert err.startswith("Error:")
+
+
+def test_promote_tool_widens_scope(monkeypatch):
+    srv = _module_with_memory_db(monkeypatch)
+    source = json.loads(srv.engraphis_remember(
+        content="All services use structured logs.", workspace="acme", repo="api"
+    ))
+
+    promoted = json.loads(srv.engraphis_promote(
+        memory_id=source["id"], target_scope="workspace",
+        workspace="acme", repo="api", reason="confirmed across repos",
+    ))
+
+    assert promoted["scope"] == "workspace"
+    assert promoted["promoted_from"] == source["id"]
+    assert srv.service().store.get_memory(source["id"]).valid_to is not None
 
 
 def test_governance_tools_reject_wrong_workspace(monkeypatch):

@@ -608,9 +608,11 @@ def receipts_export(workspace: Optional[str] = None):
 class _IdReq(BaseModel):
     id: str
     workspace: Optional[str] = None
+    repo: Optional[str] = None
     reason: str = ""
     pinned: bool = True
     content: str = ""
+    target_scope: str = ""
 
 
 @router.post("/pin")
@@ -629,6 +631,15 @@ def forget(req: _IdReq):
 def correct(req: _IdReq):
     ws = req.workspace or _default_ws()
     return _run(service().correct, req.id, req.content, workspace=ws, reason=req.reason)
+
+
+@router.post("/promote")
+def promote(req: _IdReq):
+    ws = req.workspace or _default_ws()
+    return _run(
+        service().promote, req.id, req.target_scope, workspace=ws,
+        repo=req.repo, reason=req.reason,
+    )
 
 
 class _MergeReq(BaseModel):
@@ -665,7 +676,7 @@ class _RememberReq(BaseModel):
     workspace: str = "default"
     repo: Optional[str] = None
     mtype: str = "semantic"
-    scope: str = "repo"
+    scope: Optional[str] = None
     title: str = ""
     importance: float = 0.0
     keywords: Optional[list] = None
@@ -694,7 +705,7 @@ class _IntentRememberReq(BaseModel):
     repo: Optional[str] = None
     title: str = ""
     mtype: str = "semantic"
-    scope: str = "repo"
+    scope: Optional[str] = None
     importance: float = 0.0
     metadata: Optional[dict] = None
     retention_class: Optional[str] = None

@@ -19,6 +19,36 @@ def test_engine_remember_and_recall():
     assert "actions" in res.context.lower() or "aws" in res.context.lower()
 
 
+def test_engine_infers_scope_and_rejects_impossible_parents():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+
+    workspace = eng.remember("Workspace fact.", workspace_id=wid)
+    repo = eng.remember("Repo fact.", workspace_id=wid, repo_id=rid)
+    assert eng.store.get_memory(workspace).scope == Scope.WORKSPACE
+    assert eng.store.get_memory(repo).scope == Scope.REPO
+
+    session_id = eng.start_session(wid, rid)
+    session_grouped = eng.remember(
+        "Session-grouped repo fact.", workspace_id=wid, session_id=session_id
+    )
+    grouped = eng.store.get_memory(session_grouped)
+    assert grouped.scope == Scope.REPO and grouped.repo_id == rid
+
+    workspace_session = eng.start_session(wid)
+    workspace_grouped = eng.remember(
+        "Workspace-session grouped fact.", workspace_id=wid,
+        session_id=workspace_session,
+    )
+    assert eng.store.get_memory(workspace_grouped).scope == Scope.WORKSPACE
+
+    with pytest.raises(ValueError, match="repo scope requires"):
+        eng.remember("broken", workspace_id=wid, scope=Scope.REPO)
+    with pytest.raises(ValueError, match="workspace scope requires"):
+        eng.remember("broken", workspace_id=wid, repo_id=rid, scope=Scope.WORKSPACE)
+
+
 def test_engine_falls_back_to_numpy_index_offline():
     eng = MemoryEngine.create(":memory:")
     # sqlite-vec is unavailable in the sandbox → factory falls back to NumPy.
@@ -33,6 +63,28 @@ def test_engine_respects_memory_type_and_scope():
                        workspace_id=wid, repo_id=rid, mtype=MemoryType.PROCEDURAL, scope=Scope.REPO)
     rec = eng.store.get_memory(mid)
     assert rec.mtype == MemoryType.PROCEDURAL and rec.scope == Scope.REPO
+
+
+def test_engine_session_recall_infers_parent_repo():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    sid = eng.start_session(wid, rid)
+    workspace = eng.remember(
+        "Scopeprobe workspace ancestor.", workspace_id=wid, scope=Scope.WORKSPACE
+    )
+    repo = eng.remember(
+        "Scopeprobe repo ancestor.", workspace_id=wid, repo_id=rid, scope=Scope.REPO
+    )
+    session = eng.remember(
+        "Scopeprobe exact session.", workspace_id=wid, session_id=sid,
+        scope=Scope.SESSION,
+    )
+
+    recalled = eng.recall("scopeprobe", workspace_id=wid, session_id=sid, k=10)
+    ids = {chunk["id"] for chunk in recalled.chunks}
+
+    assert {workspace, repo, session} <= ids
 
 
 # ── conflict resolution on the write path ───────────────────────────────────────
@@ -246,6 +298,72 @@ def test_correct_supersedes_without_deleting():
     assert new_rec.metadata.get("corrects") == mid
     live_ids = [m.id for m in eng.store.list_memories(SearchFilter(workspace_id=wid))]
     assert mid not in live_ids and out["id"] in live_ids
+
+
+def test_promote_widens_scope_and_preserves_source_history_and_safety():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    sid = eng.start_session(wid, rid)
+    source = eng.remember(
+        "All release tags must be signed.", workspace_id=wid, repo_id=rid,
+        session_id=sid, scope=Scope.SESSION,
+    )
+    eng.store.set_pinned(source, True)
+    eng.store.conn.execute(
+        "UPDATE memories SET sensitivity='secret', stability=9.0, access_count=4 WHERE id=?",
+        (source,),
+    )
+    eng.store.conn.commit()
+
+    out = eng.promote(source, Scope.REPO, reason="confirmed repo convention")
+
+    old = eng.store.get_memory(source)
+    promoted = eng.store.get_memory(out["id"])
+    assert old is not None and old.valid_to is not None
+    assert promoted.scope == Scope.REPO and promoted.repo_id == rid
+    assert promoted.pinned is True and promoted.sensitivity == "secret"
+    assert promoted.stability >= 9.0 and promoted.access_count >= 4
+    assert promoted.metadata["promoted_from"] == [source]
+    assert eng.store.has_link(promoted.id, source, relation="promotes")
+
+
+def test_promote_deduplicates_into_existing_wider_memory():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    text = "The organization requires signed release tags."
+    wider = eng.remember(
+        text, workspace_id=wid, scope=Scope.WORKSPACE,
+        metadata={"provenance": {"source": "agent", "trusted": True}},
+    )
+    source = eng.remember(
+        text, workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+        metadata={"provenance": {"source": "web", "trusted": False}},
+    )
+
+    out = eng.promote(source, Scope.WORKSPACE)
+
+    assert out["id"] == wider and out["op"] == "noop"
+    assert eng.store.get_memory(source).valid_to is not None
+    assert eng.store.has_link(wider, source, relation="promotes")
+    promoted = eng.store.get_memory(wider)
+    assert promoted.metadata["promoted_from"] == [source]
+    assert promoted.provenance["trusted"] is False
+
+
+def test_promote_rejects_same_or_narrower_scope():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    source = eng.remember("Repo fact.", workspace_id=wid, repo_id=rid, scope=Scope.REPO)
+
+    with pytest.raises(ValueError, match="must widen"):
+        eng.promote(source, Scope.REPO)
+    with pytest.raises(ValueError, match="must widen"):
+        eng.promote(source, Scope.SESSION)
+    with pytest.raises(ValueError, match="user scope is not supported"):
+        eng.promote(source, Scope.USER)
 
 
 # ── why / timeline / recall_proactive ────────────────────────────────────────────
