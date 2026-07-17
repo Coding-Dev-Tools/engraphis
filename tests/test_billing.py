@@ -133,7 +133,7 @@ def test_issued_key_migrates_retired_relay_url(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
     monkeypatch.setenv(
         "ENGRAPHIS_KEY_CLOUD_URL",
-        "https://team.engraphis.com/",
+        "https://engraphis-production.up.railway.app/",
     )
     key = issue_key("buyer@example.com", product_name="Engraphis Pro", days=30)
     assert parse_key(key).cloud_url == DEFAULT_RELAY_URL
@@ -921,3 +921,146 @@ def test_registry_failure_never_revokes_existing_subscription_key(monkeypatch):
 
     assert revoke_calls == []
     assert LR.is_revoked(old_id) is False
+
+
+# ── #3: in-flight vs completed must not be conflated ───────────────────────────
+def test_claim_webhook_is_tristate(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGRAPHIS_WEBHOOK_STATE", str(tmp_path / "wh.db"))
+    assert B.claim_webhook("wid") == "claimed"       # fresh slot
+    assert B.claim_webhook("wid") == "in_flight"     # held, younger than the TTL
+    B.complete_webhook("wid")
+    assert B.claim_webhook("wid") == "fulfilled"     # completed → a true duplicate
+
+
+def test_in_flight_delivery_is_retryable_not_duplicate(monkeypatch):
+    # The crash-window regression: a delivery whose earlier attempt is still in flight
+    # (or crashed mid-fulfillment, within the TTL) must get a RETRYABLE 503 so Polar
+    # keeps retrying — NOT a 2xx "duplicate", which would cancel retries and lose the key.
+    client = _inspector_client(monkeypatch)
+    assert B.claim_webhook("dlv:evt_inflight") == "claimed"   # simulate an in-flight attempt
+    body = (b'{"type":"order.paid","data":{"customer":{"email":"buyer@example.com"},'
+            b'"product":{"name":"Engraphis Pro"}}}')
+    r = _post(client, WHSEC, "evt_inflight", body)
+    assert r.status_code == 503
+    assert r.json()["status"] == "processing"
+
+
+# ── #2: refund / cancellation / revocation revokes issued keys ─────────────────
+def test_order_refunded_revokes_subscription_keys(monkeypatch):
+    from engraphis.inspector import license_registry as LR
+    from engraphis.inspector import webhooks as WH
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
+    key = WH.issue_key("buyer@example.com", product_name="Engraphis Team", seats=3,
+                       days=395, subscription_id="sub_refund")
+    kid = parse_key(key).key_id
+    assert LR.is_revoked(kid) is False
+    client = _inspector_client(monkeypatch)
+    body = _body({"type": "order.refunded", "data": {
+        "subscription_id": "sub_refund", "customer": {"email": "buyer@example.com"}}})
+    r = _post(client, WHSEC, "evt_refund", body)
+    assert r.status_code == 202
+    assert r.json()["status"] == "revoked" and r.json()["keys_revoked"] == 1
+    assert LR.is_revoked(kid) is True
+
+
+def test_subscription_canceled_revokes_by_top_level_id(monkeypatch):
+    # subscription.* payloads ARE a Subscription object, so the id is top-level (not
+    # subscription_id). Revocation must still find and revoke the key.
+    from engraphis.inspector import license_registry as LR
+    from engraphis.inspector import webhooks as WH
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
+    key = WH.issue_key("buyer@example.com", product_name="Engraphis Pro", seats=1,
+                       days=395, subscription_id="sub_cancel")
+    kid = parse_key(key).key_id
+    client = _inspector_client(monkeypatch)
+    body = _body({"type": "subscription.revoked", "data": {
+        "id": "sub_cancel", "status": "canceled",
+        "customer": {"email": "buyer@example.com"}}})
+    r = _post(client, WHSEC, "evt_cancel", body)
+    assert r.status_code == 202 and r.json()["status"] == "revoked"
+    assert LR.is_revoked(kid) is True
+
+
+# ── #4: a mid-cycle reissue is bounded to the paid period, not a full new window ─
+def test_seat_change_key_is_bounded_to_current_period_end(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
+    key = WH.handle_subscription_updated({
+        "id": "sub_pe", "status": "active", "seats": 5,
+        "customer": {"email": "lead@example.com"},
+        "product": {"name": "Engraphis Team Annual"},
+        "current_period_end": _iso_in_days(20)})
+    lic = parse_key(key)
+    days_left = (lic.expires - time.time()) / 86400
+    # bounded to ~20d period end (+5d grace), NOT a fresh 395-day annual window from now
+    assert 20 <= days_left <= 30, f"expected period-bounded key, got {days_left:.1f}d"
+
+
+def test_seat_change_without_period_end_falls_back_to_key_days(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
+    key = WH.handle_subscription_updated({
+        "id": "sub_nope", "status": "active", "seats": 5,
+        "customer": {"email": "lead@example.com"},
+        "product": {"name": "Engraphis Team"}})            # monthly, no period end
+    days_left = (parse_key(key).expires - time.time()) / 86400
+    assert 30 < days_left <= 36, f"expected ~35d monthly fallback, got {days_left:.1f}d"
+
+
+# ── #5: an out-of-order (older) subscription.updated must not regress a newer count ─
+def _sub_updated_body_ts(sub_id, seats, modified_at, status="active",
+                         product="Engraphis Team"):
+    return _body({"type": "subscription.updated", "data": {
+        "id": sub_id, "status": status, "seats": seats, "modified_at": modified_at,
+        "customer": {"email": "lead@example.com"}, "product": {"name": product}}})
+
+
+def test_out_of_order_subscription_update_is_ignored(monkeypatch):
+    client = _inspector_client(monkeypatch)
+    base = datetime.now(timezone.utc)
+    t0 = base.isoformat()
+    t1 = (base + timedelta(days=1)).isoformat()
+    t2 = (base + timedelta(days=2)).isoformat()
+    # first sighting seeds baseline (seats=3 @ t0)
+    r0 = _post(client, WHSEC, "evt_oo_seed", _sub_updated_body_ts("sub_oo", 3, t0))
+    assert r0.json()["reason"] == "baseline recorded"
+    # newer delivery: 3 -> 7 @ t2 -> fulfilled
+    r2 = _post(client, WHSEC, "evt_oo_new", _sub_updated_body_ts("sub_oo", 7, t2))
+    assert r2.json()["key_issued"] is True
+    # OLDER delivery arrives late: seats=5 @ t1 (< t2) -> ignored as out-of-order
+    r1 = _post(client, WHSEC, "evt_oo_old", _sub_updated_body_ts("sub_oo", 5, t1))
+    assert r1.json()["status"] == "ignored"
+    assert r1.json()["reason"] == "out-of-order update"
+    assert B.get_known_seats("sub_oo") == 7           # NOT regressed to 5
+
+
+# ── #7: organization enforcement + explicit product-tier override ──────────────
+def test_organization_id_mismatch_is_rejected(monkeypatch):
+    monkeypatch.setenv("POLAR_ORGANIZATION_ID", "org_expected")
+    client = _inspector_client(monkeypatch)
+    body = _body({"type": "order.paid", "data": {
+        "organization_id": "org_other",
+        "customer": {"email": "buyer@example.com"},
+        "product": {"name": "Engraphis Pro"}}})
+    r = _post(client, WHSEC, "evt_org_bad", body)
+    assert r.status_code == 403 and r.json()["error"] == "organization mismatch"
+
+
+def test_organization_id_match_is_allowed(monkeypatch):
+    monkeypatch.setenv("POLAR_ORGANIZATION_ID", "org_ok")
+    client = _inspector_client(monkeypatch)
+    body = _body({"type": "order.paid", "data": {
+        "organization_id": "org_ok",
+        "customer": {"email": "buyer@example.com"},
+        "product": {"name": "Engraphis Pro"}}})
+    r = _post(client, WHSEC, "evt_org_ok", body)
+    assert r.status_code == 202 and r.json()["key_issued"] is True
+
+
+def test_product_map_override_pins_tier(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    monkeypatch.setenv("ENGRAPHIS_POLAR_PRODUCT_MAP", '{"Engraphis Enterprise": "team"}')
+    assert WH._map_polar_product_to_plan("Engraphis Enterprise") == "team"
+    monkeypatch.delenv("ENGRAPHIS_POLAR_PRODUCT_MAP", raising=False)
+    # without the override an unrecognized product still defaults to Pro (never free)
+    assert WH._map_polar_product_to_plan("Engraphis Enterprise") == "pro"

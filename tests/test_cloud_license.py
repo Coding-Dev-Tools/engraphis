@@ -93,14 +93,31 @@ def test_register_rejects_expired_key():
 
 
 def test_seat_cap_enforced():
+    # Seat caps apply to TEAM (the seat-priced tier). Pro is the individual multi-device
+    # tier and is intentionally NOT device-capped (see test_pro_register_is_not_device_capped
+    # and sync_relay.py) — so this exercises the cap with a team key.
     c = _app()
-    key = _key(seats=1)
+    key = _key(plan="team", seats=1)
     assert c.post("/license/v1/register", json={"key": key, "machine_id": "A"}).status_code == 200
     # a second distinct machine exceeds the 1-seat cap
     over = c.post("/license/v1/register", json={"key": key, "machine_id": "B"})
     assert over.status_code == 402 and "seat" in over.json()["error"].lower()
     # the already-registered machine can always renew
     assert c.post("/license/v1/register", json={"key": key, "machine_id": "A"}).status_code == 200
+
+
+def test_pro_register_is_not_device_capped():
+    """Pro is the individual multi-device tier: one person's many devices all register
+    under the same key. The register endpoint issues the online-enforcement lease that
+    gates EVERY paid feature, so seat-capping Pro here would lock a paying customer's
+    second device out of all Pro features — including the multi-device sync they bought.
+    Mirrors test_pro_relay_is_not_device_capped for the register/lease path."""
+    c = _app()
+    key = _key(plan="pro", seats=1)                             # Pro keys are minted seats=1
+    for m in ("p1", "p2", "p3"):
+        r = c.post("/license/v1/register", json={"key": key, "machine_id": m})
+        assert r.status_code == 200, r.text
+        assert r.json()["plan"] == "pro"
 
 
 def test_verify_endpoint_reflects_status():
@@ -680,8 +697,8 @@ def test_cloud_enforced_key_uses_baked_in_url(monkeypatch):
 
 
 def test_retired_baked_in_url_migrates_to_current_relay(monkeypatch):
-    """Existing signed keys must survive the vendor's domain-to-Railway migration."""
-    key = _enforced_key(cloud_url="https://team.engraphis.com")
+    """Existing signed keys must survive the vendor's Railway-to-domain migration."""
+    key = _enforced_key(cloud_url="https://engraphis-production.up.railway.app")
     lic_parsed = parse_key(key)
     calls = {}
 
@@ -695,7 +712,7 @@ def test_retired_baked_in_url_migrates_to_current_relay(monkeypatch):
     monkeypatch.setattr(cloud_license, "register", fake_register)
     monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
     got = licensing.current_license(refresh=True)
-    assert calls["base"] == DEFAULT_RELAY_URL == "https://engraphis-production.up.railway.app"
+    assert calls["base"] == DEFAULT_RELAY_URL == "https://team.engraphis.com"
     assert got.plan == "pro" and got.has("sync")
 
 
@@ -1130,6 +1147,27 @@ def test_start_team_trial_rate_limits_by_trusted_forwarded_source(monkeypatch, t
                    json={"machine_id": "dev-other", "email": "other@example.com"},
                    headers={"X-Forwarded-For": "198.51.100.4"})
     assert other.status_code == 200
+
+
+def test_start_team_trial_ignores_client_prepended_forwarded_prefix(monkeypatch):
+    """A client cannot mint fresh rate-limit buckets by prepending its own value to
+    X-Forwarded-For: the trusted proxy appends the real client IP to the RIGHT, so only
+    the rightmost entry is authoritative. Simulate a Railway-style single trusted hop
+    (``*``) that saw one real client (203.0.113.9) but a client that keeps rotating a
+    spoofed left prefix — the cap must still bite on the real (rightmost) address."""
+    monkeypatch.setenv("ENGRAPHIS_FORWARDED_ALLOW_IPS", "*")
+    monkeypatch.setattr(license_cloud, "_trial_rate_limit_per_hour", lambda: 2)
+    c = _app()
+    _capture_verify_url(monkeypatch)
+    for i in range(2):
+        r = c.post("/license/v1/start-trial",
+                   json={"machine_id": "dev-%d" % i, "email": "dev%d@example.com" % i},
+                   headers={"X-Forwarded-For": "10.0.0.%d, 203.0.113.9" % i})
+        assert r.status_code == 200, r.text
+    over = c.post("/license/v1/start-trial",
+                  json={"machine_id": "dev-over", "email": "over@example.com"},
+                  headers={"X-Forwarded-For": "10.0.0.250, 203.0.113.9"})
+    assert over.status_code == 429
 
 
 def test_start_team_trial_ignores_forwarded_source_from_untrusted_peer(monkeypatch):

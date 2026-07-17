@@ -93,16 +93,50 @@ def _load_signing_secret() -> bytes:
     return _read_seed_file(Path(_DEFAULT_KEY_PATH))
 
 
+def _product_plan_overrides() -> dict:
+    """Operator-configured exact product-name → plan map (``ENGRAPHIS_POLAR_PRODUCT_MAP``).
+
+    JSON object of ``{"<product name>": "pro"|"team", ...}`` matched case-insensitively
+    and exactly, letting an operator pin tiering precisely instead of relying on the
+    substring heuristic — e.g. a product literally named "Engraphis Enterprise" that
+    should map to ``team``. Consulted before the built-in substring rules. Malformed
+    JSON or unknown plan values are ignored (the substring fallback still applies), so a
+    bad env var can never stiff a paying customer.
+    """
+    raw = os.environ.get("ENGRAPHIS_POLAR_PRODUCT_MAP", "").strip()
+    if not raw:
+        return {}
+    try:
+        import json
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning("ENGRAPHIS_POLAR_PRODUCT_MAP is not valid JSON — ignoring")
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out = {}
+    for name, plan in parsed.items():
+        plan = str(plan or "").strip().lower()
+        if plan in PLAN_FEATURES:
+            out[str(name).strip().lower()] = plan
+    return out
+
+
 def _map_polar_product_to_plan(product_name: str) -> str:
     """Map Polar product name to an Engraphis plan tier.
 
-    Match on substrings so "Engraphis Pro Monthly" and "Engraphis Pro Annual" both
-    resolve to ``pro``. A paid order with an *unrecognized* product name still
-    resolves to ``pro`` (never free) and logs loudly: a customer who paid must never
-    be silently stiffed with a useless free-tier key. Correct Pro-vs-Team routing
-    depends on the Polar product name containing "pro"/"team" — keep them named so.
+    An operator-configured exact-name override (``ENGRAPHIS_POLAR_PRODUCT_MAP``) wins so
+    tiering can be pinned to real business data rather than inferred. Otherwise match on
+    substrings so "Engraphis Pro Monthly" and "Engraphis Pro Annual" both resolve to
+    ``pro``. A paid order with an *unrecognized* product name still resolves to ``pro``
+    (never free) and logs loudly: a customer who paid must never be silently stiffed with
+    a useless free-tier key. Correct Pro-vs-Team routing depends on the Polar product name
+    containing "pro"/"team" (or an explicit override) — keep them named so.
     """
     name = (product_name or "").lower()
+    override = _product_plan_overrides().get(name.strip())
+    if override:
+        return override
     if "team" in name:
         return "team"
     if "pro" in name:
@@ -130,6 +164,32 @@ def _key_days(product_name: str, metadata: dict) -> int:
     if "annual" in name or "year" in name or "yr" in name:
         return 395
     return 35
+
+
+# Grace added over a subscription's current_period_end when re-issuing a key mid-cycle,
+# so a slightly-late renewal webhook never briefly locks out a paying customer. Kept
+# small (matches the 5-day grace baked into the 35-day monthly _key_days window) — the
+# whole point of bounding to the period end is that a mid-cycle change must NOT hand out
+# a fresh full 35/395-day window that outlives the paid period.
+_KEY_PERIOD_GRACE_DAYS = 5
+
+
+def _subscription_key_days(payload: dict, product_name: str, metadata: dict,
+                           *, now: Optional[float] = None) -> int:
+    """Validity (in days) for a key re-issued from a Subscription object mid-cycle.
+
+    Bounds the key to the subscription's ``current_period_end`` (+ a small fixed grace)
+    rather than a fresh full ``_key_days`` window measured from now. Without this, a
+    late-cycle seat change would mint a key valid a whole extra billing cycle past the
+    paid period (≈12 months for annual) — and since cancellation is enforced by letting
+    the period-bounded key expire, that overrun is unpaid access. Falls back to
+    :func:`_key_days` only when ``current_period_end`` is absent from the payload.
+    """
+    now = now if now is not None else time.time()
+    end = _parse_ts(payload.get("current_period_end"))
+    if end and end > now:
+        return max(1, math.ceil((end - now) / 86400) + _KEY_PERIOD_GRACE_DAYS)
+    return _key_days(product_name, metadata)
 
 
 def _plan_label(product_name: str) -> str:
@@ -745,7 +805,10 @@ def handle_subscription_updated(payload: dict) -> Optional[str]:
     product = payload.get("product") or {}
     product_name = _extract_product_name(payload)
     seats = _extract_seats(payload)
-    days = _key_days(product_name, product.get("metadata") or {})
+    # Bound the replacement key to the subscription's current paid period, NOT a fresh
+    # full window from now — a mid-cycle seat change must not extend entitlement past the
+    # period the customer has actually paid through.
+    days = _subscription_key_days(payload, product_name, product.get("metadata") or {})
     logger.info("seat count changed for %s (%s) -> %d seats, re-issuing key",
                 email_addr, product_name, seats)
     return _issue_and_email(

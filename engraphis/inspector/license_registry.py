@@ -198,6 +198,32 @@ def revoke_superseded(subscription_id: str, keep_key_id: str, *,
         conn.close()
 
 
+def revoke_by_subscription(subscription_id: str, *,
+                           db_path: Optional[str] = None) -> int:
+    """Revoke EVERY active key issued for *subscription_id*. Returns the number changed.
+
+    Used by the negative half of the billing lifecycle (refund / chargeback / hard
+    cancellation): unlike :func:`revoke_superseded`, this keeps no key — the customer is
+    no longer entitled to any. Keys are cloud-enforced (``enforce=cloud``), so the
+    revocation takes effect at the next lease renewal (within one lease TTL, ~24h).
+    Idempotent: a second call simply changes nothing.
+    """
+    subscription_id = (subscription_id or "").strip()[:128]
+    if not subscription_id:
+        return 0
+    conn = connect(db_path)
+    try:
+        with conn:
+            cur = conn.execute(
+                "UPDATE issued_licenses SET status='revoked', revoked_at=? "
+                "WHERE subscription_id=? AND status!='revoked'",
+                (time.time(), subscription_id),
+            )
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
 def is_revoked(key_id: str, *, db_path: Optional[str] = None) -> bool:
     """True only if the key is present AND explicitly revoked.
 

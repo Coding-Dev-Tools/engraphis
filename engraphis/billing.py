@@ -115,6 +115,16 @@ def _dedup_conn() -> Optional[sqlite3.Connection]:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS subscription_seats ("
             "subscription_id TEXT PRIMARY KEY, seats INTEGER NOT NULL, updated_at REAL)")
+        seat_columns = {
+            row[1] for row in conn.execute(
+                "PRAGMA table_info(subscription_seats)").fetchall()}
+        if "event_ts" not in seat_columns:
+            # The source event's own modification time (Polar ``modified_at``), so an
+            # out-of-order redelivery of an OLDER subscription.updated can't regress a
+            # newer seat count. Nullable: payloads without a timestamp fall back to the
+            # seat-count-diff logic exactly as before.
+            conn.execute(
+                "ALTER TABLE subscription_seats ADD COLUMN event_ts REAL")
         conn.commit()
         try:
             os.chmod(path, 0o600)
@@ -127,21 +137,34 @@ def _dedup_conn() -> Optional[sqlite3.Connection]:
         raise WebhookStateError("durable webhook state store unavailable") from exc
 
 
-def reserve_webhook(webhook_id: str) -> bool:
-    """Atomically claim *webhook_id* for processing.
+def claim_webhook(webhook_id: str) -> str:
+    """Atomically determine this delivery's state and claim it if free.
 
-    Completed claims remain permanent. An unfinished claim can be reclaimed after
-    :data:`_RESERVATION_TTL_SECONDS`, preventing a process crash before fulfillment
-    from suppressing the purchase forever. In-memory state is used only when no
-    durable store is configured; a configured store failure is retryable and raises.
+    Returns one of three states so the caller can answer correctly instead of
+    conflating "already done" with "still running":
+      ``"claimed"``    — we now own a fresh (or reclaimed-after-TTL) processing slot;
+                         proceed with fulfillment.
+      ``"in_flight"``  — another attempt holds an UNFINISHED claim younger than
+                         :data:`_RESERVATION_TTL_SECONDS`. The caller must return a
+                         RETRYABLE (non-2xx) response so Polar retries later: answering
+                         2xx here would cancel Polar's retries, and if the in-flight
+                         attempt crashed before minting the key the purchase would be
+                         lost forever (no future delivery to reclaim the slot at TTL).
+      ``"fulfilled"``  — a prior attempt completed; a true duplicate — answer 2xx.
+
+    Completed claims remain permanent. In-memory state is used only when no durable
+    store is configured; a configured store failure is retryable and raises.
     """
     conn = _dedup_conn()
     if conn is None:
+        # Single-worker fallback: state dies with the process, so a post-crash retry
+        # simply re-claims. A present entry means this process already handled (or is
+        # handling) it and WILL complete, so "fulfilled" (→ 2xx duplicate) is correct.
         with _mem_lock:
             if webhook_id in _mem_seen:
-                return False
+                return "fulfilled"
             _mem_seen.add(webhook_id)
-            return True
+            return "claimed"
     try:
         now = time.time()
         with conn:
@@ -149,16 +172,32 @@ def reserve_webhook(webhook_id: str) -> bool:
                 "INSERT OR IGNORE INTO processed(webhook_id, ts, state) "
                 "VALUES (?, ?, 'processing')", (webhook_id, now))
             if cur.rowcount == 1:
-                return True
+                return "claimed"
             cur = conn.execute(
                 "UPDATE processed SET ts=? WHERE webhook_id=? "
                 "AND state='processing' AND ts<=?",
                 (now, webhook_id, now - _RESERVATION_TTL_SECONDS))
-        return cur.rowcount == 1
+            if cur.rowcount == 1:
+                return "claimed"
+            row = conn.execute(
+                "SELECT state FROM processed WHERE webhook_id=?",
+                (webhook_id,)).fetchone()
+        return "in_flight" if (row is not None and row[0] == "processing") else "fulfilled"
     except sqlite3.Error as exc:
         raise WebhookStateError("could not reserve durable webhook claim") from exc
     finally:
         conn.close()
+
+
+def reserve_webhook(webhook_id: str) -> bool:
+    """Back-compat bool wrapper over :func:`claim_webhook`.
+
+    True only when this call took ownership of a fresh or reclaimed processing slot
+    (i.e. the caller should proceed to fulfill). False for both an already-fulfilled
+    claim and an in-flight one — callers that must distinguish those use
+    :func:`claim_webhook` directly.
+    """
+    return claim_webhook(webhook_id) == "claimed"
 
 
 def complete_webhook(webhook_id: str) -> None:
@@ -206,32 +245,46 @@ def release_webhook(webhook_id: str) -> None:
 # store configured this fails CLOSED (never re-issues) rather than open.
 def get_known_seats(subscription_id: str) -> Optional[int]:
     """Last seat count recorded for *subscription_id*, or ``None`` if never seen."""
+    baseline = get_seat_baseline(subscription_id)
+    return baseline[0] if baseline is not None else None
+
+
+def get_seat_baseline(subscription_id: str) -> Optional[tuple[int, Optional[float]]]:
+    """Last ``(seats, event_ts)`` recorded for *subscription_id*, or ``None``.
+
+    ``event_ts`` is the source event's own modification time (may be ``None`` for
+    baselines recorded from payloads that carried no timestamp)."""
     conn = _dedup_conn()
     if conn is None:
         return None
     try:
         row = conn.execute(
-            "SELECT seats FROM subscription_seats WHERE subscription_id = ?",
+            "SELECT seats, event_ts FROM subscription_seats WHERE subscription_id = ?",
             (subscription_id,)).fetchone()
-        return int(row[0]) if row else None
+        if not row:
+            return None
+        return int(row[0]), (float(row[1]) if row[1] is not None else None)
     except sqlite3.Error as exc:
         raise WebhookStateError("could not read durable seat baseline") from exc
     finally:
         conn.close()
 
 
-def record_known_seats(subscription_id: str, seats: int) -> bool:
-    """Persist *seats* as the new baseline. Return false without a durable store."""
+def record_known_seats(subscription_id: str, seats: int,
+                       event_ts: Optional[float] = None) -> bool:
+    """Persist *seats* (and the event's *event_ts*) as the new baseline. Return false
+    without a durable store."""
     conn = _dedup_conn()
     if conn is None:
         return False
     try:
         with conn:
             conn.execute(
-                "INSERT INTO subscription_seats(subscription_id, seats, updated_at) "
-                "VALUES (?, ?, ?) ON CONFLICT(subscription_id) DO UPDATE SET "
-                "seats=excluded.seats, updated_at=excluded.updated_at",
-                (subscription_id, seats, time.time()))
+                "INSERT INTO subscription_seats(subscription_id, seats, updated_at, "
+                "event_ts) VALUES (?, ?, ?, ?) ON CONFLICT(subscription_id) DO UPDATE SET "
+                "seats=excluded.seats, updated_at=excluded.updated_at, "
+                "event_ts=excluded.event_ts",
+                (subscription_id, seats, time.time(), event_ts))
         return True
     except sqlite3.Error as exc:
         raise WebhookStateError("could not persist durable seat baseline") from exc
@@ -239,8 +292,12 @@ def record_known_seats(subscription_id: str, seats: int) -> bool:
         conn.close()
 
 def _finalize_webhook(delivery_id: str, fulfillment_id: str,
-                      seat_baseline: Optional[tuple[str, int]] = None) -> None:
-    """Persist the seat baseline and complete both claims in one transaction."""
+                      seat_baseline: Optional[tuple] = None) -> None:
+    """Persist the seat baseline and complete both claims in one transaction.
+
+    ``seat_baseline`` is ``(subscription_id, seats)`` or ``(subscription_id, seats,
+    event_ts)``; ``event_ts`` (the source event's modification time) defaults to ``None``.
+    """
     conn = _dedup_conn()
     if conn is None:
         return
@@ -248,11 +305,14 @@ def _finalize_webhook(delivery_id: str, fulfillment_id: str,
         with conn:
             now = time.time()
             if seat_baseline is not None:
+                sub_id, seats = seat_baseline[0], seat_baseline[1]
+                event_ts = seat_baseline[2] if len(seat_baseline) > 2 else None
                 conn.execute(
-                    "INSERT INTO subscription_seats(subscription_id, seats, updated_at) "
-                    "VALUES (?, ?, ?) ON CONFLICT(subscription_id) DO UPDATE SET "
-                    "seats=excluded.seats, updated_at=excluded.updated_at",
-                    (*seat_baseline, now))
+                    "INSERT INTO subscription_seats(subscription_id, seats, updated_at, "
+                    "event_ts) VALUES (?, ?, ?, ?) ON CONFLICT(subscription_id) DO UPDATE "
+                    "SET seats=excluded.seats, updated_at=excluded.updated_at, "
+                    "event_ts=excluded.event_ts",
+                    (sub_id, seats, now, event_ts))
             for claim_id in (fulfillment_id, delivery_id):
                 cur = conn.execute(
                     "UPDATE processed SET state='fulfilled', ts=? "
@@ -280,6 +340,60 @@ def _subscription_id(data: dict) -> str:
         subscription = data.get("subscription")
         raw = subscription.get("id") if isinstance(subscription, dict) else subscription
     return str(raw or "").strip()[:128]
+
+
+def _event_modified_at(data: dict) -> Optional[float]:
+    """Epoch of the event object's own last-modification time, if the payload carries
+    one (Polar sends ``modified_at`` on Subscription objects). Used to reject an
+    out-of-order redelivery of an older subscription.updated. Returns ``None`` when the
+    payload has no usable timestamp, in which case ordering can't be established and the
+    caller falls back to seat-count comparison."""
+    from engraphis.inspector.webhooks import _parse_ts
+    return _parse_ts(data.get("modified_at") or data.get("updated_at"))
+
+
+def _event_organization_id(event: dict, data: dict) -> str:
+    """Best-effort extraction of the Polar organization id from an event, checked in the
+    locations Polar populates across order/subscription payloads."""
+    product = data.get("product") or {}
+    subscription = data.get("subscription") or {}
+    for candidate in (
+        data.get("organization_id"),
+        event.get("organization_id"),
+        product.get("organization_id"),
+        subscription.get("organization_id"),
+    ):
+        if candidate:
+            return str(candidate).strip()
+    return ""
+
+
+def _organization_mismatch(event: dict, data: dict) -> bool:
+    """True only when ``POLAR_ORGANIZATION_ID`` is configured AND the event carries a
+    DIFFERENT organization id. The check is documented (webhooks.py env docs) but was
+    never enforced. Fails closed on a concrete mismatch; when the env var is unset, or
+    the payload carries no org id to compare, it does not block fulfillment (so a
+    payload-shape assumption can never strand a real purchase)."""
+    expected = os.environ.get("POLAR_ORGANIZATION_ID", "").strip()
+    if not expected:
+        return False
+    found = _event_organization_id(event, data)
+    if not found:
+        logger.warning("polar webhook: POLAR_ORGANIZATION_ID set but event carries no "
+                       "organization id to verify — proceeding")
+        return False
+    return not hmac.compare_digest(found, expected)
+
+
+# Subscription/order lifecycle events that END entitlement. A signed delivery of any of
+# these revokes every key for the subscription (keys are cloud-enforced, so revocation
+# takes effect at the next lease renewal). "canceled" here means a hard cancel/expiry;
+# a mere cancel-at-period-end flag arrives as subscription.updated with status still
+# active and is intentionally NOT in this set — that key should live out the paid period.
+_REVOKING_EVENTS = frozenset({
+    "order.refunded", "order.refund.created",
+    "subscription.revoked", "subscription.canceled", "subscription.cancelled",
+})
 
 
 @router.post("/webhooks/polar")
@@ -356,6 +470,33 @@ async def polar_webhook(request: Request):
     event_type = (event.get("type") or "").strip()
     data = event.get("data") or {}
 
+    # Reject a signed event from a DIFFERENT Polar organization when POLAR_ORGANIZATION_ID
+    # is configured (the documented-but-previously-unenforced control). No-op when unset.
+    if _organization_mismatch(event, data):
+        logger.warning("polar webhook: organization id mismatch — rejecting")
+        return JSONResponse({"error": "organization mismatch"}, status_code=403)
+
+    # Negative lifecycle: refund / chargeback / hard cancellation revokes every key for
+    # the subscription. Keys are cloud-enforced, so revocation bites at the next lease
+    # renewal (~24h). revoke_by_subscription is idempotent, so a redelivery is harmless.
+    if event_type in _REVOKING_EVENTS:
+        sub_id = _subscription_id(data)
+        if not sub_id and event_type.startswith("subscription."):
+            sub_id = str(data.get("id") or "").strip()[:128]
+        if not sub_id:
+            return JSONResponse({"status": "ignored", "reason": "no subscription id",
+                                 "type": event_type}, status_code=202)
+        try:
+            from engraphis.inspector import license_registry as _reg
+            revoked = await asyncio.to_thread(_reg.revoke_by_subscription, sub_id)
+        except Exception:  # noqa: BLE001 — retryable: let Polar redeliver the revoke
+            logger.exception("polar webhook: revocation failed for %s", sub_id)
+            return JSONResponse({"error": "revocation failed"}, status_code=503)
+        logger.info("polar webhook: %s revoked %d key(s) for subscription %s",
+                    event_type, revoked, sub_id)
+        return JSONResponse({"status": "revoked", "keys_revoked": revoked,
+                             "type": event_type}, status_code=202)
+
     # Route by event type and derive a stable per-fulfillment key so we issue exactly
     # ONE key per order and ONE per trial, no matter which/how many events fire:
     #   order.paid           -> paid activation, trial conversion, and each renewal
@@ -370,14 +511,17 @@ async def polar_webhook(request: Request):
     #                           and unrelated updates cannot spam replacement keys.
     # A non-trial subscription.created is a no-op: its paid key comes from order.paid, so
     # a canceled trial can never keep Pro — the short trial key just expires.
-    pending_seat_baseline = None  # (sub_id, seats), persisted only after key issuance
+    pending_seat_baseline = None  # (sub_id, seats, event_ts); persisted after key issuance
     if event_type == "order.paid":
         from engraphis.inspector.webhooks import (
             _extract_seats, handle_order_paid as _fulfill)
         fulfillment_key = "order:" + str(data.get("id") or webhook_id)
         sub_id = _subscription_id(data)
         if sub_id:
-            pending_seat_baseline = (sub_id, _extract_seats(data))
+            # event_ts stays None: an Order object's modified_at is a different clock from
+            # the Subscription's, so it must not seed the seat-ordering anchor (which is
+            # compared only against subscription.updated modified_at values).
+            pending_seat_baseline = (sub_id, _extract_seats(data), None)
     elif event_type == "subscription.created":
         if str(data.get("status", "")).strip().lower() != "trialing":
             return JSONResponse({"status": "ignored", "reason": "not a trial",
@@ -386,7 +530,7 @@ async def polar_webhook(request: Request):
             _extract_seats, handle_subscription_created as _fulfill)
         sub_id = str(data.get("id") or webhook_id)
         fulfillment_key = "trial:" + sub_id
-        pending_seat_baseline = (sub_id, _extract_seats(data))
+        pending_seat_baseline = (sub_id, _extract_seats(data), _event_modified_at(data))
     elif event_type == "subscription.updated":
         status = str(data.get("status", "")).strip().lower()
         sub_id = str(data.get("id") or "").strip()[:128]
@@ -395,25 +539,43 @@ async def polar_webhook(request: Request):
                                  "subscription", "type": event_type}, status_code=202)
         from engraphis.inspector.webhooks import _extract_seats
         new_seats = _extract_seats(data)
+        event_ts = _event_modified_at(data)
         try:
-            prior_seats = get_known_seats(sub_id)
+            prior = get_seat_baseline(sub_id)
         except WebhookStateError:
             logger.exception("polar webhook: could not read seat baseline")
             return JSONResponse({"error": "webhook state unavailable"}, status_code=503)
-        if prior_seats is None:
+        if prior is None:
             # First sighting seeds the baseline; the initial paid key came from order.paid.
             try:
-                persisted = record_known_seats(sub_id, new_seats)
+                persisted = record_known_seats(sub_id, new_seats, event_ts)
             except WebhookStateError:
                 logger.exception("polar webhook: could not seed seat baseline")
                 return JSONResponse({"error": "webhook state unavailable"}, status_code=503)
             reason = "baseline recorded" if persisted else "durable baseline unavailable"
             return JSONResponse({"status": "ignored", "reason": reason,
                                  "type": event_type}, status_code=202)
+        prior_seats, prior_ts = prior
+        # Out-of-order guard: if this delivery is OLDER than the last one we acted on for
+        # this subscription, ignore it — a delayed redelivery of a stale seat count must
+        # not regress a newer one (and revoke the correct key). Only applies when both
+        # timestamps are known; without them we fall back to seat-count comparison.
+        if event_ts is not None and prior_ts is not None and event_ts <= prior_ts:
+            return JSONResponse({"status": "ignored", "reason": "out-of-order update",
+                                 "type": event_type}, status_code=202)
         if prior_seats == new_seats:
+            # No seat change. Keep the ordering anchor current (so a later, genuinely
+            # older delivery is still recognized as stale) but do not re-issue.
+            if event_ts is not None and (prior_ts is None or event_ts > prior_ts):
+                try:
+                    record_known_seats(sub_id, new_seats, event_ts)
+                except WebhookStateError:
+                    logger.exception("polar webhook: could not advance seat anchor")
+                    return JSONResponse({"error": "webhook state unavailable"},
+                                        status_code=503)
             return JSONResponse({"status": "ignored", "reason": "no seat-count change",
                                  "type": event_type}, status_code=202)
-        pending_seat_baseline = (sub_id, new_seats)
+        pending_seat_baseline = (sub_id, new_seats, event_ts)
         from engraphis.inspector.webhooks import handle_subscription_updated as _fulfill
         # webhook-id is covered by the signature and stable across retries of one
         # delivery. Versioning by it permits legitimate A -> B -> A seat cycles while
@@ -423,21 +585,40 @@ async def polar_webhook(request: Request):
         return JSONResponse({"status": "ignored", "type": event_type}, status_code=202)
 
     # Two-layer dedup: delivery-level (a retry of this exact webhook) and
-    # fulfillment-level (one key per order/trial/update version).
+    # fulfillment-level (one key per order/trial/update version). Each claim is
+    # tri-state so an in-flight attempt is answered RETRYABLE (503) rather than a 2xx
+    # "duplicate": a 2xx cancels Polar's retries, and if the in-flight attempt crashed
+    # before minting the key the purchase would be lost with no future delivery to
+    # reclaim the slot at the TTL. Only a genuinely COMPLETED claim is a duplicate.
     delivery_claim = "dlv:" + webhook_id
     fulfillment_claim = "ful:" + fulfillment_key
     delivery_reserved = False
     try:
-        if not reserve_webhook(delivery_claim):
+        delivery_state = claim_webhook(delivery_claim)
+        if delivery_state == "fulfilled":
             logger.info("polar webhook: duplicate delivery %s ignored", webhook_id)
             return JSONResponse(
                 {"status": "duplicate", "key_issued": False}, status_code=202)
+        if delivery_state == "in_flight":
+            logger.info("polar webhook: delivery %s already in flight — retry later",
+                        webhook_id)
+            return JSONResponse({"status": "processing", "key_issued": False},
+                                status_code=503)
         delivery_reserved = True
-        if not reserve_webhook(fulfillment_claim):
+        fulfillment_state = claim_webhook(fulfillment_claim)
+        if fulfillment_state == "fulfilled":
             complete_webhook(delivery_claim)
             logger.info("polar webhook: %s already fulfilled — no second key", fulfillment_key)
             return JSONResponse({"status": "already_fulfilled", "key_issued": False},
                                 status_code=202)
+        if fulfillment_state == "in_flight":
+            # A concurrent delivery for the same order/trial/version is minting the key.
+            # Release our delivery claim and have Polar retry — by then it's fulfilled.
+            _release_claims(delivery_claim)
+            logger.info("polar webhook: %s fulfillment in flight — retry later",
+                        fulfillment_key)
+            return JSONResponse({"status": "processing", "key_issued": False},
+                                status_code=503)
     except WebhookStateError:
         if delivery_reserved:
             _release_claims(delivery_claim)

@@ -80,13 +80,20 @@ async def register(request: Request):
         raise LicenseError("this license has been revoked")
 
     now = time.time()
-    conn = _conn()
-    try:
-        # Claim (or refresh) this device's seat. Reclaims seats whose lease has lapsed
-        # first, then enforces the per-license cap; raises LicenseError (→ 402) if full.
-        reg.claim_seat(conn, lic, machine_id, now=now)
-    finally:
-        conn.close()
+    # Team is the only device-capped tier (it is seat-priced). Pro is intentionally NOT
+    # device-capped here: its value is one person syncing their own machines, and
+    # ``account_id`` isolation already separates customers. Seat-capping every plan would
+    # make a Pro customer's second device fail registration → the client maps that 402 to
+    # "revoked" and drops to the free tier, breaking the flagship multi-device Pro feature.
+    # Mirrors sync_relay._authorize so the two enforcement points can't drift.
+    if lic.plan == "team":
+        conn = _conn()
+        try:
+            # Claim (or refresh) this device's seat. Reclaims seats whose lease has lapsed
+            # first, then enforces the per-license cap; raises LicenseError (→ 402) if full.
+            reg.claim_seat(conn, lic, machine_id, now=now)
+        finally:
+            conn.close()
 
     try:                                              # ensure it's in the issued registry
         reg.record_issued(key)
@@ -447,8 +454,13 @@ def _client_ip(request: Request) -> str:
     if "*" not in allowed and direct not in allowed:
         return direct
     fwd = request.headers.get("x-forwarded-for", "")
-    first = fwd.split(",", 1)[0].strip()
-    return first[:64] if first else direct
+    # A trusted proxy APPENDS the address it observed to the right of X-Forwarded-For, so
+    # the rightmost entry is the hop our proxy actually saw. Everything to its left is
+    # client-supplied and therefore spoofable — taking the leftmost token would let an
+    # attacker mint a fresh rate-limit bucket per request by pre-seeding the header. We
+    # trust exactly one hop (the direct peer), so use the last entry.
+    parts = [p.strip() for p in fwd.split(",") if p.strip()]
+    return parts[-1][:64] if parts else direct
 
 
 def _bump_trial_rate(ip: str) -> bool:
