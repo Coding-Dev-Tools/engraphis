@@ -55,7 +55,8 @@ class Settings:
     api_token: str = field(default_factory=lambda: _env("ENGRAPHIS_API_TOKEN", ""))
     # Comma-separated CORS allow-list. Defaults to loopback only (local-first).
     cors_origins: list = field(
-        default_factory=lambda: _parse_origins(_env("ENGRAPHIS_CORS_ORIGINS", ""))
+        default_factory=lambda: _parse_origins(_env("ENGRAPHIS_CORS_ORIGINS", ""),
+                                               _env_int("ENGRAPHIS_PORT", 8700))
     )
     # Optional server-side workspace binding — the hard multi-tenant isolation boundary.
     # When non-empty, MemoryService refuses any read or write whose
@@ -151,10 +152,13 @@ def _parse_headers(raw: str) -> dict:
         return {}
 
 
-def _parse_origins(raw: str) -> list:
-    """CORS allow-list. Empty -> loopback only (safe local-first default)."""
+def _parse_origins(raw: str, port: int = 8700) -> list:
+    """CORS allow-list. Empty -> loopback on the CONFIGURED port (safe local-first default).
+
+    Deriving the default from ``port`` means running the dashboard on a non-default
+    ENGRAPHIS_PORT doesn't lock its own origin out of the CORS allow-list."""
     if not raw.strip():
-        return ["http://127.0.0.1:8700", "http://localhost:8700"]
+        return ["http://127.0.0.1:%d" % port, "http://localhost:%d" % port]
     return [o.strip() for o in raw.split(",") if o.strip()]
 
 

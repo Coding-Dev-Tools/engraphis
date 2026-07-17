@@ -12,7 +12,10 @@ services:
     ports:
       - "8700:8700"
     env_file:
-      - .env
+      # Optional: a fresh clone has no .env (it's gitignored), and `docker compose up`
+      # must still work using the `environment:` block below plus the shell env.
+      - path: .env
+        required: false
     environment:
       ENGRAPHIS_HOST: 0.0.0.0
       ENGRAPHIS_DB_PATH: /data/engraphis.db
@@ -34,10 +37,14 @@ services:
     ports:
       - "8701:8700"
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       ENGRAPHIS_HOST: 0.0.0.0
-      ENGRAPHIS_DB_PATH: /data/engraphis.db
+      # The v1 server uses a DIFFERENT, incompatible memory schema from the v2 dashboard,
+      # so it MUST NOT share the dashboard's engraphis.db (doing so corrupts both). Give it
+      # its own file on the shared volume.
+      ENGRAPHIS_DB_PATH: /data/engraphis_v1.db
       ENGRAPHIS_STATE_DIR: /data/.engraphis
     volumes:
       - engraphis-data:/data
