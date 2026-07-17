@@ -148,6 +148,6 @@ remain allowed by default; a hosted deployment must set `ENGRAPHIS_DASHBOARD_URL
 canonical public URL (for example, `https://team.engraphis.com`) so that exact Host and
 Origin are added to the transport allowlist. Requests with any other Host are rejected.
 The per-user bearer token is checked on every request, and dashboard roles carry through to
-tools: viewers may use read tools, members may use mutating tools, and
-`engraphis_consolidate` requires admin. The standalone `engraphis-mcp-http` launcher keeps
-its own SDK defaults.
+tools: viewers may use read tools, members may use mutating tools, and consolidation,
+repository indexing, and PostgreSQL schema ingestion require admin. The standalone
+`engraphis-mcp-http` launcher keeps its own SDK defaults.
