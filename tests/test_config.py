@@ -9,7 +9,7 @@ from engraphis import config
 from engraphis.config import Settings
 
 
-RETIRED_RELAY_URL = "https://team.engraphis.com"
+RETIRED_RELAY_URL = "https://engraphis-production.up.railway.app"
 
 
 def test_rerank_model_defaults_to_empty(monkeypatch):
@@ -63,7 +63,7 @@ def test_license_server_url_migrates_retired_signed_host(monkeypatch):
     monkeypatch.setattr(config.settings, "relay_url", config.DEFAULT_RELAY_URL)
     monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
     assert config.resolve_license_server_url(
-        "https://team.engraphis.com/",
+        "https://engraphis-production.up.railway.app/",
     ) == config.DEFAULT_RELAY_URL
 
 
