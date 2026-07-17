@@ -3,7 +3,7 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
-## [Unreleased]
+## [0.9.7] - 2026-07-17
 
 ### Security
 - Team-mode login gained a per-source-IP failure throttle (25 failures / 15 min)
