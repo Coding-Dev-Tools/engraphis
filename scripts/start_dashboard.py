@@ -30,8 +30,13 @@ def _run_shortcut_install(silent: bool = False, icon: str = "") -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Start the Engraphis WebUI.")
     ap.add_argument("--host", default=os.environ.get("ENGRAPHIS_HOST", "127.0.0.1"))
+    # Prefer the platform-injected ``PORT`` (Railway/Fly/Heroku set it and route + health-
+    # check to exactly that port). Falling back to ``ENGRAPHIS_PORT`` then 8700 keeps local
+    # and docker-compose runs unchanged. Binding a fixed 8700 while the platform expected
+    # ``$PORT`` was half of the 2026-07-16 Railway healthcheck failure.
     ap.add_argument("--port", type=int,
-                    default=int(os.environ.get("ENGRAPHIS_PORT", "8700")))
+                    default=int(os.environ.get("PORT")
+                                or os.environ.get("ENGRAPHIS_PORT", "8700")))
     ap.add_argument("--no-open", action="store_true",
                     help="Do not open the browser on startup.")
     ap.add_argument("--install-shortcuts", action="store_true",
