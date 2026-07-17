@@ -20,6 +20,12 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - `engraphis-graph` workflow CLI and token-protected `engraphis-graph-server` read-only HTTP
   surface.
 
+### Changed
+- Railway hosting now supports Pro solo single-admin deployments: any active Pro or Team
+  entitlement can bootstrap the first admin and activates the login wall, while member
+  seats and direct hosted agent writes remain Team-only. The hosting guide now covers both
+  Pro solo sync-relay and Team member flows.
+
 ### Fixed
 - 1-hop graph recall (and the PPR large-graph fallback) now honors `graph_layers`, matching
   the PPR arm — `Store.neighbors()` gained a `layers` filter.

@@ -9,6 +9,12 @@ This is the team counterpart to the local-first model in [SYNC.md](./SYNC.md): i
 of each member running a local MCP server + syncing, one admin hosts a single instance
 (e.g. on Railway) and everyone else just connects.
 
+> **Pro solo?** Agent-connect (direct writes to a cloud instance via `/api/remember` or
+> `/mcp`) requires a **Team** license. If you're a Pro member hosting on Railway, your
+> agents run locally and sync to your Railway instance via cloud sync — activate the same
+> Pro key on each local instance, then set `ENGRAPHIS_RELAY_URL` to your Railway URL. See
+> [HOSTING_RAILWAY.md](./HOSTING_RAILWAY.md) for the Pro solo path.
+
 ## How it works
 
 1. **Admin** deploys one instance and activates Team before first-admin setup: load a
