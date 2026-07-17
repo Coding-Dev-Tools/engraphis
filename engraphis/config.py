@@ -140,7 +140,10 @@ class Settings:
 
     @property
     def base_url(self) -> str:
-        return f"http://{self.host}:{self.port}"
+        """Connectable local base URL (wildcard binds map to loopback, IPv6 literals are
+        bracketed — ``host='::'`` must not yield the malformed ``http://:::8700``)."""
+        from engraphis.netutil import display_base_url
+        return display_base_url(self.host, self.port)
 
 
 def _parse_headers(raw: str) -> dict:

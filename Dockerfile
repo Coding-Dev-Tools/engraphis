@@ -1,10 +1,15 @@
 # Engraphis — self-hosted AI memory engine. Local-first; you bring the LLM.
 FROM python:3.11-slim AS base
 
+# ENGRAPHIS_HOST is deliberately NOT set here: docker-entrypoint.sh picks the widest
+# workable bind at runtime — `::` (dual-stack: IPv6 AND IPv4) when the kernel has IPv6,
+# else 0.0.0.0. Railway healthchecks arrive over the IPv6 private network, so a baked-in
+# IPv4-only bind is exactly what caused the 2026-07-16 deploy outage; hard-coding `::`
+# instead would break rarer IPv6-disabled hosts. An explicit ENGRAPHIS_HOST env (e.g.
+# docker-compose.yml's 0.0.0.0) always wins over the entrypoint's default.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    ENGRAPHIS_HOST=0.0.0.0 \
     ENGRAPHIS_PORT=8700 \
     ENGRAPHIS_DB_PATH=/data/engraphis.db \
     # Cache the sentence-transformers model on the persistent /data volume so it downloads
@@ -45,8 +50,10 @@ EXPOSE 8700
 # /api/health is served by BOTH entrypoints (engraphis-server AND engraphis-dashboard),
 # so this check is correct regardless of which one a service runs.
 # start-period is generous: the first cold boot downloads the embedding model (cached to
-# the /data volume via HF_HOME thereafter). The app listens on IPv4 so this matches the
-# GitHub smoke test as well as platform routing; it also honors $PORT if the platform overrides it.
+# the /data volume via HF_HOME thereafter). The entrypoint's default bind (`::` dual-stack
+# where available, else 0.0.0.0) answers loopback IPv4 probes like this one AND platform
+# IPv6 routing; the check also honors $PORT if the platform overrides it — matching
+# scripts/start_dashboard.py, which prefers $PORT over ENGRAPHIS_PORT for the bind.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --retries=3 \
     CMD python -c "import os,urllib.request,sys; p=os.environ.get('PORT') or os.environ.get('ENGRAPHIS_PORT','8700'); sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:%s/api/health' % p).status==200 else 1)"
 

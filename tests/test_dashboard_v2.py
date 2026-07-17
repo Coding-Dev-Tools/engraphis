@@ -537,9 +537,12 @@ def test_team_login_lockout(monkeypatch, tmp_path):
         for _ in range(5):
             r = c.post("/api/auth/login", json={"email": "w@x.co", "password": "wrongpass1"})
             assert r.status_code == 401
+        # Lockout is a throttle, not a credential failure: typed AccountLockedError
+        # maps to 429 (+ Retry-After) so clients back off instead of re-prompting.
         r = c.post("/api/auth/login", json={"email": "w@x.co", "password": "supersecret1"})
-        assert r.status_code == 401, f"expected 401 lockout, got {r.status_code}: {r.text}"
+        assert r.status_code == 429, f"expected 429 lockout, got {r.status_code}: {r.text}"
         assert "too many" in r.text.lower()
+        assert r.headers.get("Retry-After") == "60"
 
 
 def test_trial_start_and_rejection(monkeypatch, tmp_path):

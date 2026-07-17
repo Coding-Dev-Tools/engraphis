@@ -7,7 +7,8 @@ services:
     build: .
     image: engraphis:latest
     # Team dashboard on the v2 engine. --no-open: never try to launch a browser in a
-    # container. Binds 0.0.0.0 via ENGRAPHIS_HOST (set in the image).
+    # container. Binds 0.0.0.0 via the ENGRAPHIS_HOST below (explicit here; the image
+    # itself no longer bakes a host — its entrypoint defaults to `::` dual-stack).
     command: ["engraphis-dashboard", "--no-open"]
     ports:
       - "8700:8700"
