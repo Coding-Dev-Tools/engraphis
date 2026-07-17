@@ -135,14 +135,22 @@ or structured consolidation.
 
 ---
 
-## Host on Railway (team, no install for members)
+## Host on Railway (Pro solo or Team)
 
-The dashboard ships as a Docker image that defaults to the v2 **team** dashboard
-(multi-user logins, roles, seats, cloud-license revocation). Deploy one instance for
-your team; members sign in at your URL and connect their agents over HTTP/MCP — they
-never install Engraphis locally. See [`docs/HOSTING_RAILWAY.md`](docs/HOSTING_RAILWAY.md)
-for the 5-minute guide (volume, custom domain, bootstrap the Team entitlement, create the
-first admin, invite members, and connect agents).
+The dashboard ships as a Docker image that defaults to the v2 dashboard (multi-user auth,
+roles, seats, cloud-license revocation). Deploy one instance on Railway and access your
+memories from any browser. Two paths, same button:
+
+- **Pro solo** — a Pro member deploys a single-admin cloud instance: browser dashboard
+  (analytics, automation, export) + a self-hosted sync relay. Local agents sync through
+  your own Railway instance. One admin, no member seats.
+- **Team admin** — a Team administrator deploys one instance and invites members (email +
+  password + role). Members sign in at your URL and connect their agents over HTTP/MCP —
+  no local install for members.
+
+See [`docs/HOSTING_RAILWAY.md`](docs/HOSTING_RAILWAY.md) for the 5-minute guide covering
+both paths (volume, custom domain, activate Pro/Team, create the first admin, invite
+members, and connect agents).
 
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new?template=https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/railway.json)
 

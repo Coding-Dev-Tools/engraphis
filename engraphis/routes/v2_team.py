@@ -1,9 +1,14 @@
 """Team mode (multi-user auth) for the v2 dashboard — reuses the Inspector's AuthStore.
 
 Team plumbing is ON by default; set ``ENGRAPHIS_TEAM_MODE=0`` (or false/no/off) to
-disable it. The login wall activates with a live Team entitlement and remains active
-once users exist, even if that entitlement later lapses. Sessions use an HttpOnly,
-SameSite=Strict cookie; roles (viewer/member/admin) are enforced server-side.
+disable it. The login wall activates with a live paid entitlement (Pro or Team) and
+remains active once users exist, even if that entitlement later lapses. Sessions use
+an HttpOnly, SameSite=Strict cookie; roles (viewer/member/admin) are enforced
+server-side.
+
+A Pro license bootstraps a single-admin instance (cloud dashboard + sync relay, no
+member seats). A Team license adds multi-user seats, roles, and agent-connect write.
+Adding users beyond the first admin still requires Team (see ``AuthStore.create_user``).
 """
 from __future__ import annotations
 
@@ -188,9 +193,12 @@ def attach(app: FastAPI, service):
         return False, None
 
     # Team mode is ON by default. A new unlicensed install remains open for solo use,
-    # but setup requires a Team license. Once users exist, the dashboard keeps the login
-    # wall active even if the license lapses so private team data never becomes public.
-    # Paid operations and seat growth continue to enforce the live entitlement.
+    # but setup requires a paid license (Pro or Team). A Pro license bootstraps a
+    # single-admin cloud instance (dashboard + sync relay, no member seats); a Team
+    # license adds multi-user seats, roles, and agent-connect write. Once users exist, the
+    # dashboard keeps the login wall active even if the license lapses so private data
+    # never becomes public. Paid operations and seat growth continue to enforce the
+    # live entitlement; adding seats beyond the first admin still requires Team.
     store = AuthStore(_users_db_path(settings.db_path), iterations=_auth_iterations())
 
     def _user(request: Request) -> Optional[dict]:
@@ -208,20 +216,21 @@ def attach(app: FastAPI, service):
     @router.get("/state")
     def state(request: Request):
         users = store.count_users()
-        licensed = licensing.has_feature("team")
-        return {"enabled": bool(licensed or users),
-                "needs_setup": bool(licensed and users == 0),
-                "licensed": licensed,
-                "team_locked": bool(users and not licensed),
+        entitlement = licensing.current_license()
+        team_licensed = entitlement.has("team")
+        paid = entitlement.is_paid
+        return {"enabled": bool(paid or users),
+                "needs_setup": bool(paid and users == 0),
+                "licensed": team_licensed,
+                "team_locked": bool(users and not paid),
                 "user": _user(request)}
 
     @router.post("/setup")
     def setup(body: SetupReq, request: Request, response: Response):
-        if not licensing.has_feature("team"):
+        if not licensing.current_license().is_paid:
             raise HTTPException(status_code=402, detail={
-                "error": "Team setup requires an active Team license",
-                "feature": "team",
-                "tier_required": licensing.required_plan("team"),
+                "error": "Setup requires an active Pro or Team license",
+                "tier_required": "pro",
                 "upgrade_url": licensing.upgrade_url(),
             })
         if store.count_users() > 0:

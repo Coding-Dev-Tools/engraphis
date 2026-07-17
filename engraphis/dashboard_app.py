@@ -27,7 +27,7 @@ _INDEX = _STATIC / "index.html"
 
 # Reachable without any session/token in every mode: the page shell, liveness, and
 # auth bootstrap endpoints (state/login/setup must be reachable while logged out;
-# setup still refuses to create the first admin until Team is active).
+# setup still refuses to create the first admin until a paid license is active).
 _PUBLIC = {"/", "/api/health", "/api/ready", "/api/auth/state", "/api/auth/login",
            "/api/auth/setup", "/api/auth/logout", "/api/auth/forgot", "/api/auth/reset",
            "/webhooks/polar"}
@@ -262,13 +262,13 @@ def create_app() -> FastAPI:
         # regardless of whether team mode is enabled.
         if settings.api_token and _bearer_ok(request):
             return await call_next(request)
-        # A new, unlicensed instance with no users remains open for solo use. Once a Team
-        # license activates the wall—or any users have been provisioned—the wall stays up
-        # even if entitlement later lapses. Login remains public; paid writes and seat
-        # growth keep their route-level license gates.
+        # A new, unlicensed instance with no users remains open for solo use. Once a paid
+        # license (Pro or Team) activates the wall—or any users have been provisioned—the
+        # wall stays up even if entitlement later lapses. Login remains public; paid writes
+        # and seat growth keep their route-level license gates.
         team_auth_active = (team_enabled and auth_store is not None
-                            and (licensing.has_feature("team")
-                                 or auth_store.count_users() > 0))
+                            and (auth_store.count_users() > 0
+                                 or licensing.current_license().is_paid))
         if team_auth_active:
             from engraphis.inspector.auth import min_role, role_at_least
             from engraphis.routes.v2_team import _COOKIE
