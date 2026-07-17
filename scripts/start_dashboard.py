@@ -17,6 +17,15 @@ import sys
 import webbrowser
 
 
+_DEFAULT_EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+
+
+def _embed_model_from_environment() -> str:
+    """Use the production model by default, while preserving an explicit offline opt-out."""
+    configured = os.environ.get("ENGRAPHIS_EMBED_MODEL")
+    return _DEFAULT_EMBED_MODEL if configured is None else configured.strip()
+
+
 def _run_shortcut_install(silent: bool = False, icon: str = "") -> None:
     cmd = [sys.executable, "-m", "scripts.install_shortcuts"]
     if silent:
@@ -50,9 +59,7 @@ def main() -> None:
         _run_shortcut_install(silent=args.install_shortcuts_silent, icon=args.icon)
         return
 
-    os.environ["ENGRAPHIS_EMBED_MODEL"] = (
-        os.environ.get("ENGRAPHIS_EMBED_MODEL", "").strip()
-        or "sentence-transformers/all-MiniLM-L6-v2")
+    os.environ["ENGRAPHIS_EMBED_MODEL"] = _embed_model_from_environment()
     os.environ["ENGRAPHIS_HOST"] = args.host
     os.environ["ENGRAPHIS_PORT"] = str(args.port)
 
