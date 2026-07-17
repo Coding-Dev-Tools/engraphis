@@ -89,6 +89,7 @@ jobs:
           docker run -d --name engraphis -p 8700:8700 \
             -e ENGRAPHIS_EMBED_MODEL= \
             -e ENGRAPHIS_LOOP_INTERVAL=0 \
+            -e ENGRAPHIS_HOST=0.0.0.0 \
             engraphis:ci
       - name: Wait for /api/health, then check /api/ready
         run: |
