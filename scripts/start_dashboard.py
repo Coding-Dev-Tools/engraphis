@@ -63,7 +63,11 @@ def main() -> None:
     os.environ["ENGRAPHIS_HOST"] = args.host
     os.environ["ENGRAPHIS_PORT"] = str(args.port)
 
-    url = f"http://{args.host}:{args.port}"
+    # netutil (stdlib-only, config-free) keeps this import safe BEFORE the env writes
+    # above are re-read by engraphis.config inside uvicorn's import of the app. It maps
+    # a wildcard bind (0.0.0.0/::) to loopback and brackets IPv6 for the printed URL.
+    from engraphis.netutil import display_base_url
+    url = display_base_url(args.host, args.port)
     db = os.environ.get("ENGRAPHIS_DB_PATH", "./engraphis.db")
     print(f"Engraphis WebUI — {url}")
     print(f"  Inspector :  {url}/")

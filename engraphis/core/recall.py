@@ -181,7 +181,13 @@ class RecallEngine:
         sql = "SELECT DISTINCT id, name FROM entities"
         clauses, params = [], []
         if flt.workspace_id:
-            clauses.append("workspace_id=?")
+            # Ancestor widening applies to workspace_id exactly as to repo_id below:
+            # entities recorded without a workspace (user-scope/global) are visible to a
+            # contextual read, matching SearchFilter.include_ancestors's contract.
+            if flt.include_ancestors:
+                clauses.append("(workspace_id=? OR workspace_id IS NULL)")
+            else:
+                clauses.append("workspace_id=?")
             params.append(flt.workspace_id)
         if flt.repo_id:
             if flt.include_ancestors:

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import hmac
 import logging
 import time
 import uuid
@@ -18,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from engraphis import __version__
 from engraphis.billing import router as billing_router
+from engraphis.inspector.auth import bearer_ok
 from engraphis.inspector.cloud_mount import CLOUD_PREFIXES, mount_cloud_endpoints
 from engraphis.config import settings
 from engraphis.engines import reweight, thoughts as thoughts_engine
@@ -27,11 +27,6 @@ from engraphis.routes.vault import router as vault_router
 from engraphis.stores import get_conn, init_db
 
 logger = logging.getLogger("engraphis")
-
-
-def _const_time_eq(a: str, b: str) -> bool:
-    """Constant-time string comparison (avoids token-timing side channels)."""
-    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
 _background_task: Optional[asyncio.Task] = None
@@ -117,9 +112,7 @@ def create_app() -> FastAPI:
         if token and request.method != "OPTIONS" and request.url.path != "/" \
                 and not request.url.path.startswith(_PUBLIC_PREFIXES) \
                 and not request.url.path.startswith(CLOUD_PREFIXES):
-            header = request.headers.get("authorization", "")
-            presented = header[7:].strip() if header.lower().startswith("bearer ") else ""
-            if not _const_time_eq(presented, token):
+            if not bearer_ok(request.headers.get("authorization"), token):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
         return await call_next(request)
 

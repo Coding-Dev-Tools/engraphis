@@ -37,6 +37,11 @@ SESSION_TTL_SECONDS = 12 * 3600
 LOCKOUT_FAILS = 5           # failures within LOCKOUT_WINDOW …
 LOCKOUT_WINDOW = 900        # … lock the account for LOCKOUT_SECONDS
 LOCKOUT_SECONDS = 60
+# Per-source-IP companion to the per-email lockout above: the per-email throttle alone
+# never slows a credential-stuffing sweep that tries each address once (every attempt is
+# that email's first). Cap total failures from one source across ALL emails. 5× the
+# per-email cap so a shared office NAT with a few fat-fingered users doesn't trip it.
+IP_LOCKOUT_FAILS = 25
 RESET_TOKEN_TTL_SECONDS = 1800   # a "forgot password" link is single-use, 30 min
 RESET_REQUEST_MAX = 3            # … and throttled per-email so it can't mail-bomb
 RESET_REQUEST_WINDOW = 3600      # an inbox (independent of the login lockout above)
@@ -106,6 +111,14 @@ CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_events(actor_id);
 
 class AuthError(ValueError):
     """User-facing auth failure; message is safe to surface."""
+
+
+class AccountLockedError(AuthError):
+    """Login refused because a lockout window is active (per-email or per-IP).
+
+    A distinct type so HTTP layers can map it to 429 without substring-matching the
+    human-readable message (which silently broke the mapping whenever the wording
+    changed). Subclasses :class:`AuthError` so existing broad handlers still catch it."""
 
 
 def _serialized(method):
@@ -180,6 +193,21 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
 
 
+def bearer_ok(authorization_header: Optional[str], expected_token: str) -> bool:
+    """Constant-time check of an ``Authorization: Bearer <token>`` header value.
+
+    The single shared implementation for every entrypoint (v1 app, inspector app,
+    dashboard app, license-cloud admin routes) — previously each had its own near-copy,
+    which is exactly how a timing-unsafe variant sneaks in. False when either side is
+    empty. The ``Bearer`` scheme is matched case-insensitively per RFC 7235 §2.1."""
+    if not expected_token:
+        return False
+    header = authorization_header or ""
+    supplied = header[7:].strip() if header[:7].lower() == "bearer " else ""
+    return bool(supplied) and hmac.compare_digest(
+        supplied.encode("utf-8"), expected_token.encode("utf-8"))
+
+
 def _validate_password(password: str) -> None:
     """Enforce a reasonable password policy — NIST SP 800-63B-aligned: length is
     the primary factor, with mixed character classes to resist dictionary attacks."""
@@ -211,6 +239,7 @@ class AuthStore:
         self.conn.executescript(_SCHEMA)
         self.iterations = int(iterations)
         self._failures: dict = {}   # email -> list[fail_ts] (in-memory throttle)
+        self._ip_failures: dict = {}  # ip -> list[fail_ts] (cross-email stuffing throttle)
         self._reset_requests: dict = {}   # email -> list[req_ts] (forgot-password throttle)
         self._last_prune: float = 0.0
         self._last_throttle_prune: float = 0.0
@@ -414,6 +443,7 @@ class AuthStore:
         periodic = now - self._last_throttle_prune >= 60
         for bucket, window in (
             (self._failures, LOCKOUT_WINDOW),
+            (self._ip_failures, LOCKOUT_WINDOW),
             (self._reset_requests, RESET_REQUEST_WINDOW),
         ):
             if periodic:
@@ -443,6 +473,29 @@ class AuthStore:
             return fails[-1] + LOCKOUT_SECONDS
         return 0.0
 
+    @_serialized
+    def _ip_locked_until(self, ip: Optional[str]) -> float:
+        """Per-IP analog of :meth:`_locked_until` (see :data:`IP_LOCKOUT_FAILS`)."""
+        if not ip:
+            return 0.0
+        now = time.time()
+        self._prune_throttle_maps(now)
+        fails = [t for t in self._ip_failures.get(ip, []) if now - t < LOCKOUT_WINDOW]
+        self._ip_failures.pop(ip, None)
+        if fails:
+            self._ip_failures[ip] = fails
+        if len(fails) >= IP_LOCKOUT_FAILS:
+            return fails[-1] + LOCKOUT_SECONDS
+        return 0.0
+
+    def _record_ip_failure(self, ip: Optional[str], now: float) -> None:
+        """Caller must hold ``self._lock``. Appends one failure to *ip*'s window."""
+        if not ip:
+            return
+        fails = self._ip_failures.pop(ip, [])
+        fails.append(now)
+        self._ip_failures[ip] = fails
+
     def login(self, email: str, password: str, *, ip: Optional[str] = None) -> dict:
         """Verify credentials → new session. Raises :class:`AuthError` (generic message —
         never reveals which of email/password was wrong) or the lockout notice.
@@ -466,12 +519,16 @@ class AuthStore:
         refused — this only stops a license hiccup from locking out people who already have
         an account. Existing sessions still cap out at ``SESSION_TTL_SECONDS``."""
         email = self._clean_email(email)
-        # Phase 1 (locked): throttle gate + fetch the row.
+        # Phase 1 (locked): throttle gates (per-email, then per-IP) + fetch the row.
         with self._lock:
             until = self._locked_until(email)
             if until > time.time():
                 self.record_event("login.locked", actor_email=email, ip=ip)
-                raise AuthError("too many failed attempts — try again in a minute")
+                raise AccountLockedError("too many failed attempts — try again in a minute")
+            if self._ip_locked_until(ip) > time.time():
+                self.record_event("login.ip_locked", actor_email=email, ip=ip)
+                raise AccountLockedError(
+                    "too many failed attempts from this network — try again in a minute")
             row = self.conn.execute(
                 "SELECT id, pw_hash, disabled FROM users WHERE email=?", (email,)).fetchone()
         # Phase 2 (UNLOCKED): the expensive PBKDF2. Always hash once, even for unknown
@@ -495,17 +552,19 @@ class AuthStore:
             pw_rotated = row is not None and (
                 fresh is None or fresh["pw_hash"] != row["pw_hash"])
             if not ok or fresh is None or fresh["disabled"] or pw_rotated:
+                now = time.time()
                 fails = self._failures.pop(email, [])
-                fails.append(time.time())
+                fails.append(now)
                 self._failures[email] = fails
-                self._prune_throttle_maps(time.time())
+                self._record_ip_failure(ip, now)
+                self._prune_throttle_maps(now)
                 self.record_event("login.failed", actor_email=email, ip=ip,
                                   detail=("account_disabled" if fresh and fresh["disabled"]
                                           else "bad_credentials"))
                 raise AuthError("invalid email or password")
             if self._locked_until(email) > time.time():
                 self.record_event("login.locked", actor_email=email, ip=ip)
-                raise AuthError("too many failed attempts — try again in a minute")
+                raise AccountLockedError("too many failed attempts — try again in a minute")
             self._failures.pop(email, None)
             token = self.create_session(fresh["id"])
             user = self.get_user(fresh["id"])

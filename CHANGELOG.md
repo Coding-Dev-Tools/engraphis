@@ -5,6 +5,47 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Security
+- Vendor-wide license administration on the shared relay (`/license/v1` revoke /
+  keys-by-email / deactivate / device listing) now authenticates with a dedicated
+  `ENGRAPHIS_VENDOR_ADMIN_TOKEN`, separated from the per-instance service token
+  `ENGRAPHIS_API_TOKEN` (which falls back with a logged warning until the operator
+  sets the new variable) — one leaked automation credential can no longer revoke
+  customers' keys.
+- Team-mode login gained a per-source-IP failure throttle (25 failures / 15 min)
+  alongside the existing per-email lockout, closing the credential-stuffing sweep
+  that tried each address once; lockouts now surface as a typed
+  `AccountLockedError` mapped to HTTP 429 + `Retry-After` (previously 401, or a
+  429 derived by substring-matching the error message).
+
+### Fixed
+- `remember`/`remember_with_resolution` are now atomic across the neighbor-resolve →
+  insert sequence (engine-level write lock): concurrent near-duplicate writes can no
+  longer both resolve ADD and store duplicates instead of NOOP/INVALIDATE.
+- The Inspector's `/api/auth/login`/`setup` no longer run PBKDF2 (600k iterations)
+  on the asyncio event loop — password hashing moved to a worker thread, so a burst
+  of logins can't stall every other request.
+- A failed vector-index upsert on the write path is now logged and audited
+  (`index_upsert_failed`) instead of silently swallowed — previously the memory
+  stayed invisible to semantic recall with no trace.
+- URLs built from a bind host are now IPv6-safe and connectable (`engraphis.netutil`):
+  `ENGRAPHIS_HOST=::` no longer yields the malformed `http://:::8700` in the printed
+  dashboard URL, the :8710 redirector target, or `Settings.base_url`; wildcard binds
+  map to loopback.
+- The Docker image no longer bakes an IPv4-only bind: the entrypoint defaults
+  `ENGRAPHIS_HOST` to dual-stack `::` when the kernel has IPv6 (what Railway's
+  private-network healthchecks require) and `0.0.0.0` otherwise, so wiping the
+  service's env vars can't regress the 2026-07-16 healthcheck outage.
+
+### Changed
+- Consolidated four per-app bearer-token checks into one constant-time
+  `inspector.auth.bearer_ok` helper (scheme now matched case-insensitively per
+  RFC 7235 everywhere); extracted the ~230-line code-graph HTML/Markdown export
+  templates from `core/engine.py` into `core/codegraph_export.py`; documented the
+  v1/v2 split in `engraphis/routes/__init__`; entity ancestor-widening in graph
+  recall now applies to `workspace_id` symmetrically with `repo_id`; filtered
+  sqlite-vec searches cap their geometric widening with a single full scan.
+
 ### Added
 - Schema v3 logical graph layers (`temporal`, `entity`, `causal`, `semantic`), privacy-safe
   SHA-256 receipt chains, optional LLM/host retention supervision, and a persistent code↔memory

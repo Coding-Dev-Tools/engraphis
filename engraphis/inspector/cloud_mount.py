@@ -7,10 +7,12 @@ inoperable in production** and Pro sync had no backend. This module centralizes 
 mount so ``engraphis.app`` (public server) and ``engraphis.dashboard_app`` (team
 dashboard) expose identical behavior, with no drift.
 
-These endpoints authenticate with a *license key* (Bearer) or the vendor admin token —
-NOT the instance ``ENGRAPHIS_API_TOKEN`` — so callers must exempt :data:`CLOUD_PREFIXES`
-from any API-token middleware. They also raise :class:`LicenseError`, which needs an
-app-level 402 handler; :func:`mount_cloud_endpoints` installs one if absent.
+These endpoints authenticate with a *license key* (Bearer) or the vendor admin token
+(``ENGRAPHIS_VENDOR_ADMIN_TOKEN``, falling back to ``ENGRAPHIS_API_TOKEN`` only until the
+operator sets it — see ``license_cloud._vendor_admin_token``) — so callers must exempt
+:data:`CLOUD_PREFIXES` from any API-token middleware. They also raise
+:class:`LicenseError`, which needs an app-level 402 handler;
+:func:`mount_cloud_endpoints` installs one if absent.
 """
 from __future__ import annotations
 
@@ -20,9 +22,9 @@ from fastapi.responses import JSONResponse
 from engraphis import licensing
 from engraphis.licensing import LicenseError
 
-#: Path prefixes whose auth is the license key / vendor admin token, not the instance
-#: API token. Any ENGRAPHIS_API_TOKEN gate must treat these as exempt (the routers do
-#: their own, stronger, per-request authorization).
+#: Path prefixes whose auth is the license key / dedicated vendor admin token, not the
+#: instance API token. Any ENGRAPHIS_API_TOKEN gate must treat these as exempt (the
+#: routers do their own, stronger, per-request authorization).
 CLOUD_PREFIXES = ("/relay/", "/license/v1/")
 
 

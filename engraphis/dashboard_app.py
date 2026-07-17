@@ -6,7 +6,6 @@ server (engraphis/app.py) untouched; run this with `python -m scripts.start_dash
 """
 from __future__ import annotations
 
-import hmac
 import importlib.util
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -51,8 +50,8 @@ def _mcp_transport_security(mcp):
         parsed = urlsplit(dashboard_url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username:
             raise ValueError("ENGRAPHIS_DASHBOARD_URL must be an http(s) URL without userinfo")
-        hostname = parsed.hostname
-        host = "[%s]" % hostname if ":" in hostname else hostname
+        from engraphis.netutil import bracket_host
+        host = bracket_host(parsed.hostname)
         if parsed.port is not None:
             host = "%s:%d" % (host, parsed.port)
         allowed_hosts.add(host)
@@ -175,11 +174,8 @@ def create_app() -> FastAPI:
     _mcp_session_users: dict[str, str] = {}
 
     def _bearer_ok(request: Request) -> bool:
-        token = settings.api_token
-        if not token:
-            return False
-        supplied = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
-        return bool(supplied) and hmac.compare_digest(supplied, token)
+        from engraphis.inspector.auth import bearer_ok
+        return bearer_ok(request.headers.get("Authorization"), settings.api_token)
 
     @app.middleware("http")
     async def _auth_gate(request: Request, call_next):

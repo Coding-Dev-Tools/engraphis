@@ -22,7 +22,8 @@ from pydantic import BaseModel, Field
 from engraphis import licensing
 from engraphis.config import canonicalize_relay_url, settings
 from engraphis.inspector.auth import (
-    PBKDF2_ITERATIONS, SESSION_TTL_SECONDS, AuthError, AuthStore, role_at_least)
+    PBKDF2_ITERATIONS, SESSION_TTL_SECONDS, AccountLockedError, AuthError, AuthStore,
+    role_at_least)
 
 logger = logging.getLogger("engraphis.team")
 
@@ -270,6 +271,11 @@ def attach(app: FastAPI, service):
         ip = request.client.host if request.client else None
         try:
             u = store.login(body.email, body.password, ip=ip)
+        except AccountLockedError as exc:
+            # Typed lockout → 429 with Retry-After, so clients back off instead of
+            # hammering a locked account (and the mapping can't rot with the wording).
+            raise HTTPException(status_code=429, detail={"error": str(exc)},
+                                headers={"Retry-After": "60"})
         except AuthError as exc:
             raise HTTPException(status_code=401, detail={"error": str(exc)})
         _set_cookie(response, u.pop("token"), secure=_cookie_secure(request))

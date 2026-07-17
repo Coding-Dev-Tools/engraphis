@@ -35,7 +35,14 @@ DOMPurify at all render sites. Verified against payloads with `onerror` handlers
 
 ### 2. Network exposure & authentication
 - **Loopback by default** (`ENGRAPHIS_HOST=127.0.0.1`)
-- **Optional bearer token** (`ENGRAPHIS_API_TOKEN`): constant-time comparison
+- **Optional bearer token** (`ENGRAPHIS_API_TOKEN`): constant-time comparison (single
+  shared implementation: `inspector.auth.bearer_ok`)
+- **Vendor admin separation** (`ENGRAPHIS_VENDOR_ADMIN_TOKEN`): vendor-wide license
+  administration on the relay (`/license/v1` revoke/keys/deactivate) uses its own
+  secret, so the per-instance service token can never revoke other customers' keys
+  (legacy fallback to `ENGRAPHIS_API_TOKEN` warns until the operator migrates)
+- **Login throttling**: per-email lockout plus a per-source-IP failure window
+  (cross-email credential-stuffing); lockouts are typed and mapped to HTTP 429
 - **CORS allow-list** defaults to loopback only
 - If exposed beyond localhost: put behind reverse proxy with **TLS + rate limiting**
 

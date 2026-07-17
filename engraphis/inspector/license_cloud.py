@@ -5,12 +5,14 @@ client authenticates with its *license key*, not the dashboard admin token. Regi
 verifies the key against the pinned vendor key + registry (signature, expiry, plan, not
 revoked), enforces the per-key seat cap by counting distinct machine ids, records the
 device, and returns a short-lived Ed25519-signed lease the client verifies offline.
-Revocation requires the vendor admin token (``ENGRAPHIS_API_TOKEN``).
+Revocation and the other vendor-only admin routes require the dedicated vendor admin
+token (``ENGRAPHIS_VENDOR_ADMIN_TOKEN``; falls back to ``ENGRAPHIS_API_TOKEN`` with a
+logged warning until the operator sets the new variable — see :func:`_admin_ok`).
 """
 from __future__ import annotations
 
 import asyncio
-import hmac
+import logging
 import os
 import secrets
 import time
@@ -22,9 +24,11 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from engraphis import cloud_license
 from engraphis.config import settings
 from engraphis.inspector import license_registry as reg
-from engraphis.inspector.auth import _EMAIL_RE, _hash_token
+from engraphis.inspector.auth import _EMAIL_RE, _hash_token, bearer_ok
 from engraphis.inspector.webhooks import _load_signing_secret
 from engraphis.licensing import LicenseError, PLAN_FEATURES, parse_key
+
+logger = logging.getLogger("engraphis.license_cloud")
 
 LEASE_TTL_HOURS_DEFAULT = 24
 
@@ -126,10 +130,33 @@ async def verify(key_id: str):
             "plan": row["plan"], "expires": row["expires"], "valid": bool(valid)}
 
 
+_VENDOR_FALLBACK_WARNED = False
+
+
+def _vendor_admin_token() -> str:
+    """Token authorizing vendor-wide admin actions (revoke/enumerate ANY customer's
+    license, free seats) on the shared relay.
+
+    Deliberately a SEPARATE secret from the per-instance ``ENGRAPHIS_API_TOKEN``: that
+    token is handed to scripts/agents as a generic service-account credential, and one
+    leaked automation credential must not be able to revoke every customer's key. Falls
+    back to ``ENGRAPHIS_API_TOKEN`` (with a one-time logged warning) so an existing
+    deployment keeps working until its operator sets ``ENGRAPHIS_VENDOR_ADMIN_TOKEN``."""
+    global _VENDOR_FALLBACK_WARNED
+    token = os.environ.get("ENGRAPHIS_VENDOR_ADMIN_TOKEN", "").strip()
+    if token:
+        return token
+    if settings.api_token and not _VENDOR_FALLBACK_WARNED:
+        logger.warning(
+            "ENGRAPHIS_VENDOR_ADMIN_TOKEN is not set — vendor admin routes "
+            "(/license/v1 revoke/keys/deactivate) are falling back to the shared "
+            "ENGRAPHIS_API_TOKEN. Set a dedicated vendor admin token.")
+        _VENDOR_FALLBACK_WARNED = True
+    return settings.api_token
+
+
 def _admin_ok(request: Request) -> bool:
-    token = settings.api_token
-    supplied = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
-    return bool(token) and bool(supplied) and hmac.compare_digest(supplied, token)
+    return bearer_ok(request.headers.get("Authorization"), _vendor_admin_token())
 
 
 @router.post("/revoke/{key_id}")

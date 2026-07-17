@@ -19,7 +19,7 @@ Free single-user behaviour is byte-for-byte unchanged when team mode is off.
 """
 from __future__ import annotations
 
-import hmac
+import asyncio
 import logging
 import time
 from typing import Optional
@@ -36,7 +36,8 @@ from engraphis.inspector.sync_relay import router as sync_relay_router
 from engraphis.inspector.license_cloud import router as license_cloud_router
 from engraphis.config import settings
 from engraphis.inspector.auth import (
-    SESSION_TTL_SECONDS, AuthError, AuthStore, min_role as _min_role, role_at_least,
+    SESSION_TTL_SECONDS, AccountLockedError, AuthError, AuthStore, bearer_ok,
+    min_role as _min_role, role_at_least,
 )
 from engraphis.licensing import LicenseError
 from engraphis.logging_setup import configure_logging
@@ -155,11 +156,7 @@ def create_app(service: Optional[MemoryService] = None,
         return bool(settings.team_mode) and licensing.has_feature("team")
 
     def _bearer_ok(request: Request) -> bool:
-        token = settings.api_token
-        if not token:
-            return False
-        supplied = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
-        return bool(supplied) and hmac.compare_digest(supplied, token)
+        return bearer_ok(request.headers.get("Authorization"), settings.api_token)
 
     @app.middleware("http")
     async def _auth_gate(request: Request, call_next):
@@ -273,23 +270,30 @@ def create_app(service: Optional[MemoryService] = None,
 
     @app.post("/api/auth/setup")
     async def auth_setup(body: _SetupBody, request: Request):
+        # create_user/login run PBKDF2 (600k iterations, CPU-bound) — off the event loop
+        # via to_thread, or every concurrent request stalls for the hash duration.
         if not team_active():
             raise LicenseError("team mode is not active on this instance")
         if auth().count_users() > 0:
             return JSONResponse({"error": "setup already completed"}, status_code=409)
-        auth().create_user(body.email, body.name, body.password, "admin")
-        user = auth().login(body.email, body.password)
+        await asyncio.to_thread(
+            auth().create_user, body.email, body.name, body.password, "admin")
+        user = await asyncio.to_thread(auth().login, body.email, body.password)
         return _login_response(user, request)
 
     @app.post("/api/auth/login")
     async def auth_login(body: _LoginBody, request: Request):
         if not team_active():
             return JSONResponse({"error": "team mode is not active"}, status_code=400)
+        ip = request.client.host if request.client else None
         try:
-            user = auth().login(body.email, body.password)
+            # PBKDF2 is CPU-bound; to_thread keeps the event loop free (see auth_setup).
+            user = await asyncio.to_thread(
+                auth().login, body.email, body.password, ip=ip)
+        except AccountLockedError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=429)
         except AuthError as exc:
-            status = 429 if "too many" in str(exc) else 401
-            return JSONResponse({"error": str(exc)}, status_code=status)
+            return JSONResponse({"error": str(exc)}, status_code=401)
         return _login_response(user, request)
 
     @app.post("/api/auth/logout")
