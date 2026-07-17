@@ -714,6 +714,9 @@ class _IntentRememberReq(BaseModel):
 
 @router.post("/intent/remember")
 def intent_remember(req: _IntentRememberReq):
+    # Team-gated exactly like /api/remember: this is the intent-native agent WRITE path
+    # onto this cloud instance's store, so a free/lapsed instance must not host it (402).
+    _paid("team")
     return _run(
         service().intent_remember, req.text, workspace=req.workspace, repo=req.repo,
         title=req.title, mtype=req.mtype, scope=req.scope, importance=req.importance,
@@ -734,6 +737,8 @@ class _IntentLinkReq(BaseModel):
 
 @router.post("/intent/link")
 def intent_link(req: _IntentLinkReq):
+    # Team-gated like /api/remember and /api/intent/remember — same cloud write surface.
+    _paid("team")
     return _run(
         service().intent_link, req.source_id, req.target_id, workspace=req.workspace,
         repo=req.repo, relation=req.relation, layer=req.layer, reason=req.reason,
