@@ -43,6 +43,14 @@ def test_start_session_explicit_named_workspace(monkeypatch):
     assert out["workspace"] == "acme"
 
 
+def test_start_session_explicit_none_workspace_rejected(monkeypatch):
+    srv = _module_with_memory_db(monkeypatch)
+    # Explicit None (vs omitted, which legitimately defaults to 'default') must
+    # fail-loud, never silently coerce to 'default' or crash ungracefully.
+    out = srv.engraphis_start_session(workspace=None)
+    assert out.startswith("Error:")
+
+
 def test_start_session_empty_workspace_rejected(monkeypatch):
     srv = _module_with_memory_db(monkeypatch)
     # Empty string violates min_length=1 -> service must report an error, not crash.
