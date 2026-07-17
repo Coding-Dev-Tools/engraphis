@@ -571,7 +571,7 @@ All via environment (or `.env`):
 | `ENGRAPHIS_LOOP_INTERVAL` | `60` | Background consolidation loop interval in seconds (0 = disabled) |
 | `ENGRAPHIS_DECAY_HALFLIFE_DAYS` | `7` | Ebbinghaus decay half-life (higher = memories persist longer) |
 | `ENGRAPHIS_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Trusted reverse-proxy IPs for TLS termination (`*` = trust all) |
-| `ENGRAPHIS_RELAY_URL` | `https://engraphis-production.up.railway.app` | Managed sync, license, trial, and invite relay (Pro/Team); the retired custom-domain URL is migrated automatically |
+| `ENGRAPHIS_RELAY_URL` | `https://team.engraphis.com` | Managed sync, license, trial, and invite relay (Pro/Team); the retired Railway URL is migrated automatically |
 | `ENGRAPHIS_AUTOSYNC_LOOP` | `1` | Kill switch for the in-process auto-sync loop (0 = off) |
 
 See `.env.example` for the full list including commercial/vendor, email delivery, and
