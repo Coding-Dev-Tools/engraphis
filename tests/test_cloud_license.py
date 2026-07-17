@@ -680,8 +680,8 @@ def test_cloud_enforced_key_uses_baked_in_url(monkeypatch):
 
 
 def test_retired_baked_in_url_migrates_to_current_relay(monkeypatch):
-    """Existing signed keys must survive the vendor's Railway-to-domain migration."""
-    key = _enforced_key(cloud_url="https://engraphis-production.up.railway.app")
+    """Existing signed keys must survive the vendor's domain-to-Railway migration."""
+    key = _enforced_key(cloud_url="https://team.engraphis.com")
     lic_parsed = parse_key(key)
     calls = {}
 
@@ -695,7 +695,7 @@ def test_retired_baked_in_url_migrates_to_current_relay(monkeypatch):
     monkeypatch.setattr(cloud_license, "register", fake_register)
     monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
     got = licensing.current_license(refresh=True)
-    assert calls["base"] == DEFAULT_RELAY_URL == "https://team.engraphis.com"
+    assert calls["base"] == DEFAULT_RELAY_URL == "https://engraphis-production.up.railway.app"
     assert got.plan == "pro" and got.has("sync")
 
 

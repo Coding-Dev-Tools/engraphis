@@ -133,7 +133,7 @@ def test_issued_key_migrates_retired_relay_url(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
     monkeypatch.setenv(
         "ENGRAPHIS_KEY_CLOUD_URL",
-        "https://engraphis-production.up.railway.app/",
+        "https://team.engraphis.com/",
     )
     key = issue_key("buyer@example.com", product_name="Engraphis Pro", days=30)
     assert parse_key(key).cloud_url == DEFAULT_RELAY_URL
