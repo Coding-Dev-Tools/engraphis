@@ -154,6 +154,26 @@ def _enum(value: Any, enum_cls, field: str):
         raise ValidationError(f"{field} must be one of: {allowed}")
 
 
+def _write_scope(value: Any, *, repo: Optional[str], session_id: Optional[str]) -> Scope:
+    """Resolve and validate the structural scope of a write.
+
+    Omitted scope follows the supplied context (session -> repo -> workspace). Explicit
+    scopes must name the parent they require; this prevents records whose scope says
+    ``repo`` but whose ``repo_id`` is NULL, the inconsistency that previously made the
+    hierarchy advisory rather than enforceable.
+    """
+    if value is None:
+        return Scope.REPO if (repo or session_id) else Scope.WORKSPACE
+    scope = _enum(value, Scope, "scope")
+    if scope == Scope.SESSION and not session_id:
+        raise ValidationError("session scope requires session_id")
+    if scope == Scope.REPO and not repo and not session_id:
+        raise ValidationError("repo scope requires repo (or a repo-backed session_id)")
+    if scope in (Scope.WORKSPACE, Scope.USER) and repo:
+        raise ValidationError(f"{scope.value} scope requires repo to be omitted")
+    return scope
+
+
 def _resolve_import_root(raw_path: str) -> Path:
     """Path-traversal guard for ``import_folder`` (SECURITY.md §5): the path is
     attacker-controlled if whatever calls this endpoint is (e.g. a prompt-injected
@@ -448,10 +468,23 @@ class MemoryService:
         if rec.workspace_id != wid or (rid is not None and rec.repo_id != rid):
             raise ValidationError(f"memory '{memory_id}' does not belong to that workspace/repo")
 
+    def _session_for_write(self, session_id: Optional[str], wid: str,
+                           rid: Optional[str]) -> Optional[dict]:
+        if not session_id:
+            return None
+        sid = _clean_text(session_id, field="session_id", max_chars=MAX_NAME_CHARS)
+        session = self.store.get_session(sid)
+        if session is None:
+            raise ValidationError(f"no session with id '{sid}'")
+        if session["workspace_id"] != wid or (
+                rid is not None and session.get("repo_id") != rid):
+            raise ValidationError("session_id does not belong to that workspace/repo")
+        return session
+
     # ── write ──────────────────────────────────────────────────────────────────
     def remember(self, content: str, *, workspace: str, repo: Optional[str] = None,
                  session_id: Optional[str] = None, mtype: str = "semantic",
-                 scope: str = "repo", title: str = "", importance: float = 0.0,
+                 scope: Optional[str] = None, title: str = "", importance: float = 0.0,
                  keywords: Optional[list] = None, metadata: Optional[dict] = None,
                  source: str = "agent", trusted: bool = True,
                  kind: Optional[str] = None, resolve_conflicts: bool = True,
@@ -465,7 +498,8 @@ class MemoryService:
         ws = self._clean_ws(workspace)
         rp = _clean_name(repo, field="repo") if repo else None
         mt = _enum(mtype, MemoryType, "mtype")
-        sc = _enum(scope, Scope, "scope")
+        scope_was_omitted = scope is None
+        sc = _write_scope(scope, repo=rp, session_id=session_id)
         kws = _clean_keywords(keywords)
         meta = _clean_metadata(metadata)
         retention = None
@@ -494,6 +528,19 @@ class MemoryService:
 
         wid = self.store.get_or_create_workspace(ws)
         rid = self.store.get_or_create_repo(wid, rp) if rp else None
+        session = self._session_for_write(session_id, wid, rid)
+        if sc in (Scope.SESSION, Scope.REPO) and rid is None and session:
+            rid = session.get("repo_id")
+            if rid:
+                row = self.store.conn.execute(
+                    "SELECT name FROM repos WHERE id=?", (rid,)
+                ).fetchone()
+                rp = row["name"] if row else None
+        if sc == Scope.REPO and rid is None:
+            if scope_was_omitted:
+                sc = Scope.WORKSPACE
+            else:
+                raise ValidationError("repo scope requires a repo-backed session_id")
         provenance = {"source": _clean_text(source, field="source", max_chars=MAX_NAME_CHARS,
                                             required=False) or "agent",
                       "trusted": bool(trusted)}
@@ -523,7 +570,7 @@ class MemoryService:
 
     def ingest(self, content: str, *, workspace: str, repo: Optional[str] = None,
                session_id: Optional[str] = None, mtype: str = "semantic",
-               scope: str = "repo", metadata: Optional[dict] = None,
+               scope: Optional[str] = None, metadata: Optional[dict] = None,
                source: str = "agent", trusted: bool = True,
                kind: Optional[str] = None, resolve_conflicts: bool = True) -> dict:
         """Store raw, undistilled text. With an extractor configured (ENGRAPHIS_EXTRACTOR)
@@ -534,10 +581,24 @@ class MemoryService:
         ws = self._clean_ws(workspace)
         rp = _clean_name(repo, field="repo") if repo else None
         mt = _enum(mtype, MemoryType, "mtype")
-        sc = _enum(scope, Scope, "scope")
+        scope_was_omitted = scope is None
+        sc = _write_scope(scope, repo=rp, session_id=session_id)
         meta = _clean_metadata(metadata)
         wid = self.store.get_or_create_workspace(ws)
         rid = self.store.get_or_create_repo(wid, rp) if rp else None
+        session = self._session_for_write(session_id, wid, rid)
+        if sc in (Scope.SESSION, Scope.REPO) and rid is None and session:
+            rid = session.get("repo_id")
+            if rid:
+                row = self.store.conn.execute(
+                    "SELECT name FROM repos WHERE id=?", (rid,)
+                ).fetchone()
+                rp = row["name"] if row else None
+        if sc == Scope.REPO and rid is None:
+            if scope_was_omitted:
+                sc = Scope.WORKSPACE
+            else:
+                raise ValidationError("repo scope requires a repo-backed session_id")
         provenance = {"source": _clean_text(source, field="source", max_chars=MAX_NAME_CHARS,
                                             required=False) or "agent",
                       "trusted": bool(trusted)}
@@ -567,7 +628,7 @@ class MemoryService:
     # SQLite operations into agent prompts.
     def intent_remember(self, text: str, *, workspace: str,
                         repo: Optional[str] = None, title: str = "",
-                        mtype: str = "semantic", scope: str = "repo",
+                        mtype: str = "semantic", scope: Optional[str] = None,
                         importance: float = 0.0,
                         metadata: Optional[dict] = None,
                         retention_class: Optional[str] = None,
@@ -1076,7 +1137,8 @@ class MemoryService:
 
     # ── read ───────────────────────────────────────────────────────────────────
     def recall(self, query: str, *, workspace: Optional[str] = None,
-               repo: Optional[str] = None, mtypes: Optional[list] = None,
+               repo: Optional[str] = None, session_id: Optional[str] = None,
+               mtypes: Optional[list] = None,
                k: int = 8, as_of: Optional[float] = None,
                reinforce: bool = True, intent: str = "recall",
                graph_layers: Optional[list] = None,
@@ -1099,6 +1161,7 @@ class MemoryService:
         if not workspace and self.allowed_workspaces is not None:
             raise ValidationError("workspace is required on this instance")
         wid = rid = None
+        sid = None
         if workspace:
             ws = self._clean_ws(workspace)
             wid = self._lookup_workspace(ws)
@@ -1111,10 +1174,24 @@ class MemoryService:
                 if rid is None:
                     return {"query": query, "count": 0, "context": "", "memories": [],
                             "note": f"no repo named '{rp}' in workspace '{ws}' yet"}
+            if session_id:
+                sid = _clean_text(
+                    session_id, field="session_id", max_chars=MAX_NAME_CHARS
+                )
+                session = self.store.get_session(sid)
+                if session is None:
+                    return {"query": query, "count": 0, "context": "", "memories": [],
+                            "note": f"no session with id '{sid}'"}
+                if session["workspace_id"] != wid or (
+                        rid is not None and session.get("repo_id") != rid):
+                    raise ValidationError("session_id does not belong to that workspace/repo")
+                rid = rid or session.get("repo_id")
+        elif session_id:
+            raise ValidationError("session_id requires workspace")
 
         result = self.engine.recall_engine.recall(
             query,
-            _filter(wid, rid, mts, as_of, layers),
+            _filter(wid, rid, mts, as_of, layers, session_id=sid),
             k=k, reinforce=reinforce,
         )
         memories = []
@@ -1142,7 +1219,8 @@ class MemoryService:
         return out
 
     def grounded_recall(self, query: str, *, workspace: Optional[str] = None,
-                        repo: Optional[str] = None, mtypes: Optional[list] = None,
+                        repo: Optional[str] = None, session_id: Optional[str] = None,
+                        mtypes: Optional[list] = None,
                         k: int = 8, as_of: Optional[float] = None,
                         min_support: Optional[float] = None,
                         max_citations: int = 5, llm=None) -> dict:
@@ -1177,6 +1255,7 @@ class MemoryService:
         if not workspace and self.allowed_workspaces is not None:
             raise ValidationError("workspace is required on this instance")
         wid = rid = None
+        sid = None
         if workspace:
             ws = self._clean_ws(workspace)
             wid = self._lookup_workspace(ws)
@@ -1191,10 +1270,26 @@ class MemoryService:
                     return {"query": query, "grounded": False, "abstained": True,
                             "answer": "", "support": 0.0, "citations": [],
                             "reason": f"no repo named '{rp}' in workspace '{ws}' yet"}
+            if session_id:
+                sid = _clean_text(
+                    session_id, field="session_id", max_chars=MAX_NAME_CHARS
+                )
+                session = self.store.get_session(sid)
+                if session is None:
+                    return {"query": query, "grounded": False, "abstained": True,
+                            "answer": "", "support": 0.0, "citations": [],
+                            "reason": f"no session with id '{sid}'"}
+                if session["workspace_id"] != wid or (
+                        rid is not None and session.get("repo_id") != rid):
+                    raise ValidationError("session_id does not belong to that workspace/repo")
+                rid = rid or session.get("repo_id")
+        elif session_id:
+            raise ValidationError("session_id requires workspace")
 
         ans = self.engine.grounded_recall(
-            query, workspace_id=wid, repo_id=rid, mtypes=mts, as_of=as_of, k=k,
-            llm=llm, min_support=min_support, max_citations=max_citations,
+            query, workspace_id=wid, repo_id=rid, session_id=sid, mtypes=mts,
+            as_of=as_of, k=k, llm=llm, min_support=min_support,
+            max_citations=max_citations,
         )
         out = {"query": query, **ans.to_dict()}
         out["receipt"] = self.store.record_receipt(
@@ -1257,7 +1352,7 @@ class MemoryService:
         return {"session_id": sid, "status": "summarized", "summary": summary,
                "open_threads": threads}
 
-    # ── governance: forget / pin / correct (audited, never a silent hard delete) ──
+    # ── governance: forget / pin / correct / promote (audited; history preserved) ──
     def forget(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
               reason: str = "", actor: str = "user") -> dict:
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
@@ -1296,6 +1391,40 @@ class MemoryService:
             return self.engine.correct(mid, new_content, reason=reason, actor=actor)
         except KeyError as exc:
             raise ValidationError(str(exc))
+
+    def promote(self, memory_id: str, target_scope: str, *, workspace: str,
+                repo: Optional[str] = None, reason: str = "",
+                actor: str = "user") -> dict:
+        """Widen a memory's visibility while preserving its narrow-scope history."""
+        mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
+        target = _enum(target_scope, Scope, "target_scope")
+        reason = _clean_text(
+            reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False
+        )
+        actor = _clean_text(
+            actor, field="actor", max_chars=MAX_NAME_CHARS, required=False
+        ) or "user"
+        wid, rid = self._require_scope(workspace, repo)
+        self._check_owns(mid, wid, rid)
+        try:
+            out = self.engine.promote(mid, target, reason=reason, actor=actor)
+        except (KeyError, ValueError) as exc:
+            raise ValidationError(str(exc))
+        out["workspace"] = self._clean_ws(workspace)
+        out["repo"] = None
+        if target == Scope.REPO:
+            promoted = self.store.get_memory(out["id"])
+            if promoted and promoted.repo_id:
+                row = self.store.conn.execute(
+                    "SELECT name FROM repos WHERE id=?", (promoted.repo_id,)
+                ).fetchone()
+                out["repo"] = row["name"] if row else repo
+        out["receipt"] = self.store.record_receipt(
+            "promote", workspace_id=wid, repo_id=rid or "", actor=actor,
+            target_count=1, status=out["op"],
+            metadata={"scope": target.value, "resolution": "promotion"},
+        )
+        return out
 
     def merge(self, source_ids: list, merged_content: str, *, workspace: str,
               repo: Optional[str] = None, title: Optional[str] = None,
@@ -2641,11 +2770,12 @@ class MemoryService:
         }
 
 
-def _filter(workspace_id, repo_id, mtypes, as_of, graph_layers=None):
+def _filter(workspace_id, repo_id, mtypes, as_of, graph_layers=None, *, session_id=None):
     from engraphis.core.interfaces import SearchFilter
     return SearchFilter(
-        workspace_id=workspace_id, repo_id=repo_id, mtypes=mtypes,
-        graph_layers=graph_layers, as_of=as_of,
+        workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
+        mtypes=mtypes, graph_layers=graph_layers, as_of=as_of,
+        include_ancestors=True,
     )
 
 
