@@ -81,6 +81,10 @@ class SearchFilter:
     mtypes: Optional[list[MemoryType]] = None
     graph_layers: Optional[list[GraphLayer]] = None
     as_of: Optional[float] = None    # bi-temporal time anchor; None = now
+    # Contextual recall sees broader scopes as ancestors: a repo read can see that
+    # repo plus workspace/user memories, and a session read can additionally see its
+    # exact session.  Storage/governance queries stay exact unless they opt in.
+    include_ancestors: bool = False
 
 
 @dataclass

@@ -24,7 +24,7 @@ from engraphis.core.interfaces import (
     Reranker,
     SearchFilter,
 )
-from engraphis.core.store import Store, now_ts
+from engraphis.core.store import Store, memory_matches_filter, now_ts
 
 
 @dataclass
@@ -64,7 +64,7 @@ class RecallEngine:
         recs: dict[str, MemoryRecord] = {}
         for mid in set(vec) | set(lex) | set(graph):
             rec = self.store.get_memory(mid)
-            if rec and self._visible(rec, flt, now):
+            if rec and memory_matches_filter(rec, flt, at=now):
                 recs[mid] = rec
         if not recs:
             return RecallResult()
@@ -184,33 +184,14 @@ class RecallEngine:
             clauses.append("workspace_id=?")
             params.append(flt.workspace_id)
         if flt.repo_id:
-            clauses.append("repo_id=?")
+            if flt.include_ancestors:
+                clauses.append("(repo_id=? OR repo_id IS NULL)")
+            else:
+                clauses.append("repo_id=?")
             params.append(flt.repo_id)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         return {r["id"]: r["name"] for r in self.store.conn.execute(sql, params).fetchall()}
-
-
-
-    @staticmethod
-    def _visible(rec: MemoryRecord, flt: SearchFilter, now: float) -> bool:
-        if flt.workspace_id and rec.workspace_id != flt.workspace_id:
-            return False
-        if flt.repo_id and rec.repo_id != flt.repo_id:
-            return False
-        if flt.session_id and rec.session_id != flt.session_id:
-            return False
-        if flt.scopes and rec.scope not in flt.scopes:
-            return False
-        if flt.mtypes and rec.mtype not in flt.mtypes:
-            return False
-        if rec.expired_at is not None:
-            return False
-        if rec.valid_from is not None and rec.valid_from > now:
-            return False
-        if rec.valid_to is not None and now >= rec.valid_to:
-            return False
-        return True
 
     def _pack(self, cands: list[Candidate]) -> str:
         parts, used = [], 0

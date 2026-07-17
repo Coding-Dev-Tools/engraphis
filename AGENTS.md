@@ -209,7 +209,7 @@ These are pure, unit-tested functions — change them only with a corresponding 
   (`core/graphrank.py`, default; `graph_mode="1hop"` retained for ablation); **A-MEM-style
   evolution** (`MemoryEngine._evolve`: new writes auto-link to related live neighbors and
   reinforce them — bounded, idempotent, audited).
-- **Done — expanded Phase 3:** **MCP server exists** (`engraphis/mcp_server.py`, 27 tools:
+- **Done — expanded Phase 3:** **MCP server exists** (`engraphis/mcp_server.py`, 28 tools:
   write/read (incl. **grounded recall** — `engraphis_recall_grounded`: cited answer or abstain)/
   governance/code/session — do not assume only `remember`/`recall` exist, check the
   tool list) and a **code-symbol graph** (`backends/codegraph.py`, tree-sitter with a
@@ -263,7 +263,12 @@ These are pure, unit-tested functions — change them only with a corresponding 
   into one durable `semantic` profile digest, linked `profiles`, provenance
   `source='profile_consolidation'`, idempotent + audited — the local-first analog of a
   per-subject knowledge profile. Framed local-first: a user-schedulable job, not a cloud service.
-  **Not done:** scope promotion; procedural distillation.
+  First-class **scope promotion** is implemented (`MemoryEngine.promote()` /
+  `MemoryService.promote()` / `engraphis_promote` / HTTP): it only widens scope, writes the
+  wider record before retiring the narrow source, safety-inherits pin/sensitivity/stability,
+  and preserves an audited/linked bi-temporal history. Contextual recall is hierarchy-aware:
+  repo reads inherit workspace/user facts and session reads inherit their repo/workspace while
+  excluding other sessions. **Not done:** procedural distillation.
 - **Done — unified dashboard with built-in memory inspector** (`engraphis/inspector/`
   internals mounted by `python -m scripts.start_dashboard`, :8700): product UI over
   `MemoryService` (same layer as the MCP server, so UI and tools can't drift). The

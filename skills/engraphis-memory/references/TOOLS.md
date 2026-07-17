@@ -1,6 +1,6 @@
 # Engraphis MCP tools — reference
 
-All 27 tools, grouped by job. Parameters are `name (type, default)` — no default means required.
+All 28 tools, grouped by job. Parameters are `name (type, default)` — no default means required.
 Every tool returns a JSON string; on failure it returns `"Error: <reason>"` instead of raising.
 Governance tools (`forget`/`pin`/`correct`/`link`) verify the memory actually belongs to the
 `workspace`/`repo` you pass **before** changing anything, so you can't touch memories outside a
@@ -21,7 +21,9 @@ Store a memory so it can be recalled later, across turns, sessions, and repos.
 - `repo (str, None)` — repository scope; omit for workspace-wide facts.
 - `session_id (str, None)` — from `engraphis_start_session`, if this belongs to a session.
 - `mtype (str, "semantic")` — `semantic` | `episodic` | `procedural` | `working`. See CONVENTIONS.
-- `scope (str, "repo")` — `session` | `repo` | `workspace` | `user`. See SCOPING.
+- `scope (str, None)` — `session` | `repo` | `workspace` | `user`; omitted preserves the
+  compatible default (`repo` when `repo` or a repo-backed `session_id` is present, otherwise
+  `workspace`). Session visibility must be explicit. See SCOPING.
 - `title (str, "")` — optional short title.
 - `importance (float, 0.0)` — `0..1`; higher resists decay.
 - `keywords (list[str], None)` — optional, aids lexical recall.
@@ -60,6 +62,8 @@ Call it before answering or acting when prior context would help.
 - `query (str)` — natural language, e.g. `"how do we handle auth?"`.
 - `workspace (str, None)` — restrict to this workspace.
 - `repo (str, None)` — restrict to this repo (requires `workspace`).
+- `session_id (str, None)` — exact session context (requires `workspace`); inherits repo/workspace
+  ancestors while excluding every other session.
 - `mtypes (list[str], None)` — restrict to these memory types.
 - `k (int, 8)` — max results, `1..50`.
 
@@ -74,7 +78,8 @@ rather get "insufficient evidence" than a guess. The default answer is determini
 extractive; optional LLM synthesis is accepted only when its claims remain cited.
 
 - `query (str)` — the question, e.g. `"which auth scheme did we standardise on?"`.
-- `workspace (str, None)`, `repo (str, None)`, `mtypes (list[str], None)`, `k (int, 8)`.
+- `workspace (str, None)`, `repo (str, None)`, `session_id (str, None)`,
+  `mtypes (list[str], None)`, `k (int, 8)`.
 - `min_support (float, None)` — absolute support floor `0..1`; raise it to demand stronger
   evidence before answering.
 - `synthesize (bool, false)` — ask a configured LLM for cited prose; falls back safely.
@@ -130,7 +135,7 @@ Returns `{query, history:[{…memory fields…, valid_from, valid_to}]}`, oldest
 ---
 
 ## Governance
-All four preserve history (bi-temporal close, never a hard delete) and are audited. All verify
+All five preserve history (bi-temporal close, never a hard delete) and are audited. All verify
 ownership against the `workspace`/`repo` you pass.
 
 ### `engraphis_correct`  *(preferred fix)*
@@ -147,6 +152,18 @@ Retire a memory: it stops appearing in recall, history preserved.
 - `memory_id (str)`, `workspace (str)`, `repo (str, None)`, `reason (str, "")`.
 
 Returns `{id, status:"forgotten", reason}`. Use `correct` instead when you have replacement content.
+
+### `engraphis_promote`
+Widen a live memory's visibility without editing it in place. The wider record is stored first;
+the narrow source is then bi-temporally closed and linked, with provenance, pinning, sensitivity,
+and learned stability inherited.
+
+- `memory_id (str)`, `target_scope (str)`, `workspace (str)`, `repo (str, None)`,
+  `reason (str, "")`.
+
+`target_scope` must be strictly wider: session → repo/workspace or repo → workspace. User-scope
+promotion is not yet supported because records remain workspace-bound. Returns
+`{id, promoted_from, from_scope, scope, op, reason, receipt}`.
 
 ### `engraphis_pin`
 Exempt a memory from automatic decay/pruning — for durable conventions and identity facts.
@@ -248,7 +265,7 @@ crisp fact.
 
 - `content (str, required)`; `workspace (str, required)`; `repo (str, None)`;
   `session_id (str, None)`; `mtype (str, "semantic")` — default type for unclassified facts;
-  `scope (str, "repo")`.
+  `scope (str, None)` — omitted defaults to repo for repo/session context, otherwise workspace.
 
 Returns `{workspace, repo, count, extracted, facts: [{id, op, superseded?}]}`.
 
@@ -306,6 +323,7 @@ Returns `{memories, by_type, workspaces, sessions, schema_version}`.
 - Need raw context and have a question → `recall`. Need raw context and don't yet → `recall_proactive`. Need a task-ready packet → `proactive_context`.
 - "Why?" / "since when?" → `why` / `timeline` (not `recall` — those see history).
 - Fact is wrong → `correct` (keeps the chain). Fact is obsolete with no replacement → `forget`.
+- Fact applies more broadly than first believed → `promote` (widens without duplicate recall).
 - Must never fade → `pin`. Two facts belong together → `link`.
 - Working in code → `index_repo`, then `search_code`; use `code_path`/`code_impact` for structural
   questions and PR triage.

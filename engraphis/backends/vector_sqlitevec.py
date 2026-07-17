@@ -17,28 +17,11 @@ import numpy as np
 
 from engraphis.backends.vector_numpy import NumpyVectorIndex
 from engraphis.core.interfaces import SearchFilter
-from engraphis.core.store import Store, now_ts
+from engraphis.core.store import Store, memory_matches_filter
 
 
 def _visible(rec, flt: SearchFilter) -> bool:
-    now = flt.as_of if flt.as_of is not None else now_ts()
-    if flt.workspace_id and rec.workspace_id != flt.workspace_id:
-        return False
-    if flt.repo_id and rec.repo_id != flt.repo_id:
-        return False
-    if flt.session_id and rec.session_id != flt.session_id:
-        return False
-    if flt.scopes and rec.scope not in flt.scopes:
-        return False
-    if flt.mtypes and rec.mtype not in flt.mtypes:
-        return False
-    if rec.expired_at is not None:
-        return False
-    if rec.valid_from is not None and rec.valid_from > now:
-        return False
-    if rec.valid_to is not None and now >= rec.valid_to:
-        return False
-    return True
+    return memory_matches_filter(rec, flt)
 
 
 def _cosine_from_l2(distance: float) -> float:

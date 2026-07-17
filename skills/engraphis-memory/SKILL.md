@@ -66,6 +66,7 @@ promotion: [SCOPING.md](references/SCOPING.md).
 | "How has X changed?" | `engraphis_timeline` | Every version oldest→newest with `valid_from/valid_to`. |
 | Retire a stale memory | `engraphis_forget` | Bi-temporal close, not a delete. Prefer `correct` if you have a replacement. |
 | Fix a memory's content | `engraphis_correct` | Closes old + stores replacement that records what it fixed; keeps the *why* chain. |
+| Widen a memory's scope | `engraphis_promote` | Session→repo/workspace or repo→workspace; preserves and links narrow history. |
 | Protect from decay | `engraphis_pin` | For identity/durable facts that must never fade. |
 | Connect two memories | `engraphis_link` | A-MEM-style; e.g. bug ↔ its fix. |
 | Log a raw event | `engraphis_record_event` | Lower ceremony than remember; repeats are a promotion signal. |
@@ -127,6 +128,6 @@ is needed for the memory layer. Details: the repo `README.md` "Quickstart A — 
 
 ## References
 
-- [TOOLS.md](references/TOOLS.md) — all 27 tools: parameters, defaults, returns, when to reach for each.
+- [TOOLS.md](references/TOOLS.md) — all 28 tools: parameters, defaults, returns, when to reach for each.
 - [SCOPING.md](references/SCOPING.md) — the `workspace → repo → session → memory` model, scope vs. type, and promotion.
 - [CONVENTIONS.md](references/CONVENTIONS.md) — memory types, provenance, importance, dedup/resolution, governance, and anti-patterns

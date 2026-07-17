@@ -111,6 +111,61 @@ def _fts5_available(conn: sqlite3.Connection) -> bool:
         return False
 
 
+def memory_matches_filter(rec: MemoryRecord, flt: Optional[SearchFilter], *,
+                          at: Optional[float] = None,
+                          include_invalid: bool = False) -> bool:
+    """Return whether ``rec`` is visible under the same rules as :meth:`Store._where`.
+
+    This is shared by the defensive recall check and sqlite-vec's post-filter so the
+    accelerated and NumPy retrieval paths cannot drift on hierarchy semantics.
+    """
+    if flt:
+        if flt.workspace_id and rec.workspace_id != flt.workspace_id:
+            return False
+        if flt.include_ancestors:
+            if flt.session_id:
+                if rec.scope == Scope.SESSION:
+                    if rec.session_id != flt.session_id:
+                        return False
+                elif rec.scope == Scope.REPO:
+                    if not flt.repo_id or rec.repo_id != flt.repo_id:
+                        return False
+                elif rec.scope not in (Scope.WORKSPACE, Scope.USER):
+                    return False
+            elif flt.repo_id:
+                if rec.scope == Scope.SESSION:
+                    return False
+                if rec.scope == Scope.REPO and rec.repo_id != flt.repo_id:
+                    return False
+                if rec.scope not in (Scope.REPO, Scope.WORKSPACE, Scope.USER):
+                    return False
+            elif rec.scope == Scope.SESSION:
+                # A workspace/global recall has no session context and must not leak
+                # transient working state from every session in that container.
+                return False
+        else:
+            if flt.repo_id and rec.repo_id != flt.repo_id:
+                return False
+            if flt.session_id and rec.session_id != flt.session_id:
+                return False
+        if flt.scopes and rec.scope not in flt.scopes:
+            return False
+        if flt.mtypes and rec.mtype not in flt.mtypes:
+            return False
+    if include_invalid:
+        return True
+    t = at if at is not None else (
+        flt.as_of if flt and flt.as_of is not None else now_ts()
+    )
+    if rec.expired_at is not None:
+        return False
+    if rec.valid_from is not None and rec.valid_from > t:
+        return False
+    if rec.valid_to is not None and t >= rec.valid_to:
+        return False
+    return True
+
+
 class Store:
     """A connection to one Engraphis v2 database (one file, or ``:memory:``)."""
 
@@ -677,7 +732,7 @@ class Store:
             sql += " AND workspace_id=?"
             params.append(flt.workspace_id)
         if flt and flt.repo_id:
-            sql += " AND repo_id=?"
+            sql += " AND (repo_id=? OR repo_id IS NULL)" if flt.include_ancestors else " AND repo_id=?"
             params.append(flt.repo_id)
         if flt and flt.graph_layers:
             marks = ",".join("?" for _ in flt.graph_layers)
@@ -1192,12 +1247,36 @@ class Store:
             if flt.workspace_id:
                 where.append(f"{p}workspace_id=?")
                 params.append(flt.workspace_id)
-            if flt.repo_id:
-                where.append(f"{p}repo_id=?")
-                params.append(flt.repo_id)
-            if flt.session_id:
-                where.append(f"{p}session_id=?")
-                params.append(flt.session_id)
+            if flt.include_ancestors:
+                if flt.session_id:
+                    if flt.repo_id:
+                        where.append(
+                            f"(({p}scope='session' AND {p}session_id=?) OR "
+                            f"({p}scope='repo' AND {p}repo_id=?) OR "
+                            f"{p}scope IN ('workspace','user'))"
+                        )
+                        params.extend((flt.session_id, flt.repo_id))
+                    else:
+                        where.append(
+                            f"(({p}scope='session' AND {p}session_id=?) OR "
+                            f"{p}scope IN ('workspace','user'))"
+                        )
+                        params.append(flt.session_id)
+                elif flt.repo_id:
+                    where.append(
+                        f"(({p}scope='repo' AND {p}repo_id=?) OR "
+                        f"{p}scope IN ('workspace','user'))"
+                    )
+                    params.append(flt.repo_id)
+                else:
+                    where.append(f"{p}scope<>'session'")
+            else:
+                if flt.repo_id:
+                    where.append(f"{p}repo_id=?")
+                    params.append(flt.repo_id)
+                if flt.session_id:
+                    where.append(f"{p}session_id=?")
+                    params.append(flt.session_id)
             if flt.scopes:
                 marks = ",".join("?" for _ in flt.scopes)
                 where.append(f"{p}scope IN ({marks})")

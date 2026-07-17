@@ -72,6 +72,14 @@ class _GovernBody(BaseModel):
     pinned: bool = True
 
 
+class _PromoteBody(BaseModel):
+    memory_id: str = Field(min_length=1, max_length=200)
+    target_scope: str
+    workspace: str = Field(min_length=1, max_length=200)
+    repo: Optional[str] = Field(default=None, max_length=200)
+    reason: str = Field(default="", max_length=1_000)
+
+
 class _ConsolidateBody(BaseModel):
     workspace: str = Field(min_length=1, max_length=200)
     repo: Optional[str] = Field(default=None, max_length=200)
@@ -440,6 +448,13 @@ def create_app(service: Optional[MemoryService] = None,
     async def correct(body: _CorrectBody, request: Request):
         return svc().correct(body.memory_id, body.new_content, workspace=body.workspace,
                              repo=body.repo, reason=body.reason, actor=_actor(request))
+
+    @app.post("/api/promote")
+    async def promote(body: _PromoteBody, request: Request):
+        return svc().promote(
+            body.memory_id, body.target_scope, workspace=body.workspace,
+            repo=body.repo, reason=body.reason, actor=_actor(request),
+        )
 
     @app.post("/api/consolidate")
     async def consolidate(body: _ConsolidateBody):
