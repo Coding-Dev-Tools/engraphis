@@ -131,8 +131,10 @@ def engraphis_remember(
     mtype: Annotated[str, Field(description="Memory type: 'semantic' (facts/conventions), "
                      "'episodic' (events/decisions), 'procedural' (how-tos), or "
                      "'working' (transient).")] = "semantic",
-    scope: Annotated[str, Field(description="Visibility: 'session', 'repo', 'workspace', "
-                     "or 'user'.")] = "repo",
+    scope: Annotated[Optional[str], Field(
+        description="Visibility: session, repo, workspace, or user. Omit to infer the "
+                    "compatible default: repo when repo or a repo-backed session_id is "
+                    "present, otherwise workspace. Session visibility must be explicit.")] = None,
     title: Annotated[str, Field(description="Optional short title.", max_length=1_000)] = "",
     importance: Annotated[float, Field(description="Salience 0..1; higher resists decay.",
                           ge=0.0, le=1.0)] = 0.0,
@@ -199,6 +201,9 @@ def engraphis_recall(
                                               max_length=200)] = None,
     repo: Annotated[Optional[str], Field(description="Restrict to this repo (requires "
                                          "workspace).", max_length=200)] = None,
+    session_id: Annotated[Optional[str], Field(
+        description="Optional active session context. Includes that exact session plus "
+                    "its repo/workspace ancestors; requires workspace.")] = None,
     mtypes: Annotated[Optional[List[str]], Field(description="Restrict to these memory types "
                       "(semantic/episodic/procedural/working).")] = None,
     k: Annotated[int, Field(description="Max memories to return (1-50).", ge=1, le=50)] = 8,
@@ -215,7 +220,8 @@ def engraphis_recall(
     """
     try:
         return _ok(service().recall(
-            query, workspace=workspace, repo=repo, mtypes=mtypes, k=k,
+            query, workspace=workspace, repo=repo, session_id=session_id,
+            mtypes=mtypes, k=k,
         ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -234,6 +240,9 @@ def engraphis_recall_grounded(
                                               max_length=200)] = None,
     repo: Annotated[Optional[str], Field(description="Restrict to this repo (requires "
                                          "workspace).", max_length=200)] = None,
+    session_id: Annotated[Optional[str], Field(
+        description="Optional active session context. Includes that exact session plus "
+                    "its repo/workspace ancestors; requires workspace.")] = None,
     mtypes: Annotated[Optional[List[str]], Field(description="Restrict to these memory types "
                       "(semantic/episodic/procedural/working).")] = None,
     k: Annotated[int, Field(description="Max memories to consider (1-50).", ge=1, le=50)] = 8,
@@ -270,7 +279,8 @@ def engraphis_recall_grounded(
             except Exception:
                 llm = None
         return _ok(service().grounded_recall(
-            query, workspace=workspace, repo=repo, mtypes=mtypes, k=k,
+            query, workspace=workspace, repo=repo, session_id=session_id,
+            mtypes=mtypes, k=k,
             min_support=min_support, llm=llm,
         ))
     except Exception as exc:  # noqa: BLE001
@@ -306,7 +316,7 @@ def engraphis_answer(
     integrations should prefer ``engraphis_recall_grounded`` for the clearer name.
     """
     return engraphis_recall_grounded(
-        query=query, workspace=workspace, repo=repo, mtypes=None, k=k,
+        query=query, workspace=workspace, repo=repo, session_id=None, mtypes=None, k=k,
         min_support=min_support, synthesize=synthesize,
     )
 
@@ -530,6 +540,47 @@ def engraphis_correct(
     try:
         return _ok(service().correct(memory_id, new_content, workspace=workspace, repo=repo,
                                      reason=reason))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_promote",
+    annotations={"title": "Promote a memory to a wider scope", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": False,
+                 "openWorldHint": False},
+)
+def engraphis_promote(
+    memory_id: Annotated[str, Field(description="The live memory id to promote.",
+                         min_length=1, max_length=200)],
+    target_scope: Annotated[str, Field(
+        description="A strictly wider supported visibility: repo or workspace.")],
+    workspace: Annotated[str, Field(
+        description="Workspace that owns the source memory; verified before mutation.",
+        min_length=1, max_length=200)],
+    repo: Annotated[Optional[str], Field(
+        description="Repo that owns the source memory, when applicable.",
+        max_length=200)] = None,
+    reason: Annotated[str, Field(
+        description="Why the learning now applies more broadly; recorded in audit history.",
+        max_length=1_000)] = "",
+) -> str:
+    """Widen a memory's visibility without losing its narrow-scope history.
+
+    The wider record is stored first, inherits the source's protection,
+    confidentiality, provenance, and learned stability, and is linked back to the
+    bi-temporally closed source. Promotion must be strictly wider (session→repo/workspace
+    or repo→workspace); it never edits scope in place. User-scope promotion is not yet
+    supported because records remain workspace-bound.
+
+    Returns:
+        str: JSON ``{"id","promoted_from","from_scope","scope","op","reason"}``
+        plus a privacy receipt, or an actionable validation error.
+    """
+    try:
+        return _ok(service().promote(
+            memory_id, target_scope, workspace=workspace, repo=repo, reason=reason,
+        ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -762,8 +813,10 @@ def engraphis_export_code_graph(
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
 )
 def engraphis_start_session(
-    workspace: Annotated[str, Field(description="Workspace the session belongs to.",
-                                    min_length=1, max_length=200)],
+    workspace: Annotated[str, Field(description="Workspace the session belongs to. "
+                                    "Defaults to 'default' if omitted (cron jobs often "
+                                    "omit it).",
+                                    min_length=1, max_length=200)] = "default",
     repo: Annotated[Optional[str], Field(description="Repo scope, if any.",
                                          max_length=200)] = None,
     agent: Annotated[str, Field(description="Agent/tool name (e.g. 'claude-code').",
@@ -932,8 +985,10 @@ def engraphis_ingest(
                           "engraphis_start_session, if any.")] = None,
     mtype: Annotated[str, Field(description="Default memory type for facts the extractor "
                      "doesn't classify: semantic/episodic/procedural/working.")] = "semantic",
-    scope: Annotated[str, Field(description="Visibility: 'session', 'repo', 'workspace', "
-                     "or 'user'.")] = "repo",
+    scope: Annotated[Optional[str], Field(
+        description="Visibility: session, repo, workspace, or user. Omit to infer the "
+                    "compatible default: repo when repo or a repo-backed session_id is "
+                    "present, otherwise workspace. Session visibility must be explicit.")] = None,
 ) -> str:
     """Store raw text without hand-distilling it first — the extract-then-remember path.
 
