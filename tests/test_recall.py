@@ -115,3 +115,50 @@ def test_graph_arm_does_not_match_entity_names_inside_other_words():
         now=10**12)
 
     assert related not in scores
+
+# ── regression: batched candidate lookup + deterministic tie ordering ─────────
+
+def test_recall_resolves_candidates_in_one_batched_lookup(monkeypatch):
+    """Candidates used to be resolved with a get_memory() per unique id across the
+    vec/lex/graph arms — ~150 single-row queries per recall."""
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    for i in range(12):
+        _add(store, emb, wid, rid, "deployment note number %d about caching" % i)
+
+    single = []
+    monkeypatch.setattr(store, "get_memory", lambda mid: single.append(mid))
+    batched = []
+    real_get_memories = store.get_memories
+    monkeypatch.setattr(store, "get_memories",
+                        lambda ids: (batched.append(list(ids)), real_get_memories(ids))[1])
+
+    res = eng.recall("caching", SearchFilter(workspace_id=wid), k=5, reinforce=False)
+
+    assert res.count >= 1
+    assert single == []                       # no per-id query on the recall path
+    assert len(batched) == 1                  # exactly one batched resolve
+
+
+def test_recall_tie_order_is_deterministic():
+    """Candidates come from set(vec) | set(lex) | set(graph); set iteration order varies
+    with PYTHONHASHSEED, so equal-scored results reordered across processes."""
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    # Identical content => identical scores => ordering is decided purely by the
+    # tiebreak, which must be the id and not set/hash iteration order.
+    for _ in range(8):
+        _add(store, emb, wid, rid, "the release checklist is in the runbook")
+
+    flt = SearchFilter(workspace_id=wid)
+    runs = [[c["id"] for c in eng.recall("release checklist runbook", flt, k=8,
+                                         reinforce=False).chunks]
+            for _ in range(5)]
+
+    assert all(r == runs[0] for r in runs)
+    tied = eng.recall("release checklist runbook", flt, k=8, reinforce=False).chunks
+    top = max(c["score"] for c in tied)
+    tied_ids = [c["id"] for c in tied if c["score"] == top]
+    assert tied_ids == sorted(tied_ids)       # equal scores order by id, ascending

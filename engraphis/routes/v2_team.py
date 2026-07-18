@@ -49,10 +49,12 @@ def _send_invite(u: dict, admin: dict) -> tuple:
     never fail the account-creation request that already succeeded.
 
     The email always points the member at the team dashboard to sign in. When this
-    instance is genuinely Team-licensed it ALSO carries the shared Team license key
-    (``pro_included``) so the member can activate their own local Engraphis and get
-    Pro features + cloud sync, taking one server-enforced seat — that is what turns
-    "you have a dashboard login" into "you are a licensed member of the team".
+    instance is genuinely Team-licensed AND the new account can write, it ALSO carries
+    the shared Team license key (``pro_included``) so the member can activate their own
+    local Engraphis and get Pro features + cloud sync, taking one server-enforced seat —
+    that is what turns "you have a dashboard login" into "you are a licensed member of
+    the team". A ``viewer`` never receives the key (see below): for that role
+    ``pro_included`` is False by design, not by failure.
 
     Prefers THIS instance's own email delivery (``ENGRAPHIS_RESEND_API_KEY`` /
     ``ENGRAPHIS_SMTP_*`` in its own env) when configured — the invite then comes
@@ -71,7 +73,17 @@ def _send_invite(u: dict, admin: dict) -> tuple:
 
     # Only embed a key when this instance really has the ``team`` feature, so we never
     # email a member a free/absent or non-Team "key" that would not unlock anything.
-    team_key = _read_key_material() if licensing.has_feature("team") else ""
+    #
+    # …and never for a ``viewer``. The shared Team key is NOT role-aware: the sync relay
+    # authenticates on the key alone (``inspector/sync_relay._authorize``) and knows
+    # nothing about dashboard roles, so any holder can push and delete bundles in the
+    # team's relay namespace. Mailing it to a read-only account would hand that account
+    # team-wide write access out of band of every check the dashboard makes — the
+    # dashboard refuses the viewer's every write while the relay accepts them all. The
+    # key follows the role: viewers get a dashboard-only invite.
+    can_hold_key = u.get("role") != "viewer"
+    team_key = (_read_key_material()
+                if (can_hold_key and licensing.has_feature("team")) else "")
     dashboard_url = os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
 
     if webhooks.email_configured():
@@ -89,17 +101,24 @@ def _send_invite(u: dict, admin: dict) -> tuple:
     if not key:
         return False, ("no local email delivery configured (ENGRAPHIS_RESEND_API_KEY / "
                        "ENGRAPHIS_SMTP_*) and no active license key to relay through"), False
-    # The relay accepts (and now echoes into the email) only a key that verifies as
-    # Team server-side, so a successful relay send means the member got the activation key.
+    # The relay accepts (and echoes into the email) only a key that verifies as Team
+    # server-side, so a successful relay send means a member got the activation key —
+    # viewers excepted, per the note below.
     # Sync may target a customer-operated relay while trial issuance and mail delivery
     # remain vendor services. Prefer the explicit/signed license-server URL so setting
     # ENGRAPHIS_RELAY_URL to the customer's own deployment does not route invites back
     # into a relay with no mail-provider credentials.
+    #
+    # ``key`` here is the caller's PROOF OF ENTITLEMENT to the relay, not (necessarily)
+    # the payload: the relay decides what to echo, and it withholds the key for a
+    # ``viewer`` for exactly the reason above (``license_cloud.team_invite``). So a
+    # viewer's relay-delivered invite is dashboard-only too, and ``pro_included`` must
+    # report that rather than assuming "sent == key delivered".
     sent, reason = cloud_license.send_team_invite(
         resolve_license_server_url(licensing.current_license().cloud_url), key,
         u["email"], u["name"], u["role"], admin["email"],
         dashboard_url=dashboard_url)
-    return sent, reason, bool(sent)
+    return sent, reason, bool(sent and can_hold_key)
 
 
 class SetupReq(BaseModel):
@@ -355,12 +374,17 @@ def attach(app: FastAPI, service):
                            target=u["email"], detail="role=%s" % body.role, ip=ip)
         invited, fail_reason, pro_included = _send_invite(u, admin)
         dashboard_configured = bool(os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip())
+        # A viewer is deliberately never mailed the shared Team key (see _send_invite), so
+        # "this invite carried no key" is the correct outcome for that role. Warning the
+        # admin about it would report a working, intentional policy as a licensing
+        # misconfiguration and push them to "fix" it.
+        key_expected = u["role"] != "viewer"
         if not invited:
             logger.warning("team invite email to %s failed: %s", u["email"], fail_reason)
             store.record_event("user.invite_email_failed", actor_id=admin["id"],
                                actor_email=admin["email"], target=u["email"],
                                detail=fail_reason[:200], ip=ip)
-        elif not pro_included:
+        elif not pro_included and key_expected:
             # Delivered, but the member got a dashboard-only invite with no Pro/team key,
             # because this instance is not Team-licensed. Tell the admin plainly rather
             # than letting the invite look like it silently did nothing.
@@ -372,6 +396,9 @@ def attach(app: FastAPI, service):
                                       "(instance not Team-licensed)", ip=ip)
         return {"user": u, "invited": invited,
                 "pro_activation_sent": bool(pro_included),
+                # False for a viewer: no license key is expected in that invite, so a UI
+                # can distinguish "we couldn't send the key" from "this role never gets one".
+                "pro_activation_expected": key_expected,
                 "dashboard_url_configured": dashboard_configured}
 
     @router.post("/users/update")

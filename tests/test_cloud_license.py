@@ -1038,6 +1038,103 @@ def test_team_invite_refund_targets_the_reserved_day_across_midnight(monkeypatch
     assert row["count"] == 0
 
 
+# ── team-invite relay is a VENDOR-DOMAIN mail sender, so who picks the link matters ────
+# `key` is the only authentication, and a free 3-day trial key satisfies verify_for_feature
+# (..., "team"). Unrestricted caller-supplied `dashboard_url` therefore let anyone send a
+# genuine, correctly-signed engraphis.com email pointing wherever they liked.
+
+def _trial_team_key(email="trial@corp.com"):
+    now = time.time()
+    return licensing.compose_key(
+        {"v": 1, "plan": "team", "email": email, "seats": 5, "trial": 1,
+         "issued": int(now), "expires": int(now + 3 * 86400)}, SECRET)
+
+
+def test_trial_key_cannot_choose_the_dashboard_url_in_a_vendor_email(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    captured = {}
+    monkeypatch.setattr(
+        WH, "send_team_invite_email",
+        lambda to, name, role, invited_by="", key="", dashboard_url=None:
+            captured.update(dashboard_url=dashboard_url))
+    key = _trial_team_key()
+    assert parse_key(key).is_trial is True
+    r = _app().post("/license/v1/team-invite",
+                    json={"key": key, "to": "victim@corp.com",
+                          "dashboard_url": "https://engraphis-team.attacker.test/"})
+    # Still delivered (trials must work), but pointing at the relay's OWN dashboard:
+    # send_team_invite_email resolves "" to ENGRAPHIS_DASHBOARD_URL / the hosted default.
+    assert r.status_code == 200
+    assert captured["dashboard_url"] == ""
+
+
+def test_paid_key_pins_its_dashboard_url_on_first_use(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    seen = []
+    monkeypatch.setattr(
+        WH, "send_team_invite_email",
+        lambda to, name, role, invited_by="", key="", dashboard_url=None:
+            seen.append(dashboard_url))
+    c = _app()
+    key = _key(plan="team")
+    body = {"key": key, "to": "new@corp.com", "dashboard_url": "https://team.corp.example/"}
+    assert c.post("/license/v1/team-invite", json=body).status_code == 200
+    # the same URL keeps working...
+    assert c.post("/license/v1/team-invite", json=body).status_code == 200
+    # ...a different one is refused, and never reaches the mail provider
+    moved = dict(body, dashboard_url="https://engraphis-team.attacker.test/")
+    r = c.post("/license/v1/team-invite", json=moved)
+    assert r.status_code == 409 and "dashboard url" in r.json()["error"].lower()
+    # validate_cloud_base_url canonicalizes before the pin is taken, so an equivalent
+    # spelling of the SAME URL keeps working while a different host cannot.
+    assert seen == ["https://team.corp.example"] * 2
+    # A key pinned by one customer does not constrain anybody else's key.
+    other = c.post("/license/v1/team-invite",
+                   json={"key": _key(plan="team", email="other@corp.com"),
+                         "to": "new@corp.com",
+                         "dashboard_url": "https://other.example/"})
+    assert other.status_code == 200
+
+
+def test_rejected_dashboard_url_does_not_consume_the_daily_invite_cap(monkeypatch):
+    from engraphis.inspector import license_cloud
+    from engraphis.inspector import webhooks as WH
+    monkeypatch.setattr(WH, "send_team_invite_email", lambda *a, **k: None)
+    monkeypatch.setattr(license_cloud, "_invite_daily_cap", lambda: 2)
+    c = _app()
+    key = _key(plan="team")
+    assert c.post("/license/v1/team-invite",
+                  json={"key": key, "to": "a@corp.com",
+                        "dashboard_url": "https://team.corp.example/"}).status_code == 200
+    for _ in range(3):
+        assert c.post("/license/v1/team-invite",
+                      json={"key": key, "to": "a@corp.com",
+                            "dashboard_url": "https://evil.test/"}).status_code == 409
+    # the one remaining legitimate send is still available
+    assert c.post("/license/v1/team-invite",
+                  json={"key": key, "to": "b@corp.com",
+                        "dashboard_url": "https://team.corp.example/"}).status_code == 200
+
+
+def test_relay_invite_withholds_the_license_key_from_a_viewer(monkeypatch):
+    """The relay composes the email, so the viewer rule is enforced HERE — a self-hosted
+    dashboard relaying through us cannot opt out of it."""
+    from engraphis.inspector import webhooks as WH
+    seen = {}
+    monkeypatch.setattr(
+        WH, "send_team_invite_email",
+        lambda to, name, role, invited_by="", key="", dashboard_url=None:
+            seen.__setitem__(role, key))
+    c = _app()
+    key = _key(plan="team")
+    for role in ("viewer", "member"):
+        assert c.post("/license/v1/team-invite",
+                      json={"key": key, "to": "new@corp.com",
+                            "role": role}).status_code == 200
+    assert seen["viewer"] == ""
+    assert seen["member"] == key
+
+
 # ── team-invite relay: client function, end-to-end against the real endpoint ───────────
 
 def _wire_urlopen_to(client, monkeypatch):

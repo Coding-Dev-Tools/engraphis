@@ -39,8 +39,24 @@ from engraphis.core.schema import (
 )
 
 
+# Rows materialized per locked batch when streaming the vector table (see iter_vectors).
+VECTOR_SCAN_BATCH = 2000
+# Bound placeholders per ``IN (...)`` so a batched lookup stays under SQLite's
+# SQLITE_MAX_VARIABLE_NUMBER (999 before 3.32, 32766 after) on every build.
+IN_CLAUSE_CHUNK = 500
+
+
 def now_ts() -> float:
     return time.time()
+
+
+def _escape_like(value: str) -> str:
+    """Escape LIKE wildcards so ``%``/``_``/``\\`` in user input match literally.
+
+    Mirrors ``MemoryService._successor_of``; every call site must pair it with
+    ``ESCAPE '\\'``. The escape character itself is escaped first, which the service
+    helper omits (harmless there — it matches ULIDs — but wrong in general)."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _dumps(obj: Any) -> str:
@@ -266,6 +282,16 @@ class _SerializedConnection:
 
     def execute(self, *a, **k):
         return self._run(self._raw.execute, *a, **k)
+
+    def fetchall(self, *a, **k):
+        """Execute and drain a read in ONE locked section.
+
+        ``execute()`` returns a live cursor and releases the lock before the caller
+        fetches, so anything that holds that cursor open across other work (a generator
+        yielding row-by-row, e.g. ``Store.iter_vectors``) lets another thread's write
+        interleave with an in-flight read on the shared connection — exactly what this
+        wrapper exists to prevent. Reads that must be atomic use this instead."""
+        return self._run(lambda *aa, **kk: self._raw.execute(*aa, **kk).fetchall(), *a, **k)
 
     def executemany(self, *a, **k):
         return self._run(self._raw.executemany, *a, **k)
@@ -524,7 +550,8 @@ class Store:
         return d
 
     # ── memories ──────────────────────────────────────────────────────────────
-    def add_memory(self, rec: MemoryRecord, *, audit: bool = True) -> str:
+    def add_memory(self, rec: MemoryRecord, *, audit: bool = True,
+                   commit: bool = True) -> str:
         if not rec.id:
             rec.id = ids.new_id("memory")
         existing = self.conn.execute(
@@ -576,12 +603,39 @@ class Store:
         # vector mirror (L2-normalized for cosine-as-dot)
         if rec.embedding is not None:
             self.put_vector(rec.id, rec.embedding, model=str(rec.metadata.get("embed_model", "")))
-        self.conn.commit()
+        # ``commit=False`` lets a bulk writer (sync's bundle apply) amortize one commit over
+        # a batch of rows instead of paying a durability fsync per memory. The caller then
+        # owns the transaction and MUST commit or roll back — see SyncEngine.apply_bundle.
+        if commit:
+            self.conn.commit()
         return rec.id
 
     def get_memory(self, memory_id: str) -> Optional[MemoryRecord]:
         row = self.conn.execute("SELECT * FROM memories WHERE id=?", (memory_id,)).fetchone()
         return _row_to_record(row) if row else None
+
+    def get_memories(self, memory_ids: Iterable[str]) -> dict[str, MemoryRecord]:
+        """Batched :meth:`get_memory` — one ``IN (...)`` query per chunk.
+
+        Recall resolves the union of the vector/lexical/graph arms (~150 ids) and sync
+        resolves a whole bundle; doing that one ``SELECT`` at a time is the dominant cost
+        on both paths. Ids that do not exist are simply absent from the result, mirroring
+        ``get_memory`` returning ``None``."""
+        unique: list[str] = []
+        seen: set = set()
+        for mid in memory_ids:
+            if mid and mid not in seen:
+                seen.add(mid)
+                unique.append(mid)
+        out: dict[str, MemoryRecord] = {}
+        for start in range(0, len(unique), IN_CLAUSE_CHUNK):
+            chunk = unique[start:start + IN_CLAUSE_CHUNK]
+            marks = ",".join("?" for _ in chunk)
+            rows = self.conn.fetchall(
+                f"SELECT * FROM memories WHERE id IN ({marks})", chunk)
+            for row in rows:
+                out[row["id"]] = _row_to_record(row)
+        return out
 
     def list_memories(self, flt: Optional[SearchFilter] = None,
                       *, include_invalid: bool = False, limit: Optional[int] = None) -> list[MemoryRecord]:
@@ -640,17 +694,33 @@ class Store:
     def iter_vectors(self, flt: Optional[SearchFilter] = None,
                      *, include_invalid: bool = False,
                      dim: Optional[int] = None) -> Iterable[tuple[str, np.ndarray]]:
-        """Yield normalized vectors matching the memory filter and optional dimension."""
+        """Yield normalized vectors matching the memory filter and optional dimension.
+
+        Rows are materialized *inside* the connection lock in bounded batches rather than
+        streamed off a live cursor. ``_SerializedConnection`` serializes one statement at a
+        time, so a generator that held an open cursor across its yields would let another
+        thread's write interleave with this read on the shared connection — and this is the
+        hot recall path (``NumpyVectorIndex.search`` drains it with ``list(...)``). Keyset
+        pagination on the primary key keeps peak memory at one batch no matter how large
+        ``mem_vectors`` grows, and is stable under concurrent inserts (unlike OFFSET)."""
         where, params = self._where(flt, include_invalid, alias="m")
         if dim is not None:
             where.append("v.dim=?")
             params.append(int(dim))
         sql = ("SELECT v.id AS id, v.vector AS vector FROM mem_vectors v "
-               "JOIN memories m ON m.id = v.id")
-        if where:
-            sql += " WHERE " + " AND ".join(where)
-        for r in self.conn.execute(sql, params):
-            yield r["id"], np.frombuffer(r["vector"], dtype=np.float32)
+               "JOIN memories m ON m.id = v.id WHERE "
+               + " AND ".join([*where, "v.id > ?"])
+               + " ORDER BY v.id LIMIT ?")
+        cursor_id = ""
+        while True:
+            rows = self.conn.fetchall(sql, (*params, cursor_id, VECTOR_SCAN_BATCH))
+            if not rows:
+                return
+            for r in rows:
+                yield r["id"], np.frombuffer(r["vector"], dtype=np.float32)
+            if len(rows) < VECTOR_SCAN_BATCH:
+                return
+            cursor_id = rows[-1]["id"]
 
     # ── full text ─────────────────────────────────────────────────────────────
     def _fts_upsert(self, mid: str, title: str, content: str, keywords: str) -> None:
@@ -680,10 +750,13 @@ class Store:
                 return [(r["id"], -float(r["rank"])) for r in rows]
             except sqlite3.OperationalError:
                 pass
-        like = f"%{q}%"
+        # Escape LIKE wildcards: on a non-FTS5 build an unescaped '%'/'_' in the query
+        # would be treated as a pattern and over-match (a bare "%" matching everything).
+        like = f"%{_escape_like(q)}%"
         rows = self.conn.execute(
             "SELECT f.id FROM mem_fts f JOIN memories m ON m.id = f.id "
-            "WHERE (f.content LIKE ? OR f.title LIKE ?)" + extra + " LIMIT ?",
+            "WHERE (f.content LIKE ? ESCAPE '\\' OR f.title LIKE ? ESCAPE '\\')"
+            + extra + " LIMIT ?",
             (like, like, *params, k),
         ).fetchall()
         return [(r["id"], 0.5) for r in rows]
@@ -773,12 +846,36 @@ class Store:
 
     def invalidate_edges_for_memory(self, memory_id: str, *, at: Optional[float] = None,
                                     commit: bool = True) -> None:
-        """Remove one memory's support and close edges with no remaining sources."""
+        """Remove one memory's support and close edges with no remaining sources.
+
+        Called on every INVALIDATE resolution, ``forget`` and ``correct`` — routine write
+        traffic — so the candidate scan is bounded to the owning memory's workspace. Without
+        it this was a leading-wildcard ``LIKE`` with no scope predicate at all: a full scan
+        of every edge in the database, across every tenant, on each call.
+
+        Residual (deliberate, bounded fix): support is still matched by substring against the
+        JSON ``provenance`` blob, so the scan is O(edges in this workspace) rather than an
+        indexed O(edges supported by this memory). Substring matching cannot cause a *false*
+        invalidation — every candidate row is re-checked with an exact
+        ``memory_id in _provenance_memory_ids(...)`` test below — it only over-fetches
+        candidates. The indexed fix is an ``(edge_id, memory_id)`` join table, which is NOT
+        safe to land while ``MemoryService.clone_workspace`` writes ``INSERT INTO edges``
+        directly (service.py): those edges would carry provenance but no support rows, and
+        would then silently never be invalidated. Normalize the edge writes first.
+        """
         ts = at if at is not None else now_ts()
-        rows = self.conn.execute(
-            "SELECT id, provenance FROM edges WHERE valid_to IS NULL AND provenance LIKE ?",
-            (f"%{memory_id}%",),
-        ).fetchall()
+        owner = self.conn.fetchall(
+            "SELECT workspace_id FROM memories WHERE id=?", (memory_id,))
+        workspace_id = owner[0]["workspace_id"] if owner else None
+        sql = ("SELECT id, provenance FROM edges "
+               "WHERE valid_to IS NULL AND provenance LIKE ? ESCAPE '\\'")
+        params: list[Any] = [f"%{_escape_like(memory_id)}%"]
+        if workspace_id is not None:
+            # NULL workspace_id = a global/unscoped edge; it stays in scope so this keeps
+            # closing exactly the edges it closed before, minus other tenants' rows.
+            sql += " AND (workspace_id=? OR workspace_id IS NULL)"
+            params.append(workspace_id)
+        rows = self.conn.fetchall(sql, params)
         ids_to_close: list[str] = []
         for row in rows:
             prov = _loads(row["provenance"], {})
@@ -802,7 +899,8 @@ class Store:
 
     # ── memory-to-memory links (A-MEM style) ────────────────────────────────────
     def add_link(self, a: str, b: str, relation: str = "related",
-                 layer: Optional[GraphLayer] = None, reason: str = "") -> None:
+                 layer: Optional[GraphLayer] = None, reason: str = "",
+                 *, commit: bool = True) -> None:
         """Idempotent per (pair, relation): re-linking the same two memories with the
         same relation is a no-op in either direction, so auto-evolution and explicit
         ``engraphis_link`` calls can't accrete duplicate rows."""
@@ -828,7 +926,8 @@ class Store:
                     f"UPDATE mem_links SET {', '.join(updates)} WHERE rowid=?",
                     params,
                 )
-                self.conn.commit()
+                if commit:
+                    self.conn.commit()
             return
         graph_layer = normalize_graph_layer(layer, relation).value
         self.conn.execute(
@@ -836,7 +935,8 @@ class Store:
             "VALUES (?,?,?,?,?,?)",
             (a, b, relation, graph_layer, reason, now_ts()),
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     def has_link(self, a: str, b: str, *, relation: Optional[str] = None) -> bool:
         sql = "SELECT 1 FROM mem_links WHERE ((a=? AND b=?) OR (a=? AND b=?))"

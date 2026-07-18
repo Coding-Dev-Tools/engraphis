@@ -55,6 +55,23 @@ _SCOPE_RANK = {
 # Bounded so hub memories don't accrete unbounded link lists (link quality > quantity).
 EVOLVE_MAX_LINKS = 3
 
+# code↔memory linking (see _CodeSymbolMatcher / _link_memory_to_code)
+CODE_LINK_MAX_LINKS = 200      # per-memory fan-out cap (unchanged behaviour)
+CODE_MATCHER_CACHE_SIZE = 4    # compiled matchers kept in memory, keyed by repo
+# Alternatives per compiled sub-pattern. One giant alternation risks `re`'s internal
+# code-size limit on a big repo, so the alternation is chunked; chunking cannot change
+# the result because matches are resolved per *offset*, not per pattern (see below).
+CODE_ALTERNATION_CHUNK = 500
+
+# Exactly the `\w` class the per-symbol regexes used for their word boundaries, so the
+# compiled-alternation path and the old per-symbol path agree character for character.
+_WORD_CHAR_RE = re.compile(r"\w")
+
+# Default payload caps for export_code_graph — mirrors MemoryService.graph(), which caps
+# nodes and edges because the export is reachable at the lowest ('viewer') role.
+CODE_EXPORT_DEFAULT_LIMIT = 5_000
+CODE_EXPORT_MAX_LIMIT = 20_000
+
 
 def _bounded_finite(value, *, default: float, minimum: float, maximum: float) -> float:
     try:
@@ -64,6 +81,120 @@ def _bounded_finite(value, *, default: float, minimum: float, maximum: float) ->
     if not math.isfinite(number):
         return default
     return max(minimum, min(maximum, number))
+
+
+def _writable_scope(scope: Scope, repo_id: Optional[str]) -> Scope:
+    """The nearest scope ``remember()`` will actually accept for ``repo_id``.
+
+    ``repo`` scope with no repo (a cross-repo ``merge``, or a record the sync apply path
+    wrote without going through ``remember``'s validation) is not a storable combination
+    — ``remember`` raises ``ValueError('repo scope requires repo_id')``. Rewriting it as
+    ``workspace`` keeps the memory reachable instead of failing the whole operation; a
+    ``repo``-scoped row with a NULL ``repo_id`` matches no repo read anyway.
+
+    Deliberately narrow: no other scope is rewritten. ``session`` scope without a session
+    still raises, because silently widening a session-private memory to repo/workspace
+    visibility is a worse outcome than an explicit error — and with the write now
+    happening *before* the source is retired, that error is no longer destructive.
+    """
+    return Scope.WORKSPACE if (Scope(scope) == Scope.REPO and not repo_id) else Scope(scope)
+
+
+class _CodeSymbolMatcher:
+    """Precompiled, repo-wide index behind ``MemoryEngine._link_memory_to_code``.
+
+    The naive path walked *every* symbol for *every* memory and ran ``re.compile`` twice
+    per symbol — O(symbols) regex compiles per repo-scoped write, and
+    O(records × symbols) on every ``index_repo()``, even a one-file incremental change.
+    This builds the equivalent state once per repo:
+
+    * a chunked alternation over every candidate name/fqname, matched against the memory
+      text in one C-level pass;
+    * ``name → symbol positions`` and ``token → symbol positions`` inverted indexes, so
+      only symbols that *can* link are scored.
+
+    Two details keep the produced links byte-identical to the old per-symbol loop:
+
+    1. The alternation is wrapped in a **zero-width lookahead**. A plain ``finditer``
+       returns non-overlapping matches, so a long fqname would swallow a shorter name
+       nested inside it (``engraphis.core.engine`` hides ``engine``) and silently
+       downgrade that symbol's confidence from 0.9 to the 0.75 token fallback. The
+       lookahead reports every offset instead, and every candidate length is then tested
+       at that offset — so overlapping names all still match.
+    2. Candidate positions are returned **in ``store.list_symbols`` order**, so the
+       ``CODE_LINK_MAX_LINKS`` cutoff keeps the same first-N links.
+
+    The 0.75 fallback (``tokenize(name) <= tokenize(text)``) is indexed on each symbol's
+    *rarest* name token: a subset match implies that token is present, so the candidate
+    set is complete while staying small.
+    """
+
+    __slots__ = ("symbols", "_by_len", "_lengths", "_patterns", "_by_name", "_by_token")
+
+    def __init__(self, symbols: list) -> None:
+        self.symbols = symbols
+        by_len: dict[int, set] = {}
+        by_name: dict[str, list] = {}
+        by_token: dict[str, list] = {}
+        token_freq: dict[str, int] = {}
+        pending: list[tuple[int, set]] = []
+        for position, symbol in enumerate(symbols):
+            name = str(symbol.get("name") or "").strip()
+            fqname = str(symbol.get("fqname") or "").strip()
+            if len(name) < 3:
+                continue          # exactly the per-symbol skip in _link_memory_to_code
+            # fqname first, mirroring the elif-chain's precedence; both gates copy the
+            # original's length checks on the *pre-lowercase* string.
+            candidates = ([fqname] if (fqname and len(fqname) >= 3) else []) + [name]
+            for raw in candidates:
+                lowered = raw.lower()
+                if not lowered:
+                    continue
+                by_len.setdefault(len(lowered), set()).add(lowered)
+                by_name.setdefault(lowered, []).append(position)
+            name_tokens = tokenize(name)
+            if name_tokens:
+                pending.append((position, name_tokens))
+                for token in name_tokens:
+                    token_freq[token] = token_freq.get(token, 0) + 1
+        for position, name_tokens in pending:
+            key = min(name_tokens, key=lambda token: (token_freq[token], token))
+            by_token.setdefault(key, []).append(position)
+        self._by_len = by_len
+        self._lengths = sorted(by_len, reverse=True)
+        self._by_name = by_name
+        self._by_token = by_token
+        ordered = sorted((s for group in by_len.values() for s in group),
+                         key=lambda s: (-len(s), s))
+        self._patterns = [
+            re.compile(r"(?<!\w)(?=(?:"
+                       + "|".join(re.escape(s) for s in ordered[i:i + CODE_ALTERNATION_CHUNK])
+                       + r")(?!\w))")
+            for i in range(0, len(ordered), CODE_ALTERNATION_CHUNK)
+        ]
+
+    def match(self, hay_lower: str, hay_tokens: set) -> tuple[set, list]:
+        """``(matched lowercase names, candidate symbol positions)`` for one memory."""
+        matched: set = set()
+        offsets: set = set()
+        for pattern in self._patterns:
+            for hit in pattern.finditer(hay_lower):
+                offsets.add(hit.start())
+        size = len(hay_lower)
+        for offset in offsets:
+            for length in self._lengths:
+                end = offset + length
+                if end > size or (end < size and _WORD_CHAR_RE.match(hay_lower, end)):
+                    continue
+                candidate = hay_lower[offset:end]
+                if candidate in self._by_len[length]:
+                    matched.add(candidate)
+        positions: set = set()
+        for name in matched:
+            positions.update(self._by_name.get(name, ()))
+        for token in hay_tokens:
+            positions.update(self._by_token.get(token, ()))
+        return matched, sorted(positions)
 
 
 class MemoryEngine:
@@ -86,6 +217,9 @@ class MemoryEngine:
         # Serializes the resolve→insert critical section of the write path (see
         # remember_with_resolution). RLock: ingest()/import paths may nest writes.
         self._write_lock = threading.RLock()
+        # repo_id -> (symbol-set fingerprint, _CodeSymbolMatcher). Bounded; see
+        # _code_matcher for the invalidation contract.
+        self._code_matchers: dict = {}
 
     @classmethod
     def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
@@ -660,24 +794,27 @@ class MemoryEngine:
 
     def correct(self, memory_id: str, new_content: str, *, reason: str = "",
                actor: str = "user") -> dict:
-        """Replace a memory's content without losing history: close the old validity
-        window and insert a new memory carrying the same scope/type/title — an explicit
-        INVALIDATE, not an in-place edit (AGENTS.md §3.2/§3.3: never overwrite)."""
+        """Replace a memory's content without losing history: insert a new memory
+        carrying the same scope/type/title, then close the old validity window — an
+        explicit INVALIDATE, not an in-place edit (AGENTS.md §3.2/§3.3: never overwrite).
+
+        Write-then-retire order is load-bearing (same as ``promote``/``merge``): if the
+        replacement write raises, the original must still be live. A record whose
+        ``scope``/``repo_id`` disagree — reachable through the sync apply path, which
+        doesn't go through ``remember``'s validation — used to be retired *first* and
+        then hit ``ValueError`` on the way back in, destroying it with no replacement.
+        """
         old = self.store.get_memory(memory_id)
         if old is None:
             raise KeyError(f"no memory with id '{memory_id}'")
-        self.store.close_validity(memory_id, actor=actor, reason=reason or "corrected")
-        try:
-            self.index.delete([memory_id])
-        except Exception:
-            pass
         metadata = dict(old.metadata)
         metadata["corrects"] = memory_id
         if old.provenance:
             metadata["provenance"] = dict(old.provenance)
         new_id = self.remember(
             new_content, workspace_id=old.workspace_id, repo_id=old.repo_id,
-            session_id=old.session_id, mtype=old.mtype, scope=old.scope, title=old.title,
+            session_id=old.session_id, mtype=old.mtype,
+            scope=_writable_scope(old.scope, old.repo_id), title=old.title,
             importance=old.importance, keywords=old.keywords, metadata=metadata,
             resolve_conflicts=False,   # the supersede decision was just made explicitly
         )
@@ -690,6 +827,11 @@ class MemoryEngine:
             self.store.conn.commit()
         if old.pinned:
             self.store.set_pinned(new_id, True)
+        self.store.close_validity(memory_id, actor=actor, reason=reason or "corrected")
+        try:
+            self.index.delete([memory_id])
+        except Exception:
+            pass
         return {"id": new_id, "superseded": [memory_id], "reason": reason}
 
     def promote(self, memory_id: str, target_scope: Scope, *, reason: str = "",
@@ -756,9 +898,12 @@ class MemoryEngine:
         if promoted is None:  # defensive: the write path must return a durable record
             raise RuntimeError("promotion target was not stored")
 
+        # Fail closed on an unrecognised label (same rule as ``merge``): an unknown
+        # sensitivity outranks every known one rather than silently downgrading to
+        # 'normal', so a corrupt/foreign label can never widen exposure.
         sensitivity = max(
             (old.sensitivity, promoted.sensitivity),
-            key=lambda value: _SENSITIVITY_RANK.get(value, 0),
+            key=lambda value: _SENSITIVITY_RANK.get(value, len(_SENSITIVITY_RANK)),
         )
         promoted_metadata = dict(promoted.metadata)
         inherited_from = promoted_metadata.get("promoted_from")
@@ -861,7 +1006,11 @@ class MemoryEngine:
         primary = sources[0]
         repo_id = primary.repo_id if len({r.repo_id for r in sources}) == 1 else None
         mt = mtype or primary.mtype
-        sc = scope or primary.scope
+        # Cross-repo merges are explicitly permitted (``service.merge``), which drops
+        # ``repo_id`` to None — so a 'repo' scope inherited from the primary source would
+        # be an unstorable combination. Widen it to the workspace the sources already
+        # share rather than failing (see ``_writable_scope``).
+        sc = _writable_scope(scope or primary.scope, repo_id)
         importance = max([r.importance or 0.0 for r in sources] + [0.5])
         pinned_any = any(r.pinned for r in sources)
         sensitivity = max((r.sensitivity or "normal" for r in sources),
@@ -879,17 +1028,13 @@ class MemoryEngine:
         tokens_before = sum(estimate_tokens(f"{r.title} {r.content}") for r in sources)
         title_final = title if title is not None else (primary.title or "")
 
-        # Close every source first (mirrors ``correct``): the supersede decision is
-        # explicit, so the new write skips the resolver, and evolution won't relink the
-        # merged memory to a source that is about to be retired.
-        for r in sources:
-            self.store.close_validity(r.id, actor=actor,
-                                      reason=reason or "merged into a combined memory")
-            try:
-                self.index.delete([r.id])
-            except Exception:
-                pass
-
+        # Write the merged record BEFORE retiring anything (same ordering as
+        # ``promote``/``correct``). Retiring first meant a failed ``remember()`` — e.g.
+        # an unstorable scope/repo combination, a full disk, a bad session_id — left
+        # every source closed with no merged record to replace them: unrecoverable data
+        # loss from a governance operation that is supposed to preserve history. The
+        # resolver is skipped here (the supersede decision is explicit), so the
+        # still-live sources can't be deduplicated into, and evolution stays a no-op.
         merged_id = self.remember(
             merged_content, workspace_id=primary.workspace_id, repo_id=repo_id,
             session_id=primary.session_id, mtype=mt, scope=sc, title=title_final,
@@ -907,6 +1052,15 @@ class MemoryEngine:
             self.store.conn.commit()
         if pinned_any:
             self.store.set_pinned(merged_id, True)
+        for r in sources:
+            self.store.close_validity(r.id, actor=actor,
+                                      reason=reason or "merged into a combined memory")
+            try:
+                self.index.delete([r.id])
+            except Exception:
+                pass
+        # Linking/auditing stays a separate pass so the audit trail keeps its original
+        # shape: every source's invalidate entry, then every source's merge entry.
         for r in sources:
             self.store.add_link(merged_id, r.id, "merges")
             self.store.audit(actor, "merge", r.id, f"merged into {merged_id}")
@@ -1106,29 +1260,57 @@ class MemoryEngine:
             )
         return {"query": query, "symbols": symbols}
 
+    def _code_matcher(self, repo_id: str) -> _CodeSymbolMatcher:
+        """The repo's cached ``_CodeSymbolMatcher``, rebuilt when its symbols change.
+
+        The fingerprint is one ``COUNT(*)/MAX(id)`` probe: symbol ids are ULIDs, so any
+        insert moves ``MAX(id)`` and any delete moves the count. That keeps a symbol
+        table written by some other path (``index_repo``, a migration, a test) from
+        serving a stale matcher, while costing far less than re-materialising every
+        symbol row on every repo-scoped ``remember()``.
+        """
+        row = self.store.conn.execute(
+            "SELECT COUNT(*) AS n, MAX(id) AS newest FROM symbols WHERE repo_id=?",
+            (repo_id,),
+        ).fetchone()
+        version = (int(row["n"]) if row else 0, row["newest"] if row else None)
+        cached = self._code_matchers.get(repo_id)
+        if cached is not None and cached[0] == version:
+            return cached[1]
+        matcher = _CodeSymbolMatcher(self.store.list_symbols(repo_id))
+        self._code_matchers.pop(repo_id, None)
+        while len(self._code_matchers) >= CODE_MATCHER_CACHE_SIZE:
+            self._code_matchers.pop(next(iter(self._code_matchers)), None)
+        self._code_matchers[repo_id] = (version, matcher)
+        return matcher
+
     def _link_memory_to_code(self, memory_id: str, *, content: str,
                              repo_id: str, commit: bool = True,
-                             symbols: Optional[list[dict]] = None) -> int:
-        """Persist deterministic bridges from one memory to symbols in its repo."""
+                             symbols: Optional[list[dict]] = None,
+                             matcher: Optional[_CodeSymbolMatcher] = None) -> int:
+        """Persist deterministic bridges from one memory to symbols in its repo.
+
+        Scoring is unchanged (fqname 1.0 > name 0.9 > token-subset 0.75, capped at
+        ``CODE_LINK_MAX_LINKS`` in symbol order); only the *search* changed — see
+        ``_CodeSymbolMatcher`` for why the compiled alternation produces the same links.
+        """
+        if matcher is None:
+            matcher = (self._code_matcher(repo_id) if symbols is None
+                       else _CodeSymbolMatcher(symbols))
+        symbols = matcher.symbols
         hay = str(content or "")
         hay_lower = hay.lower()
         hay_tokens = tokenize(hay)
+        matched, positions = matcher.match(hay_lower, hay_tokens)
         linked = 0
-        for symbol in symbols if symbols is not None else self.store.list_symbols(repo_id):
+        for position in positions:
+            symbol = symbols[position]
             name = str(symbol.get("name") or "").strip()
             fqname = str(symbol.get("fqname") or "").strip()
-            if len(name) < 3:
-                continue
             confidence = 0.0
-            fqname_lower = fqname.lower()
-            name_lower = name.lower()
-            if fqname and len(fqname) >= 3 and fqname_lower in hay_lower and re.search(
-                r"(?<!\w)" + re.escape(fqname.lower()) + r"(?!\w)", hay_lower
-            ):
+            if fqname and len(fqname) >= 3 and fqname.lower() in matched:
                 confidence = 1.0
-            elif name_lower in hay_lower and re.search(
-                r"(?<!\w)" + re.escape(name_lower) + r"(?!\w)", hay_lower
-            ):
+            elif name.lower() in matched:
                 confidence = 0.9
             else:
                 name_tokens = tokenize(name)
@@ -1141,7 +1323,7 @@ class MemoryEngine:
                 relation="mentions", confidence=confidence, commit=False,
             )
             linked += 1
-            if linked >= 200:
+            if linked >= CODE_LINK_MAX_LINKS:
                 break
         if commit and linked:
             self.store.conn.commit()
@@ -1151,12 +1333,12 @@ class MemoryEngine:
         """Rebuild the code↔memory bridge after an incremental repository index."""
         self.store.clear_code_memory_links(repo_id, commit=False)
         records = self.store.list_memories(SearchFilter(repo_id=repo_id), limit=5_000)
-        symbols = self.store.list_symbols(repo_id)
+        matcher = self._code_matcher(repo_id)
         linked = 0
         for record in records:
             linked += self._link_memory_to_code(
                 record.id, content=f"{record.title}\n{record.content}",
-                repo_id=repo_id, commit=False, symbols=symbols,
+                repo_id=repo_id, commit=False, matcher=matcher,
             )
         self.store.conn.commit()
         return linked
@@ -1305,10 +1487,17 @@ class MemoryEngine:
                 return key
         return chosen.get("fqname") or chosen.get("name")
 
-    def analyze_code_graph(self, *, repo_id: str) -> dict:
-        """Deterministic weighted communities, hotspots, and cross-file connections."""
-        edges = self.store.list_code_edges(repo_id)
-        symbols = self.store.list_symbols(repo_id)
+    def analyze_code_graph(self, *, repo_id: str,
+                           limit: Optional[int] = None,
+                           edge_limit: Optional[int] = None) -> dict:
+        """Deterministic weighted communities, hotspots, and cross-file connections.
+
+        ``limit``/``edge_limit`` bound the symbol/edge fetch. They default to ``None``
+        (unbounded) so ``analyze_impact`` keeps today's exact answer; ``export_code_graph``
+        passes its own caps because that payload is reachable by a ``viewer``.
+        """
+        edges = self.store.list_code_edges(repo_id, limit=edge_limit)
+        symbols = self.store.list_symbols(repo_id, limit=limit)
         adjacency: dict[str, dict[str, float]] = defaultdict(dict)
         degree: dict[str, int] = defaultdict(int)
         for edge in edges:
@@ -1516,18 +1705,46 @@ class MemoryEngine:
             "graph": analysis,
         }
 
-    def export_code_graph(self, *, repo_id: str) -> dict:
-        """Portable graph.json payload for external tooling."""
-        analysis = self.analyze_code_graph(repo_id=repo_id)
+    def export_code_graph(self, *, repo_id: str,
+                          limit: int = CODE_EXPORT_DEFAULT_LIMIT) -> dict:
+        """Portable graph.json payload for external tooling.
+
+        Bounded like its sibling ``MemoryService.graph()``, and for the same reason: the
+        export is reachable at the lowest (``viewer``) role through three surfaces
+        (``engraphis_export_code_graph``, ``GET /code/export``, ``GET /api/code/export``)
+        and the payload is re-serialized twice more by ``code_graph_report``/
+        ``code_graph_html`` — so an indexed monorepo let the least-privileged caller pull
+        (and make the server build) an unbounded response. ``limit`` caps files and
+        symbols; edges and memory links get the same ``limit * 8`` headroom ``graph()``
+        gives entity edges. ``payload['truncated']`` says whether a cap actually bit.
+        """
+        limit = max(1, min(CODE_EXPORT_MAX_LIMIT, int(limit)))
+        edge_cap = max(limit * 8, 2_000)
+        analysis = self.analyze_code_graph(repo_id=repo_id, limit=limit,
+                                           edge_limit=edge_cap)
         analysis.pop("_node_community", None)
+        files = self.store.list_code_files(repo_id)
+        # list_code_files takes no SQL limit (unlike the other three); slice instead so
+        # the emitted payload is still bounded.
+        truncated_files = len(files) > limit
+        files = files[:limit]
+        nodes = self.store.list_symbols(repo_id, limit=limit)
+        edges = self.store.list_code_edges(repo_id, limit=edge_cap)
+        memory_links = self.store.list_code_memory_links(repo_id, limit=edge_cap)
         return {
             "format": "engraphis-code-graph/1",
             "generated_at": time.time(),
             "repo_id": repo_id,
-            "files": self.store.list_code_files(repo_id),
-            "nodes": self.store.list_symbols(repo_id),
-            "edges": self.store.list_code_edges(repo_id),
-            "memory_links": self.store.list_code_memory_links(repo_id),
+            "limit": limit,
+            "edge_limit": edge_cap,
+            "truncated": bool(
+                truncated_files or len(nodes) >= limit or len(edges) >= edge_cap
+                or len(memory_links) >= edge_cap
+            ),
+            "files": files,
+            "nodes": nodes,
+            "edges": edges,
+            "memory_links": memory_links,
             "analysis": analysis,
         }
 

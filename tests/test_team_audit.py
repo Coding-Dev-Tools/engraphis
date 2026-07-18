@@ -161,6 +161,62 @@ def test_add_user_relay_failure_is_recorded_but_does_not_block_account_creation(
     assert "limit" in failed["detail"]
 
 
+# ── the shared Team key follows the role ──────────────────────────────────────────────
+# The sync relay authorizes on the license key ALONE (inspector/sync_relay._authorize) and
+# cannot see dashboard roles, so a viewer holding the shared Team key can push and delete
+# bundles in the team's relay namespace — team-wide memory poisoning by a read-only
+# account, entirely out of band of the dashboard's own checks.
+
+def test_viewer_invite_never_carries_the_shared_team_license_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
+    from engraphis.inspector import webhooks as WH
+    sent = []
+    monkeypatch.setattr(
+        WH, "send_team_invite_email",
+        lambda to, name, role, invited_by="", key="", dashboard_url=None:
+            sent.append({"to": to, "role": role, "key": key}))
+
+    c = _client(monkeypatch, tmp_path)
+    _admin(c)
+    viewer = c.post("/api/auth/users", json={"email": "v@x.co", "name": "Vi",
+                    "password": "anotherpass1", "role": "viewer"})
+    member = c.post("/api/auth/users", json={"email": "m@x.co", "name": "Mo",
+                    "password": "anotherpass1", "role": "member"})
+    assert viewer.status_code == 200 and member.status_code == 200
+
+    by_role = {entry["role"]: entry for entry in sent}
+    assert by_role["viewer"]["key"] == ""        # dashboard-only invite
+    assert by_role["member"]["key"]              # a member still gets the activation key
+    # ...and the admin is told the truth about it, both ways.
+    assert viewer.json()["pro_activation_sent"] is False
+    assert viewer.json()["pro_activation_expected"] is False
+    assert member.json()["pro_activation_sent"] is True
+    assert member.json()["pro_activation_expected"] is True
+    # A keyless viewer invite is the intended policy, not a licensing misconfiguration:
+    # it must not raise the "instance is not Team-licensed" alarm at the admin.
+    actions = [e["action"] for e in c.get("/api/auth/audit").json()["events"]]
+    assert "user.invite_no_license" not in actions
+
+
+def test_viewer_invite_through_vendor_relay_reports_no_key_delivered(monkeypatch, tmp_path):
+    """The relay withholds the key for a viewer server-side, so this instance must not
+    report "Pro activation sent" just because delivery succeeded."""
+    for var in ("ENGRAPHIS_RESEND_API_KEY", "ENGRAPHIS_SMTP_HOST",
+                "ENGRAPHIS_SMTP_USER", "ENGRAPHIS_SMTP_PASSWORD"):
+        monkeypatch.delenv(var, raising=False)
+    from engraphis import cloud_license
+    monkeypatch.setattr(cloud_license, "send_team_invite",
+                        lambda *a, **k: (True, ""))
+
+    c = _client(monkeypatch, tmp_path)
+    _admin(c)
+    r = c.post("/api/auth/users", json={"email": "v@x.co", "name": "Vi",
+               "password": "anotherpass1", "role": "viewer"})
+    assert r.status_code == 200 and r.json()["invited"] is True
+    assert r.json()["pro_activation_sent"] is False
+    assert r.json()["pro_activation_expected"] is False
+
+
 def test_role_change_and_disable_are_recorded(monkeypatch, tmp_path):
     c = _client(monkeypatch, tmp_path)
     _admin(c)

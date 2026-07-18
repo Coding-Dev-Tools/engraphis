@@ -21,9 +21,10 @@ import sqlite3
 import time
 from typing import Optional, Union
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
+from engraphis import netutil
 from engraphis.inspector import license_registry as reg
 from engraphis.licensing import LicenseError
 
@@ -127,11 +128,39 @@ def _machine_id(request: Request) -> str:
     return value
 
 
+def _rate_limited(request: Request) -> bool:
+    """True when this caller has spent its share of the unauthenticated-crypto budget.
+
+    Deliberately the SAME token bucket ``/license/v1/register`` uses
+    (``license_cloud._register_rate_ok``, keyed on :func:`netutil.client_ip`): one budget
+    for the whole unauthenticated Ed25519 surface, so alternating between the license
+    endpoints and the relay cannot buy double the budget for identical ~3ms pure-Python
+    verify work. That comment has always claimed relay coverage; this is the call that
+    makes it true.
+
+    Fails OPEN. If the limiter cannot be imported or consulted at all — a minimal install
+    without ``license_cloud``, say — the relay must keep serving paying customers.
+    Silently losing a DoS guard is bad; turning a guard's own failure into a total sync
+    outage is worse, and it would hand an attacker a much cheaper way to take the relay
+    down than flooding it.
+    """
+    try:
+        from engraphis.inspector import license_cloud
+        return not license_cloud._register_rate_ok(netutil.client_ip(request))
+    except Exception:  # noqa: BLE001 — see "fails OPEN" above
+        return False
+
+
 def _authorize(request: Request):
     """Verify the caller's license server-side. Returns (license, account_id).
 
     Raises :class:`LicenseError` (rendered as 402 by the app's exception handler) if the
-    key is missing, malformed, expired, wrong-plan, or revoked.
+    key is missing, malformed, expired, wrong-plan, or revoked, and
+    :class:`HTTPException` 429 when the caller outruns the shared burst budget above —
+    checked FIRST, so an invalid-key flood is rejected before it can buy any signature
+    verification. That ordering matters more here than on the license endpoints: several
+    relay handlers are sync ``def``s, so each in-flight request also pins one of the
+    ASGI threadpool's finite workers for the duration of the verify.
 
     Team seat enforcement lives HERE, on vendor hardware — this is the only truly
     non-bypassable gate. A Team license is paid per seat and must not be shareable beyond
@@ -142,6 +171,11 @@ def _authorize(request: Request):
     individual multi-device tier) is intentionally not device-capped at the relay: its
     value is one person syncing their own machines, and ``account_id`` already isolates it
     from other customers."""
+    if _rate_limited(request):
+        raise HTTPException(
+            status_code=429,
+            detail={"error": "too many sync attempts — try again shortly"},
+            headers={"Retry-After": "60"})
     lic = reg.verify_for_feature(_bearer_key(request), SYNC_FEATURE)
     if lic.plan == "team":
         mid = _machine_id(request)

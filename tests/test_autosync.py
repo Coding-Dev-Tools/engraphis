@@ -89,6 +89,32 @@ def test_sync_auto_toggle_is_admin_only_but_members_still_write():
     assert min_role("GET", "/api/memories") == "viewer"
 
 
+@skip_no_stack
+def test_min_role_defaults_unknown_write_verbs_to_member_not_viewer():
+    """The fall-through used to be "POST -> member, everything else -> viewer", so any
+    future DELETE/PUT/PATCH under /api/ would have shipped viewer-writable by omission.
+    The default must fail toward MORE authority required."""
+    from engraphis.inspector.auth import min_role
+    for method in ("DELETE", "PUT", "PATCH"):
+        assert min_role(method, "/api/some/future/route") == "member"
+    for method in ("GET", "HEAD"):
+        assert min_role(method, "/api/some/future/route") == "viewer"
+
+
+@skip_no_stack
+def test_min_role_keeps_self_scoped_api_tokens_available_to_viewers():
+    """The only DELETE that exists under /api/ today is a user revoking their OWN agent
+    token (routes/v2_api.py has no non-GET/POST routes at all; routes/v2_team.py has this
+    one). It is scoped to the caller's user id inside the route, so tightening the
+    fall-through above must not lock viewers out of their own credential."""
+    from engraphis.inspector.auth import min_role
+    assert min_role("POST", "/api/auth/token") == "viewer"       # mint
+    assert min_role("DELETE", "/api/auth/token/tok_123") == "viewer"   # revoke
+    assert min_role("GET", "/api/auth/tokens") == "viewer"       # list own
+    # ...while user administration next door stays admin-only for every verb.
+    assert min_role("DELETE", "/api/auth/users") == "admin"
+
+
 def test_save_load_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_AUTOSYNC_STATE", str(tmp_path / "autosync.json"))
     autosync.save_policy({"enabled": True, "cadence_minutes": 30})

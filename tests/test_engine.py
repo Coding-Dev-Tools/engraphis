@@ -659,3 +659,181 @@ def test_code_graph_html_escapes_embedded_graph_data():
     assert "</script><script>alert(1)</script>.py" not in html
     assert "\\u003c/script>" in html
     assert "&lt;/script&gt;&lt;script&gt;alert(1)&lt;/script&gt;.py" in html
+
+
+# ── correct(): write the replacement before retiring the original ───────────────────
+
+def test_correct_leaves_the_original_live_when_the_replacement_write_fails():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    mid = eng.remember("Old fact.", workspace_id=wid, resolve_conflicts=False)
+
+    def boom(*_args, **_kw):
+        raise RuntimeError("simulated write failure")
+
+    eng.remember = boom
+    with pytest.raises(RuntimeError):
+        eng.correct(mid, "New fact.")
+
+    rec = eng.store.get_memory(mid)
+    assert rec.valid_to is None and rec.content == "Old fact."
+
+
+def test_correct_repairs_a_repo_scoped_row_that_has_no_repo():
+    """The sync apply path can persist a scope/repo_id combination ``remember`` rejects.
+    Correcting one used to retire it and *then* raise, leaving nothing behind."""
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    mid = eng.remember("Synced fact.", workspace_id=wid, resolve_conflicts=False)
+    eng.store.conn.execute(
+        "UPDATE memories SET scope='repo', repo_id=NULL WHERE id=?", (mid,))
+    eng.store.conn.commit()
+
+    out = eng.correct(mid, "Corrected fact.")
+
+    new = eng.store.get_memory(out["id"])
+    assert new.content == "Corrected fact." and new.scope == Scope.WORKSPACE
+    assert new.valid_to is None
+    assert eng.store.get_memory(mid).valid_to is not None   # retired, not deleted
+
+
+# ── export_code_graph is bounded (viewer-reachable payload) ─────────────────────────
+
+def test_export_code_graph_is_bounded_and_flags_truncation():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    for n in range(12):
+        eng.store.upsert_symbol(repo_id=rid, kind="function", name=f"fn_{n:03d}",
+                                fqname=f"mod{n}.fn_{n:03d}", file=f"mod{n}.py", span="1-1")
+        eng.store.upsert_code_file(repo_id=rid, file=f"mod{n}.py", lang="python",
+                                   content_hash=f"h{n}", size_bytes=1, mtime_ns=0,
+                                   backend="test")
+
+    capped = eng.export_code_graph(repo_id=rid, limit=5)
+    assert capped["limit"] == 5
+    assert len(capped["nodes"]) == 5 and len(capped["files"]) == 5
+    assert capped["truncated"] is True
+
+    full = eng.export_code_graph(repo_id=rid)
+    assert len(full["nodes"]) == 12 and len(full["files"]) == 12
+    assert full["truncated"] is False
+    # Bogus limits are clamped, never passed through to SQL.
+    assert eng.export_code_graph(repo_id=rid, limit=-7)["limit"] == 1
+
+
+# ── code↔memory linking: the compiled matcher must reproduce the old links exactly ──
+
+_OVERLAPPING_SYMBOLS = [
+    # (kind, name, fqname, file) — deliberately overlapping/substring names.
+    ("class", "Engine", "engraphis.core.engine.Engine", "engine.py"),
+    ("function", "engine", "engraphis.core.engine", "engine.py"),
+    ("function", "engine_v2", "engraphis.core.engine_v2", "engine.py"),
+    ("function", "run", "run", "run.py"),
+    ("function", "run_all", "run.run_all", "run.py"),
+    ("function", "ru", "ru", "run.py"),                 # < 3 chars: always skipped
+    ("class", "Store", "engraphis.core.store.Store", "store.py"),
+    ("function", "store", "store", "store.py"),
+    ("function", "add", "Calculator.add", "calc.py"),
+    ("class", "Calculator", "Calculator", "calc.py"),
+]
+
+_LINK_TEXTS = [
+    "engraphis.core.engine wraps engine and engine_v2 for the migration.",
+    "See engraphis.core.store.Store; the store module also exports Store.",
+    "Calculator.add is the only caller of add() in calc.py.",
+    "run_all invokes run, but run_allocation is unrelated.",
+    "The engine_v2 rewrite lives beside engraphis.core.engine.Engine.",
+    "Nothing here mentions any indexed symbol at all.",
+]
+
+
+def _legacy_links(symbols, content):
+    """The pre-optimization per-symbol matcher, reproduced verbatim as the oracle."""
+    import re
+
+    from engraphis.core.textutil import tokenize
+
+    hay = str(content or "")
+    hay_lower = hay.lower()
+    hay_tokens = tokenize(hay)
+    out = []
+    for symbol in symbols:
+        name = str(symbol.get("name") or "").strip()
+        fqname = str(symbol.get("fqname") or "").strip()
+        if len(name) < 3:
+            continue
+        confidence = 0.0
+        fqname_lower = fqname.lower()
+        name_lower = name.lower()
+        if fqname and len(fqname) >= 3 and fqname_lower in hay_lower and re.search(
+            r"(?<!\w)" + re.escape(fqname.lower()) + r"(?!\w)", hay_lower
+        ):
+            confidence = 1.0
+        elif name_lower in hay_lower and re.search(
+            r"(?<!\w)" + re.escape(name_lower) + r"(?!\w)", hay_lower
+        ):
+            confidence = 0.9
+        else:
+            name_tokens = tokenize(name)
+            if name_tokens and name_tokens <= hay_tokens:
+                confidence = 0.75
+        if confidence <= 0.0:
+            continue
+        out.append((symbol["id"], confidence))
+        if len(out) >= 200:
+            break
+    return out
+
+
+def test_compiled_symbol_matcher_reproduces_the_legacy_links_exactly():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    for kind, name, fqname, file in _OVERLAPPING_SYMBOLS:
+        eng.store.upsert_symbol(repo_id=rid, kind=kind, name=name, fqname=fqname,
+                                file=file, span="1-1")
+    symbols = eng.store.list_symbols(rid)
+
+    for text in _LINK_TEXTS:
+        mid = eng.remember(text, workspace_id=wid, repo_id=rid, resolve_conflicts=False)
+        actual = sorted(
+            (row["symbol_id"], row["confidence"])
+            for row in eng.store.list_code_memory_links(rid)
+            if row["memory_id"] == mid
+        )
+        assert actual == sorted(_legacy_links(symbols, text)), text
+
+
+def test_symbol_matcher_still_sees_a_name_nested_inside_a_longer_fqname():
+    """A plain non-overlapping ``finditer`` over the alternation would let
+    ``engraphis.core.engine`` swallow ``engine`` and silently downgrade its confidence
+    from 0.9 to the 0.75 token fallback. Candidate offsets must stay overlapping."""
+    from engraphis.core.engine import _CodeSymbolMatcher
+
+    symbols = [
+        {"id": "sym_long", "name": "engine", "fqname": "engraphis.core.engine"},
+        {"id": "sym_short", "name": "engine", "fqname": "engine"},
+    ]
+    matcher = _CodeSymbolMatcher(symbols)
+    matched, positions = matcher.match("see engraphis.core.engine for details", set())
+    assert matched == {"engraphis.core.engine", "engine"}
+    assert positions == [0, 1], "candidates must come back in store order for the cap"
+
+
+def test_code_matcher_cache_is_invalidated_when_symbols_change():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    first = eng.remember("The deployer handles rollout.", workspace_id=wid, repo_id=rid,
+                         resolve_conflicts=False)
+    assert [r for r in eng.store.list_code_memory_links(rid)
+            if r["memory_id"] == first] == []
+
+    eng.store.upsert_symbol(repo_id=rid, kind="function", name="deployer",
+                            fqname="deployer", file="d.py", span="1-1")
+    second = eng.remember("The deployer also signs the release.", workspace_id=wid,
+                          repo_id=rid, resolve_conflicts=False)
+
+    assert [r["symbol_id"] for r in eng.store.list_code_memory_links(rid)
+            if r["memory_id"] == second], "a new symbol must invalidate the cached matcher"

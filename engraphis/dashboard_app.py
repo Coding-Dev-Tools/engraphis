@@ -194,8 +194,23 @@ def create_app() -> FastAPI:
     try:
         from engraphis.routes import v2_team
         team_enabled, auth_store = v2_team.attach(app, svc)
-    except Exception:  # noqa: BLE001 - team stays optional
-        pass
+    except Exception:  # noqa: BLE001 - team stays optional on minimal installs
+        # Swallowing this silently was an auth downgrade, not a graceful degradation:
+        # with team_enabled False and auth_store None, _auth_gate below skips the ENTIRE
+        # role layer AND personal-folder isolation (set_current_user is never called), and
+        # the deployment quietly falls back to a single shared API token — viewers get
+        # admin reach, personal folders become readable — with nothing in the log to say
+        # so. Always leave a trace; and when the operator explicitly asked for team mode,
+        # fail the boot instead of serving a provisioned team without role enforcement.
+        # Imported here, not at module scope: the MCP-mount block above binds `_logging`
+        # as a LOCAL of this function, so a module-level alias would be shadowed and
+        # unbound on the (normal) path where that block never runs.
+        import logging as _log
+        _log.getLogger("engraphis").exception(
+            "team auth failed to mount — role enforcement and personal-folder isolation "
+            "are NOT active")
+        if settings.team_mode:
+            raise
     # Streamable HTTP sessions are process-local in the MCP SDK. Bind each one to the
     # authenticated user that initialized it so another valid member cannot replay a
     # stolen session id with their own bearer token.

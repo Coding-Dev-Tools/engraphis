@@ -454,6 +454,15 @@ CREATE TABLE IF NOT EXISTS team_invite_sends (
     count  INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (key_id, day)
 );
+-- First-use pin of the dashboard URL a paid key is allowed to point its invites at.
+-- A SEPARATE table from team_invite_sends on purpose: that one is a daily counter whose
+-- old rows are pruned every send (`DELETE ... WHERE day < ?`), and a pin that evaporates
+-- overnight is not a pin — an attacker would simply wait for the next UTC day.
+CREATE TABLE IF NOT EXISTS team_invite_urls (
+    key_id        TEXT PRIMARY KEY,
+    dashboard_url TEXT NOT NULL,
+    pinned_at     REAL NOT NULL
+);
 """
 
 
@@ -513,6 +522,53 @@ def _bump_invite_count(key_id: str, day: Optional[str] = None) -> bool:
         conn.close()
 
 
+def _pin_invite_dashboard_url(key_id: str, url: str) -> bool:
+    """Bind *key_id* to the first ``dashboard_url`` it ever sent an invite with.
+
+    Returns True when *url* is the pinned one (or is the pin being established now),
+    False when this key already pinned a DIFFERENT URL.
+
+    Without this, ``dashboard_url`` is attacker-chosen free text inside an email that
+    leaves the vendor's own domain, with the vendor's own From address and reputation —
+    a credential-phishing amplifier wearing our brand. ``validate_cloud_base_url`` only
+    proves the URL is well-formed HTTPS, never that the caller owns it. Pinning does not
+    prove ownership either, but it collapses the abuse window to a single first send per
+    key and makes any later attempt to re-aim a key's invites a hard failure.
+
+    Same ``BEGIN IMMEDIATE`` check-then-write as :func:`_bump_invite_count`, for the same
+    reason: two concurrent first sends must not each observe "no pin yet" and race in
+    different URLs.
+    """
+    conn = reg.connect()
+    try:
+        conn.executescript(_INVITE_SCHEMA)
+        prev_iso = conn.isolation_level
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT dashboard_url FROM team_invite_urls WHERE key_id=?",
+                (key_id,)).fetchone()
+            if row is not None:
+                conn.execute("COMMIT")
+                return str(row["dashboard_url"]) == url
+            conn.execute(
+                "INSERT INTO team_invite_urls(key_id, dashboard_url, pinned_at) "
+                "VALUES (?,?,?)", (key_id, url, time.time()))
+            conn.execute("COMMIT")
+            return True
+        except BaseException:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            conn.isolation_level = prev_iso
+    finally:
+        conn.close()
+
+
 def _refund_invite_count(key_id: str, day: Optional[str] = None) -> None:
     """Undo a daily-cap reservation when the provider did not deliver."""
     conn = reg.connect()
@@ -532,8 +588,11 @@ async def team_invite(request: Request):
     behalf of a self-hosted Team dashboard that has none configured. 402 if *key*
     doesn't verify or lacks the ``team`` feature (:func:`license_registry.
     verify_for_feature` — the same server-side gate every other licensed feature
-    uses); 400 for a malformed recipient; 429 for a per-IP burst or past the per-key
-    daily cap; 502 if the vendor's own mail provider rejects the send."""
+    uses); 400 for a malformed recipient; 409 if a paid key tries to re-aim its invites
+    at a different ``dashboard_url`` than the one it pinned on first use; 429 for a
+    per-IP burst or past the per-key daily cap; 502 if the vendor's own mail provider
+    rejects the send. Trial keys never choose the link (see below), and a ``viewer``
+    invite never carries the license key."""
     try:
         body = await _bounded_json_object(request)
     except _JsonBodyError as exc:
@@ -580,6 +639,23 @@ async def team_invite(request: Request):
     if invited_by and not _EMAIL_RE.match(invited_by):
         return JSONResponse({"error": "invalid inviter email"}, status_code=400)
 
+    # Who gets to choose the link inside a vendor-domain email. ``key`` is the ONLY
+    # authentication here, and a free self-serve trial key satisfies ``team`` — so
+    # unrestricted caller-supplied ``dashboard_url`` made this an open, branded phishing
+    # relay for the price of one throwaway email address.
+    if lic.is_trial:
+        # Costs nothing to obtain, therefore gets no say: fall back to the relay's own
+        # ENGRAPHIS_DASHBOARD_URL and then DEFAULT_TEAM_DASHBOARD_URL, both resolved
+        # inside send_team_invite_email. A trial is a hosted-dashboard evaluation; a
+        # self-hoster with their own dashboard URL is exactly who should be paying.
+        dashboard_url = ""
+    elif dashboard_url and not await asyncio.to_thread(
+            _pin_invite_dashboard_url, lic.key_id, dashboard_url):
+        return JSONResponse(
+            {"error": "this license already sends invites for a different dashboard URL; "
+                      "contact support to change it"},
+            status_code=409)
+
     reservation_day = _today()
     if not await asyncio.to_thread(_bump_invite_count, lic.key_id, reservation_day):
         return JSONResponse(
@@ -596,8 +672,17 @@ async def team_invite(request: Request):
         # the admin; when empty, send_team_invite_email falls back to the relay's own
         # ENGRAPHIS_DASHBOARD_URL and then the hosted DEFAULT_TEAM_DASHBOARD_URL, so a
         # relay-delivered invite always carries a clickable sign-in link.
+        #
+        # NOT for a viewer. Holding this key is write access to the team's relay
+        # namespace — the relay authorizes on the key alone and cannot see dashboard
+        # roles — so mailing it to a read-only account silently promotes them past every
+        # dashboard check (see ``routes.v2_team._send_invite``). The withholding is
+        # enforced HERE, server-side, because this is the code that composes the email:
+        # a self-hosted dashboard relaying through us cannot opt out of it.
+        echo_key = "" if role == "viewer" else key
         await asyncio.to_thread(send_team_invite_email, to, name, role,
-                                invited_by=invited_by, key=key, dashboard_url=dashboard_url)
+                                invited_by=invited_by, key=echo_key,
+                                dashboard_url=dashboard_url)
     except Exception as exc:  # noqa: BLE001 — surface a safe message, don't leak internals
         try:
             await asyncio.to_thread(_refund_invite_count, lic.key_id, reservation_day)

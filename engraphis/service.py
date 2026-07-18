@@ -121,6 +121,16 @@ def _clean_keywords(value: Any) -> list[str]:
                               max_chars=MAX_KEYWORD_CHARS)
 
 
+# Keys MemoryEngine treats as trusted structured-extraction output
+# (core/engine.py::_has_structured_graph_metadata) and feeds straight into the
+# entity/edge graph tagged provenance.source="structured_extractor" — i.e.
+# indistinguishable from what backends.extractor.StructuredLLMExtractor actually
+# produced. The engine cannot tell a caller-supplied value here from its own
+# extractor's output (both arrive in the same ``metadata`` dict), so that check has to
+# happen before the caller's value ever reaches the engine — see _clean_metadata below.
+_GRAPH_HINT_KEYS = ("entities", "relations", "structured_extraction")
+
+
 def _clean_metadata(value: Any) -> dict:
     if not value:
         return {}
@@ -139,6 +149,21 @@ def _clean_metadata(value: Any) -> dict:
         # ``retention_class`` presets). Only ``remember()`` may set it, after
         # validating ``retention_class`` — never a caller-supplied metadata dict.
         value = {k: v for k, v in value.items() if k != "retention_supervision"}
+    if any(k in value for k in _GRAPH_HINT_KEYS):
+        # Graph poisoning with forged provenance (SECURITY.md): remember()/ingest() are
+        # reachable directly (MCP tool, HTTP route, dashboard) with caller-chosen
+        # metadata, so a caller could set these same keys itself and inherit the
+        # trusted extractor's label for content the extractor never saw. The genuine
+        # path is unaffected: a configured Extractor's own ExtractedFact.metadata is
+        # computed fresh inside MemoryEngine.ingest() from the extractor's real output,
+        # never from this argument. Re-home the caller's values — preserved, not
+        # dropped — under a key the engine's structured-graph check does not recognize,
+        # tagged with an honest source, so they can never masquerade as trusted
+        # extraction. Existing defanging/caps (backends/graph_extractor.py) are
+        # untouched by this; only the label was the defect.
+        hints = {k: value[k] for k in _GRAPH_HINT_KEYS if k in value}
+        value = {k: v for k, v in value.items() if k not in _GRAPH_HINT_KEYS}
+        value = {**value, "client_supplied_graph": {**hints, "source": "client_supplied"}}
     return value
 
 
@@ -2333,7 +2358,7 @@ class MemoryService:
                                        other.valid_to is None)})
         audit = [dict(r) for r in self.store.conn.execute(
             "SELECT ts, actor, action, detail FROM audit WHERE target=? ORDER BY ts", (mid,))]
-        chain = [self._chain_entry(r, wid) for r in self._chain_for(rec)]
+        chain = [self._chain_entry(r, wid) for r in self._chain_for(rec, wid)]
         return {"memory": _mem_to_dict(rec), "links": links, "audit": audit,
                 "chain": chain}
 
@@ -2347,12 +2372,22 @@ class MemoryService:
         d["events"] = [dict(r) for r in rows]
         return d
 
-    def _chain_for(self, rec) -> list:
+    def _chain_for(self, rec, wid: str) -> list:
         """Collect the full supersession component around ``rec`` and return its
         closed history oldest→newest, followed by the live record. It follows
         ``supersedes``/``corrects`` metadata backward and matching pointers forward,
         including every predecessor of an N→1 ``merge``. A linear ``correct`` chain
-        is the one-predecessor special case."""
+        is the one-predecessor special case.
+
+        ``wid`` is the *root* record's workspace id (``inspect()`` has already
+        ``_check_owns``-verified ``rec`` belongs to it) and is the isolation boundary for
+        the whole walk: ``metadata`` is caller-supplied and reaches storage intact, so a
+        writer in another workspace can plant a ``supersedes``/``corrects`` pointer
+        naming an id it doesn't own, or write a record that points *at* one. Every
+        candidate — backward via ``get_memory(pid)``, forward via the LIKE scan below —
+        is dropped unless it is itself in ``wid``, so a foreign-workspace record can
+        never ride a forged pointer into this response; the walk does not continue past
+        a dropped candidate (its own predecessors/successors are never visited)."""
         def predecessors(r):
             ids = list(r.metadata.get("supersedes") or [])
             if r.metadata.get("corrects"):
@@ -2369,11 +2404,11 @@ class MemoryService:
                     continue
                 seen.add(pid)
                 prev = self.store.get_memory(pid)
-                if prev is not None:
+                if prev is not None and prev.workspace_id == wid:
                     members[pid] = prev
                     frontier.append(prev)
             while True:
-                nxt = self._successor_of(cur.id, seen)
+                nxt = self._successor_of(cur.id, wid, seen)
                 if nxt is None:
                     break
                 seen.add(nxt.id)
@@ -2388,11 +2423,12 @@ class MemoryService:
             r.id,
         ))
 
-    def _successor_of(self, memory_id: str, seen: set):
+    def _successor_of(self, memory_id: str, workspace_id: str, seen: set):
         escaped = memory_id.replace("%", "\\%").replace("_", "\\_")
         rows = self.store.conn.execute(
-            "SELECT id, metadata FROM memories WHERE metadata LIKE ? ESCAPE '\\' AND id != ?",
-            (f"%{escaped}%", memory_id)).fetchall()
+            "SELECT id, metadata FROM memories WHERE metadata LIKE ? ESCAPE '\\' "
+            "AND id != ? AND workspace_id = ?",
+            (f"%{escaped}%", memory_id, workspace_id)).fetchall()
         import json as _json
         for r in rows:
             if r["id"] in seen:
@@ -2616,7 +2652,16 @@ class MemoryService:
                             })
                 linked_memory_ids = set()
                 if selected_layers is None or "semantic" in selected_layers:
-                    for link in self.store.list_code_memory_links(rid, limit=edge_cap):
+                    code_links = self.store.list_code_memory_links(rid, limit=edge_cap)
+                    # Batched: up to `limit` (<=5000) individual get_memory() calls here
+                    # was the dominant cost of an include_code=True request. Collect the
+                    # candidate ids first and resolve them in one IN (...) query
+                    # (Store.get_memories) — same liveness/limit checks below, just no
+                    # per-row round trip.
+                    candidate_ids = [link.get("memory_id") for link in code_links
+                                     if link.get("memory_id")]
+                    memories_by_id = self.store.get_memories(candidate_ids)
+                    for link in code_links:
                         if len(edgs) >= edge_cap:
                             break
                         code_id = symbol_id_node.get(link.get("symbol_id"))
@@ -2624,7 +2669,7 @@ class MemoryService:
                         if not code_id or not memory_id:
                             continue
                         if memory_id not in linked_memory_ids and len(entity_rows) < limit:
-                            memory = self.store.get_memory(memory_id)
+                            memory = memories_by_id.get(memory_id)
                             if memory and memory.expired_at is None and memory.valid_to is None:
                                 entity_rows.append({
                                     "id": memory_id,

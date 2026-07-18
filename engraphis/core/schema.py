@@ -121,6 +121,12 @@ CREATE TABLE IF NOT EXISTS edges (
 );
 CREATE INDEX IF NOT EXISTS idx_edge_src ON edges(workspace_id, src, valid_to, expired_at);
 CREATE INDEX IF NOT EXISTS idx_edge_dst ON edges(workspace_id, dst);
+-- Store.edges_in_scope() (the PPR retrieval arm) filters workspace_id + repo_id + the
+-- bi-temporal window; the two indexes above lead on workspace_id but then key on src/dst,
+-- so a repo-scoped graph read had to scan the whole workspace. Also bounds the
+-- workspace-scoped candidate scan in Store.invalidate_edges_for_memory().
+CREATE INDEX IF NOT EXISTS idx_edge_workspace_repo
+    ON edges(workspace_id, repo_id, valid_to, expired_at);
 
 CREATE TABLE IF NOT EXISTS mem_links (
     a          TEXT,
@@ -131,6 +137,9 @@ CREATE TABLE IF NOT EXISTS mem_links (
     created_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_mem_links_ab ON mem_links(a, b);
+-- Links are undirected: Store.get_links()/has_link()/add_link() all match "a=? OR b=?".
+-- idx_mem_links_ab only serves the `a` branch, so the `b` branch was a full table scan.
+CREATE INDEX IF NOT EXISTS idx_mem_links_b ON mem_links(b);
 
 -- ── Code symbol graph ──────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS symbols (
@@ -214,6 +223,11 @@ CREATE TABLE IF NOT EXISTS audit (
     target TEXT,
     detail TEXT
 );
+-- Every audit read is keyed on target and ordered by ts: MemoryService.inspect() and
+-- _chain_entry() ("WHERE target=? ORDER BY ts"), audit_log()/export()/analytics
+-- ("JOIN memories m ON m.id = a.target"). The table had no index at all, so each of
+-- those was a full scan that grows without bound as the audit trail accumulates.
+CREATE INDEX IF NOT EXISTS idx_audit_target ON audit(target, ts);
 
 CREATE TABLE IF NOT EXISTS operation_receipts (
     id             TEXT PRIMARY KEY,

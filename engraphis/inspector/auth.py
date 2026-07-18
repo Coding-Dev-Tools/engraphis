@@ -154,7 +154,12 @@ def min_role(method: str, path: str) -> str:
         # get more options"); anyone signed in may READ the current state (the dashboard
         # renders the toggle disabled for non-admins). GET stays viewer, writes are admin.
         return "admin" if method != "GET" else "viewer"
-    if method == "POST" and path == "/api/auth/token":
+    if path == "/api/auth/token" or path.startswith("/api/auth/token/"):
+        # A signed-in user's OWN agent API tokens: mint (POST /api/auth/token) and revoke
+        # (DELETE /api/auth/token/{id}). Every operation is scoped to the caller's user id
+        # inside the route itself, so a viewer must keep it — matched for ALL methods, not
+        # just POST, so the member-by-default fall-through below cannot lock a viewer out
+        # of revoking their own credential.
         return "viewer"
     if path in ("/api/intent/recall", "/api/code/path", "/api/code/impact"):
         return "viewer"
@@ -172,9 +177,13 @@ def min_role(method: str, path: str) -> str:
             "/api/license/activate", "/api/license/trial", "/api/license/team-trial",
             "/api/export", "/api/consolidate"):
         return "admin"
-    if method == "POST":            # pin / forget / correct — audited governance (member+)
-        return "member"
-    return "viewer"
+    # Default: reads are viewer, anything that can mutate is member+ (pin / forget /
+    # correct — audited governance). Written as "GET/HEAD are reads" rather than the old
+    # "POST is a write", because that inverted form defaulted every OTHER verb —
+    # DELETE, PUT, PATCH — to the LOWEST role. A new mutating route added under /api/
+    # would have shipped viewer-writable by omission; the default must fail toward
+    # more authority required, not less.
+    return "viewer" if method in ("GET", "HEAD") else "member"
 
 
 def _hash_password(password: str, *, iterations: int, salt: Optional[bytes] = None) -> str:

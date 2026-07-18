@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 from engraphis import licensing
 from engraphis.backends import sync_relay as relay_backend
 from engraphis.licensing import LicenseError, ed25519_public_key
+from engraphis.inspector import license_cloud
 from engraphis.inspector import license_registry as reg
 from engraphis.inspector import sync_relay
 from engraphis.backends.sync_relay import RelayTransport, RelayError
@@ -36,7 +37,14 @@ def _relay_env(monkeypatch, tmp_path):
     monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(SECRET).hex())
     monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(tmp_path / "relay.db"))
     monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY", raising=False)
+    # _authorize now shares /license/v1/register's per-IP burst budget. Every TestClient
+    # request in this file arrives from the same synthetic peer ("testclient"), so leave
+    # the limiter effectively off by default and let the tests that are ABOUT it set
+    # their own budget — otherwise the suite throttles itself, not the attacker.
+    monkeypatch.setattr(license_cloud, "REGISTER_RATE_PER_MINUTE", 10_000)
+    license_cloud._REGISTER_BUCKETS.clear()
     yield
+    license_cloud._REGISTER_BUCKETS.clear()
 
 
 def _key(plan="pro", email="buyer@example.com", *, expires_in_days=30,
@@ -99,6 +107,57 @@ def test_missing_key_is_rejected():
 def test_garbage_key_is_rejected():
     c = _app()
     assert c.get("/relay/v1/ws1/bundles", headers=_auth("ENGR1.!!!.???")).status_code == 402
+
+
+# ── unauthenticated crypto is rate limited ────────────────────────────────────────────
+# Every relay call runs a ~3ms pure-Python Ed25519 verify BEFORE anything authenticates
+# the caller, and several handlers are sync defs that also pin a threadpool worker while
+# they do it. license_cloud._register_rate_ok exists for exactly this surface; the relay
+# has to actually call it, and share the budget rather than open a second one.
+
+def test_invalid_key_flood_is_rate_limited_before_the_verify(monkeypatch):
+    monkeypatch.setattr(license_cloud, "REGISTER_RATE_PER_MINUTE", 3)
+    license_cloud._REGISTER_BUCKETS.clear()
+    c = _app()
+    bad = _auth("ENGR1.forged.forged")
+    codes = [c.get("/relay/v1/ws1/names", headers=bad).status_code for _ in range(6)]
+    assert codes[:3] == [402, 402, 402]           # budget spent on real verifies
+    assert codes[3:] == [429, 429, 429]           # then refused before any crypto
+    # A valid key is throttled by the same bucket — the limit is on the work, not on
+    # being wrong, so a flood cannot be laundered through signature-valid keys.
+    assert c.get("/relay/v1/ws1/names", headers=_auth(_key())).status_code == 429
+
+
+def test_relay_and_license_endpoints_share_one_burst_budget(monkeypatch):
+    monkeypatch.setattr(license_cloud, "REGISTER_RATE_PER_MINUTE", 2)
+    license_cloud._REGISTER_BUCKETS.clear()
+    app = FastAPI()
+    app.include_router(sync_relay.router)
+    app.include_router(license_cloud.router)
+
+    @app.exception_handler(LicenseError)
+    async def _license(request, exc):        # noqa: ANN202
+        return JSONResponse({"error": str(exc)}, status_code=402)
+
+    c = TestClient(app)
+    # one token spent on the license endpoint (its own limiter call, before its verify)...
+    assert c.post("/license/v1/register",
+                  json={"key": "ENGR1.forged.forged", "machine_id": "m-1"}).status_code == 402
+    # ...one on the relay...
+    assert c.get("/relay/v1/ws1/names", headers=_auth(_key())).status_code == 200
+    # ...and the budget is gone: alternating endpoints does not buy a second allowance.
+    assert c.get("/relay/v1/ws1/names", headers=_auth(_key())).status_code == 429
+
+
+def test_relay_stays_up_when_the_limiter_itself_fails(monkeypatch):
+    """Fail OPEN. A broken guard must not become a cheaper outage than the flood it
+    guards against."""
+    def boom(ip):
+        raise RuntimeError("bucket storage unavailable")
+
+    monkeypatch.setattr(license_cloud, "_register_rate_ok", boom)
+    c = _app()
+    assert c.get("/relay/v1/ws1/names", headers=_auth(_key())).status_code == 200
 
 
 def test_expired_key_is_rejected():
