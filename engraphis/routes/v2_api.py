@@ -268,19 +268,32 @@ def llm_test():
 class _CreateWsReq(BaseModel):
     workspace: str
     description: str = ""
-    visibility: str = "shared"
+    visibility: str = "personal"
+    confirmed: bool = False
 
 
 @router.post("/workspaces/create")
 def workspaces_create(req: _CreateWsReq):
     """Create an empty workspace/folder up front (see MemoryService.create_workspace).
     In team mode this is a POST, so the dashboard's auth gate requires the member role or
-    above — viewers can't create folders, members and admins can. ``visibility`` is
-    ``'shared'`` (the whole team can see and use it) or ``'personal'`` (only the creating
-    user — the current session — can, enforced server-side by the service's workspace
-    authorization); the owner is taken from the session, never from the request body."""
+    above — viewers can't create folders, members and admins can. New folders are personal
+    by default. A shared folder needs an explicit ``visibility='shared'`` request plus
+    ``confirmed=true``; the owner is taken from the session, never from the request body."""
     return _run(service().create_workspace, req.workspace, req.description,
-                visibility=req.visibility)
+                visibility=req.visibility, confirmed=req.confirmed)
+
+
+class _WorkspaceVisibilityReq(BaseModel):
+    workspace: str
+    visibility: str
+    confirmed: bool = False
+
+
+@router.post("/workspaces/visibility")
+def workspaces_visibility(req: _WorkspaceVisibilityReq):
+    """Change folder sharing only after the caller explicitly confirms it."""
+    return _run(service().set_workspace_visibility, req.workspace, req.visibility,
+                confirmed=req.confirmed)
 
 
 class _RenameWsReq(BaseModel):

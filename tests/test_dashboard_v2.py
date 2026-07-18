@@ -91,12 +91,35 @@ def _break_team_attach(monkeypatch):
         RuntimeError("users DB is unreadable")))
 
 
-def test_team_attach_failure_is_fatal_when_team_mode_is_configured(monkeypatch, tmp_path):
+def test_team_attach_failure_fails_closed_without_crashing_the_boot(monkeypatch, tmp_path,
+                                                                    caplog):
+    """A broken team-auth mount must refuse guarded routes, not downgrade and not crash.
+
+    Serving on would fall through to the single shared API token: no roles, no
+    personal-folder isolation. Crashing the boot is equally wrong — team_mode is ON by
+    default and ``app = create_app()`` runs at module scope, so a transient users-db lock
+    would become a healthcheck-failing crash loop that cannot self-heal.
+    """
     dashboard_app = _dashboard_module(monkeypatch, tmp_path)
     _break_team_attach(monkeypatch)
     monkeypatch.setattr(settings, "team_mode", True)
-    with pytest.raises(RuntimeError, match="users DB is unreadable"):
-        dashboard_app.create_app()
+    monkeypatch.setattr(settings, "api_token", "service-account-token")
+
+    with caplog.at_level("ERROR", logger="engraphis"):
+        app = dashboard_app.create_app()           # boots; does not raise
+    assert any("team auth failed to mount" in r.message for r in caplog.records)
+
+    with TestClient(app) as c:
+        # Railway's healthcheck path stays public, so the container is not crash-looped.
+        assert c.get("/api/health").status_code == 200
+        # Every guarded route fails closed...
+        assert c.get("/api/workspaces").status_code == 503
+        assert c.post("/mcp", json={}).status_code == 503
+        # ...including for the shared service-account token, which is exactly the
+        # weaker credential the silent fallback would have promoted to full reach.
+        assert c.get("/api/workspaces",
+                     headers={"Authorization": "Bearer service-account-token"}
+                     ).status_code == 503
 
 
 def test_team_attach_failure_is_logged_even_when_team_mode_is_off(monkeypatch, tmp_path,
@@ -179,7 +202,7 @@ def test_dashboard_markup_offers_explicit_folder_access_and_graph_views(monkeypa
         "compact", "original", "communities", "radial", "constellation", "custom",
     }
     assert markup.folder_access == [
-        {"value": "personal", "checked": False},
+        {"value": "personal", "checked": True},
         {"value": "shared", "checked": False},
     ]
 
@@ -488,7 +511,7 @@ def test_viewer_role_denied_on_governance_and_admin_routes(monkeypatch, tmp_path
         # the same routes work for the admin who created the viewer
         assert admin.post("/api/pin", json={"id": mid, "workspace": "demo",
                           "pinned": True}).status_code == 200
-        # both members and admins may create their own shared folders
+        # Both members and admins may create their own private folders.
         assert admin.post("/api/auth/users", json={"email": "m@x.co", "name": "M",
                           "password": "anotherpass1", "role": "member"}).status_code == 200
         member = TestClient(c.app)
@@ -509,9 +532,10 @@ def test_viewer_role_denied_on_governance_and_admin_routes(monkeypatch, tmp_path
         }).status_code == 403
         assert admin.post("/api/workspaces/create",
                           json={"workspace": "admin-folder"}).status_code == 200
-        # and the folders they made are visible to the whole team (shared, not per-user)
+        # Default folders are personal, so neither is exposed to a viewer.
         names = {w["name"] for w in viewer.get("/api/workspaces").json()["workspaces"]}
-        assert {"member-folder", "admin-folder"} <= names
+        assert "member-folder" not in names
+        assert "admin-folder" not in names
 
 
 def test_graph_endpoint_shape(monkeypatch, tmp_path):
@@ -1090,7 +1114,7 @@ def test_personal_folders_are_isolated_per_user(monkeypatch, tmp_path):
                       json={"workspace": "alice-secret", "visibility": "personal"}
                       ).status_code == 200
         assert c.post("/api/workspaces/create",
-                      json={"workspace": "team-proj", "visibility": "shared"}
+                      json={"workspace": "team-proj", "visibility": "shared", "confirmed": True}
                       ).status_code == 200
         # add a member (bob) and log him in to capture his session
         assert c.post("/api/auth/users", json={"email": "bob@x.co", "name": "Bob",

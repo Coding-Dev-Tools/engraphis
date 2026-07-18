@@ -699,7 +699,7 @@ def test_correct_repairs_a_repo_scoped_row_that_has_no_repo():
 
 # ── export_code_graph is bounded (viewer-reachable payload) ─────────────────────────
 
-def test_export_code_graph_is_bounded_and_flags_truncation():
+def test_export_code_graph_is_bounded_and_flags_truncation(monkeypatch):
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")
     rid = eng.store.get_or_create_repo(wid, "sample")
@@ -710,10 +710,20 @@ def test_export_code_graph_is_bounded_and_flags_truncation():
                                    content_hash=f"h{n}", size_bytes=1, mtime_ns=0,
                                    backend="test")
 
+    requested_limits = []
+    list_code_files = eng.store.list_code_files
+
+    def tracked_list_code_files(repo_id, **kwargs):
+        requested_limits.append(kwargs.get("limit"))
+        return list_code_files(repo_id, **kwargs)
+
+    monkeypatch.setattr(eng.store, "list_code_files", tracked_list_code_files)
+
     capped = eng.export_code_graph(repo_id=rid, limit=5)
     assert capped["limit"] == 5
     assert len(capped["nodes"]) == 5 and len(capped["files"]) == 5
     assert capped["truncated"] is True
+    assert requested_limits == [6]  # five payload rows plus one truncation sentinel
 
     full = eng.export_code_graph(repo_id=rid)
     assert len(full["nodes"]) == 12 and len(full["files"]) == 12

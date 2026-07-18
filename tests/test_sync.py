@@ -25,6 +25,7 @@ from engraphis.core.sync import (
     _signature,
     _version_key,
     dict_to_record,
+    inherit_store_defaults,
     merge_record,
     record_to_dict,
 )
@@ -760,9 +761,9 @@ def test_replaying_a_bundle_reports_all_unchanged(remote_content):
     syncer = SyncEngine(store)
     store.add_memory(MemoryRecord(id="mem_a", content="local", workspace_id=wid,
                                   last_access=100.0, ingested_at=90.0, valid_from=1.0))
-    # valid_from is set explicitly, exactly as export_bundle/record_to_dict emit it:
-    # Store.add_memory defaults a missing valid_from to now(), so a hand-written bundle
-    # that omits it never matches what was stored and can never converge.
+    # valid_from is set explicitly here, exactly as export_bundle/record_to_dict emit it.
+    # A bundle that OMITS it converges too, but only because apply_bundle inherits
+    # store-defaulted fields from the existing row — see the dedicated test below.
     bundle = {
         "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
         "memories": [
@@ -787,6 +788,136 @@ def test_replaying_a_bundle_reports_all_unchanged(remote_content):
     assert second["unchanged"] == 2
     assert third["updated"] == 0
     assert store.get_memory("mem_a").content == winner       # never reverts on replay
+
+
+# ── regression: a bundle that OMITS a store-defaulted field must still converge ──
+
+def _valid_from_less_bundle(content):
+    """One row that omits ``valid_from`` but DOES supply ``last_access``/``ingested_at``,
+    so a replay ties on both ordered components of the version key and lands squarely on
+    the content-hash tiebreak — the only place the omission can decide anything."""
+    return {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
+        "memories": [{"id": "mem_a", "content": content,
+                      "last_access": 100.0, "ingested_at": 90.0}],
+        "mem_links": [],
+    }
+
+
+# Contents for which the *incoming* (valid_from-less) label hashes ABOVE the stored one at
+# valid_from=1000.0 — i.e. the ones that made the un-inherited tiebreak actually flip. Held
+# fixed rather than left to the wall clock so this pins the bug on every run, not ~half.
+_FLIPPING_CONTENTS = ["first", "zzz", "0", "alpha", "m", "beta", "gamma"]
+
+
+@pytest.mark.parametrize("content", _FLIPPING_CONTENTS)
+def test_bundle_omitting_valid_from_never_rewrites_the_stored_default(content):
+    """A hand-crafted bundle row without ``valid_from`` must not rewrite itself forever.
+
+    ``dict_to_record`` leaves the field ``None`` and ``Store.add_memory`` then stamps it
+    with ``now()``. On replay the stored and incoming labels differed *only* in
+    ``valid_from``; with ``last_access`` and ``ingested_at`` tied, the version key fell
+    through to the content-hash tiebreak, so the row was reported ``updated`` and rewritten
+    with a FRESH ``valid_from`` — which changed the hash, so it flipped again next round.
+    Unbounded write amplification plus a ``sync_overwrite`` audit row per sync round,
+    reachable from an untrusted bundle (SECURITY.md — memory poisoning).
+
+    The local ``valid_from`` is seeded explicitly so the tiebreak is a pure function of the
+    test data; a rewrite would stamp a real ``now()``, nowhere near 1000.0.
+    """
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    syncer = SyncEngine(store)
+    store.add_memory(MemoryRecord(id="mem_a", content=content, workspace_id=wid,
+                                  last_access=100.0, ingested_at=90.0, valid_from=1000.0))
+    bundle = _valid_from_less_bundle(content)
+
+    for _ in range(6):
+        report = syncer.apply_bundle(bundle)
+        assert report["updated"] == 0 and report["added"] == 0   # never rewrites itself
+        assert report["unchanged"] == 1
+        row = store.get_memory("mem_a")
+        assert row.valid_from == 1000.0                          # ...and never moves
+        assert row.content == content
+        assert row.ingested_at == 90.0 and row.last_access == 100.0
+
+    # the write amplification was visible as one sync_overwrite audit row per round
+    spam = store.conn.execute(
+        "SELECT COUNT(*) c FROM audit WHERE action='sync_overwrite'").fetchone()["c"]
+    assert spam == 0
+
+
+@pytest.mark.parametrize("content", ["first", "zzz", "aaa", "payload", "0", "alpha", "m"])
+def test_bundle_omitting_valid_from_converges_when_it_created_the_row(content):
+    """End-to-end shape of the same vector: the bundle CREATES the row (so the store, not
+    the test, supplies the defaulted ``valid_from``), then is replayed. Everything after
+    the first round must be all-unchanged and the stored default must never move."""
+    store = Store(":memory:")
+    store.get_or_create_workspace("w")
+    syncer = SyncEngine(store)
+    bundle = _valid_from_less_bundle(content)
+
+    first = syncer.apply_bundle(bundle)
+    assert first["added"] == 1
+    pinned = store.get_memory("mem_a").valid_from
+    assert pinned is not None                       # the store defaulted it on write
+
+    for _ in range(5):
+        report = syncer.apply_bundle(bundle)
+        assert report["added"] == 0
+        assert report["updated"] == 0
+        assert report["unchanged"] == 1
+        assert store.get_memory("mem_a").valid_from == pinned
+    spam = store.conn.execute(
+        "SELECT COUNT(*) c FROM audit WHERE action='sync_overwrite'").fetchone()["c"]
+    assert spam == 0
+
+
+def test_incoming_valid_from_still_wins_when_genuinely_supplied():
+    """The inheritance must only fill fields the bundle OMITTED — a real, newer
+    ``valid_from`` still has to win last-writer-wins (and then stay converged)."""
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    syncer = SyncEngine(store)
+    store.add_memory(MemoryRecord(id="mem_a", content="local", workspace_id=wid,
+                                  last_access=100.0, ingested_at=90.0, valid_from=1.0))
+    bundle = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
+        "memories": [{"id": "mem_a", "content": "remote", "valid_from": 5000.0,
+                      "last_access": 200.0, "ingested_at": 90.0}],   # newer last_access
+        "mem_links": [],
+    }
+
+    first = syncer.apply_bundle(bundle)
+
+    assert first["updated"] == 1
+    row = store.get_memory("mem_a")
+    assert row.valid_from == 5000.0 and row.content == "remote"
+    # ...and the applied state is then stable
+    for _ in range(3):
+        assert syncer.apply_bundle(bundle)["unchanged"] == 1
+        assert store.get_memory("mem_a").valid_from == 5000.0
+
+
+def test_inherit_store_defaults_fills_only_omitted_fields():
+    """Unit-level contract: exactly the fields Store.add_memory defaults from the server
+    clock (valid_from / ingested_at / last_access) are inherited when omitted. valid_to and
+    expired_at are NOT — there ``None`` is a real, persistable 'still valid' value that the
+    earliest-non-null lattice already handles."""
+    existing = MemoryRecord(id="mem_1", content="a", valid_from=1.0, ingested_at=2.0,
+                            last_access=3.0, valid_to=4.0, expired_at=5.0)
+    incoming = MemoryRecord(id="mem_1", content="b")
+
+    inherit_store_defaults(existing, incoming)
+
+    assert (incoming.valid_from, incoming.ingested_at, incoming.last_access) == (1.0, 2.0, 3.0)
+    assert incoming.valid_to is None and incoming.expired_at is None
+    assert incoming.content == "b"                   # descriptive fields untouched
+
+    supplied = MemoryRecord(id="mem_1", content="b", valid_from=99.0,
+                            ingested_at=98.0, last_access=97.0)
+    inherit_store_defaults(existing, supplied)
+    assert (supplied.valid_from, supplied.ingested_at, supplied.last_access) == (99.0, 98.0, 97.0)
 
 
 # ── regression: apply_bundle must not be N+1 with a commit per row ────────────
