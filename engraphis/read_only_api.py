@@ -87,11 +87,13 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
         )
 
     @app.get("/graph")
-    def graph(workspace: str, limit: int = 2_000, layers: str = "",
+    def graph(workspace: str, limit: int = 2_000, layers: Optional[str] = None,
               include_code: bool = False, repo: Optional[str] = None):
-        selected = [value.strip() for value in layers.split(",") if value.strip()]
+        selected = None if layers is None else [
+            value.strip() for value in layers.split(",") if value.strip()
+        ]
         return run(
-            svc.graph, workspace=workspace, limit=limit, layers=selected or None,
+            svc.graph, workspace=workspace, limit=limit, layers=selected,
             include_code=include_code, repo=repo, backfill=False,
         )
 

@@ -209,6 +209,33 @@ def test_dashboard_markup_offers_explicit_folder_access_and_graph_views(monkeypa
         {"value": "shared", "checked": False},
     ]
 
+
+def test_same_graph_data_refreshes_component_centers_after_layout_changes(monkeypatch,
+                                                                          tmp_path):
+    with _client(monkeypatch, tmp_path) as c:
+        response = c.get("/")
+        assert response.status_code == 200
+
+    html = response.text
+    refresh = html[html.index("function graphRefreshComponentCenters"):
+                   html.index("function graphAlpha")]
+    render = html[html.index("function graphRender"):
+                  html.index("function graphSet(key,value)")]
+    graph_set = html[html.index("function graphSet(key,value)"):
+                     html.index("function graphApplyPreset")]
+    preset = html[html.index("function graphApplyPreset"):
+                  html.index("function graphToggleLabels")]
+
+    assert "window.GSET.mode+'|'+window.GSET.link" in refresh
+    assert "if(!force&&GCOMPONENT_LAYOUT===layout)return" in refresh
+    assert "graphIndexComponents(nodes)" in refresh
+    assert "graphRefreshComponentCenters(data.nodes,dataChanged)" in render
+    assert "if(dataChanged)FG.graphData(data)" in render
+    assert "if(dataChanged)graphSetHighlight(null)" in render
+    assert ("if(key==='link'&&GACTIVE_DATA)"
+            "graphRefreshComponentCenters(GACTIVE_DATA.nodes)" in graph_set)
+    assert "if(FG)graphRender(true,true)" in preset
+
 def test_unconfigured_remote_api_is_refused_but_loopback_is_allowed(monkeypatch, tmp_path):
     remote = ("203.0.113.8", 50000)
     with _client(monkeypatch, tmp_path, client=remote) as c:
@@ -541,13 +568,40 @@ def test_viewer_role_denied_on_governance_and_admin_routes(monkeypatch, tmp_path
         assert "admin-folder" not in names
 
 
-def test_graph_endpoint_shape(monkeypatch, tmp_path):
+def test_graph_endpoint_preserves_omitted_and_explicit_empty_layers(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as c:
-        g = c.get("/api/graph?workspace=demo").json()
-        assert set(g) >= {"nodes", "edges", "types", "top", "stats"}
-        assert set(g["stats"]) >= {"entities", "edges", "connected", "isolated"}
-        ids = {n["id"] for n in g["nodes"]}
-        assert all(e["from"] in ids and e["to"] in ids for e in g["edges"])
+        from engraphis.routes import v2_api
+
+        svc = v2_api.service()
+        wid = svc.store.get_or_create_workspace("demo")
+        conn = svc.store.conn
+        conn.execute(
+            "INSERT INTO entities(id, workspace_id, repo_id, name, etype, created_at) "
+            "VALUES (?,?,?,?,?,0)",
+            ("layer-filter-a", wid, None, "Layer filter A", "concept"),
+        )
+        conn.execute(
+            "INSERT INTO entities(id, workspace_id, repo_id, name, etype, created_at) "
+            "VALUES (?,?,?,?,?,0)",
+            ("layer-filter-b", wid, None, "Layer filter B", "concept"),
+        )
+        conn.execute(
+            "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation, layer) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("layer-filter-edge", wid, None, "layer-filter-a", "layer-filter-b",
+             "related_to", "semantic"),
+        )
+        conn.commit()
+
+        omitted = c.get("/api/graph", params={"workspace": "demo"}).json()
+        explicit_empty = c.get(
+            "/api/graph?workspace=demo&layers="
+        ).json()
+
+        assert set(omitted) >= {"nodes", "edges", "types", "top", "stats"}
+        assert set(omitted["stats"]) >= {"entities", "edges", "connected", "isolated"}
+        assert any(edge["label"] == "related_to" for edge in omitted["edges"])
+        assert explicit_empty["edges"] == []
 
 
 def test_team_seat_limit_enforcement(monkeypatch, tmp_path):

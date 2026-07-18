@@ -986,7 +986,9 @@ class Store:
         if flt and flt.repo_id:
             sql += " AND (repo_id=? OR repo_id IS NULL)" if flt.include_ancestors else " AND repo_id=?"
             params.append(flt.repo_id)
-        if flt and flt.graph_layers:
+        if flt and flt.graph_layers is not None:
+            if not flt.graph_layers:
+                return []
             marks = ",".join("?" for _ in flt.graph_layers)
             sql += f" AND layer IN ({marks})"
             params.extend(_enum(layer) for layer in flt.graph_layers)
@@ -1165,9 +1167,17 @@ class Store:
         params.append(max(1, int(limit)))
         return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
 
-    def list_code_edges(self, repo_id: str, *, limit: Optional[int] = None) -> list[dict]:
-        sql = "SELECT * FROM code_edges WHERE repo_id=? ORDER BY file, line, id"
+    def list_code_edges(self, repo_id: str, *, limit: Optional[int] = None,
+                        layers: Optional[list[GraphLayer]] = None) -> list[dict]:
+        sql = "SELECT * FROM code_edges WHERE repo_id=?"
         params: list[Any] = [repo_id]
+        if layers is not None:
+            if not layers:
+                return []
+            marks = ",".join("?" for _ in layers)
+            sql += f" AND layer IN ({marks})"
+            params.extend(_enum(layer) for layer in layers)
+        sql += " ORDER BY file, line, id"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(max(0, int(limit)))  # never -1 == SQLite "unlimited"
