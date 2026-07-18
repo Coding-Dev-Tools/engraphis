@@ -5,6 +5,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- The Knowledge Graph can color nodes by deterministic communities, entity type, or
+  connection count. The selected mode persists and the legend follows the active scale.
+
 ### Fixed
 
 - GitHub Release publication now supplies explicit repository context to `gh` in jobs
