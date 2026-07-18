@@ -16,7 +16,7 @@ a{color:var(--accent);text-decoration:none}button{font-family:inherit;cursor:poi
 .vault-switcher{padding:6px 10px;border-bottom:1px solid var(--border);cursor:pointer;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-muted);transition:all var(--transition)}.vault-switcher:hover{background:var(--surface2);color:var(--text)}.vault-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}.vault-switcher-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .nav{flex:1;padding:5px 6px;overflow-y:auto}.nav-section{font-size:12px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.9px;padding:9px 8px 3px}.nav-section:first-child{padding-top:3px}.nav-item{display:flex;align-items:center;gap:10px;padding:5px 8px;border-radius:var(--radius-sm);cursor:pointer;color:var(--text-muted);transition:all var(--transition);font-size:16px;user-select:none}.nav-item:hover{background:var(--surface2);color:var(--text)}.nav-item.active{background:var(--accent-bg);color:var(--accent)}.nav-icon{width:15px;height:15px;flex-shrink:0;color:var(--text-dim)}.nav-item:hover .nav-icon{color:var(--text-muted)}.nav-badge{margin-left:auto;font-size:12px;color:var(--text-dim);font-variant-numeric:tabular-nums}
 .sidebar-footer{padding:6px 12px;border-top:1px solid var(--border);font-size:12px;color:var(--text-dim);display:flex;align-items:center;gap:6px}.pulse-dot{width:7px;height:7px;border-radius:50%;background:var(--green)}
-.topbar{height:42px;border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:12px;flex-shrink:0;background:var(--surface)}.topbar-title{font-size:24px;font-weight:600;margin:0;letter-spacing:-.2px;flex:0 0 auto;outline:none}.topbar-sub{font-size:12px;color:var(--text-dim);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.topbar-lock{font-size:12px;flex:0 0 auto}.topbar-lock:empty{display:none}.topbar-spacer{flex:1}.topbar-search{display:flex;align-items:center;gap:6px;padding:4px 10px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;color:var(--text-dim);cursor:pointer;transition:all var(--transition)}.topbar-search:hover{border-color:var(--border-light);color:var(--text-muted)}kbd{font-family:var(--mono);font-size:12px;padding:1px 5px;background:var(--surface3);border-radius:3px;border:1px solid var(--border)}
+.topbar{height:42px;border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:12px;flex-shrink:0;background:var(--surface)}.topbar-title{font-size:24px;font-weight:600;margin:0;letter-spacing:-.2px;flex:0 0 auto;outline:none}.topbar-sub{font-size:12px;color:var(--text-dim);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.topbar-lock{font-size:12px;flex:0 0 auto}.topbar-lock:empty{display:none}.topbar-spacer{flex:1}kbd{font-family:var(--mono);font-size:12px;padding:1px 5px;background:var(--surface3);border-radius:3px;border:1px solid var(--border)}
 .view{display:none;padding:var(--space-6) var(--space-7);max-width:1200px}.view.active{display:block}.view-head{margin-bottom:var(--space-5)}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:12px}.card-head{font-size:12px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.8px;margin-bottom:2px;display:flex;align-items:center;gap:8px}.card-head .count{margin-left:auto;font-size:12px;color:var(--text-dim);font-weight:400;text-transform:none}
 .stat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-bottom:18px}.stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;position:relative;overflow:hidden;transition:border-color var(--transition)}.stat:hover{border-color:var(--border-light)}.stat-val{font-size:32px;font-weight:600;letter-spacing:-.5px;font-variant-numeric:tabular-nums}.stat-lbl{font-size:12px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.6px;margin-top:2px}.stat-bar{position:absolute;bottom:0;left:0;height:2px;transition:width .6s ease}
@@ -176,9 +176,6 @@ body{
 .topbar-title{flex:0 1 auto;color:var(--color-text);font-family:var(--font-display);font-size:var(--text-xl);font-weight:600;letter-spacing:-.01em;line-height:1}
 .topbar-sub{max-width:72ch;color:var(--color-text-muted);font-size:var(--text-xs)}
 .topbar-lock{font-size:var(--text-micro)}
-.topbar-search{min-height:var(--control-h-sm);padding:var(--space-1) var(--space-2);border-color:var(--color-border);background:transparent;color:var(--color-text-muted);font-family:var(--mono);font-size:var(--text-micro);letter-spacing:.04em;text-transform:uppercase}
-.topbar-search:hover{background:var(--color-raised)}
-.topbar-search[hidden]{display:none}
 .content{background:var(--color-canvas)}
 .view{width:100%;max-width:var(--content-max);padding:calc(var(--space-8) / 2) var(--space-9) var(--space-8)}
 .view.active{animation:none}
@@ -390,7 +387,6 @@ body{
   .topbar-heading{min-width:0}
   .topbar-title{min-width:0;overflow:hidden;font-size:var(--text-lg);text-overflow:ellipsis;white-space:nowrap}
   .topbar-spacer{display:none}
-  .topbar-search{margin-left:auto}
   .system-banner{padding:var(--space-2) var(--space-3)!important}
   .view{width:100%;max-width:none;padding:calc(var(--space-5) / 2) var(--space-4) var(--space-5)}
   .view-head{flex-wrap:wrap}
@@ -433,7 +429,6 @@ body{
 #tokens-body>div[style*="display:flex"],#sync-body>div[style*="display:flex"],#automation-body div[style*="display:flex"],#team-body div[style*="display:flex"]{flex-wrap:wrap}
 @media(max-width:420px){
   .view{padding:calc(var(--space-4) / 2) var(--space-3) var(--space-4)}
-  .topbar-search{display:none}
   .system-notice{grid-template-columns:minmax(0,1fr) auto;align-items:center}
   .system-notice-brief{display:none}
   .stat-val{font-size:var(--text-lg)}
@@ -493,7 +488,6 @@ body{
 <div class="topbar-heading"><h1 class="topbar-title" id="topbar-title">Overview</h1><span id="an-lock" class="pill pill-muted topbar-lock"></span><span id="au-lock" class="pill pill-muted topbar-lock"></span><div class="topbar-sub" id="topbar-sub" role="status" aria-live="polite"></div></div>
 </div>
 <div class="topbar-spacer"></div>
-<button type="button" class="topbar-search" id="topbar-recall" onclick="navTo('recall')" aria-label="Open Recall search"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Recall</button>
 <button id="session-action" class="btn btn-ghost btn-sm" style="display:none" onclick="onSessionIndicatorClick()" aria-label="Sign in to the dashboard">Sign in</button>
 </header>
 <div class="content">
@@ -807,8 +801,6 @@ function selectView(v){
  if(section)section.textContent=ROUTE_SECTIONS[v]||'Operate';
  const sub=document.getElementById('topbar-sub');
  if(sub)sub.textContent=DESCS[v]||'';
- const recallAction=document.getElementById('topbar-recall');
- if(recallAction)recallAction.hidden=v==='settings';
  /* Plan pills live in the topbar; clear them on navigation so only the active
     view's loader can repopulate one. */
  ['an-lock','au-lock'].forEach(id=>{const p=document.getElementById(id);if(p){p.textContent='';p.className='pill pill-muted topbar-lock'}});
