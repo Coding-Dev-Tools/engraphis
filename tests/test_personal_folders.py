@@ -16,6 +16,7 @@ from engraphis.service import MemoryService, ValidationError, set_current_user
 
 ALICE = {"email": "alice@x.co", "name": "Alice", "role": "member", "id": "u_alice"}
 BOB = {"email": "bob@x.co", "name": "Bob", "role": "admin", "id": "u_bob"}
+CAROL = {"email": "carol@x.co", "name": "Carol", "role": "member", "id": "u_carol"}
 
 
 @pytest.fixture(autouse=True)
@@ -52,26 +53,42 @@ def test_sharing_requires_confirmation_then_is_visible_to_every_teammate():
         svc.create_workspace("team-proj", visibility="shared")
     out = svc.create_workspace("team-proj", visibility="shared", confirmed=True)
     assert out["visibility"] == "shared"
+    assert svc.list_workspaces()["workspaces"][0]["can_change_access"] is True
+    assert svc.set_workspace_visibility(
+        "team-proj", "personal", confirmed=True)["visibility"] == "personal"
+    assert svc.set_workspace_visibility(
+        "team-proj", "shared", confirmed=True)["visibility"] == "shared"
     set_current_user(BOB)
     assert "team-proj" in _names(svc)
 
 
-def test_member_can_share_own_folder_but_only_admin_can_unshare_shared_folder():
+def test_original_sharer_or_admin_can_unshare_but_another_member_cannot():
     svc = _svc()
     set_current_user(ALICE)
     svc.create_workspace("alice-notes")
     shared = svc.set_workspace_visibility("alice-notes", "shared", confirmed=True)
     assert shared["visibility"] == "shared"
 
-    with pytest.raises(ValidationError, match="only an admin"):
+    listed = {w["name"]: w for w in svc.list_workspaces()["workspaces"]}
+    assert listed["alice-notes"]["can_change_access"] is True
+
+    set_current_user(CAROL)
+    listed = {w["name"]: w for w in svc.list_workspaces()["workspaces"]}
+    assert listed["alice-notes"]["can_change_access"] is False
+    with pytest.raises(ValidationError, match="original sharer or an admin"):
         svc.set_workspace_visibility("alice-notes", "personal", confirmed=True)
 
-    set_current_user(BOB)
-    private = svc.set_workspace_visibility("alice-notes", "personal", confirmed=True)
-    assert private["visibility"] == "personal" and private["owner"] == BOB["email"]
-
     set_current_user(ALICE)
-    assert "alice-notes" not in _names(svc)
+    private = svc.set_workspace_visibility("alice-notes", "personal", confirmed=True)
+    assert private["visibility"] == "personal" and private["owner"] == ALICE["email"]
+
+    # An admin can still govern a legacy shared folder that has no original sharer.
+    set_current_user(None)
+    svc.store.create_workspace("legacy-shared", settings=None)
+    set_current_user(BOB)
+    legacy_private = svc.set_workspace_visibility(
+        "legacy-shared", "personal", confirmed=True)
+    assert legacy_private["owner"] == BOB["email"]
 
 
 def test_personal_is_owned_by_its_creator():
