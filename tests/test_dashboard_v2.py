@@ -201,6 +201,9 @@ def test_dashboard_markup_offers_explicit_folder_access_and_graph_views(monkeypa
     assert set(markup.options["graph-preset"]) == {
         "compact", "original", "communities", "radial", "constellation", "custom",
     }
+    assert set(markup.options["graph-style"]) == {
+        "cyber", "galaxy", "solar", "classic",
+    }
     assert set(markup.options["graph-palette"]) == {
         "theme", "aurora", "ocean", "ember", "contrast", "custom",
     }
