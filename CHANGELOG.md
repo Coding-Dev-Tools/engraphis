@@ -5,7 +5,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
-Follow-up audit of the graph, Team / Pro / licensing, and relay surfaces after 0.9.8.
+## [0.9.9] - 2026-07-18
+
+Security and reliability release spanning graph isolation and performance, Team / Pro
+authentication, licensing and relay behavior, and the redesigned Knowledge Graph.
 
 ### Security
 
