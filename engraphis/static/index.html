@@ -617,6 +617,7 @@ body{
 <div class="graph-preset">
 <div class="graph-preset-row"><label class="field-lbl" for="graph-preset">Graph view</label><select class="select select-sm" id="graph-preset" onchange="graphApplyPreset(this.value)"><option value="compact" selected>Compact clusters</option><option value="original">Original force graph</option><option value="communities">Community islands</option><option value="radial">Radial orbit</option><option value="constellation">Constellation flow</option><option value="custom">Custom tuning</option></select></div>
 <div class="graph-preset-row"><label class="field-lbl" for="graph-style">Style</label><select class="select select-sm" id="graph-style" onchange="graphSetStyle(this.value)"><option value="cyber" selected>Cyberpunk</option><option value="galaxy">Galaxy</option><option value="solar">Solar system</option><option value="classic">Classic</option></select></div>
+<div class="graph-preset-row"><label class="field-lbl" for="graph-colorby">Color by</label><select class="select select-sm" id="graph-colorby" onchange="graphSetColorBy(this.value)"><option value="community" selected>Community</option><option value="type">Entity type</option><option value="connections">Connections</option></select></div>
 <div class="graph-preset-help" id="graph-preset-help">Tighter packing for disconnected components, with quieter relationships and clearer nodes.</div>
 </div>
 <div class="graph-control-section">
@@ -1378,7 +1379,7 @@ graphLoadColorPreferences();
 function graphUpdateColorSwatches(){document.querySelectorAll('[data-graph-node-type]').forEach(el=>{const color=graphTypeColor(el.dataset.graphNodeType);el.style.background=color;el.style.color=color})}
 function graphRefreshNodeColors(){
  const nodes=FG&&FG.graphData?FG.graphData().nodes||[]:[];
- nodes.forEach(node=>{node.color=graphTypeColor(node.etype);node.stroke=graphContrastColor(node.color)});
+ nodes.forEach(node=>{node.color=graphNodeColor(node);node.stroke=graphContrastColor(node.color)});
  graphUpdateColorSwatches();
  graphRedraw();
 }
@@ -1549,7 +1550,68 @@ function graphSetStyle(name){
  if(['classic','galaxy','solar','cyber'].indexOf(name)<0)name='cyber';
  GSTYLE=name;try{localStorage.setItem('engraphis-graph-style',name)}catch(e){}
  graphApplyStyleChrome();
- if(GRAPH&&FG){graphRefreshNodeColors();graphRender(false,false);}
+ if(GRAPH&&FG){graphRefreshNodeColors();graphRenderLegend();graphRender(false,false);}
+}
+/* ─── colorful graphs even when every node is one entity type: color by community or connections ─── */
+var GRAPH_HEAT=['#3f7bff','#6a5cff','#a24bff','#e0479f','#ff6b6b','#ffc23d'];
+var COMMUNITY_PALS={
+ classic:['#8c83e8','#5aafb3','#d7a84b','#6f9fd8','#58b882','#df7478','#b07de0','#4fb0a0','#e0894a','#7c9be0','#e06a9a','#9ac25a'],
+ galaxy:['#b789ff','#7bb4ff','#66e0d0','#ffcf6b','#ff7ea8','#8aa2ff','#c98bff','#5ad0e0','#ffa0d0','#9d7bff','#6ad0b0','#ffb060'],
+ solar:['#ffb454','#5b9bff','#3fd2c7','#ffd68a','#ff8f6b','#8ea8ff','#ffc24a','#6ac0d0','#ff9f7a','#7ab0ff','#e0b050','#5fd0b0'],
+ cyber:['#22e0ff','#ff3ea5','#b6ff3c','#ffe14d','#8b7bff','#ff5c7a','#3affd0','#ff7be0','#7affea','#c0ff4a','#5c9bff','#ff9b3c']
+};
+var GCOLORBY='community';try{var _cb=localStorage.getItem('engraphis-graph-colorby');if(['type','community','connections'].indexOf(_cb)>=0)GCOLORBY=_cb;}catch(e){}
+var _cbSelect=document.getElementById('graph-colorby');if(_cbSelect)_cbSelect.value=GCOLORBY;
+var GMAXDEG=1;
+function graphCommunityPalette(){return COMMUNITY_PALS[(typeof GSTYLE!=='undefined'&&COMMUNITY_PALS[GSTYLE])?GSTYLE:'classic'];}
+function graphComputeCommunities(nodes){
+ var label={},ids=nodes.map(function(n){return n.id;}).sort(function(a,b){a=String(a);b=String(b);return a<b?-1:a>b?1:0;}),seed=2166136261;
+ ids.forEach(function(id,i){label[id]=i;var key=String(id);for(var k=0;k<key.length;k++){seed^=key.charCodeAt(k);seed=Math.imul(seed,16777619);}});
+ for(var iter=0;iter<7;iter++){
+  var changed=false,state=(seed^Math.imul(iter+1,-1640531527))>>>0;
+  for(var a=ids.length-1;a>0;a--){state^=state<<13;state^=state>>>17;state^=state<<5;var b=(state>>>0)%(a+1),t=ids[a];ids[a]=ids[b];ids[b]=t;}
+  for(var j=0;j<ids.length;j++){
+   var id=ids[j],nb=GADJ[id];if(!nb||!nb.size)continue;
+   var counts={},best=label[id],bestC=-1;
+   nb.forEach(function(x){var l=label[x];counts[l]=(counts[l]||0)+1;if(counts[l]>bestC||(counts[l]===bestC&&l<best)){bestC=counts[l];best=l;}});
+   if(label[id]!==best){label[id]=best;changed=true;}
+  }
+  if(!changed)break;
+ }
+ var groups={};nodes.forEach(function(n){var l=label[n.id];(groups[l]=groups[l]||[]).push(n);});
+ var order=Object.keys(groups).sort(function(x,y){return groups[y].length-groups[x].length;});
+ var remap={};order.forEach(function(l,i){remap[l]=i;});
+ nodes.forEach(function(n){n.community=remap[label[n.id]];});
+}
+function graphHeatColor(node){var t=Math.min(1,Math.max(0,node.degree||0)/Math.max(1,GMAXDEG));var idx=Math.round(t*(GRAPH_HEAT.length-1));return GRAPH_HEAT[idx];}
+function graphNodeColor(node){
+ if(GCOLORBY==='community'){var pal=graphCommunityPalette();return pal[(node.community||0)%pal.length];}
+ if(GCOLORBY==='connections'){return graphHeatColor(node);}
+ return graphTypeColor(node.etype);
+}
+function graphRenderLegend(graph){
+ graph=graph||GRAPH;var legend=document.getElementById('graph-legend'),legendCount=document.getElementById('graph-legend-count');if(!legend||!graph)return;
+ if(GCOLORBY==='community'){
+  var nodes=(GACTIVE_DATA&&GACTIVE_DATA.nodes)||[],sizes={};nodes.forEach(function(n){var c=n.community||0;sizes[c]=(sizes[c]||0)+1;});
+  var order=Object.keys(sizes).map(Number).sort(function(a,b){return sizes[b]-sizes[a];}),pal=graphCommunityPalette();
+  legend.innerHTML=order.slice(0,10).map(function(c,i){var col=pal[c%pal.length];return '<div class="gtype-row"><span class="gtype-dot" style="background:'+col+';color:'+col+'"></span><span class="gtype-name">Cluster '+(i+1)+'</span><span class="gtype-count">'+sizes[c].toLocaleString()+'</span></div>';}).join('')||'<div class="empty" style="padding:8px">None</div>';
+  if(legendCount)legendCount.textContent=order.length?order.length+(order.length===1?' cluster':' clusters'):'';
+  return;
+ }
+ if(GCOLORBY==='connections'){
+  legend.innerHTML='<div style="grid-column:1/-1"><div style="display:flex;height:12px;border-radius:4px;overflow:hidden;margin-bottom:5px">'+GRAPH_HEAT.map(function(col){return '<span style="flex:1;background:'+col+'"></span>';}).join('')+'</div><div style="display:flex;justify-content:space-between;font-size:11px;color:var(--color-text-dim)"><span>Fewer</span><span>More connections</span></div></div>';
+  if(legendCount)legendCount.textContent='by connections';
+  return;
+ }
+ var types=graph.types||[];
+ legend.innerHTML=types.map(function(item){var color=graphTypeColor(item.etype);return '<div class="gtype-row"><span class="gtype-dot" data-graph-node-type="'+esc(item.etype)+'" style="background:'+color+';color:'+color+'"></span><span class="gtype-name">'+esc(graphTypeLabel(item.etype))+'</span><span class="gtype-count">'+item.count.toLocaleString()+'</span></div>';}).join('')||'<div class="empty" style="padding:8px">None</div>';
+ if(legendCount)legendCount.textContent=types.length?types.length+(types.length===1?' type':' types'):'';
+}
+function graphSetColorBy(mode){
+ if(['type','community','connections'].indexOf(mode)<0)mode='community';
+ GCOLORBY=mode;try{localStorage.setItem('engraphis-graph-colorby',mode)}catch(e){}
+ var sel=document.getElementById('graph-colorby');if(sel&&sel.value!==mode)sel.value=mode;
+ if(GRAPH&&FG&&GACTIVE_DATA){graphComputeCommunities(GACTIVE_DATA.nodes);GMAXDEG=GACTIVE_DATA.nodes.reduce(function(m,n){return Math.max(m,n.degree||0);},1);graphRefreshNodeColors();graphRenderLegend();}
 }
 function graphApplyForces(){
  if(!FG)return;
@@ -1589,7 +1651,7 @@ function graphRender(fit=true,reheat=true){
  const element=document.getElementById('graph-net'),settings=window.GSET,mode=GRAPH_PRESETS[settings.mode]||GRAPH_PRESETS.compact,data=graphData(),dataChanged=GACTIVE_DATA!==data;
  GPERF={large:data.nodes.length>600||data.links.length>2400,dense:data.links.length>1500};
  if(dataChanged){
-  buildAdj(data.links);GLABELRANK={};data.nodes.forEach(node=>{GLABELRANK[node.id]=node.rank});GACTIVE_DATA=data;
+  buildAdj(data.links);graphComputeCommunities(data.nodes);GMAXDEG=data.nodes.reduce((m,n)=>Math.max(m,n.degree||0),1);data.nodes.forEach(node=>{node.color=graphNodeColor(node);node.stroke=graphContrastColor(node.color)});GLABELRANK={};data.nodes.forEach(node=>{GLABELRANK[node.id]=node.rank});GACTIVE_DATA=data;graphRenderLegend(GRAPH);
  }
  graphRefreshComponentCenters(data.nodes,dataChanged);
  if(dataChanged)graphSetHighlight(null);
@@ -1748,8 +1810,7 @@ let GEXPLORER={graph:null,query:'',nodeLimit:GRAPH_EXPLORER_PAGE.nodes,edgeLimit
 function renderGraphSide(){
  const graph=GRAPH;if(!graph)return;
  const types=graph.types||[],legend=document.getElementById('graph-legend');
- legend.innerHTML=types.map(item=>{const color=graphTypeColor(item.etype);return `<div class="gtype-row"><span class="gtype-dot" data-graph-node-type="${esc(item.etype)}" style="background:${color};color:${color}"></span><span class="gtype-name">${esc(graphTypeLabel(item.etype))}</span><span class="gtype-count">${item.count.toLocaleString()}</span></div>`}).join('')||'<div class="empty" style="padding:8px">None</div>';
- const legendCount=document.getElementById('graph-legend-count');if(legendCount)legendCount.textContent=types.length?types.length+(types.length===1?' type':' types'):'';
+ graphRenderLegend(graph);
  GNODEBYID=new Map((graph.nodes||[]).map(node=>[node.id,node]));GGRAPHNAMES=new Map((graph.nodes||[]).map(node=>[node.id,node.label||node.id]));GKEYNODES=(graph.nodes||[]).slice().sort((a,b)=>(b.degree||0)-(a.degree||0));
  const top=(graph.top||[]).slice(0,8),maxDegree=Math.max(...top.map(item=>item.degree),1),topBox=document.getElementById('graph-top');
  topBox.innerHTML=top.length?top.map((item,index)=>{const type=(GNODEBYID.get(item.id)||{}).etype,color=graphTypeColor(type);return `<div class="gtop-row" title="${esc(item.name)} — ${item.degree} connection${item.degree===1?'':'s'}${type?' · '+esc(graphTypeLabel(type)):''}. Click to focus in the graph." onclick="graphFocus(this.dataset.entity)" data-entity="${esc(item.id)}"><span class="gtop-rank">${index+1}</span><span class="gtop-dot" data-graph-node-type="${esc(type||'person_or_concept')}" style="background:${color}"></span><span class="gtop-name">${esc(item.name)}</span><span class="gtop-bar"><span class="gtop-bar-fill" style="width:${(item.degree/maxDegree*100).toFixed(0)}%;background:${color};color:${color}"></span></span><span class="gtop-n">${item.degree}</span></div>`}).join(''):'<div class="empty" style="padding:8px">No connections</div>';
