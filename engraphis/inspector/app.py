@@ -159,16 +159,34 @@ def create_app(service: Optional[MemoryService] = None,
     def _bearer_ok(request: Request) -> bool:
         return bearer_ok(request.headers.get("Authorization"), settings.api_token)
 
+    def _bearer_token(request: Request) -> str:
+        header = request.headers.get("Authorization") or ""
+        return header[7:].strip() if header[:7].lower() == "bearer " else ""
+
     @app.middleware("http")
     async def _auth_gate(request: Request, call_next):
+        from engraphis.service import set_current_user
+
+        # Clear any identity inherited by this request context before deciding who is
+        # calling. Public, anonymous, and single-user requests must never retain the
+        # Team user bound while handling an earlier request.
+        set_current_user(None)
         path = request.url.path
         if not path.startswith("/api/") or path in _PUBLIC:
             return await call_next(request)
         if team_active():
-            user = auth().resolve_session(request.cookies.get(COOKIE_NAME, ""))
+            # Per-user API tokens authenticate headless clients exactly like browser
+            # sessions. Resolve them first, then fall back to the session cookie.
+            supplied = _bearer_token(request)
+            user = auth().resolve_api_token(supplied) if supplied else None
+            if user is None:
+                user = auth().resolve_session(request.cookies.get(COOKIE_NAME, ""))
             if user is None and _bearer_ok(request):
-                # Service-account escape hatch so existing scripts keep working.
-                user = {"id": "service-token", "email": "service-token", "role": "admin"}
+                # The deployment service token remains the global automation escape
+                # hatch: attribute it for audit, but do not turn it into a personal owner.
+                request.state.user = {
+                    "id": "service-token", "email": "service-token", "role": "admin"}
+                return await call_next(request)
             if user is None:
                 return JSONResponse({"error": "authentication required", "auth": "team"},
                                     status_code=401)
@@ -177,6 +195,7 @@ def create_app(service: Optional[MemoryService] = None,
                 return JSONResponse({"error": "requires the %s role" % need},
                                     status_code=403)
             request.state.user = user
+            set_current_user(user)
             return await call_next(request)
         # Single-user modes: optional bearer token, exactly as before team mode existed.
         if settings.api_token and not _bearer_ok(request):

@@ -60,6 +60,39 @@ def test_git_files_rejects_option_lookalike_revisions(tmp_path):
     assert not (tmp_path / "owned.txt").exists()
 
 
+def test_git_files_preserves_nul_delimited_paths_exactly(monkeypatch, tmp_path):
+    expected = [
+        "line\nbreak.py",
+        'quote"name.py',
+        "back\\slash.py",
+        " leading.py",
+        "trailing.py ",
+    ]
+    stdout = b"\0".join(os.fsencode(path) for path in expected) + b"\0"
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr=b"")
+
+    monkeypatch.setattr(graph_cli.subprocess, "run", fake_run)
+
+    assert graph_cli._git_files(str(tmp_path), "main...HEAD") == expected
+    assert calls == [(
+        [
+            "git", "-C", str(tmp_path.resolve()),
+            "-c", "core.pager=cat", "-c", "pager.diff=cat",
+            "diff", "--no-ext-diff", "--name-only", "-z",
+            "main...HEAD", "--",
+        ],
+        {
+            "capture_output": True,
+            "check": False,
+            "timeout": graph_cli._GIT_TIMEOUT_S,
+        },
+    )]
+
+
 def test_graph_union_merge_deduplicates_symbols_and_remaps_memory_links():
     base = {
         "format": "engraphis-code-graph/1",
@@ -259,7 +292,7 @@ def test_git_files_passes_a_positive_timeout_to_subprocess_run(monkeypatch, tmp_
 
     def _fake_run(cmd, **kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
 
     monkeypatch.setattr(graph_cli.subprocess, "run", _fake_run)
     graph_cli._git_files(str(tmp_path), "")

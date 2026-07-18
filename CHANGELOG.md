@@ -5,7 +5,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
-Follow-up audit of the Team / Pro / licensing / relay surfaces after 0.9.8.
+Follow-up audit of the graph, Team / Pro / licensing, and relay surfaces after 0.9.8.
 
 ### Security
 
@@ -15,9 +15,25 @@ Follow-up audit of the Team / Pro / licensing / relay surfaces after 0.9.8.
   decodes to valid-but-non-dict JSON, and a non-numeric `expires`, with `LicenseError`
   rather than an uncaught `AttributeError`/`ValueError`. Exploiting any of these still
   required the vendor signing key, so no issued lease is affected.
+- Code-graph search, path, impact, export, and unified-graph reads now apply the same
+  workspace/repo/session hierarchy filter as recall. Session-scoped memory content and
+  identifiers previously remained reachable through persisted code-memory links from a
+  repo-level caller. Reindexing still rebuilds those links for the owning session, but
+  every read now filters them by caller-visible scope.
+- Auth-bound dashboard users can no longer omit `workspace` to reach global recall, and
+  Inspector per-user bearer tokens now bind the resolved user before personal receipt
+  reads. The standalone read-only graph endpoint also disables lazy write-on-read
+  backfill.
 
 ### Fixed
 
+- Code-graph layer responses and filters now use the concrete persisted layer, including
+  inferred causal relations and explicitly semantic code edges. Code-memory link rebuilds
+  page through every live repo-associated memory instead of clearing the bridge and
+  stopping at 5,000, and Git impact parsing uses NUL-delimited paths without rewriting
+  valid filename characters.
+- Oversized audio/video resources are rejected before transcription begins. A blank
+  `ENGRAPHIS_GRAPH_TOKEN` now correctly falls back to `ENGRAPHIS_API_TOKEN`.
 - The relay sweeps `trial_pending` rows that lapsed over a day ago. Previously a magic
   link that was never opened (bounced mail, a link scanner that never follows) was only
   ever cleared when the same `machine_id` asked again, letting a caller at the
@@ -66,6 +82,11 @@ Follow-up audit of the Team / Pro / licensing / relay surfaces after 0.9.8.
   the same validated wheel and source distribution sent to PyPI. Manual workflow dispatch
   remains build/check-only, and the release job is tag-gated behind successful PyPI
   publication.
+- The Knowledge Graph defaults to compact component-aware packing and adds community,
+  radial, constellation, original, and custom layouts; theme palettes and per-type node
+  colors; a synchronized keyboard-accessible explorer; collision-aware labels; and
+  responsive controls. Large graphs reuse rendered data, cap explorer DOM rows, reduce
+  animation work, and suppress expensive dense-graph effects.
 
 ## [0.9.8] - 2026-07-18
 

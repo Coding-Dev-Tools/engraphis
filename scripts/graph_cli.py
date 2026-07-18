@@ -43,7 +43,7 @@ def _git_files(root: str, revision: str) -> list[str]:
     cmd = [
         "git", "-C", str(Path(root).resolve()),
         "-c", "core.pager=cat", "-c", "pager.diff=cat",
-        "diff", "--no-ext-diff", "--name-only",
+        "diff", "--no-ext-diff", "--name-only", "-z",
     ]
     if revision:
         # The revision sits BEFORE the ``--`` separator, so git would parse a
@@ -54,14 +54,13 @@ def _git_files(root: str, revision: str) -> list[str]:
         cmd.append(revision)
     cmd.append("--")
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False,
+        result = subprocess.run(cmd, capture_output=True, check=False,
                                 timeout=_GIT_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         raise ValidationError(f"git diff timed out after {_GIT_TIMEOUT_S}s")
     if result.returncode:
-        raise ValidationError(result.stderr.strip() or "git diff failed")
-    return [line.strip().replace("\\", "/") for line in result.stdout.splitlines()
-            if line.strip()]
+        raise ValidationError(os.fsdecode(result.stderr).strip() or "git diff failed")
+    return [os.fsdecode(path) for path in result.stdout.split(b"\0") if path]
 
 
 def _index(args) -> None:
