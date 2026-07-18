@@ -252,7 +252,9 @@ def test_bearer_token_still_works_as_service_account_in_team_mode(make_client):
 
 
 def test_personal_receipts_are_scoped_to_signed_in_user(make_client):
-    app, alice, _ = make_client(key=_key("team", seats=2), team_mode=True)
+    app, alice, _ = make_client(
+        key=_key("team", seats=2), team_mode=True, token="deployment-token"
+    )
     _setup_admin(alice)
     store = app.state.auth_store
     service = app.state.service
@@ -290,6 +292,11 @@ def test_personal_receipts_are_scoped_to_signed_in_user(make_client):
     denied = TestClient(app).get(
         "/api/receipts", params={"workspace": "alice-private"},
         headers={"Authorization": "Bearer " + token})
+    assert denied.status_code == 400
+
+    denied = TestClient(app).get(
+        "/api/receipts", params={"workspace": "alice-private"},
+        headers={"Authorization": "Bearer deployment-token"})
     assert denied.status_code == 400
 
     # A request without either credential remains anonymous after authenticated requests.
