@@ -146,26 +146,26 @@ body{
 /* Shell: a compact operations rail and a route ledger, not a dashboard frame. */
 .app{height:100vh;height:100dvh}
 .sidebar{width:var(--shell-sidebar-w);background:var(--color-panel);backdrop-filter:none}
-.brand{min-height:var(--shell-header-h);padding:var(--space-3) var(--space-4);gap:var(--space-2)}
+.brand{min-height:0;padding:calc(var(--space-3) / 2) var(--space-4);gap:var(--space-2)}
 .brand-mark{width:var(--space-4);height:var(--space-4)}
 .brand-name{color:var(--color-text);font-family:var(--font-display);font-size:var(--text-md);font-weight:600;letter-spacing:.01em}
 .brand-sub{margin-top:var(--space-1);font-family:var(--mono);font-size:var(--text-micro);letter-spacing:.08em}
-.vault-switcher{width:100%;padding:var(--space-3) var(--space-4);border-width:0 0 var(--rule);background:transparent;text-align:left}
+.vault-switcher{width:100%;padding:calc(var(--space-3) / 2) var(--space-4);border-width:0 0 var(--rule);background:transparent;text-align:left}
 .vault-switcher:hover{background:var(--color-raised)}
 .vault-switcher-meta{display:flex;flex:1;min-width:0;flex-direction:column;gap:var(--space-1)}
 .vault-switcher-label{color:var(--color-text-dim);font-family:var(--mono);font-size:var(--text-micro);letter-spacing:.08em;line-height:1;text-transform:uppercase}
 .vault-switcher-name{color:var(--color-text);font-size:var(--text-sm);font-weight:600}
 .vault-dot{border-radius:0}
-.nav{padding:var(--space-2) 0}
-.nav-section{padding:var(--space-4) var(--space-4) var(--space-1);color:var(--color-text-dim);font-family:var(--mono);font-size:var(--text-micro);font-weight:500;letter-spacing:.08em}
-.nav-section:first-child{padding-top:var(--space-2)}
-.nav-item{position:relative;gap:var(--space-2);margin:0;padding:var(--space-2) var(--space-4);border-left:var(--rule-strong) solid transparent;border-radius:0;color:var(--color-text-muted);font-size:var(--text-sm);font-weight:500}
+.nav{padding:calc(var(--space-2) / 2) 0}
+.nav-section{padding:calc(var(--space-4) / 2) var(--space-4) calc(var(--space-1) / 2);color:var(--color-text-dim);font-family:var(--mono);font-size:var(--text-micro);font-weight:500;letter-spacing:.08em}
+.nav-section:first-child{padding-top:calc(var(--space-2) / 2)}
+.nav-item{position:relative;gap:var(--space-2);margin:0;padding:calc(var(--space-2) / 2) var(--space-4);border-left:var(--rule-strong) solid transparent;border-radius:0;color:var(--color-text-muted);font-size:var(--text-sm);font-weight:500}
 .nav-item:hover{background:var(--color-raised);color:var(--color-text)}
 .nav-item.active{border-left-color:var(--color-accent);background:transparent;color:var(--color-text);font-weight:600}
 .nav-icon{width:var(--text-sm);height:var(--text-sm)}
 .nav-item.active .nav-icon{color:var(--color-accent)}
 .nav-badge{font-family:var(--mono);font-size:var(--text-micro)}
-.sidebar-footer{padding:var(--space-2) var(--space-4);font-family:var(--mono);font-size:var(--text-micro)}
+.sidebar-footer{padding:calc(var(--space-2) / 2) var(--space-4);font-family:var(--mono);font-size:var(--text-micro)}
 .pulse-dot{width:var(--space-2);height:var(--space-2)}
 
 .topbar{height:var(--shell-header-h);padding:var(--space-3) var(--space-8);gap:var(--space-3);background:var(--color-canvas)}
@@ -178,8 +178,9 @@ body{
 .topbar-lock{font-size:var(--text-micro)}
 .topbar-search{min-height:var(--control-h-sm);padding:var(--space-1) var(--space-2);border-color:var(--color-border);background:transparent;color:var(--color-text-muted);font-family:var(--mono);font-size:var(--text-micro);letter-spacing:.04em;text-transform:uppercase}
 .topbar-search:hover{background:var(--color-raised)}
+.topbar-search[hidden]{display:none}
 .content{background:var(--color-canvas)}
-.view{width:100%;max-width:var(--content-max);padding:var(--space-8) var(--space-9)}
+.view{width:100%;max-width:var(--content-max);padding:calc(var(--space-8) / 2) var(--space-9) var(--space-8)}
 .view.active{animation:none}
 .view-head{margin-bottom:var(--space-5)}
 
@@ -270,7 +271,7 @@ body{
 .empty .btn{margin-top:var(--space-3)}
 
 /* Route compositions inherit the same ledger geometry. */
-#view-overview{padding-top:var(--space-6)}
+#view-overview{padding-top:calc(var(--space-6) / 2)}
 #view-overview .stat-grid{grid-template-columns:minmax(0,1.5fr) repeat(3,minmax(0,1fr));gap:0;margin-bottom:var(--space-8);border-top:var(--rule) solid var(--color-border);border-bottom:var(--rule) solid var(--color-border)}
 #view-overview .stat{min-height:calc(var(--space-10) * 2);justify-content:center;border-top:0;border-left:var(--rule) solid var(--color-border)}
 #view-overview .stat:first-child{border-left:0}
@@ -305,6 +306,18 @@ body{
 .gslider{display:flex;align-items:center;gap:var(--space-2);margin:var(--space-2) 0;color:var(--color-text-muted);font-size:var(--text-xs)}
 .gslider label{width:var(--control-label-w);flex-shrink:0}
 .gslider input[type=range]{height:var(--space-1);flex:1;accent-color:var(--color-accent);cursor:pointer}
+.graph-preset{display:grid;gap:var(--space-1);margin-bottom:var(--space-3);padding-bottom:var(--space-3);border-bottom:var(--rule) solid var(--color-border)}
+.graph-preset-row{display:flex;align-items:center;gap:var(--space-2)}
+.graph-preset-row .field-lbl{width:var(--control-label-w);flex-shrink:0;margin:0}
+.graph-preset-row .select{min-width:0;flex:1}
+.graph-preset-help{min-height:2.8em;color:var(--color-text-dim);font-size:var(--text-micro);line-height:1.4}
+.folder-access-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(var(--compact-column-min),1fr));gap:var(--space-2)}
+.folder-access-option{display:flex;align-items:flex-start;gap:var(--space-2);padding:var(--space-3);border:var(--rule) solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-muted);cursor:pointer}
+.folder-access-option:hover{border-color:var(--color-border-strong);background:var(--color-raised)}
+.folder-access-option:has(input:checked){border-color:var(--color-accent);background:var(--accent-bg);color:var(--color-text)}
+.folder-access-option input{margin-top:3px;accent-color:var(--color-accent)}
+.folder-access-option strong{display:block;margin-bottom:var(--space-1);color:var(--color-text);font-size:var(--text-sm)}
+.folder-access-option span span{display:block;font-size:var(--text-xs);line-height:1.4}
 
 .theme-wrap{position:relative}
 .theme-menu{display:none;position:absolute;top:var(--control-h-sm);right:0;z-index:120;min-width:calc(var(--space-9) * 4);padding:var(--space-1);border:var(--rule) solid var(--color-border-strong);border-radius:var(--radius-sm);background:var(--color-panel);box-shadow:var(--shadow-dialog)}
@@ -379,7 +392,7 @@ body{
   .topbar-spacer{display:none}
   .topbar-search{margin-left:auto}
   .system-banner{padding:var(--space-2) var(--space-3)!important}
-  .view{width:100%;max-width:none;padding:var(--space-5) var(--space-4)}
+  .view{width:100%;max-width:none;padding:calc(var(--space-5) / 2) var(--space-4) var(--space-5)}
   .view-head{flex-wrap:wrap}
   #view-overview .stat-grid{grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:var(--space-6)}
   #view-overview .stat{min-height:calc(var(--space-10) + var(--space-8));padding:var(--space-3)}
@@ -419,7 +432,7 @@ body{
 }
 #tokens-body>div[style*="display:flex"],#sync-body>div[style*="display:flex"],#automation-body div[style*="display:flex"],#team-body div[style*="display:flex"]{flex-wrap:wrap}
 @media(max-width:420px){
-  .view{padding:var(--space-4) var(--space-3)}
+  .view{padding:calc(var(--space-4) / 2) var(--space-3) var(--space-4)}
   .topbar-search{display:none}
   .system-notice{grid-template-columns:minmax(0,1fr) auto;align-items:center}
   .system-notice-brief{display:none}
@@ -454,6 +467,7 @@ body{
 <div class="nav-item" data-view="recall"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Recall</div>
 <div class="nav-item" data-view="memories"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M2 4c0-1 .5-1.5 1.5-1.5h3L8 4h4.5c1 0 1.5.5 1.5 1.5v6c0 1-.5 1.5-1.5 1.5h-9C2.5 13 2 12.5 2 11.5V4z" stroke="currentColor" stroke-width="1.3"/></svg>Memories<span class="nav-badge" id="nav-mem-count"></span></div>
 <div class="nav-item" data-view="proactive"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M8 1l2 5 5 .5-4 3.5 1.5 5L8 12l-4.5 3 1.5-5-4-3.5 5-.5z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>Proactive</div>
+<div class="nav-item" data-view="workspaces"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M2 4c0-1 .5-1.5 1.5-1.5h3L8 4h4.5c1 0 1.5.5 1.5 1.5v6c0 1-.5 1.5-1.5 1.5h-9C2.5 13 2 12.5 2 11.5V4z" stroke="currentColor" stroke-width="1.3"/><path d="M2 8h12" stroke="currentColor" stroke-width="1.1"/></svg>Workspaces</div>
 <div class="nav-section">Bi-temporal history</div>
 <div class="nav-item" data-view="why"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.3"/><path d="M6 6.5a2 2 0 113 1.7c-.6.4-1 .7-1 1.3M8 12h.01" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Why</div>
 <div class="nav-item" data-view="timeline"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="11" rx="1" stroke="currentColor" stroke-width="1.3"/><path d="M2 6h12M5 1v3M11 1v3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Timeline</div>
@@ -464,7 +478,6 @@ body{
 <div class="nav-section">Engine</div>
 <div class="nav-item" data-view="consolidate"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M2 5h12M4 8h8M6 11h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Consolidate</div>
 <div class="nav-item" data-view="automation"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="3" stroke="currentColor" stroke-width="1.3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6L13 13M13 3l-1.4 1.4M4.4 11.6L3 13" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>Automation<span class="nav-badge" id="nav-automation-lock"></span></div>
-<div class="nav-item" data-view="workspaces"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M2 4c0-1 .5-1.5 1.5-1.5h3L8 4h4.5c1 0 1.5.5 1.5 1.5v6c0 1-.5 1.5-1.5 1.5h-9C2.5 13 2 12.5 2 11.5V4z" stroke="currentColor" stroke-width="1.3"/><path d="M2 8h12" stroke="currentColor" stroke-width="1.1"/></svg>Workspaces</div>
 <div class="nav-item" data-view="team"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="6" cy="6" r="2.3" stroke="currentColor" stroke-width="1.3"/><path d="M2 13c0-2.2 1.8-3.5 4-3.5s4 1.3 4 3.5" stroke="currentColor" stroke-width="1.3"/><path d="M11 5.5a2 2 0 010 4M12 13c0-1.6-.7-2.7-1.8-3.2" stroke="currentColor" stroke-width="1.2"/></svg>Team<span class="nav-badge" id="nav-team-lock"></span></div>
 <div class="nav-item" data-view="settings"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Settings</div>
 </nav>
@@ -480,7 +493,7 @@ body{
 <div class="topbar-heading"><h1 class="topbar-title" id="topbar-title">Overview</h1><span id="an-lock" class="pill pill-muted topbar-lock"></span><span id="au-lock" class="pill pill-muted topbar-lock"></span><div class="topbar-sub" id="topbar-sub" role="status" aria-live="polite"></div></div>
 </div>
 <div class="topbar-spacer"></div>
-<button type="button" class="topbar-search" onclick="navTo('recall')" aria-label="Open Recall search"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Recall</button>
+<button type="button" class="topbar-search" id="topbar-recall" onclick="navTo('recall')" aria-label="Open Recall search"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Recall</button>
 <button id="session-action" class="btn btn-ghost btn-sm" style="display:none" onclick="onSessionIndicatorClick()" aria-label="Sign in to the dashboard">Sign in</button>
 </header>
 <div class="content">
@@ -557,6 +570,10 @@ body{
 <div class="graph-controls-column">
 <div class="card"><div class="card-head">Controls</div>
 <div style="display:flex;gap:6px;margin-bottom:8px"><button class="btn btn-ghost btn-sm" style="flex:1" onclick="loadGraph()">Refresh</button><button class="btn btn-ghost btn-sm" style="flex:1" onclick="graphReheat()">Reheat</button><button class="btn btn-ghost btn-sm" style="flex:1" onclick="graphFit()">Fit</button></div>
+<div class="graph-preset">
+<div class="graph-preset-row"><label class="field-lbl" for="graph-preset">Graph view</label><select class="select select-sm" id="graph-preset" onchange="graphApplyPreset(this.value)"><option value="compact" selected>Compact clusters</option><option value="original">Original force graph</option><option value="communities">Community islands</option><option value="radial">Radial orbit</option><option value="constellation">Constellation flow</option><option value="custom">Custom tuning</option></select></div>
+<div class="graph-preset-help" id="graph-preset-help">Tighter packing for disconnected components, with quieter relationships and clearer nodes.</div>
+</div>
 <div id="graph-layer-filters" style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:8px;font-size:12px">
 <label><input type="checkbox" value="temporal" checked onchange="loadGraph()"> Temporal</label>
 <label><input type="checkbox" value="entity" checked onchange="loadGraph()"> Entity</label>
@@ -568,13 +585,13 @@ body{
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:8px"><input type="checkbox" id="graph-hide-iso" checked onchange="graphRender()"> Hide unconnected entities</label>
 <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:8px"><input type="checkbox" id="graph-labels" onchange="graphToggleLabels(this)"> Show link labels</label>
 <input class="input" id="graph-search" placeholder="Find entity…" onkeydown="if(event.key==='Enter')graphSearch()" style="margin-bottom:10px">
-<div class="gslider"><label>Text size</label><input type="range" min="6" max="28" value="13" oninput="graphSet('font',this.value)"></div>
-<div class="gslider" title="Controls how many node labels appear at a given zoom level — lower it to declutter a large graph when zoomed in"><label>Label density</label><input type="range" min="5" max="200" value="40" step="5" oninput="graphSet('labelDensity',this.value)"></div>
-<div class="gslider"><label>Node size</label><input type="range" min="2" max="14" value="5" oninput="graphSet('size',this.value)"></div>
-<div class="gslider"><label>Line width</label><input type="range" min="2" max="45" value="10" oninput="graphSet('linkw',this.value/10)"></div>
-<div class="gslider"><label>Repel force</label><input type="range" min="10" max="500" value="120" oninput="graphSet('repel',this.value)"></div>
-<div class="gslider"><label>Link distance</label><input type="range" min="8" max="150" value="30" oninput="graphSet('link',this.value)"></div>
-<div class="gslider"><label>Center gravity</label><input type="range" min="0" max="40" value="14" oninput="graphSet('gravity',this.value)"></div>
+<div class="gslider"><label>Text size</label><input type="range" min="6" max="28" value="12" data-graph-setting="font" oninput="graphSet('font',this.value)"></div>
+<div class="gslider" title="Controls how many node labels appear at a given zoom level — lower it to declutter a large graph when zoomed in"><label>Label density</label><input type="range" min="5" max="200" value="30" step="5" data-graph-setting="labelDensity" oninput="graphSet('labelDensity',this.value)"></div>
+<div class="gslider"><label>Node size</label><input type="range" min="2" max="14" value="5" data-graph-setting="size" oninput="graphSet('size',this.value)"></div>
+<div class="gslider"><label>Line width</label><input type="range" min="2" max="45" value="7" data-graph-setting="linkw" data-graph-scale="10" oninput="graphSet('linkw',this.value/10)"></div>
+<div class="gslider"><label>Repel force</label><input type="range" min="10" max="500" value="42" data-graph-setting="repel" oninput="graphSet('repel',this.value)"></div>
+<div class="gslider"><label>Link distance</label><input type="range" min="8" max="150" value="20" data-graph-setting="link" oninput="graphSet('link',this.value)"></div>
+<div class="gslider"><label>Center gravity</label><input type="range" min="0" max="40" value="26" data-graph-setting="gravity" oninput="graphSet('gravity',this.value)"></div>
 </div>
 <div class="graph-side-stack">
 <div class="card"><div class="card-head">Top connected<span class="count" id="graph-top-count"></span></div><div id="graph-top"></div></div>
@@ -684,6 +701,25 @@ body{
 </div>
 </div>
 
+<!-- NEW FOLDER DIALOG (team mode requires an explicit access choice) -->
+<div class="mm-overlay" id="folder-overlay" onclick="if(event.target===this)closeFolderCreate()" aria-hidden="true">
+<div class="mm-box" role="dialog" aria-modal="true" aria-labelledby="folder-dialog-title" aria-describedby="folder-access-help" style="max-width:560px">
+<div class="mm-head"><div class="mm-title" id="folder-dialog-title">New folder</div><button class="btn btn-ghost btn-sm" onclick="closeFolderCreate()" aria-label="Close">&#10005;</button></div>
+<div class="mm-body">
+<div class="field"><label class="field-lbl" for="folder-name">Folder name</label><input class="input" id="folder-name" autocomplete="off" placeholder="e.g. Product research"></div>
+<div class="field"><label class="field-lbl" for="folder-description">Description <span style="font-weight:400">(optional)</span></label><input class="input" id="folder-description" autocomplete="off" placeholder="What belongs here"></div>
+<fieldset style="border:0"><legend class="field-lbl">Who can access this folder?</legend>
+<div class="folder-access-grid" id="folder-access-help">
+<label class="folder-access-option"><input type="radio" name="folder-visibility" value="personal" onchange="updateFolderCreateButton()"><span><strong>Personal and private</strong><span>Only you can see and use this folder.</span></span></label>
+<label class="folder-access-option"><input type="radio" name="folder-visibility" value="shared" onchange="updateFolderCreateButton()"><span><strong>Shared with team</strong><span>Every team member can see and use this folder.</span></span></label>
+</div>
+</fieldset>
+<div class="field-hint" id="folder-create-status" role="status" aria-live="polite" style="margin-top:var(--space-2)">Choose one access level. Nothing is selected automatically.</div>
+</div>
+<div class="mm-actions"><button class="btn btn-ghost" onclick="closeFolderCreate()">Cancel</button><button class="btn btn-primary" id="folder-create-submit" onclick="submitFolderCreate()" disabled>Create folder</button></div>
+</div>
+</div>
+
 <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 <!-- Vendored locally (no CDN) so the dashboard renders fully offline / air-gapped —
      the local-first guarantee the Inspector used to hold, now the dashboard's. -->
@@ -696,7 +732,7 @@ const API=location.origin+'/api';
 let WS=null, WORKSPACES=[], LIC=null, TRIAL_DAYS=3, AN_PORTFOLIO=false;
 let AUTH_SKIPPED=false, AUTH_MODE='login', RESET_TOKEN=null, TEAM_ENABLED=false, HOSTED_BOOTSTRAP=false;
 const TITLES={overview:'Overview',recall:'Recall',memories:'Memories','mem-editor':'Memory',proactive:'Proactive recall',why:'Why',timeline:'Timeline',audit:'Audit trail',graph:'Knowledge Graph',analytics:'Analytics',consolidate:'Consolidate',automation:'Automated maintenance',workspaces:'Workspaces',team:'Team',settings:'Settings'};
-const ROUTE_SECTIONS={overview:'Operate',recall:'Operate',memories:'Operate','mem-editor':'Operate',proactive:'Operate',why:'History',timeline:'History',audit:'History',graph:'Relations',analytics:'Relations',consolidate:'Engine',automation:'Engine',workspaces:'Engine',team:'Engine',settings:'Engine'};
+const ROUTE_SECTIONS={overview:'Operate',recall:'Operate',memories:'Operate','mem-editor':'Operate',proactive:'Operate',why:'History',timeline:'History',audit:'History',graph:'Relations',analytics:'Relations',consolidate:'Engine',automation:'Engine',workspaces:'Operate',team:'Engine',settings:'Engine'};
 /* Per-view subtitle rendered in the topbar next to the view name. The body no longer
    repeats the view title/description — the topbar is the single source for both. */
 const DESCS={overview:'',recall:'Hybrid semantic + retention search over this workspace.',memories:'Browse and curate the memories in this workspace.','mem-editor':'',proactive:'What matters right now: importance × recency × retention, plus the last session handoff.',why:'The current answer to a question, with the facts it superseded.',timeline:'Bi-temporal history: what was believed, when it was valid, and when it was recorded.',audit:'Local governance history or content-free, tamper-evident receipts for sharing.',graph:'Explore entities and their sourced relationships from this workspace’s memories.',analytics:'Growth, retention, decay forecast and entity insights for this workspace.',consolidate:'Preview or commit a sweep that distils episodic memories into semantic facts and archives decayed transients.',automation:'Schedule consolidation with explicit retention thresholds for the workspaces you can manage.',workspaces:'Hard isolation boundaries. The active workspace receives new memories, imports, searches, and graph operations.',team:'Role-scoped multi-user access, seats, folders, and governance.',settings:'Local engine, optional services, licensing, appearance, and agent access.'};
@@ -771,6 +807,8 @@ function selectView(v){
  if(section)section.textContent=ROUTE_SECTIONS[v]||'Operate';
  const sub=document.getElementById('topbar-sub');
  if(sub)sub.textContent=DESCS[v]||'';
+ const recallAction=document.getElementById('topbar-recall');
+ if(recallAction)recallAction.hidden=v==='settings';
  /* Plan pills live in the topbar; clear them on navigation so only the active
     view's loader can repopulate one. */
  ['an-lock','au-lock'].forEach(id=>{const p=document.getElementById(id);if(p){p.textContent='';p.className='pill pill-muted topbar-lock'}});
@@ -1004,25 +1042,75 @@ runConsolidate=async function(dry){
    gate); viewers can't create. Outside team mode TEAM_USER is null and anyone can. */
 function canCreateWs(){return !TEAM_USER||TEAM_USER.role==='member'||TEAM_USER.role==='admin'}
 /* A folder card, shared by the Workspaces tab and the Team dashboard's Folders panel.
-   opts.manage → show rename/merge/delete actions; opts.onName → what clicking the name does.
-   In team mode the Workspaces tab renders selection-only cards (manage:false) and all
-   creation + management lives in the Team dashboard. */
+   opts.manage controls curation actions; opts.onName controls which view remains active.
+   Folder creation and privacy selection stay available in Workspaces even in team mode. */
 function folderCardName(el){const card=el.closest('.vault-card');return card?card.dataset.workspace:''}
 function folderOpen(el){const card=el.closest('.vault-card');if(!card)return;const name=card.dataset.workspace;if(card.dataset.open==='tfOpen')tfOpen(name);else wsSwitch(name)}
 function folderCardHtml(w,opts){opts=opts||{};const manage=opts.manage!==false;const onName=opts.onName==='tfOpen'?'tfOpen':'wsSwitch';const a=w.name===WS;const count=Number(w.memories)||0;const badge=w.visibility==='personal'?'<span class="pill pill-accent" style="font-size:12px" title="Personal — visible only to you">personal</span>':(TEAM_ENABLED?'<span class="pill pill-muted" style="font-size:12px" title="Shared with your whole team">shared</span>':'');const actions=manage?`<div class="vault-card-actions"><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();wsRename(folderCardName(this))">Rename</button><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();wsDescribe(folderCardName(this))">Describe</button><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();wsMerge(folderCardName(this))">Merge</button><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();wsCopy(folderCardName(this))">Copy</button><button class="btn btn-danger btn-sm" onclick="event.stopPropagation();wsDelete(folderCardName(this),Number(this.closest('.vault-card').dataset.memories))">Delete</button></div>`:'';return `<div class="vault-card${a?' active':''}" data-workspace="${esc(w.name)}" data-memories="${count}" data-open="${onName}">${actions}<div class="vault-card-name" style="cursor:pointer" onclick="folderOpen(this)">${esc(w.name)} ${badge}${a?' <span class="pill pill-green" style="font-size:12px">active</span>':''}</div>${w.description?`<div class="vault-card-desc">${esc(w.description)}</div>`:''}<div class="vault-card-stats"><span>${count} memories</span>${w.repos&&(Array.isArray(w.repos)?w.repos.length:w.repos)?'<span>'+(Array.isArray(w.repos)?w.repos.length:w.repos)+' repos</span>':''}<a href="#" onclick="event.stopPropagation();event.preventDefault();tfMemories(folderCardName(this))" style="color:var(--accent)">View memories →</a></div></div>`}
 function tfOpen(name){setWS(name);toast('Active folder: '+name,'ok');if(document.getElementById('view-team').classList.contains('active'))renderTeamFolders();else if(document.getElementById('view-workspaces').classList.contains('active'))loadWorkspaces()}
 function tfMemories(name){setWS(name);navTo('memories')}
 async function refreshFolders(){if(document.getElementById('view-team').classList.contains('active')){await renderTeamFolders()}else{await loadWorkspaces()}}
-async function loadWorkspaces(){const el=document.getElementById('ws-cards');const canNew=canCreateWs();const canSources=!TEAM_USER||TEAM_USER.role==='admin';const nb=document.getElementById('ws-new-btn');const ic=document.getElementById('import-card');const cc=document.getElementById('code-import-card');const iwn=document.getElementById('import-ws-name');if(iwn)iwn.textContent=WS?('"'+WS+'"'):'the active folder';
- if(nb){if(TEAM_ENABLED){nb.textContent='Manage folders in Team →';nb.style.display='';nb.onclick=function(){navTo('team')}}else{nb.textContent='New folder';nb.style.display=canNew?'':'none';nb.onclick=wsCreate}}
+async function loadWorkspaces(){
+ const el=document.getElementById('ws-cards'),canNew=canCreateWs(),canSources=!TEAM_USER||TEAM_USER.role==='admin';
+ const nb=document.getElementById('ws-new-btn'),ic=document.getElementById('import-card'),cc=document.getElementById('code-import-card'),iwn=document.getElementById('import-ws-name');
+ if(iwn)iwn.textContent=WS?('"'+WS+'"'):'the active folder';
+ if(nb){nb.textContent='New folder';nb.style.display=canNew?'':'none';nb.onclick=wsCreate}
  if(ic)ic.style.display=canNew?'':'none';
  if(cc)cc.style.display=canSources?'':'none';
- try{await loadWorkspaceList();
-  const banner=TEAM_ENABLED?'<div class="field-hint" style="margin-bottom:12px">Click a folder to make it the one you submit to (then import files below). Create, share and manage team folders in the <a href="#" onclick="navTo(\'team\');return false" style="color:var(--accent)">Team dashboard →</a></div>':'';
-  if(!WORKSPACES.length){el.innerHTML=banner+(TEAM_ENABLED?'<div class="empty" style="padding:8px">No folders yet — <a href="#" onclick="navTo(\'team\');return false" style="color:var(--accent)">create one in the Team dashboard →</a></div>':(canNew?'<div class="empty" style="padding:8px;text-align:center">No folders yet.<div style="margin-top:12px"><button class="btn btn-primary btn-sm" onclick="wsCreate()">＋ New folder</button></div></div>':'<div class="empty" style="padding:8px">No folders yet. Ask an admin or member to create one.</div>'));return}
-  const manage=!TEAM_ENABLED&&canNew;
-  el.innerHTML=banner+'<div class="cols-2">'+WORKSPACES.map(w=>folderCardHtml(w,{manage:manage,onName:'wsSwitch'})).join('')+'</div>'}catch(e){el.innerHTML='<div class="empty" style="padding:6px">'+esc(e.message)+'</div>'}}
-async function wsCreate(){if(!canCreateWs()){toast('Viewers can’t create folders','err');return}const nn=prompt('Name the new folder (shared with your whole team):','');if(nn===null)return;const v=nn.trim();if(!v){toast('Enter a folder name','err');return}if(WORKSPACES.some(w=>w.name===v)){toast('A folder named "'+v+'" already exists','err');return}const d=prompt('Optional description for "'+v+'":','');try{await api('/workspaces/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:v,description:(d||'').trim()})});await loadWorkspaceList();setWS(v);toast('Folder "'+v+'" created — now the active folder','ok');refreshFolders()}catch(e){toast('Create failed: '+e.message,'err')}}
+ try{
+  await loadWorkspaceList();
+  const banner=TEAM_ENABLED?'<div class="field-hint" style="margin-bottom:12px">Select the folder that receives new memories and imports. Every new folder asks you to choose <b>Personal and private</b> or <b>Shared with team</b>.</div>':'';
+  if(!WORKSPACES.length){
+   el.innerHTML=banner+(canNew?'<div class="empty" style="padding:8px;text-align:center">No folders yet.<div style="margin-top:12px"><button class="btn btn-primary btn-sm" onclick="wsCreate()">New folder</button></div></div>':'<div class="empty" style="padding:8px">No folders yet. Ask an admin or member to create one.</div>');
+   return;
+  }
+  el.innerHTML=banner+'<div class="cols-2">'+WORKSPACES.map(w=>folderCardHtml(w,{manage:canNew,onName:'wsSwitch'})).join('')+'</div>';
+ }catch(e){el.innerHTML='<div class="empty" style="padding:6px">'+esc(e.message)+'</div>'}
+}
+function updateFolderCreateButton(){
+ const selected=document.querySelector('input[name="folder-visibility"]:checked'),button=document.getElementById('folder-create-submit');
+ if(button)button.disabled=!selected;
+}
+function openFolderCreate(){
+ if(!canCreateWs()){toast('Viewers can’t create folders','err');return}
+ const overlay=document.getElementById('folder-overlay');
+ document.getElementById('folder-name').value='';
+ document.getElementById('folder-description').value='';
+ document.querySelectorAll('input[name="folder-visibility"]').forEach(input=>{input.checked=false});
+ document.getElementById('folder-create-status').textContent='Choose one access level. Nothing is selected automatically.';
+ updateFolderCreateButton();
+ overlay.classList.add('show');
+}
+function closeFolderCreate(){document.getElementById('folder-overlay').classList.remove('show')}
+async function submitFolderCreate(){
+ const name=document.getElementById('folder-name').value.trim(),description=document.getElementById('folder-description').value.trim();
+ const selected=document.querySelector('input[name="folder-visibility"]:checked'),status=document.getElementById('folder-create-status'),button=document.getElementById('folder-create-submit');
+ if(!name){status.textContent='Enter a folder name.';document.getElementById('folder-name').focus();return}
+ if(WORKSPACES.some(w=>w.name===name)){status.textContent='A folder named "'+name+'" already exists.';return}
+ if(!selected){status.textContent='Choose Personal and private or Shared with team.';return}
+ const visibility=selected.value;
+ button.disabled=true;status.textContent='Creating '+(visibility==='personal'?'a private folder…':'a team folder…');
+ try{
+  await api('/workspaces/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:name,description,visibility})});
+  await loadWorkspaceList();setWS(name);closeFolderCreate();
+  toast('Folder "'+name+'" created — '+(visibility==='personal'?'personal and private':'shared with team'),'ok');
+  await refreshFolders();
+ }catch(e){status.textContent='Create failed: '+e.message;button.disabled=false}
+}
+async function wsCreate(){
+ if(!canCreateWs()){toast('Viewers can’t create folders','err');return}
+ if(TEAM_ENABLED){openFolderCreate();return}
+ const entered=prompt('Name the new folder:','');
+ if(entered===null)return;
+ const name=entered.trim();
+ if(!name){toast('Enter a folder name','err');return}
+ if(WORKSPACES.some(w=>w.name===name)){toast('A folder named "'+name+'" already exists','err');return}
+ const description=prompt('Optional description for "'+name+'":','');
+ try{
+  await api('/workspaces/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:name,description:(description||'').trim(),visibility:'shared'})});
+  await loadWorkspaceList();setWS(name);toast('Folder "'+name+'" created — now the active folder','ok');refreshFolders();
+ }catch(e){toast('Create failed: '+e.message,'err')}
+}
 function wsSwitch(name){setWS(name);toast('Switched to '+name,'ok');loadOverview();navTo('overview')}
 
 /* import (files/folders from this PC — see MemoryService.import_folder/import_files) */
@@ -1083,13 +1171,24 @@ async function renderTeamFolders(){
  const createRow=canNew?`<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:12px">
   <div class="field" style="flex:1;min-width:150px;margin:0"><label class="field-lbl" for="tf-name">Folder name</label><input class="input" id="tf-name" placeholder="e.g. Product research" style="min-width:0" onkeydown="if(event.key==='Enter')tfCreate()"></div>
   <div class="field" style="flex:1;min-width:150px;margin:0"><label class="field-lbl" for="tf-desc">Description <span style="font-weight:400">(optional)</span></label><input class="input" id="tf-desc" placeholder="What belongs here" style="min-width:0"></div>
-  <div class="field" style="width:170px;margin:0"><label class="field-lbl" for="tf-vis">Visibility</label><select class="select" id="tf-vis"><option value="shared">Shared · whole team</option><option value="personal">Personal · only me</option></select></div>
+  <div class="field" style="width:190px;margin:0"><label class="field-lbl" for="tf-vis">Who can access?</label><select class="select" id="tf-vis"><option value="" selected disabled>Choose access…</option><option value="personal">Personal · private to me</option><option value="shared">Shared · whole team</option></select></div>
   <button class="btn btn-primary btn-sm" onclick="tfCreate()">Create folder</button>
  </div>`:'<div class="field-hint" style="margin-bottom:10px">Only admins and members can create folders. You have view access.</div>';
  const cards=WORKSPACES.length?('<div class="cols-2">'+WORKSPACES.map(w=>folderCardHtml(w,{manage:canNew,onName:'tfOpen'})).join('')+'</div>'):'<div class="empty" style="padding:20px">No folders yet.'+(canNew?' Create the first one above.':'')+'</div>';
  box.innerHTML=`<div class="card" style="margin-top:12px"><div class="card-head">Folders <span class="count">${WORKSPACES.length}</span></div><div class="field-hint" style="margin:-4px 0 12px">This is where team folders live. <b>Shared</b> folders are visible to your whole team; <b>personal</b> folders are visible only to you. Click a folder to make it active, or “View memories”.</div>${createRow}${cards}</div>`;
 }
-async function tfCreate(){if(!canCreateWs()){toast('Viewers can’t create folders','err');return}const nm=(document.getElementById('tf-name').value||'').trim();if(!nm){toast('Enter a folder name','err');return}if(WORKSPACES.some(w=>w.name===nm)){toast('A folder named "'+nm+'" already exists','err');return}const desc=(document.getElementById('tf-desc').value||'').trim();const vis=(document.getElementById('tf-vis')||{}).value||'shared';try{await api('/workspaces/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:nm,description:desc,visibility:vis})});setWS(nm);toast('Folder "'+nm+'" created — '+(vis==='personal'?'personal (only you)':'shared with your team'),'ok');renderTeamFolders()}catch(e){toast('Create failed: '+e.message,'err')}}
+async function tfCreate(){
+ if(!canCreateWs()){toast('Viewers can’t create folders','err');return}
+ const nm=(document.getElementById('tf-name').value||'').trim();
+ if(!nm){toast('Enter a folder name','err');return}
+ if(WORKSPACES.some(w=>w.name===nm)){toast('A folder named "'+nm+'" already exists','err');return}
+ const desc=(document.getElementById('tf-desc').value||'').trim(),vis=(document.getElementById('tf-vis')||{}).value||'';
+ if(vis!=='personal'&&vis!=='shared'){toast('Choose Personal and private or Shared with team','err');return}
+ try{
+  await api('/workspaces/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:nm,description:desc,visibility:vis})});
+  setWS(nm);toast('Folder "'+nm+'" created — '+(vis==='personal'?'personal and private':'shared with team'),'ok');renderTeamFolders();
+ }catch(e){toast('Create failed: '+e.message,'err')}
+}
 function teamMembersCard(me,license,users,overview){
  const seats=license.seats||0,active=nUsersActive(users),canAdd=me.role==='admin'&&(!seats||active<seats);
  const laMap={};
@@ -1174,9 +1273,17 @@ async function loadAutoSync(){const el=document.getElementById('autosync-row');i
 async function saveAutoSync(){const on=document.getElementById('autosync-on'),cad=document.getElementById('autosync-cad');if(!on)return;const body={enabled:on.checked,cadence_minutes:Math.max(5,Number(cad&&cad.value)||15)};try{await api('/sync/auto',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});toast(body.enabled?('Auto-sync on — every '+body.cadence_minutes+' min'):'Auto-sync off','ok');loadAutoSync()}catch(e){toast(e.status===402?'Cloud sync is a Pro feature — start your free trial':(e.status===403?'Only an admin can change team auto-sync':('Auto-sync: '+e.message)),'err');loadAutoSync()}}
 async function syncNow(){const b=document.getElementById('sync-btn');const s=document.getElementById('sync-status');if(b){b.disabled=true;b.textContent='Syncing…'}if(s)s.textContent='Contacting the cloud…';try{const d=await api('/sync/run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const su=d.summary||{};toast('Synced — pushed '+(su.exported||0)+', '+(su.added||0)+' new from other devices','ok');await loadSyncStatus()}catch(e){toast('Sync failed: '+e.message,'err');if(b){b.disabled=false;b.textContent='Sync now'}if(s)s.textContent='Sync failed — try again.'}}
 
-/* ─── knowledge graph (force-graph + d3-force: centered gravity, collision, neighbor highlight, LOD labels) ─── */
-let GRAPH=null, FG=null, GRESIZE=false, GADJ={}, GHILITE=null, GLABELRANK={};
-window.GSET=window.GSET||{font:13,size:5,repel:120,link:30,gravity:14,labels:false,linkw:1,labelDensity:40};
+/* ─── knowledge graph (force-graph + d3-force: compact defaults and selectable layouts) ─── */
+let GRAPH=null, FG=null, GRESIZE=false, GADJ={}, GCOMPONENTS={}, GHILITE=null, GLABELRANK={};
+const GRAPH_PRESETS={
+ original:{repel:120,link:30,gravity:14,font:13,size:5,linkw:1,labelDensity:40,curve:0,particles:0},
+ compact:{repel:42,link:20,gravity:26,font:12,size:5,linkw:.7,labelDensity:30,curve:.08,particles:0},
+ communities:{repel:58,link:22,gravity:26,font:13,size:5,linkw:.8,labelDensity:50,curve:.16,particles:0},
+ radial:{repel:68,link:26,gravity:12,font:13,size:5,linkw:.75,labelDensity:55,curve:.22,particles:0},
+ constellation:{repel:34,link:16,gravity:38,font:12,size:5,linkw:.65,labelDensity:35,curve:.32,particles:2},
+ custom:{curve:.1,particles:0}
+};
+window.GSET=window.GSET||{mode:'compact',font:12,size:5,repel:42,link:20,gravity:26,labels:false,linkw:.7,labelDensity:30};
 const ETYPE_COLOR=new Proxy({person_or_concept:'var(--entity-concept)',mention:'var(--entity-mention)',hashtag:'var(--entity-hashtag)',email:'var(--entity-email)',organization:'var(--entity-organization)',location:'var(--entity-location)'},{get:(colors,type)=>colors[type]||'var(--entity-concept)'});
 function etypeColor(type){const token=ETYPE_COLOR[type];return cssvar(token.slice(4,-1),cssvar('--color-accent'))}
 function cssvar(n,fb){const v=getComputedStyle(document.body).getPropertyValue(n).trim();return v||fb}
@@ -1185,32 +1292,174 @@ function prefersReducedMotion(){return matchMedia('(prefers-reduced-motion: redu
 async function loadGraph(){graphInjectCss();const empty=document.getElementById('graph-empty');empty.style.display='flex';empty.textContent='Loading graph…';if(!GRESIZE){GRESIZE=true;window.addEventListener('resize',()=>{if(FG){const el=document.getElementById('graph-net');FG.width(el.clientWidth).height(el.clientHeight)}})}const layers=Array.from(document.querySelectorAll('#graph-layer-filters input:checked')).map(x=>x.value).join(','),includeCode=document.getElementById('graph-include-code').checked,repo=(document.getElementById('graph-repo-filter').value||'').trim();try{GRAPH=await api('/graph?workspace='+encodeURIComponent(WS||'')+'&layers='+encodeURIComponent(layers)+'&include_code='+(includeCode?'true':'false')+(repo?'&repo='+encodeURIComponent(repo):''));renderGraphSide();graphRender()}catch(e){empty.style.display='flex';empty.textContent='Graph failed: '+e.message}}
 function graphData(){const hideIso=document.getElementById('graph-hide-iso').checked;let nodes=GRAPH.nodes;if(hideIso)nodes=nodes.filter(n=>n.degree>0);const names=new Set(nodes.map(n=>n.id));const links=GRAPH.edges.filter(e=>names.has(e.from)&&names.has(e.to)).map(e=>({source:e.from,target:e.to,label:e.label,layer:e.layer||'semantic'}));return {nodes:nodes.map(n=>({id:n.id,label:n.label,etype:n.etype,degree:n.degree,val:1+n.degree})),links}}
 function buildAdj(links){GADJ={};links.forEach(l=>{const s=(l.source&&l.source.id)||l.source,t=(l.target&&l.target.id)||l.target;(GADJ[s]=GADJ[s]||new Set()).add(t);(GADJ[t]=GADJ[t]||new Set()).add(s)})}
-function graphRender(fit=true){const empty=document.getElementById('graph-empty');if(typeof ForceGraph==='undefined'){empty.style.display='flex';empty.textContent='Graph engine could not load. Refresh or verify the installed static assets.';return}const el=document.getElementById('graph-net');GHILITE=null;const data=graphData();buildAdj(data.links);GLABELRANK={};data.nodes.slice().sort((a,b)=>b.degree-a.degree).forEach((n,i)=>{GLABELRANK[n.id]=i});if(!data.nodes.length){empty.style.display='flex';empty.textContent=GRAPH.nodes.length?('No connected entities — untick "Hide unconnected" to see all '+GRAPH.nodes.length+'.'):'No entities in this workspace yet.';if(FG)FG.graphData({nodes:[],links:[]});return}empty.style.display='none';const labelColor=cssvar('--text'),dimColor=cssvar('--text-dim'),edgeColor='rgba(140,142,170,0.38)',accent=cssvar('--accent'),hasD3=(typeof d3!=='undefined');window.GCOL={label:labelColor,dim:dimColor,accent:accent,edgeRgb:cssvar('--graph-edge','140,142,170')};
+function graphIndexComponents(nodes){
+ const seen=new Set(),components=[];
+ nodes.forEach(node=>{
+  if(seen.has(node.id))return;
+  const ids=[],stack=[node.id];seen.add(node.id);
+  while(stack.length){const id=stack.pop();ids.push(id);(GADJ[id]||[]).forEach(next=>{if(!seen.has(next)){seen.add(next);stack.push(next)}})}
+  components.push(ids);
+ });
+ components.sort((a,b)=>b.length-a.length);
+ GCOMPONENTS={};
+ const cols=Math.max(1,Math.ceil(Math.sqrt(components.length))),gap=Math.max(84,window.GSET.link*4);
+ components.forEach((ids,index)=>{
+  const row=Math.floor(index/cols),col=index%cols,used=Math.min(cols,components.length-row*cols);
+  const x=(col-(used-1)/2)*gap,y=(row-(Math.ceil(components.length/cols)-1)/2)*gap;
+  ids.forEach(id=>{GCOMPONENTS[id]={index,size:ids.length,x,y}});
+ });
+}
+function graphAlpha(color,alpha){
+ const hex=/^#([0-9a-f]{6})$/i.exec(color||'');
+ if(hex){const n=parseInt(hex[1],16);return `rgba(${n>>16},${(n>>8)&255},${n&255},${alpha})`}
+ const rgb=(color||'').match(/\d+(?:\.\d+)?/g);
+ return rgb&&rgb.length>=3?`rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha})`:color;
+}
+function graphApplyForces(){
+ if(!FG)return;
+ const G=window.GSET,mode=G.mode||'compact';
+ FG.d3Force('charge').strength(-G.repel);
+ FG.d3Force('link').distance(G.link);
+ if(typeof d3==='undefined')return;
+ FG.d3Force('radial',null);
+ if(mode==='communities'){
+  const target=node=>GCOMPONENTS[node.id]||{x:0,y:0};
+  FG.d3Force('x',d3.forceX(node=>target(node).x).strength(G.gravity/100));
+  FG.d3Force('y',d3.forceY(node=>target(node).y).strength(G.gravity/100));
+ }else{
+  const centering=mode==='radial'?Math.max(.04,G.gravity/300):G.gravity/100;
+  FG.d3Force('x',d3.forceX(0).strength(centering));
+  FG.d3Force('y',d3.forceY(0).strength(centering));
+  if(mode==='radial'&&d3.forceRadial)FG.d3Force('radial',d3.forceRadial(node=>Math.max(0,5-Math.min(5,node.degree||0))*Math.max(8,G.link*.72)).strength(.32));
+ }
+ FG.d3Force('collide',d3.forceCollide(node=>Math.max(2,G.size*Math.sqrt(node.val)*.45)+1.5).iterations(2));
+}
+function graphRedraw(){if(FG)FG.nodeCanvasObject(FG.nodeCanvasObject())}
+function graphRender(fit=true){
+ const empty=document.getElementById('graph-empty');
+ if(typeof ForceGraph==='undefined'){empty.style.display='flex';empty.textContent='Graph engine could not load. Refresh or verify the installed static assets.';return}
+ const el=document.getElementById('graph-net'),G=window.GSET,mode=GRAPH_PRESETS[G.mode]||GRAPH_PRESETS.compact;
+ GHILITE=null;
+ const data=graphData();
+ buildAdj(data.links);graphIndexComponents(data.nodes);
+ GLABELRANK={};data.nodes.slice().sort((a,b)=>b.degree-a.degree).forEach((node,index)=>{GLABELRANK[node.id]=index});
+ if(!data.nodes.length){
+  empty.style.display='flex';
+  empty.textContent=GRAPH.nodes.length?('No connected entities — untick "Hide unconnected" to see all '+GRAPH.nodes.length+'.'):'No entities in this workspace yet.';
+  if(FG)FG.graphData({nodes:[],links:[]});
+  return;
+ }
+ empty.style.display='none';
+ const labelColor=cssvar('--color-text'),dimColor=cssvar('--color-text-dim'),accentColor=cssvar('--color-accent'),edgeRgb=cssvar('--graph-edge');
+ window.GCOL={label:labelColor,dim:dimColor,accent:accentColor,edgeRgb,panel:cssvar('--color-panel')};
  const reduced=prefersReducedMotion(),reheatButton=document.querySelector('#view-graph button[onclick="graphReheat()"]');
  if(reheatButton){reheatButton.setAttribute('aria-disabled',String(reduced));reheatButton.setAttribute('aria-label',reduced?'Reheat layout unavailable while reduced motion is enabled':'Reheat layout');reheatButton.title=reduced?'Unavailable while reduced motion is enabled':''}
- if(!FG){FG=ForceGraph()(el);FG.backgroundColor('rgba(0,0,0,0)').cooldownTime(reduced?0:4000).cooldownTicks(reduced?1:Infinity).warmupTicks(reduced?160:40).nodeRelSize(1).autoPauseRedraw(reduced).onNodeClick(n=>graphNodeClick(n.label)).onNodeHover(n=>{GHILITE=n?n.id:null;el.style.cursor=n?'pointer':'grab';if(FG)FG.refresh()})}
+ if(!FG){
+  FG=ForceGraph()(el);
+  FG.backgroundColor('rgba(0,0,0,0)').cooldownTime(reduced?0:3200).cooldownTicks(reduced?1:Infinity).warmupTicks(reduced?140:60).nodeRelSize(1).autoPauseRedraw(reduced)
+   .onNodeClick(node=>graphNodeClick(node.label)).onNodeHover(node=>{GHILITE=node?node.id:null;el.style.cursor=node?'pointer':'grab';graphRedraw()});
+ }
  FG.width(el.clientWidth).height(el.clientHeight);
- FG.nodeCanvasObject((node,ctx,scale)=>{const G=window.GSET,hl=GHILITE;const focus=hl&&GADJ[hl]&&GADJ[hl].size>1;const isNb=focus&&(node.id===hl||(GADJ[hl]&&GADJ[hl].has(node.id)));const dim=focus&&!isNb;const r=Math.max(1.2,G.size*Math.sqrt(node.val)*0.45);ctx.globalAlpha=dim?0.12:1;ctx.beginPath();ctx.arc(node.x,node.y,r,0,2*Math.PI);ctx.fillStyle=etypeColor(node.etype);ctx.fill();if(node.id===hl&&focus){ctx.lineWidth=1.6/scale;ctx.strokeStyle=window.GCOL.label;ctx.stroke()}ctx.globalAlpha=1});
- FG.nodePointerAreaPaint((node,color,ctx)=>{const r=Math.max(3,window.GSET.size*Math.sqrt(node.val)*0.45)+2;ctx.beginPath();ctx.arc(node.x,node.y,r,0,2*Math.PI);ctx.fillStyle=color;ctx.fill()});
- FG.linkColor(l=>{const C=window.GCOL,a=Math.min(0.9,0.2+0.22*(window.GSET.linkw||1));const focus=GHILITE&&GADJ[GHILITE]&&GADJ[GHILITE].size>1;const layerColor={temporal:cssvar('--color-info'),entity:cssvar('--color-teal'),causal:cssvar('--color-warning'),semantic:C.accent}[l.layer]||('rgba('+C.edgeRgb+','+a+')');if(!focus)return layerColor;const s=(l.source.id||l.source),t=(l.target.id||l.target);return (s===GHILITE||t===GHILITE)?layerColor:'rgba('+C.edgeRgb+',0.05)'});
- FG.linkWidth(l=>{const w=window.GSET.linkw||1;const focus=GHILITE&&GADJ[GHILITE]&&GADJ[GHILITE].size>1;if(!focus)return 0.85*w;const s=(l.source.id||l.source),t=(l.target.id||l.target);return (s===GHILITE||t===GHILITE)?1.7*w:0.35*w});
- FG.linkDirectionalArrowLength(2).linkDirectionalArrowRelPos(1);
- if(window.GSET.labels){FG.linkCanvasObjectMode(()=>'after').linkCanvasObject((link,ctx,scale)=>{if(scale<2.4||!link.label||!link.source.x)return;const fs=(window.GSET.font*0.82)/scale;ctx.font=fs+'px sans-serif';ctx.fillStyle=window.GCOL.dim;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(link.label,(link.source.x+link.target.x)/2,(link.source.y+link.target.y)/2)})}else{FG.linkCanvasObjectMode(()=>undefined)}
- // labels drawn in a final pass so they sit ON TOP of every node dot & link (never covered), incl. on hover
- FG.onRenderFramePost((ctx,scale)=>{const G=window.GSET;if(!(G.font>0))return;const hl=GHILITE,nodes=(FG.graphData().nodes)||[],halo=cssvar('--bg');const focus=hl&&GADJ[hl]&&GADJ[hl].size>1;const cap=Math.round((G.labelDensity||40)*Math.max(0.3,scale-1));ctx.textAlign='center';ctx.textBaseline='top';ctx.lineJoin='round';for(let i=0;i<nodes.length;i++){const node=nodes[i];if(node.x==null)continue;const isNb=focus&&(node.id===hl||(GADJ[hl]&&GADJ[hl].has(node.id)));if(focus&&!isNb)continue;const rank=GLABELRANK[node.id];if(!(isNb||(rank!==undefined&&rank<cap)))continue;const r=Math.max(1.2,G.size*Math.sqrt(node.val)*0.45),fs=G.font/scale,y=node.y+r+2/scale;ctx.font=fs+'px -apple-system,Segoe UI,sans-serif';ctx.lineWidth=3/scale;ctx.strokeStyle=halo;ctx.strokeText(node.label,node.x,y);ctx.fillStyle=window.GCOL.label;ctx.fillText(node.label,node.x,y)}});
- FG.d3Force('charge').strength(-window.GSET.repel);
- FG.d3Force('link').distance(window.GSET.link);
- if(hasD3){FG.d3Force('x',d3.forceX(0).strength(window.GSET.gravity/100));FG.d3Force('y',d3.forceY(0).strength(window.GSET.gravity/100));FG.d3Force('collide',d3.forceCollide(n=>Math.max(2,window.GSET.size*Math.sqrt(n.val)*0.45)+1.5))}
+ FG.nodeCanvasObject((node,ctx,scale)=>{
+  const settings=window.GSET,focus=GHILITE&&GADJ[GHILITE]&&GADJ[GHILITE].size>1;
+  const neighbor=focus&&(node.id===GHILITE||(GADJ[GHILITE]&&GADJ[GHILITE].has(node.id))),dim=focus&&!neighbor;
+  const radius=Math.max(1.4,settings.size*Math.sqrt(node.val)*.45),color=etypeColor(node.etype);
+  ctx.globalAlpha=dim?.1:1;
+  if(!dim&&(node.id===GHILITE||node.degree>=4)){
+   ctx.beginPath();ctx.arc(node.x,node.y,radius+2.5/scale,0,2*Math.PI);ctx.fillStyle=color;ctx.globalAlpha=node.id===GHILITE?.28:.12;ctx.fill();ctx.globalAlpha=1;
+  }
+  ctx.beginPath();ctx.arc(node.x,node.y,radius,0,2*Math.PI);ctx.fillStyle=color;ctx.fill();
+  if(settings.mode==='constellation'&&!dim){ctx.beginPath();ctx.arc(node.x,node.y,Math.max(.7,radius*.26),0,2*Math.PI);ctx.fillStyle=window.GCOL.label;ctx.globalAlpha=.72;ctx.fill()}
+  if(node.id===GHILITE){ctx.beginPath();ctx.arc(node.x,node.y,radius+1.2/scale,0,2*Math.PI);ctx.lineWidth=1.4/scale;ctx.strokeStyle=window.GCOL.label;ctx.globalAlpha=1;ctx.stroke()}
+  ctx.globalAlpha=1;
+ });
+ FG.nodePointerAreaPaint((node,color,ctx)=>{const radius=Math.max(3,window.GSET.size*Math.sqrt(node.val)*.45)+3;ctx.beginPath();ctx.arc(node.x,node.y,radius,0,2*Math.PI);ctx.fillStyle=color;ctx.fill()});
+ FG.linkColor(link=>{
+  const C=window.GCOL,focus=GHILITE&&GADJ[GHILITE]&&GADJ[GHILITE].size>1;
+  const source=(link.source&&link.source.id)||link.source,target=(link.target&&link.target.id)||link.target,active=!focus||source===GHILITE||target===GHILITE;
+  const color={temporal:cssvar('--color-info'),entity:cssvar('--color-teal'),causal:cssvar('--color-warning'),semantic:C.accent}[link.layer]||('rgb('+C.edgeRgb+')');
+  return graphAlpha(color,active?(focus?.78:.34):.045);
+ });
+ FG.linkWidth(link=>{const width=window.GSET.linkw||1,focus=GHILITE&&GADJ[GHILITE]&&GADJ[GHILITE].size>1;if(!focus)return .8*width;const source=(link.source&&link.source.id)||link.source,target=(link.target&&link.target.id)||link.target;return (source===GHILITE||target===GHILITE)?1.8*width:.3*width});
+ if(FG.linkLineDash)FG.linkLineDash(link=>link.layer==='temporal'?[4,3]:(link.layer==='causal'?[2,2]:null));
+ if(FG.linkCurvature)FG.linkCurvature(mode.curve);
+ FG.linkDirectionalArrowLength(2.5).linkDirectionalArrowRelPos(1);
+ if(FG.linkDirectionalParticles){FG.linkDirectionalParticles(reduced?0:mode.particles).linkDirectionalParticleWidth(1.7).linkDirectionalParticleSpeed(.004)}
+ if(G.labels){
+  FG.linkCanvasObjectMode(()=>'after').linkCanvasObject((link,ctx,scale)=>{
+   if(scale<2.4||!link.label||!link.source.x)return;
+   const fontSize=(G.font*.82)/scale;
+   ctx.font=fontSize+'px sans-serif';ctx.fillStyle=window.GCOL.dim;ctx.textAlign='center';ctx.textBaseline='middle';
+   ctx.fillText(link.label,(link.source.x+link.target.x)/2,(link.source.y+link.target.y)/2);
+  });
+ }else{FG.linkCanvasObjectMode(()=>undefined)}
+ FG.onRenderFramePost((ctx,scale)=>{
+  const settings=window.GSET;
+  if(!(settings.font>0))return;
+  const highlighted=GHILITE,nodes=(FG.graphData().nodes)||[],focus=highlighted&&GADJ[highlighted]&&GADJ[highlighted].size>1;
+  const cap=Math.round((settings.labelDensity||40)*Math.max(.32,scale-.85));
+  ctx.textAlign='center';ctx.textBaseline='top';ctx.lineJoin='round';
+  for(let index=0;index<nodes.length;index++){
+   const node=nodes[index];
+   if(node.x==null)continue;
+   const neighbor=focus&&(node.id===highlighted||(GADJ[highlighted]&&GADJ[highlighted].has(node.id)));
+   if(focus&&!neighbor)continue;
+   const rank=GLABELRANK[node.id];
+   if(!(neighbor||(rank!==undefined&&rank<cap)))continue;
+   const radius=Math.max(1.4,settings.size*Math.sqrt(node.val)*.45),fontSize=settings.font/scale,y=node.y+radius+2/scale;
+   ctx.font=fontSize+'px -apple-system,Segoe UI,sans-serif';ctx.lineWidth=3/scale;ctx.strokeStyle=window.GCOL.panel;
+   ctx.strokeText(node.label,node.x,y);ctx.fillStyle=window.GCOL.label;ctx.fillText(node.label,node.x,y);
+  }
+ });
  FG.graphData(data);
+ graphApplyForces();
  if(!reduced)FG.d3ReheatSimulation();
- clearTimeout(window.__gfit);if(fit){if(reduced)requestAnimationFrame(()=>{if(FG)FG.zoomToFit(0,60)});else window.__gfit=setTimeout(()=>{if(FG)FG.zoomToFit(600,60)},1600)}
+ clearTimeout(window.__gfit);
+ if(fit){
+  if(reduced)requestAnimationFrame(()=>{if(FG)FG.zoomToFit(0,72)});
+  else window.__gfit=setTimeout(()=>{if(FG)FG.zoomToFit(520,72)},1250);
+ }
 }
-function graphSet(key,val){window.GSET[key]=Number(val);if(!FG)return;let layout=false;if(key==='repel'){FG.d3Force('charge').strength(-window.GSET.repel);layout=true}else if(key==='link'){FG.d3Force('link').distance(window.GSET.link);layout=true}else if(key==='gravity'){if(typeof d3!=='undefined'){FG.d3Force('x').strength(window.GSET.gravity/100);FG.d3Force('y').strength(window.GSET.gravity/100);layout=true}}else if(key==='linkw'){FG.linkWidth(FG.linkWidth());FG.linkColor(FG.linkColor())}if(layout){if(prefersReducedMotion())graphRender(false);else FG.d3ReheatSimulation()}}
+function graphSet(key,val){
+ window.GSET[key]=Number(val);
+ window.GSET.mode='custom';
+ const picker=document.getElementById('graph-preset'),help=document.getElementById('graph-preset-help');
+ if(picker)picker.value='custom';
+ if(help)help.textContent='Custom tuning · the force and label controls below now define this view.';
+ if(!FG)return;
+ const layout=key==='repel'||key==='link'||key==='gravity'||key==='size';
+ if(layout)graphApplyForces();
+ if(key==='linkw'){FG.linkWidth(FG.linkWidth());FG.linkColor(FG.linkColor())}
+ else graphRedraw();
+ if(layout){if(prefersReducedMotion())graphRender(false);else FG.d3ReheatSimulation()}
+}
+function graphApplyPreset(name){
+ const preset=GRAPH_PRESETS[name]||GRAPH_PRESETS.compact;
+ window.GSET.mode=GRAPH_PRESETS[name]?name:'compact';
+ if(name!=='custom'){
+  ['repel','link','gravity','font','size','linkw','labelDensity'].forEach(key=>{
+   window.GSET[key]=preset[key];
+   const control=document.querySelector('[data-graph-setting="'+key+'"]');
+   if(control)control.value=preset[key]*(Number(control.dataset.graphScale)||1);
+  });
+ }
+ const notes={
+  original:'Original force graph · stronger repulsion and weak centering reproduce the previous, wider spacing.',
+  compact:'Compact clusters · shorter links, gentler repulsion and stronger centering keep connected memories together.',
+  communities:'Community islands · connected components are packed around nearby component centers.',
+  radial:'Radial orbit · high-degree entities settle near the center while lower-degree entities form outer rings.',
+  constellation:'Constellation flow · a dense curved-link view with subtle directional particles.',
+  custom:'Custom tuning · the force and label controls below define this view.'
+ };
+ const help=document.getElementById('graph-preset-help');
+ if(help)help.textContent=notes[window.GSET.mode];
+ if(FG)graphRender(true);
+}
 function graphToggleLabels(cb){window.GSET.labels=cb.checked;graphRender()}
-function graphRecolor(){if(!FG||!window.GCOL)return;window.GCOL.label=cssvar('--text');window.GCOL.dim=cssvar('--text-dim');window.GCOL.accent=cssvar('--accent');window.GCOL.edgeRgb=cssvar('--graph-edge');FG.linkColor(FG.linkColor());FG.linkWidth(FG.linkWidth())}
+function graphRecolor(){if(!FG||!window.GCOL)return;window.GCOL.label=cssvar('--color-text');window.GCOL.dim=cssvar('--color-text-dim');window.GCOL.accent=cssvar('--color-accent');window.GCOL.edgeRgb=cssvar('--graph-edge');window.GCOL.panel=cssvar('--color-panel');FG.linkColor(FG.linkColor());FG.linkWidth(FG.linkWidth());graphRedraw()}
 function graphFit(){if(FG)FG.zoomToFit(prefersReducedMotion()?0:600,60)}
 function graphReheat(){if(!FG)return;if(prefersReducedMotion()){toast('Layout motion is off because reduced motion is enabled.','ok');return}FG.d3ReheatSimulation()}
-function graphFocus(name){clearTimeout(window.__gfit);const n=FG&&(FG.graphData().nodes||[]).find(x=>x.id===name),duration=prefersReducedMotion()?0:700;if(n&&n.x!=null){GHILITE=name;FG.centerAt(n.x,n.y,duration);FG.zoom(5,duration);FG.refresh();syncGraphExplorerSelection(name)}else{const hi=document.getElementById('graph-hide-iso');if(hi&&hi.checked){hi.checked=false;graphRender(false);setTimeout(()=>graphFocus(name),duration?600:0)}else toast('Entity not in view','err')}}
+function graphFocus(name){clearTimeout(window.__gfit);const n=FG&&(FG.graphData().nodes||[]).find(x=>x.id===name),duration=prefersReducedMotion()?0:700;if(n&&n.x!=null){GHILITE=name;FG.centerAt(n.x,n.y,duration);FG.zoom(5,duration);graphRedraw();syncGraphExplorerSelection(name)}else{const hi=document.getElementById('graph-hide-iso');if(hi&&hi.checked){hi.checked=false;graphRender(false);setTimeout(()=>graphFocus(name),duration?600:0)}else toast('Entity not in view','err')}}
 function graphSearch(){const q=document.getElementById('graph-search').value.trim().toLowerCase();if(!q||!GRAPH)return;const m=GRAPH.nodes.find(n=>(n.label||n.id||'').toLowerCase().includes(q));if(m){graphFocus(m.id);const ex=document.getElementById('graph-explorer-search');if(ex){ex.value=q;renderGraphExplorer(q)}}else toast('No entity matches','err')}
 function closeEntityMems(){document.getElementById('mm-overlay').classList.remove('show')}
 async function graphNodeClick(name){const ov=document.getElementById('mm-overlay');ov.classList.add('show');document.getElementById('mm-title').textContent=name;document.getElementById('mm-meta').innerHTML='<span class="pill pill-accent">entity</span>';document.getElementById('mm-body').innerHTML='<div class="spinner" style="margin:16px auto"></div>';document.getElementById('mm-actions').innerHTML='';try{const d=await api('/memories?q='+encodeURIComponent(name)+'&workspace='+encodeURIComponent(WS||'')+'&limit=12');document.getElementById('mm-body').innerHTML=d.memories.length?('<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Memories mentioning this entity</div>'+d.memories.map(m=>`<div data-memory-id="${esc(m.id)}" style="padding:8px 0;border-bottom:1px solid var(--surface2);cursor:pointer" onclick="closeEntityMems();openMem(this.dataset.memoryId)"><div style="font-weight:500;font-size:16px">${esc(m.title||m.id)}</div><div style="font-size:12px;color:var(--text-muted)">${esc((m.content||'').slice(0,220))}</div></div>`).join('')):'<div class="empty" style="padding:16px">No memories mention this entity by name.</div>'}catch(e){document.getElementById('mm-body').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}}
@@ -1342,7 +1591,19 @@ initTheme();
 // the login form underneath the reset form.
 (async function(){RESET_TOKEN=getResetToken();if(RESET_TOKEN){AUTH_SKIPPED=true;showResetForm();boot();return}try{const st=await api('/auth/state');TEAM_ENABLED=!!st.enabled;TEAM_USER=st.enabled?(st.user||null):null;updateSessionIndicator(TEAM_USER);if(st.enabled&&!st.user){showAuth(st)}}catch(e){}boot()})();
 setInterval(checkHealth,30000);
-document.addEventListener('keydown',e=>{if(e.key!=='Escape')return;const mm=document.getElementById('mm-overlay');if(mm&&mm.classList.contains('show')){closeEntityMems();return}const au=document.getElementById('auth-overlay');if(au&&au.classList.contains('show')){closeAuth();return}const tm=document.getElementById('theme-menu');if(tm&&tm.style.display==='block'){closeThemeMenu();document.getElementById('theme-btn').focus();return}if(document.querySelector('.app').classList.contains('mobile-nav-open')){closeMobileNav();document.getElementById('mobile-nav-toggle').focus();return}if(document.getElementById('view-mem-editor').classList.contains('active'))closeMem();});
+document.addEventListener('keydown',event=>{
+ if(event.key!=='Escape')return;
+ const memories=document.getElementById('mm-overlay');
+ if(memories&&memories.classList.contains('show')){closeEntityMems();return}
+ const folder=document.getElementById('folder-overlay');
+ if(folder&&folder.classList.contains('show')){closeFolderCreate();return}
+ const auth=document.getElementById('auth-overlay');
+ if(auth&&auth.classList.contains('show')){closeAuth();return}
+ const theme=document.getElementById('theme-menu');
+ if(theme&&theme.style.display==='block'){closeThemeMenu();document.getElementById('theme-btn').focus();return}
+ if(document.querySelector('.app').classList.contains('mobile-nav-open')){closeMobileNav();document.getElementById('mobile-nav-toggle').focus();return}
+ if(document.getElementById('view-mem-editor').classList.contains('active'))closeMem();
+});
 </script>
 </body>
 </html>
