@@ -504,7 +504,35 @@ async def polar_webhook(request: Request):
         if not order_id and event_type.startswith("order."):
             order_id = str(data.get("id") or "").strip()[:128]
         if not sub_id and not order_id:
-            return JSONResponse({"status": "ignored", "reason": "missing revoke target",
+            # A plain 2xx here would tell Polar the delivery succeeded and stop
+            # redelivery, silently dropping a REVOCATION — a refunded or revoked customer
+            # keeps a working paid key forever with nothing left to retry. But a plain
+            # 5xx does not converge either: unlike the transient "revocation failed" case
+            # below, a payload with no ids will NEVER become mappable, so every redelivery
+            # re-enters this branch and fails identically, and sustained failures can get
+            # the endpoint disabled — which would then drop real order.paid fulfillments.
+            #
+            # So: answer retryably the FIRST time (visible in Polar's dashboard, and a
+            # genuinely transient shape glitch gets another chance), then converge to 2xx
+            # once a redelivery proves it is deterministic. The error log above is the
+            # durable alert either way. A dedicated claim namespace keeps this out of the
+            # way of the real delivery claim used further down.
+            logger.error("polar webhook: %s carries no subscription or order id — "
+                         "cannot map to a key to revoke", event_type)
+            unmappable_claim = "unmappable:" + webhook_id
+            unmappable_state = claim_webhook(unmappable_claim)
+            if unmappable_state == "claimed":
+                return JSONResponse(
+                    {"error": "missing revoke target", "type": event_type},
+                    status_code=503)
+            if unmappable_state != "fulfilled":
+                # Latch the claim so any FURTHER redelivery short-circuits straight to
+                # "fulfilled" above. Guarded because complete_webhook only accepts a claim
+                # that is still pending — calling it on an already-fulfilled one raises
+                # WebhookStateError, which would surface as a 500 and put us right back in
+                # the non-converging retry loop this branch exists to avoid.
+                complete_webhook(unmappable_claim)
+            return JSONResponse({"status": "unmappable", "reason": "missing revoke target",
                                  "type": event_type}, status_code=202)
         try:
             from engraphis.inspector import license_registry as _reg

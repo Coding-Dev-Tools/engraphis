@@ -27,6 +27,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+import math
 import os
 import tempfile
 import threading
@@ -217,9 +218,29 @@ def verify_lease(token: str, *, now: Optional[float] = None) -> dict:
         payload = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
         raise LicenseError("lease payload is not valid JSON")
+    # A signed body that decodes to valid-but-non-dict JSON ("5", "null", "[]") would make
+    # the .get() below raise AttributeError instead of the LicenseError this function
+    # documents. Every current caller wraps this in a broad `except Exception` and so
+    # still fails closed, but a future caller catching LicenseError specifically would
+    # not — mirror parse_key's isinstance guard rather than rely on that.
+    if not isinstance(payload, dict):
+        raise LicenseError("lease payload is not a JSON object")
     exp = payload.get("expires")
     now = _monotonic_now() if now is None else now
-    if exp is None or now > float(exp):
+    if exp is None:
+        raise LicenseError("lease has expired")
+    try:
+        exp_f = float(exp)
+    except (TypeError, ValueError):  # non-numeric "expires" — unusable, not a 500
+        raise LicenseError("lease expiry is not a number")
+    # NaN and Infinity must be rejected EXPLICITLY, not left to the comparison below:
+    # `now > nan` and `now > inf` are both False, so either value would sail past the
+    # expiry check and yield a lease that NEVER expires — the one fail-OPEN in this
+    # function. json.loads accepts a bare `NaN`/`Infinity` literal by default, and
+    # float("inf") accepts the string form, so both are reachable from a payload.
+    if not math.isfinite(exp_f):
+        raise LicenseError("lease expiry is not a finite number")
+    if now > exp_f:
         raise LicenseError("lease has expired")
     return payload
 

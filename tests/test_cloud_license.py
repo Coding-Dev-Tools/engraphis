@@ -198,6 +198,39 @@ def test_expired_lease_is_rejected():
         cloud_license.verify_lease(expired)
 
 
+@pytest.mark.parametrize("expires", [float("nan"), float("inf"), "inf", "NaN"])
+def test_non_finite_lease_expiry_is_rejected(expires):
+    """A lease whose ``expires`` is NaN or Infinity must NOT verify.
+
+    Both `now > nan` and `now > inf` evaluate to False, so a non-finite expiry would
+    sail straight past the expiry comparison and yield a lease that never expires — the
+    one fail-OPEN in verify_lease. json.loads accepts a bare `NaN`/`Infinity` literal by
+    default and float() accepts the string forms, so both are reachable from a payload."""
+    lease = cloud_license.compose_lease(
+        {"v": 1, "key_id": "x", "plan": "pro", "features": ["sync"],
+         "machine_id": "m", "issued": 0, "expires": expires}, SECRET)
+    with pytest.raises(LicenseError, match="finite"):
+        cloud_license.verify_lease(lease)
+
+
+@pytest.mark.parametrize("payload", [5, None, [], "lease"])
+def test_non_object_lease_payload_is_rejected(payload):
+    """A correctly-signed body that decodes to valid-but-non-dict JSON must raise
+    LicenseError, not AttributeError — verify_lease documents LicenseError, and a caller
+    that catches it specifically (rather than bare Exception) would otherwise crash."""
+    lease = cloud_license.compose_lease(payload, SECRET)
+    with pytest.raises(LicenseError, match="JSON object"):
+        cloud_license.verify_lease(lease)
+
+
+def test_non_numeric_lease_expiry_is_rejected():
+    lease = cloud_license.compose_lease(
+        {"v": 1, "key_id": "x", "plan": "pro", "features": ["sync"],
+         "machine_id": "m", "issued": 0, "expires": "whenever"}, SECRET)
+    with pytest.raises(LicenseError, match="not a number"):
+        cloud_license.verify_lease(lease)
+
+
 # ── client gate: cloud mode fails closed ────────────────────────────────────────────────
 
 def _wire_register_to(client, monkeypatch):
@@ -1208,6 +1241,97 @@ def test_start_team_trial_resend_supersedes_earlier_unclicked_link(monkeypatch):
 
     fresh = c.get("/license/v1/start-trial/verify", params={"token": new_token})
     assert fresh.status_code == 200
+
+
+def test_start_trial_sweeps_expired_pending_links(monkeypatch):
+    """A magic link that is never opened must not sit in trial_pending forever.
+
+    Before the sweep, a pending row was only ever cleared by the SAME machine_id asking
+    again or by that exact token being redeemed — so links that simply go unclicked
+    (bounced mail, a scanner that never follows, an attacker who never intends to redeem)
+    accumulated one row per request, letting anyone at the /start-trial rate-limit ceiling
+    grow the relay volume without bound. Any later reservation must now drop them."""
+    c = _app()
+    captured = _capture_verify_url(monkeypatch)
+
+    assert c.post("/license/v1/start-trial",
+                  json={"machine_id": "dev-abandoned",
+                        "email": "abandoned@example.com"}).status_code == 200
+    abandoned_token = _token_from_url(captured["url"])
+
+    def _pending_machine_ids():
+        conn = reg.connect()
+        try:
+            return {r[0] for r in conn.execute(
+                "SELECT machine_id FROM trial_pending").fetchall()}
+        finally:
+            conn.close()
+
+    assert "dev-abandoned" in _pending_machine_ids()
+
+    # Age the abandoned link well past its retention window, not merely past its TTL:
+    # a link that lapsed only moments ago is deliberately RETAINED so that
+    # verify_team_trial can still say "expired" rather than "invalid" (see
+    # test_expired_link_keeps_saying_expired_after_an_unrelated_reservation below).
+    conn = reg.connect()
+    try:
+        conn.execute("UPDATE trial_pending SET expires_at=? WHERE machine_id=?",
+                     (time.time() - license_cloud._TRIAL_PENDING_RETENTION_SECONDS - 60,
+                      "dev-abandoned"))
+        conn.commit()
+    finally:
+        conn.close()
+
+    # A reservation by a DIFFERENT device is what has to collect the garbage — the
+    # abandoned device is by definition never coming back to clear its own row.
+    assert c.post("/license/v1/start-trial",
+                  json={"machine_id": "dev-other",
+                        "email": "other@example.com"}).status_code == 200
+
+    remaining = _pending_machine_ids()
+    assert "dev-abandoned" not in remaining, "expired pending link was not swept"
+    assert "dev-other" in remaining, "sweep must not drop the still-valid link"
+
+    # The swept link is genuinely dead, not merely hidden.
+    assert c.get("/license/v1/start-trial/verify",
+                 params={"token": abandoned_token}).status_code == 400
+
+
+def test_expired_link_keeps_saying_expired_after_an_unrelated_reservation(monkeypatch):
+    """The retention window exists so the expiry diagnostic survives the sweep.
+
+    Sweeping rows the instant they lapse would bound the table but silently downgrade
+    "this link has expired — request a new trial" into "this link is invalid or has
+    already been used", and would do it NON-deterministically: which message a user saw
+    would depend on whether some unrelated device happened to call /start-trial in
+    between. Regression test for exactly that."""
+    c = _app()
+    captured = _capture_verify_url(monkeypatch)
+
+    assert c.post("/license/v1/start-trial",
+                  json={"machine_id": "dev-late-clicker",
+                        "email": "late@example.com"}).status_code == 200
+    token = _token_from_url(captured["url"])
+
+    # Lapse the link (past TTL) but keep it inside the retention window.
+    conn = reg.connect()
+    try:
+        conn.execute("UPDATE trial_pending SET expires_at=? WHERE machine_id=?",
+                     (time.time() - 60, "dev-late-clicker"))
+        conn.commit()
+    finally:
+        conn.close()
+
+    # An unrelated device reserves — this is what runs the sweep.
+    assert c.post("/license/v1/start-trial",
+                  json={"machine_id": "dev-unrelated",
+                        "email": "unrelated@example.com"}).status_code == 200
+
+    late = c.get("/license/v1/start-trial/verify", params={"token": token})
+    assert late.status_code == 400
+    assert "expired" in late.text.lower(), (
+        "expired link must still report EXPIRED after an unrelated reservation, got: %s"
+        % late.text[:200])
 
 
 def test_start_team_trial_rejects_grant_after_device_already_confirmed(monkeypatch):

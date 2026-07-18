@@ -332,7 +332,13 @@ def attach(app: FastAPI, service):
 
     @router.get("/users")
     def users(request: Request):
-        _require(request, "member")
+        # "admin", not "member": auth.min_role() maps every /api/auth/users* path to admin
+        # and runs FIRST in dashboard_app's _auth_gate middleware, so a member is already
+        # refused upstream and a laxer check here is dead code that only misleads. Keeping
+        # the two in agreement means min_role() stays the single source of truth and this
+        # route can't quietly become the weaker one if the router is ever mounted without
+        # that middleware.
+        _require(request, "admin")
         return {"users": store.list_users()}
 
     @router.post("/users")

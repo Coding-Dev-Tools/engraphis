@@ -3,6 +3,43 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [Unreleased]
+
+Follow-up audit of the Team / Pro / licensing / relay surfaces after 0.9.8.
+
+### Security
+
+- `verify_lease` now rejects a non-finite `expires` (`NaN`, `Infinity`). Both `now > nan`
+  and `now > inf` are False, so such a lease previously passed the expiry check and never
+  expired — the one fail-open in lease verification. It also rejects a signed body that
+  decodes to valid-but-non-dict JSON, and a non-numeric `expires`, with `LicenseError`
+  rather than an uncaught `AttributeError`/`ValueError`. Exploiting any of these still
+  required the vendor signing key, so no issued lease is affected.
+
+### Fixed
+
+- The relay sweeps `trial_pending` rows that lapsed over a day ago. Previously a magic
+  link that was never opened (bounced mail, a link scanner that never follows) was only
+  ever cleared when the same `machine_id` asked again, letting a caller at the
+  `/start-trial` rate-limit ceiling grow the table without bound on the volume that also
+  holds `relay.db`. The one-day retention window is deliberate: sweeping at expiry would
+  downgrade "this link has expired — request a new trial" into "this link is invalid or
+  has already been used", non-deterministically, depending on whether an unrelated device
+  happened to reserve in between.
+- A revoking Polar webhook (`order.refunded`, `subscription.revoked`) that carries neither
+  a subscription id nor an order id is no longer answered `202`. A 2xx stops Polar's
+  redelivery, so an unexpected payload shape silently dropped the revocation and left a
+  refunded customer with a working paid key. It now answers retryably on first delivery
+  and converges to `202` once a redelivery proves the payload is deterministically
+  unmappable — a permanent 5xx loop risks the endpoint being disabled, which would then
+  drop real `order.paid` fulfillments.
+
+### Changed
+
+- `GET /api/auth/users` checks `admin` at the route, matching `auth.min_role()`. The
+  middleware already enforced admin, so this is defense in depth with no behaviour change;
+  the route previously said `member`, which was dead code that misrepresented the policy.
+
 ## [0.9.8] - 2026-07-18
 
 Hardening release focused on dependable installation, upgrades, startup, dashboard use,

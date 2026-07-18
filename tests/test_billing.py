@@ -621,6 +621,47 @@ def test_order_refunded_without_subscription_revokes_by_order(monkeypatch):
     assert reg.is_revoked(key_id) is True
 
 
+def test_unmappable_revoke_event_is_retryable_not_silently_dropped(monkeypatch):
+    """A revoking event we cannot map to a key must NOT answer 2xx.
+
+    Polar stops redelivering once it sees a 2xx, so returning 202 for an unmappable
+    revoke would silently drop the revocation entirely — a refunded customer keeps a
+    working paid key with nothing left to retry. A 5xx keeps the delivery on Polar's
+    retry queue where it stays visible."""
+    client = _inspector_client(monkeypatch)
+    # A revoking event whose payload carries no subscription id and no order id at all.
+    orphan = _body({"type": "subscription.revoked", "data": {"customer": {}}})
+
+    first = _post(client, WHSEC, "evt_revoke_no_target", orphan)
+    assert first.status_code >= 500, (
+        "unmappable revoke must be retryable on first delivery, got %s" % first.status_code)
+    assert first.json().get("error") == "missing revoke target"
+
+
+def test_unmappable_revoke_event_converges_instead_of_retrying_forever(monkeypatch):
+    """...but it must not 5xx forever either.
+
+    A payload with no ids will NEVER become mappable, so an unconditional 5xx means every
+    redelivery fails identically and sustained failures can get the whole endpoint
+    disabled — which would then drop real order.paid fulfillments. One retryable answer,
+    then converge to 2xx."""
+    client = _inspector_client(monkeypatch)
+    orphan = _body({"type": "subscription.revoked", "data": {"customer": {}}})
+
+    assert _post(client, WHSEC, "evt_revoke_converge", orphan).status_code >= 500
+    # Same webhook-id redelivered: proven deterministic, so stop the retry loop.
+    replay = _post(client, WHSEC, "evt_revoke_converge", orphan)
+    assert replay.status_code == 202, (
+        "redelivery of an unmappable revoke must converge, got %s" % replay.status_code)
+    assert replay.json().get("status") == "unmappable"
+    # And it stays converged.
+    assert _post(client, WHSEC, "evt_revoke_converge", orphan).status_code == 202
+
+    # A DIFFERENT delivery still gets its own first-time retryable answer — convergence
+    # is per-delivery, not a global latch that would mute a later real failure.
+    assert _post(client, WHSEC, "evt_revoke_other", orphan).status_code >= 500
+
+
 def test_subscription_canceled_honors_paid_period(monkeypatch):
     client = _inspector_client(monkeypatch)
     order = _body({"type": "order.paid", "data": {

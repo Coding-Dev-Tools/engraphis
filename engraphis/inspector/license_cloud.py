@@ -647,11 +647,25 @@ CREATE TABLE IF NOT EXISTS trial_pending (
     expires_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS trial_pending_machine_idx ON trial_pending(machine_id);
+-- The retention sweep in _reserve_trial filters on expires_at while holding the write
+-- lock; without this it is a full scan of exactly the table the sweep exists to bound.
+CREATE INDEX IF NOT EXISTS trial_pending_expires_idx ON trial_pending(expires_at);
 """
 
 #: How long a magic link stays valid. Long enough to go check an inbox, short enough
 #: that an unclicked link isn't a standing liability sitting in the DB.
 _TRIAL_TOKEN_TTL_SECONDS = 1800
+
+#: How long an ALREADY-EXPIRED pending row is kept before it is swept (see the sweep in
+#: :func:`_reserve_trial`). Deleting expired rows the instant they lapse would bound the
+#: table but silently break the diagnostic in :func:`verify_team_trial`: that function
+#: distinguishes "this link has expired — request a new trial" (row still present, past
+#: its TTL) from "this link is invalid or has already been used" (row gone). Sweeping
+#: eagerly collapses the first message into the second, and does so NON-deterministically
+#: — the message a user sees would depend on whether some unrelated device happened to
+#: call /start-trial between the link lapsing and the user clicking it. A day of grace
+#: keeps the honest message while still bounding growth to roughly one day of requests.
+_TRIAL_PENDING_RETENTION_SECONDS = 86400
 
 _TRIAL_RATE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS trial_start_attempts (
@@ -826,6 +840,18 @@ def _reserve_trial(mid: str, email: str, plan: str) -> Optional[str]:
             if existing:
                 conn.execute("COMMIT")
                 return None
+            # Drop pending links that lapsed more than a day ago. Without this, a row
+            # whose magic link is NEVER opened (bounced mail, a scanner that never
+            # follows, an attacker who never intended to redeem) is only ever cleared by
+            # the same machine_id asking again — so an attacker rotating machine_id at the
+            # /start-trial rate-limit ceiling grows this table without bound on the same
+            # volume that holds relay.db. Same reasoning and same free-inside-the-lock
+            # placement as the trial_start_attempts and team_invite_sends sweeps above.
+            # The retention window is deliberate, NOT slack: see
+            # _TRIAL_PENDING_RETENTION_SECONDS — sweeping at expiry would turn
+            # verify_team_trial's "this link has expired" into "this link is invalid".
+            conn.execute("DELETE FROM trial_pending WHERE expires_at < ?",
+                         (now - _TRIAL_PENDING_RETENTION_SECONDS,))
             conn.execute("DELETE FROM trial_pending WHERE machine_id=?", (mid,))
             conn.execute(
                 "INSERT INTO trial_pending(token_hash, machine_id, email, plan, "
