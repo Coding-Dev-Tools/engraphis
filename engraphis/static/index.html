@@ -616,6 +616,7 @@ body{
 <div class="graph-action-row"><button class="btn btn-ghost btn-sm" onclick="loadGraph()">Refresh</button><button class="btn btn-ghost btn-sm" onclick="graphReheat()">Reheat</button><button class="btn btn-ghost btn-sm" onclick="graphFit()">Fit</button></div>
 <div class="graph-preset">
 <div class="graph-preset-row"><label class="field-lbl" for="graph-preset">Graph view</label><select class="select select-sm" id="graph-preset" onchange="graphApplyPreset(this.value)"><option value="compact" selected>Compact clusters</option><option value="original">Original force graph</option><option value="communities">Community islands</option><option value="radial">Radial orbit</option><option value="constellation">Constellation flow</option><option value="custom">Custom tuning</option></select></div>
+<div class="graph-preset-row"><label class="field-lbl" for="graph-style">Style</label><select class="select select-sm" id="graph-style" onchange="graphSetStyle(this.value)"><option value="cyber" selected>Cyberpunk</option><option value="galaxy">Galaxy</option><option value="solar">Solar system</option><option value="classic">Classic</option></select></div>
 <div class="graph-preset-help" id="graph-preset-help">Tighter packing for disconnected components, with quieter relationships and clearer nodes.</div>
 </div>
 <div class="graph-control-section">
@@ -1370,7 +1371,7 @@ function graphLoadColorPreferences(){
  }catch(e){GCOLOR_OVERRIDES={};GCOLOR_PALETTE='theme'}
 }
 function graphSaveColorPreferences(){try{localStorage.setItem(GRAPH_COLOR_KEY,JSON.stringify({palette:GCOLOR_PALETTE,colors:GCOLOR_OVERRIDES}))}catch(e){}}
-function graphTypeColor(type){return GCOLOR_OVERRIDES[type]||cssvar(ETYPE_TOKEN[type]||'--entity-concept',cssvar('--color-accent','#8c83e8'))}
+function graphTypeColor(type){if(GCOLOR_OVERRIDES[type])return GCOLOR_OVERRIDES[type];if(typeof GSTYLE!=='undefined'&&GSTYLE&&GSTYLE!=='classic'&&STYLE_PAL[GSTYLE]&&STYLE_PAL[GSTYLE][type])return STYLE_PAL[GSTYLE][type];return cssvar(ETYPE_TOKEN[type]||'--entity-concept',cssvar('--color-accent','#8c83e8'))}
 function graphContrastColor(color){if(!graphValidColor(color))return cssvar('--color-canvas','#0e1014');const n=parseInt(color.slice(1),16),lum=.2126*(n>>16)+.7152*((n>>8)&255)+.0722*(n&255);return lum>150?'#111827':'#f8fafc'}
 const ETYPE_COLOR=new Proxy({},{get:(_,type)=>graphTypeColor(type)});
 graphLoadColorPreferences();
@@ -1484,10 +1485,71 @@ function graphAlpha(color,alpha){
  return rgb&&rgb.length>=3?`rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha})`:color;
 }
 function graphReadThemeColors(){
- const layers={temporal:cssvar('--color-info','#6f9fd8'),entity:cssvar('--color-teal','#5aafb3'),causal:cssvar('--color-warning','#d7a84b'),semantic:cssvar('--color-accent','#8c83e8')};
+ const layers=(typeof GSTYLE!=='undefined'&&GSTYLE&&GSTYLE!=='classic'&&STYLE_LAYERS[GSTYLE])?Object.assign({},STYLE_LAYERS[GSTYLE]):{temporal:cssvar('--color-info','#6f9fd8'),entity:cssvar('--color-teal','#5aafb3'),causal:cssvar('--color-warning','#d7a84b'),semantic:cssvar('--color-accent','#8c83e8')};
  const baseAlpha=GPERF.dense?.18:.32,links={};
  Object.entries(layers).forEach(([layer,color])=>{links[layer]={base:graphAlpha(color,baseAlpha),active:graphAlpha(color,.82),dim:graphAlpha(color,.035)}});
  return {label:cssvar('--color-text','#e7e9ee'),dim:cssvar('--color-text-dim','#7e8795'),accent:cssvar('--color-accent','#8c83e8'),panel:cssvar('--color-panel','#15181e'),canvas:cssvar('--color-canvas','#0e1014'),layers,links};
+}
+/* ─── graph aesthetic styles (Galaxy · Solar system · Cyberpunk), additive ─── */
+var STYLE_PAL={
+ galaxy:{person_or_concept:'#b789ff',mention:'#7bb4ff',hashtag:'#ffcf6b',email:'#8aa2ff',organization:'#66e0d0',location:'#ff7ea8'},
+ solar:{person_or_concept:'#ffb454',mention:'#3fd2c7',hashtag:'#ffd68a',email:'#8ea8ff',organization:'#5b9bff',location:'#ff8f6b'},
+ cyber:{person_or_concept:'#ff3ea5',mention:'#b6ff3c',hashtag:'#ffe14d',email:'#8b7bff',organization:'#22e0ff',location:'#ff5c7a'}
+};
+var STYLE_LAYERS={
+ galaxy:{temporal:'#7bb4ff',entity:'#66e0d0',causal:'#ffcf6b',semantic:'#b789ff'},
+ solar:{temporal:'#5b9bff',entity:'#3fd2c7',causal:'#ffb454',semantic:'#ffd68a'},
+ cyber:{temporal:'#22e0ff',entity:'#b6ff3c',causal:'#ffe14d',semantic:'#ff3ea5'}
+};
+var STYLE_BG={
+ classic:'',
+ galaxy:'radial-gradient(58% 50% at 24% 22%,rgba(126,64,208,.30),transparent 66%),radial-gradient(52% 58% at 82% 78%,rgba(220,72,164,.20),transparent 68%),radial-gradient(46% 52% at 62% 42%,rgba(58,120,224,.16),transparent 70%),#06040f',
+ solar:'radial-gradient(40% 48% at 50% 50%,rgba(255,184,92,.16),transparent 60%),radial-gradient(90% 90% at 50% 50%,rgba(18,32,64,.55),transparent 82%),#05070d',
+ cyber:'linear-gradient(rgba(34,224,255,.055) 1px,transparent 1px) 0 0/30px 30px,linear-gradient(90deg,rgba(34,224,255,.055) 1px,transparent 1px) 0 0/30px 30px,radial-gradient(72% 60% at 50% 0%,rgba(255,62,165,.12),transparent 72%),#050810'
+};
+var GSTYLE='cyber';try{var _gs=localStorage.getItem('engraphis-graph-style');if(_gs)GSTYLE=_gs;}catch(e){}
+function graphMakeStars(){var a=[],c=['#dfe6ff','#dfe6ff','#c9b6ff','#a7c6ff','#ffd9ef'];for(var i=0;i<110;i++){a.push({x:(Math.random()-.5)*1200,y:(Math.random()-.5)*1200,r:Math.random()*1.1+.25,a:Math.random()*.7+.25,tw:Math.random()*1.6+.4,ph:Math.random()*6.28,c:c[i%c.length]});}return a;}
+var GSTARS=graphMakeStars();
+function graphLighten(c,amt){var r,g,b;if(c[0]==='#'){var n=parseInt(c.slice(1),16);r=n>>16&255;g=n>>8&255;b=n&255;}else{var m=c.match(/\d+/g);r=+m[0];g=+m[1];b=+m[2];}r=Math.round(r+(255-r)*amt);g=Math.round(g+(255-g)*amt);b=Math.round(b+(255-b)*amt);return 'rgb('+r+','+g+','+b+')';}
+function graphStyleBackground(ctx,scale){
+ if(GSTYLE==='galaxy'){
+  if(GPERF.large)return;var t=performance.now()/1000,S=GSTARS;ctx.save();ctx.globalCompositeOperation='lighter';
+  for(var i=0;i<S.length;i++){var s=S[i],al=s.a*(.5+.5*Math.sin(t*s.tw+s.ph));if(al<=.02)continue;ctx.globalAlpha=al;ctx.beginPath();ctx.arc(s.x,s.y,s.r,0,6.2832);ctx.fillStyle=s.c;ctx.fill();}ctx.restore();
+ }else if(GSTYLE==='solar'){
+  ctx.save();var g=ctx.createRadialGradient(0,0,2,0,0,130);g.addColorStop(0,'rgba(255,192,112,.20)');g.addColorStop(.6,'rgba(255,150,80,.05)');g.addColorStop(1,'rgba(255,150,80,0)');ctx.fillStyle=g;ctx.beginPath();ctx.arc(0,0,130,0,6.2832);ctx.fill();
+  ctx.strokeStyle='rgba(255,190,120,.10)';ctx.lineWidth=1/scale;var RR=[72,132,200,286,384];for(var k=0;k<RR.length;k++){ctx.beginPath();ctx.ellipse(0,0,RR[k],RR[k]*.66,0,0,6.2832);ctx.stroke();}ctx.restore();
+ }
+}
+function graphStyleNode(node,ctx,scale){
+ if(!Number.isFinite(node.x)||!Number.isFinite(node.y))return;
+ var focus=GHOVERSET&&GHOVERSET.size>1,neighbor=focus&&GHOVERSET.has(node.id),dim=focus&&!neighbor;
+ var r=node.radius,col=node.color,rich=node.id===GHILITE||neighbor||node.hub||node.degree>=3;
+ ctx.globalAlpha=dim?.12:1;
+ if(GSTYLE==='galaxy'){
+  if(rich&&!GPERF.large){ctx.save();ctx.globalCompositeOperation='lighter';var R=r*(node.id===GHILITE?4.4:3.0);var g=ctx.createRadialGradient(node.x,node.y,0,node.x,node.y,R);g.addColorStop(0,graphAlpha(col,dim?.15:.6));g.addColorStop(.42,graphAlpha(col,dim?.05:.16));g.addColorStop(1,graphAlpha(col,0));ctx.fillStyle=g;ctx.beginPath();ctx.arc(node.x,node.y,R,0,6.2832);ctx.fill();ctx.restore();}
+  ctx.beginPath();ctx.arc(node.x,node.y,r,0,6.2832);ctx.fillStyle=col;ctx.fill();
+  ctx.beginPath();ctx.arc(node.x,node.y,Math.max(.4,r*.4),0,6.2832);ctx.fillStyle='rgba(255,255,255,.9)';ctx.fill();
+ }else if(GSTYLE==='solar'){
+  var sun=node.rank===0;if(sun)r*=1.7;
+  if(rich&&!GPERF.large){ctx.save();ctx.globalCompositeOperation='lighter';var cc=sun?'#ffcf6b':col,R2=r*(sun?3.4:2.1);var g2=ctx.createRadialGradient(node.x,node.y,0,node.x,node.y,R2);g2.addColorStop(0,graphAlpha(cc,dim?.1:(sun?.6:.3)));g2.addColorStop(1,graphAlpha(cc,0));ctx.fillStyle=g2;ctx.beginPath();ctx.arc(node.x,node.y,R2,0,6.2832);ctx.fill();ctx.restore();}
+  if(!GPERF.large){var sg=ctx.createRadialGradient(node.x-r*.4,node.y-r*.4,Math.max(.1,r*.12),node.x,node.y,r);sg.addColorStop(0,graphLighten(sun?'#ffe4ad':col,.5));sg.addColorStop(1,sun?'#e08a25':col);ctx.fillStyle=sg;}else{ctx.fillStyle=col;}
+  ctx.beginPath();ctx.arc(node.x,node.y,r,0,6.2832);ctx.fill();
+ }else{
+  ctx.save();if(rich&&!GPERF.large){ctx.shadowColor=col;ctx.shadowBlur=dim?2:r*2.6;}ctx.beginPath();ctx.arc(node.x,node.y,r,0,6.2832);ctx.fillStyle=col;ctx.fill();ctx.restore();
+  ctx.beginPath();ctx.arc(node.x,node.y,Math.max(.4,r*.42),0,6.2832);ctx.fillStyle='#eafcff';ctx.fill();
+ }
+ if(node.id===GHILITE){ctx.lineWidth=1.3/scale;ctx.strokeStyle=GSTYLE==='cyber'?'#ffffff':'rgba(255,255,255,.9)';ctx.beginPath();ctx.arc(node.x,node.y,r+1.4/scale,0,6.2832);ctx.stroke();}
+ ctx.globalAlpha=1;
+}
+function graphApplyStyleChrome(){
+ var net=document.querySelector('.graph-network');if(net)net.style.background=STYLE_BG[GSTYLE]||'';
+ var sel=document.getElementById('graph-style');if(sel&&sel.value!==GSTYLE)sel.value=GSTYLE;
+}
+function graphSetStyle(name){
+ if(['classic','galaxy','solar','cyber'].indexOf(name)<0)name='cyber';
+ GSTYLE=name;try{localStorage.setItem('engraphis-graph-style',name)}catch(e){}
+ graphApplyStyleChrome();
+ if(GRAPH&&FG){graphRefreshNodeColors();graphRender(false,false);}
 }
 function graphApplyForces(){
  if(!FG)return;
@@ -1537,12 +1599,13 @@ function graphRender(fit=true,reheat=true){
   if(FG)FG.graphData({nodes:[],links:[]});
   graphUpdateHud(data);graphSetLayoutStatus('No entities',false);return;
  }
- empty.style.display='none';window.GCOL=graphReadThemeColors();graphUpdateHud(data);
+ empty.style.display='none';window.GCOL=graphReadThemeColors();graphApplyStyleChrome();graphUpdateHud(data);
  const reduced=prefersReducedMotion(),reheatButton=document.querySelector('#view-graph button[onclick="graphReheat()"]');
  if(reheatButton){reheatButton.setAttribute('aria-disabled',String(reduced));reheatButton.setAttribute('aria-label',reduced?'Reheat layout unavailable while reduced motion is enabled':'Reheat layout');reheatButton.title=reduced?'Unavailable while reduced motion is enabled':''}
  if(!FG){
   FG=ForceGraph()(element);
   FG.backgroundColor('rgba(0,0,0,0)').nodeRelSize(1).autoPauseRedraw(true)
+   .onRenderFramePre((ctx,scale)=>{try{graphStyleBackground(ctx,scale)}catch(e){}})
    .onNodeClick(node=>{syncGraphExplorerSelection(node.id);graphNodeClick(node.label)})
    .onNodeHover(node=>{graphSetHighlight(node&&node.id);element.style.cursor=node?'pointer':'grab'})
    .onEngineStop(()=>graphSetLayoutStatus(prefersReducedMotion()?'Static layout':'Layout settled',false));
@@ -1555,6 +1618,7 @@ function graphRender(fit=true,reheat=true){
  if(FG.d3AlphaDecay)FG.d3AlphaDecay(GPERF.large?.055:.035);
  if(FG.d3VelocityDecay)FG.d3VelocityDecay(GPERF.large?.45:.38);
  FG.nodeCanvasObject((node,ctx,scale)=>{
+  if(typeof GSTYLE!=='undefined'&&GSTYLE!=='classic'){graphStyleNode(node,ctx,scale);return;}
   const focus=GHOVERSET&&GHOVERSET.size>1,neighbor=focus&&GHOVERSET.has(node.id),dim=focus&&!neighbor,radius=node.radius,color=node.color;
   ctx.globalAlpha=dim?.08:1;
   if(!dim&&(node.id===GHILITE||node.hub)){
@@ -1575,7 +1639,7 @@ function graphRender(fit=true,reheat=true){
  if(FG.linkLineDash)FG.linkLineDash(GPERF.dense?null:(link=>link.layer==='temporal'?[4,3]:(link.layer==='causal'?[2,2]:null)));
  if(FG.linkCurvature)FG.linkCurvature(GPERF.dense?0:mode.curve);
  FG.linkDirectionalArrowLength(GPERF.dense?0:2.5).linkDirectionalArrowRelPos(1);
- if(FG.linkDirectionalParticles){FG.linkDirectionalParticles(reduced||data.links.length>800?0:mode.particles).linkDirectionalParticleWidth(1.7).linkDirectionalParticleSpeed(.004)}
+ if(FG.linkDirectionalParticles){FG.linkDirectionalParticles(reduced||data.links.length>800?0:(GSTYLE==='cyber'?2:mode.particles)).linkDirectionalParticleWidth(1.7).linkDirectionalParticleSpeed(.004)}
  if(settings.labels){
   FG.linkCanvasObjectMode(()=>'after').linkCanvasObject((link,ctx,scale)=>{
    if(scale<2.4||!link.label||!link.source.x||(GPERF.dense&&!GHILITE))return;

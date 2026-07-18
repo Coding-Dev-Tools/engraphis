@@ -41,6 +41,10 @@ their credentials and sessions live in a companion `<database>.users.db`; back u
 
 **You'll see the full product** — a dark-themed (with multiple theme options in left sidebar), sidebar-navigated dashboard with 14 tabs:
 
+**New graphical interface!** Shape the Knowledge Graph with several **Styles, Colors,
+and Presets**. Switch among Cyberpunk, Galaxy, Solar system, and Classic looks; choose
+a color palette and layout preset; or change the colors used for each type of node.
+
 | Tab | What you see |
 |-----|-------------|
 | **Overview** | Live memory counts, memory-type mix, and a health summary at a glance |
@@ -97,7 +101,7 @@ embeddings. You bring an LLM only for optional chat, synthesis, structured extra
 or structured consolidation.
 
 - **Local-first & private** — runs offline; the core depends only on `numpy`.
-- **MCP-native** — 28 tools for Claude Code, Cursor, Cline, Zed, Windsurf.
+- **MCP-native** — 28 tools for Claude Code, Command Code, Cursor, Cline, Zed, Windsurf.
 - **Self-maintaining facts** — writes are deterministically conflict-resolved (no LLM required).
 - **Advisory retention supervision** — an optional LLM can label writes as ephemeral, normal,
   or critical; outputs are bounded, clamped, audited, and can never silently drop a write.
@@ -246,6 +250,7 @@ the database at rest, and `ENGRAPHIS_LICENSE_KEY` to unlock Pro/Team features. S
 pip install "engraphis[mcp]"
 engraphis-init                     # writes .env + prints config snippets
 claude mcp add engraphis -- engraphis-mcp
+cmd mcp add engraphis -- engraphis-mcp  # Command Code CLI
 ```
 
 Your agent now has 28 tools — remember, recall (grounded + proactive), proactive context,

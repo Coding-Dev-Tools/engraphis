@@ -98,15 +98,18 @@ Follow-up audit of the graph, Team / Pro / licensing, and relay surfaces after 0
   remains build/check-only, and the release job is tag-gated behind successful PyPI
   publication.
 - The Knowledge Graph defaults to compact component-aware packing and adds community,
-  radial, constellation, original, and custom layouts; theme palettes and per-type node
-  colors; a synchronized keyboard-accessible explorer; collision-aware labels; and
-  responsive controls. Large graphs reuse rendered data, cap explorer DOM rows, reduce
-  animation work, and suppress expensive dense-graph effects.
+  radial, constellation, original, and custom layouts; selectable Cyberpunk, Galaxy,
+  Solar system, and Classic visual styles with persisted palettes; per-type node colors;
+  a synchronized keyboard-accessible explorer; collision-aware labels; and responsive
+  controls. Large graphs reuse rendered data, cap explorer DOM rows, reduce animation
+  work, and suppress expensive dense-graph effects.
 - The duplicate global Recall shortcut was removed from the dashboard header. Recall
   remains available in the Memory Operations sidebar and from contextual page actions.
 - The README comparison matrix now includes Obsidian and clarifies the distinctions
   between note-link graphs, agent memory, code awareness, encryption, and sleep-time
   consolidation.
+- The README now documents Command Code CLI as an MCP-native client and includes its
+  verified stdio registration command.
 
 ## [0.9.8] - 2026-07-18
 
