@@ -7,4 +7,4 @@ try:
 except PackageNotFoundError:  # source tree without an installed distribution
     # Keep in step with [project] version in pyproject.toml — tests/test_packaging.py
     # pins the two together so a release cannot ship them out of sync.
-    __version__ = "0.9.8"
+    __version__ = "0.9.9"
