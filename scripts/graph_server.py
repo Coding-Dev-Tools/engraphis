@@ -5,7 +5,6 @@ import argparse
 import ipaddress
 import os
 
-
 def _loopback(host: str) -> bool:
     # An empty host string makes the socket layer bind ALL interfaces, so it is
     # emphatically not loopback; any unparseable hostname is treated as
@@ -19,7 +18,6 @@ def _loopback(host: str) -> bool:
     except ValueError:
         return False
 
-
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="engraphis-graph-server")
     parser.add_argument("--host", default=os.environ.get("ENGRAPHIS_GRAPH_HOST", "127.0.0.1"))
@@ -27,8 +25,9 @@ def main(argv=None) -> int:
         "--port", type=int, default=int(os.environ.get("ENGRAPHIS_GRAPH_PORT", "8720"))
     )
     args = parser.parse_args(argv)
-    token = os.environ.get(
-        "ENGRAPHIS_GRAPH_TOKEN", os.environ.get("ENGRAPHIS_API_TOKEN", "")
+    token = (
+        os.environ.get("ENGRAPHIS_GRAPH_TOKEN")
+        or os.environ.get("ENGRAPHIS_API_TOKEN", "")
     )
     if not _loopback(args.host) and not token:
         parser.error(
@@ -46,7 +45,6 @@ def main(argv=None) -> int:
     uvicorn.run(create_read_only_app(token=token), host=args.host, port=args.port,
                 proxy_headers=False)
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

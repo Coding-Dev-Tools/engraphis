@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from engraphis.read_only_api import create_read_only_app
 from engraphis.service import MemoryService
+from engraphis.backends.graph_extractor import RegexGraphExtractor
 
 
 def test_read_only_api_requires_token_and_does_not_reinforce():
@@ -52,3 +53,23 @@ def test_read_only_api_serves_graph_and_intent_recall():
     )
     assert response.status_code == 200
     assert response.json()["operation"] == "recall"
+
+
+def test_read_only_graph_does_not_lazy_backfill():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    svc.remember(
+        "Alice Johnson works at Acme Corporation.",
+        workspace="w", scope="workspace",
+    )
+    svc.engine.graph_extractor = RegexGraphExtractor()
+    before = svc.store.conn.execute(
+        "SELECT COUNT(*) AS n FROM entities"
+    ).fetchone()["n"]
+
+    response = TestClient(create_read_only_app(svc)).get("/graph", params={"workspace": "w"})
+
+    assert response.status_code == 200
+    assert response.json()["nodes"] == []
+    assert svc.store.conn.execute(
+        "SELECT COUNT(*) AS n FROM entities"
+    ).fetchone()["n"] == before

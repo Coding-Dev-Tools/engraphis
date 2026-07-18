@@ -353,6 +353,10 @@ class LocalResourceExtractor:
             raise ResourceExtractionError(f"resource path not found: {path}")
         if not source.is_file():
             raise ResourceExtractionError(f"resource path is not a file: {path}")
+        if source.stat().st_size > MAX_RESOURCE_BYTES:
+            raise ResourceExtractionError(
+                f"resource exceeds the {MAX_RESOURCE_BYTES}-byte extraction limit"
+            )
         suffix = source.suffix.lower()
         if suffix in AUDIO_EXTENSIONS | VIDEO_EXTENSIONS:
             text, extra = _transcribe_path(str(source))

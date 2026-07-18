@@ -277,6 +277,14 @@ def test_clear_symbols_for_file_replaces_not_accumulates(store):
     assert names == {"new"}
 
 
+def test_explicit_semantic_code_edge_preserves_its_layer(store):
+    store.add_code_edge(
+        repo_id="repo_x", src="deploy", dst="release", relation="related_to",
+        layer=GraphLayer.SEMANTIC,
+    )
+    assert store.list_code_edges("repo_x")[0]["layer"] == GraphLayer.SEMANTIC.value
+
+
 def test_code_edge_callers(store):
     store.add_code_edge(repo_id="repo_x", src="Calculator", dst="add", relation="calls",
                         file="calc.py", line=9)

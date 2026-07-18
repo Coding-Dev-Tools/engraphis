@@ -1332,7 +1332,8 @@ class MemoryEngine:
             "code_memory_links": code_memory_links,
         }
 
-    def search_code(self, query: str, *, repo_id: str, limit: int = 20) -> dict:
+    def search_code(self, query: str, *, repo_id: str, limit: int = 20,
+                    flt: Optional[SearchFilter] = None) -> dict:
         """Symbol-graph + lexical code search — far cheaper than
         dumping files for structural questions, and (via ``called_by``) answers "what
         breaks if I change X" directly from the call graph."""
@@ -1340,7 +1341,7 @@ class MemoryEngine:
         for s in symbols:
             s["called_by"] = self.store.get_symbol_callers(repo_id, s["name"], limit=10)
             s["linked_memories"] = self.store.memories_for_symbol(
-                repo_id, s["id"], limit=10
+                repo_id, s["id"], flt=flt, limit=10
             )
         return {"query": query, "symbols": symbols}
 
@@ -1371,11 +1372,12 @@ class MemoryEngine:
     def _link_memory_to_code(self, memory_id: str, *, content: str,
                              repo_id: str, commit: bool = True,
                              symbols: Optional[list[dict]] = None,
-                             matcher: Optional[_CodeSymbolMatcher] = None) -> int:
+                             matcher: Optional[_CodeSymbolMatcher] = None,
+                             max_links: int = CODE_LINK_MAX_LINKS) -> int:
         """Persist deterministic bridges from one memory to symbols in its repo.
 
         Scoring is unchanged (fqname 1.0 > name 0.9 > token-subset 0.75, capped at
-        ``CODE_LINK_MAX_LINKS`` in symbol order); only the *search* changed — see
+        ``max_links`` in symbol order); only the *search* changed — see
         ``_CodeSymbolMatcher`` for why the compiled alternation produces the same links.
         """
         if matcher is None:
@@ -1407,28 +1409,61 @@ class MemoryEngine:
                 relation="mentions", confidence=confidence, commit=False,
             )
             linked += 1
-            if linked >= CODE_LINK_MAX_LINKS:
+            if linked >= max_links:
                 break
         if commit and linked:
             self.store.conn.commit()
         return linked
 
     def rebuild_code_memory_links(self, *, repo_id: str) -> int:
-        """Rebuild the code↔memory bridge after an incremental repository index."""
-        self.store.clear_code_memory_links(repo_id, commit=False)
-        records = self.store.list_memories(SearchFilter(repo_id=repo_id), limit=5_000)
-        matcher = self._code_matcher(repo_id)
+        """Rebuild every live repo-associated bridge using bounded keyset pages."""
+        memory_filter = SearchFilter(repo_id=repo_id, include_ancestors=False)
         linked = 0
-        for record in records:
-            linked += self._link_memory_to_code(
-                record.id, content=f"{record.title}\n{record.content}",
-                repo_id=repo_id, commit=False, matcher=matcher,
+        after_memory_id = ""
+        while True:
+            records = self.store.list_memories_page(
+                memory_filter, after_id=after_memory_id, limit=250,
             )
-        self.store.conn.commit()
+            if not records:
+                break
+            memory_ids = [record.id for record in records]
+            self.store.clear_code_memory_links_for_memories(
+                repo_id, memory_ids, commit=False,
+            )
+            linked_per_memory = {record.id: 0 for record in records}
+            symbol_cursor: Optional[tuple[str, str, str]] = None
+            while True:
+                symbols = self.store.list_symbols_page(
+                    repo_id, after=symbol_cursor, limit=500,
+                )
+                if not symbols:
+                    break
+                matcher = _CodeSymbolMatcher(symbols)
+                for record in records:
+                    remaining = 200 - linked_per_memory[record.id]
+                    if remaining <= 0:
+                        continue
+                    count = self._link_memory_to_code(
+                        record.id,
+                        content=f"{record.title}\n{record.content}",
+                        repo_id=repo_id,
+                        commit=False,
+                        matcher=matcher,
+                        max_links=remaining,
+                    )
+                    linked_per_memory[record.id] += count
+                    linked += count
+                last_symbol = symbols[-1]
+                symbol_cursor = (
+                    last_symbol["file"], last_symbol["fqname"], last_symbol["id"],
+                )
+            self.store.conn.commit()
+            after_memory_id = records[-1].id
+        self.store.prune_code_memory_links(repo_id)
         return linked
 
     def code_path(self, source: str, target: str, *, repo_id: str,
-                  max_depth: int = 8) -> dict:
+                  max_depth: int = 8, flt: Optional[SearchFilter] = None) -> dict:
         """Shortest path across definitions, calls, imports, and symbol aliases."""
         symbols = self.store.list_symbols(repo_id)
         stored_edges = self.store.list_code_edges(repo_id)
@@ -1455,7 +1490,7 @@ class MemoryEngine:
             node_meta.setdefault(dst, {"kind": "code", "name": dst})
         symbol_by_id = {symbol["id"]: symbol for symbol in symbols}
         now = now_ts()
-        for link in self.store.list_code_memory_links(repo_id):
+        for link in self.store.list_code_memory_links(repo_id, flt=flt):
             if link.get("expired_at") is not None:
                 continue
             valid_to = link.get("valid_to")
@@ -1679,7 +1714,8 @@ class MemoryEngine:
             "_node_community": node_community,
         }
 
-    def analyze_impact(self, changed_files: list[str], *, repo_id: str) -> dict:
+    def analyze_impact(self, changed_files: list[str], *, repo_id: str,
+                       flt: Optional[SearchFilter] = None) -> dict:
         """Estimate graph and memory impact for a git diff / PR file list."""
         normalized = []
         seen = set()
@@ -1712,7 +1748,7 @@ class MemoryEngine:
         memory_mentions: dict[str, dict] = {}
         touched_symbol_ids = {symbol["id"] for symbol in symbols}
         now = now_ts()
-        for link in self.store.list_code_memory_links(repo_id):
+        for link in self.store.list_code_memory_links(repo_id, flt=flt):
             if link.get("expired_at") is not None:
                 continue
             valid_to = link.get("valid_to")
@@ -1737,14 +1773,9 @@ class MemoryEngine:
              if s.get("name") and len(str(s.get("name"))) >= 3}
         )[:80]
         for name in names_for_mentions:
-            escaped = str(name).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            rows = self.store.conn.execute(
-                "SELECT id, title, mtype FROM memories WHERE repo_id=? "
-                "AND (valid_from IS NULL OR valid_from<=?) "
-                "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL "
-                "AND (title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\') LIMIT 10",
-                (repo_id, now, now, f"%{escaped}%", f"%{escaped}%"),
-            ).fetchall()
+            rows = self.store.memories_mentioning(
+                repo_id, name, flt=flt, limit=10,
+            )
             for row in rows:
                 item = memory_mentions.setdefault(
                     row["id"],
@@ -1790,7 +1821,8 @@ class MemoryEngine:
         }
 
     def export_code_graph(self, *, repo_id: str,
-                          limit: int = CODE_EXPORT_DEFAULT_LIMIT) -> dict:
+                          limit: int = CODE_EXPORT_DEFAULT_LIMIT,
+                          flt: Optional[SearchFilter] = None) -> dict:
         """Portable graph.json payload for external tooling.
 
         Bounded like its sibling ``MemoryService.graph()``, and for the same reason: the
@@ -1814,7 +1846,9 @@ class MemoryEngine:
         files = files[:limit]
         nodes = self.store.list_symbols(repo_id, limit=limit)
         edges = self.store.list_code_edges(repo_id, limit=edge_cap)
-        memory_links = self.store.list_code_memory_links(repo_id, limit=edge_cap)
+        memory_links = self.store.list_code_memory_links(
+            repo_id, flt=flt, limit=edge_cap
+        )
         return {
             "format": "engraphis-code-graph/1",
             "generated_at": time.time(),
@@ -1832,19 +1866,21 @@ class MemoryEngine:
             "analysis": analysis,
         }
 
-    def code_graph_report(self, *, repo_id: str, payload: Optional[dict] = None) -> str:
+    def code_graph_report(self, *, repo_id: str, payload: Optional[dict] = None,
+                          flt: Optional[SearchFilter] = None) -> str:
         """Human-readable GRAPH_REPORT.md companion to :meth:`export_code_graph`.
 
         Rendering lives in :mod:`engraphis.core.codegraph_export` (pure function of the
         payload) so the engine facade stays thin."""
         from engraphis.core.codegraph_export import render_report
-        return render_report(payload or self.export_code_graph(repo_id=repo_id))
+        return render_report(payload or self.export_code_graph(repo_id=repo_id, flt=flt))
 
-    def code_graph_html(self, *, repo_id: str, payload: Optional[dict] = None) -> str:
+    def code_graph_html(self, *, repo_id: str, payload: Optional[dict] = None,
+                        flt: Optional[SearchFilter] = None) -> str:
         """Self-contained, dependency-free graph.html export (see
         :mod:`engraphis.core.codegraph_export`)."""
         from engraphis.core.codegraph_export import render_html
-        return render_html(payload or self.export_code_graph(repo_id=repo_id))
+        return render_html(payload or self.export_code_graph(repo_id=repo_id, flt=flt))
 
     # ── session passthrough (convenience) ──────────────────────────────────────
     def start_session(self, workspace_id: str, repo_id: Optional[str] = None, **kw) -> str:
