@@ -3,6 +3,21 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [Unreleased]
+
+Follow-up audit of the Team / Pro / licensing / relay surfaces after 0.9.8.
+
+### Security
+
+
+### Fixed
+
+### Changed
+
+- `GET /api/auth/users` checks `admin` at the route, matching `auth.min_role()`. The
+  middleware already enforced admin, so this is defense in depth with no behaviour change;
+  the route previously said `member`, which was dead code that misrepresented the policy.
+
 ## [0.9.8] - 2026-07-18
 
 Hardening release focused on dependable installation, upgrades, startup, dashboard use,
