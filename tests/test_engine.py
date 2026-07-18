@@ -4,7 +4,7 @@ import pytest
 
 from engraphis.backends.vector_numpy import NumpyVectorIndex
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.interfaces import MemoryType, Scope, SearchFilter
+from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
 
 
 def test_engine_remember_and_recall():
@@ -639,6 +639,99 @@ def test_code_memory_paths_hide_forgotten_memories(tmp_path):
     eng.forget(mid)
     assert eng.code_path("deploy", mid, repo_id=rid)["found"] is False
     assert eng.analyze_impact(["deploy.py"], repo_id=rid)["memory_mentions"] == []
+
+
+def test_code_reads_apply_session_visibility_to_every_memory_surface():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    session_id = eng.store.start_session(wid, rid)
+    symbol_id = eng.store.upsert_symbol(
+        repo_id=rid, kind="function", name="deploy", fqname="deploy",
+        file="deploy.py", span="1-1",
+    )
+    repo_memory = eng.store.add_memory(MemoryRecord(
+        id="", content="deploy uses the public release process", title="repo deploy",
+        workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+    ))
+    session_memory = eng.store.add_memory(MemoryRecord(
+        id="", content="deploy uses a private session token", title="session deploy secret",
+        workspace_id=wid, repo_id=rid, session_id=session_id, scope=Scope.SESSION,
+    ))
+    for memory_id in (repo_memory, session_memory):
+        eng.store.link_memory_symbol(
+            repo_id=rid, symbol_id=symbol_id, memory_id=memory_id,
+        )
+
+    repo_filter = SearchFilter(
+        workspace_id=wid, repo_id=rid, include_ancestors=True,
+    )
+    search = eng.search_code("deploy", repo_id=rid, flt=repo_filter)
+    assert {row["id"] for row in search["symbols"][0]["linked_memories"]} == {
+        repo_memory
+    }
+    assert eng.code_path("deploy", repo_memory, repo_id=rid, flt=repo_filter)["found"]
+    assert not eng.code_path(
+        "deploy", session_memory, repo_id=rid, flt=repo_filter,
+    )["found"]
+    impact = eng.analyze_impact(["deploy.py"], repo_id=rid, flt=repo_filter)
+    assert {row["id"] for row in impact["memory_mentions"]} == {repo_memory}
+    exported = eng.export_code_graph(repo_id=rid, flt=repo_filter)
+    assert {row["memory_id"] for row in exported["memory_links"]} == {repo_memory}
+    assert session_memory not in eng.code_graph_html(repo_id=rid, flt=repo_filter)
+
+    session_filter = SearchFilter(
+        workspace_id=wid, repo_id=rid, session_id=session_id,
+        include_ancestors=True,
+    )
+    session_search = eng.search_code("deploy", repo_id=rid, flt=session_filter)
+    assert {row["id"] for row in session_search["symbols"][0]["linked_memories"]} == {
+        repo_memory, session_memory
+    }
+    assert eng.code_path(
+        "deploy", session_memory, repo_id=rid, flt=session_filter,
+    )["found"]
+
+
+def test_rebuild_code_memory_links_keysets_past_five_thousand_session_records():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    session_id = eng.store.start_session(wid, rid)
+    symbol_id = eng.store.upsert_symbol(
+        repo_id=rid, kind="function", name="deploy", fqname="deploy",
+        file="deploy.py", span="1-1",
+    )
+    target_id = "mem_00000"
+    rows = [
+        (
+            target_id, wid, rid, session_id, "session", "semantic",
+            "oldest", "deploy remains linked", 0.0, 0.0,
+        )
+    ]
+    rows.extend(
+        (
+            f"mem_{i:05d}", wid, rid, None, "repo", "semantic",
+            "", "unrelated filler", float(i), float(i),
+        )
+        for i in range(1, 5001)
+    )
+    eng.store.conn.executemany(
+        "INSERT INTO memories("
+        "id, workspace_id, repo_id, session_id, scope, mtype, title, content, "
+        "valid_from, ingested_at"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    eng.store.link_memory_symbol(
+        repo_id=rid, symbol_id=symbol_id, memory_id=target_id,
+    )
+
+    eng.rebuild_code_memory_links(repo_id=rid)
+
+    assert {
+        row["memory_id"] for row in eng.store.list_code_memory_links(rid)
+    } == {target_id}
 
 
 def test_code_graph_html_escapes_embedded_graph_data():

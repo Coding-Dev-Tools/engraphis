@@ -42,6 +42,33 @@ def test_explicit_graph_layer_survives_database_reopen(tmp_path):
     )[0].layer == GraphLayer.TEMPORAL
 
 
+def test_link_infers_layer_for_response_receipt_and_persistence():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    first = svc.remember("First fact", workspace="w", scope="workspace")
+    second = svc.remember("Second fact", workspace="w", scope="workspace")
+    third = svc.remember("Third fact", workspace="w", scope="workspace")
+
+    inferred = svc.link(
+        first["id"], second["id"], workspace="w", relation="causes",
+    )
+    assert inferred["layer"] == "causal"
+    assert inferred["receipt"]["metadata"]["layer"] == "causal"
+
+    explicit = svc.link(
+        first["id"], third["id"], workspace="w",
+        relation="causes", layer="temporal",
+    )
+    assert explicit["layer"] == "temporal"
+    assert explicit["receipt"]["metadata"]["layer"] == "temporal"
+
+    links = svc.store.get_links(first["id"])
+    assert {(link["b"], link["layer"]) for link in links
+            if link["relation"] == "causes"} == {
+        (second["id"], "causal"),
+        (third["id"], "temporal"),
+    }
+
+
 def test_receipts_are_content_free_chained_and_tamper_evident():
     svc = MemoryService.create(":memory:", graph_extractor="none")
     secret = "launch code ORANGE-UNICORN-991"
@@ -107,6 +134,76 @@ def test_code_graph_links_memories_and_supports_unified_paths(tmp_path):
     types = {node["etype"] for node in graph["nodes"]}
     assert "code_function" in types and "memory_semantic" in types
     assert any(edge["layer"] == "semantic" for edge in graph["edges"])
+
+
+def test_unified_graph_filters_each_code_edge_by_persisted_layer():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    svc.remember("Repo memory", workspace="w", repo="app")
+    _, rid = svc._require_scope("w", "app")
+    for name in ("source", "causal_target", "temporal_target", "entity_target"):
+        svc.store.upsert_symbol(
+            repo_id=rid, kind="function", name=name, fqname=name,
+            file=f"{name}.py", span="1:1",
+        )
+    svc.store.add_code_edge(
+        repo_id=rid, src="source", dst="causal_target",
+        relation="causes", layer=GraphLayer.CAUSAL,
+    )
+    svc.store.add_code_edge(
+        repo_id=rid, src="source", dst="temporal_target",
+        relation="follows", layer=GraphLayer.TEMPORAL,
+    )
+    svc.store.add_code_edge(
+        repo_id=rid, src="source", dst="entity_target",
+        relation="calls", layer=GraphLayer.ENTITY,
+    )
+
+    graph = svc.graph(
+        workspace="w", repo="app", include_code=True, layers=["causal"],
+    )
+
+    assert {edge["layer"] for edge in graph["edges"]} == {"causal"}
+    assert {edge["label"] for edge in graph["edges"]} == {"causes"}
+    assert {"app:source", "app:causal_target"} <= {
+        node["label"] for node in graph["nodes"]
+    }
+
+
+def test_repo_code_reads_exclude_session_scoped_linked_memories():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    repo_memory = svc.remember(
+        "Repository guidance for deploy_release.",
+        workspace="w", repo="app", scope="repo",
+    )
+    session = svc.start_session("w", repo="app")
+    session_memory = svc.remember(
+        "Temporary session note for deploy_release.",
+        workspace="w", repo="app", session_id=session["session_id"],
+        scope="session",
+    )
+    _, rid = svc._require_scope("w", "app")
+    symbol_id = svc.store.upsert_symbol(
+        repo_id=rid, kind="function", name="deploy_release",
+        fqname="deploy_release", file="deploy.py", span="1:1",
+    )
+    svc.store.link_memory_symbol(
+        repo_id=rid, symbol_id=symbol_id, memory_id=repo_memory["id"],
+    )
+    svc.store.link_memory_symbol(
+        repo_id=rid, symbol_id=symbol_id, memory_id=session_memory["id"],
+    )
+
+    search = svc.search_code("deploy_release", workspace="w", repo="app")
+    assert {
+        memory["id"] for memory in search["symbols"][0]["linked_memories"]
+    } == {repo_memory["id"]}
+
+    graph = svc.graph(
+        workspace="w", repo="app", include_code=True, layers=["semantic"],
+    )
+    node_ids = {node["id"] for node in graph["nodes"]}
+    assert repo_memory["id"] in node_ids
+    assert session_memory["id"] not in node_ids
 
 
 def test_intent_recall_locate_code_returns_memory_and_symbol_results(tmp_path):

@@ -92,7 +92,7 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
         selected = [value.strip() for value in layers.split(",") if value.strip()]
         return run(
             svc.graph, workspace=workspace, limit=limit, layers=selected or None,
-            include_code=include_code, repo=repo,
+            include_code=include_code, repo=repo, backfill=False,
         )
 
     @app.get("/code/search")

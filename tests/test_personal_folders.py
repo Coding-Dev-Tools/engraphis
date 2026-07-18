@@ -10,6 +10,8 @@ These run offline on numpy alone (no fastapi/HTTP) by driving the current-user c
 directly — the same value the dashboard's team auth gate binds once per request. The full
 HTTP path (real cookies, two users, one app) is covered in test_dashboard_v2.py.
 """
+from unittest.mock import Mock
+
 import pytest
 
 from engraphis.service import MemoryService, ValidationError, set_current_user
@@ -143,6 +145,30 @@ def test_non_owner_is_refused_read_and_write_access():
             call()
 
 
+def test_current_user_cannot_run_workspace_less_recall(monkeypatch):
+    svc = _svc()
+    engine_recall = Mock(side_effect=AssertionError("global recall executed"))
+    monkeypatch.setattr(svc.engine.recall_engine, "recall", engine_recall)
+    set_current_user(ALICE)
+
+    with pytest.raises(ValidationError, match=r"^workspace is required on this instance$"):
+        svc.recall("private notes")
+
+    engine_recall.assert_not_called()
+
+
+def test_current_user_cannot_run_workspace_less_grounded_recall(monkeypatch):
+    svc = _svc()
+    engine_recall = Mock(side_effect=AssertionError("global grounded recall executed"))
+    monkeypatch.setattr(svc.engine, "grounded_recall", engine_recall)
+    set_current_user(ALICE)
+
+    with pytest.raises(ValidationError, match=r"^workspace is required on this instance$"):
+        svc.grounded_recall("private notes")
+
+    engine_recall.assert_not_called()
+
+
 def test_owner_keeps_full_access_to_their_personal_folder():
     svc = _svc()
     set_current_user(ALICE)
@@ -168,9 +194,17 @@ def test_no_user_context_sees_and_reaches_everything():
     svc = _svc()
     set_current_user(ALICE)
     svc.create_workspace("alice-scratch", visibility="personal")
+    private = svc.remember(
+        "Alice keeps private deployment notes here.",
+        workspace="alice-scratch",
+        scope="workspace",
+    )
     set_current_user(None)
     assert "alice-scratch" in _names(svc)
     assert svc._clean_ws("alice-scratch") == "alice-scratch"
+    global_recall = svc.recall("private deployment notes")
+    assert any(m["id"] == private["id"] for m in global_recall["memories"])
+    assert svc.grounded_recall("private deployment notes")["query"] == "private deployment notes"
 
 
 def test_folders_created_before_the_feature_are_treated_as_shared():
