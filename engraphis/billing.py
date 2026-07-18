@@ -664,10 +664,11 @@ async def polar_webhook(request: Request):
     try:
         # Blocking work (Ed25519 sign + email) runs off the event loop.
         key = await asyncio.to_thread(_fulfill, data)
-    except Exception as exc:  # noqa: BLE001 — surface a safe message, log full trace
+    except Exception as exc:  # noqa: BLE001 - external-provider boundary
         _release_claims(delivery_claim, fulfillment_claim)
-        logger.exception("polar webhook: fulfillment failed")
-        return JSONResponse({"error": "fulfillment failed: %s" % exc}, status_code=500)
+        logger.error("polar webhook: fulfillment failed (%s)", type(exc).__name__)
+        return JSONResponse({"error": "license fulfillment failed; retry delivery"},
+                            status_code=500)
 
     if not key:
         # Nothing issued (missing email) — release the claims so a corrected delivery

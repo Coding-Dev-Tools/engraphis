@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import math
 import re
 import secrets
 import sqlite3
@@ -113,12 +114,21 @@ class AuthError(ValueError):
     """User-facing auth failure; message is safe to surface."""
 
 
+class SetupAlreadyCompletedError(AuthError):
+    """Atomic first-admin creation lost a race to another setup request."""
+
+
 class AccountLockedError(AuthError):
     """Login refused because a lockout window is active (per-email or per-IP).
 
     A distinct type so HTTP layers can map it to 429 without substring-matching the
     human-readable message (which silently broke the mapping whenever the wording
-    changed). Subclasses :class:`AuthError` so existing broad handlers still catch it."""
+    changed). Subclasses :class:`AuthError` so existing broad handlers still catch it.
+    ``retry_after`` is the authoritative remaining backoff for HTTP/CLI adapters."""
+
+    def __init__(self, message: str, retry_after: float = LOCKOUT_SECONDS) -> None:
+        super().__init__(message)
+        self.retry_after = max(1, int(math.ceil(retry_after)))
 
 
 def _serialized(method):
@@ -293,7 +303,7 @@ class AuthStore:
                 # lock, refuse — this closes the setup TOCTOU where two concurrent requests
                 # both passed the router's count check and both created an admin.
                 if require_empty:
-                    raise AuthError("team already set up")
+                    raise SetupAlreadyCompletedError("setup already completed")
                 from engraphis.licensing import require_feature
                 require_feature("team")
             if seat_limit is not None and int(conn.execute(
@@ -522,13 +532,19 @@ class AuthStore:
         # Phase 1 (locked): throttle gates (per-email, then per-IP) + fetch the row.
         with self._lock:
             until = self._locked_until(email)
-            if until > time.time():
+            now = time.time()
+            if until > now:
                 self.record_event("login.locked", actor_email=email, ip=ip)
-                raise AccountLockedError("too many failed attempts — try again in a minute")
-            if self._ip_locked_until(ip) > time.time():
+                raise AccountLockedError(
+                    "too many failed attempts — try again shortly", until - now)
+            ip_until = self._ip_locked_until(ip)
+            now = time.time()
+            if ip_until > now:
                 self.record_event("login.ip_locked", actor_email=email, ip=ip)
                 raise AccountLockedError(
-                    "too many failed attempts from this network — try again in a minute")
+                    "too many failed attempts from this network — try again shortly",
+                    ip_until - now,
+                )
             row = self.conn.execute(
                 "SELECT id, pw_hash, disabled FROM users WHERE email=?", (email,)).fetchone()
         # Phase 2 (UNLOCKED): the expensive PBKDF2. Always hash once, even for unknown
@@ -562,9 +578,20 @@ class AuthStore:
                                   detail=("account_disabled" if fresh and fresh["disabled"]
                                           else "bad_credentials"))
                 raise AuthError("invalid email or password")
-            if self._locked_until(email) > time.time():
+            until = self._locked_until(email)
+            now = time.time()
+            if until > now:
                 self.record_event("login.locked", actor_email=email, ip=ip)
-                raise AccountLockedError("too many failed attempts — try again in a minute")
+                raise AccountLockedError(
+                    "too many failed attempts — try again shortly", until - now)
+            ip_until = self._ip_locked_until(ip)
+            now = time.time()
+            if ip_until > now:
+                self.record_event("login.ip_locked", actor_email=email, ip=ip)
+                raise AccountLockedError(
+                    "too many failed attempts from this network — try again shortly",
+                    ip_until - now,
+                )
             self._failures.pop(email, None)
             token = self.create_session(fresh["id"])
             user = self.get_user(fresh["id"])

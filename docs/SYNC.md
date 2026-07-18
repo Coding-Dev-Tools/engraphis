@@ -129,7 +129,7 @@ set up and no way to bypass the gate by patching the client:
 
 ```bash
 # Point at a relay host explicitly …
-python -m scripts.sync --db engraphis.db --workspace acme --relay https://sync.engraphis.app
+python -m scripts.sync --db engraphis.db --workspace acme --relay https://team.engraphis.com
 
 # … or set ENGRAPHIS_RELAY_URL once and pass a bare --relay
 python -m scripts.sync --db engraphis.db --workspace acme --relay

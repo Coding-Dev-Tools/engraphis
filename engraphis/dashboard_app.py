@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 import os as _os
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -25,17 +26,30 @@ _STATIC = Path(__file__).resolve().parent / "static"
 _INDEX = _STATIC / "index.html"
 
 # Reachable without any session/token in every mode: the page shell, liveness, and
-# auth bootstrap endpoints (state/login/setup must be reachable while logged out;
-# setup still refuses to create the first admin until a paid license is active).
+# auth endpoints needed while logged out. First-admin setup is handled separately below:
+# it is safe from loopback, or remotely when the deployment API token authenticates it.
 _PUBLIC = {"/", "/api/health", "/api/ready", "/api/auth/state", "/api/auth/login",
-           "/api/auth/setup", "/api/auth/logout", "/api/auth/forgot", "/api/auth/reset",
+           "/api/auth/logout", "/api/auth/forgot", "/api/auth/reset",
            "/webhooks/polar"}
 
-# A zero-user Team install must be able to inspect entitlement and start a trial before
-# its first admin exists. These routes stop being public as soon as any user is created.
+# A zero-user Team install must be able to inspect entitlement before its first admin
+# exists. Trial creation is deliberately NOT public: on a hosted instance the deployment
+# API token proves ownership, preventing a stranger from consuming the one-device trial.
+# This route stops being public as soon as any user is created.
 _TEAM_BOOTSTRAP_PUBLIC = {
-    "/api/license", "/api/license/trial", "/api/license/team-trial",
+    "/api/license",
 }
+
+
+def _embedder_status(embedder, configured_model: str) -> str:
+    """Concise startup status without misdiagnosing an explicit offline selection."""
+    from engraphis.backends.embedder_deterministic import DeterministicEmbedder
+
+    if not isinstance(embedder, DeterministicEmbedder):
+        return "semantic search ready"
+    if not configured_model:
+        return "deterministic offline mode selected"
+    return "configured model unavailable; deterministic fallback active"
 
 
 def _mcp_transport_security(mcp):
@@ -48,7 +62,8 @@ def _mcp_transport_security(mcp):
     dashboard_url = _os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
     if dashboard_url:
         parsed = urlsplit(dashboard_url)
-        if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username:
+        if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None):
             raise ValueError("ENGRAPHIS_DASHBOARD_URL must be an http(s) URL without userinfo")
         from engraphis.netutil import bracket_host
         host = bracket_host(parsed.hostname)
@@ -98,8 +113,11 @@ def create_app() -> FastAPI:
             _mcp_mod.mcp.settings.transport_security = _prev_security
         _mcp_mgr = _mcp_mod.mcp.session_manager
     except (Exception, SystemExit) as _exc:  # noqa: BLE001 - MCP mount stays optional
-        import sys as _sys
-        print("[engraphis] MCP /mcp mount skipped: %s" % _exc, file=_sys.stderr)
+        import logging as _logging
+        # A server-only install intentionally has no MCP SDK; that expected shape stays
+        # silent. If an installed SDK fails to mount, retain a warning for operators.
+        _level = _logging.INFO if importlib.util.find_spec("mcp") is None else _logging.WARNING
+        _logging.getLogger("engraphis").log(_level, "MCP /mcp mount skipped: %s", _exc)
 
     @_contextlib.asynccontextmanager
     async def _lifespan(app: FastAPI):
@@ -109,9 +127,23 @@ def create_app() -> FastAPI:
         else:
             yield
 
-    app = FastAPI(title="Engraphis Dashboard", docs_url="/api/docs",
+    # FastAPI's interactive docs execute CDN-hosted JavaScript with same-origin
+    # authority. Do not expose that supply-chain surface on an authenticated memory
+    # dashboard; the machine-readable schema remains available behind the normal gate.
+    app = FastAPI(title="Engraphis Dashboard", docs_url=None, redoc_url=None,
                   openapi_url="/api/openapi.json", lifespan=_lifespan)
     app.state.mcp_over_http = False
+
+    # Honour the advertised allow-list on the actual GA dashboard entrypoint.  A
+    # wildcard can never carry browser credentials.
+    _cors_wildcard = "*" in settings.cors_origins
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=not _cors_wildcard,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.exception_handler(licensing.LicenseError)
     async def _license_error(_request: Request, exc: licensing.LicenseError):
@@ -129,14 +161,10 @@ def create_app() -> FastAPI:
         allowed_workspaces=settings.allowed_workspaces)
     try:
         import sys as _sys
-        from engraphis.backends.embedder_deterministic import DeterministicEmbedder
         _ed = svc.engine.embedder
-        _ok = not isinstance(_ed, DeterministicEmbedder)
-        print("[engraphis] embedder: %s dim=%s %s" % (
+        print("[engraphis] embedder: %s dim=%s (%s)" % (
             type(_ed).__name__, getattr(_ed, "dim", "?"),
-            "(semantic search ready)" if _ok else
-            "(deterministic fallback - semantic Recall/Why/Timeline disabled; "
-            "install sentence-transformers into THIS python)"), file=_sys.stderr)
+            _embedder_status(_ed, settings.embed_model)), file=_sys.stderr)
     except Exception:
         pass
     v2_api.set_service(svc)
@@ -177,6 +205,12 @@ def create_app() -> FastAPI:
         from engraphis.inspector.auth import bearer_ok
         return bearer_ok(request.headers.get("Authorization"), settings.api_token)
 
+    def _bearer_token(request: Request) -> str:
+        header = request.headers.get("Authorization") or ""
+        return header[7:].strip() if header[:7].lower() == "bearer " else ""
+
+    from engraphis.netutil import is_local_request
+
     @app.middleware("http")
     async def _auth_gate(request: Request, call_next):
         from engraphis.service import set_current_user
@@ -187,15 +221,29 @@ def create_app() -> FastAPI:
         # is exactly "no per-user restriction".
         set_current_user(None)
         path = request.url.path
+        # Let CORSMiddleware answer browser preflights. It is registered inside this
+        # function middleware, so authenticating first would turn valid preflights into
+        # 401/403 responses before the CORS policy could evaluate them.
+        if request.method == "OPTIONS":
+            return await call_next(request)
         team_bootstrap_public = (
             path in _TEAM_BOOTSTRAP_PUBLIC
             and team_enabled
             and auth_store is not None
             and auth_store.count_users() == 0
         )
+        setup_bootstrap_public = (
+            path == "/api/auth/setup"
+            and team_enabled
+            and auth_store is not None
+            and auth_store.count_users() == 0
+            and (is_local_request(request)
+                 or bool(settings.api_token and _bearer_ok(request)))
+        )
+        # The OpenAPI schema publishes the full route map and therefore passes through
+        # the same wall as every other /api path below.
         if (not path.startswith("/api/") and not (path == "/mcp" or path.startswith("/mcp/"))) \
-                or path in _PUBLIC or team_bootstrap_public or path.startswith("/api/docs") \
-                or path.startswith("/api/openapi"):
+                or path in _PUBLIC or team_bootstrap_public or setup_bootstrap_public:
             return await call_next(request)
         # MCP-over-HTTP agent endpoint (/mcp) — Team-gated (402 without a Team license)
         # and authenticated with a per-user bearer token. Each MCP tool then enforces its
@@ -205,7 +253,7 @@ def create_app() -> FastAPI:
                     and licensing.has_feature("team")):
                 return JSONResponse({"error": "a Team license is required to connect agents",
                                       "feature": "team", "auth": "team"}, status_code=402)
-            supplied = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+            supplied = _bearer_token(request)
             mu = auth_store.resolve_api_token(supplied) if supplied else None
             if mu is None:
                 return JSONResponse({"error": "authentication required", "auth": "team"},
@@ -274,7 +322,7 @@ def create_app() -> FastAPI:
             # fall back to the browser session cookie. Either way the resolved member is
             # bound via set_current_user so personal-folder ownership holds on every
             # workspace-scoped read/write.
-            supplied = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
+            supplied = _bearer_token(request)
             user = auth_store.resolve_api_token(supplied) if supplied else None
             if user is None:
                 user = auth_store.resolve_session(request.cookies.get(_COOKIE, ""))
@@ -291,8 +339,32 @@ def create_app() -> FastAPI:
             set_current_user(user)
             return await call_next(request)
         # Single-user modes: optional bearer token, exactly as before team mode existed.
-        if settings.api_token and not _bearer_ok(request):
-            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        if settings.api_token:
+            if not _bearer_ok(request):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            return await call_next(request)
+
+        # No auth wall of any kind is active: team mode has no users AND no paid license
+        # yet, and no ENGRAPHIS_API_TOKEN is set. Locally that is the intended
+        # zero-config experience. Reached over the network it is a hole — this is the
+        # window between "Railway finishes the deploy" and "the operator creates the
+        # first admin", during which the container is already bound publicly and
+        # /api/* would otherwise answer anyone. That exposes routes that are admin-only
+        # the moment the wall goes up: /api/resources/postgres (outbound connect to a
+        # caller-supplied DSN), /api/code/index and /api/workspaces/import-folder
+        # (server-local file reads), /api/workspaces/delete.
+        #
+        # Hosted first-admin setup requires ENGRAPHIS_API_TOKEN; otherwise any remote
+        # caller could win a deployment race and make themselves the first admin.
+        if not is_local_request(request):
+            return JSONResponse(
+                {"error": "this instance has no authentication configured, so remote API "
+                          "access is refused. For a hosted first boot, set "
+                          "ENGRAPHIS_API_TOKEN (and ENGRAPHIS_LICENSE_KEY for first-admin "
+                          "setup) in the deployment environment, restart, "
+                          "then create the first admin account.",
+                 "auth": "unconfigured"},
+                status_code=403)
         return await call_next(request)
 
     if _STATIC.is_dir():
@@ -315,6 +387,12 @@ def create_app() -> FastAPI:
         _mcp_mod.set_service(svc)
         app.mount("/mcp", _mcp_asgi)
         app.state.mcp_over_http = True
+
+    # Installed LAST so it is the OUTERMOST middleware (Starlette wraps in reverse
+    # registration order): the headers must also land on the 401/403/402 responses the
+    # auth gate returns short of call_next, not only on successful ones.
+    from engraphis import http_security
+    http_security.install(app)
 
     _maybe_start_autosync()
     _maybe_start_dreaming()

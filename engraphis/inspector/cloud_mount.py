@@ -8,9 +8,8 @@ mount so ``engraphis.app`` (public server) and ``engraphis.dashboard_app`` (team
 dashboard) expose identical behavior, with no drift.
 
 These endpoints authenticate with a *license key* (Bearer) or the vendor admin token
-(``ENGRAPHIS_VENDOR_ADMIN_TOKEN``, falling back to ``ENGRAPHIS_API_TOKEN`` only until the
-operator sets it — see ``license_cloud._vendor_admin_token``) — so callers must exempt
-:data:`CLOUD_PREFIXES` from any API-token middleware. They also raise
+(``ENGRAPHIS_VENDOR_ADMIN_TOKEN``; it never falls back to the instance API token) — so
+callers must exempt :data:`CLOUD_PREFIXES` from any API-token middleware. They also raise
 :class:`LicenseError`, which needs an app-level 402 handler;
 :func:`mount_cloud_endpoints` installs one if absent.
 """

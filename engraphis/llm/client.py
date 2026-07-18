@@ -157,8 +157,18 @@ class LLMClient:
             )
             return {"ok": True, "reply": (reply or "").strip()[:200],
                     "error": "", "provider": self.provider, "model": self.model}
-        except Exception as exc:  # noqa: BLE001 — surface every failure mode to the UI
-            return {"ok": False, "reply": "", "error": str(exc),
+        except Exception as exc:  # noqa: BLE001 - external-provider boundary
+            logger.error("LLM connection test failed (%s)", type(exc).__name__)
+            if isinstance(exc, httpx.HTTPStatusError):
+                status = exc.response.status_code
+                error = ("Provider rejected the request (HTTP %d). Check the API key, "
+                         "model name, and provider settings." % status)
+            elif isinstance(exc, httpx.RequestError):
+                error = ("Could not reach the configured provider. Check the base URL "
+                         "and network connection.")
+            else:
+                error = "The provider test failed. Check the configured provider and model."
+            return {"ok": False, "reply": "", "error": error,
                     "provider": self.provider, "model": self.model}
 
     # ── Provider implementations ────────────────────────────────────────────

@@ -33,9 +33,12 @@ def _cloud_env(monkeypatch, tmp_path):
     monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(SECRET).hex())
     monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", SECRET.hex())  # server signs leases
     monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(tmp_path / "relay.db"))
+    monkeypatch.setenv("ENGRAPHIS_RELAY_PUBLIC_URL", "https://relay.example.test")
     monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
     monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY", raising=False)
     monkeypatch.delenv("ENGRAPHIS_FORWARDED_ALLOW_IPS", raising=False)
+    monkeypatch.setattr(license_cloud, "REGISTER_RATE_PER_MINUTE", 10_000)
+    license_cloud._REGISTER_BUCKETS.clear()
     # keep all client-side state files inside tmp
     monkeypatch.setattr(cloud_license, "_DIR", tmp_path)
     monkeypatch.setattr(cloud_license, "_LEASE_FILE", tmp_path / "lease.sig")
@@ -74,6 +77,35 @@ def test_register_issues_valid_machine_bound_lease():
     payload = cloud_license.verify_lease(lease)             # verifies signature + expiry
     assert payload["machine_id"] == "m-1" and payload["plan"] == "pro"
     assert "sync" in payload["features"]
+
+
+@pytest.mark.parametrize("body", [
+    [], {"key": 1, "machine_id": "m"}, {"key": "x", "machine_id": ["m"]},
+    {"key": "x\nforged", "machine_id": "m"},
+    {"key": "x", "machine_id": "m" * 201},
+])
+def test_register_rejects_malformed_or_unbounded_fields_without_crypto(body):
+    assert _app().post("/license/v1/register", json=body).status_code == 400
+
+
+def test_license_json_body_is_bounded_before_decode():
+    response = _app().post(
+        "/license/v1/register",
+        content=b'{"key":"' + b"x" * license_cloud.MAX_JSON_BODY_BYTES + b'"}',
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 413
+
+
+def test_register_crypto_work_is_rate_limited(monkeypatch):
+    monkeypatch.setattr(license_cloud, "REGISTER_RATE_PER_MINUTE", 2)
+    license_cloud._REGISTER_BUCKETS.clear()
+    c = _app()
+    payload = {"key": "well-formed-but-invalid", "machine_id": "m"}
+    assert c.post("/license/v1/register", json=payload).status_code == 402
+    assert c.post("/license/v1/register", json=payload).status_code == 402
+    limited = c.post("/license/v1/register", json=payload)
+    assert limited.status_code == 429 and limited.headers["Retry-After"] == "60"
 
 
 def test_register_rejects_revoked_key():
@@ -137,8 +169,15 @@ def test_revoke_endpoint_requires_admin_token(monkeypatch):
     kid = parse_key(key).key_id
     reg.record_issued(key)
     assert c.post("/license/v1/revoke/%s" % kid).status_code == 401
+    # The per-instance service credential must NOT open vendor-wide admin routes: the
+    # ENGRAPHIS_API_TOKEN fallback was removed 2026-07-18 (audit finding M5).
     monkeypatch.setattr(settings, "api_token", "adm1n")
-    ok = c.post("/license/v1/revoke/%s" % kid, headers={"Authorization": "Bearer adm1n"})
+    monkeypatch.delenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", raising=False)
+    denied = c.post("/license/v1/revoke/%s" % kid, headers={"Authorization": "Bearer adm1n"})
+    assert denied.status_code == 401 and reg.is_revoked(kid) is False
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", "vendor-adm1n")
+    ok = c.post("/license/v1/revoke/%s" % kid,
+                headers={"Authorization": "Bearer vendor-adm1n"})
     assert ok.status_code == 200 and reg.is_revoked(kid) is True
 
 
@@ -257,6 +296,31 @@ def test_license_client_sets_cloudflare_safe_headers(monkeypatch):
         "user_agent": "Engraphis/1.0 (+https://engraphis.com)",
         "accept": "application/json",
     }
+
+
+@pytest.mark.parametrize("headers, expected", [
+    ({"Retry-After": "60"}, "retry shortly"),
+    ({}, "retry tomorrow"),
+])
+def test_team_invite_429_distinguishes_burst_gate_from_daily_cap(monkeypatch, headers,
+                                                                 expected):
+    """The relay returns 429 for two unrelated reasons and only one is a day-long wait.
+
+    The per-IP burst gate in front of the Ed25519 verify sends Retry-After; the per-key
+    daily cap does not. Collapsing both into "retry tomorrow" tells an admin who hit a
+    60-second limit to give up for the day.
+    """
+    def raise_429(req, timeout=None):
+        raise cloud_license.urllib.error.HTTPError(
+            req.full_url, 429, "Too Many Requests", headers, None)
+
+    monkeypatch.setattr(cloud_license.urllib.request, "urlopen", raise_429)
+    sent, reason = cloud_license.send_team_invite(
+        "https://relay.example", _key(plan="team"), "new@corp.com",
+        "Mo", "member", "admin@corp.com",
+    )
+    assert sent is False
+    assert expected in reason, reason
 
 
 def test_license_clients_refuse_plain_http_off_loopback(monkeypatch):
@@ -506,8 +570,10 @@ def test_pro_trial_never_grants_team(monkeypatch):
 # ── admin operations: revoke-by-email, key lookup, device visibility, deactivate ───────
 
 def _admin(monkeypatch):
-    monkeypatch.setattr(settings, "api_token", "adm1n")
-    return {"Authorization": "Bearer adm1n"}
+    """Vendor admin credential. Deliberately NOT settings.api_token — those are separate
+    secrets and the fallback between them was removed 2026-07-18 (audit finding M5)."""
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", "vendor-adm1n")
+    return {"Authorization": "Bearer vendor-adm1n"}
 
 
 def test_revoke_by_email_kills_all_customer_keys(monkeypatch):
@@ -520,6 +586,17 @@ def test_revoke_by_email_kills_all_customer_keys(monkeypatch):
     r = c.post("/license/v1/revoke-by-email", json={"email": "team@corp.com"}, headers=h)
     assert r.status_code == 200 and r.json()["count"] == 2
     assert reg.is_revoked(parse_key(k1).key_id) and reg.is_revoked(parse_key(k2).key_id)
+
+
+def test_vendor_json_routes_reject_non_object_or_non_string_fields(monkeypatch):
+    c = _app()
+    h = _admin(monkeypatch)
+    assert c.post("/license/v1/revoke-by-email", json=[], headers=h).status_code == 400
+    assert c.post(
+        "/license/v1/deactivate",
+        json={"key_id": ["bad"], "machine_id": "d1"},
+        headers=h,
+    ).status_code == 400
 
 
 def test_keys_lookup_by_email_shows_seat_usage(monkeypatch):
@@ -806,18 +883,23 @@ def test_team_invite_relay_rejects_invalid_recipient_email():
     assert r.status_code == 400
 
 
-def test_team_invite_relay_ignores_malformed_invited_by(monkeypatch):
-    from engraphis.inspector import webhooks as WH
-    captured = {}
-    monkeypatch.setattr(
-        WH, "send_team_invite_email",
-        lambda to, name, role, invited_by="", key="", dashboard_url=None:
-            captured.update(invited_by=invited_by))
+def test_team_invite_relay_rejects_malformed_invited_by():
     c = _app()
     r = c.post("/license/v1/team-invite",
                json={"key": _key(plan="team"), "to": "new@corp.com",
                      "invited_by": "garbage"})
-    assert r.status_code == 200 and captured["invited_by"] == ""
+    assert r.status_code == 400
+
+
+@pytest.mark.parametrize("field,value", [
+    ("name", ["not", "text"]),
+    ("role", "owner"),
+    ("dashboard_url", "javascript:alert(1)"),
+    ("dashboard_url", "https://user:pass@example.com"),
+])
+def test_team_invite_relay_rejects_hostile_fields(field, value):
+    body = {"key": _key(plan="team"), "to": "new@corp.com", field: value}
+    assert _app().post("/license/v1/team-invite", json=body).status_code == 400
 
 
 def test_team_invite_relay_enforces_daily_cap_per_key(monkeypatch):
@@ -841,15 +923,59 @@ def test_team_invite_relay_enforces_daily_cap_per_key(monkeypatch):
 
 def test_team_invite_relay_surfaces_delivery_failure_as_502(monkeypatch):
     from engraphis.inspector import webhooks as WH
+    from engraphis.inspector import license_cloud
 
     def boom(*a, **k):
-        raise RuntimeError("simulated Resend outage")
+        raise RuntimeError("api_key=RESEND_SECRET_123 C:/private/customer.db")
 
     monkeypatch.setattr(WH, "send_team_invite_email", boom)
+    monkeypatch.setattr(license_cloud, "_invite_daily_cap", lambda: 1)
     c = _app()
+    key = _key(plan="team")
     r = c.post("/license/v1/team-invite",
-               json={"key": _key(plan="team"), "to": "new@corp.com"})
+               json={"key": key, "to": "new@corp.com"})
     assert r.status_code == 502
+    assert "RESEND_SECRET_123" not in r.text and "private" not in r.text
+    # Failed delivery does not consume the successful-send cap.
+    monkeypatch.setattr(WH, "send_team_invite_email", lambda *a, **k: None)
+    retry = c.post("/license/v1/team-invite",
+                   json={"key": key, "to": "new@corp.com"})
+    assert retry.status_code == 200
+
+
+def test_team_invite_refund_failure_keeps_provider_error_sanitized(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+    from engraphis.inspector import license_cloud
+
+    monkeypatch.setattr(
+        WH, "send_team_invite_email",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("token=SECRET")))
+    monkeypatch.setattr(
+        license_cloud, "_refund_invite_count",
+        lambda *a: (_ for _ in ()).throw(OSError("C:/private/relay.db")))
+    response = _app().post(
+        "/license/v1/team-invite",
+        json={"key": _key(plan="team"), "to": "new@corp.com"})
+    assert response.status_code == 502
+    assert "SECRET" not in response.text and "private" not in response.text
+
+
+def test_team_invite_refund_targets_the_reserved_day_across_midnight(monkeypatch):
+    key_id = "midnight-key"
+    assert license_cloud._bump_invite_count(key_id, "2026-07-18") is True
+    monkeypatch.setattr(license_cloud, "_today", lambda: "2026-07-19")
+
+    license_cloud._refund_invite_count(key_id, "2026-07-18")
+
+    conn = reg.connect()
+    try:
+        row = conn.execute(
+            "SELECT count FROM team_invite_sends WHERE key_id=? AND day=?",
+            (key_id, "2026-07-18"),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["count"] == 0
 
 
 # ── team-invite relay: client function, end-to-end against the real endpoint ───────────
@@ -1040,6 +1166,26 @@ def test_start_team_trial_requires_valid_email():
                   json={"machine_id": "dev-1", "email": "not-an-email"}).status_code == 400
 
 
+def test_start_team_trial_requires_configured_public_url(monkeypatch):
+    monkeypatch.delenv("ENGRAPHIS_RELAY_PUBLIC_URL")
+    captured = _capture_verify_url(monkeypatch)
+    response = _app().post(
+        "/license/v1/start-trial",
+        json={"machine_id": "dev-1", "email": "dev@example.com"},
+        headers={"Host": "attacker.invalid"},
+    )
+    assert response.status_code == 503
+    assert captured == {}
+
+
+def test_start_team_trial_rejects_oversized_machine_id():
+    response = _app().post(
+        "/license/v1/start-trial",
+        json={"machine_id": "m" * 129, "email": "dev@example.com"},
+    )
+    assert response.status_code == 400
+
+
 def test_start_team_trial_resend_supersedes_earlier_unclicked_link(monkeypatch):
     """A second, unconfirmed /start-trial request for the same still-pending device is
     a resend, not a conflict — trial_grants isn't written until a link is opened, so
@@ -1116,13 +1262,14 @@ def test_start_team_trial_surfaces_email_delivery_failure_as_502(monkeypatch):
     from engraphis.inspector import webhooks as WH
 
     def boom(*a, **k):
-        raise RuntimeError("simulated Resend outage")
+        raise RuntimeError("api_key=RESEND_SECRET_123 C:/private/customer.db")
 
     monkeypatch.setattr(WH, "send_trial_verification_email", boom)
     c = _app()
     r = c.post("/license/v1/start-trial",
                json={"machine_id": "dev-1", "email": "dev@example.com"})
     assert r.status_code == 502
+    assert "RESEND_SECRET_123" not in r.text and "private" not in r.text
 
 
 @pytest.mark.parametrize("trusted_peers", ["*", "testclient, 127.0.0.1"])

@@ -22,6 +22,7 @@ import json
 import os
 import re
 import threading
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -588,8 +589,9 @@ def _cloud_gate(lic: "License", material: str) -> tuple:
     try:
         from engraphis import cloud_license
         return cloud_license.gate(lic, material, base_url=base)
-    except Exception as exc:  # any error verifying with the server → fail closed
-        return False, "cloud verification error: %s" % exc
+    except Exception:  # any error verifying with the server -> fail closed
+        return False, ("cloud verification failed; check the license service URL and "
+                       "network connection")
 
 
 def invalidate_cache() -> None:
@@ -832,11 +834,35 @@ def activate(key: str) -> License:
     """Verify ``key``, persist it to ``~/.engraphis/license.key``, refresh the cache."""
     parse_key(key)  # raises LicenseError if bad — nothing persisted then
     _LICENSE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _LICENSE_FILE.write_text(key.strip() + "\n", encoding="utf-8")
+    # Create a private sibling from the first byte, fsync it, then atomically replace the
+    # destination. A failed reactivation therefore leaves the last valid key intact and
+    # never writes through an existing permissive inode or symlink.
+    fd, temp_name = tempfile.mkstemp(
+        prefix=".license.key.", dir=str(_LICENSE_FILE.parent))
+    temp_path = Path(temp_name)
     try:
-        os.chmod(_LICENSE_FILE, 0o600)
-    except OSError:  # e.g. some Windows filesystems
-        pass
+        try:
+            os.chmod(temp_path, 0o600)
+        except OSError:  # e.g. some Windows filesystems
+            pass
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(key.strip() + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(str(temp_path), str(_LICENSE_FILE))
+        try:
+            os.chmod(_LICENSE_FILE, 0o600)
+        except OSError:  # e.g. some Windows filesystems
+            pass
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+        raise
     return current_license(refresh=True)
 
 

@@ -246,9 +246,12 @@ class MemoryEngine:
             # …but it must not be silent either: without the vector row this memory is
             # invisible to the semantic-recall arm until re-indexed, so leave a trace in
             # both the log and the audit trail (best-effort — never fail the write twice).
-            logger.warning("vector-index upsert failed for %s: %s", mid, exc)
+            logger.warning("vector-index upsert failed for %s (%s)",
+                           mid, type(exc).__name__)
             try:
-                self.store.audit("engine", "index_upsert_failed", mid, str(exc)[:500])
+                self.store.audit(
+                    "engine", "index_upsert_failed", mid,
+                    "failure_type=%s" % type(exc).__name__)
             except Exception:  # noqa: BLE001
                 pass
         if repo_id:

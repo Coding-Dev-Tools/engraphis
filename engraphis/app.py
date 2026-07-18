@@ -22,6 +22,7 @@ from engraphis.inspector.cloud_mount import CLOUD_PREFIXES, mount_cloud_endpoint
 from engraphis.config import settings
 from engraphis.engines import reweight, thoughts as thoughts_engine
 from engraphis.logging_setup import configure_logging
+from engraphis.netutil import client_ip
 from engraphis.routes.memory import router as memory_router
 from engraphis.routes.vault import router as vault_router
 from engraphis.stores import get_conn, init_db
@@ -84,6 +85,8 @@ def create_app() -> FastAPI:
                     "consolidation. Local-first; you bring the LLM.",
         version=__version__,
         lifespan=_lifespan,
+        docs_url=None,
+        redoc_url=None,
     )
 
     # Local-first CORS: loopback by default, override with ENGRAPHIS_CORS_ORIGINS.
@@ -103,7 +106,7 @@ def create_app() -> FastAPI:
     # verified in engraphis.billing) — it can't carry a bearer token, so it must be
     # exempt from ENGRAPHIS_API_TOKEN auth and from rate limiting.
     _PUBLIC_PREFIXES = ("/memory/health", "/api/health", "/api/ready",
-                        "/docs", "/openapi.json", "/redoc", "/static",
+                        "/openapi.json", "/static",
                         "/webhooks/polar")
 
     @app.middleware("http")
@@ -129,7 +132,7 @@ def create_app() -> FastAPI:
             nonlocal _last_prune
             if request.method == "OPTIONS" or request.url.path.startswith(_PUBLIC_PREFIXES):
                 return await call_next(request)
-            client = request.client.host if request.client else "unknown"
+            client = client_ip(request)
             now = time.monotonic()
             # Periodically prune stale IP entries to prevent unbounded growth.
             if now - _last_prune > _PRUNE_EVERY:
@@ -168,6 +171,11 @@ def create_app() -> FastAPI:
                    "duration_ms": duration_ms},
         )
         return response
+
+    # Baseline security response headers, outermost of all (registered after the log
+    # middleware, so it wraps it) — see engraphis.http_security.
+    from engraphis import http_security
+    http_security.install(app)
 
     # DB init + background loop lifecycle live in _lifespan (above); see FastAPI(lifespan=…).
     app.include_router(memory_router)

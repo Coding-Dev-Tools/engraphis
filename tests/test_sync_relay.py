@@ -168,6 +168,30 @@ def test_relay_bounds_bundle_count_and_total_workspace_storage(monkeypatch):
     ).status_code == 413
 
 
+def test_relay_enforces_account_byte_and_workspace_ceilings(monkeypatch):
+    monkeypatch.setattr(sync_relay, "MAX_ACCOUNT_BYTES", 5)
+    monkeypatch.setattr(sync_relay, "MAX_WORKSPACES_PER_ACCOUNT", 2)
+    account = "account"
+
+    assert sync_relay._store_bundle(account, "ws1", "a.json", b"1234") == (None, 200)
+    # A replacement subtracts the old row before projecting account usage.
+    assert sync_relay._store_bundle(account, "ws1", "a.json", b"12") == (None, 200)
+    assert sync_relay._store_bundle(account, "ws2", "b.json", b"123") == (None, 200)
+    error, status = sync_relay._store_bundle(account, "ws3", "c.json", b"1")
+    assert status == 413 and "workspaces" in error
+    error, status = sync_relay._store_bundle(account, "ws2", "b.json", b"1234")
+    assert status == 413 and "storage" in error
+
+
+def test_zero_byte_bundle_is_still_detected_as_a_replacement(monkeypatch):
+    monkeypatch.setattr(sync_relay, "MAX_BUNDLES_PER_WORKSPACE", 1)
+    account = "account"
+    assert sync_relay._store_bundle(account, "ws", "empty.json", b"") == (None, 200)
+    # LENGTH(data)==0 used to double as the existence sentinel, so this replacement was
+    # mistaken for a second bundle and rejected at the count ceiling.
+    assert sync_relay._store_bundle(account, "ws", "empty.json", b"") == (None, 200)
+
+
 def test_relay_quota_check_is_atomic_under_concurrent_pushes(monkeypatch):
     monkeypatch.setattr(sync_relay, "MAX_BUNDLES_PER_WORKSPACE", 1)
     monkeypatch.setattr(sync_relay, "MAX_WORKSPACE_BYTES", 10)

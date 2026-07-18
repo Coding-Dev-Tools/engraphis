@@ -355,7 +355,8 @@ def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
             if subscription_id:
                 revoke_superseded(subscription_id, key_id)
         except Exception as exc:
-            logger.warning("could not record/reconcile issued key in registry: %s", exc)
+            logger.warning("could not record/reconcile issued key in registry (%s)",
+                           type(exc).__name__)
     return key
 
 
@@ -765,12 +766,14 @@ def _issue_and_email(email_addr: str, product_name: str, seats: int,
         saved = _persist_fallback_key(email_addr, key, product_name)
         if saved:
             logger.warning(
-                "email delivery failed (%s) — key %s for %s saved to %s (deliver manually)",
-                exc, fp, email_addr, saved)
+                "email delivery failed (%s) — key %s for %s saved to the private "
+                "fallback file (deliver manually)",
+                type(exc).__name__, fp, email_addr)
         else:
             logger.error(
                 "email delivery failed (%s) AND could not persist key %s for %s — "
-                "reissue via `python -m scripts.license_admin issue`", exc, fp, email_addr)
+                "reissue via `python -m scripts.license_admin issue`",
+                type(exc).__name__, fp, email_addr)
     return key
 
 

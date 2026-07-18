@@ -15,6 +15,7 @@ The original launcher is archived at
 """
 from __future__ import annotations
 
+import argparse
 import sys
 
 _MSG = (
@@ -26,7 +27,12 @@ _MSG = (
 )
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        prog="engraphis-inspector",
+        description="Retired launcher; use engraphis-dashboard instead.",
+    )
+    ap.parse_args(argv)
     sys.stderr.write(_MSG)
     return 0
 

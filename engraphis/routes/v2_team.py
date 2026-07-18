@@ -20,7 +20,8 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from engraphis import licensing
-from engraphis.config import canonicalize_relay_url, settings
+from engraphis.config import resolve_license_server_url, settings
+from engraphis.netutil import client_ip
 from engraphis.inspector.auth import (
     PBKDF2_ITERATIONS, SESSION_TTL_SECONDS, AccountLockedError, AuthError, AuthStore,
     role_at_least)
@@ -80,7 +81,8 @@ def _send_invite(u: dict, admin: dict) -> tuple:
                                             dashboard_url=dashboard_url)
             return True, "", bool(team_key)
         except Exception as exc:  # noqa: BLE001 — caller logs/audits, never raises further
-            return False, str(exc), False
+            logger.error("local team invite delivery failed (%s)", type(exc).__name__)
+            return False, "local email provider rejected delivery", False
 
     from engraphis import cloud_license
     key = _read_key_material()
@@ -89,8 +91,12 @@ def _send_invite(u: dict, admin: dict) -> tuple:
                        "ENGRAPHIS_SMTP_*) and no active license key to relay through"), False
     # The relay accepts (and now echoes into the email) only a key that verifies as
     # Team server-side, so a successful relay send means the member got the activation key.
+    # Sync may target a customer-operated relay while trial issuance and mail delivery
+    # remain vendor services. Prefer the explicit/signed license-server URL so setting
+    # ENGRAPHIS_RELAY_URL to the customer's own deployment does not route invites back
+    # into a relay with no mail-provider credentials.
     sent, reason = cloud_license.send_team_invite(
-        canonicalize_relay_url(settings.relay_url), key,
+        resolve_license_server_url(licensing.current_license().cloud_url), key,
         u["email"], u["name"], u["role"], admin["email"],
         dashboard_url=dashboard_url)
     return sent, reason, bool(sent)
@@ -172,25 +178,11 @@ def _auth_iterations() -> int:
 def _cookie_secure(request: Request) -> bool:
     """Whether the session cookie should carry the Secure flag.
 
-    True when the EXTERNAL connection is HTTPS — including behind a TLS-terminating proxy
-    (Railway et al.) that forwards plain HTTP internally but sets ``X-Forwarded-Proto:
-    https``. Trusting ``request.url.scheme`` alone dropped Secure for every proxied
-    deployment, letting the session cookie ride over cleartext HTTP. (Honouring the
-    forwarded proto can only ADD Secure — making the cookie more restrictive — so a forged
-    header cannot downgrade cookie security.)
-
-    Caveat (non-proxied plain-HTTP deployments): the forwarded proto is trusted from ANY
-    caller, so on a deployment that terminates NO TLS and sits behind NO proxy, an
-    intermediary — or the client itself — that injects ``X-Forwarded-Proto: https`` makes
-    this cookie Secure and therefore undeliverable over HTTP. That is a self-inflicted
-    lockout of that one caller (a client can only set the header on its OWN request), never
-    a cross-user risk and never a way to leak or downgrade a session. The supported topology
-    (TLS terminated at the app or a fronting proxy) is unaffected; if you must serve cleartext
-    HTTP with no proxy, do not front the app with anything that sets that header."""
-    if request.url.scheme == "https":
-        return True
-    xfp = request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
-    return xfp == "https"
+    Direct HTTPS is authoritative. Forwarded protocol headers are honored only when the
+    direct peer is listed in ``ENGRAPHIS_FORWARDED_ALLOW_IPS``; see
+    :func:`engraphis.http_security.wants_https`."""
+    from engraphis.http_security import wants_https
+    return wants_https(request)
 
 
 def _set_cookie(response: Response, token: str, *, secure: bool = False) -> None:
@@ -269,7 +261,7 @@ def attach(app: FastAPI, service):
             store.record_event("team.setup", actor_id=admin["id"], actor_email=admin["email"],
                                detail="initial admin created")
             u = store.login(body.email, body.password,
-                            ip=request.client.host if request.client else None)
+                            ip=client_ip(request))
         except AuthError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)})
         _set_cookie(response, u.pop("token"), secure=_cookie_secure(request))
@@ -277,14 +269,14 @@ def attach(app: FastAPI, service):
 
     @router.post("/login")
     def login(body: LoginReq, request: Request, response: Response):
-        ip = request.client.host if request.client else None
+        ip = client_ip(request)
         try:
             u = store.login(body.email, body.password, ip=ip)
         except AccountLockedError as exc:
             # Typed lockout → 429 with Retry-After, so clients back off instead of
             # hammering a locked account (and the mapping can't rot with the wording).
             raise HTTPException(status_code=429, detail={"error": str(exc)},
-                                headers={"Retry-After": "60"})
+                                headers={"Retry-After": str(exc.retry_after)})
         except AuthError as exc:
             raise HTTPException(status_code=401, detail={"error": str(exc)})
         _set_cookie(response, u.pop("token"), secure=_cookie_secure(request))
@@ -313,7 +305,9 @@ def attach(app: FastAPI, service):
                 from engraphis.inspector.webhooks import send_password_reset_email
                 send_password_reset_email(info["email"], info["name"], reset_url)
             except Exception as exc:  # noqa: BLE001 — must never change the response
-                logger.warning("password reset email to %s failed: %s", info["email"], exc)
+                logger.warning(
+                    "password reset email to %s failed (%s)",
+                    info["email"], type(exc).__name__)
         return {"ok": True}
 
     @router.post("/reset")
@@ -350,7 +344,7 @@ def attach(app: FastAPI, service):
                                   seat_limit=seats)
         except AuthError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)})
-        ip = request.client.host if request.client else None
+        ip = client_ip(request)
         store.record_event("user.created", actor_id=admin["id"], actor_email=admin["email"],
                            target=u["email"], detail="role=%s" % body.role, ip=ip)
         invited, fail_reason, pro_included = _send_invite(u, admin)
@@ -383,7 +377,7 @@ def attach(app: FastAPI, service):
                                   seat_limit=licensing.current_license().seats)
         except AuthError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)})
-        ip = request.client.host if request.client else None
+        ip = client_ip(request)
         tgt = u["email"] if u else body.user_id
         if body.role is not None and (not before or before["role"] != body.role):
             store.record_event("user.role_changed", actor_id=admin["id"],
@@ -405,7 +399,7 @@ def attach(app: FastAPI, service):
             deleted = store.delete_user(body.user_id)
         except AuthError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)})
-        ip = request.client.host if request.client else None
+        ip = client_ip(request)
         store.record_event("user.deleted", actor_id=admin["id"], actor_email=admin["email"],
                            target=deleted["email"], ip=ip)
         return {"ok": True}
@@ -468,7 +462,7 @@ def attach(app: FastAPI, service):
     def create_token(body: TokenReq, request: Request):
         u = _require(request, "viewer")
         row = store.create_api_token(u["id"], label=body.label)
-        ip = request.client.host if request.client else None
+        ip = client_ip(request)
         store.record_event("api_token.created", actor_id=u["id"], actor_email=u["email"],
                            detail=row["label"] or "(unlabelled)", ip=ip)
         # ``token`` is returned ONCE; list_api_tokens below never includes it.
@@ -485,7 +479,7 @@ def attach(app: FastAPI, service):
         ok = store.revoke_api_token(u["id"], token_id)
         if not ok:
             raise HTTPException(status_code=404, detail={"error": "token not found"})
-        ip = request.client.host if request.client else None
+        ip = client_ip(request)
         store.record_event("api_token.revoked", actor_id=u["id"], actor_email=u["email"],
                            target=token_id, ip=ip)
         return {"ok": True}

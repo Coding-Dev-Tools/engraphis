@@ -14,6 +14,8 @@ untrusted anyway), so an end-to-end-encrypted client can push ciphertext unchang
 """
 from __future__ import annotations
 
+import asyncio
+import os
 import re
 import sqlite3
 import time
@@ -31,6 +33,29 @@ MAX_WORKSPACE_BYTES = 256 * 1024 * 1024
 MAX_BUNDLES_PER_WORKSPACE = 64
 MAX_BUNDLE_NAME_CHARS = 200
 MAX_WORKSPACE_ID_CHARS = 200
+
+
+def _nonnegative_env_int(name: str, default: int) -> int:
+    """Read a quota without letting an invalid deployment value break app startup."""
+    try:
+        return max(0, int(os.environ.get(name, str(default)) or default))
+    except (TypeError, ValueError):
+        return default
+
+# Per-ACCOUNT ceilings (2026-07-18). The two per-workspace limits above are not a storage
+# bound on their own: ``workspace_id`` is caller-supplied and only length/charset-checked,
+# so a single account could mint unlimited distinct ids and store 256 MB under each. That
+# matters more than ordinary quota-busting because the relay DB shares the /data volume
+# with ``relay.db`` — the revocation registry and seat table — so one holder of a free
+# 3-day trial key could fill the disk and take license verification down for EVERY
+# customer (with Railway's restartPolicyMaxRetries: 10 turning that into a hard outage).
+#
+# Sized to be generous for real use and still bounded: 2 GB is 8 full workspaces at the
+# existing per-workspace cap, and 64 workspaces is well past any plausible team.
+MAX_ACCOUNT_BYTES = _nonnegative_env_int(
+    "ENGRAPHIS_RELAY_MAX_ACCOUNT_BYTES", 2 * 1024 * 1024 * 1024)
+MAX_WORKSPACES_PER_ACCOUNT = _nonnegative_env_int(
+    "ENGRAPHIS_RELAY_MAX_WORKSPACES_PER_ACCOUNT", 64)
 # Compatibility endpoint only. Current clients list names and fetch one raw bundle at a
 # time, so this older base64 response is intentionally capped to prevent a single request
 # from constructing a multi-hundred-megabyte JSON object in memory.
@@ -138,10 +163,12 @@ router = APIRouter(prefix="/relay/v1", tags=["sync-relay"])
 
 def _store_bundle(account_id: str, workspace: str, name: str,
                   payload: Union[bytes, bytearray]) -> tuple[Optional[str], int]:
-    """Atomically enforce per-workspace quotas and upsert one bundle.
+    """Atomically enforce per-workspace AND per-account quotas, then upsert one bundle.
 
     ``BEGIN IMMEDIATE`` closes the count/size TOCTOU race: concurrent first-time pushes
     cannot both observe spare quota and then oversubscribe the same account/workspace.
+    Every check below runs inside that one transaction for the same reason — the
+    account-wide totals are as racy as the per-workspace ones.
     Returns ``(error, status)`` where ``error is None`` means success.
     """
     conn = _conn()
@@ -151,18 +178,48 @@ def _store_bundle(account_id: str, workspace: str, name: str,
         conn.execute("BEGIN IMMEDIATE")
         usage = conn.execute(
             "SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(data)), 0) AS total, "
-            "COALESCE(MAX(CASE WHEN name=? THEN LENGTH(data) ELSE 0 END), 0) AS replacing "
+            "COALESCE(MAX(CASE WHEN name=? THEN LENGTH(data) ELSE 0 END), 0) AS replacing, "
+            "COALESCE(MAX(CASE WHEN name=? THEN 1 ELSE 0 END), 0) AS replacing_exists "
             "FROM sync_bundles WHERE account_id=? AND workspace_id=?",
-            (name, account_id, workspace),
+            (name, name, account_id, workspace),
         ).fetchone()
         replacing = int(usage["replacing"] or 0)
-        if replacing == 0 and int(usage["n"] or 0) >= MAX_BUNDLES_PER_WORKSPACE:
+        replacing_exists = bool(usage["replacing_exists"])
+        if not replacing_exists and int(usage["n"] or 0) >= MAX_BUNDLES_PER_WORKSPACE:
             conn.execute("ROLLBACK")
             return "workspace has too many device bundles", 413
         projected = int(usage["total"] or 0) - replacing + len(payload)
         if projected > MAX_WORKSPACE_BYTES:
             conn.execute("ROLLBACK")
             return "workspace relay storage limit exceeded", 413
+
+        # Account-wide ceilings. Without these the per-workspace caps bound nothing:
+        # workspace_id is caller-supplied, so an account can create unlimited ids.
+        account = conn.execute(
+            "SELECT COALESCE(SUM(LENGTH(data)), 0) AS total, "
+            "COUNT(DISTINCT workspace_id) AS workspaces "
+            "FROM sync_bundles WHERE account_id=?",
+            (account_id,),
+        ).fetchone()
+        # Workspace COUNT is checked before total bytes so that a push which trips both
+        # reports the structural limit ("you have too many workspaces") rather than the
+        # incidental one ("storage full") — the former tells the operator what to
+        # actually change.
+        if MAX_WORKSPACES_PER_ACCOUNT > 0 and int(usage["n"] or 0) == 0:
+            # Only a push that creates a NEW workspace can grow the workspace count;
+            # writing another bundle into an existing one must never be refused here.
+            if int(account["workspaces"] or 0) >= MAX_WORKSPACES_PER_ACCOUNT:
+                conn.execute("ROLLBACK")
+                return "account has too many synced workspaces", 413
+        if MAX_ACCOUNT_BYTES > 0:
+            # Subtract the row being replaced so re-pushing an existing bundle at the
+            # ceiling still succeeds — otherwise an account that legitimately reached the
+            # cap could never sync again, only delete.
+            account_projected = (
+                int(account["total"] or 0) - replacing + len(payload))
+            if account_projected > MAX_ACCOUNT_BYTES:
+                conn.execute("ROLLBACK")
+                return "account relay storage limit exceeded", 413
         conn.execute(
             "INSERT INTO sync_bundles (account_id, workspace_id, name, data, updated_at) "
             "VALUES (?,?,?,?,?) "
@@ -187,7 +244,10 @@ def _store_bundle(account_id: str, workspace: str, name: str,
 @router.post("/{workspace_id}/bundles/{name}")
 async def push_bundle(workspace_id: str, name: str, request: Request):
     """Store (overwrite) one full-state bundle for the caller's account+workspace."""
-    _lic, account_id = _authorize(request)          # raises → 402 if unlicensed
+    # Signature verification and Team seat claiming are CPU/SQLite work; keep both off
+    # the event loop so a slow claim cannot stall health checks or unrelated clients.
+    _lic, account_id = await asyncio.to_thread(
+        _authorize, request)                         # raises → 402 if unlicensed
     workspace = _safe_workspace_id(workspace_id)
     safe = _safe_name(name)
     if not workspace or not safe:
@@ -207,14 +267,54 @@ async def push_bundle(workspace_id: str, name: str, request: Request):
         if len(data) + len(chunk) > MAX_BUNDLE_BYTES:
             return JSONResponse({"error": "bundle too large"}, status_code=413)
         data.extend(chunk)
-    error, status = _store_bundle(account_id, workspace, safe, data)
+    error, status = await asyncio.to_thread(
+        _store_bundle, account_id, workspace, safe, data)
     if error:
         return JSONResponse({"error": error}, status_code=status)
     return {"ok": True, "name": safe, "bytes": len(data)}
 
 
+@router.delete("/{workspace_id}/bundles/{name}")
+async def delete_bundle(workspace_id: str, name: str, request: Request):
+    """Delete one bundle, freeing its bytes (and its workspace, if it was the last one).
+
+    Added 2026-07-18 alongside the per-account quotas. Without a delete route those caps
+    are a one-way door: an account that reaches ``MAX_WORKSPACES_PER_ACCOUNT`` or
+    ``MAX_ACCOUNT_BYTES`` could only ever overwrite existing bundles with smaller ones,
+    and would otherwise need vendor DB surgery to sync again. A quota the customer cannot
+    remediate is an outage, not a limit.
+
+    Scoped to the caller's own ``account_id`` like every other bundle query, so this
+    cannot touch another customer's data. Idempotent: deleting an absent bundle is 200
+    with ``deleted: false``, so a retried client request is never an error.
+    """
+    _lic, account_id = await asyncio.to_thread(
+        _authorize, request)                         # raises -> 402 if unlicensed
+    workspace = _safe_workspace_id(workspace_id)
+    safe = _safe_name(name)
+    if not workspace or not safe:
+        return JSONResponse({"error": "invalid workspace or bundle name"}, status_code=400)
+    deleted = await asyncio.to_thread(
+        _delete_bundle, account_id, workspace, safe)
+    return {"ok": True, "name": safe, "deleted": deleted}
+
+
+def _delete_bundle(account_id: str, workspace: str, name: str) -> bool:
+    """Perform the blocking SQLite delete outside the ASGI event loop."""
+    conn = _conn()
+    try:
+        cursor = conn.execute(
+            "DELETE FROM sync_bundles "
+            "WHERE account_id=? AND workspace_id=? AND name=?",
+            (account_id, workspace, name))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
 @router.get("/{workspace_id}/bundles/{name}")
-async def pull_bundle(workspace_id: str, name: str, request: Request):
+def pull_bundle(workspace_id: str, name: str, request: Request):
     """Return one opaque bundle as raw bytes.
 
     Current clients use this endpoint after ``/names`` so server and client memory stay
@@ -244,7 +344,7 @@ async def pull_bundle(workspace_id: str, name: str, request: Request):
 
 
 @router.get("/{workspace_id}/bundles")
-async def pull_bundles(workspace_id: str, request: Request):
+def pull_bundles(workspace_id: str, request: Request):
     """Legacy bulk response for older clients.
 
     The current client uses ``/names`` plus one raw ``/bundles/{name}`` fetch at a time.
@@ -285,7 +385,7 @@ async def pull_bundles(workspace_id: str, request: Request):
 
 
 @router.get("/{workspace_id}/names")
-async def list_names(workspace_id: str, request: Request):
+def list_names(workspace_id: str, request: Request):
     """Bundle names only (no payloads) for the caller's account+workspace."""
     _lic, account_id = _authorize(request)
     workspace = _safe_workspace_id(workspace_id)

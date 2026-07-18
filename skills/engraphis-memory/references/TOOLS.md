@@ -6,7 +6,7 @@ Governance tools (`forget`/`pin`/`correct`/`link`) verify the memory actually be
 `workspace`/`repo` you pass **before** changing anything, so you can't touch memories outside a
 scope you were already given.
 
-Group index: [Write](#write) · [Read](#read) · [History](#history) · [Governance](#governance) ·
+Group index: [Write](#write) · [Read](#read) · [History](#history-bi-temporal) · [Governance](#governance) ·
 [Code](#code) · [Sessions](#sessions) · [Ops](#ops).
 
 ---

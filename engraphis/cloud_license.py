@@ -28,6 +28,7 @@ import ipaddress
 import json
 import logging
 import os
+import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -143,18 +144,31 @@ def machine_id() -> str:
         mid = uuid.uuid4().hex
         try:
             _MACHINE_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
-            # Atomic create-if-absent so two PROCESSES racing a first run don't each persist
-            # a DIFFERENT id (registering the same device twice and burning a seat). The
-            # exclusive create fails if another process already wrote one; adopt that value.
+            # Publish a fully-written private file with an atomic create-if-absent link.
+            # Creating the destination first and then writing it exposes an empty file to
+            # a competing process, which can make that process cache a different id.
+            fd, temp_name = tempfile.mkstemp(
+                prefix=".machine_id.", dir=str(_MACHINE_ID_FILE.parent))
+            temp_path = Path(temp_name)
             try:
-                fd = os.open(str(_MACHINE_ID_FILE),
-                             os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fd = -1
                     fh.write(mid)
-            except FileExistsError:
-                existing = _MACHINE_ID_FILE.read_text(encoding="utf-8").strip()
-                if existing:
-                    mid = existing
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                try:
+                    os.link(str(temp_path), str(_MACHINE_ID_FILE))
+                except FileExistsError:
+                    existing = _MACHINE_ID_FILE.read_text(encoding="utf-8").strip()
+                    if existing:
+                        mid = existing
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
             try:
                 os.chmod(_MACHINE_ID_FILE, 0o600)
             except OSError:
@@ -266,8 +280,8 @@ def register(base_url: str, key: str, mid: str, *, timeout: float = _REGISTER_TI
     server did not definitively deny the key."""
     try:
         base = validate_cloud_base_url(base_url)
-    except ValueError as exc:
-        logger.warning("license registration blocked: %s", exc)
+    except ValueError:
+        logger.warning("license registration blocked: invalid service URL")
         return None
     url = base + "/license/v1/register"
     data = json.dumps({"key": key, "machine_id": mid}).encode("utf-8")
@@ -305,8 +319,8 @@ def send_team_invite(base_url: str, key: str, to: str, name: str, role: str,
     """
     try:
         base = validate_cloud_base_url(base_url)
-    except ValueError as exc:
-        return False, str(exc)
+    except ValueError:
+        return False, "relay URL must use HTTPS (except loopback) and contain no credentials"
     url = base + "/license/v1/team-invite"
     data = json.dumps({"key": key, "to": to, "name": name, "role": role,
                        "invited_by": invited_by, "dashboard_url": dashboard_url}
@@ -318,13 +332,19 @@ def send_team_invite(base_url: str, key: str, to: str, name: str, role: str,
             body = json.loads(resp.read().decode("utf-8"))
         return bool(body.get("sent")), ""
     except urllib.error.HTTPError as exc:
-        try:
-            detail = json.loads(exc.read().decode("utf-8")).get("error", "")
-        except Exception:
-            detail = ""
-        return False, (detail or "relay returned HTTP %d" % exc.code)
-    except (urllib.error.URLError, ValueError, TimeoutError, OSError) as exc:
-        return False, "relay unreachable: %s" % exc
+        if exc.code == 402:
+            return False, "an active Team license is required for relayed invites"
+        if exc.code == 429:
+            # Two different 429s share this route. The short per-IP burst gate in front
+            # of the relay's Ed25519 verify sends Retry-After; the per-key DAILY cap does
+            # not. Without this branch an admin who tripped the 60-second gate is told to
+            # come back tomorrow, and gives up on an invite that would work immediately.
+            if exc.headers is not None and exc.headers.get("Retry-After"):
+                return False, "relay is rate-limiting invites; retry shortly"
+            return False, "daily relayed-invite limit reached; retry tomorrow"
+        return False, "relay rejected invite (HTTP %d)" % exc.code
+    except (urllib.error.URLError, ValueError, TimeoutError, OSError):
+        return False, "relay is unreachable; check ENGRAPHIS_RELAY_URL and the network"
 
 
 def request_trial_key(base_url: str, mid: str, plan: str = "team", email: str = "", *,
@@ -346,8 +366,9 @@ def request_trial_key(base_url: str, mid: str, plan: str = "team", email: str = 
     (pro) and :func:`~engraphis.licensing.start_team_trial` (team)."""
     try:
         base = validate_cloud_base_url(base_url)
-    except ValueError as exc:
-        return None, str(exc), False
+    except ValueError:
+        return None, ("relay URL must use HTTPS (except loopback) and contain no "
+                      "credentials"), False
     url = base + "/license/v1/start-trial"
     data = json.dumps({"machine_id": mid, "email": email, "plan": plan}).encode("utf-8")
     req = urllib.request.Request(
@@ -359,17 +380,17 @@ def request_trial_key(base_url: str, mid: str, plan: str = "team", email: str = 
         if key:
             return key, "", False
         if body.get("pending"):
-            return None, (body.get("message") or
-                          "check your email to confirm and activate the trial"), True
+            return None, "check your email to confirm and activate the trial", True
         return None, "relay returned no key", False
     except urllib.error.HTTPError as exc:
-        try:
-            detail = json.loads(exc.read().decode("utf-8")).get("error", "")
-        except Exception:
-            detail = ""
-        return None, (detail or "relay returned HTTP %d" % exc.code), False
-    except (urllib.error.URLError, ValueError, TimeoutError, OSError) as exc:
-        return None, "relay unreachable: %s" % exc, False
+        if exc.code == 409:
+            return None, "the free trial has already been used on this device", False
+        if exc.code == 429:
+            return None, "too many trial requests; try again later", False
+        return None, "trial relay rejected the request (HTTP %d)" % exc.code, False
+    except (urllib.error.URLError, ValueError, TimeoutError, OSError):
+        return None, ("trial relay is unreachable; check ENGRAPHIS_RELAY_URL and the "
+                      "network"), False
 
 
 def request_team_trial_key(base_url: str, mid: str, email: str = "", *,

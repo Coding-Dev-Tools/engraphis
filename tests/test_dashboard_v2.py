@@ -29,7 +29,8 @@ def _seed(db_path: str) -> MemoryService:
     return svc
 
 
-def _client(monkeypatch, tmp_path, *, team=False, key=None):
+def _client(monkeypatch, tmp_path, *, team=False, key=None,
+            client=("127.0.0.1", 50000), api_token=""):
     db = str(tmp_path / "dash.db")
     monkeypatch.setattr(settings, "db_path", db)
     monkeypatch.setattr(settings, "embed_model", "")
@@ -37,6 +38,7 @@ def _client(monkeypatch, tmp_path, *, team=False, key=None):
     monkeypatch.setenv("ENGRAPHIS_TEAM_MODE", "1" if team else "0")
     monkeypatch.setenv("ENGRAPHIS_TEAM_INVITES", "0")
     monkeypatch.setenv("ENGRAPHIS_TEST_AUTH_ITERATIONS", "1000")
+    monkeypatch.setattr(settings, "api_token", api_token)
     monkeypatch.setattr(lic, "_LICENSE_FILE", tmp_path / "license.key")
     if key:
         monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
@@ -48,7 +50,7 @@ def _client(monkeypatch, tmp_path, *, team=False, key=None):
     from engraphis.routes import v2_api
     v2_api.set_service(svc)
     from engraphis.dashboard_app import create_app
-    return TestClient(create_app())
+    return TestClient(create_app(), client=client)
 
 
 def _team_key(seats=5):
@@ -67,6 +69,47 @@ def test_dashboard_serves_and_bootstraps(monkeypatch, tmp_path):
         assert b["stats"]["memories"] >= 2
         assert any(w["name"] == "demo" for w in b["workspaces"])
         assert b["license"]["plan"] == "free"
+
+
+def test_unconfigured_remote_api_is_refused_but_loopback_is_allowed(monkeypatch, tmp_path):
+    remote = ("203.0.113.8", 50000)
+    with _client(monkeypatch, tmp_path, client=remote) as c:
+        denied = c.get("/api/bootstrap")
+        assert denied.status_code == 403 and denied.json()["auth"] == "unconfigured"
+
+
+def test_unconfigured_hosted_team_can_reach_safe_license_bootstrap(monkeypatch, tmp_path):
+    """The public page must have a safe way out of the remote API deny-by-default wall."""
+    remote = ("203.0.113.8", 50000)
+    with _client(monkeypatch, tmp_path, team=True, client=remote) as c:
+        assert c.get("/").status_code == 200
+        state = c.get("/api/auth/state")
+        assert state.status_code == 200
+        assert state.json() == {
+            "enabled": False, "needs_setup": False, "licensed": False,
+            "team_locked": False, "user": None,
+        }
+        denied = c.get("/api/bootstrap")
+        assert denied.status_code == 403 and denied.json()["auth"] == "unconfigured"
+        license_status = c.get("/api/license")
+        assert license_status.status_code == 200
+        assert license_status.json()["plan"] == "free"
+
+
+def test_remote_api_token_opens_the_single_user_api(monkeypatch, tmp_path):
+    with _client(
+        monkeypatch, tmp_path, client=("203.0.113.8", 50000), api_token="secret"
+    ) as c:
+        assert c.get("/api/bootstrap").status_code == 401
+        assert c.get(
+            "/api/bootstrap", headers={"Authorization": "Bearer secret"}
+        ).status_code == 200
+
+
+def test_forwarding_header_never_turns_a_proxied_request_into_loopback(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as c:
+        response = c.get("/api/bootstrap", headers={"X-Forwarded-For": "127.0.0.1"})
+        assert response.status_code == 403
 
 
 @pytest.mark.parametrize("raw", ["0", " false ", "NO", "Off"])
@@ -530,6 +573,7 @@ def test_team_password_policy_enforced(monkeypatch, tmp_path):
 
 def test_team_login_lockout(monkeypatch, tmp_path):
     """Repeated failed logins must lock the account temporarily."""
+    monkeypatch.setattr("engraphis.inspector.auth.LOCKOUT_SECONDS", 7)
     with _client(monkeypatch, tmp_path, team=True, key=_team_key()) as c:
         assert c.post("/api/auth/setup", json={"email": "w@x.co", "name": "W",
                       "password": "supersecret1"}).status_code == 200
@@ -542,7 +586,24 @@ def test_team_login_lockout(monkeypatch, tmp_path):
         r = c.post("/api/auth/login", json={"email": "w@x.co", "password": "supersecret1"})
         assert r.status_code == 429, f"expected 429 lockout, got {r.status_code}: {r.text}"
         assert "too many" in r.text.lower()
-        assert r.headers.get("Retry-After") == "60"
+        assert r.headers.get("Retry-After") == "7"
+
+
+def test_advertised_api_root_is_real(monkeypatch, tmp_path):
+    from engraphis import __version__
+
+    with _client(monkeypatch, tmp_path) as c:
+        r = c.get("/api")
+        assert r.status_code == 200
+        assert r.json() == {
+            "service": "engraphis",
+            # Never a literal: a hardcoded version passes only while the installed
+            # dist metadata happens to agree, then fails on a clean CI build.
+            "version": __version__,
+            "health": "/api/health",
+            "ready": "/api/ready",
+            "openapi": "/api/openapi.json",
+        }
 
 
 def test_trial_start_and_rejection(monkeypatch, tmp_path):
@@ -859,6 +920,41 @@ def test_import_files_route_multipart_upload(monkeypatch, tmp_path):
 
         found = c.get("/api/recall?q=okapis&workspace=demo").json()
         assert any("okapis" in m["content"] for m in found["memories"])
+
+
+def test_server_only_dashboard_is_quiet_about_absent_mcp(monkeypatch, tmp_path, caplog):
+    """A server-only install has no MCP SDK; that expected shape must not warn.
+
+    Two things this test used to get wrong. It asserted through ``capsys``, but the
+    message is a ``logging`` call — whether it reaches stdout depends on which earlier
+    test last touched the root logger, so the result tracked suite ORDER rather than
+    behaviour. And it left ``settings.db_path`` alone, so ``create_app()`` built a real
+    database at the default location: it polluted the developer's tree and failed
+    outright on any filesystem SQLite dislikes.
+    """
+    import logging
+
+    from engraphis import dashboard_app
+
+    monkeypatch.setattr(settings, "db_path", str(tmp_path / "dash.db"))
+    monkeypatch.setattr(settings, "embed_model", "")
+    monkeypatch.setattr(dashboard_app.importlib.util, "find_spec", lambda _name: None)
+    with caplog.at_level(logging.INFO, logger="engraphis"):
+        dashboard_app.create_app()
+    skipped = [r for r in caplog.records if "MCP /mcp mount skipped" in r.getMessage()]
+    assert all(r.levelno < logging.WARNING for r in skipped), \
+        [(r.levelname, r.getMessage()) for r in skipped]
+
+
+def test_explicit_offline_embedder_status_is_not_a_missing_dependency_warning():
+    from engraphis.backends import DeterministicEmbedder
+    from engraphis.dashboard_app import _embedder_status
+
+    embedder = DeterministicEmbedder(dim=64)
+    assert _embedder_status(embedder, "") == "deterministic offline mode selected"
+    assert _embedder_status(embedder, "configured/model") == (
+        "configured model unavailable; deterministic fallback active"
+    )
 
 
 def test_personal_folders_are_isolated_per_user(monkeypatch, tmp_path):

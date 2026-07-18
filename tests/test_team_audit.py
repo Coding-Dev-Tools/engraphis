@@ -125,6 +125,8 @@ def test_add_user_falls_back_to_vendor_relay_when_no_local_email_configured(monk
         return True, ""
 
     monkeypatch.setattr(cloud_license, "send_team_invite", fake_send)
+    monkeypatch.setattr(settings, "relay_url", "https://customer.example")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "https://team.engraphis.com")
 
     c = _client(monkeypatch, tmp_path)
     _admin(c)
@@ -133,6 +135,7 @@ def test_add_user_falls_back_to_vendor_relay_when_no_local_email_configured(monk
     assert r.status_code == 200 and r.json()["invited"] is True
     assert captured["to"] == "m@x.co" and captured["invited_by"] == "admin@x.co"
     assert captured["key"]                       # the raw active license key was forwarded
+    assert captured["base_url"] == "https://team.engraphis.com"
     actions = [e["action"] for e in c.get("/api/auth/audit").json()["events"]]
     assert "user.invite_email_failed" not in actions
 

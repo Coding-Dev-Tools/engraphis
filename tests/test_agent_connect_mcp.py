@@ -110,6 +110,16 @@ def test_mcp_requires_auth_401(monkeypatch, tmp_path):
         assert r.status_code == 401  # no token, no cookie -> refused
 
 
+def test_per_user_bearer_scheme_is_case_insensitive(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path, key=_team_key()) as c:
+        _setup_admin(c)
+        token = _mint(c)
+        c.cookies.clear()
+        response = c.get(
+            "/api/memories", headers={"Authorization": "bearer %s" % token})
+        assert response.status_code == 200
+
+
 def test_mcp_rejects_browser_cookie_without_bearer(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path, key=_team_key()) as c:
         _setup_admin(c)  # leaves a valid dashboard session cookie in the client
@@ -140,6 +150,15 @@ def test_mcp_rejects_unconfigured_host(monkeypatch, tmp_path):
                              "clientInfo": {"name": "t", "version": "1"}}},
                    headers={**_h(token), "Host": "attacker.invalid"})
         assert r.status_code == 421
+
+
+def test_dashboard_url_rejects_embedded_credentials(monkeypatch):
+    from engraphis.dashboard_app import _mcp_transport_security
+    from engraphis.mcp_server import mcp
+
+    monkeypatch.setenv("ENGRAPHIS_DASHBOARD_URL", "https://:secret@dash.example.com")
+    with pytest.raises(ValueError, match="without userinfo"):
+        _mcp_transport_security(mcp)
 
 
 def test_mcp_handshake_lists_engraphis_tools(monkeypatch, tmp_path):

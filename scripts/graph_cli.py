@@ -26,7 +26,10 @@ def _service() -> MemoryService:
 
 
 def _json(value) -> None:
-    print(json.dumps(value, indent=2, ensure_ascii=False, default=str))
+    # Console JSON must survive the default Windows charmap codec. Non-ASCII graph
+    # labels remain lossless JSON escapes instead of turning a successful command into
+    # exit 2 when stdout cannot encode characters such as U+2192.
+    print(json.dumps(value, indent=2, ensure_ascii=True, default=str))
 
 
 def _git_files(root: str, revision: str) -> list[str]:
@@ -476,7 +479,11 @@ def _common(parser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="engraphis-graph")
-    sub = parser.add_subparsers(dest="command", required=True)
+    visible = ("index", "search", "query", "explain", "path", "impact", "prs",
+               "export", "postgres", "install-merge-driver")
+    sub = parser.add_subparsers(
+        dest="command", required=True, metavar="{%s}" % ",".join(visible)
+    )
 
     item = sub.add_parser("index", help="Incrementally index a repository")
     _common(item)
@@ -545,7 +552,11 @@ def build_parser() -> argparse.ArgumentParser:
     item.add_argument("other")
     item.set_defaults(func=_merge)
 
-    item = sub.add_parser("install-merge-driver")
+    # argparse.SUPPRESS still renders ``merge ==SUPPRESS==`` for subparsers. Keep the
+    # command callable by git while removing only its help pseudo-action.
+    sub._choices_actions = [a for a in sub._choices_actions if a.dest != "merge"]
+
+    item = sub.add_parser("install-merge-driver", help="Install the graph union merge driver")
     item.add_argument("--root", default=".")
     item.add_argument("--graph-path", default="engraphis-graph-out/graph.json")
     item.set_defaults(func=_install_merge_driver)

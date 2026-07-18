@@ -29,18 +29,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from engraphis import __version__, licensing
+from engraphis import __version__, http_security, licensing
 from engraphis.analytics import compute_analytics, render_analytics_html
 from engraphis.billing import router as billing_router
 from engraphis.inspector.sync_relay import router as sync_relay_router
 from engraphis.inspector.license_cloud import router as license_cloud_router
 from engraphis.config import settings
 from engraphis.inspector.auth import (
-    SESSION_TTL_SECONDS, AccountLockedError, AuthError, AuthStore, bearer_ok,
-    min_role as _min_role, role_at_least,
+    SESSION_TTL_SECONDS, AccountLockedError, AuthError, AuthStore,
+    SetupAlreadyCompletedError, bearer_ok, min_role as _min_role, role_at_least,
 )
 from engraphis.licensing import LicenseError
 from engraphis.logging_setup import configure_logging
+from engraphis.netutil import client_ip, is_local_request
 from engraphis.service import MemoryService, ValidationError
 
 logger = logging.getLogger("engraphis")
@@ -212,10 +213,11 @@ def create_app(service: Optional[MemoryService] = None,
         Server Error" body. The frontend's api() helper does res.json() on every
         response, so that plaintext body fails to parse and surfaces as the opaque
         "Error: bad response" -- hiding the real cause from both the user and
-        whoever's debugging it. Log the full exception server-side, return a
-        sanitized JSON message client-side (same shape every other handler here
-        uses), so at minimum the failure is visible and structured."""
-        logger.exception("unhandled exception on %s %s", request.method, request.url.path)
+        whoever's debugging it. Log the exception type server-side without copying
+        potentially sensitive exception text, and return a sanitized JSON message
+        client-side so the failure remains visible and structured."""
+        logger.error("unhandled exception on %s %s (%s)", request.method,
+                     request.url.path, type(exc).__name__)
         return JSONResponse({"error": "internal error -- see server logs"}, status_code=500)
 
     def _actor(request: Request) -> str:
@@ -265,7 +267,7 @@ def create_app(service: Optional[MemoryService] = None,
                                       "role": user["role"]}})
         resp.set_cookie(COOKIE_NAME, user["token"], max_age=SESSION_TTL_SECONDS,
                         httponly=True, samesite="strict", path="/",
-                        secure=request.url.scheme == "https")
+                        secure=http_security.wants_https(request))
         return resp
 
     @app.post("/api/auth/setup")
@@ -276,8 +278,19 @@ def create_app(service: Optional[MemoryService] = None,
             raise LicenseError("team mode is not active on this instance")
         if auth().count_users() > 0:
             return JSONResponse({"error": "setup already completed"}, status_code=409)
-        await asyncio.to_thread(
-            auth().create_user, body.email, body.name, body.password, "admin")
+        if not is_local_request(request) and not bearer_ok(
+                request.headers.get("Authorization"), settings.api_token):
+            return JSONResponse(
+                {"error": "deployment API token required for remote setup"},
+                status_code=401,
+            )
+        try:
+            await asyncio.to_thread(
+                auth().create_user, body.email, body.name, body.password, "admin",
+                require_empty=True,
+            )
+        except SetupAlreadyCompletedError:
+            return JSONResponse({"error": "setup already completed"}, status_code=409)
         user = await asyncio.to_thread(auth().login, body.email, body.password)
         return _login_response(user, request)
 
@@ -285,13 +298,16 @@ def create_app(service: Optional[MemoryService] = None,
     async def auth_login(body: _LoginBody, request: Request):
         if not team_active():
             return JSONResponse({"error": "team mode is not active"}, status_code=400)
-        ip = request.client.host if request.client else None
+        ip = client_ip(request)
         try:
             # PBKDF2 is CPU-bound; to_thread keeps the event loop free (see auth_setup).
             user = await asyncio.to_thread(
                 auth().login, body.email, body.password, ip=ip)
         except AccountLockedError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=429)
+            # Report the actual remaining window; never let HTTP metadata drift from
+            # throttle configuration or elapsed time.
+            return JSONResponse({"error": str(exc)}, status_code=429,
+                                headers={"Retry-After": str(exc.retry_after)})
         except AuthError as exc:
             return JSONResponse({"error": str(exc)}, status_code=401)
         return _login_response(user, request)
@@ -472,5 +488,9 @@ def create_app(service: Optional[MemoryService] = None,
     app.include_router(billing_router)
     app.include_router(sync_relay_router)
     app.include_router(license_cloud_router)
+
+    # Baseline security response headers — see engraphis.http_security. Registered last
+    # so it wraps the auth middleware above and also covers its 401/402 short-circuits.
+    http_security.install(app)
 
     return app

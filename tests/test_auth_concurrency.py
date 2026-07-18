@@ -323,6 +323,37 @@ def test_login_burst_cannot_beat_lockout_via_offlock_hash(monkeypatch, tmp_path)
     ).fetchone()[0] == 0
 
 
+def test_login_burst_cannot_beat_ip_lockout_via_offlock_hash(monkeypatch, tmp_path):
+    """A concurrent credential-stuffing burst must stop a parked successful login."""
+    _allow_team(monkeypatch)
+    from engraphis.inspector.auth import IP_LOCKOUT_FAILS
+
+    store = AuthStore(str(tmp_path / "users.db"), iterations=1)
+    store.create_user("admin@example.com", "Admin", PASSWORD, "admin")
+    store.create_user("member@example.com", "Member", PASSWORD, "member", seat_limit=5)
+    in_hash, release = _park_first_hash(monkeypatch)
+    ip = "203.0.113.12"
+    result = {}
+
+    def do_login():
+        try:
+            result["user"] = store.login("member@example.com", PASSWORD, ip=ip)
+        except AuthError as exc:
+            result["error"] = str(exc)
+
+    thread = threading.Thread(target=do_login)
+    thread.start()
+    assert in_hash.wait(5)
+    for i in range(IP_LOCKOUT_FAILS):
+        with pytest.raises(AuthError):
+            store.login(f"unknown-{i}@example.com", "WrongPassword0!", ip=ip)
+    release.set()
+    thread.join(5)
+
+    assert "user" not in result
+    assert "too many failed attempts from this network" in result.get("error", "")
+
+
 def test_login_does_not_hold_store_lock_during_password_hash(monkeypatch, tmp_path):
     """PBKDF2 (~100ms) must run OUTSIDE ``AuthStore._lock`` (commit e8d4ac9): the async auth
     middleware resolves every request's session under that SAME lock, so holding it across the

@@ -69,10 +69,10 @@ python -m scripts.consolidate --db engraphis.db --workspace acme --dry-run
 
 # ── Cloud sync (Pro; schedulable job over a shared folder OR the managed relay — see docs/SYNC.md) ──
 python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/engraphis --dry-run
-python -m scripts.sync --db engraphis.db --workspace acme --relay https://sync.engraphis.app  # or bare --relay + ENGRAPHIS_RELAY_URL
+python -m scripts.sync --db engraphis.db --workspace acme --relay https://team.engraphis.com  # or bare --relay + ENGRAPHIS_RELAY_URL
 
 # ── Run the v1 server (needs the full install) ───────────────────────────────
-python -m scripts.start_server      # http://127.0.0.1:8700  (dashboard at /, OpenAPI at /docs)
+python -m scripts.start_server      # http://127.0.0.1:8700  (dashboard at /, schema at /openapi.json)
 python -m scripts.test_routes       # HTTP smoke test — requires a running server + httpx
 python -m scripts.cli recall "what do we know about X" -n vault    # CLI: ingest/recall/chat/thoughts/list
 

@@ -1,9 +1,9 @@
 """The vendor admin token is a SEPARATE secret from the instance API token.
 
 /license/v1's vendor-only routes (revoke, keys, revoke-by-email, deactivate, devices)
-authorize vendor-wide actions against every customer on the shared relay. They must
-prefer ``ENGRAPHIS_VENDOR_ADMIN_TOKEN``; the ``ENGRAPHIS_API_TOKEN`` fallback exists
-only for continuity until the operator sets the dedicated variable (and warns once).
+authorize vendor-wide actions against every customer on the shared relay. They require
+``ENGRAPHIS_VENDOR_ADMIN_TOKEN`` and fail closed when it is absent; the ordinary
+``ENGRAPHIS_API_TOKEN`` must never authorize vendor-wide operations.
 Same fixture posture as test_cloud_license.py (real signer, tmp relay DB).
 """
 import time
@@ -16,7 +16,6 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from engraphis import cloud_license, licensing
-from engraphis.config import settings
 from engraphis.inspector import license_cloud
 from engraphis.inspector import license_registry as reg
 from engraphis.licensing import LicenseError, ed25519_public_key, parse_key
@@ -32,6 +31,7 @@ def _cloud_env(monkeypatch, tmp_path):
     monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", SECRET.hex())
     monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(tmp_path / "relay.db"))
     monkeypatch.delenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_API_TOKEN", raising=False)
     monkeypatch.setattr(cloud_license, "_DIR", tmp_path)
     monkeypatch.setattr(cloud_license, "_LEASE_FILE", tmp_path / "lease.sig")
     monkeypatch.setattr(cloud_license, "_MACHINE_ID_FILE", tmp_path / "machine_id")
@@ -68,7 +68,7 @@ def test_vendor_token_wins_and_api_token_stops_working(monkeypatch):
     c = _app()
     kid = _issued_kid()
     monkeypatch.setenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", "vendor-secret")
-    monkeypatch.setattr(settings, "api_token", "instance-token")
+    monkeypatch.setenv("ENGRAPHIS_API_TOKEN", "instance-token")
     denied = c.post("/license/v1/revoke/%s" % kid,
                     headers={"Authorization": "Bearer instance-token"})
     assert denied.status_code == 401
@@ -78,23 +78,22 @@ def test_vendor_token_wins_and_api_token_stops_working(monkeypatch):
     assert ok.status_code == 200 and reg.is_revoked(kid) is True
 
 
-def test_fallback_to_api_token_until_operator_migrates(monkeypatch):
-    """No vendor token configured → the API token still works (continuity), with a
-    one-time warning nudging the operator to split the secrets."""
+def test_missing_vendor_token_never_falls_back_to_instance_token(monkeypatch):
+    """No vendor token configured means the instance token is denied, with one
+    operator warning explaining how to re-enable the vendor-only routes."""
     c = _app()
     kid = _issued_kid()
-    monkeypatch.setattr(settings, "api_token", "instance-token")
-    monkeypatch.setattr(license_cloud, "_VENDOR_FALLBACK_WARNED", False)
-    ok = c.post("/license/v1/revoke/%s" % kid,
-                headers={"Authorization": "Bearer instance-token"})
-    assert ok.status_code == 200 and reg.is_revoked(kid) is True
-    assert license_cloud._VENDOR_FALLBACK_WARNED is True    # warning fired exactly once
+    monkeypatch.setenv("ENGRAPHIS_API_TOKEN", "instance-token")
+    monkeypatch.setattr(license_cloud, "_VENDOR_UNSET_WARNED", False)
+    denied = c.post("/license/v1/revoke/%s" % kid,
+                    headers={"Authorization": "Bearer instance-token"})
+    assert denied.status_code == 401 and reg.is_revoked(kid) is False
+    assert license_cloud._VENDOR_UNSET_WARNED is True
 
 
 def test_no_tokens_configured_fails_closed(monkeypatch):
     c = _app()
     kid = _issued_kid()
-    monkeypatch.setattr(settings, "api_token", "")
     assert c.post("/license/v1/revoke/%s" % kid).status_code == 401
     assert c.post("/license/v1/revoke/%s" % kid,
                   headers={"Authorization": "Bearer anything"}).status_code == 401
@@ -105,7 +104,7 @@ def test_every_vendor_admin_route_uses_the_vendor_token(monkeypatch):
     c = _app()
     kid = _issued_kid()
     monkeypatch.setenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", "vendor-secret")
-    monkeypatch.setattr(settings, "api_token", "instance-token")
+    monkeypatch.setenv("ENGRAPHIS_API_TOKEN", "instance-token")
     bad = {"Authorization": "Bearer instance-token"}
     good = {"Authorization": "Bearer vendor-secret"}
     probes = [

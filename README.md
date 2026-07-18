@@ -1,6 +1,6 @@
 # Engraphis
 
-[![Version](https://img.shields.io/badge/version-0.9.6-blue.svg)](https://github.com/Coding-Dev-Tools/engraphis)
+[![Version](https://img.shields.io/badge/version-0.9.8-blue.svg)](https://github.com/Coding-Dev-Tools/engraphis)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/Coding-Dev-Tools/engraphis/blob/main/LICENSE)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://buymeacoffee.com/Jaixii)
 
@@ -36,7 +36,8 @@ engraphis-dashboard
 ```
 
 Opens `http://127.0.0.1:8700` in your browser. No cloud, no signup, no API key for memory.
-Everything lives in a single SQLite file on your machine.
+Memory lives in a local SQLite file on your machine. When hosted user accounts are enabled,
+their credentials and sessions live in a companion `<database>.users.db`; back up both files.
 
 **You'll see the full product** — a dark-themed (with multiple theme options in left sidebar), sidebar-navigated dashboard with 14 tabs:
 
@@ -139,12 +140,14 @@ or structured consolidation.
 
 The dashboard ships as a Docker image that defaults to the v2 dashboard (multi-user auth,
 roles, seats, cloud-license revocation). Deploy one instance on Railway and access your
-memories from any browser. Two paths, same button:
+memories from any browser. Two supported paths:
 
 - **Pro solo** — a Pro member deploys a single-admin cloud instance: browser dashboard
   (analytics, automation, export) + a self-hosted sync relay. Activate the same Pro key
-  on each local instance, set `ENGRAPHIS_RELAY_URL=https://team.engraphis.com` on both
-  the hosted service and local instances, then enable auto-sync (or run **Sync now**).
+  on each local instance, set `ENGRAPHIS_RELAY_URL` on both the hosted service and local
+  instances to **your Railway deployment URL**, then enable auto-sync (or run **Sync now**).
+  Keep `ENGRAPHIS_CLOUD_URL=https://team.engraphis.com` on the hosted service so trials,
+  revocable leases, and fallback invite delivery continue to use the managed issuer.
   One admin, no member seats.
 - **Team admin** — a Team administrator deploys one instance and invites members (email +
   password + role). Members sign in at your URL and connect their agents over HTTP/MCP —
@@ -154,12 +157,21 @@ See [`docs/HOSTING_RAILWAY.md`](docs/HOSTING_RAILWAY.md) for the 5-minute guide 
 both paths (volume, custom domain, activate Pro/Team, create the first admin, invite
 members, and connect agents).
 
-[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new?template=https://raw.githubusercontent.com/Coding-Dev-Tools/engraphis/main/railway.json)
+**→ [Deploy on Railway (5-minute guide)](docs/HOSTING_RAILWAY.md)**
 
-> The button provisions a service from this repo's Dockerfile. After it builds, you add
-> a persistent `/data` volume (so activated keys + memories survive redeploys) and set
-> `ENGRAPHIS_FORWARDED_ALLOW_IPS=*` — both one-click steps in the Railway dashboard;
-> full walk-through in the hosting guide.
+> Deploying from this repo's `Dockerfile` takes about five minutes: create the service,
+> attach a persistent `/data` volume (so activated keys + memories survive redeploys),
+> and set `ENGRAPHIS_FORWARDED_ALLOW_IPS=*`, `ENGRAPHIS_DASHBOARD_URL`, and a strong
+> `ENGRAPHIS_API_TOKEN` for hosted bootstrap. `railway.json`
+> in this repo already supplies the build and healthcheck config. The hosting guide walks
+> through each step with the exact values.
+>
+> *(A one-click "Deploy on Railway" button previously sat here pointing at
+> `railway.app/new?template=<raw railway.json URL>`. Railway ignores that parameter —
+> `railway.json` is per-service build config, not a publishable template — so the button
+> only ever landed people on a generic project chooser. It was removed on 2026-07-18
+> rather than left looking functional. `docs/RAILWAY_TEMPLATE.md` contains the spec to
+> publish a real template; once published, its button can go back here.)*
 
 Hosted **Agent Connect** tokens are per-user, shown only once, and stored only as SHA-256
 digests. Roles are rechecked on every HTTP/MCP call; disabling a member or resetting their
@@ -179,10 +191,14 @@ pip install "engraphis[encryption]" # SQLCipher encryption-at-rest extra
 pip install engraphis               # core library — numpy only, fully offline
 ```
 
-The core library supports Python 3.9+. The upstream MCP SDK requires Python 3.10+, so
-use Python 3.10 or newer for the `mcp` or `all` installation paths.
-`sqlcipher3-binary` currently publishes Linux wheels; on Windows, `all` installs without
-that optional driver and `engraphis[encryption]` requires a compatible SQLCipher build.
+The NumPy-only core library supports Python 3.9+. Current patched releases of the WebUI
+stack, MCP SDK, and image parser require Python 3.10+, so use Python 3.10 or newer for
+the `server`, `mcp`, `documents`, or `all` installation paths.
+`sqlcipher3-binary` publishes CPython manylinux x86-64 wheels. On that target,
+`engraphis[encryption]` installs the driver. The cross-platform `all` extra deliberately
+omits it so `all` remains resolvable on macOS, Windows, Linux ARM, and musl; on those
+targets, provision a compatible SQLCipher driver separately before enabling a database
+key. Plaintext SQLite remains the explicit default on every platform.
 
 > **Linux / macOS:** if `pip install` fails with `error: externally-managed-environment`,
 > your system Python is marked read-only (PEP 668). Install into a virtual environment
@@ -214,6 +230,9 @@ overrides from `.env` or the shell. The legacy v1 API is opt-in with
 `docker compose --profile api up engraphis-api` and uses a separate database so its
 incompatible schema cannot collide with the dashboard.
 
+Compose publishes both services on host loopback only. Set a strong `ENGRAPHIS_API_TOKEN`
+before changing either port mapping to a non-loopback host address.
+
 Set `ENGRAPHIS_API_TOKEN` to require API authentication, `ENGRAPHIS_DB_KEY` to encrypt
 the database at rest, and `ENGRAPHIS_LICENSE_KEY` to unlock Pro/Team features. See
 `docker-compose.yml` for all options.
@@ -242,7 +261,10 @@ For unattended jobs, `engraphis_start_session`, `engraphis_remember`, and
 pip install "engraphis[code]"
 engraphis-graph index -w acme -r api --root .
 engraphis-graph search -w acme -r api "UserService"
-engraphis-graph query -w acme -r api "where is token rotation implemented?"
+# `query`/`explain` blend code search with your stored memories: query matches symbol
+# and file NAMES (a full question sentence won't match anything), and explain's answer
+# is drawn from memories recorded against the repo — both are empty on a fresh index.
+engraphis-graph query -w acme -r api "UserService"
 engraphis-graph explain -w acme -r api "why does deploy depend on approval?"
 engraphis-graph path -w acme -r api UserService DatabasePool
 engraphis-graph impact -w acme -r api --root . --git-range origin/main...HEAD
@@ -265,7 +287,7 @@ For a read-only recall and graph API that can be shared without exposing write o
 
 ```bash
 pip install "engraphis[server]"
-engraphis-graph-server                 # http://127.0.0.1:8720/docs
+engraphis-graph-server                 # API at http://127.0.0.1:8720; schema at /openapi.json
 ```
 
 A non-loopback bind fails closed unless `ENGRAPHIS_GRAPH_TOKEN` (or
@@ -565,10 +587,10 @@ All via environment (or `.env`):
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
-| `ENGRAPHIS_DB_PATH` | `<project/package root>/engraphis.db` | SQLite database file |
+| `ENGRAPHIS_DB_PATH` | Source: `<repo>/engraphis.db`; installed: platform user-data directory | SQLite database file. Installed defaults are `%LOCALAPPDATA%\engraphis\engraphis.db` (Windows), `~/Library/Application Support/engraphis/engraphis.db` (macOS), and `$XDG_DATA_HOME/engraphis/engraphis.db` or `~/.local/share/engraphis/engraphis.db` (Linux). The environment variable overrides every default. |
 | `ENGRAPHIS_HOST` | `127.0.0.1` | Server bind address |
 | `ENGRAPHIS_PORT` | `8700` | Dashboard port |
-| `ENGRAPHIS_API_TOKEN` | — | If set, REST API requires `Authorization: Bearer <token>` |
+| `ENGRAPHIS_API_TOKEN` | — | Protects REST API routes with `Authorization: Bearer <token>` and proves deployment ownership during hosted trial and remote first-admin setup; leave unset only for loopback-only use |
 | `ENGRAPHIS_CORS_ORIGINS` | loopback on `ENGRAPHIS_PORT` | Comma-separated REST CORS allow-list; defaults to `127.0.0.1` and `localhost` on the configured port |
 | `ENGRAPHIS_WORKSPACES` | — | Optional comma-separated server-side workspace allow-list |
 | `ENGRAPHIS_DB_KEY` | — | Encrypt the database at rest (SQLCipher). Or use `ENGRAPHIS_DB_KEY_FILE` |
@@ -591,8 +613,10 @@ All via environment (or `.env`):
 | `ENGRAPHIS_DASHBOARD_URL` | — | Canonical public dashboard URL used in invites, reset links, redirects, and the hosted MCP Host/Origin allow-list |
 | `ENGRAPHIS_LOOP_INTERVAL` | `60` | Background consolidation loop interval in seconds (0 = disabled) |
 | `ENGRAPHIS_DECAY_HALFLIFE_DAYS` | `7` | Ebbinghaus decay half-life (higher = memories persist longer) |
-| `ENGRAPHIS_FORWARDED_ALLOW_IPS` | `127.0.0.1` | Proxies trusted for forwarded client/TLS headers (`*` only when the service is reachable exclusively through that proxy) |
-| `ENGRAPHIS_RELAY_URL` | `https://team.engraphis.com` | Managed sync, license, trial, and invite relay (Pro/Team); the retired Railway URL is migrated automatically |
+| `ENGRAPHIS_FORWARDED_ALLOW_IPS` | *(none)* | Proxies trusted for forwarded client/TLS headers (`*` only when the service is reachable exclusively through that proxy) |
+| `ENGRAPHIS_LOCAL_TRUSTED_PEERS` | *(none)* | Exact peers/CIDRs treated as local without forwarding headers; intended for the shipped loopback-published Compose bridge, not public deployments |
+| `ENGRAPHIS_RELAY_URL` | `https://team.engraphis.com` | Sync relay target (Pro/Team); set to a customer deployment for self-hosted sync |
+| `ENGRAPHIS_CLOUD_URL` | signed key issuer, then relay URL | License/trial/invite service override; keep `https://team.engraphis.com` when `ENGRAPHIS_RELAY_URL` points at a customer-operated sync relay |
 | `ENGRAPHIS_AUTOSYNC_LOOP` | `1` | Kill switch for the in-process auto-sync loop (0 = off) |
 
 See `.env.example` for the full list including commercial/vendor, email delivery, and

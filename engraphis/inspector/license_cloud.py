@@ -6,12 +6,17 @@ verifies the key against the pinned vendor key + registry (signature, expiry, pl
 revoked), enforces the per-key seat cap by counting distinct machine ids, records the
 device, and returns a short-lived Ed25519-signed lease the client verifies offline.
 Revocation and the other vendor-only admin routes require the dedicated vendor admin
-token (``ENGRAPHIS_VENDOR_ADMIN_TOKEN``; falls back to ``ENGRAPHIS_API_TOKEN`` with a
-logged warning until the operator sets the new variable — see :func:`_admin_ok`).
+token (``ENGRAPHIS_VENDOR_ADMIN_TOKEN``). There is no fallback to ``ENGRAPHIS_API_TOKEN``:
+with the variable unset those routes fail closed — see :func:`_vendor_admin_token`.
+
+Self-serve trial signup additionally requires ``ENGRAPHIS_RELAY_PUBLIC_URL``, because the
+confirmation link is emailed and must never be built from the request's ``Host`` header —
+see :func:`_relay_public_base`.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import secrets
@@ -21,8 +26,7 @@ from typing import Optional
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from engraphis import cloud_license
-from engraphis.config import settings
+from engraphis import cloud_license, netutil
 from engraphis.inspector import license_registry as reg
 from engraphis.inspector.auth import _EMAIL_RE, _hash_token, bearer_ok
 from engraphis.inspector.webhooks import _load_signing_secret
@@ -57,6 +61,128 @@ def _conn():
     return conn
 
 
+# License keys are currently far smaller than 8 KiB; 16 KiB leaves room for the other
+# fields while bounding memory before JSON decoding. Checking Content-Length alone is not
+# sufficient because a caller can stream a chunked request without that header.
+MAX_JSON_BODY_BYTES = 16 * 1024
+
+
+class _JsonBodyError(ValueError):
+    def __init__(self, message: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+async def _bounded_json_object(request: Request) -> dict:
+    """Read one small JSON object without buffering an attacker-sized request."""
+    declared = request.headers.get("Content-Length")
+    if declared:
+        try:
+            declared_bytes = int(declared)
+        except ValueError:
+            raise _JsonBodyError("invalid content length") from None
+        if declared_bytes < 0:
+            raise _JsonBodyError("invalid content length")
+        if declared_bytes > MAX_JSON_BODY_BYTES:
+            raise _JsonBodyError("JSON body too large", 413)
+
+    raw = bytearray()
+    try:
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > MAX_JSON_BODY_BYTES:
+                raise _JsonBodyError("JSON body too large", 413)
+            raw.extend(chunk)
+        body = json.loads(raw)
+    except _JsonBodyError:
+        raise
+    except (UnicodeDecodeError, ValueError):
+        raise _JsonBodyError("invalid JSON body") from None
+    if not isinstance(body, dict):
+        raise _JsonBodyError("JSON body must be an object")
+    return body
+
+
+def _json_error(exc: _JsonBodyError) -> JSONResponse:
+    return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+
+
+def _single_line(value: object, *, max_chars: int, required: bool = True) -> Optional[str]:
+    """Return a stripped bounded string, or ``None`` when the field is invalid."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if required and not text:
+        return None
+    if len(text) > max_chars or any(
+            ord(char) < 32 or ord(char) == 127 for char in text):
+        return None
+    return text
+
+
+#: Per-IP burst cap on the unauthenticated, CPU-bound relay endpoints (``/register`` and
+#: ``/team-invite``, which share one budget).
+#: Ed25519 verification here is the pure-Python RFC-8032 reference implementation at
+#: ~3 ms a call, and ``/register`` performs two (parse_key + record_issued) — roughly
+#: 165 registrations/second/core. Without a cap, a few hundred requests per second of
+#: well-formed-but-invalid keys saturates the worker and starves ``/api/health``, which
+#: the platform reads as a failed healthcheck and restarts (Railway:
+#: ``restartPolicyMaxRetries: 10``) — i.e. an unauthenticated remote DoS.
+#:
+#: In-process and best-effort by design: it is a burst damper in front of the expensive
+#: crypto, not an accounting control (that is ``_bump_trial_rate``, which is durable and
+#: transactional because it guards a one-per-device grant). A second worker gets its own
+#: bucket; the DoS ceiling scales with workers, which is the intent.
+def _nonnegative_env_int(name: str, default: int) -> int:
+    """Read a non-negative integer without letting a typo break module import."""
+    try:
+        return max(0, int(os.environ.get(name, str(default)) or default))
+    except (TypeError, ValueError):
+        logger.warning("%s must be an integer; using %d", name, default)
+        return default
+
+
+REGISTER_RATE_PER_MINUTE = _nonnegative_env_int(
+    "ENGRAPHIS_REGISTER_RATE_PER_MINUTE", 60)
+_REGISTER_BUCKETS: "dict[str, tuple[float, float]]" = {}
+_REGISTER_BUCKETS_MAX = 4096
+
+
+def _register_rate_key(request: Request) -> str:
+    """Best available caller identity; a header can never disable the limiter.
+
+    Until an edge proxy is trusted explicitly, its direct address is the conservative
+    shared bucket. Configure ENGRAPHIS_FORWARDED_ALLOW_IPS for per-client buckets.
+    """
+    return netutil.client_ip(request)
+
+
+def _register_rate_ok(ip: str) -> bool:
+    """Token bucket, ``REGISTER_RATE_PER_MINUTE`` tokens refilling over 60s. Returns
+    False when the caller has spent its burst. Disabled entirely when the limit is <= 0
+    or when *ip* is empty (see :func:`_register_rate_key`).
+
+    The table is capped at ``_REGISTER_BUCKETS_MAX`` entries and evicts one oldest
+    insertion when full: an attacker rotating source addresses must not be able to grow
+    it without bound (that would be a memory-exhaustion DoS in the code meant to prevent
+    a DoS). Dict insertion order makes this O(1); the worst case forgives one old caller's
+    burst without resetting every active caller's budget."""
+    if REGISTER_RATE_PER_MINUTE <= 0 or not ip:
+        return True
+    now = time.monotonic()
+    rate = REGISTER_RATE_PER_MINUTE / 60.0
+    tokens, last = _REGISTER_BUCKETS.get(ip, (float(REGISTER_RATE_PER_MINUTE), now))
+    tokens = min(float(REGISTER_RATE_PER_MINUTE), tokens + (now - last) * rate)
+    if tokens < 1.0:
+        _REGISTER_BUCKETS[ip] = (tokens, now)
+        return False
+    if len(_REGISTER_BUCKETS) >= _REGISTER_BUCKETS_MAX and ip not in _REGISTER_BUCKETS:
+        # Evict one oldest bucket instead of clearing EVERY caller's budget. Clearing
+        # made a distributed source-address spray reset all active rate limits at once.
+        _REGISTER_BUCKETS.pop(next(iter(_REGISTER_BUCKETS)), None)
+    _REGISTER_BUCKETS[ip] = (tokens - 1.0, now)
+    return True
+
+
 def _lease_ttl_seconds() -> int:
     """Deprecated shim — the lease TTL now lives in license_registry (single source of
     truth shared with seat reclamation). Kept so any external caller keeps working."""
@@ -71,16 +197,39 @@ async def register(request: Request):
     """Register a device for a key and return a signed lease. 402 if the key is bad/
     expired/revoked; 402 (seat message) if the per-key device cap is reached."""
     try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-    key = (body.get("key") or "").strip()
-    machine_id = (body.get("machine_id") or "").strip()
-    if not machine_id:
+        body = await _bounded_json_object(request)
+    except _JsonBodyError as exc:
+        return _json_error(exc)
+    raw_key, raw_machine = body.get("key"), body.get("machine_id")
+    if not isinstance(raw_key, str) or not isinstance(raw_machine, str):
+        return JSONResponse({"error": "key and machine_id must be strings"}, status_code=400)
+    if not raw_machine.strip():
         return JSONResponse({"error": "machine_id required"}, status_code=400)
+    # Same bounds check the other routes use — one implementation, so the definition of
+    # "bounded single-line" cannot drift between endpoints. `key` is required=False
+    # deliberately: an empty key stays a 402 from the verifier (as it always has), not a
+    # 400, so the response for a wrong key does not depend on whether it is blank.
+    key = _single_line(raw_key, max_chars=8192, required=False)
+    machine_id = _single_line(raw_machine, max_chars=200)
+    if key is None:
+        return JSONResponse({"error": "license key must be a bounded single-line value"},
+                            status_code=400)
+    if machine_id is None:
+        return JSONResponse({"error": "machine_id must be a bounded single-line value"},
+                            status_code=400)
 
-    lic = parse_key(key)                              # signature + expiry + plan → 402
-    if reg.is_revoked(lic.key_id):
+    # Burst-cap BEFORE the ~3 ms signature verify below, so an invalid-key flood is
+    # rejected for the price of a dict lookup instead of the price of Ed25519.
+    if not _register_rate_ok(_register_rate_key(request)):
+        return JSONResponse(
+            {"error": "too many registration attempts — try again shortly"},
+            status_code=429, headers={"Retry-After": "60"})
+
+    # parse_key is pure-Python Ed25519 (~3 ms) and record_issued parses again. Run both
+    # in a worker thread: on the single-worker deployments we ship, doing this inline
+    # blocks the event loop for every other request including /api/health.
+    lic = await asyncio.to_thread(parse_key, key)     # signature + expiry + plan → 402
+    if await asyncio.to_thread(reg.is_revoked, lic.key_id):
         raise LicenseError("this license has been revoked")
 
     now = time.time()
@@ -91,16 +240,23 @@ async def register(request: Request):
     # "revoked" and drops to the free tier, breaking the flagship multi-device Pro feature.
     # Mirrors sync_relay._authorize so the two enforcement points can't drift.
     if lic.plan == "team":
-        conn = _conn()
-        try:
-            # Claim (or refresh) this device's seat. Reclaims seats whose lease has lapsed
-            # first, then enforces the per-license cap; raises LicenseError (→ 402) if full.
-            reg.claim_seat(conn, lic, machine_id, now=now)
-        finally:
-            conn.close()
+        def _claim():
+            conn = _conn()
+            try:
+                # Claim (or refresh) this device's seat. Reclaims seats whose lease has
+                # lapsed first, then enforces the per-license cap; raises LicenseError
+                # (→ 402) if full.
+                reg.claim_seat(conn, lic, machine_id, now=now)
+            finally:
+                conn.close()
+        # Off-loop too: claim_seat takes BEGIN IMMEDIATE and can wait out the whole
+        # busy_timeout (5s) under concurrent claims for the same key. Inline, that stalls
+        # every other in-flight request; in a thread it stalls only this one. LicenseError
+        # propagates out of to_thread unchanged, so the 402 mapping is unaffected.
+        await asyncio.to_thread(_claim)
 
     try:                                              # ensure it's in the issued registry
-        reg.record_issued(key)
+        await asyncio.to_thread(reg.record_issued, key)   # re-parses the key — off-loop
     except Exception:
         pass
 
@@ -108,7 +264,8 @@ async def register(request: Request):
     payload = {"v": 1, "key_id": lic.key_id, "plan": lic.plan,
                "features": sorted(lic.features), "machine_id": machine_id,
                "issued": int(now), "expires": int(now + ttl)}
-    lease = cloud_license.compose_lease(payload, _load_signing_secret())
+    signing_secret = await asyncio.to_thread(_load_signing_secret)
+    lease = await asyncio.to_thread(cloud_license.compose_lease, payload, signing_secret)
     return {"lease": lease, "expires": payload["expires"], "plan": lic.plan}
 
 
@@ -130,7 +287,7 @@ async def verify(key_id: str):
             "plan": row["plan"], "expires": row["expires"], "valid": bool(valid)}
 
 
-_VENDOR_FALLBACK_WARNED = False
+_VENDOR_UNSET_WARNED = False
 
 
 def _vendor_admin_token() -> str:
@@ -139,20 +296,24 @@ def _vendor_admin_token() -> str:
 
     Deliberately a SEPARATE secret from the per-instance ``ENGRAPHIS_API_TOKEN``: that
     token is handed to scripts/agents as a generic service-account credential, and one
-    leaked automation credential must not be able to revoke every customer's key. Falls
-    back to ``ENGRAPHIS_API_TOKEN`` (with a one-time logged warning) so an existing
-    deployment keeps working until its operator sets ``ENGRAPHIS_VENDOR_ADMIN_TOKEN``."""
-    global _VENDOR_FALLBACK_WARNED
+    leaked automation credential must not be able to revoke every customer's key.
+
+    SECURITY (2026-07-18): this used to fall back to ``ENGRAPHIS_API_TOKEN`` with a logged
+    warning, which meant the separation above existed on paper only — on a relay that set
+    the common variable (the documented setup) any holder of the service-account token
+    could revoke every customer's license. The fallback is gone: with
+    ``ENGRAPHIS_VENDOR_ADMIN_TOKEN`` unset these routes fail CLOSED (``bearer_ok`` returns
+    False for an empty expected token), which costs the operator vendor tooling until they
+    set the variable but can never cost a customer their license."""
+    global _VENDOR_UNSET_WARNED
     token = os.environ.get("ENGRAPHIS_VENDOR_ADMIN_TOKEN", "").strip()
-    if token:
-        return token
-    if settings.api_token and not _VENDOR_FALLBACK_WARNED:
+    if not token and not _VENDOR_UNSET_WARNED:
         logger.warning(
             "ENGRAPHIS_VENDOR_ADMIN_TOKEN is not set — vendor admin routes "
-            "(/license/v1 revoke/keys/deactivate) are falling back to the shared "
-            "ENGRAPHIS_API_TOKEN. Set a dedicated vendor admin token.")
-        _VENDOR_FALLBACK_WARNED = True
-    return settings.api_token
+            "(/license/v1 revoke/keys/deactivate) are DISABLED. Set that variable to a "
+            "dedicated secret (not ENGRAPHIS_API_TOKEN) to re-enable them.")
+        _VENDOR_UNSET_WARNED = True
+    return token
 
 
 def _admin_ok(request: Request) -> bool:
@@ -200,12 +361,13 @@ async def revoke_by_email(request: Request):
     if not _admin_ok(request):
         return JSONResponse({"error": "vendor admin token required"}, status_code=401)
     try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-    email = (body.get("email") or "").strip().lower()
-    if not email:
-        return JSONResponse({"error": "email required"}, status_code=400)
+        body = await _bounded_json_object(request)
+    except _JsonBodyError as exc:
+        return _json_error(exc)
+    email = _single_line(body.get("email"), max_chars=384)
+    if email is None or not _EMAIL_RE.match(email.lower()):
+        return JSONResponse({"error": "valid email required"}, status_code=400)
+    email = email.lower()
     conn = reg.connect()
     try:
         rows = conn.execute(
@@ -243,13 +405,16 @@ async def deactivate_device(request: Request):
     if not _admin_ok(request):
         return JSONResponse({"error": "vendor admin token required"}, status_code=401)
     try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-    key_id = (body.get("key_id") or "").strip()
-    machine_id = (body.get("machine_id") or "").strip()
-    if not key_id or not machine_id:
-        return JSONResponse({"error": "key_id and machine_id required"}, status_code=400)
+        body = await _bounded_json_object(request)
+    except _JsonBodyError as exc:
+        return _json_error(exc)
+    key_id = _single_line(body.get("key_id"), max_chars=200)
+    machine_id = _single_line(body.get("machine_id"), max_chars=200)
+    if key_id is None or machine_id is None:
+        return JSONResponse(
+            {"error": "key_id and machine_id must be bounded single-line strings"},
+            status_code=400,
+        )
     conn = _conn()
     try:
         freed = reg.release_seat(conn, key_id, machine_id)
@@ -292,7 +457,7 @@ def _today() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
 
 
-def _bump_invite_count(key_id: str) -> bool:
+def _bump_invite_count(key_id: str, day: Optional[str] = None) -> bool:
     """Atomically bump today's send count for *key_id*. Returns True if the send is
     allowed (was under the cap before this call), False if already at/over it.
 
@@ -302,7 +467,7 @@ def _bump_invite_count(key_id: str) -> bool:
     conn = reg.connect()
     try:
         conn.executescript(_INVITE_SCHEMA)
-        day = _today()
+        day = day or _today()
         cap = _invite_daily_cap()
         prev_iso = conn.isolation_level
         conn.isolation_level = None
@@ -319,6 +484,9 @@ def _bump_invite_count(key_id: str) -> bool:
                 "INSERT INTO team_invite_sends(key_id, day, count) VALUES (?,?,1) "
                 "ON CONFLICT(key_id, day) DO UPDATE SET count = count + 1",
                 (key_id, day))
+            # Only today's row is ever read — drop older days so this table cannot grow
+            # without bound (same reasoning as _bump_trial_rate; free inside this lock).
+            conn.execute("DELETE FROM team_invite_sends WHERE day < ?", (day,))
             conn.execute("COMMIT")
             return True
         except BaseException:
@@ -333,32 +501,75 @@ def _bump_invite_count(key_id: str) -> bool:
         conn.close()
 
 
+def _refund_invite_count(key_id: str, day: Optional[str] = None) -> None:
+    """Undo a daily-cap reservation when the provider did not deliver."""
+    conn = reg.connect()
+    try:
+        conn.executescript(_INVITE_SCHEMA)
+        conn.execute(
+            "UPDATE team_invite_sends SET count = MAX(0, count - 1) "
+            "WHERE key_id=? AND day=?", (key_id, day or _today()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 @router.post("/team-invite")
 async def team_invite(request: Request):
     """Send a team-invite notification through the vendor's own mail provider, on
     behalf of a self-hosted Team dashboard that has none configured. 402 if *key*
     doesn't verify or lacks the ``team`` feature (:func:`license_registry.
     verify_for_feature` — the same server-side gate every other licensed feature
-    uses); 400 for a malformed recipient; 429 past the per-key daily cap; 502 if
-    the vendor's own mail provider rejects the send."""
+    uses); 400 for a malformed recipient; 429 for a per-IP burst or past the per-key
+    daily cap; 502 if the vendor's own mail provider rejects the send."""
     try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-    key = (body.get("key") or "").strip()
-    to = (body.get("to") or "").strip().lower()
-    name = (body.get("name") or "").strip()[:120]
-    role = (body.get("role") or "member").strip()[:32]
-    invited_by = (body.get("invited_by") or "").strip().lower()
-    dashboard_url = (body.get("dashboard_url") or "").strip()[:2048]
+        body = await _bounded_json_object(request)
+    except _JsonBodyError as exc:
+        return _json_error(exc)
+    key = _single_line(body.get("key"), max_chars=8192)
+    to = _single_line(body.get("to"), max_chars=384)
+    name = _single_line(body.get("name", ""), max_chars=120, required=False)
+    role = _single_line(body.get("role", "member"), max_chars=32)
+    invited_by = _single_line(
+        body.get("invited_by", ""), max_chars=384, required=False)
+    dashboard_url = _single_line(
+        body.get("dashboard_url", ""), max_chars=2048, required=False)
+    if None in (key, to, name, role, invited_by, dashboard_url):
+        return JSONResponse(
+            {"error": "invite fields must be bounded single-line strings"},
+            status_code=400,
+        )
+    to = to.lower()
+    invited_by = invited_by.lower()
+    if role not in {"viewer", "member", "admin"}:
+        return JSONResponse({"error": "invalid team role"}, status_code=400)
+    if dashboard_url:
+        try:
+            dashboard_url = cloud_license.validate_cloud_base_url(dashboard_url)
+        except ValueError:
+            return JSONResponse({"error": "invalid dashboard URL"}, status_code=400)
 
-    lic = reg.verify_for_feature(key, "team")          # bad/expired/wrong-plan/revoked → 402
+    # Burst-cap before the verify below, for the same reason /register does: this is an
+    # unauthenticated Ed25519 verify on a caller-supplied key. The bucket is deliberately
+    # SHARED with /register rather than per-endpoint — one budget covers the whole
+    # unauthenticated crypto surface, so alternating endpoints cannot buy double the
+    # budget for the same work.
+    if not _register_rate_ok(_register_rate_key(request)):
+        return JSONResponse(
+            {"error": "too many invite attempts — try again shortly"},
+            status_code=429, headers={"Retry-After": "60"})
+
+    # Signature verification is pure-Python CPU work; like /register, keep it off the
+    # event loop so an invalid-key burst cannot stall the relay health endpoint.
+    lic = await asyncio.to_thread(
+        reg.verify_for_feature, key, "team")            # bad/expired/wrong-plan/revoked → 402
     if not _EMAIL_RE.match(to):
         return JSONResponse({"error": "invalid recipient email"}, status_code=400)
     if invited_by and not _EMAIL_RE.match(invited_by):
-        invited_by = ""                                 # ignore a malformed value, don't fail
+        return JSONResponse({"error": "invalid inviter email"}, status_code=400)
 
-    if not _bump_invite_count(lic.key_id):
+    reservation_day = _today()
+    if not await asyncio.to_thread(_bump_invite_count, lic.key_id, reservation_day):
         return JSONResponse(
             {"error": "daily invite-email limit reached for this license — try again "
                       "tomorrow, or configure your own ENGRAPHIS_RESEND_API_KEY/SMTP "
@@ -376,7 +587,14 @@ async def team_invite(request: Request):
         await asyncio.to_thread(send_team_invite_email, to, name, role,
                                 invited_by=invited_by, key=key, dashboard_url=dashboard_url)
     except Exception as exc:  # noqa: BLE001 — surface a safe message, don't leak internals
-        return JSONResponse({"error": "delivery failed: %s" % exc}, status_code=502)
+        try:
+            await asyncio.to_thread(_refund_invite_count, lic.key_id, reservation_day)
+        except Exception as refund_exc:  # noqa: BLE001 - retain the safe provider response
+            logger.error("invite quota refund failed (%s)", type(refund_exc).__name__)
+        logger.error("team invite delivery failed (%s)", type(exc).__name__)
+        return JSONResponse(
+            {"error": "invite delivery failed; check the relay mail configuration and retry"},
+            status_code=502)
     return {"sent": True}
 
 
@@ -470,24 +688,11 @@ def _hour_bucket(now: Optional[float] = None) -> str:
 
 
 def _client_ip(request: Request) -> str:
-    """Return the direct peer unless that peer is configured as a forwarding proxy.
-
-    ``ENGRAPHIS_FORWARDED_ALLOW_IPS`` accepts ``*`` (for platforms such as Railway
-    where the proxy peer is not stable) or comma-separated exact direct-peer IPs.
-    """
-    direct = ((request.client.host if request.client else "") or "unknown")[:64]
-    allowed_raw = os.environ.get("ENGRAPHIS_FORWARDED_ALLOW_IPS", "").strip()
-    allowed = {item.strip() for item in allowed_raw.split(",") if item.strip()}
-    if "*" not in allowed and direct not in allowed:
-        return direct
-    fwd = request.headers.get("x-forwarded-for", "")
-    # A trusted proxy APPENDS the address it observed to the right of X-Forwarded-For, so
-    # the rightmost entry is the hop our proxy actually saw. Everything to its left is
-    # client-supplied and therefore spoofable — taking the leftmost token would let an
-    # attacker mint a fresh rate-limit bucket per request by pre-seeding the header. We
-    # trust exactly one hop (the direct peer), so use the last entry.
-    parts = [p.strip() for p in fwd.split(",") if p.strip()]
-    return parts[-1][:64] if parts else direct
+    """Thin alias for :func:`engraphis.netutil.client_ip` — the implementation moved
+    there (2026-07-18) so the dashboard's login lockout and audit log can share the one
+    correct rightmost-``X-Forwarded-For`` reading instead of trusting
+    ``request.client.host``. Kept as a name so existing callers/tests here don't move."""
+    return netutil.client_ip(request)
 
 
 def _bump_trial_rate(ip: str) -> bool:
@@ -516,6 +721,12 @@ def _bump_trial_rate(ip: str) -> bool:
                 "INSERT INTO trial_start_attempts(ip, window, count) VALUES (?,?,1) "
                 "ON CONFLICT(ip, window) DO UPDATE SET count = count + 1",
                 (ip, window))
+            # Drop windows that can never be consulted again (only the CURRENT hour is
+            # ever read). Without this the table grows one row per (ip, hour) forever —
+            # an attacker rotating source addresses turns the rate limiter itself into
+            # unbounded disk growth on the same volume that holds relay.db. Done inside
+            # the existing BEGIN IMMEDIATE so it costs no extra lock acquisition.
+            conn.execute("DELETE FROM trial_start_attempts WHERE window < ?", (window,))
             conn.execute("COMMIT")
         except BaseException:
             try:
@@ -530,16 +741,39 @@ def _bump_trial_rate(ip: str) -> bool:
     return True
 
 
-def _relay_public_base(request: Request) -> str:
-    """Base URL to build the magic link against. ``ENGRAPHIS_RELAY_PUBLIC_URL`` (set
-    once by the operator) takes precedence over ``request.base_url`` because a proxy
-    (Railway included) can terminate TLS and forward plain HTTP internally, which would
-    otherwise bake an ``http://`` link into a real email — same env-override precedence
-    pattern as ``ENGRAPHIS_KEY_CLOUD_URL`` in ``webhooks.issue_key``."""
-    override = os.environ.get("ENGRAPHIS_RELAY_PUBLIC_URL", "").strip().rstrip("/")
-    if override:
-        return override
-    return str(request.base_url).rstrip("/")
+def _relay_public_base() -> str:
+    """Base URL to build the emailed magic link against — ``ENGRAPHIS_RELAY_PUBLIC_URL``,
+    or ``""`` if it is unset or unusable.
+
+    SECURITY (2026-07-18): this deliberately takes NO ``Request``. It used to fall back to
+    ``str(request.base_url)``, which is derived from the client-supplied ``Host`` header —
+    and no entrypoint installs ``TrustedHostMiddleware``. That let an attacker POST
+    ``/start-trial`` with ``Host: attacker.tld`` and a victim's address, so the victim
+    received a genuine vendor email whose confirm link pointed at the attacker; replaying
+    the captured token yielded a real signed key carrying the VICTIM's email — and since
+    ``license_registry.account_id_for()`` namespaces the relay on ``sha256(email)``, that
+    key landed inside the victim's sync-bundle tenant.
+
+    The parameter is gone rather than merely unused so the Host header cannot be
+    reintroduced here by a later well-meaning edit. Callers MUST treat ``""`` as "trial
+    signup is not configured" and refuse to send mail (see :func:`start_team_trial`) —
+    failing closed, exactly as ``routes.v2_team``'s password-reset link already does with
+    ``ENGRAPHIS_DASHBOARD_URL``.
+
+    The value is validated with the same rules the client applies to a cloud URL
+    (HTTPS-only except loopback, no embedded credentials, no query/fragment), so a
+    typo'd or hostile env value fails closed instead of shipping a bad link to a customer.
+    """
+    raw = os.environ.get("ENGRAPHIS_RELAY_PUBLIC_URL", "").strip().rstrip("/")
+    if not raw:
+        return ""
+    try:
+        return cloud_license.validate_cloud_base_url(raw).rstrip("/")
+    except ValueError as exc:
+        logger.error(
+            "ENGRAPHIS_RELAY_PUBLIC_URL is set but unusable (%s) — trial signup is "
+            "disabled until it is corrected", exc)
+        return ""
 
 
 def _trial_verify_success_html(key: str, plan: str, days: int) -> str:
@@ -557,6 +791,9 @@ white-space:pre-wrap;font-size:13px">{_html.escape(key)}</pre>
 <li>Go to Settings &rarr; License</li>
 <li>Paste the key above and click Activate</li>
 </ol>
+<p><strong>Hosted deployment:</strong> add the complete key above as the private
+<code>ENGRAPHIS_LICENSE_KEY</code> deployment variable and redeploy. Then open the
+dashboard and create the first admin. Do not post the key in logs or support tickets.</p>
 <p>You can close this page.</p>
 </body></html>"""
 
@@ -571,39 +808,8 @@ def _trial_verify_error_html(message: str) -> str:
 </body></html>"""
 
 
-@router.post("/start-trial")
-async def start_team_trial(request: Request):
-    """Request a one-time, self-serve trial for *machine_id* + *email*.
-
-    Does NOT issue a key synchronously (see the 2026-07-14 module comment above): it
-    emails a one-time magic link to *email* and mints the real signed key only when
-    that link is opened (:func:`verify_team_trial`, the ``GET`` companion below).
-    ``plan`` selects the tier ("pro" or "team", default "team"). 429 if this source IP
-    has requested too many trials recently (``ENGRAPHIS_TRIAL_RATE_LIMIT_PER_HOUR``,
-    default 5/hour); 400 for a missing machine_id, an unknown plan, or a missing/
-    malformed email; 409 if this device already holds a trial grant; 502 if the
-    verification email could not be sent."""
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-    mid = (body.get("machine_id") or "").strip()[:128]
-    email = (body.get("email") or "").strip().lower()
-    plan = (body.get("plan") or "team").strip().lower()
-    if not mid:
-        return JSONResponse({"error": "machine_id required"}, status_code=400)
-    if plan not in PLAN_FEATURES:
-        return JSONResponse({"error": "unknown plan '%s'" % plan}, status_code=400)
-    if not email or not _EMAIL_RE.match(email):
-        return JSONResponse(
-            {"error": "a valid email address is required to start a trial"},
-            status_code=400)
-
-    if not _bump_trial_rate(_client_ip(request)):
-        return JSONResponse(
-            {"error": "too many trial requests from this network — try again later"},
-            status_code=429)
-
+def _reserve_trial(mid: str, email: str, plan: str) -> Optional[str]:
+    """Reserve the newest pending magic link without blocking the event loop."""
     conn = reg.connect()
     try:
         conn.executescript(_TRIAL_SCHEMA)
@@ -619,11 +825,7 @@ async def start_team_trial(request: Request):
                 "SELECT 1 FROM trial_grants WHERE machine_id=?", (mid,)).fetchone()
             if existing:
                 conn.execute("COMMIT")
-                return JSONResponse(
-                    {"error": "the free trial has already been used on this device"},
-                    status_code=409)
-            # A fresh request supersedes any earlier unclicked link for this device —
-            # only the newest email/token pair should ever be redeemable.
+                return None
             conn.execute("DELETE FROM trial_pending WHERE machine_id=?", (mid,))
             conn.execute(
                 "INSERT INTO trial_pending(token_hash, machine_id, email, plan, "
@@ -631,6 +833,7 @@ async def start_team_trial(request: Request):
                 (_hash_token(token), mid, email, plan, now,
                  now + _TRIAL_TOKEN_TTL_SECONDS))
             conn.execute("COMMIT")
+            return token
         except BaseException:
             try:
                 conn.execute("ROLLBACK")
@@ -642,15 +845,77 @@ async def start_team_trial(request: Request):
     finally:
         conn.close()
 
-    verify_url = "%s/license/v1/start-trial/verify?token=%s" % (
-        _relay_public_base(request), token)
+
+@router.post("/start-trial")
+async def start_team_trial(request: Request):
+    """Request a one-time, self-serve trial for *machine_id* + *email*.
+
+    Does NOT issue a key synchronously (see the 2026-07-14 module comment above): it
+    emails a one-time magic link to *email* and mints the real signed key only when
+    that link is opened (:func:`verify_team_trial`, the ``GET`` companion below).
+    ``plan`` selects the tier ("pro" or "team", default "team"). 429 if this source IP
+    has requested too many trials recently (``ENGRAPHIS_TRIAL_RATE_LIMIT_PER_HOUR``,
+    default 5/hour); 400 for a missing machine_id, an unknown plan, or a missing/
+    malformed email; 409 if this device already holds a trial grant; 502 if the
+    verification email could not be sent."""
+    try:
+        body = await _bounded_json_object(request)
+    except _JsonBodyError as exc:
+        return _json_error(exc)
+    raw_mid, raw_email = body.get("machine_id"), body.get("email")
+    raw_plan = body.get("plan", "team")
+    if not isinstance(raw_mid, str) or not isinstance(raw_email, str) \
+            or not isinstance(raw_plan, str):
+        return JSONResponse(
+            {"error": "machine_id, email, and plan must be strings"}, status_code=400)
+    mid = raw_mid.strip()
+    email = raw_email.strip().lower()
+    plan = raw_plan.strip().lower()
+    if not mid:
+        return JSONResponse({"error": "machine_id required"}, status_code=400)
+    if len(mid) > 128 or any(ord(char) < 32 or ord(char) == 127 for char in mid):
+        return JSONResponse({"error": "machine_id must be a bounded single-line value"},
+                            status_code=400)
+    if plan not in PLAN_FEATURES:
+        return JSONResponse({"error": "unknown plan '%s'" % plan}, status_code=400)
+    if not email or not _EMAIL_RE.match(email):
+        return JSONResponse(
+            {"error": "a valid email address is required to start a trial"},
+            status_code=400)
+
+    # Fail closed BEFORE any state is written or rate budget is spent: without a
+    # configured public base we would have to derive the emailed link from the Host
+    # header, which is attacker-controlled (see _relay_public_base). A misconfigured
+    # relay declines trials rather than mailing a link somebody else chose.
+    public_base = _relay_public_base()
+    if not public_base:
+        logger.error("ENGRAPHIS_RELAY_PUBLIC_URL is not set — refusing to email a "
+                     "trial link built from an untrusted Host header")
+        return JSONResponse(
+            {"error": "trial signup is not configured on this relay"}, status_code=503)
+
+    if not await asyncio.to_thread(_bump_trial_rate, _client_ip(request)):
+        return JSONResponse(
+            {"error": "too many trial requests from this network — try again later"},
+            status_code=429)
+
+    token = await asyncio.to_thread(_reserve_trial, mid, email, plan)
+    if token is None:
+        return JSONResponse(
+            {"error": "the free trial has already been used on this device"},
+            status_code=409)
+
+    verify_url = "%s/license/v1/start-trial/verify?token=%s" % (public_base, token)
     from engraphis.inspector.webhooks import send_trial_verification_email
     try:
         await asyncio.to_thread(
             send_trial_verification_email, email, verify_url, plan,
             minutes=_TRIAL_TOKEN_TTL_SECONDS // 60)
     except Exception as exc:  # noqa: BLE001 — surface a safe message, don't leak internals
-        return JSONResponse({"error": "delivery failed: %s" % exc}, status_code=502)
+        logger.error("trial verification delivery failed (%s)", type(exc).__name__)
+        return JSONResponse(
+            {"error": "trial email delivery failed; check the relay mail configuration "
+                      "and retry"}, status_code=502)
 
     return {"pending": True,
             "message": "check %s for a link to confirm and activate your trial" % email,
@@ -658,7 +923,7 @@ async def start_team_trial(request: Request):
 
 
 @router.get("/start-trial/verify")
-async def verify_team_trial(token: str = ""):
+def verify_team_trial(token: str = ""):
     """Redeem a magic-link token from :func:`start_team_trial` — mints and displays the
     real signed trial key. Answers a small HTML page, not JSON: this is meant to be
     opened directly from the confirmation email by a human, who needs to read and copy
@@ -732,4 +997,11 @@ async def verify_team_trial(token: str = ""):
         reg.record_issued(key)
     except Exception:
         pass
-    return HTMLResponse(_trial_verify_success_html(key, plan, TRIAL_DAYS))
+    # This body contains the full signed license key and the URL still carries the
+    # one-time token, so keep both out of shared caches and out of Referer headers on
+    # any link the reader clicks from here.
+    return HTMLResponse(_trial_verify_success_html(key, plan, TRIAL_DAYS), headers={
+        "Cache-Control": "no-store, no-cache, must-revalidate, private",
+        "Pragma": "no-cache",
+        "Referrer-Policy": "no-referrer",
+    })
