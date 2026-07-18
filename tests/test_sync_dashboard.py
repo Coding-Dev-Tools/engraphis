@@ -136,7 +136,7 @@ def test_sync_never_pushes_personal_folders(monkeypatch, tmp_path):
         from engraphis.routes import v2_api
         from engraphis.service import set_current_user
         svc = v2_api.service()
-        svc.create_workspace("team-shared", visibility="shared")
+        svc.create_workspace("team-shared", visibility="shared", confirmed=True)
         set_current_user({"email": "owner@x.co", "role": "admin", "id": "o1"})
         try:
             svc.create_workspace("my-personal", visibility="personal")

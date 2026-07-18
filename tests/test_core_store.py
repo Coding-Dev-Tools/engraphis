@@ -222,6 +222,18 @@ def test_code_listing_helpers_honor_limit(store):
                             relation="calls", file="mod.py", line=i + 1)
     assert len(store.list_code_edges("repo_x")) == 4
     assert len(store.list_code_edges("repo_x", limit=3)) == 3
+    # list_code_files was the one sibling with no SQL limit, so engine.export_code_graph
+    # had to fetch the whole repo and slice it in Python.
+    for i in range(5):
+        store.upsert_code_file(repo_id="repo_x", file=f"m{i}.py", lang="python",
+                               content_hash=f"h{i}", size_bytes=1, mtime_ns=i,
+                               backend="regex")
+    assert len(store.list_code_files("repo_x")) == 5            # default: unbounded
+    assert len(store.list_code_files("repo_x", limit=2)) == 2
+    assert store.list_code_files("repo_x", limit=0) == []       # never SQLite's -1
+    # the limit composes with the language filter rather than replacing it
+    assert len(store.list_code_files("repo_x", languages={"python"}, limit=3)) == 3
+    assert store.list_code_files("repo_x", languages={"rust"}, limit=3) == []
 
 
 def test_memory_links_infer_and_filter_graph_layers(store):
