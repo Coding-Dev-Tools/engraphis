@@ -122,17 +122,18 @@ or structured consolidation.
 
 ## Why it wins
 
-| Axis | mem0 | Zep | Engraphis |
-|---|---|---|---|
-| Product WebUI (local, no cloud) | ✗ | ✗ | **✓ (dashboard with built-in inspector)** |
-| Open & self-hostable engine | ✓ | partial | **✓ fully open, local-first** |
-| Forgetting/decay | partial | ✗ | **✓** |
-| Bi-temporal graph | partial | ✓ | **✓** |
-| Native multi-repo model | ✗ | ✗ | **✓ (unique)** |
-| Code-aware (AST/symbol graph) | ✗ | ✗ | **✓ (unique)** |
-| Cloud sync (CRDT merge) | ✗ | ✗ | **✓ (deterministic, no conflict copies)** |
-| Encryption at rest | ✗ | ✗ | **✓ (SQLCipher)** |
-| MCP-native for coding agents | ✓ | ✗ | **✓** |
+| Axis | Obsidian | mem0 | Zep | Engraphis |
+|---|---|---|---|---|
+| Product WebUI (local, no cloud) | ✗ (native desktop/mobile app) | ✗ | ✗ | **✓ (dashboard with built-in inspector)** |
+| Open & self-hostable engine | ✗ (open Markdown files, not a self-hosted engine) | ✓ | partial | **✓ fully open, local-first** |
+| Forgetting/decay | ✗ | partial | ✗ | **✓** |
+| Bi-temporal graph | ✗ (note-link graph; no fact validity) | partial | ✓ | **✓** |
+| Native multi-repo model | ✗ (separate vaults; no repo/session hierarchy) | ✗ | ✗ | **✓ (unique)** |
+| Code-aware (AST/symbol graph) | ✗ | ✗ | ✗ | **✓ (unique)** |
+| Cloud sync (CRDT merge) | ✗ (file merge or optional conflict copies) | ✗ | ✗ | **✓ (deterministic, no conflict copies)** |
+| Encryption at rest | partial | ✗ | ✗ | **✓ (local SQLCipher database)** |
+| MCP-native for coding agents | partial (not core) | ✓ | ✗ | **✓ (first-party memory and code tools)** |
+| Sleep-time consolidation | ✗ | ✗ | ✗ | **✓** |
 
 ---
 
