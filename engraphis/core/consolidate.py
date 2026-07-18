@@ -25,6 +25,7 @@ import hashlib
 import json
 import re
 import time
+from dataclasses import replace as _replace
 from typing import Any, Optional
 
 from engraphis.core import scoring
@@ -47,6 +48,16 @@ PROFILE_MIN_NAME_LEN = 3
 PROFILE_RELATION = "profiles"
 # How many source lines the deterministic profile quotes.
 PROFILE_QUOTES = 6
+# Row budget per pass. The store truncates with ``ORDER BY ingested_at DESC LIMIT n``, so
+# every pass must push its type filter into SQL (``SearchFilter.mtypes``) — filtering in
+# Python afterwards silently returns *zero* candidates as soon as the newest ``n`` rows
+# happen to be of the wrong type, which reads as "nothing to consolidate" in the report.
+DISTILL_SCAN_LIMIT = 2000
+PROFILE_SCAN_LIMIT = 5000
+# Transient types eligible for archival (pass 2).
+TRANSIENT_TYPES = [MemoryType.WORKING, MemoryType.EPISODIC]
+# Types a profile/inference pass rolls up (passes 3 and 4).
+DURABLE_TYPES = [MemoryType.EPISODIC, MemoryType.SEMANTIC]
 
 # Associative cross-cluster inference (dream pass 4): connect memories in *different,
 # dissimilar* subject clusters that share a bridging entity. Deliberately conservative —
@@ -123,8 +134,8 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
     now = time.time() if now is None else now
     flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id)
 
-    episodic = [m for m in store.list_memories(flt, limit=2000)
-                if m.mtype == MemoryType.EPISODIC]
+    episodic = store.list_memories(
+        _replace(flt, mtypes=[MemoryType.EPISODIC]), limit=DISTILL_SCAN_LIMIT)
     clusters = _cluster_by_subject(episodic, threshold=subject_jaccard)
 
     report: dict = {"workspace_id": workspace_id, "repo_id": repo_id, "dry_run": dry_run,
@@ -207,8 +218,9 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
         report["digests_created"].append(entry)
 
     # ── pass 2: archive fully-decayed transient memories ─────────────────────
-    for m in store.list_memories(flt, limit=2000):
-        if m.mtype not in (MemoryType.WORKING, MemoryType.EPISODIC) or m.pinned:
+    for m in store.list_memories(_replace(flt, mtypes=TRANSIENT_TYPES),
+                                 limit=DISTILL_SCAN_LIMIT):
+        if m.pinned:
             continue
         r = scoring.retention(m.stability, m.last_access, now)
         if r >= archive_below:
@@ -276,6 +288,49 @@ def _cluster_by_subject(memories: list[MemoryRecord], *, threshold: float) -> li
     for i, m in enumerate(memories):
         groups.setdefault(find(i), []).append(m)
     return list(groups.values())
+
+
+def _inherit_safety(engine, memory_id: str, sources: list[MemoryRecord]) -> tuple[str, bool]:
+    """Give a freshly-written digest the *most restrictive* safety labels of its sources.
+
+    Every consolidation write quotes source text verbatim, but ``engine.remember()``
+    takes no ``sensitivity`` argument and defaults ``provenance.trusted`` to True — so
+    without this a digest over a ``secret`` or untrusted memory becomes a ``normal``,
+    trusted fact. That is a laundering path with teeth: ``SyncEngine.export_bundle``
+    filters on ``sensitivity != 'secret'``, so the digest would carry the excluded
+    content past that filter to every other machine, and a poisoned source's quotes
+    would arrive wearing a trusted label.
+
+    ``merge``/``correct``/``promote`` already inherit this way (AGENTS.md §6). Same
+    lattice (``engine._SENSITIVITY_RANK``, unknown labels fail closed as *most*
+    restrictive) and the same post-write patch, because the write path can't take these
+    as arguments. Tightening only: an already-untrusted digest (``_write_inference``)
+    stays untrusted even when all its sources are trusted.
+    """
+    from engraphis.core.engine import _SENSITIVITY_RANK
+
+    record = engine.store.get_memory(memory_id)
+    if record is None:                          # defensive: nothing to patch
+        return "normal", True
+    sensitivity = max(
+        [record.sensitivity or "normal"] + [(m.sensitivity or "normal") for m in sources],
+        key=lambda value: _SENSITIVITY_RANK.get(value, len(_SENSITIVITY_RANK)),
+    )
+    trusted = (bool((record.provenance or {}).get("trusted", True))
+               and all(bool((m.provenance or {}).get("trusted", True)) for m in sources))
+    provenance = dict(record.provenance or {})
+    provenance["trusted"] = trusted
+    metadata = dict(record.metadata or {})
+    metadata["provenance"] = dict(provenance)
+    engine.store.conn.execute(
+        "UPDATE memories SET sensitivity=?, metadata=?, provenance=? WHERE id=?",
+        (sensitivity,
+         json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
+         json.dumps(provenance, ensure_ascii=False, separators=(",", ":")),
+         memory_id),
+    )
+    engine.store.conn.commit()
+    return sensitivity, trusted
 
 
 def _already_consolidated(store, memory_id: str) -> bool:
@@ -528,10 +583,12 @@ def _write_digest(engine, cluster: list[MemoryRecord], *, content: str, subject:
                                  "consolidates": [m.id for m in cluster]}},
         resolve_conflicts=False,   # the digest is new by construction
     )
+    sensitivity, trusted = _inherit_safety(engine, digest_id, cluster)
     for m in cluster:
         engine.store.add_link(digest_id, m.id, "consolidates")
     engine.store.audit("consolidation", "distill", digest_id,
-                       f"digested {len(cluster)} episodic memories")
+                       f"digested {len(cluster)} episodic memories "
+                       f"(sensitivity={sensitivity}, trusted={trusted})")
     return digest_id
 
 
@@ -582,12 +639,14 @@ def _write_structured_digests(engine, cluster: list[MemoryRecord], facts: list[d
             keywords=fact.get("keywords") or _common_tokens(sources, k=8),
             metadata=metadata, resolve_conflicts=False,
         )
+        sensitivity, trusted = _inherit_safety(engine, mid, sources)
         for memory in sources:
             engine.store.add_link(mid, memory.id, "consolidates")
         audit = fact.get("llm") or {}
         engine.store.audit("consolidation", "distill_structured", mid,
                            f"schema-distilled {len(sources)} memories; "
                            f"confidence={fact.get('confidence', 0.0):.2f}; "
+                           f"sensitivity={sensitivity}; trusted={trusted}; "
                            f"prompt_sha256={audit.get('prompt_sha256', '')}")
         ids.append(mid)
 
@@ -633,9 +692,9 @@ def consolidate_profiles(engine, *, workspace_id: str, repo_id: Optional[str] = 
     report: dict = {"workspace_id": workspace_id, "repo_id": repo_id, "dry_run": dry_run,
                     "entities_considered": 0, "profiles_created": [], "skipped_existing": 0}
 
-    live = [m for m in store.list_memories(flt, limit=5000)
-            if m.mtype in (MemoryType.EPISODIC, MemoryType.SEMANTIC)
-            and m.metadata.get("provenance", {}).get("source") != "profile_consolidation"]
+    live = [m for m in store.list_memories(_replace(flt, mtypes=DURABLE_TYPES),
+                                           limit=PROFILE_SCAN_LIMIT)
+            if m.metadata.get("provenance", {}).get("source") != "profile_consolidation"]
     p_before = p_after = 0
 
     for ent in store.list_entities(flt, limit=2000):
@@ -701,10 +760,12 @@ def _write_profile(engine, name: str, etype: str, sources: list[MemoryRecord],
                                  "etype": etype, "profiles": [m.id for m in sources]}},
         resolve_conflicts=False,   # a profile is new by construction
     )
+    sensitivity, trusted = _inherit_safety(engine, profile_id, sources)
     for m in sources:
         engine.store.add_link(profile_id, m.id, PROFILE_RELATION)
     engine.store.audit("consolidation", "profile", profile_id,
-                       f"profiled {len(sources)} memories about {name}")
+                       f"profiled {len(sources)} memories about {name} "
+                       f"(sensitivity={sensitivity}, trusted={trusted})")
     return profile_id
 
 
@@ -728,9 +789,9 @@ def infer_links(engine, *, workspace_id: str, repo_id: Optional[str] = None,
     store = engine.store
     now = time.time() if now is None else now
     flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id)
-    live = [m for m in store.list_memories(flt, limit=5000)
-            if m.mtype in (MemoryType.EPISODIC, MemoryType.SEMANTIC)
-            and m.metadata.get("provenance", {}).get("source") != "dream_inference"]
+    live = [m for m in store.list_memories(_replace(flt, mtypes=DURABLE_TYPES),
+                                           limit=PROFILE_SCAN_LIMIT)
+            if m.metadata.get("provenance", {}).get("source") != "dream_inference"]
     report: dict = {"workspace_id": workspace_id, "repo_id": repo_id, "dry_run": dry_run,
                     "entities_considered": 0, "links_created": [], "skipped_existing": 0}
     if len(live) < 2:
@@ -828,8 +889,12 @@ def _write_inference(engine, name: str, etype: str, reps: list[MemoryRecord],
                                  "links": [m.id for m in reps]}},
         resolve_conflicts=False,   # an inference is new by construction
     )
+    # Inferences are already ``trusted: false``; this additionally pulls up the strictest
+    # sensitivity of the notes it quotes (and can only keep trust at false).
+    sensitivity, trusted = _inherit_safety(engine, inference_id, reps)
     for m in reps:
         engine.store.add_link(inference_id, m.id, INFER_RELATION)
     engine.store.audit("consolidation", "infer", inference_id,
-                       f"inferred a connection via {name} from {len(reps)} notes")
+                       f"inferred a connection via {name} from {len(reps)} notes "
+                       f"(sensitivity={sensitivity}, trusted={trusted})")
     return inference_id

@@ -270,3 +270,241 @@ def test_code_edge_callers(store):
                         file="calc.py", line=9)
     callers = store.get_symbol_callers("repo_x", "add")
     assert any(c["src"] == "Calculator" for c in callers)
+
+
+# ── regression: iter_vectors must not hand out a live cursor (see store.py) ───
+
+def _spy_on_fetchall(store_mod, monkeypatch):
+    """Record every locked/materialized read. Patched on the class, not the instance:
+    _SerializedConnection.__setattr__ forwards to the wrapped sqlite3 connection."""
+    calls: list = []
+    real = store_mod._SerializedConnection.fetchall
+
+    def spy(self, *a, **k):
+        calls.append(a[0])
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(store_mod._SerializedConnection, "fetchall", spy)
+    return calls
+
+
+def test_iter_vectors_materializes_in_bounded_batches(store, monkeypatch):
+    """The read is drained inside the connection lock, one bounded batch at a time.
+
+    Regression: iter_vectors used to yield straight off a cursor returned by
+    conn.execute(), which releases the lock before the caller fetches — so another
+    thread's write could interleave with an in-flight read on the shared connection.
+    """
+    import numpy as np
+
+    from engraphis.core import store as store_mod
+
+    wid = store.get_or_create_workspace("w")
+    for i in range(10):
+        store.add_memory(MemoryRecord(id="mem_%02d" % i, content="c%d" % i,
+                                      workspace_id=wid,
+                                      embedding=np.ones(4, dtype=np.float32)))
+
+    monkeypatch.setattr(store_mod, "VECTOR_SCAN_BATCH", 3)
+    calls = _spy_on_fetchall(store_mod, monkeypatch)
+
+    got = [mid for mid, _ in store.iter_vectors()]
+
+    assert got == sorted(got)                      # keyset pagination => stable order
+    assert len(got) == len(set(got)) == 10         # every row exactly once
+    # 10 rows / batch of 3 => 4 fetches (the last is short and terminates the loop).
+    assert len(calls) == 4
+    assert all("LIMIT ?" in sql for sql in calls)
+
+
+def test_iter_vectors_tolerates_concurrent_writes(tmp_path):
+    """A writer on another thread must not corrupt or truncate an in-flight scan."""
+    import threading
+
+    import numpy as np
+
+    s = Store(str(tmp_path / "vec.db"))
+    wid = s.get_or_create_workspace("w")
+    original = {"mem_%03d" % i for i in range(40)}
+    for mid in sorted(original):
+        s.add_memory(MemoryRecord(id=mid, content=mid, workspace_id=wid,
+                                  embedding=np.ones(4, dtype=np.float32)))
+
+    errors: list = []
+    stop = threading.Event()
+
+    def writer():
+        try:
+            i = 0
+            while not stop.is_set():
+                s.add_memory(MemoryRecord(id="zzz_%03d" % i, content="new",
+                                          workspace_id=wid,
+                                          embedding=np.ones(4, dtype=np.float32)))
+                i += 1
+        except Exception as exc:  # noqa: BLE001 — surface for the assertion
+            errors.append(exc)
+
+    th = threading.Thread(target=writer)
+    th.start()
+    try:
+        seen = [mid for mid, _ in s.iter_vectors()]
+    finally:
+        stop.set()
+        th.join()
+    s.close()
+
+    assert not errors, errors
+    assert len(seen) == len(set(seen))             # no row yielded twice
+    assert original <= set(seen)                   # nothing pre-existing was skipped
+
+
+# ── regression: invalidate_edges_for_memory must not scan every tenant ────────
+
+def _edge_with_support(store, *, eid, workspace_id, memory_id):
+    store.upsert_edge(Edge(id=eid, src="a", dst="b", relation="rel",
+                           workspace_id=workspace_id,
+                           provenance={"memory_id": memory_id,
+                                       "memory_ids": [memory_id]}))
+
+
+def test_invalidate_edges_is_scoped_to_the_owning_workspace(store):
+    w1 = store.get_or_create_workspace("w1")
+    w2 = store.get_or_create_workspace("w2")
+    mid = "mem_shared_id"
+    store.add_memory(MemoryRecord(id=mid, content="x", workspace_id=w1))
+    _edge_with_support(store, eid="edge_w1", workspace_id=w1, memory_id=mid)
+    _edge_with_support(store, eid="edge_w2", workspace_id=w2, memory_id=mid)
+    _edge_with_support(store, eid="edge_global", workspace_id=None, memory_id=mid)
+
+    store.invalidate_edges_for_memory(mid)
+
+    closed = {r["id"] for r in store.conn.execute(
+        "SELECT id FROM edges WHERE valid_to IS NOT NULL").fetchall()}
+    assert "edge_w1" in closed          # the owning workspace's edge is closed
+    assert "edge_global" in closed      # unscoped edges stay in scope (unchanged behaviour)
+    assert "edge_w2" not in closed      # another tenant's edge is never touched
+
+
+def test_invalidate_edges_escapes_like_wildcards(store):
+    wid = store.get_or_create_workspace("w")
+    wild = "mem_%"
+    other = "mem_other"
+    store.add_memory(MemoryRecord(id=wild, content="x", workspace_id=wid))
+    store.add_memory(MemoryRecord(id=other, content="x", workspace_id=wid))
+    _edge_with_support(store, eid="edge_other", workspace_id=wid, memory_id=other)
+
+    store.invalidate_edges_for_memory(wild)
+
+    # 'mem_%' must not behave as a LIKE pattern matching every mem_* id.
+    row = store.conn.execute(
+        "SELECT valid_to FROM edges WHERE id='edge_other'").fetchone()
+    assert row["valid_to"] is None
+
+
+def test_invalidate_edges_keeps_edges_with_remaining_support(store):
+    wid = store.get_or_create_workspace("w")
+    a = store.add_memory(MemoryRecord(id="mem_a", content="a", workspace_id=wid))
+    b = store.add_memory(MemoryRecord(id="mem_b", content="b", workspace_id=wid))
+    store.upsert_edge(Edge(id="edge_two", src="s", dst="d", relation="rel",
+                           workspace_id=wid,
+                           provenance={"memory_id": a, "memory_ids": [a, b]}))
+
+    store.invalidate_edges_for_memory(a)
+
+    row = store.conn.execute(
+        "SELECT valid_to, provenance FROM edges WHERE id='edge_two'").fetchone()
+    assert row["valid_to"] is None
+    assert b in row["provenance"] and a not in row["provenance"]
+
+
+# ── regression: batched get_memories ──────────────────────────────────────────
+
+def test_get_memories_batches_and_matches_get_memory(store):
+    from engraphis.core import store as store_mod
+
+    wid = store.get_or_create_workspace("w")
+    ids = [store.add_memory(MemoryRecord(id="", content="c%d" % i, workspace_id=wid))
+           for i in range(12)]
+
+    got = store.get_memories(ids + ids + ["mem_missing", ""])
+
+    assert set(got) == set(ids)                    # missing/empty ids are simply absent
+    for mid in ids:
+        assert got[mid].content == store.get_memory(mid).content
+    assert store.get_memories([]) == {}
+    assert store_mod.IN_CLAUSE_CHUNK <= 999        # stays under SQLITE_MAX_VARIABLE_NUMBER
+
+
+def test_get_memories_chunks_past_the_variable_limit(store, monkeypatch):
+    from engraphis.core import store as store_mod
+
+    wid = store.get_or_create_workspace("w")
+    ids = [store.add_memory(MemoryRecord(id="", content="c%d" % i, workspace_id=wid))
+           for i in range(7)]
+    monkeypatch.setattr(store_mod, "IN_CLAUSE_CHUNK", 2)
+    calls = _spy_on_fetchall(store_mod, monkeypatch)
+
+    got = store.get_memories(ids)
+
+    assert set(got) == set(ids)
+    assert len(calls) == 4                         # ceil(7 / 2)
+
+
+# ── regression: LIKE wildcards in the non-FTS5 lexical fallback ───────────────
+
+def test_fts_fallback_escapes_like_wildcards(store):
+    wid = store.get_or_create_workspace("w")
+    store.add_memory(MemoryRecord(id="mem_pct", content="deploys are 100% green",
+                                  workspace_id=wid))
+    store.add_memory(MemoryRecord(id="mem_plain", content="nothing special here",
+                                  workspace_id=wid))
+    store.has_fts5 = False                          # force the LIKE fallback
+
+    hits = {mid for mid, _ in store.fts_search("100%", 10)}
+    assert hits == {"mem_pct"}                      # '%' is literal, not "match everything"
+
+    assert {mid for mid, _ in store.fts_search("%", 10)} == {"mem_pct"}
+    assert store.fts_search("_", 10) == []           # '_' is literal, not "any character"
+
+
+# ── regression: indexes exist, and are added to pre-existing databases ────────
+
+def _index_names(conn):
+    return {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
+
+
+NEW_INDEXES = {"idx_audit_target", "idx_edge_workspace_repo", "idx_mem_links_b"}
+
+
+def test_new_indexes_exist_on_a_fresh_database(store):
+    assert NEW_INDEXES <= _index_names(store.conn)
+
+
+def test_new_indexes_are_added_to_an_existing_database(tmp_path):
+    path = str(tmp_path / "legacy.db")
+    s = Store(path)
+    for name in NEW_INDEXES:
+        s.conn.execute("DROP INDEX IF EXISTS %s" % name)
+    s.conn.commit()
+    assert not (NEW_INDEXES & _index_names(s.conn))
+    s.close()
+
+    s2 = Store(path)                                # re-open runs the schema script again
+    try:
+        assert NEW_INDEXES <= _index_names(s2.conn)
+    finally:
+        s2.close()
+
+
+def test_audit_index_is_used_by_the_inspect_query(store):
+    plan = " ".join(str(r[3]) for r in store.conn.execute(
+        "EXPLAIN QUERY PLAN SELECT ts, actor, action, detail FROM audit "
+        "WHERE target=? ORDER BY ts", ("mem_x",)).fetchall())
+    assert "idx_audit_target" in plan
+
+
+def test_mem_links_b_index_is_used(store):
+    plan = " ".join(str(r[3]) for r in store.conn.execute(
+        "EXPLAIN QUERY PLAN SELECT a, b FROM mem_links WHERE b=?", ("mem_x",)).fetchall())
+    assert "idx_mem_links_b" in plan
