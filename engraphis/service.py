@@ -1642,7 +1642,7 @@ class MemoryService:
         ws = self._clean_ws(workspace)
         rp = _clean_name(repo, field="repo")
         root_path = _clean_text(root_path, field="root_path", max_chars=MAX_CONTENT_CHARS)
-        wid = self.store.get_or_create_workspace(ws)
+        wid = self._get_or_create_workspace(ws)
         rid = self.store.get_or_create_repo(wid, rp)
         langs = None
         if languages:
@@ -2646,11 +2646,13 @@ class MemoryService:
                 (wid, limit)).fetchall()
         entity_rows = [dict(row) for row in ents]
         node_ids = {row["id"] for row in entity_rows}
+        selected_graph_layers = None
         selected_layers = None
-        if layers:
-            selected_layers = {
-                _enum(layer, GraphLayer, "layer").value for layer in layers
-            }
+        if layers is not None:
+            selected_graph_layers = [
+                _enum(layer, GraphLayer, "layer") for layer in layers
+            ]
+            selected_layers = {layer.value for layer in selected_graph_layers}
         # Nodes are capped at ``limit``; edges need their own cap or a large workspace
         # graph / indexed repo lets the lowest-privilege caller pull an unbounded
         # payload (the SQL fetches are LIMIT-ed too, so server-side work stays
@@ -2663,7 +2665,10 @@ class MemoryService:
                 "layer": edge.layer.value if edge.layer else "semantic",
             }
             for edge in self.store.edges_in_scope(
-                SearchFilter(workspace_id=wid), limit=edge_cap
+                SearchFilter(
+                    workspace_id=wid, graph_layers=selected_graph_layers
+                ),
+                limit=edge_cap,
             )
             if edge.src in node_ids and edge.dst in node_ids
             and (
@@ -2739,7 +2744,9 @@ class MemoryService:
                         })
                     return file_nodes.get(file_name)
 
-                for edge in self.store.list_code_edges(rid, limit=edge_cap):
+                for edge in self.store.list_code_edges(
+                    rid, limit=edge_cap, layers=selected_graph_layers
+                ):
                     if len(edgs) >= edge_cap:
                         break
                     edge_layer = edge.get("layer") or "entity"

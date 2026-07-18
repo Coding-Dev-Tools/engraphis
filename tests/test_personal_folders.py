@@ -114,6 +114,28 @@ def test_personal_without_a_current_user_degrades_to_shared():
     assert out["visibility"] == "shared" and out["owner"] == ""
 
 
+def test_index_repo_implicit_workspace_respects_team_privacy_default(tmp_path):
+    (tmp_path / "app.py").write_text("def run():\n    return True\n")
+
+    svc = _svc()
+    set_current_user(ALICE)
+    svc.index_repo(workspace="fresh-code", repo="app", root_path=str(tmp_path))
+    workspace = {w["name"]: w for w in svc.list_workspaces()["workspaces"]}["fresh-code"]
+    assert workspace["visibility"] == "personal"
+    assert workspace["owner"] == ALICE["email"]
+    assert workspace["mine"] is True
+
+    set_current_user(BOB)
+    assert "fresh-code" not in _names(svc)
+
+    anonymous = _svc()
+    set_current_user(None)
+    anonymous.index_repo(workspace="local-code", repo="app", root_path=str(tmp_path))
+    workspace = anonymous.list_workspaces()["workspaces"][0]
+    assert workspace["visibility"] == "shared"
+    assert workspace.get("owner", "") == ""
+
+
 # ── isolation: listing ────────────────────────────────────────────────────────
 def test_personal_folder_is_hidden_from_other_users_even_admins():
     svc = _svc()

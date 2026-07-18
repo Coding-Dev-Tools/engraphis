@@ -168,6 +168,100 @@ def test_unified_graph_filters_each_code_edge_by_persisted_layer():
         node["label"] for node in graph["nodes"]
     }
 
+    assert svc.graph(
+        workspace="w", repo="app", include_code=True, layers=[]
+    )["edges"] == []
+    assert svc.graph(
+        workspace="w", repo="app", include_code=True
+    )["edges"]
+
+
+def test_workspace_graph_filters_layers_before_edge_cap():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid = svc.store.get_or_create_workspace("w")
+    source = svc.store.upsert_entity(Node(
+        id="", name="source", ntype="concept", workspace_id=wid
+    ))
+    target = svc.store.upsert_entity(Node(
+        id="", name="target", ntype="concept", workspace_id=wid
+    ))
+    # graph(limit=2) has an edge cap of 2,000. Put more than that many
+    # nonmatching rows ahead of the requested causal edge.
+    for index in range(2001):
+        svc.store.upsert_edge(Edge(
+            id=f"a-nonmatching-{index:04d}",
+            src=source,
+            dst=target,
+            relation="related",
+            layer=GraphLayer.SEMANTIC,
+            workspace_id=wid,
+        ))
+    svc.store.upsert_edge(Edge(
+        id="z-matching",
+        src=source,
+        dst=target,
+        relation="causes",
+        layer=GraphLayer.CAUSAL,
+        workspace_id=wid,
+    ))
+
+    graph = svc.graph(
+        workspace="w", limit=2, layers=["causal"], backfill=False
+    )
+
+    assert [(edge["label"], edge["layer"]) for edge in graph["edges"]] == [
+        ("causes", "causal")
+    ]
+
+
+def test_code_graph_filters_layers_before_edge_cap():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    svc.remember("Repo memory", workspace="w", repo="app")
+    _, rid = svc._require_scope("w", "app")
+    for name in ("source", "target"):
+        svc.store.upsert_symbol(
+            repo_id=rid,
+            kind="function",
+            name=name,
+            fqname=name,
+            file=f"{name}.py",
+            span="1:1",
+        )
+    # graph(limit=2) has an edge cap of 2,000. File ordering puts more than
+    # that many nonmatching rows ahead of the requested semantic edge.
+    for index in range(2001):
+        svc.store.add_code_edge(
+            repo_id=rid,
+            src="source",
+            dst="target",
+            relation="calls",
+            layer=GraphLayer.ENTITY,
+            file="a.py",
+            line=index,
+            commit=False,
+        )
+    svc.store.add_code_edge(
+        repo_id=rid,
+        src="source",
+        dst="target",
+        relation="explains",
+        layer=GraphLayer.SEMANTIC,
+        file="z.py",
+        line=1,
+    )
+
+    graph = svc.graph(
+        workspace="w",
+        repo="app",
+        include_code=True,
+        limit=2,
+        layers=["semantic"],
+    )
+
+    assert [(edge["label"], edge["layer"]) for edge in graph["edges"]] == [
+        ("explains", "semantic")
+    ]
+
 
 def test_repo_code_reads_exclude_session_scoped_linked_memories():
     svc = MemoryService.create(":memory:", graph_extractor="none")
