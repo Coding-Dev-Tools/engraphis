@@ -222,6 +222,13 @@ def test_code_listing_helpers_honor_limit(store):
                             relation="calls", file="mod.py", line=i + 1)
     assert len(store.list_code_edges("repo_x")) == 4
     assert len(store.list_code_edges("repo_x", limit=3)) == 3
+    assert len(store.list_code_edges(
+        "repo_x", layers=[GraphLayer.ENTITY], limit=3
+    )) == 3
+    assert store.list_code_edges(
+        "repo_x", layers=[GraphLayer.CAUSAL], limit=3
+    ) == []
+    assert store.list_code_edges("repo_x", layers=[], limit=3) == []
     # list_code_files was the one sibling with no SQL limit, so engine.export_code_graph
     # had to fetch the whole repo and slice it in Python.
     for i in range(5):

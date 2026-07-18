@@ -25,6 +25,9 @@ Follow-up audit of the graph, Team / Pro / licensing, and relay surfaces after 0
   before personal receipt reads, so the deployment service account remains available for
   shared automation without bypassing personal-folder ownership. The standalone
   read-only graph endpoint also disables lazy write-on-read backfill.
+- Repository indexing now creates a first-time Team workspace through the same
+  privacy-aware path as remember/import/session writes, instead of silently creating a
+  shared, unowned folder for the authenticated user.
 
 ### Fixed
 
@@ -33,6 +36,12 @@ Follow-up audit of the graph, Team / Pro / licensing, and relay surfaces after 0
   page through every live repo-associated memory instead of clearing the bridge and
   stopping at 5,000, and Git impact parsing uses NUL-delimited paths without rewriting
   valid filename characters.
+- Graph layer predicates are applied before workspace and code-edge response caps, and an
+  explicit all-off layer selection remains empty instead of reverting to every layer.
+  Layout preset and custom link-distance changes also recompute component centers while
+  preserving the existing graph data and node objects.
+  Filter reloads also tolerate transient graph-data invalidation, so restoring layers
+  redraws the canvas instead of leaving the explorer list beside an empty graph.
 - Oversized audio/video resources are rejected before transcription begins. A blank
   `ENGRAPHIS_GRAPH_TOKEN` now correctly falls back to `ENGRAPHIS_API_TOKEN`.
 - The relay sweeps `trial_pending` rows that lapsed over a day ago. Previously a magic

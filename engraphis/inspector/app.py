@@ -432,13 +432,16 @@ def create_app(service: Optional[MemoryService] = None,
         return svc().verify_receipts(workspace=workspace)
 
     @app.get("/api/graph")
-    async def graph(workspace: str, limit: int = 2000, layers: str = "",
-                    include_code: bool = False, repo: Optional[str] = None):
+    async def graph(workspace: str, limit: int = 2000,
+                    layers: Optional[str] = None, include_code: bool = False,
+                    repo: Optional[str] = None):
         """Entity-relation network for the Graph tab -- same
         :meth:`MemoryService.graph` the v1-look dashboard's ``/api/graph`` calls
         (engraphis/graphdata.py), so both UIs render identical graphs and share
         the same workspace-binding isolation guard."""
-        selected = [x.strip() for x in layers.split(",") if x.strip()] if layers else None
+        selected = None if layers is None else [
+            x.strip() for x in layers.split(",") if x.strip()
+        ]
         return svc().graph(
             workspace=workspace, limit=limit, layers=selected,
             include_code=include_code, repo=repo,

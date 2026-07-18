@@ -1338,7 +1338,7 @@ async function saveAutoSync(){const on=document.getElementById('autosync-on'),ca
 async function syncNow(){const b=document.getElementById('sync-btn');const s=document.getElementById('sync-status');if(b){b.disabled=true;b.textContent='Syncing…'}if(s)s.textContent='Contacting the cloud…';try{const d=await api('/sync/run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const su=d.summary||{};toast('Synced — pushed '+(su.exported||0)+', '+(su.added||0)+' new from other devices','ok');await loadSyncStatus()}catch(e){toast('Sync failed: '+e.message,'err');if(b){b.disabled=false;b.textContent='Sync now'}if(s)s.textContent='Sync failed — try again.'}}
 
 /* ─── knowledge graph (force-graph + d3-force: compact defaults and selectable layouts) ─── */
-let GRAPH=null, FG=null, GRESIZE=false, GRESIZEFRAME=0, GADJ={}, GCOMPONENTS={}, GHILITE=null, GHOVERSET=null, GLABELRANK={}, GLABELBOXES=[], GDATA_CACHE=null, GACTIVE_DATA=null, GREDRAWFRAME=0, GPERF={large:false,dense:false};
+let GRAPH=null, FG=null, GRESIZE=false, GRESIZEFRAME=0, GADJ={}, GCOMPONENTS={}, GCOMPONENT_LAYOUT=null, GHILITE=null, GHOVERSET=null, GLABELRANK={}, GLABELBOXES=[], GDATA_CACHE=null, GACTIVE_DATA=null, GREDRAWFRAME=0, GPERF={large:false,dense:false};
 const GRAPH_PRESETS={
  original:{label:'Original force',repel:120,link:30,gravity:14,font:13,size:5,linkw:1,labelDensity:40,curve:0,particles:0},
  compact:{label:'Compact clusters',repel:42,link:20,gravity:26,font:12,size:5,linkw:.7,labelDensity:30,curve:.08,particles:0},
@@ -1414,7 +1414,7 @@ function graphUpdateHud(data){
  if(count&&data)count.textContent=data.nodes.length.toLocaleString()+' entities · '+data.links.length.toLocaleString()+' relations';
  if(badge)badge.textContent=GPERF.large?'Large graph mode':'Adaptive rendering';
 }
-function graphInvalidateData(){GDATA_CACHE=null;GACTIVE_DATA=null;GHILITE=null;GHOVERSET=null}
+function graphInvalidateData(){GDATA_CACHE=null;GACTIVE_DATA=null;GCOMPONENT_LAYOUT=null;GHILITE=null;GHOVERSET=null}
 async function loadGraph(){
  graphInjectCss();graphInvalidateData();GRAPH=null;
  const empty=document.getElementById('graph-empty'),net=document.getElementById('graph-net'),nodesBox=document.getElementById('graph-entity-list'),edgesBox=document.getElementById('graph-relation-list');
@@ -1428,9 +1428,9 @@ async function loadGraph(){
    GRESIZEFRAME=requestAnimationFrame(()=>{GRESIZEFRAME=0;const element=document.getElementById('graph-net');if(FG&&element)FG.width(element.clientWidth).height(element.clientHeight)});
   });
  }
- const layers=Array.from(document.querySelectorAll('#graph-layer-filters input:checked')).map(input=>input.value).join(','),includeCode=document.getElementById('graph-include-code').checked,repo=(document.getElementById('graph-repo-filter').value||'').trim();
+ const layerInputs=Array.from(document.querySelectorAll('#graph-layer-filters input')),selectedLayers=layerInputs.filter(input=>input.checked).map(input=>input.value),layerFilter=selectedLayers.length===layerInputs.length?'':'&layers='+encodeURIComponent(selectedLayers.join(',')),includeCode=document.getElementById('graph-include-code').checked,repo=(document.getElementById('graph-repo-filter').value||'').trim();
  try{
-  GRAPH=await api('/graph?workspace='+encodeURIComponent(WS||'')+'&layers='+encodeURIComponent(layers)+'&include_code='+(includeCode?'true':'false')+(repo?'&repo='+encodeURIComponent(repo):''));
+  GRAPH=await api('/graph?workspace='+encodeURIComponent(WS||'')+layerFilter+'&include_code='+(includeCode?'true':'false')+(repo?'&repo='+encodeURIComponent(repo):''));
   renderGraphSide();graphRender();
  }catch(error){
   empty.style.display='flex';empty.textContent='Graph failed: '+error.message;graphSetLayoutStatus('Load failed',false);
@@ -1471,6 +1471,11 @@ function graphIndexComponents(nodes){
   const x=(col-(used-1)/2)*gap,y=(row-(Math.ceil(components.length/cols)-1)/2)*gap;
   ids.forEach(id=>{GCOMPONENTS[id]={index,size:ids.length,x,y}});
  });
+}
+function graphRefreshComponentCenters(nodes,force=false){
+ const layout=window.GSET.mode+'|'+window.GSET.link;
+ if(!force&&GCOMPONENT_LAYOUT===layout)return;
+ graphIndexComponents(nodes);GCOMPONENT_LAYOUT=layout;
 }
 function graphAlpha(color,alpha){
  const hex=/^#([0-9a-f]{6})$/i.exec(color||'');
@@ -1523,9 +1528,9 @@ function graphRender(fit=true,reheat=true){
  GPERF={large:data.nodes.length>600||data.links.length>2400,dense:data.links.length>1500};
  if(dataChanged){
   buildAdj(data.links);GLABELRANK={};data.nodes.forEach(node=>{GLABELRANK[node.id]=node.rank});GACTIVE_DATA=data;
-  graphIndexComponents(data.nodes);
  }
- graphSetHighlight(null);
+ graphRefreshComponentCenters(data.nodes,dataChanged);
+ if(dataChanged)graphSetHighlight(null);
  if(!data.nodes.length){
   empty.style.display='flex';
   empty.textContent=GRAPH.nodes.length?('No connected entities — untick "Hide unconnected" to see all '+GRAPH.nodes.length+'.'):'No entities in this workspace yet.';
@@ -1579,7 +1584,9 @@ function graphRender(fit=true,reheat=true){
  }else{FG.linkCanvasObjectMode(()=>undefined)}
  FG.onRenderFramePost((ctx,scale)=>{
   if(!(settings.font>0))return;
-  const nodes=GACTIVE_DATA.nodes,focus=GHOVERSET&&GHOVERSET.size>1,cap=Math.max(1,Math.round((settings.labelDensity||40)*Math.max(.32,scale-.85))),fontSize=settings.font/scale,boxes=GLABELBOXES,candidateLimit=Math.min(nodes.length,Math.max(72,cap*10));
+  const nodes=(GACTIVE_DATA&&GACTIVE_DATA.nodes)||[];
+  if(!nodes.length)return;
+  const focus=GHOVERSET&&GHOVERSET.size>1,cap=Math.max(1,Math.round((settings.labelDensity||40)*Math.max(.32,scale-.85))),fontSize=settings.font/scale,boxes=GLABELBOXES,candidateLimit=Math.min(nodes.length,Math.max(72,cap*10));
   boxes.length=0;
   ctx.textAlign='center';ctx.textBaseline='top';ctx.lineJoin='round';ctx.font=fontSize+'px -apple-system,Segoe UI,sans-serif';ctx.lineWidth=3/scale;ctx.strokeStyle=window.GCOL.panel;ctx.fillStyle=window.GCOL.label;
   let drawn=0;
@@ -1615,6 +1622,7 @@ function graphSet(key,value){
  if(!FG)return;
  const layout=key==='repel'||key==='link'||key==='gravity'||key==='size';
  if(key==='size')graphRefreshNodeMetrics();
+ if(key==='link'&&GACTIVE_DATA)graphRefreshComponentCenters(GACTIVE_DATA.nodes);
  if(layout)graphApplyForces();
  if(key==='linkw'){FG.linkWidth(FG.linkWidth());FG.linkColor(FG.linkColor())}else graphRedraw();
  if(layout&&!prefersReducedMotion()){graphSetLayoutStatus('Updating layout',true);FG.d3ReheatSimulation()}

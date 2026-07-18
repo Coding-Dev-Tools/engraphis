@@ -46,7 +46,9 @@ def test_read_only_api_serves_graph_and_intent_recall():
         workspace="w", scope="workspace",
     )
     client = TestClient(create_read_only_app(svc))
-    assert client.get("/graph", params={"workspace": "w"}).json()["nodes"]
+    omitted = client.get("/graph", params={"workspace": "w"}).json()
+    assert omitted["nodes"] and omitted["edges"]
+    assert client.get("/graph?workspace=w&layers=").json()["edges"] == []
     response = client.post(
         "/intent/recall",
         json={"query": "Alice", "intent": "explain", "workspace": "w"},
