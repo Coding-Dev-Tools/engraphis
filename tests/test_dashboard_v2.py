@@ -4,6 +4,7 @@ Skips on the numpy-only CI gate (needs fastapi/httpx), like the other v1 tests. 
 deterministic embedder so recall works without torch, and a fresh DB per test.
 """
 import time
+from html.parser import HTMLParser
 
 import pytest
 
@@ -70,6 +71,66 @@ def test_dashboard_serves_and_bootstraps(monkeypatch, tmp_path):
         assert any(w["name"] == "demo" for w in b["workspaces"])
         assert b["license"]["plan"] == "free"
 
+
+def test_dashboard_markup_offers_explicit_folder_access_and_graph_views(monkeypatch,
+                                                                        tmp_path):
+    class DashboardMarkup(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.sections = []
+            self.current_section = None
+            self.section_text = None
+            self.nav_sections = {}
+            self.select_id = None
+            self.options = {}
+            self.folder_access = []
+
+        def handle_starttag(self, tag, attributes):
+            attrs = dict(attributes)
+            classes = set(attrs.get("class", "").split())
+            if tag == "div" and "nav-section" in classes:
+                self.sections.append("")
+                self.current_section = len(self.sections) - 1
+                self.section_text = self.current_section
+            elif tag == "div" and "nav-item" in classes and attrs.get("data-view"):
+                self.nav_sections[attrs["data-view"]] = self.current_section
+            elif tag == "select":
+                self.select_id = attrs.get("id")
+            elif tag == "option" and self.select_id:
+                self.options.setdefault(self.select_id, []).append(attrs.get("value"))
+            elif tag == "input" and attrs.get("name") == "folder-visibility":
+                self.folder_access.append({
+                    "value": attrs.get("value"),
+                    "checked": "checked" in attrs,
+                })
+
+        def handle_endtag(self, tag):
+            if tag == "div" and self.section_text is not None:
+                self.section_text = None
+            elif tag == "select":
+                self.select_id = None
+
+        def handle_data(self, data):
+            if self.section_text is not None:
+                self.sections[self.section_text] += data.strip()
+
+    with _client(monkeypatch, tmp_path) as c:
+        response = c.get("/")
+        assert response.status_code == 200
+
+    markup = DashboardMarkup()
+    markup.feed(response.text)
+    workspaces_section = markup.nav_sections["workspaces"]
+    assert markup.sections[workspaces_section] == "Memory operations"
+    assert workspaces_section == markup.nav_sections["memories"]
+    assert markup.nav_sections["why"] != workspaces_section
+    assert set(markup.options["graph-preset"]) == {
+        "compact", "original", "communities", "radial", "constellation", "custom",
+    }
+    assert markup.folder_access == [
+        {"value": "personal", "checked": False},
+        {"value": "shared", "checked": False},
+    ]
 
 def test_unconfigured_remote_api_is_refused_but_loopback_is_allowed(monkeypatch, tmp_path):
     remote = ("203.0.113.8", 50000)
