@@ -5,11 +5,19 @@ on:
     tags:
       - "v*.*.*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing tag to repair as a GitHub Release"
+        required: false
+        type: string
 
 jobs:
   build:
     name: Build distributions
     runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' ||
+      inputs.release_tag == ''
 
     steps:
       - name: Check out source
@@ -92,6 +100,7 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
@@ -101,5 +110,50 @@ jobs:
               --verify-tag \
               --generate-notes \
               --title "Engraphis ${GITHUB_REF_NAME#v}" \
+              --latest
+          fi
+
+  github-release-repair:
+    name: Repair GitHub Release
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Download published distributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          run_id="$(gh run list \
+            --workflow release.yml \
+            --branch "$RELEASE_TAG" \
+            --event push \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')"
+          test -n "$run_id"
+          gh run download "$run_id" \
+            --name python-package-distributions \
+            --dir dist
+
+      - name: Repair GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "GitHub Release $RELEASE_TAG already exists; nothing to repair."
+          else
+            gh release create "$RELEASE_TAG" dist/* \
+              --verify-tag \
+              --generate-notes \
+              --title "Engraphis ${RELEASE_TAG#v}" \
               --latest
           fi
