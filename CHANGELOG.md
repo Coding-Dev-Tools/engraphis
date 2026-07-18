@@ -62,6 +62,10 @@ Follow-up audit of the Team / Pro / licensing / relay surfaces after 0.9.8.
 - `GET /api/auth/users` checks `admin` at the route, matching `auth.min_role()`. The
   middleware already enforced admin, so this is defense in depth with no behaviour change;
   the route previously said `member`, which was dead code that misrepresented the policy.
+- Successful version-tag publication now creates the matching GitHub Release and attaches
+  the same validated wheel and source distribution sent to PyPI. Manual workflow dispatch
+  remains build/check-only, and the release job is tag-gated behind successful PyPI
+  publication.
 
 ## [0.9.8] - 2026-07-18
 
