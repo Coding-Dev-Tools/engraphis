@@ -639,12 +639,13 @@ Confirm it's you and get your trial key here — this link works once and expire
 
     {verify_url}
 
-Opening it mints your trial key and shows it on a confirmation page, with
-instructions to activate it in your dashboard (Settings -> License -> paste key ->
-Activate).
+Opening it shows a confirmation page with an "Activate my {label} trial" button.
+Clicking that button mints your trial key and shows it, with instructions to activate
+it in your dashboard (Settings -> License -> paste key -> Activate).
 
 If you didn't request this, you can safely ignore this email: no trial has been
-issued, and none will be unless this link is opened.
+issued, and none will be unless that button is clicked. Simply opening the link — or
+a mail scanner opening it for you — grants nothing.
 
 — The Engraphis team
 """
@@ -652,13 +653,15 @@ issued, and none will be unless this link is opened.
 
 def send_trial_verification_email(to: str, verify_url: str, plan: str = "team", *,
                                    minutes: int = 30) -> None:
-    """Deliver a one-time magic link that mints a self-serve trial key on click.
+    """Deliver a one-time magic link that mints a self-serve trial key on confirmation.
 
     Part of the 2026-07-14 trial-abuse hardening: ``inspector.license_cloud``'s
     ``POST /license/v1/start-trial`` no longer issues a key synchronously from a bare
     machine_id (trivially reset by deleting one local file — see that module's
-    comment); it emails this link instead, and the matching ``GET .../start-trial/
-    verify`` mints the key only once it's opened. Raises on delivery failure (see
+    comment); it emails this link instead. Opening the link (``GET .../start-trial/
+    verify``) only renders a confirm page — the key is minted by the ``POST`` that
+    page's button sends, so a mail link-prescanner GETting the URL on the recipient's
+    behalf cannot burn the one-time grant. Raises on delivery failure (see
     :func:`_send_text_email`) — unlike the password-reset send above, the caller DOES
     let a failure change the HTTP response (502): trial start is opt-in self-serve
     (no account to enumerate), and silently swallowing the failure would strand the

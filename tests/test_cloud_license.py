@@ -108,6 +108,33 @@ def test_register_crypto_work_is_rate_limited(monkeypatch):
     assert limited.status_code == 429 and limited.headers["Retry-After"] == "60"
 
 
+def test_public_verify_probe_is_rate_limited(monkeypatch):
+    """The status probe was the last unauthenticated route here with no limit at all.
+
+    It shares /register's burst budget — safe because nothing polls it (only
+    scripts/smoke_cloud.py), so there is no legitimate high-frequency caller to starve."""
+    monkeypatch.setattr(license_cloud, "REGISTER_RATE_PER_MINUTE", 2)
+    license_cloud._REGISTER_BUCKETS.clear()
+    c = _app()
+    assert c.get("/license/v1/verify/deadbeef").status_code == 200
+    assert c.get("/license/v1/verify/deadbeef").status_code == 200
+    limited = c.get("/license/v1/verify/deadbeef")
+    assert limited.status_code == 429 and limited.headers["Retry-After"] == "60"
+
+
+def test_verify_probe_shares_the_register_budget(monkeypatch):
+    """Alternating between the two routes must not buy extra work — same reasoning as
+    the existing /register + /team-invite shared budget."""
+    monkeypatch.setattr(license_cloud, "REGISTER_RATE_PER_MINUTE", 2)
+    license_cloud._REGISTER_BUCKETS.clear()
+    c = _app()
+    assert c.get("/license/v1/verify/deadbeef").status_code == 200
+    assert c.post("/license/v1/register",
+                  json={"key": "well-formed-but-invalid", "machine_id": "m"}
+                  ).status_code == 402
+    assert c.get("/license/v1/verify/deadbeef").status_code == 429
+
+
 def test_register_rejects_revoked_key():
     c = _app()
     key = _key()
@@ -1073,9 +1100,11 @@ def test_send_team_invite_client_fails_closed_on_network_error(monkeypatch):
 # button, send invite" experience to actually work, or they never see the value).
 #
 # 2026-07-14 hardening: POST /start-trial no longer hands back a key synchronously — it
-# emails a one-time magic link, and GET /start-trial/verify (opened from that email)
-# mints the key. Tests below mock the outbound send (no real SMTP in CI) and drive the
-# link explicitly, same as a user clicking it, via the two helpers immediately below.
+# emails a one-time magic link. Opening that link (GET) only renders a confirm page;
+# the key is minted by the POST that the page's button sends — see
+# test_get_on_magic_link_does_not_redeem_it for why that split exists. Tests below mock
+# the outbound send (no real SMTP in CI) and drive the link explicitly, same as a user
+# clicking it, via the two helpers immediately below.
 
 def _capture_verify_url(monkeypatch):
     """Stub outbound trial-verification email (no real SMTP/Resend in tests); returns
@@ -1107,7 +1136,7 @@ def _start_and_confirm(c, captured, machine_id, email="dev@example.com", plan="t
                json={"machine_id": machine_id, "email": email, "plan": plan})
     assert r.status_code == 200 and r.json().get("pending") is True
     token = _token_from_url(captured["url"])
-    v = c.get("/license/v1/start-trial/verify", params={"token": token})
+    v = c.post("/license/v1/start-trial/verify", params={"token": token})
     assert v.status_code == 200, v.text
     return _key_from_verify_html(v.text)
 
@@ -1129,10 +1158,10 @@ def test_trial_signing_failure_does_not_consume_magic_link(monkeypatch):
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("signing failed")))
 
     with pytest.raises(RuntimeError, match="signing failed"):
-        c.get("/license/v1/start-trial/verify", params={"token": token})
+        c.post("/license/v1/start-trial/verify", params={"token": token})
 
     monkeypatch.setattr(WH, "issue_key", issue_key)
-    retry = c.get("/license/v1/start-trial/verify", params={"token": token})
+    retry = c.post("/license/v1/start-trial/verify", params={"token": token})
     assert retry.status_code == 200
     assert parse_key(_key_from_verify_html(retry.text)).is_trial is True
 
@@ -1162,7 +1191,7 @@ def test_start_team_trial_grants_five_seats_regardless_of_request_body(monkeypat
     assert r.status_code == 200
     token = _token_from_url(captured["url"])
     key = _key_from_verify_html(
-        c.get("/license/v1/start-trial/verify", params={"token": token}).text)
+        c.post("/license/v1/start-trial/verify", params={"token": token}).text)
     assert parse_key(key).seats == 5
 
     r2 = c.post("/license/v1/start-trial",
@@ -1171,7 +1200,7 @@ def test_start_team_trial_grants_five_seats_regardless_of_request_body(monkeypat
     assert r2.status_code == 200
     token2 = _token_from_url(captured["url"])
     key2 = _key_from_verify_html(
-        c.get("/license/v1/start-trial/verify", params={"token": token2}).text)
+        c.post("/license/v1/start-trial/verify", params={"token": token2}).text)
     assert parse_key(key2).seats == 5
 
 
@@ -1236,10 +1265,10 @@ def test_start_team_trial_resend_supersedes_earlier_unclicked_link(monkeypatch):
     new_token = _token_from_url(captured["url"])
     assert new_token != old_token
 
-    stale = c.get("/license/v1/start-trial/verify", params={"token": old_token})
+    stale = c.post("/license/v1/start-trial/verify", params={"token": old_token})
     assert stale.status_code == 400
 
-    fresh = c.get("/license/v1/start-trial/verify", params={"token": new_token})
+    fresh = c.post("/license/v1/start-trial/verify", params={"token": new_token})
     assert fresh.status_code == 200
 
 
@@ -1293,8 +1322,200 @@ def test_start_trial_sweeps_expired_pending_links(monkeypatch):
     assert "dev-other" in remaining, "sweep must not drop the still-valid link"
 
     # The swept link is genuinely dead, not merely hidden.
-    assert c.get("/license/v1/start-trial/verify",
+    assert c.post("/license/v1/start-trial/verify",
                  params={"token": abandoned_token}).status_code == 400
+
+
+def test_get_on_magic_link_does_not_redeem_it(monkeypatch):
+    """A bare GET must NOT burn the one-time trial grant.
+
+    Corporate mail gateways and antivirus link-prescanners (Outlook Safe Links, Proofpoint
+    URL Defense) GET every URL in an email before the recipient sees it. While a GET
+    redeemed the token, a prescanner silently consumed the grant and the human who then
+    clicked got "invalid or has already been used" on a legitimate first attempt — worst
+    at exactly the corporate mail estates most likely to be buying Team. GET is now
+    read-only; only the POST the confirm button sends grants anything."""
+    c = _app()
+    captured = _capture_verify_url(monkeypatch)
+    assert c.post("/license/v1/start-trial",
+                  json={"machine_id": "dev-prescanned",
+                        "email": "scanned@example.com"}).status_code == 200
+    token = _token_from_url(captured["url"])
+
+    # The prescanner sweeps the link — possibly more than once.
+    for _ in range(3):
+        peek = c.get("/license/v1/start-trial/verify", params={"token": token})
+        assert peek.status_code == 200, peek.text[:200]
+
+    # No grant was recorded by any of that.
+    conn = reg.connect()
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM trial_grants").fetchone()[0] == 0, (
+            "a GET must not record a trial grant")
+        assert conn.execute(
+            "SELECT COUNT(*) FROM trial_pending WHERE machine_id=?",
+            ("dev-prescanned",)).fetchone()[0] == 1, "a GET must not consume the token"
+    finally:
+        conn.close()
+
+    # ...so the human's click still works and yields a real key.
+    confirmed = c.post("/license/v1/start-trial/verify", params={"token": token})
+    assert confirmed.status_code == 200, confirmed.text[:300]
+    assert parse_key(_key_from_verify_html(confirmed.text)).is_trial is True
+
+
+def test_confirm_form_action_survives_a_sub_path_relay(monkeypatch):
+    """The confirm form must post back to wherever the page was actually served from.
+
+    validate_cloud_base_url PRESERVES the path component (it only rejects query and
+    fragment), so ENGRAPHIS_RELAY_PUBLIC_URL=https://example.com/relay is valid config.
+    A root-absolute form action would render fine and then POST to a 404, stranding the
+    customer with a token that expires in 30 minutes and no diagnostic. A query-only
+    relative reference resolves against the current document instead."""
+    monkeypatch.setenv("ENGRAPHIS_RELAY_PUBLIC_URL", "https://example.test/relay")
+    c = _app()
+    captured = _capture_verify_url(monkeypatch)
+    assert c.post("/license/v1/start-trial",
+                  json={"machine_id": "dev-subpath",
+                        "email": "subpath@example.com"}).status_code == 200
+    url = captured["url"]
+    assert url.startswith("https://example.test/relay/license/v1/start-trial/verify")
+
+    token = _token_from_url(url)
+    body = c.get("/license/v1/start-trial/verify", params={"token": token}).text
+    action = re.search(r'action="([^"]*)"', body)
+    assert action, "confirm page has no form action: %s" % body[:300]
+    assert not action.group(1).startswith("/"), (
+        "form action must be relative so it resolves against the served path, got %r"
+        % action.group(1))
+    # And it must still carry the token.
+    assert token in action.group(1)
+
+
+def test_trial_verify_routes_are_rate_limited(monkeypatch):
+    """Both /start-trial/verify handlers hit SQLite before they can know the token is
+    junk — and the POST takes BEGIN IMMEDIATE, a write lock on the same relay.db that
+    carries seat claims and sync bundles. Flooding either with garbage tokens is a
+    bigger lever than the single indexed SELECT behind /verify/{key_id}."""
+    monkeypatch.setattr(license_cloud, "REGISTER_RATE_PER_MINUTE", 2)
+    license_cloud._REGISTER_BUCKETS.clear()
+    c = _app()
+    assert c.post("/license/v1/start-trial/verify",
+                  params={"token": "junk"}).status_code == 400
+    assert c.get("/license/v1/start-trial/verify",
+                 params={"token": "junk"}).status_code == 400
+    # Budget spent — and it is SHARED across both handlers, so alternating buys nothing.
+    limited = c.post("/license/v1/start-trial/verify", params={"token": "junk"})
+    assert limited.status_code == 429 and limited.headers["Retry-After"] == "60"
+    assert c.get("/license/v1/start-trial/verify",
+                 params={"token": "junk"}).status_code == 429
+
+
+def test_every_trial_verify_response_is_uncacheable(monkeypatch):
+    """EVERY /start-trial/verify response — success, each error, and the 429 — must carry
+    the no-store/no-referrer headers, on both the GET and the POST.
+
+    The request URL itself carries the one-time token, so an error page is just as
+    Referer-leaky as the success page that holds the key. This pins the invariant across
+    all of them because the success path and the error paths previously used separate
+    inline header literals and drifted apart."""
+    def _assert_locked_down(r, label):
+        assert "no-store" in r.headers.get("Cache-Control", ""), \
+            "%s (%s) is cacheable" % (label, r.status_code)
+        assert r.headers.get("Referrer-Policy") == "no-referrer", \
+            "%s (%s) leaks Referer" % (label, r.status_code)
+
+    c = _app()
+    captured = _capture_verify_url(monkeypatch)
+
+    # Both handlers, missing + bogus token.
+    _assert_locked_down(c.get("/license/v1/start-trial/verify"), "GET no token")
+    _assert_locked_down(c.post("/license/v1/start-trial/verify"), "POST no token")
+    for method in (c.get, c.post):
+        _assert_locked_down(
+            method("/license/v1/start-trial/verify", params={"token": "nope"}),
+            "%s bogus token" % method.__name__.upper())
+
+    # Confirm page and success page.
+    assert c.post("/license/v1/start-trial",
+                  json={"machine_id": "dev-hdrs", "email": "hdrs@example.com"}
+                  ).status_code == 200
+    token = _token_from_url(captured["url"])
+    _assert_locked_down(
+        c.get("/license/v1/start-trial/verify", params={"token": token}), "confirm page")
+    granted = c.post("/license/v1/start-trial/verify", params={"token": token})
+    assert granted.status_code == 200
+    _assert_locked_down(granted, "success page (contains the key)")
+
+    # Already-used-device 409.
+    assert c.post("/license/v1/start-trial",
+                  json={"machine_id": "dev-hdrs", "email": "hdrs@example.com"}
+                  ).status_code == 409
+
+    # And the 429, which must keep Retry-After as well.
+    monkeypatch.setattr(license_cloud, "REGISTER_RATE_PER_MINUTE", 1)
+    license_cloud._REGISTER_BUCKETS.clear()
+    c.get("/license/v1/start-trial/verify", params={"token": "nope"})
+    throttled = c.get("/license/v1/start-trial/verify", params={"token": "nope"})
+    assert throttled.status_code == 429
+    assert throttled.headers["Retry-After"] == "60"
+    _assert_locked_down(throttled, "429")
+
+
+def test_confirm_page_posts_the_token_back(monkeypatch):
+    """The GET page must actually offer the POST that redeems — otherwise the split
+    above would leave users with no way to finish."""
+    c = _app()
+    captured = _capture_verify_url(monkeypatch)
+    assert c.post("/license/v1/start-trial",
+                  json={"machine_id": "dev-confirm-form",
+                        "email": "form@example.com"}).status_code == 200
+    token = _token_from_url(captured["url"])
+
+    page = c.get("/license/v1/start-trial/verify", params={"token": token})
+    assert page.status_code == 200
+    body = page.text
+    assert 'method="post"' in body.lower()
+    assert token in body, "the form must post the token back"
+    assert "form@example.com" in body, "confirm page should name the account it activates"
+
+
+@pytest.mark.parametrize("bad", ["", "not-a-real-token"])
+def test_confirm_page_reports_a_bad_token_without_mutating(bad):
+    """GET mirrors the POST's diagnostics, and stays read-only doing it."""
+    c = _app()
+    r = c.get("/license/v1/start-trial/verify", params={"token": bad})
+    assert r.status_code == 400
+    assert "invalid" in r.text.lower() or "missing" in r.text.lower()
+
+
+def test_confirm_page_reports_an_expired_link_as_expired(monkeypatch):
+    c = _app()
+    captured = _capture_verify_url(monkeypatch)
+    assert c.post("/license/v1/start-trial",
+                  json={"machine_id": "dev-lapsed-peek",
+                        "email": "lapsed@example.com"}).status_code == 200
+    token = _token_from_url(captured["url"])
+
+    conn = reg.connect()
+    try:
+        conn.execute("UPDATE trial_pending SET expires_at=? WHERE machine_id=?",
+                     (time.time() - 60, "dev-lapsed-peek"))
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = c.get("/license/v1/start-trial/verify", params={"token": token})
+    assert r.status_code == 400
+    assert "expired" in r.text.lower()
+    # Read-only: the lapsed row is left for the retention sweep, not deleted here.
+    conn = reg.connect()
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM trial_pending WHERE machine_id=?",
+            ("dev-lapsed-peek",)).fetchone()[0] == 1
+    finally:
+        conn.close()
 
 
 def test_expired_link_keeps_saying_expired_after_an_unrelated_reservation(monkeypatch):
@@ -1327,7 +1548,7 @@ def test_expired_link_keeps_saying_expired_after_an_unrelated_reservation(monkey
                   json={"machine_id": "dev-unrelated",
                         "email": "unrelated@example.com"}).status_code == 200
 
-    late = c.get("/license/v1/start-trial/verify", params={"token": token})
+    late = c.post("/license/v1/start-trial/verify", params={"token": token})
     assert late.status_code == 400
     assert "expired" in late.text.lower(), (
         "expired link must still report EXPIRED after an unrelated reservation, got: %s"
@@ -1353,7 +1574,7 @@ def test_start_team_trial_rejects_grant_after_device_already_confirmed(monkeypat
 
 def test_start_team_trial_verify_rejects_unknown_token():
     c = _app()
-    r = c.get("/license/v1/start-trial/verify", params={"token": "not-a-real-token"})
+    r = c.post("/license/v1/start-trial/verify", params={"token": "not-a-real-token"})
     assert r.status_code == 400
 
 
@@ -1363,9 +1584,9 @@ def test_start_team_trial_verify_link_is_one_time_use(monkeypatch):
     c.post("/license/v1/start-trial",
           json={"machine_id": "dev-1", "email": "dev@example.com"})
     token = _token_from_url(captured["url"])
-    first = c.get("/license/v1/start-trial/verify", params={"token": token})
+    first = c.post("/license/v1/start-trial/verify", params={"token": token})
     assert first.status_code == 200
-    replay = c.get("/license/v1/start-trial/verify", params={"token": token})
+    replay = c.post("/license/v1/start-trial/verify", params={"token": token})
     assert replay.status_code == 400
 
 
@@ -1377,7 +1598,7 @@ def test_start_team_trial_verify_rejects_expired_token(monkeypatch):
                json={"machine_id": "dev-1", "email": "dev@example.com"})
     assert r.status_code == 200
     token = _token_from_url(captured["url"])
-    v = c.get("/license/v1/start-trial/verify", params={"token": token})
+    v = c.post("/license/v1/start-trial/verify", params={"token": token})
     assert v.status_code == 400
     assert "expired" in v.text.lower()
 
@@ -1496,7 +1717,7 @@ def test_request_team_trial_key_client_reports_already_used(monkeypatch):
         "http://127.0.0.1", "dev-1", email="dev@example.com"
     )
     token = _token_from_url(captured["url"])
-    confirmed = c.get("/license/v1/start-trial/verify", params={"token": token})
+    confirmed = c.post("/license/v1/start-trial/verify", params={"token": token})
     assert confirmed.status_code == 200                 # the device now holds a grant
     key, reason, pending = cloud_license.request_team_trial_key(
         "http://127.0.0.1", "dev-1", email="dev@example.com")

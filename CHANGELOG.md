@@ -34,6 +34,29 @@ Follow-up audit of the Team / Pro / licensing / relay surfaces after 0.9.8.
   unmappable — a permanent 5xx loop risks the endpoint being disabled, which would then
   drop real `order.paid` fulfillments.
 
+- Opening a trial magic link no longer redeems it. `GET /license/v1/start-trial/verify`
+  now renders a confirmation page and the grant happens on the `POST` its button sends.
+  Corporate mail gateways and antivirus link-prescanners (Outlook Safe Links, Proofpoint
+  URL Defense) GET every URL in an email before the recipient sees it, which silently
+  burned the one-time grant and left a legitimate first attempt looking "already used" —
+  worst at exactly the corporate mail estates most likely to be evaluating Team. The GET
+  is read-only: it never deletes a lapsed row, so a prescanner cannot destroy what it
+  cannot redeem. The token stays in the query string, so no request body is parsed and no
+  multipart dependency is involved.
+  The confirm form posts to a query-only relative reference, so it resolves against the
+  path the page was actually served from — `ENGRAPHIS_RELAY_PUBLIC_URL` may legitimately
+  carry a path (`validate_cloud_base_url` preserves it), and a root-absolute action would
+  have rendered fine and then posted to a 404.
+- `GET /license/v1/verify/{key_id}` and both `/license/v1/start-trial/verify` handlers now
+  share the `/register` + `/team-invite` per-IP burst budget. These were the remaining
+  unauthenticated relay routes with no limit; the trial-verify pair matters most, since
+  both touch SQLite — and the POST takes `BEGIN IMMEDIATE` on the same `relay.db` that
+  carries seat claims and sync bundles — before they can tell the token is junk.
+- Every `/start-trial/verify` response (success, each error, and the 429) sends
+  `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. The request URL carries
+  the one-time token, so the error pages are as Referer-leaky as the success page that
+  holds the key; they previously used separate inline header literals and had drifted.
+
 ### Changed
 
 - `GET /api/auth/users` checks `admin` at the route, matching `auth.min_role()`. The

@@ -270,8 +270,20 @@ async def register(request: Request):
 
 
 @router.get("/verify/{key_id}")
-async def verify(key_id: str):
+async def verify(key_id: str, request: Request):
     """Public status probe for a key fingerprint (no key material needed)."""
+    # Shares the /register + /team-invite burst budget. One indexed SELECT is far cheaper
+    # than the Ed25519 verify that budget was sized for, and key_id is a SHA-256
+    # fingerprint so there is nothing to enumerate — but "cheap" is not "free", and an
+    # unmetered public endpoint on the same SQLite file as the relay is not worth keeping
+    # as a deliberate exception. Sharing rather than adding a bucket is safe here because
+    # no client polls this route (only scripts/smoke_cloud.py), so there is no legitimate
+    # high-frequency caller to starve. The same budget covers both /start-trial/verify
+    # handlers, which are the genuinely expensive unauthenticated routes here.
+    if not _register_rate_ok(_register_rate_key(request)):
+        return JSONResponse(
+            {"error": "too many verification probes — try again shortly"},
+            status_code=429, headers={"Retry-After": "60"})
     conn = reg.connect()
     try:
         row = conn.execute(
@@ -822,6 +834,44 @@ def _trial_verify_error_html(message: str) -> str:
 </body></html>"""
 
 
+def _trial_confirm_html(token: str, plan: str, email: str) -> str:
+    """The interstitial a human sees before the trial is actually granted.
+
+    Exists so that redemption needs a deliberate POST rather than the bare GET an email
+    link-prescanner performs on the recipient's behalf — see :func:`confirm_team_trial`.
+    The form posts back to this same URL with the token in the query string, so there is
+    no request body to parse."""
+    import html as _html
+    label = _html.escape(plan.title())
+    # A QUERY-ONLY relative reference, deliberately: it resolves against the current
+    # document's own path, so the form posts back to wherever this page was actually
+    # served from. A root-absolute "/license/v1/start-trial/verify?..." would silently
+    # break every sub-path deployment — validate_cloud_base_url PRESERVES the path
+    # component (it only rejects query/fragment), so ENGRAPHIS_RELAY_PUBLIC_URL=
+    # https://example.com/relay is valid config; the emailed link would render fine and
+    # then POST to a 404, stranding the customer with a token that expires in 30 minutes
+    # and no diagnostic. Same breakage behind a root_path reverse proxy.
+    # The token goes into an attribute, so escape it with quote=True (the default).
+    action = "?token=%s" % _html.escape(token)
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Confirm your Engraphis {label} trial</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:640px;margin:48px auto;padding:0 16px">
+<h2>Confirm your {label} trial</h2>
+<p>You're one click away. This will activate a trial for
+<strong>{_html.escape(email)}</strong>.</p>
+<form method="post" action="{action}">
+<button type="submit" style="font:inherit;font-weight:600;padding:12px 20px;border:0;
+border-radius:8px;background:#5941c2;color:#fff;cursor:pointer">
+Activate my {label} trial</button>
+</form>
+<p style="color:#666;font-size:13px;margin-top:24px">This link can only be used once.
+If you didn't request a trial, you can ignore this page — nothing happens until you
+click the button.</p>
+</body></html>"""
+
+
 def _reserve_trial(mid: str, email: str, plan: str) -> Optional[str]:
     """Reserve the newest pending magic link without blocking the event loop."""
     conn = reg.connect()
@@ -878,7 +928,9 @@ async def start_team_trial(request: Request):
 
     Does NOT issue a key synchronously (see the 2026-07-14 module comment above): it
     emails a one-time magic link to *email* and mints the real signed key only when
-    that link is opened (:func:`verify_team_trial`, the ``GET`` companion below).
+    that link is CONFIRMED. Opening it (``GET``) only renders :func:`confirm_team_trial`'s
+    page; the key is minted by :func:`verify_team_trial`, the ``POST`` that page's button
+    sends — so a mail link-prescanner cannot burn the grant on the recipient's behalf.
     ``plan`` selects the tier ("pro" or "team", default "team"). 429 if this source IP
     has requested too many trials recently (``ENGRAPHIS_TRIAL_RATE_LIMIT_PER_HOUR``,
     default 5/hour); 400 for a missing machine_id, an unknown plan, or a missing/
@@ -948,16 +1000,106 @@ async def start_team_trial(request: Request):
             "expires_in": _TRIAL_TOKEN_TTL_SECONDS}
 
 
+#: Applied to EVERY /start-trial/verify response, not just the success page: the request
+#: URL itself carries the one-time token, so even an error page must stay out of shared
+#: caches and out of the Referer of anything the reader clicks from there.
+_TRIAL_PAGE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, private",
+    "Pragma": "no-cache",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+def _trial_verify_rate_limited(request: Request) -> Optional[HTMLResponse]:
+    """Shared burst gate for both /start-trial/verify handlers, or None when allowed.
+
+    Both are unauthenticated and both hit SQLite before they can know whether the token
+    is even real: the GET runs connect + two executescripts + a PRAGMA + a SELECT, and
+    the POST additionally takes BEGIN IMMEDIATE — a RESERVED write lock on the same
+    relay.db that carries seat claims and sync bundles — BEFORE it discovers the token is
+    garbage. Flooding either one with junk tokens is therefore a bigger lever than the
+    single indexed SELECT behind /verify/{key_id}. Both are sync defs, so each request
+    also pins a threadpool worker. Answers HTML, not JSON: these routes are opened by a
+    human in a browser."""
+    if _register_rate_ok(_register_rate_key(request)):
+        return None
+    return HTMLResponse(
+        _trial_verify_error_html("Too many attempts — please wait a minute and retry."),
+        status_code=429, headers=dict(_TRIAL_PAGE_HEADERS, **{"Retry-After": "60"}))
+
+
 @router.get("/start-trial/verify")
-def verify_team_trial(token: str = ""):
-    """Redeem a magic-link token from :func:`start_team_trial` — mints and displays the
-    real signed trial key. Answers a small HTML page, not JSON: this is meant to be
-    opened directly from the confirmation email by a human, who needs to read and copy
-    a key, not parse a response body. One-time: the token is deleted on first use
-    (success OR a stale/losing race), so replaying a link never mints twice."""
+def confirm_team_trial(request: Request, token: str = ""):
+    """Render the confirmation page for a magic-link token — WITHOUT redeeming it.
+
+    Redemption lives in the POST companion below, and this split is load-bearing rather
+    than cosmetic. Corporate mail gateways and antivirus link-prescanners (Outlook Safe
+    Links, Proofpoint URL Defense, and friends) routinely GET every URL they find in an
+    email body before the recipient ever sees it. When a bare GET redeemed the token, a
+    prescanner silently burned the one-time grant, and the human who then clicked the
+    link got "this link is invalid or has already been used" on a completely legitimate
+    first attempt — and it hit hardest at exactly the corporate mail estates most likely
+    to be buying Team.
+
+    So: GET is safe and idempotent (it only reads), and the actual grant happens on a
+    POST that a human has to click a button to send. Prescanners do not submit forms.
+    The token still rides in the query string, which is what the form posts back to, so
+    no request body parsing — and therefore no multipart dependency — is involved."""
+    limited = _trial_verify_rate_limited(request)
+    if limited is not None:
+        return limited
     token = (token or "").strip()
     if not token:
-        return HTMLResponse(_trial_verify_error_html("Missing token."), status_code=400)
+        return HTMLResponse(_trial_verify_error_html("Missing token."),
+                            status_code=400, headers=_TRIAL_PAGE_HEADERS)
+
+    conn = reg.connect()
+    try:
+        conn.executescript(_TRIAL_SCHEMA)
+        _ensure_trial_plan_column(conn)
+        conn.executescript(_TRIAL_PENDING_SCHEMA)
+        row = conn.execute(
+            "SELECT machine_id, email, plan, expires_at FROM trial_pending "
+            "WHERE token_hash=?", (_hash_token(token),)).fetchone()
+    finally:
+        conn.close()
+
+    # Mirror the POST's diagnostics so a user learns the real problem before clicking,
+    # not after. Read-only: a lapsed row is left for the retention sweep in
+    # _reserve_trial, never deleted here (deleting on GET would hand a prescanner a way
+    # to destroy the row it cannot redeem).
+    if row is None:
+        return HTMLResponse(
+            _trial_verify_error_html("This link is invalid or has already been used."),
+            status_code=400, headers=_TRIAL_PAGE_HEADERS)
+    if row["expires_at"] < time.time():
+        return HTMLResponse(
+            _trial_verify_error_html(
+                "This link has expired — request a new trial from the dashboard."),
+            status_code=400, headers=_TRIAL_PAGE_HEADERS)
+
+    return HTMLResponse(_trial_confirm_html(token, row["plan"], row["email"]),
+                        headers=_TRIAL_PAGE_HEADERS)
+
+
+@router.post("/start-trial/verify")
+def verify_team_trial(request: Request, token: str = ""):
+    """Redeem a magic-link token from :func:`start_team_trial` — mints and displays the
+    real signed trial key. Answers a small HTML page, not JSON: this is meant to be
+    reached by a human clicking the confirm button on the GET page above, who needs to
+    read and copy a key, not parse a response body. One-time: the token is deleted on
+    first use (success OR a stale/losing race), so replaying it never mints twice.
+
+    Takes the token from the QUERY STRING, not a form body: the GET page posts back to
+    its own URL, so there is nothing to parse and no python-multipart dependency (which
+    has broken the [server] extra before)."""
+    limited = _trial_verify_rate_limited(request)
+    if limited is not None:
+        return limited
+    token = (token or "").strip()
+    if not token:
+        return HTMLResponse(_trial_verify_error_html("Missing token."),
+                            status_code=400, headers=_TRIAL_PAGE_HEADERS)
 
     conn = reg.connect()
     try:
@@ -978,14 +1120,14 @@ def verify_team_trial(token: str = ""):
                 return HTMLResponse(
                     _trial_verify_error_html(
                         "This link is invalid or has already been used."),
-                    status_code=400)
+                    status_code=400, headers=_TRIAL_PAGE_HEADERS)
             if row["expires_at"] < now:
                 conn.execute("DELETE FROM trial_pending WHERE token_hash=?", (token_hash,))
                 conn.execute("COMMIT")
                 return HTMLResponse(
                     _trial_verify_error_html(
                         "This link has expired — request a new trial from the dashboard."),
-                    status_code=400)
+                    status_code=400, headers=_TRIAL_PAGE_HEADERS)
             mid, email, plan = row["machine_id"], row["email"], row["plan"]
             existing = conn.execute(
                 "SELECT 1 FROM trial_grants WHERE machine_id=?", (mid,)).fetchone()
@@ -996,7 +1138,7 @@ def verify_team_trial(token: str = ""):
                 return HTMLResponse(
                     _trial_verify_error_html(
                         "The free trial has already been used on this device."),
-                    status_code=409)
+                    status_code=409, headers=_TRIAL_PAGE_HEADERS)
             from engraphis.inspector.webhooks import issue_key
             from engraphis.licensing import TRIAL_DAYS
             seats = TEAM_TRIAL_SEATS if plan == "team" else 1
@@ -1025,9 +1167,7 @@ def verify_team_trial(token: str = ""):
         pass
     # This body contains the full signed license key and the URL still carries the
     # one-time token, so keep both out of shared caches and out of Referer headers on
-    # any link the reader clicks from here.
-    return HTMLResponse(_trial_verify_success_html(key, plan, TRIAL_DAYS), headers={
-        "Cache-Control": "no-store, no-cache, must-revalidate, private",
-        "Pragma": "no-cache",
-        "Referrer-Policy": "no-referrer",
-    })
+    # any link the reader clicks from here. Uses the shared constant rather than an
+    # inline copy so the success page and the error pages can never drift apart.
+    return HTMLResponse(_trial_verify_success_html(key, plan, TRIAL_DAYS),
+                        headers=_TRIAL_PAGE_HEADERS)
