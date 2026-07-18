@@ -26,6 +26,7 @@ from typing import Any, Optional
 
 from engraphis.backends.extractor import ChunkingExtractor
 from engraphis.core.engine import MemoryEngine
+from engraphis.core.graph_layers import normalize_graph_layer
 from engraphis.core.interfaces import Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter
 from engraphis.graphdata import build_graph_payload, empty_graph
 
@@ -1197,9 +1198,9 @@ class MemoryService:
             if graph_layers else None
         )
 
-        # A bound instance must never do a workspace-less (global) recall — that would read
-        # across every tenant's memories, the exact boundary the binding exists to enforce.
-        if not workspace and self.allowed_workspaces is not None:
+        # A configured workspace binding or a bound dashboard user must never do a
+        # workspace-less (global) recall — either case represents a tenant boundary.
+        if not workspace and (self.allowed_workspaces is not None or current_user() is not None):
             raise ValidationError("workspace is required on this instance")
         wid = rid = None
         sid = None
@@ -1293,7 +1294,7 @@ class MemoryService:
             min_support = max(0.0, min(1.0, min_support))
         mts = [_enum(m, MemoryType, "mtype") for m in mtypes] if mtypes else None
 
-        if not workspace and self.allowed_workspaces is not None:
+        if not workspace and (self.allowed_workspaces is not None or current_user() is not None):
             raise ValidationError("workspace is required on this instance")
         wid = rid = None
         sid = None
@@ -1607,7 +1608,9 @@ class MemoryService:
         reason = _clean_text(
             reason, field="reason", max_chars=MAX_TITLE_CHARS, required=False
         )
-        graph_layer = _enum(layer, GraphLayer, "layer") if layer else None
+        graph_layer = normalize_graph_layer(
+            _enum(layer, GraphLayer, "layer") if layer else None, relation
+        )
         wid, rid = self._require_scope(workspace, repo)
         self._check_owns(a, wid, rid)
         self._check_owns(b, wid, rid)
@@ -1618,13 +1621,12 @@ class MemoryService:
         except KeyError as exc:
             raise ValidationError(str(exc))
         out = {"a": a, "b": b, "relation": relation,
-               "layer": (graph_layer.value if graph_layer else None),
+               "layer": graph_layer.value,
                "reason": reason, "linked": True}
         out["receipt"] = self.store.record_receipt(
             "link", workspace_id=wid, repo_id=rid or "", actor="agent",
             target_count=2, status="ok",
-            metadata={"relation": relation,
-                      "layer": graph_layer.value if graph_layer else "inferred"},
+            metadata={"relation": relation, "layer": graph_layer.value},
         )
         return out
 
@@ -1675,7 +1677,12 @@ class MemoryService:
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
         wid, rid = self._require_scope(workspace, repo)
         limit = max(1, min(MAX_K, int(limit)))
-        return self.engine.search_code(query, repo_id=rid, limit=limit)
+        return self.engine.search_code(
+            query, repo_id=rid, limit=limit,
+            flt=SearchFilter(
+                workspace_id=wid, repo_id=rid, include_ancestors=True
+            ),
+        )
 
     def code_path(self, source: str, target: str, *, workspace: str, repo: str,
                   max_depth: int = 8) -> dict:
@@ -1683,12 +1690,17 @@ class MemoryService:
             raise ValidationError("repo is required for a code path query")
         source = _clean_text(source, field="source", max_chars=500)
         target = _clean_text(target, field="target", max_chars=500)
-        _, rid = self._require_scope(workspace, repo)
+        wid, rid = self._require_scope(workspace, repo)
         try:
             max_depth = max(1, min(32, int(max_depth)))
         except (TypeError, ValueError):
             raise ValidationError("max_depth must be an integer")
-        return self.engine.code_path(source, target, repo_id=rid, max_depth=max_depth)
+        return self.engine.code_path(
+            source, target, repo_id=rid, max_depth=max_depth,
+            flt=SearchFilter(
+                workspace_id=wid, repo_id=rid, include_ancestors=True
+            ),
+        )
 
     def code_impact(self, changed_files: list, *, workspace: str, repo: str) -> dict:
         if not repo:
@@ -1696,20 +1708,30 @@ class MemoryService:
         files = _clean_string_list(
             changed_files, field="changed_files", max_items=2_000, max_chars=4_000
         )
-        _, rid = self._require_scope(workspace, repo)
-        return self.engine.analyze_impact(files, repo_id=rid)
+        wid, rid = self._require_scope(workspace, repo)
+        return self.engine.analyze_impact(
+            files, repo_id=rid,
+            flt=SearchFilter(
+                workspace_id=wid, repo_id=rid, include_ancestors=True
+            ),
+        )
 
     def export_code_graph(self, *, workspace: str, repo: str) -> dict:
         if not repo:
             raise ValidationError("repo is required to export a code graph")
-        _, rid = self._require_scope(workspace, repo)
-        graph = self.engine.export_code_graph(repo_id=rid)
+        wid, rid = self._require_scope(workspace, repo)
+        flt = SearchFilter(
+            workspace_id=wid, repo_id=rid, include_ancestors=True
+        )
+        graph = self.engine.export_code_graph(repo_id=rid, flt=flt)
         return {
             "graph": graph,
             "report_markdown": self.engine.code_graph_report(
-                repo_id=rid, payload=graph
+                repo_id=rid, payload=graph, flt=flt
             ),
-            "graph_html": self.engine.code_graph_html(repo_id=rid, payload=graph),
+            "graph_html": self.engine.code_graph_html(
+                repo_id=rid, payload=graph, flt=flt
+            ),
         }
 
     # ── inspection (powers the Memory Inspector UI) ─────────────────────────────
@@ -2595,7 +2617,7 @@ class MemoryService:
 
     def graph(self, *, workspace: str, limit: int = 2000,
               layers: Optional[list] = None, include_code: bool = False,
-              repo: Optional[str] = None) -> dict:
+              repo: Optional[str] = None, backfill: bool = True) -> dict:
         """Entity-relation network for a workspace: nodes/edges plus type counts,
         top-connected entities, and connectivity stats — powers the Graph tab in
         both the v1-look dashboard and the Inspector UI (engraphis.graphdata
@@ -2616,7 +2638,8 @@ class MemoryService:
         # Lazy backfill: old memories can predate graph extraction or predate the
         # structured-metadata graph bridge. On first Graph-tab open in a process, feed
         # the missing graph state once; feed() de-dupes entities/edges.
-        if self._should_backfill_graph(wid, bool(ents)):
+        # Strictly read-only surfaces disable this write-on-first-read migration.
+        if backfill and self._should_backfill_graph(wid, bool(ents)):
             self._lazy_backfill_graph(wid)
             ents = conn.execute(
                 "SELECT id, name, etype FROM entities WHERE workspace_id=? LIMIT ?",
@@ -2649,10 +2672,7 @@ class MemoryService:
             )
         ]
         repo_names: list[str] = []
-        if include_code and (
-            selected_layers is None
-            or {"entity", "semantic"} & selected_layers
-        ):
+        if include_code:
             repo_rows = []
             if repo:
                 repo_name = _clean_name(repo, field="repo")
@@ -2673,6 +2693,9 @@ class MemoryService:
                 rid = repo_row["id"]
                 repo_name = repo_row["name"]
                 repo_names.append(repo_name)
+                code_filter = SearchFilter(
+                    workspace_id=wid, repo_id=rid, include_ancestors=True
+                )
                 symbols = self.store.list_symbols(rid, limit=limit)
                 symbol_node: dict[str, str] = {}
                 symbol_id_node: dict[str, str] = {}
@@ -2716,21 +2739,25 @@ class MemoryService:
                         })
                     return file_nodes.get(file_name)
 
-                if selected_layers is None or "entity" in selected_layers:
-                    for edge in self.store.list_code_edges(rid, limit=edge_cap):
-                        if len(edgs) >= edge_cap:
-                            break
-                        src = code_endpoint(edge.get("src") or "", edge.get("file") or "")
-                        dst = code_endpoint(edge.get("dst") or "")
-                        if src and dst and src != dst:
-                            edgs.append({
-                                "src": src, "dst": dst,
-                                "relation": edge.get("relation") or "",
-                                "layer": edge.get("layer") or "entity",
-                            })
+                for edge in self.store.list_code_edges(rid, limit=edge_cap):
+                    if len(edgs) >= edge_cap:
+                        break
+                    edge_layer = edge.get("layer") or "entity"
+                    if selected_layers is not None and edge_layer not in selected_layers:
+                        continue
+                    src = code_endpoint(edge.get("src") or "", edge.get("file") or "")
+                    dst = code_endpoint(edge.get("dst") or "")
+                    if src and dst and src != dst:
+                        edgs.append({
+                            "src": src, "dst": dst,
+                            "relation": edge.get("relation") or "",
+                            "layer": edge_layer,
+                        })
                 linked_memory_ids = set()
                 if selected_layers is None or "semantic" in selected_layers:
-                    code_links = self.store.list_code_memory_links(rid, limit=edge_cap)
+                    code_links = self.store.list_code_memory_links(
+                        rid, limit=edge_cap, flt=code_filter
+                    )
                     # Batched: up to `limit` (<=5000) individual get_memory() calls here
                     # was the dominant cost of an include_code=True request. Collect the
                     # candidate ids first and resolve them in one IN (...) query

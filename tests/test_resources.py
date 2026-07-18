@@ -44,6 +44,24 @@ def test_unknown_binary_resource_fails_actionably():
         LocalResourceExtractor().extract_bytes("blob.bin", b"\x00\x01\x02\x03" * 100)
 
 
+def test_extract_path_rejects_oversized_media_before_transcription(tmp_path, monkeypatch):
+    def unexpected_transcription(*_args, **_kwargs):
+        raise AssertionError("oversized resource reached transcription")
+
+    monkeypatch.setattr(resources, "MAX_RESOURCE_BYTES", 1)
+    monkeypatch.setattr(resources, "_transcribe_path", unexpected_transcription)
+    extractor = LocalResourceExtractor()
+
+    for suffix in (".mp3", ".mp4"):
+        path = tmp_path / f"oversized{suffix}"
+        path.write_bytes(b"xx")
+
+        with pytest.raises(ResourceExtractionError) as exc_info:
+            extractor.extract_path(str(path))
+
+        assert str(exc_info.value) == "resource exceeds the 1-byte extraction limit"
+
+
 def test_docx_rejects_dtd_and_entity_declarations():
     xml = (
         '<?xml version="1.0"?>' + (" " * 5_000)

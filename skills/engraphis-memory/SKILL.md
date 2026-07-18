@@ -8,7 +8,7 @@ description: 'Give the agent durable, scoped, explainable memory across sessions
 Engraphis is a local-first memory engine exposed to agents over MCP. This skill is the
 *discipline* for using it well: what to store, how to scope it, and which tool answers which
 question. It assumes the Engraphis MCP server is connected, so tools are named `engraphis_*`
-(27 of them). If those tools are absent, see [Setup](#setup) — do not fall back to ad-hoc notes.
+(28 of them). If those tools are absent, see [Setup](#setup) — do not fall back to ad-hoc notes.
 
 Memory here is **scoped, typed, bi-temporal, and self-maintaining**: writes are deduplicated and
 contradictions supersede (never silently overwrite), and forgetting lowers priority instead of

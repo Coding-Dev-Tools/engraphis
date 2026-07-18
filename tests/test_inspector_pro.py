@@ -12,7 +12,7 @@ from engraphis.config import settings  # noqa: E402
 from engraphis.inspector.app import create_app  # noqa: E402
 from engraphis.inspector.auth import AuthStore  # noqa: E402
 from engraphis.licensing import compose_key, ed25519_public_key  # noqa: E402
-from engraphis.service import MemoryService  # noqa: E402
+from engraphis.service import MemoryService, set_current_user  # noqa: E402
 
 SECRET = bytes(range(32))
 PW = "hunter2hunter2"  # ≥ 10 chars
@@ -249,6 +249,53 @@ def test_bearer_token_still_works_as_service_account_in_team_mode(make_client):
     r = c.get("/api/recall", params={"q": "rate", "workspace": "acme"},
               headers={"Authorization": "Bearer wrong"})
     assert r.status_code == 401
+
+
+def test_personal_receipts_are_scoped_to_signed_in_user(make_client):
+    app, alice, _ = make_client(key=_key("team", seats=2), team_mode=True)
+    _setup_admin(alice)
+    store = app.state.auth_store
+    service = app.state.service
+    alice_user = next(user for user in store.list_users()
+                      if user["email"] == "admin@x.co")
+
+    # Seed a receipt in Alice's personal folder without going around the same service
+    # authorization chokepoint exercised by the HTTP receipt handler.
+    set_current_user(alice_user)
+    try:
+        service.create_workspace("alice-private", visibility="personal")
+        service.remember("Alice's private receipt", workspace="alice-private")
+    finally:
+        set_current_user(None)
+
+    assert alice.get("/api/receipts",
+                     params={"workspace": "alice-private"}).json()["entries"]
+
+    assert alice.post("/api/auth/users", json={
+        "email": "bob@x.co", "name": "Bob", "password": PW,
+        "role": "viewer"}).status_code == 200
+    bob_user = next(user for user in store.list_users()
+                    if user["email"] == "bob@x.co")
+    bob = TestClient(app)
+    assert bob.post("/api/auth/login", json={
+        "email": "bob@x.co", "password": PW}).status_code == 200
+
+    denied = bob.get("/api/receipts", params={"workspace": "alice-private"})
+    assert denied.status_code == 400
+    assert denied.json()["error"] == \
+        "workspace 'alice-private' is a personal folder of another user"
+
+    token = store.create_api_token(
+        bob_user["id"], label="receipt regression")["token"]
+    denied = TestClient(app).get(
+        "/api/receipts", params={"workspace": "alice-private"},
+        headers={"Authorization": "Bearer " + token})
+    assert denied.status_code == 400
+
+    # A request without either credential remains anonymous after authenticated requests.
+    anonymous = TestClient(app).get(
+        "/api/receipts", params={"workspace": "alice-private"})
+    assert anonymous.status_code == 401
 
 
 def test_activate_endpoint_persists_and_unlocks(make_client, monkeypatch, tmp_path):

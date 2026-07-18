@@ -649,6 +649,22 @@ class Store:
         rows = self.conn.execute(sql, params).fetchall()
         return [_row_to_record(r) for r in rows]
 
+    def list_memories_page(self, flt: Optional[SearchFilter] = None, *,
+                           after_id: str = "", limit: int = 500) -> list[MemoryRecord]:
+        """Return one deterministic keyset page without materializing the full scope."""
+        sql = "SELECT * FROM memories"
+        where, params = self._where(flt, include_invalid=False)
+        if after_id:
+            where.append("id>?")
+            params.append(after_id)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY id LIMIT ?"
+        params.append(max(1, int(limit)))
+        rows = self.conn.execute(sql, params).fetchall()
+        return [_row_to_record(row) for row in rows]
+
+
     def close_validity(self, memory_id: str, *, at: Optional[float] = None,
                        actor: str = "system", reason: str = "contradicted") -> None:
         """Bi-temporal invalidation (§8.3): close a fact's validity window without deleting."""
@@ -1059,7 +1075,7 @@ class Store:
                       commit: bool = True) -> str:
         eid = ids.new_id("edge")
         graph_layer = normalize_graph_layer(layer, relation)
-        if graph_layer == GraphLayer.SEMANTIC:
+        if layer is None and graph_layer == GraphLayer.SEMANTIC:
             graph_layer = GraphLayer.ENTITY
         self.conn.execute(
             "INSERT INTO code_edges(id, repo_id, src, dst, relation, layer, file, line) "
@@ -1132,6 +1148,22 @@ class Store:
             sql += " LIMIT ?"
             params.append(max(0, int(limit)))  # never -1 == SQLite "unlimited"
         return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+
+    def list_symbols_page(self, repo_id: str, *,
+                          after: Optional[tuple[str, str, str]] = None,
+                          limit: int = 500) -> list[dict]:
+        sql = "SELECT * FROM symbols WHERE repo_id=?"
+        params: list[Any] = [repo_id]
+        if after is not None:
+            file, fqname, symbol_id = after
+            sql += (
+                " AND (file>? OR (file=? AND fqname>?) "
+                "OR (file=? AND fqname=? AND id>?))"
+            )
+            params.extend((file, file, fqname, file, fqname, symbol_id))
+        sql += " ORDER BY file, fqname, id LIMIT ?"
+        params.append(max(1, int(limit)))
+        return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
 
     def list_code_edges(self, repo_id: str, *, limit: Optional[int] = None) -> list[dict]:
         sql = "SELECT * FROM code_edges WHERE repo_id=? ORDER BY file, line, id"
@@ -1206,7 +1238,35 @@ class Store:
         if commit:
             self.conn.commit()
 
+    def clear_code_memory_links_for_memories(self, repo_id: str, memory_ids: list[str],
+                                             *, commit: bool = True) -> None:
+        if not memory_ids:
+            return
+        marks = ",".join("?" for _ in memory_ids)
+        self.conn.execute(
+            f"DELETE FROM code_memory_links WHERE repo_id=? AND memory_id IN ({marks})",
+            (repo_id, *memory_ids),
+        )
+        if commit:
+            self.conn.commit()
+
+    def prune_code_memory_links(self, repo_id: str, *, commit: bool = True) -> None:
+        """Remove bridges whose repo-associated memory is no longer live."""
+        t = now_ts()
+        self.conn.execute(
+            "DELETE FROM code_memory_links WHERE repo_id=? AND NOT EXISTS ("
+            "SELECT 1 FROM memories AS m WHERE m.id=code_memory_links.memory_id AND m.repo_id=? "
+            "AND (m.valid_from IS NULL OR m.valid_from<=?) "
+            "AND (m.valid_to IS NULL OR ?<m.valid_to) AND m.expired_at IS NULL"
+            ")",
+            (repo_id, repo_id, t, t),
+        )
+        if commit:
+            self.conn.commit()
+
+
     def list_code_memory_links(self, repo_id: str, *,
+                               flt: Optional[SearchFilter] = None,
                                limit: Optional[int] = None) -> list[dict]:
         sql = (
             "SELECT l.*, s.name, s.fqname, s.file, s.kind AS symbol_kind, "
@@ -1214,9 +1274,15 @@ class Store:
             "FROM code_memory_links l "
             "LEFT JOIN symbols s ON s.id=l.symbol_id "
             "LEFT JOIN memories m ON m.id=l.memory_id "
-            "WHERE l.repo_id=? ORDER BY l.created_at, l.id"
+            "WHERE l.repo_id=?"
         )
         params: list[Any] = [repo_id]
+        if flt is not None:
+            where, visibility_params = self._where(flt, include_invalid=False, alias="m")
+            if where:
+                sql += " AND " + " AND ".join(where)
+                params.extend(visibility_params)
+        sql += " ORDER BY l.created_at, l.id"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(max(0, int(limit)))  # never -1 == SQLite "unlimited"
@@ -1224,16 +1290,24 @@ class Store:
         return [dict(row) for row in rows]
 
     def memories_for_symbol(self, repo_id: str, symbol_id: str, *,
+                            flt: Optional[SearchFilter] = None,
                             limit: int = 20) -> list[dict]:
-        rows = self.conn.execute(
+        sql = (
             "SELECT m.id, m.title, m.content, m.mtype, m.scope, m.importance, "
             "m.provenance, l.relation, l.confidence "
             "FROM code_memory_links l JOIN memories m ON m.id=l.memory_id "
-            "WHERE l.repo_id=? AND l.symbol_id=? "
-            "AND (m.valid_to IS NULL OR ?<m.valid_to) AND m.expired_at IS NULL "
-            "ORDER BY l.confidence DESC, m.importance DESC, m.ingested_at DESC LIMIT ?",
-            (repo_id, symbol_id, now_ts(), max(1, min(100, int(limit)))),
-        ).fetchall()
+            "WHERE l.repo_id=? AND l.symbol_id=?"
+        )
+        params: list[Any] = [repo_id, symbol_id]
+        where, visibility_params = self._where(flt, include_invalid=False, alias="m")
+        if where:
+            sql += " AND " + " AND ".join(where)
+            params.extend(visibility_params)
+        sql += (
+            " ORDER BY l.confidence DESC, m.importance DESC, m.ingested_at DESC LIMIT ?"
+        )
+        params.append(max(1, min(100, int(limit))))
+        rows = self.conn.execute(sql, params).fetchall()
         out = []
         for row in rows:
             item = dict(row)
@@ -1249,6 +1323,25 @@ class Store:
             (repo_id, memory_id),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def memories_mentioning(self, repo_id: str, text: str, *,
+                            flt: Optional[SearchFilter] = None,
+                            limit: int = 10) -> list[dict]:
+        escaped = str(text).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        sql = (
+            "SELECT m.id, m.title, m.mtype FROM memories AS m "
+            "WHERE m.repo_id=? AND (m.title LIKE ? ESCAPE '\\' "
+            "OR m.content LIKE ? ESCAPE '\\')"
+        )
+        pattern = f"%{escaped}%"
+        params: list[Any] = [repo_id, pattern, pattern]
+        where, visibility_params = self._where(flt, include_invalid=False, alias="m")
+        if where:
+            sql += " AND " + " AND ".join(where)
+            params.extend(visibility_params)
+        sql += " ORDER BY m.ingested_at DESC LIMIT ?"
+        params.append(max(0, int(limit)))
+        return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
 
     # ── events & audit ──────────────────────────────────────────────────────
     def append_event(self, *, kind: str, content: str, workspace_id: str = "",
