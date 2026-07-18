@@ -44,6 +44,11 @@ Follow-up audit of the graph, Team / Pro / licensing, and relay surfaces after 0
   redraws the canvas instead of leaving the explorer list beside an empty graph.
 - Oversized audio/video resources are rejected before transcription begins. A blank
   `ENGRAPHIS_GRAPH_TOKEN` now correctly falls back to `ENGRAPHIS_API_TOKEN`.
+- The sync relay now has its own per-IP token bucket
+  (`ENGRAPHIS_RELAY_RATE_PER_MINUTE`, default 600) instead of sharing the
+  60-request/minute license-registration budget. A full 64-bundle sync round can complete
+  without throttling its final requests, while invalid-key floods remain bounded before
+  Ed25519 verification.
 - The relay sweeps `trial_pending` rows that lapsed over a day ago. Previously a magic
   link that was never opened (bounced mail, a link scanner that never follows) was only
   ever cleared when the same `machine_id` asked again, letting a caller at the
@@ -97,6 +102,11 @@ Follow-up audit of the graph, Team / Pro / licensing, and relay surfaces after 0
   colors; a synchronized keyboard-accessible explorer; collision-aware labels; and
   responsive controls. Large graphs reuse rendered data, cap explorer DOM rows, reduce
   animation work, and suppress expensive dense-graph effects.
+- The duplicate global Recall shortcut was removed from the dashboard header. Recall
+  remains available in the Memory Operations sidebar and from contextual page actions.
+- The README comparison matrix now includes Obsidian and clarifies the distinctions
+  between note-link graphs, agent memory, code awareness, encryption, and sleep-time
+  consolidation.
 
 ## [0.9.8] - 2026-07-18
 
