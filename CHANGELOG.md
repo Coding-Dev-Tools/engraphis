@@ -12,6 +12,11 @@ Follow-up audit of the Team / Pro / licensing / relay surfaces after 0.9.8.
 
 ### Fixed
 
+- Every `/start-trial/verify` response (success, each error, and the 429) sends
+  `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. The request URL carries
+  the one-time token, so the error pages are as Referer-leaky as the success page that
+  holds the key; they previously used separate inline header literals and had drifted.
+
 ### Changed
 
 - `GET /api/auth/users` checks `admin` at the route, matching `auth.min_role()`. The
