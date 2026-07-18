@@ -307,7 +307,55 @@ body{
 .graph-preset-row{display:flex;align-items:center;gap:var(--space-2)}
 .graph-preset-row .field-lbl{width:var(--control-label-w);flex-shrink:0;margin:0}
 .graph-preset-row .select{min-width:0;flex:1}
-.graph-preset-help{min-height:2.8em;color:var(--color-text-dim);font-size:var(--text-micro);line-height:1.4}
+.graph-preset-help{min-height:2.8em;color:var(--color-text-dim);font-size:var(--text-xs);line-height:1.4}
+.graph-layout{grid-template-columns:minmax(0,1fr) minmax(300px,340px);gap:var(--space-4);align-items:start}
+.graph-main{min-width:0}
+.graph-network{height:min(680px,calc(100dvh - 190px));min-height:540px;isolation:isolate;border-color:var(--color-border-strong);background-color:var(--color-canvas);background-image:radial-gradient(circle at 45% 42%,var(--color-accent-bg) 0,transparent 58%),linear-gradient(rgba(var(--graph-edge),.055) 1px,transparent 1px),linear-gradient(90deg,rgba(var(--graph-edge),.055) 1px,transparent 1px);background-size:auto,32px 32px,32px 32px;box-shadow:inset 0 0 0 var(--rule) rgba(var(--graph-edge),.05)}
+#graph-net{z-index:1}
+#graph-empty{z-index:3}
+.graph-hud{position:absolute;top:var(--space-3);left:var(--space-3);z-index:2;display:flex;max-width:calc(100% - var(--space-6));align-items:center;gap:var(--space-3);padding:var(--space-1);border:0;border-radius:0;background:transparent;color:var(--color-text-muted);pointer-events:none;text-shadow:0 1px 2px var(--color-canvas),0 0 8px var(--color-canvas)}
+.graph-hud-copy{display:grid;gap:1px}
+.graph-hud-kicker{font-family:var(--mono);font-size:var(--text-xs);letter-spacing:.08em;text-transform:uppercase;color:var(--color-accent)}
+.graph-hud-count{font-size:var(--text-xs);font-weight:600;color:var(--color-text)}
+.graph-layout-status{display:inline-flex;align-items:center;gap:var(--space-1);font-family:var(--mono);font-size:var(--text-xs);white-space:nowrap}
+.graph-layout-status::before{width:6px;height:6px;border-radius:50%;background:var(--color-success);content:""}
+.graph-layout-status.busy::before{background:var(--color-warning);box-shadow:0 0 0 3px var(--color-warning-bg)}
+.graph-controls-column{display:flex;max-height:min(680px,calc(100dvh - 190px));flex-direction:column;gap:var(--space-3);overflow-y:auto;padding-right:2px}
+.graph-controls-column>.card:first-child{display:block}
+.graph-control-card{display:grid!important;gap:var(--space-3)}
+.graph-card-title-row,.graph-section-head,.graph-palette-row{display:flex;align-items:center;justify-content:space-between;gap:var(--space-2)}
+.graph-card-title-row .card-head,.graph-section-head .field-lbl{margin:0}
+.graph-performance-badge{font-family:var(--mono);font-size:var(--text-xs);color:var(--color-success)}
+.graph-action-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--space-1)}
+.graph-control-section{display:grid;gap:var(--space-2);padding-top:var(--space-3);border-top:var(--rule) solid var(--color-border)}
+.graph-section-label{font-family:var(--font-display);font-size:var(--text-xs);font-weight:600;color:var(--color-text)}
+.graph-layer-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--space-1) var(--space-2);font-size:var(--text-xs)}
+.graph-check{display:flex;align-items:center;gap:var(--space-2);color:var(--color-text-muted);cursor:pointer}
+.graph-check input{accent-color:var(--color-accent)}
+.graph-palette-row .field-lbl{margin:0;white-space:nowrap}
+.graph-palette-row .select{min-width:0;flex:1}
+.graph-color-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--space-1)}
+.graph-color-item{display:flex;min-width:0;align-items:center;gap:var(--space-2);padding:var(--space-1) var(--space-2);border:0;border-bottom:var(--rule) solid var(--color-border);border-radius:0;background:transparent;color:var(--color-text-muted);font-size:var(--text-xs);cursor:pointer}
+.graph-color-item:hover{border-color:var(--color-border-strong);color:var(--color-text)}
+.graph-color-item span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-transform:capitalize}
+.graph-color-input{width:26px;height:26px;flex:0 0 26px;padding:2px;border:var(--rule) solid var(--color-border-strong);border-radius:50%;background:transparent;cursor:pointer}
+.graph-color-input::-webkit-color-swatch-wrapper{padding:0}
+.graph-color-input::-webkit-color-swatch{border:0;border-radius:50%}
+.graph-palette-help{color:var(--color-text-dim);font-size:var(--text-xs);line-height:1.4}
+.graph-advanced{padding-top:var(--space-3);border-top:var(--rule) solid var(--color-border)}
+.graph-advanced>summary{display:flex;align-items:center;justify-content:space-between;color:var(--color-text-muted);font-size:var(--text-xs);font-weight:600;cursor:pointer;list-style:none}
+.graph-advanced>summary::after{content:"+";font-family:var(--mono);color:var(--color-accent)}
+.graph-advanced[open]>summary::after{content:"−"}
+.graph-advanced-body{padding-top:var(--space-2)}
+.graph-side-stack{display:grid;gap:var(--space-3)}
+.graph-side-stack>.card:last-child{margin-top:0}
+.graph-legend-card{padding:var(--space-3)}
+.graph-legend-grid{display:grid;grid-template-columns:1fr;gap:var(--space-1);overflow:visible}
+.graph-explorer-more{width:100%;padding:var(--space-2);border:0;border-bottom:var(--rule) solid var(--color-border);background:var(--color-panel);color:var(--color-accent);font-size:var(--text-xs);cursor:pointer}
+.graph-explorer-more:hover{background:var(--color-raised)}
+.graph-explorer-summary{color:var(--color-text-dim);font-size:var(--text-xs)}
+@media(max-width:1100px){.graph-controls-column{max-height:none;overflow:visible}.graph-network{height:min(var(--graph-canvas-max),62vh)}}
+@media(max-width:768px){.graph-hud{right:var(--space-3);align-items:flex-start;justify-content:space-between}.graph-network{min-height:var(--graph-canvas-min)}.graph-color-grid{grid-template-columns:1fr}}
 .folder-access-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(var(--compact-column-min),1fr));gap:var(--space-2)}
 .folder-access-option{display:flex;align-items:flex-start;gap:var(--space-2);padding:var(--space-3);border:var(--rule) solid var(--color-border);border-radius:var(--radius-sm);color:var(--color-text-muted);cursor:pointer}
 .folder-access-option:hover{border-color:var(--color-border-strong);background:var(--color-raised)}
@@ -558,27 +606,41 @@ body{
 <div class="graph-main">
 <div class="graph-network">
 <div id="graph-net" role="region" aria-label="Interactive knowledge graph. Use arrow keys to move between entities and Enter to open the selected entity." tabindex="0" onkeydown="graphKeyboard(event)" style="position:absolute;inset:0"></div>
+<div class="graph-hud" aria-hidden="true"><div class="graph-hud-copy"><span class="graph-hud-kicker" id="graph-hud-mode">Knowledge map</span><strong class="graph-hud-count" id="graph-hud-count">Loading entities…</strong></div><span class="graph-layout-status busy" id="graph-layout-status">Preparing layout</span></div>
 <div id="graph-empty" class="empty status-region" role="status" aria-live="polite" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;padding:20px">Loading graph…</div>
 </div>
 </div>
 <div class="graph-controls-column">
-<div class="card"><div class="card-head">Controls</div>
-<div style="display:flex;gap:6px;margin-bottom:8px"><button class="btn btn-ghost btn-sm" style="flex:1" onclick="loadGraph()">Refresh</button><button class="btn btn-ghost btn-sm" style="flex:1" onclick="graphReheat()">Reheat</button><button class="btn btn-ghost btn-sm" style="flex:1" onclick="graphFit()">Fit</button></div>
+<div class="card graph-control-card">
+<div class="graph-card-title-row"><div class="card-head">Explore</div><span class="graph-performance-badge" id="graph-performance-badge">Adaptive rendering</span></div>
+<div class="graph-action-row"><button class="btn btn-ghost btn-sm" onclick="loadGraph()">Refresh</button><button class="btn btn-ghost btn-sm" onclick="graphReheat()">Reheat</button><button class="btn btn-ghost btn-sm" onclick="graphFit()">Fit</button></div>
 <div class="graph-preset">
 <div class="graph-preset-row"><label class="field-lbl" for="graph-preset">Graph view</label><select class="select select-sm" id="graph-preset" onchange="graphApplyPreset(this.value)"><option value="compact" selected>Compact clusters</option><option value="original">Original force graph</option><option value="communities">Community islands</option><option value="radial">Radial orbit</option><option value="constellation">Constellation flow</option><option value="custom">Custom tuning</option></select></div>
 <div class="graph-preset-help" id="graph-preset-help">Tighter packing for disconnected components, with quieter relationships and clearer nodes.</div>
 </div>
-<div id="graph-layer-filters" style="display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-bottom:8px;font-size:12px">
-<label><input type="checkbox" value="temporal" checked onchange="loadGraph()"> Temporal</label>
-<label><input type="checkbox" value="entity" checked onchange="loadGraph()"> Entity</label>
-<label><input type="checkbox" value="causal" checked onchange="loadGraph()"> Causal</label>
-<label><input type="checkbox" value="semantic" checked onchange="loadGraph()"> Semantic</label>
+<div class="graph-control-section">
+<div class="graph-section-label">Data and focus</div>
+<div id="graph-layer-filters" class="graph-layer-grid">
+<label class="graph-check"><input type="checkbox" value="temporal" checked onchange="loadGraph()"> Temporal</label>
+<label class="graph-check"><input type="checkbox" value="entity" checked onchange="loadGraph()"> Entity</label>
+<label class="graph-check"><input type="checkbox" value="causal" checked onchange="loadGraph()"> Causal</label>
+<label class="graph-check"><input type="checkbox" value="semantic" checked onchange="loadGraph()"> Semantic</label>
 </div>
-<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:6px"><input type="checkbox" id="graph-include-code" onchange="loadGraph()"> Overlay code + linked memories</label>
-<input class="input" id="graph-repo-filter" placeholder="Optional repo filter" onkeydown="if(event.key==='Enter')loadGraph()" style="margin-bottom:8px">
-<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:8px"><input type="checkbox" id="graph-hide-iso" checked onchange="graphRender()"> Hide unconnected entities</label>
-<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:8px"><input type="checkbox" id="graph-labels" onchange="graphToggleLabels(this)"> Show link labels</label>
-<input class="input" id="graph-search" placeholder="Find entity…" onkeydown="if(event.key==='Enter')graphSearch()" style="margin-bottom:10px">
+<label class="graph-check"><input type="checkbox" id="graph-include-code" onchange="loadGraph()"> Overlay code + linked memories</label>
+<input class="input" id="graph-repo-filter" placeholder="Optional repo filter" onkeydown="if(event.key==='Enter')loadGraph()">
+<input class="input" id="graph-search" placeholder="Find entity…" onkeydown="if(event.key==='Enter')graphSearch()">
+<label class="graph-check"><input type="checkbox" id="graph-hide-iso" checked onchange="graphRender()"> Hide unconnected entities</label>
+<label class="graph-check"><input type="checkbox" id="graph-labels" onchange="graphToggleLabels(this)"> Show link labels</label>
+</div>
+<div class="graph-control-section">
+<div class="graph-section-head"><span class="graph-section-label">Node colors</span><button class="btn btn-ghost btn-sm" onclick="graphResetColors()">Reset</button></div>
+<div class="graph-palette-row"><label class="field-lbl" for="graph-palette">Palette</label><select class="select select-sm" id="graph-palette" onchange="graphApplyPalette(this.value)"><option value="theme">Theme colors</option><option value="aurora">Aurora</option><option value="ocean">Ocean</option><option value="ember">Ember</option><option value="contrast">High contrast</option><option value="custom" disabled>Custom colors</option></select></div>
+<div class="graph-color-grid" id="graph-color-controls" role="group" aria-label="Node colors by entity type"><div class="graph-palette-help">Colors appear after graph data loads.</div></div>
+<div class="graph-palette-help">Choose a palette or tune each entity type. Preferences stay in this browser.</div>
+</div>
+<details class="graph-advanced">
+<summary>Appearance and layout physics</summary>
+<div class="graph-advanced-body">
 <div class="gslider"><label>Text size</label><input type="range" min="6" max="28" value="12" data-graph-setting="font" oninput="graphSet('font',this.value)"></div>
 <div class="gslider" title="Controls how many node labels appear at a given zoom level — lower it to declutter a large graph when zoomed in"><label>Label density</label><input type="range" min="5" max="200" value="30" step="5" data-graph-setting="labelDensity" oninput="graphSet('labelDensity',this.value)"></div>
 <div class="gslider"><label>Node size</label><input type="range" min="2" max="14" value="5" data-graph-setting="size" oninput="graphSet('size',this.value)"></div>
@@ -586,6 +648,8 @@ body{
 <div class="gslider"><label>Repel force</label><input type="range" min="10" max="500" value="42" data-graph-setting="repel" oninput="graphSet('repel',this.value)"></div>
 <div class="gslider"><label>Link distance</label><input type="range" min="8" max="150" value="20" data-graph-setting="link" oninput="graphSet('link',this.value)"></div>
 <div class="gslider"><label>Center gravity</label><input type="range" min="0" max="40" value="26" data-graph-setting="gravity" oninput="graphSet('gravity',this.value)"></div>
+</div>
+</details>
 </div>
 <div class="graph-side-stack">
 <div class="card"><div class="card-head">Top connected<span class="count" id="graph-top-count"></span></div><div id="graph-top"></div></div>
@@ -595,7 +659,7 @@ body{
 </div>
 </div>
 <section class="graph-explorer" aria-labelledby="graph-explorer-title">
-<div class="graph-explorer-head"><div><h2 id="graph-explorer-title" style="font-size:16px">Semantic graph explorer</h2><p class="field-hint">Keyboard-accessible entities and relationships synchronized with the visual graph.</p></div><input class="input" id="graph-explorer-search" aria-label="Filter graph entities and relations" placeholder="Filter entities or relations…" oninput="renderGraphExplorer(this.value)" style="width:min(320px,100%)"></div>
+<div class="graph-explorer-head"><div><h2 id="graph-explorer-title" style="font-size:16px">Semantic graph explorer</h2><p class="field-hint">Keyboard-accessible entities and relationships synchronized with the visual graph.</p></div><input class="input" id="graph-explorer-search" aria-label="Filter graph entities and relations" placeholder="Filter entities or relations…" oninput="graphQueueExplorer(this.value)" style="width:min(320px,100%)"></div>
 <div class="graph-explorer-grid"><div><h3 class="card-head">Entities <span class="count" id="graph-explorer-node-count"></span></h3><div id="graph-entity-list" class="graph-explorer-list" role="group" aria-label="Graph entities"></div></div><div><h3 class="card-head">Relations <span class="count" id="graph-explorer-edge-count"></span></h3><div id="graph-relation-list" class="graph-explorer-list" role="group" aria-label="Graph relations"></div></div></div>
 </section>
 </div>
@@ -1274,24 +1338,123 @@ async function saveAutoSync(){const on=document.getElementById('autosync-on'),ca
 async function syncNow(){const b=document.getElementById('sync-btn');const s=document.getElementById('sync-status');if(b){b.disabled=true;b.textContent='Syncing…'}if(s)s.textContent='Contacting the cloud…';try{const d=await api('/sync/run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const su=d.summary||{};toast('Synced — pushed '+(su.exported||0)+', '+(su.added||0)+' new from other devices','ok');await loadSyncStatus()}catch(e){toast('Sync failed: '+e.message,'err');if(b){b.disabled=false;b.textContent='Sync now'}if(s)s.textContent='Sync failed — try again.'}}
 
 /* ─── knowledge graph (force-graph + d3-force: compact defaults and selectable layouts) ─── */
-let GRAPH=null, FG=null, GRESIZE=false, GADJ={}, GCOMPONENTS={}, GHILITE=null, GLABELRANK={};
+let GRAPH=null, FG=null, GRESIZE=false, GRESIZEFRAME=0, GADJ={}, GCOMPONENTS={}, GHILITE=null, GHOVERSET=null, GLABELRANK={}, GLABELBOXES=[], GDATA_CACHE=null, GACTIVE_DATA=null, GREDRAWFRAME=0, GPERF={large:false,dense:false};
 const GRAPH_PRESETS={
- original:{repel:120,link:30,gravity:14,font:13,size:5,linkw:1,labelDensity:40,curve:0,particles:0},
- compact:{repel:42,link:20,gravity:26,font:12,size:5,linkw:.7,labelDensity:30,curve:.08,particles:0},
- communities:{repel:58,link:22,gravity:26,font:13,size:5,linkw:.8,labelDensity:50,curve:.16,particles:0},
- radial:{repel:68,link:26,gravity:12,font:13,size:5,linkw:.75,labelDensity:55,curve:.22,particles:0},
- constellation:{repel:34,link:16,gravity:38,font:12,size:5,linkw:.65,labelDensity:35,curve:.32,particles:2},
- custom:{curve:.1,particles:0}
+ original:{label:'Original force',repel:120,link:30,gravity:14,font:13,size:5,linkw:1,labelDensity:40,curve:0,particles:0},
+ compact:{label:'Compact clusters',repel:42,link:20,gravity:26,font:12,size:5,linkw:.7,labelDensity:30,curve:.08,particles:0},
+ communities:{label:'Community islands',repel:58,link:22,gravity:26,font:13,size:5,linkw:.8,labelDensity:50,curve:.16,particles:0},
+ radial:{label:'Radial orbit',repel:68,link:26,gravity:12,font:13,size:5,linkw:.75,labelDensity:55,curve:.22,particles:0},
+ constellation:{label:'Constellation flow',repel:34,link:16,gravity:38,font:12,size:5,linkw:.65,labelDensity:35,curve:.32,particles:2},
+ custom:{label:'Custom tuning',curve:.1,particles:0}
 };
 window.GSET=window.GSET||{mode:'compact',font:12,size:5,repel:42,link:20,gravity:26,labels:false,linkw:.7,labelDensity:30};
-const ETYPE_COLOR=new Proxy({person_or_concept:'var(--entity-concept)',mention:'var(--entity-mention)',hashtag:'var(--entity-hashtag)',email:'var(--entity-email)',organization:'var(--entity-organization)',location:'var(--entity-location)'},{get:(colors,type)=>colors[type]||'var(--entity-concept)'});
-function etypeColor(type){const token=ETYPE_COLOR[type];return cssvar(token.slice(4,-1),cssvar('--color-accent'))}
-function cssvar(n,fb){const v=getComputedStyle(document.body).getPropertyValue(n).trim();return v||fb}
+const ETYPE_TOKEN={person_or_concept:'--entity-concept',mention:'--entity-mention',hashtag:'--entity-hashtag',email:'--entity-email',organization:'--entity-organization',location:'--entity-location'};
+const GRAPH_PALETTES={
+ theme:null,
+ aurora:{person_or_concept:'#8b7cf6',mention:'#2dd4bf',hashtag:'#fbbf24',email:'#60a5fa',organization:'#f472b6',location:'#a3e635'},
+ ocean:{person_or_concept:'#38bdf8',mention:'#2dd4bf',hashtag:'#facc15',email:'#818cf8',organization:'#22d3ee',location:'#34d399'},
+ ember:{person_or_concept:'#f97316',mention:'#fb7185',hashtag:'#facc15',email:'#a78bfa',organization:'#ef4444',location:'#84cc16'},
+ contrast:{person_or_concept:'#0072b2',mention:'#009e73',hashtag:'#e69f00',email:'#56b4e9',organization:'#cc79a7',location:'#d55e00'}
+};
+const GRAPH_COLOR_KEY='engraphis-graph-colors-v1';
+let GCOLOR_OVERRIDES={}, GCOLOR_PALETTE='theme';
+function cssvar(name,fallback){const value=getComputedStyle(document.body).getPropertyValue(name).trim();return value||fallback}
+function graphValidColor(color){return /^#[0-9a-f]{6}$/i.test(color||'')}
+function graphTypeLabel(type){return String(type||'entity').replace(/_/g,' ')}
+function graphLoadColorPreferences(){
+ try{
+  const saved=JSON.parse(localStorage.getItem(GRAPH_COLOR_KEY)||'{}'),colors=saved&&saved.colors;
+  if(colors&&typeof colors==='object')Object.entries(colors).forEach(([type,color])=>{if(graphValidColor(color))GCOLOR_OVERRIDES[type]=color.toLowerCase()});
+  if(saved&&saved.palette&&Object.prototype.hasOwnProperty.call(GRAPH_PALETTES,saved.palette))GCOLOR_PALETTE=saved.palette;
+  else if(Object.keys(GCOLOR_OVERRIDES).length)GCOLOR_PALETTE='custom';
+ }catch(e){GCOLOR_OVERRIDES={};GCOLOR_PALETTE='theme'}
+}
+function graphSaveColorPreferences(){try{localStorage.setItem(GRAPH_COLOR_KEY,JSON.stringify({palette:GCOLOR_PALETTE,colors:GCOLOR_OVERRIDES}))}catch(e){}}
+function graphTypeColor(type){return GCOLOR_OVERRIDES[type]||cssvar(ETYPE_TOKEN[type]||'--entity-concept',cssvar('--color-accent','#8c83e8'))}
+function graphContrastColor(color){if(!graphValidColor(color))return cssvar('--color-canvas','#0e1014');const n=parseInt(color.slice(1),16),lum=.2126*(n>>16)+.7152*((n>>8)&255)+.0722*(n&255);return lum>150?'#111827':'#f8fafc'}
+const ETYPE_COLOR=new Proxy({},{get:(_,type)=>graphTypeColor(type)});
+graphLoadColorPreferences();
+function graphUpdateColorSwatches(){document.querySelectorAll('[data-graph-node-type]').forEach(el=>{const color=graphTypeColor(el.dataset.graphNodeType);el.style.background=color;el.style.color=color})}
+function graphRefreshNodeColors(){
+ const nodes=FG&&FG.graphData?FG.graphData().nodes||[]:[];
+ nodes.forEach(node=>{node.color=graphTypeColor(node.etype);node.stroke=graphContrastColor(node.color)});
+ graphUpdateColorSwatches();
+ graphRedraw();
+}
+function renderGraphColorControls(){
+ const box=document.getElementById('graph-color-controls'),picker=document.getElementById('graph-palette');
+ if(picker)picker.value=GCOLOR_PALETTE;
+ if(!box)return;
+ const types=GRAPH&&GRAPH.types&&GRAPH.types.length?GRAPH.types.map(item=>item.etype):Object.keys(ETYPE_TOKEN);
+ box.innerHTML=types.map(type=>{const label=graphTypeLabel(type),color=graphTypeColor(type);return `<label class="graph-color-item" title="Change ${esc(label)} node color"><input class="graph-color-input" type="color" value="${color}" data-node-type="${esc(type)}" aria-label="Color for ${esc(label)} nodes" oninput="graphSetTypeColor(this.dataset.nodeType,this.value,false)" onchange="graphSetTypeColor(this.dataset.nodeType,this.value,true)"><span>${esc(label)}</span></label>`}).join('');
+}
+function graphSetTypeColor(type,color,persist){
+ if(!type||!graphValidColor(color))return;
+ GCOLOR_OVERRIDES[type]=color.toLowerCase();GCOLOR_PALETTE='custom';
+ const picker=document.getElementById('graph-palette');if(picker)picker.value='custom';
+ graphRefreshNodeColors();
+ if(persist)graphSaveColorPreferences();
+}
+function graphApplyPalette(name){
+ if(!Object.prototype.hasOwnProperty.call(GRAPH_PALETTES,name))name='theme';
+ GCOLOR_PALETTE=name;GCOLOR_OVERRIDES=GRAPH_PALETTES[name]?{...GRAPH_PALETTES[name]}:{};
+ graphSaveColorPreferences();graphRecolor();
+}
+function graphResetColors(){graphApplyPalette('theme');toast('Node colors reset to the active theme','ok')}
 function graphInjectCss(){}
 function prefersReducedMotion(){return matchMedia('(prefers-reduced-motion: reduce)').matches}
-async function loadGraph(){graphInjectCss();const empty=document.getElementById('graph-empty');empty.style.display='flex';empty.textContent='Loading graph…';if(!GRESIZE){GRESIZE=true;window.addEventListener('resize',()=>{if(FG){const el=document.getElementById('graph-net');FG.width(el.clientWidth).height(el.clientHeight)}})}const layers=Array.from(document.querySelectorAll('#graph-layer-filters input:checked')).map(x=>x.value).join(','),includeCode=document.getElementById('graph-include-code').checked,repo=(document.getElementById('graph-repo-filter').value||'').trim();try{GRAPH=await api('/graph?workspace='+encodeURIComponent(WS||'')+'&layers='+encodeURIComponent(layers)+'&include_code='+(includeCode?'true':'false')+(repo?'&repo='+encodeURIComponent(repo):''));renderGraphSide();graphRender()}catch(e){empty.style.display='flex';empty.textContent='Graph failed: '+e.message}}
-function graphData(){const hideIso=document.getElementById('graph-hide-iso').checked;let nodes=GRAPH.nodes;if(hideIso)nodes=nodes.filter(n=>n.degree>0);const names=new Set(nodes.map(n=>n.id));const links=GRAPH.edges.filter(e=>names.has(e.from)&&names.has(e.to)).map(e=>({source:e.from,target:e.to,label:e.label,layer:e.layer||'semantic'}));return {nodes:nodes.map(n=>({id:n.id,label:n.label,etype:n.etype,degree:n.degree,val:1+n.degree})),links}}
-function buildAdj(links){GADJ={};links.forEach(l=>{const s=(l.source&&l.source.id)||l.source,t=(l.target&&l.target.id)||l.target;(GADJ[s]=GADJ[s]||new Set()).add(t);(GADJ[t]=GADJ[t]||new Set()).add(s)})}
+function graphSetLayoutStatus(text,busy){
+ const status=document.getElementById('graph-layout-status');if(status){status.textContent=text;status.classList.toggle('busy',!!busy)}
+ const net=document.getElementById('graph-net');if(net)net.setAttribute('aria-busy',String(!!busy));
+}
+function graphUpdateHud(data){
+ const mode=document.getElementById('graph-hud-mode'),count=document.getElementById('graph-hud-count'),badge=document.getElementById('graph-performance-badge');
+ const preset=GRAPH_PRESETS[window.GSET.mode]||GRAPH_PRESETS.compact;
+ if(mode)mode.textContent=preset.label||'Custom graph';
+ if(count&&data)count.textContent=data.nodes.length.toLocaleString()+' entities · '+data.links.length.toLocaleString()+' relations';
+ if(badge)badge.textContent=GPERF.large?'Large graph mode':'Adaptive rendering';
+}
+function graphInvalidateData(){GDATA_CACHE=null;GACTIVE_DATA=null;GHILITE=null;GHOVERSET=null}
+async function loadGraph(){
+ graphInjectCss();graphInvalidateData();GRAPH=null;
+ const empty=document.getElementById('graph-empty'),net=document.getElementById('graph-net'),nodesBox=document.getElementById('graph-entity-list'),edgesBox=document.getElementById('graph-relation-list');
+ empty.style.display='flex';empty.textContent='Loading graph…';graphSetLayoutStatus('Loading data',true);
+ if(net)net.setAttribute('aria-busy','true');
+ renderGraphExplorer();
+ if(!GRESIZE){
+  GRESIZE=true;
+  window.addEventListener('resize',()=>{
+   if(!FG||GRESIZEFRAME)return;
+   GRESIZEFRAME=requestAnimationFrame(()=>{GRESIZEFRAME=0;const element=document.getElementById('graph-net');if(FG&&element)FG.width(element.clientWidth).height(element.clientHeight)});
+  });
+ }
+ const layers=Array.from(document.querySelectorAll('#graph-layer-filters input:checked')).map(input=>input.value).join(','),includeCode=document.getElementById('graph-include-code').checked,repo=(document.getElementById('graph-repo-filter').value||'').trim();
+ try{
+  GRAPH=await api('/graph?workspace='+encodeURIComponent(WS||'')+'&layers='+encodeURIComponent(layers)+'&include_code='+(includeCode?'true':'false')+(repo?'&repo='+encodeURIComponent(repo):''));
+  renderGraphSide();graphRender();
+ }catch(error){
+  empty.style.display='flex';empty.textContent='Graph failed: '+error.message;graphSetLayoutStatus('Load failed',false);
+ }finally{
+  if(net)net.setAttribute('aria-busy','false');
+  if(!GRAPH){
+   if(FG)FG.graphData({nodes:[],links:[]});
+   const message=empty.textContent||'Graph data unavailable.';
+   if(nodesBox)nodesBox.innerHTML='<div class="empty" style="padding:12px">'+esc(message)+'</div>';
+   if(edgesBox)edgesBox.innerHTML='<div class="empty" style="padding:12px">Relations are unavailable until graph data loads.</div>';
+  }
+ }
+}
+function graphData(){
+ const hideIso=document.getElementById('graph-hide-iso').checked;
+ if(GDATA_CACHE&&GDATA_CACHE.graph===GRAPH&&GDATA_CACHE.hideIso===hideIso)return GDATA_CACHE.data;
+ let sourceNodes=GRAPH.nodes;if(hideIso)sourceNodes=sourceNodes.filter(node=>node.degree>0);
+ const names=new Set(sourceNodes.map(node=>node.id));
+ const nodes=sourceNodes.map(node=>({id:node.id,label:node.label||node.id,displayLabel:(node.label||node.id).length>30?(node.label||node.id).slice(0,29)+'…':(node.label||node.id),etype:node.etype,degree:node.degree||0,val:1+(node.degree||0)}));
+ nodes.sort((a,b)=>b.degree-a.degree).forEach((node,index)=>{node.rank=index;node.hub=index<24;node.radius=Math.max(1.6,window.GSET.size*Math.sqrt(node.val)*.45);node.color=graphTypeColor(node.etype);node.stroke=graphContrastColor(node.color)});
+ const links=GRAPH.edges.filter(edge=>names.has(edge.from)&&names.has(edge.to)).map(edge=>({source:edge.from,target:edge.to,label:edge.label,layer:edge.layer||'semantic'}));
+ const data={nodes,links};GDATA_CACHE={graph:GRAPH,hideIso,data};return data;
+}
+function buildAdj(links){GADJ={};links.forEach(link=>{const source=(link.source&&link.source.id)||link.source,target=(link.target&&link.target.id)||link.target;(GADJ[source]=GADJ[source]||new Set()).add(target);(GADJ[target]=GADJ[target]||new Set()).add(source)})}
 function graphIndexComponents(nodes){
  const seen=new Set(),components=[];
  nodes.forEach(node=>{
@@ -1311,127 +1474,150 @@ function graphIndexComponents(nodes){
 }
 function graphAlpha(color,alpha){
  const hex=/^#([0-9a-f]{6})$/i.exec(color||'');
- if(hex){const n=parseInt(hex[1],16);return `rgba(${n>>16},${(n>>8)&255},${n&255},${alpha})`}
+ if(hex){const value=parseInt(hex[1],16);return `rgba(${value>>16},${(value>>8)&255},${value&255},${alpha})`}
  const rgb=(color||'').match(/\d+(?:\.\d+)?/g);
  return rgb&&rgb.length>=3?`rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha})`:color;
 }
+function graphReadThemeColors(){
+ const layers={temporal:cssvar('--color-info','#6f9fd8'),entity:cssvar('--color-teal','#5aafb3'),causal:cssvar('--color-warning','#d7a84b'),semantic:cssvar('--color-accent','#8c83e8')};
+ const baseAlpha=GPERF.dense?.18:.32,links={};
+ Object.entries(layers).forEach(([layer,color])=>{links[layer]={base:graphAlpha(color,baseAlpha),active:graphAlpha(color,.82),dim:graphAlpha(color,.035)}});
+ return {label:cssvar('--color-text','#e7e9ee'),dim:cssvar('--color-text-dim','#7e8795'),accent:cssvar('--color-accent','#8c83e8'),panel:cssvar('--color-panel','#15181e'),canvas:cssvar('--color-canvas','#0e1014'),layers,links};
+}
 function graphApplyForces(){
  if(!FG)return;
- const G=window.GSET,mode=G.mode||'compact';
- FG.d3Force('charge').strength(-G.repel);
- FG.d3Force('link').distance(G.link);
+ const settings=window.GSET,mode=settings.mode||'compact';
+ FG.d3Force('charge').strength(-settings.repel);
+ FG.d3Force('link').distance(settings.link);
  if(typeof d3==='undefined')return;
  FG.d3Force('radial',null);
  if(mode==='communities'){
   const target=node=>GCOMPONENTS[node.id]||{x:0,y:0};
-  FG.d3Force('x',d3.forceX(node=>target(node).x).strength(G.gravity/100));
-  FG.d3Force('y',d3.forceY(node=>target(node).y).strength(G.gravity/100));
+  FG.d3Force('x',d3.forceX(node=>target(node).x).strength(settings.gravity/100));
+  FG.d3Force('y',d3.forceY(node=>target(node).y).strength(settings.gravity/100));
  }else{
-  const centering=mode==='radial'?Math.max(.04,G.gravity/300):G.gravity/100;
+  const centering=mode==='radial'?Math.max(.04,settings.gravity/300):settings.gravity/100;
   FG.d3Force('x',d3.forceX(0).strength(centering));
   FG.d3Force('y',d3.forceY(0).strength(centering));
-  if(mode==='radial'&&d3.forceRadial)FG.d3Force('radial',d3.forceRadial(node=>Math.max(0,5-Math.min(5,node.degree||0))*Math.max(8,G.link*.72)).strength(.32));
+  if(mode==='radial'&&d3.forceRadial)FG.d3Force('radial',d3.forceRadial(node=>Math.max(0,5-Math.min(5,node.degree||0))*Math.max(8,settings.link*.72)).strength(.32));
  }
- FG.d3Force('collide',d3.forceCollide(node=>Math.max(2,G.size*Math.sqrt(node.val)*.45)+1.5).iterations(2));
+ FG.d3Force('collide',d3.forceCollide(node=>node.radius+1.5).iterations(GPERF.large?1:2));
 }
-function graphRedraw(){if(FG)FG.nodeCanvasObject(FG.nodeCanvasObject())}
-function graphRender(fit=true){
+function graphSetHighlight(id){
+ GHILITE=id||null;
+ GHOVERSET=id?new Set([id,...(GADJ[id]||[])]):null;
+ graphRedraw();
+}
+function graphRefreshNodeMetrics(){
+ const nodes=FG&&FG.graphData?FG.graphData().nodes||[]:[];
+ nodes.forEach(node=>{node.radius=Math.max(1.6,window.GSET.size*Math.sqrt(node.val)*.45)});
+}
+function graphRedraw(){
+ if(!FG||GREDRAWFRAME)return;
+ GREDRAWFRAME=requestAnimationFrame(()=>{GREDRAWFRAME=0;if(FG)FG.nodeCanvasObject(FG.nodeCanvasObject())});
+}
+function graphRender(fit=true,reheat=true){
  const empty=document.getElementById('graph-empty');
- if(typeof ForceGraph==='undefined'){empty.style.display='flex';empty.textContent='Graph engine could not load. Refresh or verify the installed static assets.';return}
- const el=document.getElementById('graph-net'),G=window.GSET,mode=GRAPH_PRESETS[G.mode]||GRAPH_PRESETS.compact;
- GHILITE=null;
- const data=graphData();
- buildAdj(data.links);graphIndexComponents(data.nodes);
- GLABELRANK={};data.nodes.slice().sort((a,b)=>b.degree-a.degree).forEach((node,index)=>{GLABELRANK[node.id]=index});
+ if(typeof ForceGraph==='undefined'){empty.style.display='flex';empty.textContent='Graph engine could not load. Refresh or verify the installed static assets.';graphSetLayoutStatus('Engine unavailable',false);return}
+ const element=document.getElementById('graph-net'),settings=window.GSET,mode=GRAPH_PRESETS[settings.mode]||GRAPH_PRESETS.compact,data=graphData(),dataChanged=GACTIVE_DATA!==data;
+ GPERF={large:data.nodes.length>600||data.links.length>2400,dense:data.links.length>1500};
+ if(dataChanged){
+  buildAdj(data.links);GLABELRANK={};data.nodes.forEach(node=>{GLABELRANK[node.id]=node.rank});GACTIVE_DATA=data;
+  graphIndexComponents(data.nodes);
+ }
+ graphSetHighlight(null);
  if(!data.nodes.length){
   empty.style.display='flex';
   empty.textContent=GRAPH.nodes.length?('No connected entities — untick "Hide unconnected" to see all '+GRAPH.nodes.length+'.'):'No entities in this workspace yet.';
   if(FG)FG.graphData({nodes:[],links:[]});
-  return;
+  graphUpdateHud(data);graphSetLayoutStatus('No entities',false);return;
  }
- empty.style.display='none';
- const labelColor=cssvar('--color-text'),dimColor=cssvar('--color-text-dim'),accentColor=cssvar('--color-accent'),edgeRgb=cssvar('--graph-edge');
- window.GCOL={label:labelColor,dim:dimColor,accent:accentColor,edgeRgb,panel:cssvar('--color-panel')};
+ empty.style.display='none';window.GCOL=graphReadThemeColors();graphUpdateHud(data);
  const reduced=prefersReducedMotion(),reheatButton=document.querySelector('#view-graph button[onclick="graphReheat()"]');
  if(reheatButton){reheatButton.setAttribute('aria-disabled',String(reduced));reheatButton.setAttribute('aria-label',reduced?'Reheat layout unavailable while reduced motion is enabled':'Reheat layout');reheatButton.title=reduced?'Unavailable while reduced motion is enabled':''}
  if(!FG){
-  FG=ForceGraph()(el);
-  FG.backgroundColor('rgba(0,0,0,0)').cooldownTime(reduced?0:3200).cooldownTicks(reduced?1:Infinity).warmupTicks(reduced?140:60).nodeRelSize(1).autoPauseRedraw(reduced)
-   .onNodeClick(node=>graphNodeClick(node.label)).onNodeHover(node=>{GHILITE=node?node.id:null;el.style.cursor=node?'pointer':'grab';graphRedraw()});
+  FG=ForceGraph()(element);
+  FG.backgroundColor('rgba(0,0,0,0)').nodeRelSize(1).autoPauseRedraw(true)
+   .onNodeClick(node=>{syncGraphExplorerSelection(node.id);graphNodeClick(node.label)})
+   .onNodeHover(node=>{graphSetHighlight(node&&node.id);element.style.cursor=node?'pointer':'grab'})
+   .onEngineStop(()=>graphSetLayoutStatus(prefersReducedMotion()?'Static layout':'Layout settled',false));
  }
- FG.width(el.clientWidth).height(el.clientHeight);
+ FG.width(element.clientWidth).height(element.clientHeight)
+  .cooldownTime(reduced?0:(GPERF.large?1100:2200))
+  .cooldownTicks(reduced?1:(GPERF.large?80:160))
+  .warmupTicks(reduced?45:(GPERF.large?18:40))
+  .autoPauseRedraw(true);
+ if(FG.d3AlphaDecay)FG.d3AlphaDecay(GPERF.large?.055:.035);
+ if(FG.d3VelocityDecay)FG.d3VelocityDecay(GPERF.large?.45:.38);
  FG.nodeCanvasObject((node,ctx,scale)=>{
-  const settings=window.GSET,focus=GHILITE&&GADJ[GHILITE]&&GADJ[GHILITE].size>1;
-  const neighbor=focus&&(node.id===GHILITE||(GADJ[GHILITE]&&GADJ[GHILITE].has(node.id))),dim=focus&&!neighbor;
-  const radius=Math.max(1.4,settings.size*Math.sqrt(node.val)*.45),color=etypeColor(node.etype);
-  ctx.globalAlpha=dim?.1:1;
-  if(!dim&&(node.id===GHILITE||node.degree>=4)){
-   ctx.beginPath();ctx.arc(node.x,node.y,radius+2.5/scale,0,2*Math.PI);ctx.fillStyle=color;ctx.globalAlpha=node.id===GHILITE?.28:.12;ctx.fill();ctx.globalAlpha=1;
+  const focus=GHOVERSET&&GHOVERSET.size>1,neighbor=focus&&GHOVERSET.has(node.id),dim=focus&&!neighbor,radius=node.radius,color=node.color;
+  ctx.globalAlpha=dim?.08:1;
+  if(!dim&&(node.id===GHILITE||node.hub)){
+   ctx.beginPath();ctx.arc(node.x,node.y,radius+(node.id===GHILITE?3.4:2.2)/scale,0,2*Math.PI);ctx.fillStyle=color;ctx.globalAlpha=node.id===GHILITE?.32:.14;ctx.fill();ctx.globalAlpha=1;
   }
   ctx.beginPath();ctx.arc(node.x,node.y,radius,0,2*Math.PI);ctx.fillStyle=color;ctx.fill();
-  if(settings.mode==='constellation'&&!dim){ctx.beginPath();ctx.arc(node.x,node.y,Math.max(.7,radius*.26),0,2*Math.PI);ctx.fillStyle=window.GCOL.label;ctx.globalAlpha=.72;ctx.fill()}
-  if(node.id===GHILITE){ctx.beginPath();ctx.arc(node.x,node.y,radius+1.2/scale,0,2*Math.PI);ctx.lineWidth=1.4/scale;ctx.strokeStyle=window.GCOL.label;ctx.globalAlpha=1;ctx.stroke()}
+  ctx.lineWidth=.55/scale;ctx.strokeStyle=node.stroke;ctx.globalAlpha=dim?.06:.38;ctx.stroke();
+  if(settings.mode==='constellation'&&!GPERF.large&&!dim){ctx.beginPath();ctx.arc(node.x,node.y,Math.max(.7,radius*.24),0,2*Math.PI);ctx.fillStyle=window.GCOL.label;ctx.globalAlpha=.72;ctx.fill()}
+  if(node.id===GHILITE){ctx.beginPath();ctx.arc(node.x,node.y,radius+1.4/scale,0,2*Math.PI);ctx.lineWidth=1.5/scale;ctx.strokeStyle=window.GCOL.label;ctx.globalAlpha=1;ctx.stroke()}
   ctx.globalAlpha=1;
  });
- FG.nodePointerAreaPaint((node,color,ctx)=>{const radius=Math.max(3,window.GSET.size*Math.sqrt(node.val)*.45)+3;ctx.beginPath();ctx.arc(node.x,node.y,radius,0,2*Math.PI);ctx.fillStyle=color;ctx.fill()});
+ FG.nodePointerAreaPaint((node,color,ctx)=>{const radius=Math.max(3,node.radius)+3;ctx.beginPath();ctx.arc(node.x,node.y,radius,0,2*Math.PI);ctx.fillStyle=color;ctx.fill()});
  FG.linkColor(link=>{
-  const C=window.GCOL,focus=GHILITE&&GADJ[GHILITE]&&GADJ[GHILITE].size>1;
-  const source=(link.source&&link.source.id)||link.source,target=(link.target&&link.target.id)||link.target,active=!focus||source===GHILITE||target===GHILITE;
-  const color={temporal:cssvar('--color-info'),entity:cssvar('--color-teal'),causal:cssvar('--color-warning'),semantic:C.accent}[link.layer]||('rgb('+C.edgeRgb+')');
-  return graphAlpha(color,active?(focus?.78:.34):.045);
+  const focus=GHOVERSET&&GHOVERSET.size>1,source=(link.source&&link.source.id)||link.source,target=(link.target&&link.target.id)||link.target,active=!focus||source===GHILITE||target===GHILITE;
+  const palette=window.GCOL.links[link.layer]||window.GCOL.links.semantic;return active?(focus?palette.active:palette.base):palette.dim;
  });
- FG.linkWidth(link=>{const width=window.GSET.linkw||1,focus=GHILITE&&GADJ[GHILITE]&&GADJ[GHILITE].size>1;if(!focus)return .8*width;const source=(link.source&&link.source.id)||link.source,target=(link.target&&link.target.id)||link.target;return (source===GHILITE||target===GHILITE)?1.8*width:.3*width});
- if(FG.linkLineDash)FG.linkLineDash(link=>link.layer==='temporal'?[4,3]:(link.layer==='causal'?[2,2]:null));
- if(FG.linkCurvature)FG.linkCurvature(mode.curve);
- FG.linkDirectionalArrowLength(2.5).linkDirectionalArrowRelPos(1);
- if(FG.linkDirectionalParticles){FG.linkDirectionalParticles(reduced?0:mode.particles).linkDirectionalParticleWidth(1.7).linkDirectionalParticleSpeed(.004)}
- if(G.labels){
+ FG.linkWidth(link=>{const width=window.GSET.linkw||1,focus=GHOVERSET&&GHOVERSET.size>1;if(!focus)return (GPERF.dense?.62:.82)*width;const source=(link.source&&link.source.id)||link.source,target=(link.target&&link.target.id)||link.target;return (source===GHILITE||target===GHILITE)?1.8*width:.25*width});
+ if(FG.linkLineDash)FG.linkLineDash(GPERF.dense?null:(link=>link.layer==='temporal'?[4,3]:(link.layer==='causal'?[2,2]:null)));
+ if(FG.linkCurvature)FG.linkCurvature(GPERF.dense?0:mode.curve);
+ FG.linkDirectionalArrowLength(GPERF.dense?0:2.5).linkDirectionalArrowRelPos(1);
+ if(FG.linkDirectionalParticles){FG.linkDirectionalParticles(reduced||data.links.length>800?0:mode.particles).linkDirectionalParticleWidth(1.7).linkDirectionalParticleSpeed(.004)}
+ if(settings.labels){
   FG.linkCanvasObjectMode(()=>'after').linkCanvasObject((link,ctx,scale)=>{
-   if(scale<2.4||!link.label||!link.source.x)return;
-   const fontSize=(G.font*.82)/scale;
-   ctx.font=fontSize+'px sans-serif';ctx.fillStyle=window.GCOL.dim;ctx.textAlign='center';ctx.textBaseline='middle';
-   ctx.fillText(link.label,(link.source.x+link.target.x)/2,(link.source.y+link.target.y)/2);
+   if(scale<2.4||!link.label||!link.source.x||(GPERF.dense&&!GHILITE))return;
+   const fontSize=(settings.font*.82)/scale;ctx.font=fontSize+'px sans-serif';ctx.fillStyle=window.GCOL.dim;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(link.label,(link.source.x+link.target.x)/2,(link.source.y+link.target.y)/2);
   });
  }else{FG.linkCanvasObjectMode(()=>undefined)}
  FG.onRenderFramePost((ctx,scale)=>{
-  const settings=window.GSET;
   if(!(settings.font>0))return;
-  const highlighted=GHILITE,nodes=(FG.graphData().nodes)||[],focus=highlighted&&GADJ[highlighted]&&GADJ[highlighted].size>1;
-  const cap=Math.round((settings.labelDensity||40)*Math.max(.32,scale-.85));
-  ctx.textAlign='center';ctx.textBaseline='top';ctx.lineJoin='round';
-  for(let index=0;index<nodes.length;index++){
-   const node=nodes[index];
-   if(node.x==null)continue;
-   const neighbor=focus&&(node.id===highlighted||(GADJ[highlighted]&&GADJ[highlighted].has(node.id)));
-   if(focus&&!neighbor)continue;
-   const rank=GLABELRANK[node.id];
-   if(!(neighbor||(rank!==undefined&&rank<cap)))continue;
-   const radius=Math.max(1.4,settings.size*Math.sqrt(node.val)*.45),fontSize=settings.font/scale,y=node.y+radius+2/scale;
-   ctx.font=fontSize+'px -apple-system,Segoe UI,sans-serif';ctx.lineWidth=3/scale;ctx.strokeStyle=window.GCOL.panel;
-   ctx.strokeText(node.label,node.x,y);ctx.fillStyle=window.GCOL.label;ctx.fillText(node.label,node.x,y);
+  const nodes=GACTIVE_DATA.nodes,focus=GHOVERSET&&GHOVERSET.size>1,cap=Math.max(1,Math.round((settings.labelDensity||40)*Math.max(.32,scale-.85))),fontSize=settings.font/scale,boxes=GLABELBOXES,candidateLimit=Math.min(nodes.length,Math.max(72,cap*10));
+  boxes.length=0;
+  ctx.textAlign='center';ctx.textBaseline='top';ctx.lineJoin='round';ctx.font=fontSize+'px -apple-system,Segoe UI,sans-serif';ctx.lineWidth=3/scale;ctx.strokeStyle=window.GCOL.panel;ctx.fillStyle=window.GCOL.label;
+  let drawn=0;
+  for(let pass=GHILITE?0:1;pass<2&&drawn<cap;pass++){
+   const scanLimit=pass===0?nodes.length:candidateLimit;
+   for(let index=0;index<scanLimit&&drawn<cap;index++){
+    const node=nodes[index];if(node.x==null||node.y==null)continue;
+    const selected=node.id===GHILITE;if((pass===0&&!selected)||(pass===1&&selected))continue;
+    if(focus&&!GHOVERSET.has(node.id))continue;
+    const y=node.y+node.radius+2/scale,width=Math.max(10/scale,node.displayLabel.length*fontSize*.56),pad=3/scale,left=node.x-width/2-pad,right=node.x+width/2+pad,top=y-pad,bottom=y+fontSize*1.3+pad;
+    let collision=false;
+    for(let offset=0;offset<boxes.length&&!selected;offset+=4){if(left<boxes[offset+2]&&right>boxes[offset]&&top<boxes[offset+3]&&bottom>boxes[offset+1])collision=true}
+    if(collision)continue;
+    ctx.strokeText(node.displayLabel,node.x,y);ctx.fillText(node.displayLabel,node.x,y);boxes.push(left,top,right,bottom);drawn++;
+   }
   }
  });
- FG.graphData(data);
+ if(dataChanged)FG.graphData(data);
  graphApplyForces();
- if(!reduced)FG.d3ReheatSimulation();
+ if(reheat){graphSetLayoutStatus(reduced?'Static layout':'Arranging entities',!reduced);if(!reduced)FG.d3ReheatSimulation()}
+ else graphRedraw();
  clearTimeout(window.__gfit);
  if(fit){
   if(reduced)requestAnimationFrame(()=>{if(FG)FG.zoomToFit(0,72)});
-  else window.__gfit=setTimeout(()=>{if(FG)FG.zoomToFit(520,72)},1250);
+  else window.__gfit=setTimeout(()=>{if(FG)FG.zoomToFit(420,72)},GPERF.large?650:950);
  }
 }
-function graphSet(key,val){
- window.GSET[key]=Number(val);
- window.GSET.mode='custom';
+function graphSet(key,value){
+ window.GSET[key]=Number(value);window.GSET.mode='custom';
  const picker=document.getElementById('graph-preset'),help=document.getElementById('graph-preset-help');
  if(picker)picker.value='custom';
- if(help)help.textContent='Custom tuning · the force and label controls below now define this view.';
+ if(help)help.textContent='Custom tuning · the appearance and physics controls now define this view.';
  if(!FG)return;
  const layout=key==='repel'||key==='link'||key==='gravity'||key==='size';
+ if(key==='size')graphRefreshNodeMetrics();
  if(layout)graphApplyForces();
- if(key==='linkw'){FG.linkWidth(FG.linkWidth());FG.linkColor(FG.linkColor())}
- else graphRedraw();
- if(layout){if(prefersReducedMotion())graphRender(false);else FG.d3ReheatSimulation()}
+ if(key==='linkw'){FG.linkWidth(FG.linkWidth());FG.linkColor(FG.linkColor())}else graphRedraw();
+ if(layout&&!prefersReducedMotion()){graphSetLayoutStatus('Updating layout',true);FG.d3ReheatSimulation()}
 }
 function graphApplyPreset(name){
  const preset=GRAPH_PRESETS[name]||GRAPH_PRESETS.compact;
@@ -1448,35 +1634,89 @@ function graphApplyPreset(name){
   compact:'Compact clusters · shorter links, gentler repulsion and stronger centering keep connected memories together.',
   communities:'Community islands · connected components are packed around nearby component centers.',
   radial:'Radial orbit · high-degree entities settle near the center while lower-degree entities form outer rings.',
-  constellation:'Constellation flow · a dense curved-link view with subtle directional particles.',
-  custom:'Custom tuning · the force and label controls below define this view.'
+  constellation:'Constellation flow · curved directional relationships for smaller graphs.',
+  custom:'Custom tuning · the appearance and physics controls below define this view.'
  };
- const help=document.getElementById('graph-preset-help');
- if(help)help.textContent=notes[window.GSET.mode];
- if(FG)graphRender(true);
+ const help=document.getElementById('graph-preset-help'),largeNote=GPERF.large?' Expensive animation, curves, and arrows stay off for this large graph.':'';
+ if(help)help.textContent=notes[window.GSET.mode]+largeNote;
+ graphRefreshNodeMetrics();
+ if(FG)graphRender(true,true);
 }
-function graphToggleLabels(cb){window.GSET.labels=cb.checked;graphRender()}
-function graphRecolor(){if(!FG||!window.GCOL)return;window.GCOL.label=cssvar('--color-text');window.GCOL.dim=cssvar('--color-text-dim');window.GCOL.accent=cssvar('--color-accent');window.GCOL.edgeRgb=cssvar('--graph-edge');window.GCOL.panel=cssvar('--color-panel');FG.linkColor(FG.linkColor());FG.linkWidth(FG.linkWidth());graphRedraw()}
-function graphFit(){if(FG)FG.zoomToFit(prefersReducedMotion()?0:600,60)}
-function graphReheat(){if(!FG)return;if(prefersReducedMotion()){toast('Layout motion is off because reduced motion is enabled.','ok');return}FG.d3ReheatSimulation()}
-function graphFocus(name){clearTimeout(window.__gfit);const n=FG&&(FG.graphData().nodes||[]).find(x=>x.id===name),duration=prefersReducedMotion()?0:700;if(n&&n.x!=null){GHILITE=name;FG.centerAt(n.x,n.y,duration);FG.zoom(5,duration);graphRedraw();syncGraphExplorerSelection(name)}else{const hi=document.getElementById('graph-hide-iso');if(hi&&hi.checked){hi.checked=false;graphRender(false);setTimeout(()=>graphFocus(name),duration?600:0)}else toast('Entity not in view','err')}}
-function graphSearch(){const q=document.getElementById('graph-search').value.trim().toLowerCase();if(!q||!GRAPH)return;const m=GRAPH.nodes.find(n=>(n.label||n.id||'').toLowerCase().includes(q));if(m){graphFocus(m.id);const ex=document.getElementById('graph-explorer-search');if(ex){ex.value=q;renderGraphExplorer(q)}}else toast('No entity matches','err')}
+function graphToggleLabels(control){window.GSET.labels=control.checked;if(FG)graphRender(false,false)}
+function graphRecolor(){
+ renderGraphColorControls();
+ if(!FG)return;
+ window.GCOL=graphReadThemeColors();graphRefreshNodeColors();
+ FG.linkColor(FG.linkColor());FG.linkWidth(FG.linkWidth());graphRedraw();
+}
+function graphFit(){if(FG)FG.zoomToFit(prefersReducedMotion()?0:500,72)}
+function graphReheat(){
+ if(!FG)return;
+ if(prefersReducedMotion()){toast('Layout motion is off because reduced motion is enabled.','ok');return}
+ graphSetLayoutStatus('Reheating layout',true);FG.d3ReheatSimulation();
+}
+function graphFocus(name){
+ clearTimeout(window.__gfit);
+ const node=FG&&(FG.graphData().nodes||[]).find(item=>item.id===name),duration=prefersReducedMotion()?0:550;
+ if(node&&node.x!=null){graphSetHighlight(name);FG.centerAt(node.x,node.y,duration);FG.zoom(5,duration);syncGraphExplorerSelection(name)}
+ else{const hide=document.getElementById('graph-hide-iso');if(hide&&hide.checked){hide.checked=false;graphRender(false,true);setTimeout(()=>graphFocus(name),duration?500:0)}else toast('Entity not in view','err')}
+}
+function graphSearch(){
+ const query=document.getElementById('graph-search').value.trim().toLowerCase();if(!query||!GRAPH)return;
+ const match=GRAPH.nodes.find(node=>(node.label||node.id||'').toLowerCase().includes(query));
+ if(match){graphFocus(match.id);const explorer=document.getElementById('graph-explorer-search');if(explorer){explorer.value=query;renderGraphExplorer(query,true)}}
+ else toast('No entity matches','err');
+}
 function closeEntityMems(){document.getElementById('mm-overlay').classList.remove('show')}
 async function graphNodeClick(name){const ov=document.getElementById('mm-overlay');ov.classList.add('show');document.getElementById('mm-title').textContent=name;document.getElementById('mm-meta').innerHTML='<span class="pill pill-accent">entity</span>';document.getElementById('mm-body').innerHTML='<div class="spinner" style="margin:16px auto"></div>';document.getElementById('mm-actions').innerHTML='';try{const d=await api('/memories?q='+encodeURIComponent(name)+'&workspace='+encodeURIComponent(WS||'')+'&limit=12');document.getElementById('mm-body').innerHTML=d.memories.length?('<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Memories mentioning this entity</div>'+d.memories.map(m=>`<div data-memory-id="${esc(m.id)}" style="padding:8px 0;border-bottom:1px solid var(--surface2);cursor:pointer" onclick="closeEntityMems();openMem(this.dataset.memoryId)"><div style="font-weight:500;font-size:16px">${esc(m.title||m.id)}</div><div style="font-size:12px;color:var(--text-muted)">${esc((m.content||'').slice(0,220))}</div></div>`).join('')):'<div class="empty" style="padding:16px">No memories mention this entity by name.</div>'}catch(e){document.getElementById('mm-body').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}}
-function renderGraphSide(){const g=GRAPH;const leg=document.getElementById('graph-legend');leg.innerHTML=(g.types||[]).map(t=>`<div class="gtype-row"><span class="gtype-dot" style="background:${ETYPE_COLOR[t.etype]||'#a78bfa'};color:${ETYPE_COLOR[t.etype]||'#a78bfa'}"></span><span class="gtype-name">${esc(t.etype)}</span><span class="gtype-count">${t.count}</span></div>`).join('')||'<div class="empty" style="padding:8px">None</div>';const lc=document.getElementById('graph-legend-count');if(lc){const nt=(g.types||[]).length;lc.textContent=nt?nt+(nt===1?' type':' types'):''}const nodeType={};(g.nodes||[]).forEach(n=>{nodeType[n.id]=n.etype});const maxd=Math.max.apply(null,(g.top||[]).map(t=>t.degree).concat([1]));document.getElementById('graph-top').innerHTML=(g.top&&g.top.length)?g.top.map((t,i)=>{const c=ETYPE_COLOR[nodeType[t.id]]||'#a78bfa';return `<div class="gtop-row" title="${esc(t.name)} — ${t.degree} connection${t.degree===1?'':'s'}${nodeType[t.id]?' · '+esc(nodeType[t.id]):''}. Click to focus in the graph." onclick="graphFocus(this.getAttribute('data-n'))" data-n="${esc(t.id)}"><span class="gtop-rank">${i+1}</span><span class="gtop-dot" style="background:${c}"></span><span class="gtop-name">${esc(t.name)}</span><span class="gtop-bar"><span class="gtop-bar-fill" style="width:${(t.degree/maxd*100).toFixed(0)}%;background:${c};color:${c}"></span></span><span class="gtop-n">${t.degree}</span></div>`}).join(''):'<div class="empty" style="padding:8px">No connections</div>';const tc=document.getElementById('graph-top-count');if(tc)tc.textContent=(g.top||[]).length||'';const s=g.stats||{};const row=(k,v,c)=>`<div style="display:flex;justify-content:space-between;padding:3px 0"><span>${k}</span><b${c?' style="color:'+c+'"':''}>${v}</b></div>`;document.getElementById('graph-stats').innerHTML=row('Entities',s.entities||0,'var(--blue)')+row('Relations',s.edges||0,'var(--cyan)')+row('Connected',s.connected||0,'var(--green)')+row('Isolated',s.isolated||0,'var(--text-dim)')}
 let GKEYINDEX=-1;
-function graphExploreEntity(id){if(!GRAPH)return;const node=(GRAPH.nodes||[]).find(n=>n.id===id);if(!node)return;graphFocus(node.id);graphNodeClick(node.label||node.id)}
-function graphKeyboard(e){if(!GRAPH||!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Enter'].includes(e.key))return;const nodes=(FG&&FG.graphData().nodes&&FG.graphData().nodes.length?FG.graphData().nodes:graphData().nodes).slice().sort((a,b)=>(b.degree||0)-(a.degree||0));if(!nodes.length)return;e.preventDefault();if(e.key==='Enter'){const node=nodes[Math.max(0,GKEYINDEX)];graphExploreEntity(node.id);return}const step=(e.key==='ArrowLeft'||e.key==='ArrowUp')?-1:1;GKEYINDEX=(GKEYINDEX+step+nodes.length)%nodes.length;const node=nodes[GKEYINDEX],net=document.getElementById('graph-net');graphFocus(node.id);net.setAttribute('aria-label','Selected entity '+(node.label||node.id)+', '+(node.degree||0)+' relations. Press Enter to open. Use arrow keys to move.')}
-function syncGraphExplorerSelection(id){document.querySelectorAll('#graph-entity-list [data-entity]').forEach(b=>{const on=b.dataset.entity===id;b.classList.toggle('active',on);if(on)b.setAttribute('aria-current','true');else b.removeAttribute('aria-current')})}
-function renderGraphExplorer(query){const nodesBox=document.getElementById('graph-entity-list'),edgesBox=document.getElementById('graph-relation-list');if(!nodesBox||!edgesBox)return;if(!GRAPH){nodesBox.innerHTML='<div class="empty" style="padding:12px">Graph data is loading.</div>';edgesBox.innerHTML='<div class="empty" style="padding:12px">Graph data is loading.</div>';return}const q=(query||'').trim().toLowerCase(),nodes=GRAPH.nodes||[],edges=GRAPH.edges||[],names=new Map(nodes.map(n=>[n.id,n.label||n.id]));const shownNodes=q?nodes.filter(n=>((n.label||n.id||'')+' '+(n.etype||'')).toLowerCase().includes(q)):nodes;const shownEdges=q?edges.filter(e=>((names.get(e.from)||e.from||'')+' '+(e.label||'')+' '+(names.get(e.to)||e.to||'')+' '+(e.layer||'')).toLowerCase().includes(q)):edges;document.getElementById('graph-explorer-node-count').textContent=shownNodes.length+' of '+nodes.length;document.getElementById('graph-explorer-edge-count').textContent=shownEdges.length+' of '+edges.length;nodesBox.innerHTML=shownNodes.length?shownNodes.map(n=>`<button type="button" class="graph-explorer-item" role="listitem" data-entity="${esc(n.id)}" onclick="graphExploreEntity(this.dataset.entity)"><span class="gtype-dot" style="background:${ETYPE_COLOR[n.etype]||'var(--entity-concept)'}" aria-hidden="true"></span><span>${esc(n.label||n.id)}</span><span class="graph-explorer-meta">${esc((n.etype||'entity').replace(/_/g,' '))} · ${n.degree||0} relation${n.degree===1?'':'s'}</span></button>`).join(''):'<div class="empty" style="padding:12px">No entities match this filter.</div>';edgesBox.innerHTML=shownEdges.length?shownEdges.map(e=>`<div class="graph-explorer-item graph-relation-row" role="listitem"><button type="button" class="graph-entity-link" data-entity="${esc(e.from)}" onclick="graphExploreEntity(this.dataset.entity)">${esc(names.get(e.from)||e.from)}</button><span class="graph-relation-label">${esc(e.label||e.layer||'related to')}</span><button type="button" class="graph-entity-link" data-entity="${esc(e.to)}" onclick="graphExploreEntity(this.dataset.entity)">${esc(names.get(e.to)||e.to)}</button><span class="graph-explorer-meta">${esc(e.layer||'semantic')}</span></div>`).join(''):'<div class="empty" style="padding:12px">No relations match this filter.</div>';syncGraphExplorerSelection(GHILITE)}
-const graphNodeClickBase=graphNodeClick;
-graphNodeClick=async function(name){if(GRAPH){const node=(GRAPH.nodes||[]).find(n=>(n.label||n.id)===name);if(node)syncGraphExplorerSelection(node.id)}return graphNodeClickBase(name)}
-const graphRenderBase=graphRender;
-graphRender=function(fit){if(typeof ForceGraph==='undefined'){const empty=document.getElementById('graph-empty');empty.style.display='flex';empty.textContent='The vendored local graph library is unavailable. Reload this local dashboard; no network connection is required.';return}return graphRenderBase(fit)}
-const renderGraphSideBase=renderGraphSide;
-renderGraphSide=function(){renderGraphSideBase();renderGraphExplorer(document.getElementById('graph-explorer-search').value)}
-const loadGraphBase=loadGraph;
-loadGraph=async function(){const net=document.getElementById('graph-net'),nodes=document.getElementById('graph-entity-list'),edges=document.getElementById('graph-relation-list');GRAPH=null;if(net)net.setAttribute('aria-busy','true');renderGraphExplorer();try{return await loadGraphBase()}finally{if(net)net.setAttribute('aria-busy','false');if(!GRAPH){if(FG)FG.graphData({nodes:[],links:[]});const message=(document.getElementById('graph-empty').textContent||'Graph data unavailable.');if(nodes)nodes.innerHTML='<div class="empty" style="padding:12px">'+esc(message)+'</div>';if(edges)edges.innerHTML='<div class="empty" style="padding:12px">Relations are unavailable until graph data loads.</div>'}}}
+let GNODEBYID=new Map(), GGRAPHNAMES=new Map(), GKEYNODES=[];
+const GRAPH_EXPLORER_PAGE={nodes:80,edges:100};
+let GEXPLORER={graph:null,query:'',nodeLimit:GRAPH_EXPLORER_PAGE.nodes,edgeLimit:GRAPH_EXPLORER_PAGE.edges}, GEXPLORER_TIMER=0;
+function renderGraphSide(){
+ const graph=GRAPH;if(!graph)return;
+ const types=graph.types||[],legend=document.getElementById('graph-legend');
+ legend.innerHTML=types.map(item=>{const color=graphTypeColor(item.etype);return `<div class="gtype-row"><span class="gtype-dot" data-graph-node-type="${esc(item.etype)}" style="background:${color};color:${color}"></span><span class="gtype-name">${esc(graphTypeLabel(item.etype))}</span><span class="gtype-count">${item.count.toLocaleString()}</span></div>`}).join('')||'<div class="empty" style="padding:8px">None</div>';
+ const legendCount=document.getElementById('graph-legend-count');if(legendCount)legendCount.textContent=types.length?types.length+(types.length===1?' type':' types'):'';
+ GNODEBYID=new Map((graph.nodes||[]).map(node=>[node.id,node]));GGRAPHNAMES=new Map((graph.nodes||[]).map(node=>[node.id,node.label||node.id]));GKEYNODES=(graph.nodes||[]).slice().sort((a,b)=>(b.degree||0)-(a.degree||0));
+ const top=(graph.top||[]).slice(0,8),maxDegree=Math.max(...top.map(item=>item.degree),1),topBox=document.getElementById('graph-top');
+ topBox.innerHTML=top.length?top.map((item,index)=>{const type=(GNODEBYID.get(item.id)||{}).etype,color=graphTypeColor(type);return `<div class="gtop-row" title="${esc(item.name)} — ${item.degree} connection${item.degree===1?'':'s'}${type?' · '+esc(graphTypeLabel(type)):''}. Click to focus in the graph." onclick="graphFocus(this.dataset.entity)" data-entity="${esc(item.id)}"><span class="gtop-rank">${index+1}</span><span class="gtop-dot" data-graph-node-type="${esc(type||'person_or_concept')}" style="background:${color}"></span><span class="gtop-name">${esc(item.name)}</span><span class="gtop-bar"><span class="gtop-bar-fill" style="width:${(item.degree/maxDegree*100).toFixed(0)}%;background:${color};color:${color}"></span></span><span class="gtop-n">${item.degree}</span></div>`}).join(''):'<div class="empty" style="padding:8px">No connections</div>';
+ const topCount=document.getElementById('graph-top-count');if(topCount)topCount.textContent=top.length===((graph.top||[]).length)?String(top.length):(top.length+' of '+(graph.top||[]).length);
+ const stats=graph.stats||{},statRow=(label,value,color)=>`<div style="display:flex;justify-content:space-between;padding:3px 0"><span>${label}</span><b${color?' style="color:'+color+'"':''}>${Number(value||0).toLocaleString()}</b></div>`;
+ document.getElementById('graph-stats').innerHTML=statRow('Entities',stats.entities,'var(--blue)')+statRow('Relations',stats.edges,'var(--cyan)')+statRow('Connected',stats.connected,'var(--green)')+statRow('Isolated',stats.isolated,'var(--text-dim)');
+ renderGraphColorControls();graphUpdateColorSwatches();
+ renderGraphExplorer(document.getElementById('graph-explorer-search').value);
+}
+function graphExploreEntity(id){const node=GNODEBYID.get(id);if(!node)return;graphFocus(node.id);graphNodeClick(node.label||node.id)}
+function graphKeyboard(event){
+ if(!GRAPH||!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Enter'].includes(event.key))return;
+ const nodes=GACTIVE_DATA&&GACTIVE_DATA.nodes.length?GACTIVE_DATA.nodes:GKEYNODES;if(!nodes.length)return;
+ event.preventDefault();
+ if(event.key==='Enter'){const node=nodes[Math.max(0,GKEYINDEX)];graphExploreEntity(node.id);return}
+ const step=(event.key==='ArrowLeft'||event.key==='ArrowUp')?-1:1;GKEYINDEX=(GKEYINDEX+step+nodes.length)%nodes.length;
+ const node=nodes[GKEYINDEX],net=document.getElementById('graph-net');graphFocus(node.id);net.setAttribute('aria-label','Selected entity '+(node.label||node.id)+', '+(node.degree||0)+' relations. Press Enter to open. Use arrow keys to move.');
+}
+function syncGraphExplorerSelection(id){document.querySelectorAll('#graph-entity-list [data-entity]').forEach(button=>{const active=button.dataset.entity===id;button.classList.toggle('active',active);if(active)button.setAttribute('aria-current','true');else button.removeAttribute('aria-current')})}
+function graphQueueExplorer(query){clearTimeout(GEXPLORER_TIMER);GEXPLORER_TIMER=setTimeout(()=>renderGraphExplorer(query,true),120)}
+function graphExplorerMore(kind){
+ if(kind==='nodes')GEXPLORER.nodeLimit+=GRAPH_EXPLORER_PAGE.nodes;else GEXPLORER.edgeLimit+=GRAPH_EXPLORER_PAGE.edges;
+ renderGraphExplorer(GEXPLORER.query,false);
+}
+function renderGraphExplorer(query,reset=false){
+ const nodesBox=document.getElementById('graph-entity-list'),edgesBox=document.getElementById('graph-relation-list');if(!nodesBox||!edgesBox)return;
+ if(!GRAPH){nodesBox.innerHTML='<div class="empty" style="padding:12px">Graph data is loading.</div>';edgesBox.innerHTML='<div class="empty" style="padding:12px">Graph data is loading.</div>';return}
+ const normalized=(query||'').trim().toLowerCase();
+ if(reset||GEXPLORER.graph!==GRAPH||GEXPLORER.query!==normalized){GEXPLORER={graph:GRAPH,query:normalized,nodeLimit:GRAPH_EXPLORER_PAGE.nodes,edgeLimit:GRAPH_EXPLORER_PAGE.edges}}
+ const nodes=GKEYNODES,edges=GRAPH.edges||[],shownNodes=normalized?nodes.filter(node=>((node.label||node.id||'')+' '+(node.etype||'')).toLowerCase().includes(normalized)):nodes,shownEdges=normalized?edges.filter(edge=>((GGRAPHNAMES.get(edge.from)||edge.from||'')+' '+(edge.label||'')+' '+(GGRAPHNAMES.get(edge.to)||edge.to||'')+' '+(edge.layer||'')).toLowerCase().includes(normalized)):edges;
+ const nodePage=shownNodes.slice(0,GEXPLORER.nodeLimit),edgePage=shownEdges.slice(0,GEXPLORER.edgeLimit);
+ document.getElementById('graph-explorer-node-count').textContent=nodePage.length+' of '+shownNodes.length;
+ document.getElementById('graph-explorer-edge-count').textContent=edgePage.length+' of '+shownEdges.length;
+ nodesBox.innerHTML=nodePage.length?nodePage.map(node=>{const color=graphTypeColor(node.etype);return `<button type="button" class="graph-explorer-item" role="listitem" data-entity="${esc(node.id)}" onclick="graphExploreEntity(this.dataset.entity)"><span class="gtype-dot" data-graph-node-type="${esc(node.etype||'person_or_concept')}" style="background:${color}" aria-hidden="true"></span><span>${esc(node.label||node.id)}</span><span class="graph-explorer-meta">${esc(graphTypeLabel(node.etype))} · ${node.degree||0} relation${node.degree===1?'':'s'}</span></button>`}).join(''):'<div class="empty" style="padding:12px">No entities match this filter.</div>';
+ if(nodePage.length<shownNodes.length)nodesBox.insertAdjacentHTML('beforeend',`<button type="button" class="graph-explorer-more" onclick="graphExplorerMore('nodes')">Show ${Math.min(GRAPH_EXPLORER_PAGE.nodes,shownNodes.length-nodePage.length)} more entities</button>`);
+ edgesBox.innerHTML=edgePage.length?edgePage.map(edge=>`<div class="graph-explorer-item graph-relation-row" role="listitem"><button type="button" class="graph-entity-link" data-entity="${esc(edge.from)}" onclick="graphExploreEntity(this.dataset.entity)">${esc(GGRAPHNAMES.get(edge.from)||edge.from)}</button><span class="graph-relation-label">${esc(edge.label||edge.layer||'related to')}</span><button type="button" class="graph-entity-link" data-entity="${esc(edge.to)}" onclick="graphExploreEntity(this.dataset.entity)">${esc(GGRAPHNAMES.get(edge.to)||edge.to)}</button><span class="graph-explorer-meta">${esc(edge.layer||'semantic')}</span></div>`).join(''):'<div class="empty" style="padding:12px">No relations match this filter.</div>';
+ if(edgePage.length<shownEdges.length)edgesBox.insertAdjacentHTML('beforeend',`<button type="button" class="graph-explorer-more" onclick="graphExplorerMore('edges')">Show ${Math.min(GRAPH_EXPLORER_PAGE.edges,shownEdges.length-edgePage.length)} more relations</button>`);
+ syncGraphExplorerSelection(GHILITE);
+}
 function loadAnalyticsView(){
  if(LIC&&(LIC.features||[]).includes('analytics'))return loadAnalytics();
  const el=document.getElementById('analytics-body'),lock=document.getElementById('an-lock'),acts=document.getElementById('an-actions');
