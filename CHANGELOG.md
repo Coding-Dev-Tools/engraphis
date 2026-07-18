@@ -5,6 +5,12 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- GitHub Release publication now supplies explicit repository context to `gh` in jobs
+  without a checkout. A workflow-dispatch repair path can reuse the tagged run's
+  validated distribution artifact if PyPI succeeds before release creation fails.
+
 ## [0.9.9] - 2026-07-18
 
 Security and reliability release spanning graph isolation and performance, Team / Pro
