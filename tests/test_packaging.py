@@ -33,10 +33,17 @@ def test_every_vendored_browser_library_has_redistribution_notice():
 
 def test_manual_release_dispatch_cannot_publish():
     workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-    assert "if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')" in workflow
+    assert workflow.count(
+        "if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
+    ) == 2
     assert "Require tag and package version to match" in workflow
     assert "python -m twine check dist/*" in workflow
     assert "python -m pip_audit --local" in workflow
+    assert "github-release:" in workflow
+    assert "needs: publish" in workflow
+    assert "contents: write" in workflow
+    assert 'gh release create "$GITHUB_REF_NAME" dist/*' in workflow
+    assert "--verify-tag" in workflow
 
 
 def test_source_tree_version_matches_pyproject():
