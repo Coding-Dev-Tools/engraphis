@@ -1147,6 +1147,19 @@ def test_personal_folders_are_isolated_per_user(monkeypatch, tmp_path):
                       headers=hdr(bob)).status_code == 200
         assert "bob-notes" not in names(alice)
         assert "alice-secret" in names(alice)
+        # Sharing is confirmation-gated, and the member who shared the folder may undo
+        # that choice without needing an admin to take ownership for them.
+        assert c.post("/api/workspaces/visibility", json={
+            "workspace": "bob-notes", "visibility": "shared",
+        }, headers=hdr(bob)).status_code == 400
+        assert c.post("/api/workspaces/visibility", json={
+            "workspace": "bob-notes", "visibility": "shared", "confirmed": True,
+        }, headers=hdr(bob)).status_code == 200
+        assert "bob-notes" in names(alice)
+        assert c.post("/api/workspaces/visibility", json={
+            "workspace": "bob-notes", "visibility": "personal", "confirmed": True,
+        }, headers=hdr(bob)).status_code == 200
+        assert "bob-notes" not in names(alice)
         # visibility is surfaced on the listing so the dashboard can badge folders
         vis = {w["name"]: w.get("visibility") for w in
                c.get("/api/workspaces", headers=hdr(alice)).json()["workspaces"]}
