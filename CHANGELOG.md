@@ -3,6 +3,93 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [0.9.8] - 2026-07-18
+
+Hardening release focused on dependable installation, upgrades, startup, dashboard use,
+and safe hosted deployment.
+
+### Security
+
+- Every entrypoint sends baseline response headers — CSP, `X-Frame-Options: DENY`,
+  `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, and HSTS over HTTPS
+  only. Override with `ENGRAPHIS_CSP` / `ENGRAPHIS_HSTS`; set either to an empty string to
+  omit that header where a fronting proxy supplies its own.
+- Loopback/bootstrap trust now rejects all common forwarding metadata, including
+  `X-Forwarded-Proto`; a same-host TLS proxy can no longer make an internet request
+  look like an unproxied local setup request.
+- Inspector first-admin setup now uses the auth store's atomic empty-database gate, so
+  concurrent different-email requests cannot both create administrators.
+
+### Added
+
+- MCP clients now receive canonical recall, session, durable-memory, and handoff guidance
+  through the server's initialization instructions.
+- The dashboard exposes a small `/api` service index, and the graph CLI documents its
+  public commands without showing the internal merge-driver command.
+- Regression coverage now exercises the sqlite-vec backend, workspace-aware entity recall,
+  installed database migration, encryption packaging, CLI startup, update paths, and release
+  artifacts.
+
+### Changed
+
+- Installed builds now keep the default database in the platform user-data directory.
+  Existing package-directory databases are copied with SQLite's backup API, validated, and
+  preserved as recovery copies; source checkouts retain their repository-local default.
+- `engraphis-update` discovers the highest stable SemVer tag, validates explicit versions,
+  fails closed on fetch errors, refuses dirty editable worktrees, and keeps pip, pipx, Git,
+  and documents the source-rebuild path for locally built Docker images.
+- Dashboard styling and navigation were reworked with five selectable themes, responsive
+  mobile behavior, semantic landmarks, improved keyboard focus, clearer confirmations, and
+  fully self-hosted browser assets.
+- Console launchers now validate arguments before optional imports, report actionable startup
+  failures, display reachable IPv4/IPv6 URLs and resolved database paths, and advertise the
+  current dashboard and API routes.
+- Optional-dependency bounds and extras were refreshed. The cross-platform `all` extra no
+  longer pulls the platform-limited SQLCipher driver, while encryption continues to fail
+  closed when no compatible driver is available.
+- The release workflow now pins actions by commit, runs the full test/evaluation and package
+  validation gates, matches release tags to package versions, and reserves publishing for
+  validated tag pushes. Bundled browser-library license notices are included in distributions.
+- Installation, hosting, sync, graph-query, MCP tool-count, and database-location guidance was
+  synchronized with the current commands and runtime behavior.
+
+### Fixed
+
+- Installed `engraphis-init` configuration is now loaded from the current directory's
+  `.env` without parent traversal, while explicit environment variables retain precedence.
+  Upgrading no longer opens a fresh platform-default database instead of the database the
+  user selected through `engraphis-init`.
+- A failed dashboard memory-detail request can no longer retain a prior memory identity or
+  leave write controls enabled, preventing a later Save from modifying the wrong memory.
+- A fresh hosted deployment now renders an actionable, non-data bootstrap screen when remote
+  API access is denied by default; it offers the safe Team-trial path or deployment-variable
+  setup without exposing account-wide license activation to a signed-out browser.
+- Dashboard, REST, Inspector, MCP, licensing, sync, billing, and provider failures now return
+  bounded user-facing messages rather than raw exceptions or upstream response bodies.
+- Trusted-proxy handling now evaluates the rightmost forwarded hop, supports exact/CIDR
+  allow-lists, and prevents untrusted forwarding headers from changing URLs or secure-cookie
+  decisions. Interactive API documentation is disabled on user-facing servers by default.
+- Dashboard handlers now read memory, workspace, member, and token identifiers from escaped
+  `data-*` attributes instead of interpolating untrusted values into inline JavaScript.
+- Repository-graph JSON output now escapes non-ASCII labels so Windows console encodings do
+  not turn successful `impact`, `prs`, or query commands into exit-code 2 failures.
+- A server-only installation now includes the multipart parser required by dashboard import
+  routes instead of depending on the unrelated MCP extra to provide it transitively.
+- `engraphis-mcp --help` works without importing the optional MCP stack; server-only and
+  explicitly offline configurations no longer emit misleading missing-dependency warnings.
+- Dashboard and legacy-server launch failures retain database recovery details instead of
+  collapsing them into generic errors, and invalid port values are rejected cleanly.
+- SQLite vector selection is now tested in both accelerated and offline-fallback modes, while
+  memory writes remain durable and audited if an index update fails.
+- The zero-configuration Compose dashboard now admits its Docker host bridge while both
+  published ports remain loopback-only; widening a port requires an API token.
+- Git-installed updates retain their recorded PEP 610 remote, and failed editable updates
+  restore the original branch without exposing a Python traceback.
+- Customer-operated sync relays are separated from the managed license/trial/invite service,
+  and the sample `.env` no longer overrides installed database defaults with a relative path.
+- MCP end-of-session guidance again represents completed work with an empty unresolved list
+  instead of persisting a fake open thread.
+
 ## [0.9.7] - 2026-07-17
 
 ### Security

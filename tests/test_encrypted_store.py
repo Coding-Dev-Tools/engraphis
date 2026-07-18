@@ -1,7 +1,7 @@
 """Encryption at rest (SQLCipher) — opt-in whole-DB AES-256 encryption of the memory DB.
 
-Skips unless the optional sqlcipher3 driver is installed (``pip install engraphis[encryption]``),
-like the fastapi/mcp extras — so the numpy-only offline gate stays green. With the driver
+Skips unless a compatible sqlcipher3 driver is installed (the ``encryption`` extra supplies
+one on CPython manylinux x86-64), so the NumPy-only offline gate stays green. With the driver
 present it proves: the file is unreadable without the key, recall + re-open work through the
 encrypted connection (the re-open path exercises the exception-translating adapter), a wrong
 key fails loudly, keys load from env or file, and the default (no key) path stays plaintext.

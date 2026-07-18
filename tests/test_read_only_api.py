@@ -23,6 +23,12 @@ def test_read_only_api_requires_token_and_does_not_reinforce():
         headers={"Authorization": "Bearer secret"},
     )
     assert response.status_code == 200 and response.json()["count"] == 1
+    lowercase = client.get(
+        "/recall", params={"query": "database", "workspace": "w"},
+        headers={"Authorization": "bearer secret"},
+    )
+    assert lowercase.status_code == 200
+    assert response.headers["x-frame-options"] == "DENY"
     assert svc.store.get_memory(memory["id"]).access_count == before
     assert svc.store.conn.execute(
         "SELECT COUNT(*) AS n FROM operation_receipts"

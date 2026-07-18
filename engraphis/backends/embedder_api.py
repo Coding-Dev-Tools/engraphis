@@ -112,7 +112,8 @@ class ApiEmbedder:
                 resp.raise_for_status()
                 data = resp.json()
         except Exception as exc:
-            logger.warning("Batch embedding failed (%s), falling back per-item", exc)
+            logger.warning("Batch embedding failed (%s), falling back per-item",
+                           type(exc).__name__)
             # Fallback: embed one at a time
             vecs = [self._embed_one(t) for t in texts]
             return np.asarray(vecs, dtype=np.float32)
@@ -170,7 +171,7 @@ class ApiEmbedder:
                 resp.raise_for_status()
                 data = resp.json()
         except Exception as exc:
-            logger.error("Single embedding request failed: %s", exc)
+            logger.error("Single embedding request failed (%s)", type(exc).__name__)
             return [0.0] * (self._dim or 384)
 
         items = data.get("data", [])
