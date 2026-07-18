@@ -223,3 +223,101 @@ def test_forgetting_one_support_keeps_a_multi_source_edge_live():
 
     svc.store.invalidate_edges_for_memory(second)
     assert svc.store.edges_in_scope(SearchFilter(workspace_id=wid)) == []
+
+
+# ── caller-supplied graph metadata must not forge trusted provenance ───────────────
+def test_client_supplied_entities_never_claim_structured_extractor_provenance():
+    """metadata.entities/relations are how the *trusted* extractor
+    (backends.extractor.StructuredLLMExtractor) hands MemoryEngine graph hints, fed
+    with provenance.source="structured_extractor" (core/engine.py). remember() is
+    reachable directly (MCP tool, HTTP route, dashboard) with caller-chosen metadata,
+    so a caller setting the same keys must not inherit that trusted label for content
+    the extractor never saw — the values are preserved (not silently dropped) but
+    re-homed under an honestly-labeled key the engine's structured-graph check does
+    not recognize, so no entity/edge is written under the trusted label at all."""
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    out = svc.remember(
+        "Innocuous content.", workspace="acme", scope="workspace",
+        metadata={
+            "entities": ["Forged Entity"],
+            "relations": [{"source": "Forged Entity", "relation": "controls",
+                           "target": "Everything"}],
+        },
+    )
+    rec = svc.store.get_memory(out["id"])
+    assert "entities" not in rec.metadata and "relations" not in rec.metadata
+    assert rec.metadata["client_supplied_graph"]["entities"] == ["Forged Entity"]
+    assert rec.metadata["client_supplied_graph"]["source"] == "client_supplied"
+
+    g = svc.graph(workspace="acme")
+    assert g["nodes"] == [] and g["edges"] == []
+    wid = svc.store.get_or_create_workspace("acme")
+    edges = svc.store.edges_in_scope(SearchFilter(workspace_id=wid), limit=100)
+    assert all(e.provenance.get("source") != "structured_extractor" for e in edges)
+
+
+def test_client_supplied_structured_extraction_key_is_also_relabeled():
+    """The third key _has_structured_graph_metadata checks — nested under
+    metadata.structured_extraction rather than top-level — gets the same treatment."""
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    out = svc.ingest(
+        "raw transcript blob", workspace="acme", scope="workspace",
+        metadata={"structured_extraction": {"entities": ["Forged"], "relations": []}},
+    )
+    mid = out["facts"][0]["id"]
+    rec = svc.store.get_memory(mid)
+    assert "structured_extraction" not in rec.metadata
+    assert (rec.metadata["client_supplied_graph"]["structured_extraction"]["entities"]
+            == ["Forged"])
+    assert svc.graph(workspace="acme")["nodes"] == []
+
+
+def test_structured_extractor_metadata_still_populates_graph_when_genuine():
+    """Regression guard for the fix above: the legitimate path — a configured
+    Extractor's OWN ExtractedFact.metadata, never the caller's ingest() argument —
+    must still feed the graph under the real "structured_extractor" label."""
+    pytest.importorskip("pydantic")
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    svc.engine.extractor = StructuredLLMExtractor(_StructuredGraphLLM())
+    svc.ingest("raw transcript blob", workspace="acme", scope="workspace")
+
+    wid = svc.store.get_or_create_workspace("acme")
+    edges = svc.store.edges_in_scope(SearchFilter(workspace_id=wid), limit=100)
+    assert edges and all(e.provenance.get("source") == "structured_extractor"
+                         for e in edges)
+
+
+# ── graph(include_code=True) linked-memory lookups must be batched, not N+1 ────────
+def test_graph_include_code_batches_linked_memory_lookups(monkeypatch):
+    """Was one store.get_memory() call per code-linked memory (up to `limit`, <=5000)
+    on every include_code=True request. Store.get_memories() batches it into one
+    IN (...) query; this pins both correctness (same nodes surface) and the batching
+    itself (get_memory() must not be called from this loop at all)."""
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid = svc.store.get_or_create_workspace("acme")
+    rid = svc.store.get_or_create_repo(wid, "web")
+
+    mem_ids = []
+    for i in range(3):
+        mid = svc.remember(f"Memory number {i}.", workspace="acme", repo="web",
+                           scope="repo", resolve_conflicts=False)["id"]
+        mem_ids.append(mid)
+        symbol_id = svc.store.upsert_symbol(
+            repo_id=rid, kind="function", name=f"fn{i}", fqname=f"fn{i}",
+            file=f"f{i}.py", span="1:1-2:1", lang="python",
+        )
+        svc.store.link_memory_symbol(repo_id=rid, symbol_id=symbol_id, memory_id=mid)
+
+    get_memory_calls = []
+    real_get_memory = svc.store.get_memory
+
+    def _tracked_get_memory(memory_id):
+        get_memory_calls.append(memory_id)
+        return real_get_memory(memory_id)
+
+    monkeypatch.setattr(svc.store, "get_memory", _tracked_get_memory)
+
+    g = svc.graph(workspace="acme", repo="web", include_code=True)
+
+    assert get_memory_calls == []                          # batched, not per-row
+    assert set(mem_ids) <= {n["id"] for n in g["nodes"]}

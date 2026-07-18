@@ -238,3 +238,42 @@ def test_install_merge_driver_rejects_unsafe_attributes_before_git(monkeypatch, 
         graph_cli._install_merge_driver(SimpleNamespace(
             root=str(tmp_path), graph_path="graph.json"
         ))
+
+
+def test_git_files_fails_closed_on_a_hang_instead_of_blocking(monkeypatch, tmp_path):
+    """impact --git-range and prs --base/--head/--conflicts-with feed _git_files an
+    agent-controlled revision string; a revision that makes `git diff` hang (huge
+    diff, a repo-local .gitconfig external diff driver or pager, a submodule
+    credential prompt) must fail closed, not block the process indefinitely."""
+    def _hang(cmd, **kwargs):
+        raise graph_cli.subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(graph_cli.subprocess, "run", _hang)
+
+    with pytest.raises(graph_cli.ValidationError, match="timed out"):
+        graph_cli._git_files(str(tmp_path), "HEAD~1..HEAD")
+
+
+def test_git_files_passes_a_positive_timeout_to_subprocess_run(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(graph_cli.subprocess, "run", _fake_run)
+    graph_cli._git_files(str(tmp_path), "")
+
+    assert isinstance(captured.get("timeout"), (int, float)) and captured["timeout"] > 0
+
+
+def test_install_merge_driver_fails_closed_on_git_config_hang(monkeypatch, tmp_path):
+    def _hang(cmd, **kwargs):
+        raise graph_cli.subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(graph_cli.subprocess, "run", _hang)
+
+    with pytest.raises(graph_cli.ValidationError, match="timed out"):
+        graph_cli._install_merge_driver(SimpleNamespace(
+            root=str(tmp_path), graph_path="graph.json"
+        ))
