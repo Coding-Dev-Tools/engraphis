@@ -1077,7 +1077,8 @@ class Store:
         return dict(row) if row else None
 
     def list_code_files(self, repo_id: str, *,
-                        languages: Optional[set] = None) -> list[dict]:
+                        languages: Optional[set] = None,
+                        limit: Optional[int] = None) -> list[dict]:
         sql = "SELECT * FROM code_files WHERE repo_id=?"
         params: list[Any] = [repo_id]
         if languages:
@@ -1085,6 +1086,9 @@ class Store:
             sql += f" AND lang IN ({marks})"
             params.extend(sorted(languages))
         sql += " ORDER BY file"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(0, int(limit)))  # never -1 == SQLite "unlimited"
         return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
 
     def upsert_code_file(self, *, repo_id: str, file: str, lang: str,

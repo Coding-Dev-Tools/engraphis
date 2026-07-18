@@ -185,6 +185,42 @@ def merge_record(local: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     )
 
 
+# Fields ``Store.add_memory`` fills in from the SERVER clock when they arrive as ``None``
+# (store.py: ``ingested_at``/``valid_from``/``last_access`` are each defaulted to ``now_ts()``).
+# For these, "omitted by the bundle" is NOT a competing value — the store has no way to
+# persist an unset one, so the omission can only ever mean "whatever the row already has".
+#
+# ``valid_to``/``expired_at`` are deliberately NOT in this set: there ``None`` is a genuine,
+# persistable value meaning "still valid / not retired", and the earliest-non-null lattice
+# already handles it.
+_STORE_DEFAULTED_FIELDS = ("valid_from", "ingested_at", "last_access")
+
+
+def inherit_store_defaults(existing: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
+    """Fill store-defaulted fields the incoming row OMITTED from ``existing`` (in place).
+
+    Must run before ``merge_record`` whenever the id already exists locally, otherwise
+    ``apply_bundle`` never converges for a bundle that omits one of these fields:
+    ``dict_to_record`` leaves it ``None``, ``add_memory`` then stamps it with ``now()``, so
+    on the next replay the stored and incoming labels differ *only* in that field. When
+    ``last_access`` and ``ingested_at`` tie, the version key falls through to the
+    content-hash tiebreak, which flips a coin — roughly half of all replays reported
+    ``updated``, rewrote the row with a FRESH default, and flipped again next round.
+    Unbounded write amplification and ``sync_overwrite`` audit spam on every sync round,
+    reachable from an untrusted bundle (SECURITY.md — memory poisoning).
+
+    Peer-to-peer bundles never tripped this because ``record_to_dict`` always emits all
+    three; a hand-crafted bundle does. This is NOT done inside ``merge_record``: that
+    function is a pure lattice over two complete records and has no notion of "the store
+    would have defaulted this". A value the incoming row genuinely supplies is untouched,
+    so a legitimately newer ``valid_from`` still wins last-writer-wins normally.
+    """
+    for field_name in _STORE_DEFAULTED_FIELDS:
+        if getattr(incoming, field_name) is None:
+            setattr(incoming, field_name, getattr(existing, field_name))
+    return incoming
+
+
 def _signature(rec: MemoryRecord) -> str:
     """Fingerprint of everything sync persists — to tell 'changed' from 'no-op'."""
     return _stable_hash(_label_tuple(rec) + [
@@ -639,7 +675,11 @@ class SyncEngine:
             accepted[rec.id] = rec
         else:
             accepted[rec.id] = existing
-            merged = merge_record(existing, rec)
+            # A field the bundle simply OMITTED is not a competing value: the store would
+            # only stamp it with now() on write, so inherit it from the row we already hold
+            # before merging. Without this, apply_bundle never converges for a bundle that
+            # omits valid_from — see inherit_store_defaults.
+            merged = merge_record(existing, inherit_store_defaults(existing, rec))
             if _signature(merged) == _signature(existing):
                 report["unchanged"] += 1
             else:
