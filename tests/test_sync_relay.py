@@ -40,13 +40,17 @@ def _relay_env(monkeypatch, tmp_path):
     monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(SECRET).hex())
     monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(tmp_path / "relay.db"))
     monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY", raising=False)
-    # _authorize now shares /license/v1/register's per-IP burst budget. Every TestClient
-    # request in this file arrives from the same synthetic peer ("testclient"), so leave
-    # the limiter effectively off by default and let the tests that are ABOUT it set
-    # their own budget — otherwise the suite throttles itself, not the attacker.
+    # _authorize uses the relay's OWN per-IP burst budget (_relay_rate_ok), separate from
+    # /license/v1/register's. Every TestClient request in this file arrives from the same
+    # synthetic peer ("testclient"), so leave the limiter effectively off by default and
+    # let the tests that are ABOUT it set their own budget — otherwise the suite throttles
+    # itself, not the attacker. Clear both buckets so neither leaks across tests.
+    monkeypatch.setattr(license_cloud, "RELAY_RATE_PER_MINUTE", 10_000)
     monkeypatch.setattr(license_cloud, "REGISTER_RATE_PER_MINUTE", 10_000)
+    license_cloud._RELAY_BUCKETS.clear()
     license_cloud._REGISTER_BUCKETS.clear()
     yield
+    license_cloud._RELAY_BUCKETS.clear()
     license_cloud._REGISTER_BUCKETS.clear()
 
 
@@ -115,12 +119,14 @@ def test_garbage_key_is_rejected():
 # ── unauthenticated crypto is rate limited ────────────────────────────────────────────
 # Every relay call runs a ~3ms pure-Python Ed25519 verify BEFORE anything authenticates
 # the caller, and several handlers are sync defs that also pin a threadpool worker while
-# they do it. license_cloud._register_rate_ok exists for exactly this surface; the relay
-# has to actually call it, and share the budget rather than open a second one.
+# they do it. license_cloud._relay_rate_ok bounds how much of that work an invalid-key
+# flood from one IP can buy — using the relay's OWN budget, sized for a full sync round,
+# NOT the /register bucket (a 60/min register budget would 429 the tail of every large
+# round, and a 429 aborts the whole pull, so the round would never converge).
 
 def test_invalid_key_flood_is_rate_limited_before_the_verify(monkeypatch):
-    monkeypatch.setattr(license_cloud, "REGISTER_RATE_PER_MINUTE", 3)
-    license_cloud._REGISTER_BUCKETS.clear()
+    monkeypatch.setattr(license_cloud, "RELAY_RATE_PER_MINUTE", 3)
+    license_cloud._RELAY_BUCKETS.clear()
     c = _app()
     bad = _auth("ENGR1.forged.forged")
     codes = [c.get("/relay/v1/ws1/names", headers=bad).status_code for _ in range(6)]
@@ -131,25 +137,44 @@ def test_invalid_key_flood_is_rate_limited_before_the_verify(monkeypatch):
     assert c.get("/relay/v1/ws1/names", headers=_auth(_key())).status_code == 429
 
 
-def test_relay_and_license_endpoints_share_one_burst_budget(monkeypatch):
-    monkeypatch.setattr(license_cloud, "REGISTER_RATE_PER_MINUTE", 2)
+def test_a_full_sync_round_is_not_throttled_by_the_relay_budget(monkeypatch):
+    """Regression: the anti-DoS budget must not DoS legitimate sync. A full round is
+    ~1 names + MAX_BUNDLES_PER_WORKSPACE bundle GETs + 1 push; at the default budget that
+    whole round must go through, or large-workspace sync never converges (429 is fatal to
+    the pull)."""
+    monkeypatch.setattr(license_cloud, "RELAY_RATE_PER_MINUTE", 600)  # the shipped default
+    license_cloud._RELAY_BUCKETS.clear()
+    c = _app()
+    key = _key()
+    # Seed the workspace with the maximum number of bundles a round would pull.
+    n = sync_relay.MAX_BUNDLES_PER_WORKSPACE
+    for i in range(n):
+        assert c.post("/relay/v1/ws1/bundles/bundle-%03d.json" % i,
+                      content=b"{}", headers=_auth(key)).status_code == 200
+    # A round: list names, GET every bundle, push this device's own bundle back (in place,
+    # as a real round does) — none of these ~n+2 requests may be throttled.
+    assert c.get("/relay/v1/ws1/names", headers=_auth(key)).status_code == 200
+    for i in range(n):
+        assert c.get("/relay/v1/ws1/bundles/bundle-%03d.json" % i,
+                     headers=_auth(key)).status_code == 200
+    assert c.post("/relay/v1/ws1/bundles/bundle-000.json",
+                  content=b"{}", headers=_auth(key)).status_code == 200
+
+
+def test_relay_and_register_budgets_are_independent(monkeypatch):
+    """The relay must not drain the register budget or vice versa — they are separate
+    surfaces with very different legitimate request rates."""
+    monkeypatch.setattr(license_cloud, "RELAY_RATE_PER_MINUTE", 1)
+    monkeypatch.setattr(license_cloud, "REGISTER_RATE_PER_MINUTE", 10_000)
+    license_cloud._RELAY_BUCKETS.clear()
     license_cloud._REGISTER_BUCKETS.clear()
-    app = FastAPI()
-    app.include_router(sync_relay.router)
-    app.include_router(license_cloud.router)
-
-    @app.exception_handler(LicenseError)
-    async def _license(request, exc):        # noqa: ANN202
-        return JSONResponse({"error": str(exc)}, status_code=402)
-
-    c = TestClient(app)
-    # one token spent on the license endpoint (its own limiter call, before its verify)...
-    assert c.post("/license/v1/register",
-                  json={"key": "ENGR1.forged.forged", "machine_id": "m-1"}).status_code == 402
-    # ...one on the relay...
+    c = _app()
+    # Spend the relay's single token, then confirm it is refused...
     assert c.get("/relay/v1/ws1/names", headers=_auth(_key())).status_code == 200
-    # ...and the budget is gone: alternating endpoints does not buy a second allowance.
     assert c.get("/relay/v1/ws1/names", headers=_auth(_key())).status_code == 429
+    # ...while the register budget (a different bucket) is untouched and still generous.
+    for _ in range(5):
+        assert license_cloud._register_rate_ok("testclient") is True
 
 
 def test_relay_stays_up_when_the_limiter_itself_fails(monkeypatch):
@@ -158,7 +183,7 @@ def test_relay_stays_up_when_the_limiter_itself_fails(monkeypatch):
     def boom(ip):
         raise RuntimeError("bucket storage unavailable")
 
-    monkeypatch.setattr(license_cloud, "_register_rate_ok", boom)
+    monkeypatch.setattr(license_cloud, "_relay_rate_ok", boom)
     c = _app()
     assert c.get("/relay/v1/ws1/names", headers=_auth(_key())).status_code == 200
 

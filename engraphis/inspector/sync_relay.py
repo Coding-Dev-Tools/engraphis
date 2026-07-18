@@ -129,14 +129,15 @@ def _machine_id(request: Request) -> str:
 
 
 def _rate_limited(request: Request) -> bool:
-    """True when this caller has spent its share of the unauthenticated-crypto budget.
+    """True when this caller has spent its per-IP relay budget.
 
-    Deliberately the SAME token bucket ``/license/v1/register`` uses
-    (``license_cloud._register_rate_ok``, keyed on :func:`netutil.client_ip`): one budget
-    for the whole unauthenticated Ed25519 surface, so alternating between the license
-    endpoints and the relay cannot buy double the budget for identical ~3ms pure-Python
-    verify work. That comment has always claimed relay coverage; this is the call that
-    makes it true.
+    Uses the relay's OWN token bucket (``license_cloud._relay_rate_ok``, keyed on
+    :func:`netutil.client_ip`), NOT the ``/register`` bucket. A single legitimate sync
+    round makes ~1 + up to ``MAX_BUNDLES_PER_WORKSPACE`` (64) + 1 requests back to back,
+    so the 60/min register budget would 429 the tail of every large-workspace round — and
+    a 429 aborts the whole pull, so the round would never converge. The relay budget is
+    sized for that request profile (``RELAY_RATE_PER_MINUTE``) while still bounding how
+    much pure-Python Ed25519 verify work an invalid-key flood from one address can buy.
 
     Fails OPEN. If the limiter cannot be imported or consulted at all — a minimal install
     without ``license_cloud``, say — the relay must keep serving paying customers.
@@ -146,7 +147,7 @@ def _rate_limited(request: Request) -> bool:
     """
     try:
         from engraphis.inspector import license_cloud
-        return not license_cloud._register_rate_ok(netutil.client_ip(request))
+        return not license_cloud._relay_rate_ok(netutil.client_ip(request))
     except Exception:  # noqa: BLE001 — see "fails OPEN" above
         return False
 
@@ -156,7 +157,7 @@ def _authorize(request: Request):
 
     Raises :class:`LicenseError` (rendered as 402 by the app's exception handler) if the
     key is missing, malformed, expired, wrong-plan, or revoked, and
-    :class:`HTTPException` 429 when the caller outruns the shared burst budget above —
+    :class:`HTTPException` 429 when the caller outruns the relay burst budget above —
     checked FIRST, so an invalid-key flood is rejected before it can buy any signature
     verification. That ordering matters more here than on the license endpoints: several
     relay handlers are sync ``def``s, so each in-flight request also pins one of the

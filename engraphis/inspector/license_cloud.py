@@ -146,6 +146,20 @@ REGISTER_RATE_PER_MINUTE = _nonnegative_env_int(
 _REGISTER_BUCKETS: "dict[str, tuple[float, float]]" = {}
 _REGISTER_BUCKETS_MAX = 4096
 
+# The relay reuses this token-bucket machinery but NOT the register budget. ``/register``
+# is hit once per client per lease renewal; a single relay *sync round* legitimately makes
+# ~1 + MAX_BUNDLES_PER_WORKSPACE (64) + 1 requests back to back, so charging it against the
+# 60/min register bucket would 429 the tail of every large-workspace round — and 429 aborts
+# the whole pull. Give the relay its own, sync-sized per-IP budget. Its purpose is narrow:
+# bound how much ~3ms pure-Python Ed25519 verify work (each on a finite ASGI threadpool
+# worker) an *invalid-key* flood from one address can buy before the key is even parsed.
+# Default ~10 full rounds/min/IP — generous for real clients (incl. a modest NAT'd team),
+# still a hard ceiling on a flood. Tunable; <= 0 disables.
+RELAY_RATE_PER_MINUTE = _nonnegative_env_int(
+    "ENGRAPHIS_RELAY_RATE_PER_MINUTE", 600)
+_RELAY_BUCKETS: "dict[str, tuple[float, float]]" = {}
+_RELAY_BUCKETS_MAX = 4096
+
 
 def _register_rate_key(request: Request) -> str:
     """Best available caller identity; a header can never disable the limiter.
@@ -156,31 +170,46 @@ def _register_rate_key(request: Request) -> str:
     return netutil.client_ip(request)
 
 
-def _register_rate_ok(ip: str) -> bool:
-    """Token bucket, ``REGISTER_RATE_PER_MINUTE`` tokens refilling over 60s. Returns
-    False when the caller has spent its burst. Disabled entirely when the limit is <= 0
-    or when *ip* is empty (see :func:`_register_rate_key`).
+def _token_bucket_ok(buckets: "dict[str, tuple[float, float]]", ip: str,
+                     rate_per_minute: int, max_buckets: int) -> bool:
+    """Shared token-bucket core: ``rate_per_minute`` tokens refilling over 60s, keyed on
+    *ip*. Returns False when the caller has spent its burst. Disabled (always True) when
+    the limit is <= 0 or *ip* is empty.
 
-    The table is capped at ``_REGISTER_BUCKETS_MAX`` entries and evicts one oldest
-    insertion when full: an attacker rotating source addresses must not be able to grow
-    it without bound (that would be a memory-exhaustion DoS in the code meant to prevent
-    a DoS). Dict insertion order makes this O(1); the worst case forgives one old caller's
-    burst without resetting every active caller's budget."""
-    if REGISTER_RATE_PER_MINUTE <= 0 or not ip:
+    *buckets* is capped at *max_buckets* entries and evicts one oldest insertion when
+    full: an attacker rotating source addresses must not be able to grow it without bound
+    (that would be a memory-exhaustion DoS in the code meant to prevent a DoS). Dict
+    insertion order makes this O(1); the worst case forgives one old caller's burst
+    without resetting every active caller's budget."""
+    if rate_per_minute <= 0 or not ip:
         return True
     now = time.monotonic()
-    rate = REGISTER_RATE_PER_MINUTE / 60.0
-    tokens, last = _REGISTER_BUCKETS.get(ip, (float(REGISTER_RATE_PER_MINUTE), now))
-    tokens = min(float(REGISTER_RATE_PER_MINUTE), tokens + (now - last) * rate)
+    rate = rate_per_minute / 60.0
+    tokens, last = buckets.get(ip, (float(rate_per_minute), now))
+    tokens = min(float(rate_per_minute), tokens + (now - last) * rate)
     if tokens < 1.0:
-        _REGISTER_BUCKETS[ip] = (tokens, now)
+        buckets[ip] = (tokens, now)
         return False
-    if len(_REGISTER_BUCKETS) >= _REGISTER_BUCKETS_MAX and ip not in _REGISTER_BUCKETS:
+    if len(buckets) >= max_buckets and ip not in buckets:
         # Evict one oldest bucket instead of clearing EVERY caller's budget. Clearing
         # made a distributed source-address spray reset all active rate limits at once.
-        _REGISTER_BUCKETS.pop(next(iter(_REGISTER_BUCKETS)), None)
-    _REGISTER_BUCKETS[ip] = (tokens - 1.0, now)
+        buckets.pop(next(iter(buckets)), None)
+    buckets[ip] = (tokens - 1.0, now)
     return True
+
+
+def _register_rate_ok(ip: str) -> bool:
+    """Per-IP budget for the unauthenticated ``/license/v1/*`` endpoints (register, trial,
+    team-invite). See :func:`_token_bucket_ok`."""
+    return _token_bucket_ok(_REGISTER_BUCKETS, ip, REGISTER_RATE_PER_MINUTE,
+                            _REGISTER_BUCKETS_MAX)
+
+
+def _relay_rate_ok(ip: str) -> bool:
+    """Per-IP budget for the ``/relay/v1/*`` sync surface — separate bucket from
+    :func:`_register_rate_ok`, sized for a full sync round (see ``RELAY_RATE_PER_MINUTE``)
+    so legitimate large-workspace sync never trips it."""
+    return _token_bucket_ok(_RELAY_BUCKETS, ip, RELAY_RATE_PER_MINUTE, _RELAY_BUCKETS_MAX)
 
 
 def _lease_ttl_seconds() -> int:
