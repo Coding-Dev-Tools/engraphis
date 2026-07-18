@@ -1,4 +1,5 @@
 import json
+import io
 import os
 from types import SimpleNamespace
 
@@ -6,6 +7,26 @@ import pytest
 
 from scripts import graph_cli
 from scripts.graph_cli import _merge_payloads, build_parser
+
+
+def test_console_json_survives_windows_charmap_stdout(monkeypatch):
+    sink = io.BytesIO()
+    stream = io.TextIOWrapper(sink, encoding="cp1252")
+    monkeypatch.setattr(graph_cli.sys, "stdout", stream)
+
+    graph_cli._json({"edge": "caller → callee"})
+    stream.flush()
+
+    assert b"caller \\u2192 callee" in sink.getvalue()
+
+
+def test_help_hides_internal_merge_and_describes_installer(capsys):
+    with pytest.raises(SystemExit) as exc:
+        graph_cli.build_parser().parse_args(["--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "==SUPPRESS==" not in out
+    assert "Install the graph union merge driver" in out
 
 
 def test_graph_cli_exposes_repo_workflow_commands():

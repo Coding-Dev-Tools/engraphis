@@ -8,7 +8,11 @@ import os
 
 from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse
-import uvicorn
+
+# uvicorn is imported in __main__ only. It is the ASGI *server*, not a dependency of the
+# app object, and it is absent from the [test] extra — importing it here made
+# `from engraphis.redirector import create_app` raise ModuleNotFoundError under the
+# documented `pip install -e ".[test]"` CI install.
 
 
 def _redirect_base() -> str:
@@ -40,6 +44,8 @@ def create_app() -> FastAPI:
             target += "?" + qs
         return RedirectResponse(target, status_code=301)
 
+    from engraphis import http_security
+    http_security.install(app)
     return app
 
 
@@ -47,7 +53,9 @@ app = create_app()
 
 
 if __name__ == "__main__":
+    import uvicorn
+
     port = int(os.environ.get("ENGRAPHIS_INSPECTOR_PORT", "8710"))
     host = os.environ.get("ENGRAPHIS_HOST", "127.0.0.1")
-    print(f"Engraphis redirect — :{port} → {host}:8700")
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    print(f"Engraphis redirect - :{port} -> {host}:8700")
+    uvicorn.run(app, host=host, port=port, log_level="warning", proxy_headers=False)

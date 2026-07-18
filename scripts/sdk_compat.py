@@ -1,6 +1,6 @@
 """Helper — talk to a local Engraphis server from Python.
 
-Engraphis exposes a self-describing REST API (OpenAPI at ``/docs``). This helper
+Engraphis exposes a self-describing REST API (schema at ``/openapi.json``). This helper
 shows the minimal pattern for pointing any HTTP client at your local server. It
 has no third-party SDK dependency — just ``httpx``.
 

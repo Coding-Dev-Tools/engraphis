@@ -7,6 +7,18 @@ import pytest
 pytest.importorskip("mcp", reason="optional 'mcp' extra not installed")
 
 
+def test_stdio_server_default_log_level_is_quiet():
+    from engraphis.mcp_server import mcp
+    assert mcp.settings.log_level == "WARNING"
+
+
+def test_unexpected_tool_failure_does_not_leak_exception_text():
+    from engraphis.mcp_server import _err
+    output = _err(RuntimeError("token=SECRET C:/private/customer.db"))
+    assert output.startswith("Error:")
+    assert "SECRET" not in output and "private" not in output
+
+
 def _module_with_memory_db(monkeypatch):
     import engraphis.mcp_server as srv
     from engraphis.service import MemoryService
@@ -33,6 +45,12 @@ def test_server_identity_and_tools_registered():
 
     import engraphis.mcp_server as srv
     assert srv.mcp.name == "engraphis_mcp"
+    assert srv.mcp.instructions == srv._SESSION_PROTOCOL
+    assert "engraphis_recall_proactive" in srv.mcp.instructions
+    assert "operator-configured\nworkspace" in srv.mcp.instructions
+    assert "engraphis_start_session" in srv.mcp.instructions
+    assert "engraphis_end_session" in srv.mcp.instructions
+    assert "open_threads=[]" in srv.mcp.instructions
     tools = {t.name: t for t in asyncio.run(srv.mcp.list_tools())}
     assert _ALL_TOOLS <= set(tools)
     # Flat schema (not a nested "params" object) so agents can call fields directly.

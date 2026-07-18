@@ -7,7 +7,7 @@ retention-supervision, and privacy-receipt additions introduced with schema vers
 flowchart LR
     Agent["Agent / host LLM"] --> Intent["remember · link · recall"]
     CLI["engraphis-graph CLI"] --> Service["MemoryService"]
-    MCP["27 MCP tools"] --> Service
+    MCP["28 MCP tools"] --> Service
     HTTP["Dashboard + read-only graph HTTP"] --> Service
     Import["Local resources / PostgreSQL catalog"] --> Extractors["Optional local extractors"]
     Extractors --> Service

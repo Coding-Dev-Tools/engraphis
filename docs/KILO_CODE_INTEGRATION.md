@@ -10,7 +10,7 @@ This manual is written for someone who wants the full technical picture: what En
 
 There are two separate questions hiding inside "connect Kilo Code to Engraphis," and they are usually where people talk past each other:
 
-1. **Transport layer — "get the pipes connected."** This is: install the Engraphis MCP server, tell Kilo Code how to launch it, confirm the tools show up. It's a plumbing task. When it's done, Kilo Code can *see* 27 `engraphis_*` tools. Success here is binary — either the tools appear or they don't.
+1. **Transport layer — "get the pipes connected."** This is: install the Engraphis MCP server, tell Kilo Code how to launch it, confirm the tools show up. It's a plumbing task. When it's done, Kilo Code can *see* 28 `engraphis_*` tools. Success here is binary — either the tools appear or they don't.
 
 2. **Orchestration layer — "use the memory well."** This is: *when* should the agent remember vs. recall, how should memories be scoped (`workspace → repo → session`), which of the 28 tools answers which question, and how to keep the store clean over time. This is where the actual value is, and it's a discipline, not a config.
 

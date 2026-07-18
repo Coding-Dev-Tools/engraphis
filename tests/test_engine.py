@@ -19,6 +19,33 @@ def test_engine_remember_and_recall():
     assert "actions" in res.context.lower() or "aws" in res.context.lower()
 
 
+def test_index_upsert_failure_preserves_memory_and_audits(caplog):
+    class BrokenIndex:
+        def search(self, _vec, _k, *, filter=None):
+            return []
+
+        def upsert(self, _ids, _vecs, meta=None):
+            raise RuntimeError("simulated index outage")
+
+    eng = MemoryEngine.create(":memory:", vector_backend="numpy", auto_evolve=False)
+    eng.index = BrokenIndex()
+    eng.recall_engine.index = eng.index
+    wid = eng.store.get_or_create_workspace("w")
+    with caplog.at_level("WARNING"):
+        out = eng.remember_with_resolution("Durable fact.", workspace_id=wid)
+    assert eng.store.get_memory(out["id"]).content == "Durable fact."
+    row = eng.store.conn.execute(
+        "SELECT action, target, detail FROM audit WHERE action='index_upsert_failed'"
+    ).fetchone()
+    assert dict(row) == {
+        "action": "index_upsert_failed",
+        "target": out["id"],
+        "detail": "failure_type=RuntimeError",
+    }
+    assert "simulated index outage" not in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
 def test_engine_infers_scope_and_rejects_impossible_parents():
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")
@@ -49,10 +76,26 @@ def test_engine_infers_scope_and_rejects_impossible_parents():
         eng.remember("broken", workspace_id=wid, repo_id=rid, scope=Scope.WORKSPACE)
 
 
-def test_engine_falls_back_to_numpy_index_offline():
+def test_engine_falls_back_to_numpy_index_offline(monkeypatch):
+    """The factory's fallback CONTRACT, independent of what this environment happens to
+    have installed (sqlite-vec is now a [test] dependency, so simulate its absence):
+    sqlite-vec unavailable → NumPy reference index, never an error."""
+    import engraphis.backends.vector_sqlitevec as vs
+
+    class _Unavailable:
+        def __init__(self, *a, **k):
+            raise ImportError("sqlite_vec not installed (simulated)")
+
+    monkeypatch.setattr(vs, "SqliteVecVectorIndex", _Unavailable)
     eng = MemoryEngine.create(":memory:")
-    # sqlite-vec is unavailable in the sandbox → factory falls back to NumPy.
     assert isinstance(eng.index, NumpyVectorIndex)
+
+
+def test_engine_prefers_sqlitevec_index_when_available():
+    pytest.importorskip("sqlite_vec", reason="sqlite-vec extra not installed")
+    from engraphis.backends.vector_sqlitevec import SqliteVecVectorIndex
+    eng = MemoryEngine.create(":memory:")
+    assert isinstance(eng.index, SqliteVecVectorIndex)
 
 
 def test_engine_respects_memory_type_and_scope():

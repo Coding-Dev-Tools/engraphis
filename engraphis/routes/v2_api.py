@@ -8,6 +8,7 @@ engraphis/routes/v2_team.py and is included by the dashboard app.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Optional
 
@@ -19,6 +20,7 @@ from engraphis.config import DEFAULT_RELAY_URL, canonicalize_relay_url, settings
 from engraphis.service import MemoryService, ValidationError
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
+logger = logging.getLogger("engraphis.api")
 
 _service: Optional[MemoryService] = None
 
@@ -77,7 +79,8 @@ def _run(fn, *a, **k):
                          "pip install \"sentence-transformers>=2.7\" — then restart the "
                          "dashboard. The Memories, Graph, Overview and Audit tabs work without it.",
                 "embedder": True})
-        raise HTTPException(status_code=500, detail={"error": msg})
+        logger.error("dashboard operation failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=500, detail={"error": "internal server error"})
 
 
 def _default_ws() -> Optional[str]:
@@ -160,6 +163,19 @@ def _keyword_search(ws, q, limit=20):
 
 
 # ── health / bootstrap ────────────────────────────────────────────────────────
+@router.get("")
+def api_index():
+    """Small, stable landing document for the API URL printed by the dashboard."""
+    from engraphis import __version__
+    return {
+        "service": "engraphis",
+        "version": __version__,
+        "health": "/api/health",
+        "ready": "/api/ready",
+        "openapi": "/api/openapi.json",
+    }
+
+
 @router.get("/health")
 def health():
     return {"status": "ok", "engine": "v2"}
@@ -243,7 +259,9 @@ def llm_test():
         with LLMClient() as llm:
             return llm.ping()
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": str(exc),
+        logger.error("LLM connection test failed (%s)", type(exc).__name__)
+        return {"ok": False, "error": "The provider test failed. Check the configured "
+                                      "provider, model, and network connection.",
                 "provider": settings.llm_provider, "model": settings.llm_model}
 
 
@@ -435,7 +453,8 @@ def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
         raise HTTPException(status_code=400, detail={"error": str(exc)})
     except Exception as exc:  # noqa: BLE001
         if not _is_embedder_mismatch(exc):
-            raise HTTPException(status_code=500, detail={"error": str(exc)})
+            logger.error("dashboard recall failed (%s)", type(exc).__name__)
+            raise HTTPException(status_code=500, detail={"error": "internal server error"})
         mems = _keyword_search(ws, q, k)
         return {"query": q, "workspace": ws, "count": len(mems), "context": "",
                 "memories": mems, "mode": "keyword",
@@ -515,7 +534,8 @@ def why(q: str = Query(...), workspace: Optional[str] = None, k: int = 5):
         raise HTTPException(status_code=400, detail={"error": str(exc)})
     except Exception as exc:  # noqa: BLE001
         if not _is_embedder_mismatch(exc):
-            raise HTTPException(status_code=500, detail={"error": str(exc)})
+            logger.error("dashboard why failed (%s)", type(exc).__name__)
+            raise HTTPException(status_code=500, detail={"error": "internal server error"})
         mems = _keyword_search(ws, q, k)
         return {"query": q, "workspace": ws, "answer": mems, "supersedes": [],
                 "mode": "keyword",
@@ -534,7 +554,8 @@ def timeline(q: str = Query(...), workspace: Optional[str] = None, limit: int = 
         raise HTTPException(status_code=400, detail={"error": str(exc)})
     except Exception as exc:  # noqa: BLE001
         if not _is_embedder_mismatch(exc):
-            raise HTTPException(status_code=500, detail={"error": str(exc)})
+            logger.error("dashboard timeline failed (%s)", type(exc).__name__)
+            raise HTTPException(status_code=500, detail={"error": "internal server error"})
         mems = _keyword_search(ws, q, limit)
         return {"query": q, "workspace": ws, "history": mems, "mode": "keyword",
                 "note": "Keyword match — install sentence-transformers for semantic search."}

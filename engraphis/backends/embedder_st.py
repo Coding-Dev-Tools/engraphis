@@ -45,7 +45,9 @@ def get_embedder(model_name: Optional[str] = None, dim: int = 256):
         except Exception as exc:  # noqa: BLE001 - optional dep; record why we fall back
             LAST_EMBEDDER_ERROR = "%s: %s" % (type(exc).__name__, exc)
             import logging
-            logging.getLogger("engraphis").warning(
+            log = logging.getLogger("engraphis")
+            emit = log.info if isinstance(exc, ModuleNotFoundError) else log.warning
+            emit(
                 "embedder '%s' unavailable (%s) - using the %d-dim deterministic "
                 "embedder; semantic recall/why/timeline will not match stored vectors.",
                 model_name, LAST_EMBEDDER_ERROR, dim)

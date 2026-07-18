@@ -161,8 +161,12 @@ def make_connector(key: str) -> Callable[[str], object]:
         import sqlcipher3  # noqa: F401  (optional dependency)
     except Exception as exc:  # noqa: BLE001
         raise EncryptionError(
-            "ENGRAPHIS_DB_KEY is set but the SQLCipher driver is not installed. "
-            "Install it with:  pip install \"engraphis[encryption]\"") from exc
+            "ENGRAPHIS_DB_KEY is set but no compatible SQLCipher driver is importable. "
+            "On CPython manylinux x86-64, install it with: pip install "
+            "\"engraphis[encryption]\". On macOS, Windows, Linux ARM, or musl, "
+            "provision a compatible sqlcipher3 driver separately. Engraphis will not "
+            "fall back to plaintext."
+        ) from exc
 
     pragma = _key_pragma(key)
 

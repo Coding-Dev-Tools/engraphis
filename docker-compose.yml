@@ -17,7 +17,9 @@ services:
     # itself no longer bakes a host — its entrypoint defaults to `::` dual-stack).
     command: ["engraphis-dashboard", "--no-open"]
     ports:
-      - "8700:8700"
+      # Keep the zero-token quickstart reachable only from this machine. Do not widen
+      # this bind without first setting ENGRAPHIS_API_TOKEN in .env.
+      - "127.0.0.1:8700:8700"
     env_file:
       # Optional: a fresh clone has no .env (it's gitignored), and `docker compose up`
       # must still work using the `environment:` block below plus the shell env.
@@ -25,6 +27,9 @@ services:
         required: false
     environment:
       ENGRAPHIS_HOST: 0.0.0.0
+      # Docker NAT presents the host browser as a private bridge peer. This exception is
+      # safe only because the published host port above is loopback-only.
+      ENGRAPHIS_LOCAL_TRUSTED_PEERS: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7
       ENGRAPHIS_DB_PATH: /data/engraphis.db
       # Persist license/trial/machine-id/lease + the revocation registry on the volume.
       ENGRAPHIS_STATE_DIR: /data/.engraphis
@@ -42,7 +47,7 @@ services:
     command: ["engraphis-server"]
     profiles: ["api"]
     ports:
-      - "8701:8700"
+      - "127.0.0.1:8701:8700"
     env_file:
       - path: .env
         required: false

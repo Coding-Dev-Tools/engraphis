@@ -12,7 +12,7 @@ of each member running a local MCP server + syncing, one admin hosts a single in
 > **Pro solo?** Agent-connect (direct writes to a cloud instance via `/api/remember` or
 > `/mcp`) requires a **Team** license. If you're a Pro member hosting on Railway, your
 > agents run locally and sync to your Railway instance via cloud sync — activate the same
-> Pro key on each local instance, then set `ENGRAPHIS_RELAY_URL` to your Railway URL. See
+> Pro key on each local instance, then set `ENGRAPHIS_RELAY_URL` to your Railway deployment URL. See
 > [HOSTING_RAILWAY.md](./HOSTING_RAILWAY.md) for the Pro solo path.
 
 ## How it works
@@ -22,7 +22,7 @@ of each member running a local MCP server + syncing, one admin hosts a single in
    confirmation link.
 2. **Admin** creates the first account, then invites members (email + password + role).
    Each active user consumes a seat.
-3. **Member** signs in at the dashboard URL (e.g. `https://team.engraphis.com/`) with
+3. **Member** signs in at the dashboard URL (e.g. `https://memory.example.com/`) with
    email + password — no key and no local install. If the license later lapses, the
    authentication wall remains in place and existing users can still sign in.
 4. **Member** opens **Settings → Connect your agent → Create token** and copies the
@@ -51,7 +51,7 @@ Token management (requires a browser session):
 it first to confirm its token is valid and learn the base URL:
 
 ```bash
-curl -H "Authorization: Bearer <token>" https://team.engraphis.com/api/auth/connect-info
+curl -H "Authorization: Bearer <token>" https://memory.example.com/api/auth/connect-info
 ```
 
 ## The agent write/read API
@@ -85,12 +85,12 @@ curl -H "Authorization: Bearer <token>" https://team.engraphis.com/api/auth/conn
 Example:
 
 ```bash
-curl -X POST https://team.engraphis.com/api/remember \
+curl -X POST https://memory.example.com/api/remember \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"content":"Redis caches the gateway.","workspace":"default"}'
 
-curl "https://team.engraphis.com/api/recall?q=Redis&workspace=default" \
+curl "https://memory.example.com/api/recall?q=Redis&workspace=default" \
   -H "Authorization: Bearer <token>"
 ```
 
@@ -133,7 +133,7 @@ Agent config (streamable-http transport) — add to your MCP client:
 ```json
 {
   "engraphis": {
-    "url": "https://team.engraphis.com/mcp",
+    "url": "https://memory.example.com/mcp",
     "headers": { "Authorization": "Bearer <your-token>" }
   }
 }
@@ -145,7 +145,7 @@ whether it writes locally or to the cloud.
 
 **Security note:** MCP's built-in DNS-rebinding protection remains enabled. Loopback hosts
 remain allowed by default; a hosted deployment must set `ENGRAPHIS_DASHBOARD_URL` to its
-canonical public URL (for example, `https://team.engraphis.com`) so that exact Host and
+canonical public URL (for example, `https://memory.example.com`) so that exact Host and
 Origin are added to the transport allowlist. Requests with any other Host are rejected.
 The per-user bearer token is checked on every request, and dashboard roles carry through to
 tools: viewers may use read tools, members may use mutating tools, and consolidation,

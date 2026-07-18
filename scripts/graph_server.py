@@ -41,8 +41,10 @@ def main(argv=None) -> int:
     except ImportError as exc:
         raise SystemExit(
             "The server extra is required: pip install \"engraphis[server]\""
+            " (needs Python 3.10+)"
         ) from exc
-    uvicorn.run(create_read_only_app(token=token), host=args.host, port=args.port)
+    uvicorn.run(create_read_only_app(token=token), host=args.host, port=args.port,
+                proxy_headers=False)
     return 0
 
 

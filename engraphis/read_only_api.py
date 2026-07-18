@@ -1,7 +1,6 @@
 """Small read-only HTTP surface for shared recall and repository-graph queries."""
 from __future__ import annotations
 
-import hmac
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
@@ -9,6 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from engraphis.config import settings
+from engraphis.inspector.auth import bearer_ok
 from engraphis.service import MemoryService, ValidationError
 
 
@@ -45,15 +45,16 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
         extractor=settings.extractor,
     )
     expected = str(token or "")
-    app = FastAPI(title="Engraphis Read-Only Graph API", version="1")
+    app = FastAPI(
+        title="Engraphis Read-Only Graph API", version="1",
+        docs_url=None, redoc_url=None,
+    )
 
     @app.middleware("http")
     async def authorize(request, call_next):
-        if expected and request.url.path not in {"/health", "/docs", "/openapi.json"}:
+        if expected and request.url.path not in {"/health", "/openapi.json"}:
             supplied = request.headers.get("authorization", "")
-            if not supplied.startswith("Bearer ") or not hmac.compare_digest(
-                supplied[7:], expected
-            ):
+            if not bearer_ok(supplied, expected):
                 return JSONResponse(
                     {"detail": "invalid bearer token"}, status_code=401
                 )
@@ -130,4 +131,6 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
             expected_head=expected_head, expected_count=expected_count,
         )
 
+    from engraphis import http_security
+    http_security.install(app)
     return app
