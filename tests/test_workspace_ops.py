@@ -517,3 +517,32 @@ def test_reorder_rejects_empty_foreign_and_oversized():
         svc.reorder_memories([str(i) for i in range(1001)], workspace="a")  # > 1000
     # the valid id alone still works (control)
     assert svc.reorder_memories([a], workspace="a")["reordered"] == 1
+
+
+# ── inspect() supersession chain — workspace isolation ─────────────────────────
+def test_inspect_chain_forward_pointer_does_not_cross_workspace():
+    """metadata is caller-supplied and reaches storage intact, so a writer in
+    workspace b can plant metadata.supersedes naming an id it doesn't own. inspect()
+    only _check_owns'd the root id; the forward LIKE scan (_successor_of) had no
+    workspace filter, so b's record rode the forged pointer into a's chain."""
+    svc = _svc()
+    a_id = svc.remember("Workspace A secret fact.", workspace="a",
+                        scope="workspace")["id"]
+    svc.remember("Forged successor claiming to supersede A's memory.", workspace="b",
+                scope="workspace", metadata={"supersedes": [a_id]})
+
+    result = svc.inspect(a_id, workspace="a")
+    assert {m["id"] for m in result["chain"]} == {a_id}
+
+
+def test_inspect_chain_backward_pointer_does_not_cross_workspace():
+    """Same boundary on the backward walk: a's own record forges a supersedes
+    pointer naming a real memory that belongs to workspace b."""
+    svc = _svc()
+    b_id = svc.remember("Workspace B fact.", workspace="b", scope="workspace")["id"]
+    forged_id = svc.remember("A's record forging a backward pointer into B.",
+                             workspace="a", scope="workspace",
+                             metadata={"supersedes": [b_id]})["id"]
+
+    result = svc.inspect(forged_id, workspace="a")
+    assert {m["id"] for m in result["chain"]} == {forged_id}

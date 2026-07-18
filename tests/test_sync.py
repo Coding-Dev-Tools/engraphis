@@ -6,6 +6,7 @@ hashing embedder + NumPy index, per AGENTS.md §7).
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 
@@ -22,6 +23,7 @@ from engraphis.core.sync import (
     SyncEngine,
     SyncError,
     _signature,
+    _version_key,
     dict_to_record,
     merge_record,
     record_to_dict,
@@ -695,3 +697,285 @@ def test_deeply_nested_json_does_not_crash_sync_decoding(tmp_path):
     report = sa.sync(get_transport("folder", root=str(root)), wa)
     assert report["totals"]["added"] == 0
     assert any(x.get("bundle") == "bundle-dev_nested.json" and x.get("error") == "unreadable" for x in report["applied"])
+
+
+# ── regression: merge_record must be idempotent (ingested_at is LWW, not a lattice) ──
+
+def test_merge_takes_the_winners_ingested_at():
+    """``ingested_at`` is in _LWW_FIELDS and is the version key's second component.
+
+    Merging it as a min-lattice made _version_key(merged) < _version_key(winner), so a
+    replayed bundle re-ran LWW from a lowered key and fell through to the content-hash
+    tiebreak — silently reverting the later edit.
+    """
+    a = MemoryRecord(id="mem_1", content="old", last_access=100.0, ingested_at=50.0)
+    b = MemoryRecord(id="mem_1", content="new", last_access=200.0, ingested_at=10.0)
+
+    merged = merge_record(a, b)
+
+    assert merged.content == "new"                    # higher last_access wins
+    assert merged.ingested_at == b.ingested_at        # ...and brings its own ingested_at
+    assert _version_key(merged) == _version_key(b)    # merged IS the winner, key and all
+
+
+@pytest.mark.parametrize(
+    ("la_a", "ing_a", "la_b", "ing_b"),
+    [
+        (100.0, 50.0, 200.0, 10.0),    # incoming wins on last_access, lower ingested_at
+        (200.0, 10.0, 100.0, 50.0),    # local wins on last_access, lower ingested_at
+        (100.0, 10.0, 100.0, 50.0),    # tie on last_access, decided by ingested_at
+        (100.0, 50.0, 100.0, 50.0),    # full tie, decided by the content hash
+        (None, None, 100.0, 10.0),     # null clocks on one side
+    ],
+)
+def test_merge_is_idempotent_for_unequal_ingested_at(la_a, ing_a, la_b, ing_b):
+    a = MemoryRecord(id="mem_1", content="alpha", last_access=la_a, ingested_at=ing_a)
+    b = MemoryRecord(id="mem_1", content="beta", last_access=la_b, ingested_at=ing_b)
+
+    once = merge_record(a, b)
+    # merge(merge(a, b), b) == merge(a, b), in both argument orders (the docstring's claim)
+    assert _signature(merge_record(once, b)) == _signature(once)
+    assert _signature(merge_record(b, once)) == _signature(once)
+    assert _signature(merge_record(once, a)) == _signature(once)
+    # ...and the merge result carries the winner's version key exactly
+    winner = a if _version_key(a) >= _version_key(b) else b
+    assert _version_key(once) == _version_key(winner)
+
+
+@pytest.mark.parametrize("remote_content", ["first", "zzz", "aaa", "payload", "0"])
+def test_replaying_a_bundle_reports_all_unchanged(remote_content):
+    """apply_bundle's contract: 'applying the same bundle twice reports the second as
+    all-unchanged'. Existing coverage only used equal ingested_at values, which hid the
+    min-lattice bug entirely.
+
+    Setup: the LOCAL row wins last-writer-wins (tie on last_access, higher ingested_at),
+    while the remote carries a LOWER ingested_at. Under the min-lattice the merged row
+    kept the remote's lower ingested_at, so the merged version key dropped below the
+    remote's and the next replay was decided by the content-hash tiebreak — reverting the
+    local content whenever the remote's hash happened to sort higher. Sweeping several
+    remote payloads exercises both sides of that comparison.
+    """
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    syncer = SyncEngine(store)
+    store.add_memory(MemoryRecord(id="mem_a", content="local", workspace_id=wid,
+                                  last_access=100.0, ingested_at=90.0, valid_from=1.0))
+    # valid_from is set explicitly, exactly as export_bundle/record_to_dict emit it:
+    # Store.add_memory defaults a missing valid_from to now(), so a hand-written bundle
+    # that omits it never matches what was stored and can never converge.
+    bundle = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
+        "memories": [
+            {"id": "mem_a", "content": remote_content, "valid_from": 1.0,
+             "last_access": 100.0, "ingested_at": 5.0},
+            {"id": "mem_b", "content": "second", "valid_from": 1.0,
+             "last_access": 50.0, "ingested_at": 10.0},
+        ],
+        "mem_links": [{"a": "mem_a", "b": "mem_b", "relation": "related"}],
+    }
+
+    first = syncer.apply_bundle(bundle)
+    winner = store.get_memory("mem_a").content
+    second = syncer.apply_bundle(bundle)
+    third = syncer.apply_bundle(bundle)
+
+    # The merged row keeps the LWW winner's ingested_at, not min(local, remote).
+    assert store.get_memory("mem_a").ingested_at == 90.0
+    assert winner == "local"                                # local won LWW
+    assert first["unchanged"] == 1 and first["added"] == 1   # mem_a no-op, mem_b new
+    assert second["added"] == second["updated"] == 0
+    assert second["unchanged"] == 2
+    assert third["updated"] == 0
+    assert store.get_memory("mem_a").content == winner       # never reverts on replay
+
+
+# ── regression: apply_bundle must not be N+1 with a commit per row ────────────
+
+def _bundle(n, *, links=()):
+    return {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
+        "memories": [{"id": "mem_%d" % i, "content": "c%d" % i, "last_access": 1.0,
+                      "valid_from": 1.0} for i in range(n)],
+        "mem_links": list(links),
+    }
+
+
+def test_apply_bundle_commits_per_batch_not_per_row(monkeypatch):
+    from engraphis.core import store as store_mod
+    from engraphis.core import sync as sync_mod
+
+    store = Store(":memory:")
+    store.get_or_create_workspace("w")          # pre-create so its commit isn't counted
+    syncer = SyncEngine(store)
+    monkeypatch.setattr(sync_mod, "APPLY_BATCH", 2)
+    commits = []
+    real_commit = store_mod._SerializedConnection.commit
+
+    def spy(self):
+        commits.append(1)
+        return real_commit(self)
+
+    monkeypatch.setattr(store_mod._SerializedConnection, "commit", spy)
+
+    report = syncer.apply_bundle(_bundle(5))
+
+    assert report["added"] == 5
+    # 3 (ceil(5/2) memory batches) + 1 (final links commit). The old per-row path paid a
+    # commit per add_memory AND one per audit row — 10 for the same bundle.
+    assert len(commits) == 4
+
+
+def test_apply_bundle_uses_one_batched_lookup_instead_of_get_memory_per_row(monkeypatch):
+    store = Store(":memory:")
+    syncer = SyncEngine(store)
+    calls = []
+    monkeypatch.setattr(store, "get_memory",
+                        lambda mid: calls.append(mid))          # must never be reached
+
+    report = syncer.apply_bundle(_bundle(20))
+
+    assert report["added"] == 20
+    assert calls == []
+
+
+def test_apply_bundle_sees_a_duplicate_id_within_one_batch():
+    """The batched existence lookup must write through, or the second copy of an id in
+    the same bundle would merge against a stale pre-write row."""
+    store = Store(":memory:")
+    bundle = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
+        "memories": [
+            {"id": "mem_dup", "content": "first", "last_access": 10.0},
+            {"id": "mem_dup", "content": "second", "last_access": 20.0},
+        ],
+        "mem_links": [],
+    }
+
+    report = SyncEngine(store).apply_bundle(bundle)
+
+    assert report["added"] == 1                       # the 2nd is an update, not an add
+    assert report["updated"] == 1
+    assert store.get_memory("mem_dup").content == "second"
+
+
+def test_apply_bundle_failure_keeps_committed_batches_and_frees_the_connection(monkeypatch):
+    """Preserve the old partial-apply semantics: a failure part-way through must not
+    silently roll back the rows that already applied, and must never leave the shared
+    connection pinned in an open transaction (that would stall every other thread)."""
+    from engraphis.core import sync as sync_mod
+
+    store = Store(":memory:")
+    syncer = SyncEngine(store)
+    monkeypatch.setattr(sync_mod, "APPLY_BATCH", 2)
+    real_write = syncer._write
+
+    def exploding_write(rec, *, commit=True):
+        if rec.id == "mem_4":
+            raise RuntimeError("disk on fire")
+        return real_write(rec, commit=commit)
+
+    monkeypatch.setattr(syncer, "_write", exploding_write)
+
+    with pytest.raises(RuntimeError, match="disk on fire"):
+        syncer.apply_bundle(_bundle(6))
+
+    assert store.get_memory("mem_0") is not None      # committed batches survive
+    assert store.get_memory("mem_1") is not None
+    assert store.get_memory("mem_5") is None          # never reached
+    assert store.conn.in_transaction is False         # no dangling pinned transaction
+    store.create_workspace("still-usable")            # the connection is not deadlocked
+
+
+# ── regression: one bad bundle must not kill the rest of the sync round ───────
+
+class _FlakyTransport:
+    """Mimics RelayTransport.pull(): a generator that raises part-way through the round
+    (a relay 404 on a bundle deleted mid-round, an oversized blob, ...)."""
+
+    def __init__(self, *bundles, fail_after=1):
+        self.bundles = bundles
+        self.fail_after = fail_after
+        self.pushed = []
+
+    def push(self, name, data):
+        self.pushed.append(name)
+
+    def pull(self):
+        for i, (name, data) in enumerate(self.bundles):
+            if i == self.fail_after:
+                raise RuntimeError("relay request failed (404): %s" % name)
+            yield name, data
+
+
+def _peer_bundle(device, mem_id):
+    return json.dumps({
+        "format": SYNC_FORMAT, "version": 1, "device_id": device,
+        "workspace_name": "w", "repos": {},
+        "memories": [{"id": mem_id, "content": "from %s" % device, "last_access": 5.0}],
+        "mem_links": [],
+    }).encode("utf-8")
+
+
+def test_sync_round_survives_a_transport_failure_mid_round():
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    transport = _FlakyTransport(
+        ("bundle-peer1.json", _peer_bundle("dev_peer1", "mem_p1")),
+        ("bundle-peer2.json", _peer_bundle("dev_peer2", "mem_p2")),
+        fail_after=1,
+    )
+
+    result = SyncEngine(store).sync(transport, wid)   # must NOT raise
+
+    assert store.get_memory("mem_p1") is not None     # the good bundle still applied
+    assert result["totals"]["added"] == 1
+    # The round is explicitly NOT a success: bundles were dropped.
+    assert result["complete"] is False
+    assert len(result["errors"]) == 1
+    assert "transport" in result["errors"][0]["error"]
+    assert result["peers_applied"] == 1
+
+
+def test_sync_round_reports_incomplete_when_a_bundle_is_refused():
+    """Fail-closed is preserved: a bundle apply_bundle refuses is still refused, and the
+    round must not report success just because the other bundles landed."""
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    bad = json.dumps({"format": SYNC_FORMAT, "version": 99, "device_id": "dev_bad",
+                      "workspace_name": "w", "repos": {},
+                      "memories": [], "mem_links": []}).encode("utf-8")
+
+    class _Transport:
+        def push(self, name, data):
+            pass
+
+        def pull(self):
+            return [("bundle-peer1.json", _peer_bundle("dev_peer1", "mem_p1")),
+                    ("bundle-bad.json", bad)]
+
+    result = SyncEngine(store).sync(_Transport(), wid)
+
+    assert store.get_memory("mem_p1") is not None
+    assert result["complete"] is False
+    assert result["peers_applied"] == 1
+    assert any("unsupported bundle version" in e["error"] for e in result["errors"])
+
+
+def test_sync_round_is_complete_when_every_bundle_applies():
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+
+    class _Transport:
+        def push(self, name, data):
+            pass
+
+        def pull(self):
+            return [("bundle-peer1.json", _peer_bundle("dev_peer1", "mem_p1")),
+                    ("bundle-peer2.json", _peer_bundle("dev_peer2", "mem_p2"))]
+
+    result = SyncEngine(store).sync(_Transport(), wid)
+
+    assert result["complete"] is True
+    assert result["errors"] == []
+    assert result["peers_applied"] == 2
+    assert result["totals"]["added"] == 2

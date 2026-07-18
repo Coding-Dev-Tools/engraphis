@@ -32,8 +32,19 @@ def _json(value) -> None:
     print(json.dumps(value, indent=2, ensure_ascii=True, default=str))
 
 
+# Revisions reach _git_files from agent-controlled input (impact --git-range,
+# prs --base/--head/--conflicts-with); a value that makes `git diff` hang — a huge
+# diff, a repo-local .gitconfig external diff driver or pager, a submodule credential
+# prompt — must not block the process indefinitely.
+_GIT_TIMEOUT_S = 30
+
+
 def _git_files(root: str, revision: str) -> list[str]:
-    cmd = ["git", "-C", str(Path(root).resolve()), "diff", "--name-only"]
+    cmd = [
+        "git", "-C", str(Path(root).resolve()),
+        "-c", "core.pager=cat", "-c", "pager.diff=cat",
+        "diff", "--no-ext-diff", "--name-only",
+    ]
     if revision:
         # The revision sits BEFORE the ``--`` separator, so git would parse a
         # leading-dash value as an option (e.g. ``--output=<file>`` writes an
@@ -42,7 +53,11 @@ def _git_files(root: str, revision: str) -> list[str]:
             raise ValidationError(f"invalid git revision {revision!r}")
         cmd.append(revision)
     cmd.append("--")
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False,
+                                timeout=_GIT_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise ValidationError(f"git diff timed out after {_GIT_TIMEOUT_S}s")
     if result.returncode:
         raise ValidationError(result.stderr.strip() or "git diff failed")
     return [line.strip().replace("\\", "/") for line in result.stdout.splitlines()
@@ -456,14 +471,17 @@ def _install_merge_driver(args) -> None:
         else graph_path
     )
     rule = f"{pattern} merge=engraphis-graph"
-    subprocess.run([
-        "git", "-C", str(root), "config", "merge.engraphis-graph.name",
-        "Engraphis code graph union merge",
-    ], check=True)
-    subprocess.run([
-        "git", "-C", str(root), "config", "merge.engraphis-graph.driver",
-        f'"{sys.executable}" -m scripts.graph_cli merge "%O" "%A" "%B"',
-    ], check=True)
+    try:
+        subprocess.run([
+            "git", "-C", str(root), "config", "merge.engraphis-graph.name",
+            "Engraphis code graph union merge",
+        ], check=True, timeout=_GIT_TIMEOUT_S)
+        subprocess.run([
+            "git", "-C", str(root), "config", "merge.engraphis-graph.driver",
+            f'"{sys.executable}" -m scripts.graph_cli merge "%O" "%A" "%B"',
+        ], check=True, timeout=_GIT_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise ValidationError(f"git config timed out after {_GIT_TIMEOUT_S}s")
     if rule not in current.splitlines():
         _atomic_write_text(
             attributes,

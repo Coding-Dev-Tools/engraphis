@@ -395,6 +395,137 @@ def test_profiles_do_not_match_entity_names_inside_other_words():
     assert report["profiles_created"] == []
 
 
+# ── safety inheritance: a digest may not launder its sources ────────────────────────
+#
+# Every consolidation write quotes source text verbatim, but ``engine.remember()`` takes
+# no ``sensitivity`` argument and defaults ``provenance.trusted`` to True. Since
+# ``SyncEngine.export_bundle`` filters on ``sensitivity != 'secret'``, an un-inherited
+# digest would ferry secret quotes to every other machine — and hand a poisoned source's
+# text a trusted label. ``merge``/``correct``/``promote`` already inherit; these pin the
+# consolidation paths to the same rule.
+
+def _cluster_with_one_secret_untrusted_source():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    ids = []
+    for run in (101, 202, 303):
+        ids.append(eng.remember(
+            f"Build failed on the flaky network integration test in CI run {run}.",
+            workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC,
+            metadata={"provenance": {"trusted": False}} if run == 202 else None,
+            resolve_conflicts=False))
+    eng.store.conn.execute(
+        "UPDATE memories SET sensitivity='secret' WHERE id=?", (ids[0],))
+    eng.store.conn.commit()
+    return eng, wid, rid, ids
+
+
+def test_digest_inherits_strictest_sensitivity_and_trust_of_its_sources():
+    eng, wid, rid, ids = _cluster_with_one_secret_untrusted_source()
+
+    report = consolidate(eng, workspace_id=wid, repo_id=rid)
+
+    digest = eng.store.get_memory(report["digests_created"][0]["id"])
+    # The laundering channel is real: the secret source is quoted verbatim.
+    assert "CI run 101" in digest.content
+    assert digest.sensitivity == "secret", "a digest quoting secret sources must not sync"
+    assert digest.provenance.get("trusted") is False
+    assert digest.metadata["provenance"]["trusted"] is False
+    # Inheritance must not clobber the provenance the digest already carries.
+    assert digest.metadata["provenance"]["source"] == "consolidation"
+    assert set(digest.metadata["provenance"]["consolidates"]) == set(ids)
+
+
+def test_profile_digest_inherits_strictest_sensitivity_and_trust():
+    from engraphis.core.consolidate import consolidate_profiles
+
+    eng, wid, rid, name = _engine_with_entity_mentions()
+    source = eng.store.list_memories(SearchFilter(workspace_id=wid), limit=100)[0]
+    eng.store.conn.execute(
+        "UPDATE memories SET sensitivity='sensitive', provenance='{\"trusted\": false}' "
+        "WHERE id=?", (source.id,))
+    eng.store.conn.commit()
+
+    report = consolidate_profiles(eng, workspace_id=wid, repo_id=rid)
+
+    profile = eng.store.get_memory(report["profiles_created"][0]["id"])
+    assert profile.sensitivity == "sensitive"
+    assert profile.provenance.get("trusted") is False
+    assert profile.metadata["provenance"]["source"] == "profile_consolidation"
+
+
+def test_inference_digest_stays_untrusted_when_every_source_is_trusted():
+    """The tightening is one-way: inheritance can never *raise* trust back to True."""
+    from engraphis.core.consolidate import infer_links
+    from engraphis.core.interfaces import Node
+
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    eng.remember("Aurora tuned the Postgres vacuum settings on the billing shard.",
+                 workspace_id=wid, repo_id=rid, mtype=MemoryType.SEMANTIC,
+                 resolve_conflicts=False)
+    secret = eng.remember(
+        "Aurora keeps the pager rotation spreadsheet in a private drive folder.",
+        workspace_id=wid, repo_id=rid, mtype=MemoryType.SEMANTIC,
+        resolve_conflicts=False)
+    eng.store.conn.execute(
+        "UPDATE memories SET sensitivity='secret' WHERE id=?", (secret,))
+    eng.store.conn.commit()
+    eng.store.upsert_entity(Node(
+        id="", name="Aurora", ntype="person", workspace_id=wid, repo_id=rid))
+
+    report = infer_links(eng, workspace_id=wid, repo_id=rid, dry_run=False)
+
+    assert report["links_created"], "fixture must bridge two dissimilar clusters"
+    inferred = eng.store.get_memory(report["links_created"][0]["id"])
+    assert inferred.provenance.get("trusted") is False
+    assert inferred.sensitivity == "secret"
+
+
+# ── scan-limit regression: the type filter must run in SQL, not in Python ───────────
+#
+# ``store.list_memories`` truncates with ``ORDER BY ingested_at DESC LIMIT n``. Filtering
+# by ``mtype`` afterwards means that once the newest n rows are all of the wrong type,
+# every pass sees zero candidates and reports a clean, empty sweep — a silent wrong
+# answer rather than an error. These shrink the budget instead of writing 2000 rows.
+
+def test_distill_pass_sees_episodics_behind_newer_semantic_rows(monkeypatch):
+    from engraphis.core import consolidate as consolidate_module
+
+    monkeypatch.setattr(consolidate_module, "DISTILL_SCAN_LIMIT", 4)
+    eng, wid, rid = _engine_with_repeats()          # 4 episodic rows, 3 of them a cluster
+    for n in range(6):                              # …then bury them under newer rows
+        eng.remember(f"Durable architecture note {n} about module layout.",
+                     workspace_id=wid, repo_id=rid, mtype=MemoryType.SEMANTIC,
+                     resolve_conflicts=False)
+
+    report = consolidate(eng, workspace_id=wid, repo_id=rid)
+
+    assert len(report["digests_created"]) == 1, "old code truncated to 6 semantic rows"
+
+
+def test_archive_pass_sees_transients_behind_newer_semantic_rows(monkeypatch):
+    from engraphis.core import consolidate as consolidate_module
+
+    monkeypatch.setattr(consolidate_module, "DISTILL_SCAN_LIMIT", 3)
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    stale = eng.remember("Scratch note from an old session.", workspace_id=wid,
+                         mtype=MemoryType.WORKING, resolve_conflicts=False)
+    eng.store.conn.execute("UPDATE memories SET stability=0.01, last_access=? WHERE id=?",
+                           (time.time() - 86_400, stale))
+    eng.store.conn.commit()
+    for n in range(5):
+        eng.remember(f"Durable architecture note {n}.", workspace_id=wid,
+                     mtype=MemoryType.SEMANTIC, resolve_conflicts=False)
+
+    report = consolidate(eng, workspace_id=wid)
+
+    assert [row["id"] for row in report["archived"]] == [stale]
+
+
 # ── scheduled report artifact (scripts/consolidate.py --report, Team-gated) ──────────
 
 from engraphis import licensing as _lic  # noqa: E402

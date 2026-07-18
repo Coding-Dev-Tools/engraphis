@@ -60,6 +60,57 @@ def _team_key(seats=5):
                         "expires": int(time.time() + 365 * 86400)}, _SECRET)
 
 
+# ── a broken team mount must not degrade into "no auth at all" ────────────────────────
+# `except Exception: pass` around v2_team.attach left team_enabled=False/auth_store=None,
+# which makes _auth_gate skip the ENTIRE role layer and personal-folder isolation
+# (set_current_user is never called) and fall back to one shared API token — silently.
+
+def _dashboard_module(monkeypatch, tmp_path):
+    """Settings for building create_app() directly, with dashboard_app imported FIRST.
+
+    That ordering is load-bearing: the module runs ``app = create_app()`` at import
+    scope, so if the first import is the one we deliberately break, Python discards the
+    half-initialized module and re-runs that module-level construction on the next
+    import — polluting later tests instead of testing anything. Import while healthy,
+    break afterwards, then call create_app() ourselves.
+    """
+    monkeypatch.setattr(settings, "db_path", str(tmp_path / "dash.db"))
+    monkeypatch.setattr(settings, "embed_model", "")
+    monkeypatch.setenv("ENGRAPHIS_EMBED_MODEL", "")
+    monkeypatch.setattr(settings, "api_token", "")
+    monkeypatch.setattr(lic, "_LICENSE_FILE", tmp_path / "license.key")
+    monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY", raising=False)
+    lic.current_license(refresh=True)
+    from engraphis import dashboard_app
+    return dashboard_app
+
+
+def _break_team_attach(monkeypatch):
+    from engraphis.routes import v2_team
+    monkeypatch.setattr(v2_team, "attach", lambda app, svc: (_ for _ in ()).throw(
+        RuntimeError("users DB is unreadable")))
+
+
+def test_team_attach_failure_is_fatal_when_team_mode_is_configured(monkeypatch, tmp_path):
+    dashboard_app = _dashboard_module(monkeypatch, tmp_path)
+    _break_team_attach(monkeypatch)
+    monkeypatch.setattr(settings, "team_mode", True)
+    with pytest.raises(RuntimeError, match="users DB is unreadable"):
+        dashboard_app.create_app()
+
+
+def test_team_attach_failure_is_logged_even_when_team_mode_is_off(monkeypatch, tmp_path,
+                                                                  caplog):
+    dashboard_app = _dashboard_module(monkeypatch, tmp_path)
+    _break_team_attach(monkeypatch)
+    monkeypatch.setattr(settings, "team_mode", False)
+    with caplog.at_level("ERROR", logger="engraphis"):
+        app = dashboard_app.create_app()           # still boots: team stays optional
+    with TestClient(app) as c:
+        assert c.get("/api/health").status_code == 200
+    assert any("team auth failed to mount" in r.message for r in caplog.records)
+
+
 def test_dashboard_serves_and_bootstraps(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as c:
         # / serves the unified dashboard — the standalone Inspector was retired into it

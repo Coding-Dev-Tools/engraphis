@@ -61,9 +61,15 @@ class RecallEngine:
         graph = self._graph_arm(query, flt, now)                       # id -> weight
 
         # ── gather candidates and enforce visibility defensively ─────────────
+        # Sorted, not raw set order: a set of ids iterates in hash order, which varies with
+        # PYTHONHASHSEED, so equal-scored results used to come back in a different order in
+        # every process. Sorting here (and on the final sort below) makes recall reproducible.
+        # One batched lookup replaces ~150 single-row get_memory() calls per recall.
+        candidate_ids = sorted(set(vec) | set(lex) | set(graph))
+        fetched = self.store.get_memories(candidate_ids)
         recs: dict[str, MemoryRecord] = {}
-        for mid in set(vec) | set(lex) | set(graph):
-            rec = self.store.get_memory(mid)
+        for mid in candidate_ids:
+            rec = fetched.get(mid)
             if rec and memory_matches_filter(rec, flt, at=now):
                 recs[mid] = rec
         if not recs:
@@ -88,7 +94,8 @@ class RecallEngine:
             arm = "semantic" if mid in vec else ("lexical" if mid in lex else "graph")
             scored.append(Candidate(id=mid, score=base + 0.5 * rrf.get(mid, 0.0),
                                     arm=arm, record=rec))
-        scored.sort(key=lambda c: c.score, reverse=True)
+        # Tie-break on id so equal scores get a stable, process-independent order.
+        scored.sort(key=lambda c: (-c.score, c.id))
 
         # ── rerank top-N, keep k ─────────────────────────────────────────────
         pool = scored[: max(k * 4, k)]
@@ -220,4 +227,6 @@ def _entity_pattern(name: str) -> re.Pattern[str]:
 
 
 def _ranked(arm: dict[str, float], recs: dict) -> list[str]:
-    return [i for i, _ in sorted(arm.items(), key=lambda x: -x[1]) if i in recs]
+    # Tie-break on id: RRF depends on rank position, so equal arm scores must not order
+    # differently between runs (they feed the final score).
+    return [i for i, _ in sorted(arm.items(), key=lambda x: (-x[1], x[0])) if i in recs]
