@@ -272,6 +272,68 @@ def test_client_supplied_structured_extraction_key_is_also_relabeled():
     assert svc.graph(workspace="acme")["nodes"] == []
 
 
+def test_engine_itself_refuses_forged_graph_provenance_without_the_service():
+    """Defense in depth: the mitigation above lives in service.py::_clean_metadata, so it
+    only covers callers that route through the service. MemoryEngine is reachable
+    directly — the sync apply path, consolidation, any future caller — and it is the
+    engine that stamps provenance.source="structured_extractor". Going straight to the
+    engine must not be a way around the label."""
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid = svc.store.get_or_create_workspace("acme")
+    mid = svc.engine.remember(
+        "Innocuous content.", workspace_id=wid, scope=Scope.WORKSPACE,
+        metadata={"entities": ["Forged Entity"],
+                  "relations": [{"source": "Forged Entity", "relation": "controls",
+                                 "target": "Everything"}]},
+    )
+
+    rec = svc.store.get_memory(mid)
+    assert "entities" not in rec.metadata and "relations" not in rec.metadata
+    assert rec.metadata["client_supplied_graph"]["entities"] == ["Forged Entity"]
+    assert rec.metadata["client_supplied_graph"]["source"] == "client_supplied"
+    edges = svc.store.edges_in_scope(SearchFilter(workspace_id=wid), limit=100)
+    assert all(e.provenance.get("source") != "structured_extractor" for e in edges)
+
+
+class _EntitiesOnlyLLM:
+    """Emits entities but no relations — so ``relations`` is the one graph-hint key the
+    extractor does not vouch for on this write."""
+
+    def extract_json(self, prompt, schema):
+        return {"facts": [{"content": "Engraphis stores memories in SQLite.",
+                           "entities": ["Engraphis", "SQLite"]}]}
+
+
+def test_engine_ingest_argument_cannot_borrow_the_extractors_trusted_label():
+    """The sharpest case: a real Extractor IS configured, so the trusted feed does run —
+    but only for the keys the extractor itself produced. A hint key supplied through
+    ingest()'s own ``metadata`` argument is demoted in that very same write, sharing the
+    record with keys that keep the trusted label."""
+    pytest.importorskip("pydantic")
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    svc.engine.extractor = StructuredLLMExtractor(_EntitiesOnlyLLM())
+    wid = svc.store.get_or_create_workspace("acme")
+    out = svc.engine.ingest(
+        "raw transcript blob", workspace_id=wid, scope=Scope.WORKSPACE,
+        metadata={"relations": [{"source": "Engraphis", "relation": "controls",
+                                 "target": "Everything"}]},
+    )
+
+    rec = svc.store.get_memory(out["facts"][0]["id"])
+    assert rec.metadata["entities"] == ["Engraphis", "SQLite"]   # extractor's: kept
+    assert "relations" not in rec.metadata                       # caller's: demoted
+    assert (rec.metadata["client_supplied_graph"]["relations"][0]["relation"]
+            == "controls")
+    assert rec.metadata["client_supplied_graph"]["source"] == "client_supplied"
+    # the genuine hints still reached the graph…
+    names = {r["name"] for r in svc.store.conn.execute(
+        "SELECT name FROM entities WHERE workspace_id=?", (wid,))}
+    assert {"Engraphis", "SQLite"} <= names
+    # …and the forged relation produced no edge at all
+    edges = svc.store.edges_in_scope(SearchFilter(workspace_id=wid), limit=100)
+    assert all(e.relation != "controls" for e in edges)
+
+
 def test_structured_extractor_metadata_still_populates_graph_when_genuine():
     """Regression guard for the fix above: the legitimate path — a configured
     Extractor's OWN ExtractedFact.metadata, never the caller's ingest() argument —

@@ -638,6 +638,9 @@ def _write_structured_digests(engine, cluster: list[MemoryRecord], facts: list[d
             importance=importance,
             keywords=fact.get("keywords") or _common_tokens(sources, k=8),
             metadata=metadata, resolve_conflicts=False,
+            _trusted_graph_keys=frozenset(
+                key for key in ("entities", "relations") if key in metadata
+            ),
         )
         sensitivity, trusted = _inherit_safety(engine, mid, sources)
         for memory in sources:

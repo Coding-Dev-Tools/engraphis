@@ -174,6 +174,10 @@ def test_structured_consolidation_writes_typed_fact_graph_and_can_supersede_sour
     pytest.importorskip("pydantic")
     eng, wid, rid = _engine_with_auth_repeats()
     llm = _StructuredConsolidationLLM()
+    # Called as the module function on purpose: the entities/relations below survive only
+    # because _write_structured_digests vouches for them explicitly (_trusted_graph_keys).
+    # If that vouch is ever dropped, the engine demotes them as caller-supplied metadata
+    # and the graph assertions below fail — see core/engine.py::_rehome_untrusted_graph_hints.
     report = consolidate(eng, workspace_id=wid, repo_id=rid, structured=True,
                          supersede_sources=True, llm=llm)
 

@@ -108,3 +108,32 @@ class TestPolarWebhook:
         )
         assert r.status_code == 500
         assert "fulfillment failed" in r.json()["error"].lower()
+
+
+class TestTeamInviteEmailCopy:
+    """Viewers are never sent the shared Team key (they hold no seat), and neither is
+    anyone on an instance without a Team license — so the keyless invite must not read
+    like half of a two-part email."""
+
+    def _text(self, key=""):
+        from engraphis.inspector.webhooks import _team_invite_email_text
+        return _team_invite_email_text(
+            "Dana", "viewer", "https://team.example", invited_by="Admin",
+            key=key, to="dana@example.com")
+
+    def test_keyless_invite_never_advertises_a_missing_second_option(self):
+        text = self._text()
+        assert "two ways" not in text
+        assert "OPTION" not in text            # nothing to number against
+        assert "the second is optional" not in text
+        assert "license key" not in text.split("Sign in to the team dashboard")[0]
+        # the one path that does exist is still fully described
+        assert "Sign in to the team dashboard" in text
+        assert "dana@example.com" in text and "https://team.example" in text
+
+    def test_keyed_invite_still_renders_both_options(self):
+        text = self._text(key="ENG-TEAM-KEY")
+        assert "two ways" in text and "the second is optional" in text
+        assert "OPTION 1 (required to join the team)" in text
+        assert "OPTION 2 (optional)" in text
+        assert "ENG-TEAM-KEY" in text

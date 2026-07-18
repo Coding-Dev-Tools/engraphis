@@ -710,11 +710,11 @@ body{
 <div class="field"><label class="field-lbl" for="folder-description">Description <span style="font-weight:400">(optional)</span></label><input class="input" id="folder-description" autocomplete="off" placeholder="What belongs here"></div>
 <fieldset style="border:0"><legend class="field-lbl">Who can access this folder?</legend>
 <div class="folder-access-grid" id="folder-access-help">
-<label class="folder-access-option"><input type="radio" name="folder-visibility" value="personal" onchange="updateFolderCreateButton()"><span><strong>Personal and private</strong><span>Only you can see and use this folder.</span></span></label>
+<label class="folder-access-option"><input type="radio" name="folder-visibility" value="personal" checked onchange="updateFolderCreateButton()"><span><strong>Personal and private</strong><span>Only you can see and use this folder.</span></span></label>
 <label class="folder-access-option"><input type="radio" name="folder-visibility" value="shared" onchange="updateFolderCreateButton()"><span><strong>Shared with team</strong><span>Every team member can see and use this folder.</span></span></label>
 </div>
 </fieldset>
-<div class="field-hint" id="folder-create-status" role="status" aria-live="polite" style="margin-top:var(--space-2)">Choose one access level. Nothing is selected automatically.</div>
+<div class="field-hint" id="folder-create-status" role="status" aria-live="polite" style="margin-top:var(--space-2)">Personal and private is selected by default. Sharing requires confirmation.</div>
 </div>
 <div class="mm-actions"><button class="btn btn-ghost" onclick="closeFolderCreate()">Cancel</button><button class="btn btn-primary" id="folder-create-submit" onclick="submitFolderCreate()" disabled>Create folder</button></div>
 </div>
@@ -1046,7 +1046,7 @@ function canCreateWs(){return !TEAM_USER||TEAM_USER.role==='member'||TEAM_USER.r
    Folder creation and privacy selection stay available in Workspaces even in team mode. */
 function folderCardName(el){const card=el.closest('.vault-card');return card?card.dataset.workspace:''}
 function folderOpen(el){const card=el.closest('.vault-card');if(!card)return;const name=card.dataset.workspace;if(card.dataset.open==='tfOpen')tfOpen(name);else wsSwitch(name)}
-function folderCardHtml(w,opts){opts=opts||{};const manage=opts.manage!==false;const onName=opts.onName==='tfOpen'?'tfOpen':'wsSwitch';const a=w.name===WS;const count=Number(w.memories)||0;const badge=w.visibility==='personal'?'<span class="pill pill-accent" style="font-size:12px" title="Personal — visible only to you">personal</span>':(TEAM_ENABLED?'<span class="pill pill-muted" style="font-size:12px" title="Shared with your whole team">shared</span>':'');const actions=manage?`<div class="vault-card-actions"><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();wsRename(folderCardName(this))">Rename</button><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();wsDescribe(folderCardName(this))">Describe</button><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();wsMerge(folderCardName(this))">Merge</button><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();wsCopy(folderCardName(this))">Copy</button><button class="btn btn-danger btn-sm" onclick="event.stopPropagation();wsDelete(folderCardName(this),Number(this.closest('.vault-card').dataset.memories))">Delete</button></div>`:'';return `<div class="vault-card${a?' active':''}" data-workspace="${esc(w.name)}" data-memories="${count}" data-open="${onName}">${actions}<div class="vault-card-name" style="cursor:pointer" onclick="folderOpen(this)">${esc(w.name)} ${badge}${a?' <span class="pill pill-green" style="font-size:12px">active</span>':''}</div>${w.description?`<div class="vault-card-desc">${esc(w.description)}</div>`:''}<div class="vault-card-stats"><span>${count} memories</span>${w.repos&&(Array.isArray(w.repos)?w.repos.length:w.repos)?'<span>'+(Array.isArray(w.repos)?w.repos.length:w.repos)+' repos</span>':''}<a href="#" onclick="event.stopPropagation();event.preventDefault();tfMemories(folderCardName(this))" style="color:var(--accent)">View memories →</a></div></div>`}
+function folderCardHtml(w,opts){opts=opts||{};const manage=opts.manage!==false;const onName=opts.onName==='tfOpen'?'tfOpen':'wsSwitch';const a=w.name===WS;const count=Number(w.memories)||0;const personal=w.visibility==='personal';const badge=personal?'<span class="pill pill-accent" style="font-size:12px" title="Personal — visible only to you">personal</span>':(TEAM_ENABLED?'<span class="pill pill-muted" style="font-size:12px" title="Shared with your whole team">shared</span>':'');const canChangeAccess=personal||!!(TEAM_USER&&TEAM_USER.role==='admin');const access=TEAM_ENABLED&&canChangeAccess?`<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();wsChangeVisibility(folderCardName(this),'${personal?'shared':'personal'}')">${personal?'Share':'Unshare'}</button>`:'';const actions=manage?`<div class="vault-card-actions">${access}<button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();wsRename(folderCardName(this))">Rename</button><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();wsDescribe(folderCardName(this))">Describe</button><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();wsMerge(folderCardName(this))">Merge</button><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();wsCopy(folderCardName(this))">Copy</button><button class="btn btn-danger btn-sm" onclick="event.stopPropagation();wsDelete(folderCardName(this),Number(this.closest('.vault-card').dataset.memories))">Delete</button></div>`:'';return `<div class="vault-card${a?' active':''}" data-workspace="${esc(w.name)}" data-memories="${count}" data-open="${onName}">${actions}<div class="vault-card-name" style="cursor:pointer" onclick="folderOpen(this)">${esc(w.name)} ${badge}${a?' <span class="pill pill-green" style="font-size:12px">active</span>':''}</div>${w.description?`<div class="vault-card-desc">${esc(w.description)}</div>`:''}<div class="vault-card-stats"><span>${count} memories</span>${w.repos&&(Array.isArray(w.repos)?w.repos.length:w.repos)?'<span>'+(Array.isArray(w.repos)?w.repos.length:w.repos)+' repos</span>':''}<a href="#" onclick="event.stopPropagation();event.preventDefault();tfMemories(folderCardName(this))" style="color:var(--accent)">View memories →</a></div></div>`}
 function tfOpen(name){setWS(name);toast('Active folder: '+name,'ok');if(document.getElementById('view-team').classList.contains('active'))renderTeamFolders();else if(document.getElementById('view-workspaces').classList.contains('active'))loadWorkspaces()}
 function tfMemories(name){setWS(name);navTo('memories')}
 async function refreshFolders(){if(document.getElementById('view-team').classList.contains('active')){await renderTeamFolders()}else{await loadWorkspaces()}}
@@ -1076,8 +1076,8 @@ function openFolderCreate(){
  const overlay=document.getElementById('folder-overlay');
  document.getElementById('folder-name').value='';
  document.getElementById('folder-description').value='';
- document.querySelectorAll('input[name="folder-visibility"]').forEach(input=>{input.checked=false});
- document.getElementById('folder-create-status').textContent='Choose one access level. Nothing is selected automatically.';
+ document.querySelectorAll('input[name="folder-visibility"]').forEach(input=>{input.checked=input.value==='personal'});
+ document.getElementById('folder-create-status').textContent='Personal and private is selected by default. Sharing requires confirmation.';
  updateFolderCreateButton();
  overlay.classList.add('show');
 }
@@ -1091,7 +1091,8 @@ async function submitFolderCreate(){
  const visibility=selected.value;
  button.disabled=true;status.textContent='Creating '+(visibility==='personal'?'a private folder…':'a team folder…');
  try{
-  await api('/workspaces/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:name,description,visibility})});
+  if(visibility==='shared'&&!confirm('Share "'+name+'" with the whole team? Every team member will be able to see and use it.')){button.disabled=false;status.textContent='Folder remains personal and private.';return}
+  await api('/workspaces/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:name,description,visibility,confirmed:visibility==='shared'})});
   await loadWorkspaceList();setWS(name);closeFolderCreate();
   toast('Folder "'+name+'" created — '+(visibility==='personal'?'personal and private':'shared with team'),'ok');
   await refreshFolders();
@@ -1107,9 +1108,15 @@ async function wsCreate(){
  if(WORKSPACES.some(w=>w.name===name)){toast('A folder named "'+name+'" already exists','err');return}
  const description=prompt('Optional description for "'+name+'":','');
  try{
-  await api('/workspaces/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:name,description:(description||'').trim(),visibility:'shared'})});
+  await api('/workspaces/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:name,description:(description||'').trim()})});
   await loadWorkspaceList();setWS(name);toast('Folder "'+name+'" created — now the active folder','ok');refreshFolders();
  }catch(e){toast('Create failed: '+e.message,'err')}
+}
+async function wsChangeVisibility(name,visibility){
+ const sharing=visibility==='shared';
+ const question=sharing?'Share "'+name+'" with the whole team? Every team member will be able to see and use it.':'Unshare "'+name+'"? It will become personal and private to you.';
+ if(!confirm(question))return;
+ try{await api('/workspaces/visibility',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:name,visibility,confirmed:true})});await loadWorkspaceList();toast('Folder "'+name+'" '+(sharing?'shared with team':'is now personal and private'),'ok');await refreshFolders()}catch(e){toast('Could not change folder access: '+e.message,'err')}
 }
 function wsSwitch(name){setWS(name);toast('Switched to '+name,'ok');loadOverview();navTo('overview')}
 
@@ -1171,11 +1178,11 @@ async function renderTeamFolders(){
  const createRow=canNew?`<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:12px">
   <div class="field" style="flex:1;min-width:150px;margin:0"><label class="field-lbl" for="tf-name">Folder name</label><input class="input" id="tf-name" placeholder="e.g. Product research" style="min-width:0" onkeydown="if(event.key==='Enter')tfCreate()"></div>
   <div class="field" style="flex:1;min-width:150px;margin:0"><label class="field-lbl" for="tf-desc">Description <span style="font-weight:400">(optional)</span></label><input class="input" id="tf-desc" placeholder="What belongs here" style="min-width:0"></div>
-  <div class="field" style="width:190px;margin:0"><label class="field-lbl" for="tf-vis">Who can access?</label><select class="select" id="tf-vis"><option value="" selected disabled>Choose access…</option><option value="personal">Personal · private to me</option><option value="shared">Shared · whole team</option></select></div>
+  <div class="field" style="width:190px;margin:0"><label class="field-lbl" for="tf-vis">Who can access?</label><select class="select" id="tf-vis"><option value="personal" selected>Personal · private to me</option><option value="shared">Shared · whole team</option></select></div>
   <button class="btn btn-primary btn-sm" onclick="tfCreate()">Create folder</button>
  </div>`:'<div class="field-hint" style="margin-bottom:10px">Only admins and members can create folders. You have view access.</div>';
  const cards=WORKSPACES.length?('<div class="cols-2">'+WORKSPACES.map(w=>folderCardHtml(w,{manage:canNew,onName:'tfOpen'})).join('')+'</div>'):'<div class="empty" style="padding:20px">No folders yet.'+(canNew?' Create the first one above.':'')+'</div>';
- box.innerHTML=`<div class="card" style="margin-top:12px"><div class="card-head">Folders <span class="count">${WORKSPACES.length}</span></div><div class="field-hint" style="margin:-4px 0 12px">This is where team folders live. <b>Shared</b> folders are visible to your whole team; <b>personal</b> folders are visible only to you. Click a folder to make it active, or “View memories”.</div>${createRow}${cards}</div>`;
+ box.innerHTML=`<div class="card" style="margin-top:12px"><div class="card-head">Folders <span class="count">${WORKSPACES.length}</span></div><div class="field-hint" style="margin:-4px 0 12px">New folders are <b>personal</b> by default. Share one only after confirming that the whole team should have access. Click a folder to make it active, or “View memories”.</div>${createRow}${cards}</div>`;
 }
 async function tfCreate(){
  if(!canCreateWs()){toast('Viewers can’t create folders','err');return}
@@ -1184,8 +1191,9 @@ async function tfCreate(){
  if(WORKSPACES.some(w=>w.name===nm)){toast('A folder named "'+nm+'" already exists','err');return}
  const desc=(document.getElementById('tf-desc').value||'').trim(),vis=(document.getElementById('tf-vis')||{}).value||'';
  if(vis!=='personal'&&vis!=='shared'){toast('Choose Personal and private or Shared with team','err');return}
+ if(vis==='shared'&&!confirm('Share "'+nm+'" with the whole team? Every team member will be able to see and use it.'))return;
  try{
-  await api('/workspaces/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:nm,description:desc,visibility:vis})});
+  await api('/workspaces/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:nm,description:desc,visibility:vis,confirmed:vis==='shared'})});
   setWS(nm);toast('Folder "'+nm+'" created — '+(vis==='personal'?'personal and private':'shared with team'),'ok');renderTeamFolders();
  }catch(e){toast('Create failed: '+e.message,'err')}
 }

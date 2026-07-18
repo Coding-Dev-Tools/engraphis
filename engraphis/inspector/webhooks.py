@@ -569,15 +569,25 @@ to Settings -> Cloud Sync and turn sync on for the same workspace your team
 uses. Your local store converges with the team's (new memories and edits flow
 both ways); you keep a full local copy that works offline.
 """ % key if key else "")
+    # OPTION 2 only exists when this invite actually carries a key. Viewers never get one
+    # (they hold no seat), and neither does any instance without a shared Team license —
+    # so for them the "two ways… the second is optional" framing pointed at a section
+    # that was not in the email. Keyless invites get a single-path preamble instead, and
+    # the "OPTION 1" label drops with it (there is nothing to number against).
+    intro = ("""You have two ways to use Engraphis as part of this team. You only need the first
+one to be a member; the second is optional."""
+             if key else
+             "Here's everything you need to get started.")
+    option_heading = ("OPTION 1 (required to join the team): sign in to the team dashboard"
+                      if key else "Sign in to the team dashboard")
     return """{greeting}
 
 {who} to an Engraphis team dashboard as a {role}.
 
-You have two ways to use Engraphis as part of this team. You only need the first
-one to be a member; the second is optional.
+{intro}
 
 ──────────────────────────────────────────────────────────────────────────────
-OPTION 1 (required to join the team): sign in to the team dashboard
+{option_heading}
 ──────────────────────────────────────────────────────────────────────────────
 The team's shared memories live on a hosted dashboard. Open it and sign in:
 
@@ -593,8 +603,9 @@ nothing else.
 
 Learn more: {site_url}
 Source & self-hosting: {repo_url}
-""".format(greeting=greeting, who=who, role=role, where=where,
-               login_email=login_email, activate=activate, reply_note=reply_note,
+""".format(greeting=greeting, who=who, role=role, where=where, intro=intro,
+               option_heading=option_heading, login_email=login_email,
+               activate=activate, reply_note=reply_note,
                site_url=SITE_URL, repo_url=REPO_URL)
 
 

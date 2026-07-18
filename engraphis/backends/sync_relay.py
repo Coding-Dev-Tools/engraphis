@@ -29,6 +29,14 @@ MAX_RELAY_NAMES_BYTES = 1024 * 1024
 MAX_RELAY_LEGACY_RESPONSE_BYTES = 65 * 1024 * 1024
 MAX_RELAY_NAMES = 64
 MAX_BUNDLE_NAME_CHARS = 200
+# How many individual bundles may fail before ``pull`` gives up on the round. Isolating
+# per-bundle failures must not turn one broken relay into 64 sequential timeouts.
+MAX_PULL_BUNDLE_FAILURES = 8
+MAX_PULL_FAILURE_CHARS = 200
+# Refusals that apply to the whole round, not to one bundle: retrying the remaining
+# bundles would only mask the refusal and hammer the relay. 401/403 authentication and
+# authorization, 402 unusable license, 429 backpressure.
+FATAL_PULL_STATUSES = frozenset({401, 402, 403, 429})
 
 
 class RelayError(RuntimeError):
@@ -37,6 +45,14 @@ class RelayError(RuntimeError):
     def __init__(self, message: str, *, status: Optional[int] = None):
         super().__init__(message)
         self.status = status
+
+
+class RelayUnreachable(RelayError):
+    """The relay could not be contacted at all (DNS/TCP/TLS), so no HTTP status exists.
+
+    Distinct from a per-bundle failure: if the host is unreachable for one bundle it is
+    unreachable for all of them, so ``pull`` aborts the round instead of isolating it.
+    """
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -183,7 +199,8 @@ class RelayTransport:
             raise RelayError("relay request failed (%s): %s" % (exc.code, msg),
                              status=exc.code) from exc
         except urllib.error.URLError as exc:
-            raise RelayError("could not reach the relay at %s: %s" % (self.base, exc.reason))
+            raise RelayUnreachable(
+                "could not reach the relay at %s: %s" % (self.base, exc.reason))
 
     # ── SyncTransport protocol ───────────────────────────────────────────────────────
     def push(self, name: str, data: bytes) -> None:
@@ -200,9 +217,28 @@ class RelayTransport:
     def pull(self) -> Iterable[Tuple[str, bytes]]:
         """Fetch bundles one at a time so peak memory is bounded by one snapshot.
 
+        Per-bundle failures are **isolated**: a bundle that 404s (deleted mid-round) or
+        blows the client size limit is skipped and the round keeps going, so one poisoned
+        or truncated bundle can no longer starve every peer queued behind it and stall
+        sync indefinitely. ``SyncEngine.sync`` already records a raising transport as a
+        per-bundle error, but a generator that raises is closed and cannot be resumed —
+        which is why the isolation has to happen here, at the source.
+
+        Skipped bundles are *not* swallowed. They are collected and re-raised as one
+        ``RelayError`` after the round is exhausted, i.e. after every good bundle has been
+        yielded; ``sync()`` records that as a transport error and reports
+        ``complete: False``, so a round that dropped bundles never reads as a success.
+
+        Fail-closed behaviour is unchanged. Nothing is substituted for a skipped bundle,
+        every delivered bundle still goes through ``apply_bundle``'s signature,
+        authorization and confinement checks untouched, and round-level refusals — an
+        unreachable relay, or a ``FATAL_PULL_STATUSES`` response — abort immediately
+        rather than being isolated, because they apply to every bundle in the round.
+
         A bounded fallback keeps rolling upgrades compatible with the first relay server,
         which exposed only the base64 bulk endpoint.
         """
+        failures: List[str] = []
         for index, name in enumerate(self.list_names()):
             try:
                 data = self._request(
@@ -214,10 +250,26 @@ class RelayTransport:
                 if index == 0 and exc.status == 404:
                     yield from self._pull_legacy()
                     return
-                raise
+                if isinstance(exc, RelayUnreachable) or exc.status in FATAL_PULL_STATUSES:
+                    raise
+                failures.append(("%s: %s" % (name, exc))[:MAX_PULL_FAILURE_CHARS])
+                if len(failures) >= MAX_PULL_BUNDLE_FAILURES:
+                    break
+                continue
             yield name, data
+        if failures:
+            raise RelayError("relay skipped %d bundle(s) this round: %s"
+                             % (len(failures), "; ".join(failures)))
 
-    def _pull_legacy(self) -> List[Tuple[str, bytes]]:
+    def _pull_legacy(self) -> Iterable[Tuple[str, bytes]]:
+        """The first-generation bulk endpoint, with the same per-bundle isolation.
+
+        A structurally unusable *response* still fails the whole call (there is nothing
+        to salvage), but a single malformed *entry* is skipped rather than discarding
+        every other peer's bundle in the batch — same contract as ``pull``: the good
+        entries are yielded first, then one summarizing ``RelayError`` marks the round
+        incomplete.
+        """
         try:
             raw = self._request(
                 self._url("bundles"), method="GET",
@@ -227,9 +279,16 @@ class RelayTransport:
             bundles = body.get("bundles") if isinstance(body, dict) else None
             if not isinstance(bundles, list) or len(bundles) > MAX_RELAY_NAMES:
                 raise ValueError("bundles is not a bounded list")
-            out: List[Tuple[str, bytes]] = []
-            seen = set()
-            for bundle in bundles:
+        except (
+            UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError,
+        ) as exc:
+            raise RelayError("relay returned an invalid legacy bundle response") from exc
+
+        out: List[Tuple[str, bytes]] = []
+        seen = set()
+        skipped = 0
+        for bundle in bundles:
+            try:
                 if not isinstance(bundle, dict):
                     raise ValueError("bundle entry is not an object")
                 name = _safe_bundle_name(bundle.get("name"))
@@ -242,14 +301,16 @@ class RelayTransport:
                 data = base64.b64decode(encoded, validate=True)
                 if len(data) > MAX_RELAY_BUNDLE_BYTES:
                     raise ValueError("bundle entry is too large")
-                seen.add(name)
-                out.append((name, data))
-            return out
-        except (
-            UnicodeDecodeError, json.JSONDecodeError, RecursionError,
-            ValueError, binascii.Error,
-        ) as exc:
-            raise RelayError("relay returned an invalid legacy bundle response") from exc
+            except (ValueError, binascii.Error):
+                skipped += 1
+                continue
+            seen.add(name)
+            out.append((name, data))
+        yield from out
+        if skipped:
+            raise RelayError(
+                "relay returned %d invalid legacy bundle entr%s"
+                % (skipped, "y" if skipped == 1 else "ies"))
 
     def list_names(self) -> List[str]:
         try:

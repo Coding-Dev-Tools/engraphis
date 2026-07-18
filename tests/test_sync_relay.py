@@ -6,6 +6,7 @@ Runs on the numpy-only gate: stdlib + fastapi TestClient, no network.
 """
 import base64
 import io
+import json
 import time
 import threading
 import urllib.error
@@ -26,7 +27,9 @@ from engraphis.licensing import LicenseError, ed25519_public_key
 from engraphis.inspector import license_cloud
 from engraphis.inspector import license_registry as reg
 from engraphis.inspector import sync_relay
-from engraphis.backends.sync_relay import RelayTransport, RelayError
+from engraphis.backends.sync_relay import RelayError, RelayTransport, RelayUnreachable
+from engraphis.core.store import Store
+from engraphis.core.sync import SYNC_FORMAT, SyncEngine
 
 SECRET = bytes(range(32))  # deterministic test vendor keypair
 
@@ -507,6 +510,144 @@ def test_relay_transport_has_bounded_fallback_for_first_generation_server(monkey
     monkeypatch.setattr(relay_backend, "_urlopen_no_redirect", fake_urlopen)
     transport = RelayTransport("https://relay.example", "ws1", license_key="secret")
     assert list(transport.pull()) == [("bundle-a.json", b"{}")]
+
+
+# ── per-bundle isolation in pull(): one bad bundle must not stall the round ─────────────
+
+def _stub_relay(monkeypatch, names, bodies):
+    """Serve ``names`` from /names and each bundle GET from ``bodies``.
+
+    A ``bodies`` value is either the raw body bytes or an exception to raise for that
+    bundle. Pushes succeed silently.
+    """
+    class _Response:
+        def __init__(self, data):
+            self.data = data
+
+        def read(self, limit=-1):
+            return self.data if limit < 0 else self.data[:limit]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        path = urllib.parse.urlsplit(req.full_url).path
+        if req.method == "POST":
+            return _Response(b"")
+        if path.endswith("/names"):
+            return _Response(json.dumps({"names": names}).encode("utf-8"))
+        body = bodies[path.rsplit("/", 1)[-1]]
+        if isinstance(body, BaseException):
+            raise body
+        return _Response(body)
+
+    monkeypatch.setattr(relay_backend, "_urlopen_no_redirect", fake_urlopen)
+
+
+def _http_error(status):
+    return urllib.error.HTTPError("https://relay.example/x", status, "nope", None,
+                                  io.BytesIO(b"nope"))
+
+
+def test_relay_pull_isolates_a_bad_bundle_and_still_delivers_the_rest(monkeypatch):
+    """One undeliverable bundle must not starve the peers queued behind it.
+
+    ``sync()`` already records a raising transport per bundle, but a generator that
+    raises is closed and cannot be resumed — so the isolation has to happen here or the
+    rest of the round is lost anyway."""
+    _stub_relay(
+        monkeypatch,
+        ["bundle-a.json", "bundle-bad.json", "bundle-c.json"],
+        {"bundle-a.json": b'{"a":1}',
+         "bundle-bad.json": _http_error(500),
+         "bundle-c.json": b'{"c":1}'},
+    )
+    transport = RelayTransport("https://relay.example", "ws1", license_key="secret")
+    bundles = transport.pull()
+
+    assert next(bundles) == ("bundle-a.json", b'{"a":1}')
+    assert next(bundles) == ("bundle-c.json", b'{"c":1}')   # the point of the fix
+    # …and the drop is still surfaced, after the good bundles, so the round can never
+    # read as a success (sync() turns this into complete=False).
+    with pytest.raises(RelayError, match="bundle-bad.json"):
+        next(bundles)
+
+
+@pytest.mark.parametrize("status", sorted(relay_backend.FATAL_PULL_STATUSES))
+def test_relay_pull_never_isolates_a_round_level_refusal(monkeypatch, status):
+    """Fail-closed: an unusable license, an authorization refusal or backpressure applies
+    to every bundle in the round, so it aborts immediately instead of being retried per
+    bundle — and the status stays visible to the caller."""
+    _stub_relay(monkeypatch, ["bundle-a.json", "bundle-b.json"],
+                {"bundle-a.json": b"{}", "bundle-b.json": _http_error(status)})
+    transport = RelayTransport("https://relay.example", "ws1", license_key="secret")
+    bundles = transport.pull()
+
+    assert next(bundles) == ("bundle-a.json", b"{}")
+    with pytest.raises(RelayError) as exc:
+        next(bundles)
+    assert exc.value.status == status
+
+
+def test_relay_pull_aborts_the_round_when_the_relay_becomes_unreachable(monkeypatch):
+    """A host that cannot be reached for one bundle cannot be reached for the next 63
+    either; isolating that would burn a full timeout per name."""
+    _stub_relay(monkeypatch, ["bundle-a.json", "bundle-b.json", "bundle-c.json"],
+                {"bundle-a.json": b"{}",
+                 "bundle-b.json": urllib.error.URLError("connection refused")})
+    transport = RelayTransport("https://relay.example", "ws1", license_key="secret")
+    bundles = transport.pull()
+
+    assert next(bundles) == ("bundle-a.json", b"{}")
+    with pytest.raises(RelayUnreachable):
+        next(bundles)
+
+
+def test_relay_pull_gives_up_after_too_many_isolated_failures(monkeypatch):
+    monkeypatch.setattr(relay_backend, "MAX_PULL_BUNDLE_FAILURES", 2)
+    names = ["bundle-%d.json" % i for i in range(5)]
+    _stub_relay(monkeypatch, names, {name: _http_error(500) for name in names})
+    transport = RelayTransport("https://relay.example", "ws1", license_key="secret")
+
+    with pytest.raises(RelayError, match="skipped 2 bundle"):
+        list(transport.pull())
+
+
+def _peer_bundle(device, mem_id):
+    return json.dumps({
+        "format": SYNC_FORMAT, "version": 1, "device_id": device,
+        "workspace_name": "w", "repos": {},
+        "memories": [{"id": mem_id, "content": "from %s" % device, "last_access": 5.0}],
+        "mem_links": [],
+    }).encode("utf-8")
+
+
+def test_sync_round_over_the_relay_applies_every_peer_behind_a_broken_bundle(monkeypatch):
+    """End-to-end contract with core/sync.py: the peer *after* the poisoned bundle still
+    lands, and the round is still reported as incomplete because a bundle was dropped."""
+    _stub_relay(
+        monkeypatch,
+        ["bundle-peer1.json", "bundle-bad.json", "bundle-peer2.json"],
+        {"bundle-peer1.json": _peer_bundle("dev_peer1", "mem_p1"),
+         "bundle-bad.json": _http_error(500),
+         "bundle-peer2.json": _peer_bundle("dev_peer2", "mem_p2")},
+    )
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    transport = RelayTransport("https://relay.example", "w", license_key="secret")
+
+    result = SyncEngine(store).sync(transport, wid)      # must NOT raise
+
+    assert store.get_memory("mem_p1") is not None
+    assert store.get_memory("mem_p2") is not None        # was skipped before the fix
+    assert result["totals"]["added"] == 2
+    assert result["peers_applied"] == 2
+    assert result["complete"] is False                   # a bundle was dropped
+    assert any("transport" in e["error"] and "bundle-bad.json" in e["error"]
+               for e in result["errors"])
 
 
 def test_relay_transport_does_not_forward_bearer_across_redirects():

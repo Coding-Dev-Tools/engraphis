@@ -36,13 +36,42 @@ def _names(svc):
 
 
 # ── defaults / creation ───────────────────────────────────────────────────────
-def test_shared_is_the_default_and_visible_to_every_teammate():
+def test_personal_is_the_default_and_hidden_from_every_teammate():
     svc = _svc()
     set_current_user(ALICE)
-    out = svc.create_workspace("team-proj", "shared notes")
-    assert out["visibility"] == "shared"
+    out = svc.create_workspace("team-proj", "private notes")
+    assert out["visibility"] == "personal"
     set_current_user(BOB)  # a different teammate
+    assert "team-proj" not in _names(svc)
+
+
+def test_sharing_requires_confirmation_then_is_visible_to_every_teammate():
+    svc = _svc()
+    set_current_user(ALICE)
+    with pytest.raises(ValidationError, match="explicit confirmation"):
+        svc.create_workspace("team-proj", visibility="shared")
+    out = svc.create_workspace("team-proj", visibility="shared", confirmed=True)
+    assert out["visibility"] == "shared"
+    set_current_user(BOB)
     assert "team-proj" in _names(svc)
+
+
+def test_member_can_share_own_folder_but_only_admin_can_unshare_shared_folder():
+    svc = _svc()
+    set_current_user(ALICE)
+    svc.create_workspace("alice-notes")
+    shared = svc.set_workspace_visibility("alice-notes", "shared", confirmed=True)
+    assert shared["visibility"] == "shared"
+
+    with pytest.raises(ValidationError, match="only an admin"):
+        svc.set_workspace_visibility("alice-notes", "personal", confirmed=True)
+
+    set_current_user(BOB)
+    private = svc.set_workspace_visibility("alice-notes", "personal", confirmed=True)
+    assert private["visibility"] == "personal" and private["owner"] == BOB["email"]
+
+    set_current_user(ALICE)
+    assert "alice-notes" not in _names(svc)
 
 
 def test_personal_is_owned_by_its_creator():
@@ -71,7 +100,7 @@ def test_personal_folder_is_hidden_from_other_users_even_admins():
     svc = _svc()
     set_current_user(ALICE)
     svc.create_workspace("alice-scratch", visibility="personal")
-    svc.create_workspace("team-proj", visibility="shared")
+    svc.create_workspace("team-proj", visibility="shared", confirmed=True)
     assert _names(svc) == ["alice-scratch", "team-proj"]  # owner sees both
     set_current_user(BOB)  # admin — but personal means personal
     assert _names(svc) == ["team-proj"]  # alice-scratch is omitted entirely
@@ -109,7 +138,7 @@ def test_owner_keeps_full_access_to_their_personal_folder():
 def test_shared_folder_stays_accessible_to_everyone():
     svc = _svc()
     set_current_user(ALICE)
-    svc.create_workspace("team-proj", visibility="shared")
+    svc.create_workspace("team-proj", visibility="shared", confirmed=True)
     set_current_user(BOB)
     assert svc._clean_ws("team-proj") == "team-proj"  # not blocked for a teammate
 
@@ -132,8 +161,23 @@ def test_folders_created_before_the_feature_are_treated_as_shared():
     # feature) must read as shared, never accidentally locked to nobody.
     svc = _svc()
     set_current_user(None)
-    svc.create_workspace("legacy", "old folder")  # stored with no visibility key
+    svc.store.create_workspace("legacy", settings=None)  # stored with no visibility key
     set_current_user(BOB)
     listed = {w["name"]: w for w in svc.list_workspaces()["workspaces"]}
     assert listed["legacy"]["visibility"] == "shared"
     assert svc._clean_ws("legacy") == "legacy"
+
+
+def test_share_and_unshare_require_confirmation_and_are_audited():
+    svc = _svc()
+    set_current_user(ALICE)
+    svc.create_workspace("alice-scratch")
+    with pytest.raises(ValidationError, match="explicit confirmation"):
+        svc.set_workspace_visibility("alice-scratch", "shared")
+    assert svc.set_workspace_visibility("alice-scratch", "shared", confirmed=True)["visibility"] == "shared"
+    set_current_user(BOB)
+    assert "alice-scratch" in _names(svc)
+    result = svc.set_workspace_visibility("alice-scratch", "personal", confirmed=True)
+    assert result["owner"] == BOB["email"]
+    set_current_user(ALICE)
+    assert "alice-scratch" not in _names(svc)

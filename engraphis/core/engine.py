@@ -55,6 +55,11 @@ _SCOPE_RANK = {
 # Bounded so hub memories don't accrete unbounded link lists (link quality > quantity).
 EVOLVE_MAX_LINKS = 3
 
+# Metadata keys that feed the entity/edge graph under the *trusted*
+# provenance.source="structured_extractor" label — i.e. "a configured Extractor produced
+# this". See _has_structured_graph_metadata / _trusted_graph_hints.
+GRAPH_HINT_KEYS = ("entities", "relations", "structured_extraction")
+
 # code↔memory linking (see _CodeSymbolMatcher / _link_memory_to_code)
 CODE_LINK_MAX_LINKS = 200      # per-memory fan-out cap (unchanged behaviour)
 CODE_MATCHER_CACHE_SIZE = 4    # compiled matchers kept in memory, keyed by repo
@@ -81,6 +86,44 @@ def _bounded_finite(value, *, default: float, minimum: float, maximum: float) ->
     if not math.isfinite(number):
         return default
     return max(minimum, min(maximum, number))
+
+
+def _rehome_untrusted_graph_hints(metadata: dict,
+                                  trusted: Optional[frozenset] = None) -> dict:
+    """Strip forged extractor provenance out of a write's metadata.
+
+    ``GRAPH_HINT_KEYS`` are how a configured ``Extractor`` hands the engine graph hints,
+    and the engine feeds them into the entity/edge graph tagged
+    ``provenance.source="structured_extractor"``. But ``metadata`` is caller-controlled on
+    every direct engine path (MCP tool, HTTP route, the sync apply path), and by the time
+    it reaches ``_resolve_and_store`` a caller's value is indistinguishable from the
+    extractor's own output — so anyone who can write a memory could mint graph edges
+    wearing the trusted label for content no extractor ever saw.
+
+    Vouching therefore has to be **out of band**. ``ingest()`` alone knows which keys came
+    from ``ExtractedFact.metadata`` rather than from its own ``metadata`` argument, and
+    says so through a *keyword argument* — a channel untrusted JSON cannot reach;
+    ``consolidate()`` marks its sweep the same way. No in-band signal would do: every
+    field a caller can see is a field a caller can set (``metadata["provenance"]["source"]``
+    included — ``service.remember(source=...)`` writes it verbatim). Every unvouched hint
+    is re-homed (preserved, never dropped) under a key the structured-graph check does not
+    recognize, with an honest source label.
+
+    ``engraphis/service.py::_clean_metadata`` does the same at the service boundary; this
+    is the defense-in-depth copy for callers that bypass it. Both are idempotent — a value
+    re-homed at either layer has no hint keys left to relabel at the other.
+    """
+    vouched = trusted or frozenset()
+    untrusted = [k for k in GRAPH_HINT_KEYS if k in metadata and k not in vouched]
+    if not untrusted:
+        return metadata
+    out = {k: v for k, v in metadata.items() if k not in untrusted}
+    existing = out.get("client_supplied_graph")
+    hints = dict(existing) if isinstance(existing, dict) else {}
+    hints.update({k: metadata[k] for k in untrusted})
+    hints["source"] = "client_supplied"
+    out["client_supplied_graph"] = hints
+    return out
 
 
 def _writable_scope(scope: Scope, repo_id: Optional[str]) -> Scope:
@@ -217,6 +260,10 @@ class MemoryEngine:
         # Serializes the resolve→insert critical section of the write path (see
         # remember_with_resolution). RLock: ingest()/import paths may nest writes.
         self._write_lock = threading.RLock()
+        # Depth of the engine's own trusted producers on THIS thread (consolidate()).
+        # Thread-local on purpose: a sweep must never vouch for another thread's
+        # concurrent caller-driven write. See _resolve_and_store.
+        self._internal_writes = threading.local()
         # repo_id -> (symbol-set fingerprint, _CodeSymbolMatcher). Bounded; see
         # _code_matcher for the invalidation contract.
         self._code_matchers: dict = {}
@@ -250,7 +297,8 @@ class MemoryEngine:
                  scope: Optional[Scope] = None, title: str = "", importance: float = 0.0,
                  keywords: Optional[list] = None, metadata: Optional[dict] = None,
                  valid_from: Optional[float] = None, resolve_conflicts: bool = True,
-                 candidate_k: int = 5) -> str:
+                 candidate_k: int = 5,
+                 _trusted_graph_keys: Optional[frozenset] = None) -> str:
         """Store one memory. Returns the id of the *live* record: a new id for ADD/
         INVALIDATE, or the existing memory's id if this was resolved as a NOOP
         (near-duplicate). See ``remember_with_resolution`` for the full decision detail.
@@ -259,7 +307,7 @@ class MemoryEngine:
             content, workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
             mtype=mtype, scope=scope, title=title, importance=importance, keywords=keywords,
             metadata=metadata, valid_from=valid_from, resolve_conflicts=resolve_conflicts,
-            candidate_k=candidate_k,
+            candidate_k=candidate_k, _trusted_graph_keys=_trusted_graph_keys,
         )["id"]
 
     def remember_with_resolution(self, content: str, *, workspace_id: str,
@@ -267,7 +315,8 @@ class MemoryEngine:
                  mtype: MemoryType = MemoryType.SEMANTIC, scope: Optional[Scope] = None,
                  title: str = "", importance: float = 0.0, keywords: Optional[list] = None,
                  metadata: Optional[dict] = None, valid_from: Optional[float] = None,
-                 resolve_conflicts: bool = True, candidate_k: int = 5) -> dict:
+                 resolve_conflicts: bool = True, candidate_k: int = 5,
+                 _trusted_graph_keys: Optional[frozenset] = None) -> dict:
         """Store one memory with deterministic conflict resolution.
 
         Returns ``{"id", "op", ...}`` where ``op`` is one of:
@@ -318,7 +367,7 @@ class MemoryEngine:
                 session_id=session_id, mtype=mtype, scope=scope, title=title,
                 importance=importance, keywords=keywords, metadata=metadata,
                 valid_from=valid_from, resolve_conflicts=resolve_conflicts,
-                candidate_k=candidate_k,
+                candidate_k=candidate_k, trusted_graph_keys=_trusted_graph_keys,
             )
 
     def _resolve_and_store(self, content: str, *, text: str, vec: np.ndarray,
@@ -326,9 +375,14 @@ class MemoryEngine:
                            session_id: Optional[str], mtype: MemoryType, scope: Scope,
                            title: str, importance: float, keywords: Optional[list],
                            metadata: Optional[dict], valid_from: Optional[float],
-                           resolve_conflicts: bool, candidate_k: int) -> dict:
+                           resolve_conflicts: bool, candidate_k: int,
+                           trusted_graph_keys: Optional[frozenset] = None) -> dict:
         """The resolve→insert body of ``remember_with_resolution``. The caller holds
-        ``self._write_lock`` for the whole call (atomicity of the resolve decision)."""
+        ``self._write_lock`` for the whole call (atomicity of the resolve decision).
+
+        ``trusted_graph_keys`` names the ``GRAPH_HINT_KEYS`` this write's ``metadata``
+        genuinely inherited from an ``Extractor``; everything else is treated as
+        caller-supplied — see ``_rehome_untrusted_graph_hints``."""
         decision, neighbors = None, []
         if resolve_conflicts:
             decision, neighbors = self._resolve_against_neighbors(
@@ -342,7 +396,14 @@ class MemoryEngine:
             self.store.audit("resolver", "noop", decision.target_id, decision.reason)
             return {"id": decision.target_id, "op": "noop", "reason": decision.reason}
 
-        meta = dict(metadata or {})
+        # Before anything reads it: demote graph hints this write cannot prove came from
+        # an Extractor, so the "structured_extractor" feed below can only ever see
+        # genuine extractor output (defense in depth for direct-engine callers that never
+        # pass through service.py::_clean_metadata). A consolidation sweep on this thread
+        # is one of the engine's own producers and vouches for all of them.
+        if trusted_graph_keys is None and getattr(self._internal_writes, "depth", 0):
+            trusted_graph_keys = frozenset(GRAPH_HINT_KEYS)
+        meta = _rehome_untrusted_graph_hints(dict(metadata or {}), trusted_graph_keys)
         if decision is not None and decision.op == ResolutionOp.INVALIDATE:
             # Persist the supersession pointer on the new record so the chain is
             # queryable later (why/timeline/inspector), not only in the audit log.
@@ -395,6 +456,9 @@ class MemoryEngine:
         # from llm_structured is already validated before storage, so feed it directly
         # into the graph even when the regex graph extractor is disabled; then run the
         # configured text extractor too (idempotent via feed/store de-duping).
+        # ``meta`` was demoted above, so any hint still under a GRAPH_HINT_KEYS name here
+        # was vouched for by ingest() — the "structured_extractor" label below is earned,
+        # not merely asserted by whoever built the metadata dict.
         if self._has_structured_graph_metadata(meta):
             try:
                 from engraphis.backends.graph_extractor import (
@@ -597,12 +661,19 @@ class MemoryEngine:
         results = []
         base_metadata = dict(metadata or {})
         for f in facts:
-            fact_metadata = {**base_metadata, **(getattr(f, "metadata", {}) or {})}
+            fact_own = getattr(f, "metadata", {}) or {}
+            # This is the one place that can tell the two apart: ``fact_own`` is computed
+            # fresh from the Extractor's real output, while ``base_metadata`` is the
+            # caller's argument. The extractor's keys win the merge, so vouching by name
+            # is exact — and a hint key present only in ``base_metadata`` stays untrusted
+            # even though it shares a name with one the extractor could have produced.
+            trusted = frozenset(k for k in GRAPH_HINT_KEYS if k in fact_own)
             results.append(self.remember_with_resolution(
                 f.content, workspace_id=workspace_id, repo_id=repo_id,
                 session_id=session_id, mtype=f.mtype or default_mtype, scope=scope,
                 title=f.title, importance=f.importance, keywords=f.keywords,
-                metadata=fact_metadata, resolve_conflicts=resolve_conflicts,
+                metadata={**base_metadata, **fact_own},
+                resolve_conflicts=resolve_conflicts, _trusted_graph_keys=trusted,
             ))
         return {"facts": results, "count": len(results), "extracted": extracted}
 
@@ -610,10 +681,23 @@ class MemoryEngine:
     def consolidate(self, *, workspace_id: str, repo_id: Optional[str] = None,
                     dry_run: bool = False, llm=None, **kw) -> dict:
         """One sleep-time consolidation sweep — episodic→semantic distillation plus
-        decayed-transient archival. See ``core.consolidate.consolidate`` for knobs."""
+        decayed-transient archival. See ``core.consolidate.consolidate`` for knobs.
+
+        Marks the sweep as an engine-internal producer for its duration, so the structured
+        digests it writes keep their graph hints (they are distilled from this device's
+        own memories by the operator's configured LLM, exactly like an ``Extractor``'s
+        output — not caller-supplied metadata). Every production entry point goes through
+        here; see ``_rehome_untrusted_graph_hints`` for why this cannot be signalled
+        in-band through the metadata dict.
+        """
         from engraphis.core.consolidate import consolidate as _consolidate
-        return _consolidate(self, workspace_id=workspace_id, repo_id=repo_id,
-                            dry_run=dry_run, llm=llm, **kw)
+        depth = getattr(self._internal_writes, "depth", 0)
+        self._internal_writes.depth = depth + 1
+        try:
+            return _consolidate(self, workspace_id=workspace_id, repo_id=repo_id,
+                                dry_run=dry_run, llm=llm, **kw)
+        finally:
+            self._internal_writes.depth = depth
 
     # ── read ──────────────────────────────────────────────────────────────────
     def _recall_filter(self, *, workspace_id: Optional[str], repo_id: Optional[str],
@@ -1723,9 +1807,9 @@ class MemoryEngine:
         analysis = self.analyze_code_graph(repo_id=repo_id, limit=limit,
                                            edge_limit=edge_cap)
         analysis.pop("_node_community", None)
-        files = self.store.list_code_files(repo_id)
-        # list_code_files takes no SQL limit (unlike the other three); slice instead so
-        # the emitted payload is still bounded.
+        # Fetch one sentinel row beyond the payload cap so truncation stays observable
+        # without materializing every indexed file in a large repository.
+        files = self.store.list_code_files(repo_id, limit=limit + 1)
         truncated_files = len(files) > limit
         files = files[:limit]
         nodes = self.store.list_symbols(repo_id, limit=limit)

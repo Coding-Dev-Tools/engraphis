@@ -28,11 +28,11 @@ def _mem_ids(svc, name):
 
 
 # ── create_workspace ─────────────────────────────────────────────────────────
-def test_create_makes_empty_shared_workspace():
+def test_create_makes_empty_workspace():
     svc = _svc()
     out = svc.create_workspace("team-alpha", "shared research notes")
     assert out["created"] and out["workspace"] == "team-alpha"
-    # it exists, is empty, and is listed for everyone (shared, not per-user)
+    # It exists, is empty, and remains available to the local single-user service.
     assert _wsid(svc, "team-alpha") is not None
     assert _mem_ids(svc, "team-alpha") == set()
     listed = {w["name"]: w for w in svc.list_workspaces()["workspaces"]}

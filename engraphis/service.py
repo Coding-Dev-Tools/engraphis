@@ -439,11 +439,11 @@ class MemoryService:
 
     def _workspace_visibility(self, ws: str) -> tuple[str, str]:
         """Return ``(visibility, owner)`` for an existing workspace, read from its
-        ``settings`` JSON. Defaults to ``("shared", "")`` for any workspace that has no
-        visibility recorded (every folder created before this feature, and every folder a
-        team creates as shared) — so the ownership check below only ever restricts folders
-        explicitly marked personal. Never raises: a missing row or malformed settings is
-        treated as shared, so authorization can't be broken by bad data."""
+        ``settings`` JSON. Folders created before per-folder access controls have no
+        visibility recorded and remain shared for compatibility; all new team folders are
+        written explicitly as personal unless their creator deliberately shares them.
+        Never raises: a missing row or malformed settings is treated as shared, so a bad
+        settings payload cannot turn into an accidental denial of service."""
         try:
             row = self.store.conn.execute(
                 "SELECT settings FROM workspaces WHERE name=?", (ws,)).fetchone()
@@ -459,6 +459,22 @@ class MemoryService:
             return ("shared", "")
         vis = s.get("visibility") or "shared"
         return (vis if vis == "personal" else "shared", s.get("owner") or "")
+
+    def _get_or_create_workspace(self, ws: str) -> str:
+        """Get ``ws`` or create it private to the authenticated team user.
+
+        Writes can create a workspace without first using the dashboard's explicit
+        Create-folder dialog. That path must obey the same safe default, otherwise an
+        agent or import could silently create a team-visible folder. Non-team callers do
+        not have an identity and retain the established single-tenant behaviour.
+        """
+        existing = self._lookup_workspace(ws)
+        if existing is not None:
+            return existing
+        user = current_user() or {}
+        owner = user.get("email") or ""
+        workspace_settings = {"visibility": "personal", "owner": owner} if owner else None
+        return self.store.create_workspace(ws, settings=workspace_settings)
 
     def _enforce_personal_access(self, ws: str) -> None:
         """Block access to another user's personal folder. No current user (single-tenant,
@@ -551,7 +567,7 @@ class MemoryService:
             raise ValidationError("importance must be finite")
         importance = max(0.0, min(1.0, importance))
 
-        wid = self.store.get_or_create_workspace(ws)
+        wid = self._get_or_create_workspace(ws)
         rid = self.store.get_or_create_repo(wid, rp) if rp else None
         session = self._session_for_write(session_id, wid, rid)
         if sc in (Scope.SESSION, Scope.REPO) and rid is None and session:
@@ -609,7 +625,7 @@ class MemoryService:
         scope_was_omitted = scope is None
         sc = _write_scope(scope, repo=rp, session_id=session_id)
         meta = _clean_metadata(metadata)
-        wid = self.store.get_or_create_workspace(ws)
+        wid = self._get_or_create_workspace(ws)
         rid = self.store.get_or_create_repo(wid, rp) if rp else None
         session = self._session_for_write(session_id, wid, rid)
         if sc in (Scope.SESSION, Scope.REPO) and rid is None and session:
@@ -827,7 +843,7 @@ class MemoryService:
                             required=False) or "user"
 
         folder = _resolve_import_root(raw_path)
-        wid = self.store.get_or_create_workspace(ws)
+        wid = self._get_or_create_workspace(ws)
         files = _iter_import_files(folder, pattern, MAX_IMPORT_FILES)
         total_bytes = 0
         for file in files:
@@ -932,7 +948,7 @@ class MemoryService:
                 f"import batch is too large (max {MAX_IMPORT_TOTAL_BYTES} bytes)"
             )
 
-        wid = self.store.get_or_create_workspace(ws)
+        wid = self._get_or_create_workspace(ws)
         from engraphis.backends.resources import get_resource_extractor
         resource_extractor = get_resource_extractor()
         imported, skipped, errors, derived_facts = 0, 0, 0, 0
@@ -1343,7 +1359,7 @@ class MemoryService:
         rp = _clean_name(repo, field="repo") if repo else None
         agent = _clean_text(agent, field="agent", max_chars=MAX_NAME_CHARS, required=False)
         goal = _clean_text(goal, field="goal", max_chars=MAX_TITLE_CHARS, required=False)
-        wid = self.store.get_or_create_workspace(ws)
+        wid = self._get_or_create_workspace(ws)
         rid = self.store.get_or_create_repo(wid, rp) if rp else None
         if not force_new:
             existing = self.store.get_active_session(wid, rid, agent=agent)
@@ -1743,8 +1759,9 @@ class MemoryService:
         return {"workspaces": out}
 
     # ── workspace curation (create / rename / describe / delete) ─────────────────
-    def create_workspace(self, name: str, description: str = "",
-                         *, visibility: str = "shared", actor: str = "user") -> dict:
+    def create_workspace(self, name: str, description: str = "", *,
+                         visibility: str = "personal", confirmed: bool = False,
+                         actor: str = "user") -> dict:
         """Create an empty workspace (a "folder") so a team can set one up *before* any
         memory is written to it — the dashboard's Workspaces tab and the agent write path
         both otherwise only mint a workspace lazily (``get_or_create_workspace``), which
@@ -1753,18 +1770,21 @@ class MemoryService:
         (``ENGRAPHIS_WORKSPACES``) still refuses names outside its allow-list, and rejects a
         name that already exists (mirrors ``rename``'s uniqueness check).
 
-        ``visibility`` is ``'shared'`` (default — the whole team can see and use it) or
-        ``'personal'`` (visible and usable only by the creating user, enforced by
-        ``_authorize_workspace``). Personal requires a signed-in dashboard user to own it;
-        if there is no current user (single-tenant / standalone MCP / CLI) a ``personal`` request
-        degrades to ``shared`` rather than minting an owner-less folder nobody could ever
-        reach."""
+        ``visibility`` defaults to ``'personal'``: a new team folder is private to its
+        creator until they intentionally share it. ``'shared'`` requires
+        ``confirmed=True`` so a client cannot make a whole-team folder by omission.
+        Personal requires a signed-in dashboard user to own it; outside team mode there is
+        no identity, so the established single-tenant behaviour remains unrestricted."""
         ws = self._clean_ws(name)
         description = _clean_text(description, field="description",
                                   max_chars=MAX_CONTENT_CHARS, required=False)
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
                             required=False) or "user"
-        visibility = "personal" if str(visibility or "").lower() == "personal" else "shared"
+        visibility = str(visibility or "personal").lower()
+        if visibility not in ("personal", "shared"):
+            raise ValidationError("visibility must be 'personal' or 'shared'")
+        if visibility == "shared" and confirmed is not True:
+            raise ValidationError("sharing a folder requires explicit confirmation")
         owner = ""
         if visibility == "personal":
             u = current_user()
@@ -1785,6 +1805,51 @@ class MemoryService:
         self.store.conn.commit()
         return {"workspace": ws, "id": wid, "description": description,
                 "visibility": visibility, "owner": owner, "created": True}
+
+    def set_workspace_visibility(self, workspace: str, visibility: str, *,
+                                 confirmed: bool = False, actor: str = "user") -> dict:
+        """Explicitly share or unshare a team folder after user confirmation."""
+        ws = self._clean_ws(workspace)
+        target = str(visibility or "").lower()
+        if target not in ("personal", "shared"):
+            raise ValidationError("visibility must be 'personal' or 'shared'")
+        if confirmed is not True:
+            raise ValidationError("changing folder access requires explicit confirmation")
+        user = current_user() or {}
+        owner = user.get("email") or ""
+        if not owner:
+            raise ValidationError("changing folder access requires a signed-in team user")
+        actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
+                            required=False) or "user"
+        wid = self._lookup_workspace(ws)
+        if wid is None:
+            raise ValidationError(f"no workspace named '{ws}' yet")
+        row = self.store.conn.execute("SELECT settings FROM workspaces WHERE id=?", (wid,)).fetchone()
+        try:
+            workspace_settings = json.loads(row["settings"]) if row and row["settings"] else {}
+            if not isinstance(workspace_settings, dict):
+                workspace_settings = {}
+        except Exception:
+            workspace_settings = {}
+        previous, _ = self._workspace_visibility(ws)
+        if previous == "shared" and target == "personal" and user.get("role") != "admin":
+            # Making a team-visible folder private removes it from every other member.
+            # A regular member must not be able to claim an existing shared workspace.
+            raise ValidationError("only an admin can make a shared folder personal")
+        if target == "personal":
+            workspace_settings["visibility"] = "personal"
+            workspace_settings["owner"] = owner
+            action = "workspace_unshare"
+        else:
+            workspace_settings["visibility"] = "shared"
+            workspace_settings.pop("owner", None)
+            action = "workspace_share"
+        self.store.conn.execute("UPDATE workspaces SET settings=? WHERE id=?",
+                                (json.dumps(workspace_settings), wid))
+        self.store.audit(actor, action, wid, f"{ws}: {previous} -> {target}")
+        self.store.conn.commit()
+        return {"workspace": ws, "visibility": target,
+                "owner": owner if target == "personal" else "", "changed": previous != target}
 
     def rename_workspace(self, workspace: str, new_name: str, *, actor: str = "user") -> dict:
         """Rename a workspace's label. Memories key off ``workspace_id``, so this is a pure

@@ -190,7 +190,7 @@ def create_app() -> FastAPI:
     # Team auth plumbing is mounted whenever team mode is configured. The request gate
     # activates for a live Team license or an already-provisioned user database, so a
     # lapsed license never turns a private team instance into an open single-user app.
-    team_enabled, auth_store = False, None
+    team_enabled, auth_store, team_auth_broken = False, None, False
     try:
         from engraphis.routes import v2_team
         team_enabled, auth_store = v2_team.attach(app, svc)
@@ -201,16 +201,16 @@ def create_app() -> FastAPI:
         # the deployment quietly falls back to a single shared API token — viewers get
         # admin reach, personal folders become readable — with nothing in the log to say
         # so. Always leave a trace; and when the operator explicitly asked for team mode,
-        # fail the boot instead of serving a provisioned team without role enforcement.
+        # refuse every guarded route (see `team_auth_broken` in _auth_gate below) rather
+        # than serving a provisioned team without role enforcement.
         # Imported here, not at module scope: the MCP-mount block above binds `_logging`
         # as a LOCAL of this function, so a module-level alias would be shadowed and
         # unbound on the (normal) path where that block never runs.
         import logging as _log
         _log.getLogger("engraphis").exception(
             "team auth failed to mount — role enforcement and personal-folder isolation "
-            "are NOT active")
-        if settings.team_mode:
-            raise
+            "are NOT active; /api/* will answer 503 until this is repaired")
+        team_auth_broken = settings.team_mode
     # Streamable HTTP sessions are process-local in the MCP SDK. Bind each one to the
     # authenticated user that initialized it so another valid member cannot replay a
     # stolen session id with their own bearer token.
@@ -260,6 +260,20 @@ def create_app() -> FastAPI:
         if (not path.startswith("/api/") and not (path == "/mcp" or path.startswith("/mcp/"))) \
                 or path in _PUBLIC or team_bootstrap_public or setup_bootstrap_public:
             return await call_next(request)
+        # Team mode was configured but its auth layer failed to mount (logged at mount
+        # time). Continuing would silently fall through to the single shared API token
+        # below: no roles, no personal-folder isolation. Refuse every guarded route.
+        #
+        # Deliberately enforced here rather than by re-raising at mount time: `app =
+        # create_app()` runs at module scope and team_mode is ON by default, so raising
+        # turns a transient users-db lock into a boot crash loop that cannot self-heal and
+        # fails Railway's healthcheck. /api/health and /api/ready are exempted above, so
+        # the container stays up and recovers on restart once the store is readable —
+        # while everything that needs an identity fails closed until it is.
+        if team_auth_broken:
+            return JSONResponse(
+                {"error": "team authentication is unavailable on this instance",
+                 "auth": "team"}, status_code=503)
         # MCP-over-HTTP agent endpoint (/mcp) — Team-gated (402 without a Team license)
         # and authenticated with a per-user bearer token. Each MCP tool then enforces its
         # own viewer/member/admin role while reusing the dashboard's shared MemoryService.
