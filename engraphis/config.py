@@ -3,17 +3,223 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+import sys
+from contextlib import contextmanager
+import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Optional
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    # ``engraphis-init`` writes the configuration contract to ``./.env``. Calling
+    # ``load_dotenv()`` without a path makes python-dotenv search from this module's
+    # installed location, so a wheel install silently ignored the file it had just told
+    # the user to create. Load only the process working directory (no parent traversal),
+    # and retain python-dotenv's default ``override=False`` so an explicit environment
+    # always wins.
+    load_dotenv(dotenv_path=os.path.join(os.getcwd(), ".env"))
 except Exception:
     pass
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_DB_NOTICES = set()
+
+
+def _default_db_path(root: Path = _PROJECT_ROOT, *, os_name: Optional[str] = None,
+                     platform: Optional[str] = None, environ: Optional[dict] = None,
+                     home: Optional[Path] = None) -> str:
+    """Default DB location. In a source checkout: ``<repo>/engraphis.db`` (dev behavior,
+    unchanged). Installed into site-/dist-packages: a per-user data directory instead —
+    a DB inside site-packages is invisible to the user, contradicts the printed
+    "./engraphis.db", and is silently DELETED by ``pip install -U`` / uninstall.
+    Pure function of *root* so both branches are unit-testable."""
+    parts = {p.lower() for p in root.parts}
+    if "site-packages" not in parts and "dist-packages" not in parts:
+        return str(root / "engraphis.db")
+    os_name = os.name if os_name is None else os_name
+    platform = sys.platform if platform is None else platform
+    environ = os.environ if environ is None else environ
+    home = Path.home() if home is None else home
+    if os_name == "nt":
+        win_home = PureWindowsPath(str(home))
+        base = PureWindowsPath(
+            environ.get("LOCALAPPDATA") or (win_home / "AppData" / "Local")
+        )
+    elif platform == "darwin":
+        posix_home = PurePosixPath(str(home).replace("\\", "/"))
+        base = posix_home / "Library" / "Application Support"
+    else:
+        posix_home = PurePosixPath(str(home).replace("\\", "/"))
+        base = PurePosixPath(
+            environ.get("XDG_DATA_HOME") or (posix_home / ".local" / "share")
+        )
+    return str(base / "engraphis" / "engraphis.db")
+
+
+def _db_notice(key: str, message: str) -> None:
+    """Emit a migration/collision notice once per process, on stderr only."""
+    if key not in _DEFAULT_DB_NOTICES:
+        _DEFAULT_DB_NOTICES.add(key)
+        print("[engraphis] %s" % message, file=sys.stderr)
+
+
+def _backup_sqlite(src: Path, dst: Path) -> None:
+    """Create and validate a consistent SQLite backup at *dst*.
+
+    SQLite's backup API includes committed WAL content; copying only the main file can
+    silently drop recent writes. The source remains untouched for rollback/recovery.
+    """
+    source = sqlite3.connect(str(src), timeout=30)
+    target = sqlite3.connect(str(dst), timeout=30)
+    try:
+        source.execute("PRAGMA query_only=ON")
+        source.backup(target)
+        check = target.execute("PRAGMA quick_check").fetchone()
+        if not check or check[0] != "ok":
+            raise sqlite3.DatabaseError("backup integrity check failed")
+        target.commit()
+    finally:
+        target.close()
+        source.close()
+
+
+@contextmanager
+def _migration_lock(target: Path):
+    """Serialize first-run migration across processes without a third-party lock."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target.with_name(".%s.migration.lock" % target.name)
+    handle = open(lock_path, "a+b")  # noqa: SIM115 - held through the context yield
+    locked = False
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        locked = True
+        yield
+    finally:
+        try:
+            if locked:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+def _prepare_installed_db_default_unlocked(root: Path, target: Path) -> Path:
+    """Preserve the unsafe pre-1.0 installed default when moving to user data.
+
+    Engraphis 0.9.7 placed ``engraphis.db`` next to site-packages. A 1.0 process must
+    not quietly open a new empty database while that file still contains user data.
+    Migrate the memory and companion auth databases through staged SQLite backups,
+    preserving the legacy files. A collision never overwrites either side.
+    """
+    legacy = root / "engraphis.db"
+    if not legacy.is_file():
+        return target
+    if target.exists():
+        _db_notice(
+            "default-db-collision:%s" % target,
+            "both the current database (%s) and preserved pre-1.0 database (%s) exist; "
+            "using the current database without merging or overwriting either file"
+            % (target, legacy),
+        )
+        return target
+
+    pairs = []
+    legacy_users = Path(str(legacy) + ".users.db")
+    target_users = Path(str(target) + ".users.db")
+    if legacy_users.is_file():
+        pairs.append((legacy_users, target_users))
+    # Publish the primary memory DB last: it is the migration's commit marker. If the
+    # process or host dies between the two os.replace calls, the next start will either
+    # see both files (complete) or only the auth companion and refuse to continue. The
+    # reverse order could expose a primary DB without its users after a hard crash.
+    pairs.append((legacy, target))
+    if any(dst.exists() for _, dst in pairs):
+        raise RuntimeError(
+            "cannot migrate the pre-1.0 database because a destination companion "
+            "already exists; set ENGRAPHIS_DB_PATH explicitly and reconcile the files"
+        )
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staged = []
+    installed = []
+    try:
+        for src, dst in pairs:
+            tmp = dst.with_name(".%s.migrating-%s" % (dst.name, uuid.uuid4().hex))
+            staged.append((tmp, dst))
+            _backup_sqlite(src, tmp)
+        for tmp, dst in staged:
+            os.replace(str(tmp), str(dst))
+            installed.append(dst)
+    except Exception as exc:
+        # Publishing two databases cannot be one filesystem transaction. If the users DB
+        # publish fails after memory succeeds, remove the newly-published copy so the next
+        # run retries both from the preserved legacy sources instead of opening half a pair.
+        for dst in reversed(installed):
+            try:
+                dst.unlink()
+            except OSError:
+                pass
+        for tmp, _ in staged:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise RuntimeError(
+            "could not migrate the preserved pre-1.0 database at %s; no new database "
+            "was opened. Set ENGRAPHIS_DB_PATH to that file to recover (%s)" %
+            (legacy, exc)
+        ) from None
+
+    _db_notice(
+        "default-db-migrated:%s" % target,
+        "copied the preserved pre-1.0 database from %s to %s; the original remains "
+        "untouched" % (legacy, target),
+    )
+    return target
+
+
+def _prepare_installed_db_default(root: Path, target: Path) -> Path:
+    """Run the preservation-first migration under a cross-process file lock.
+
+    The unlocked implementation publishes both the memory and auth databases. Without
+    serialization, two simultaneous first starts could overwrite or roll back each
+    other's destination between the initial collision check and ``os.replace``.
+    """
+    legacy = root / "engraphis.db"
+    if not legacy.is_file() or target.exists():
+        return _prepare_installed_db_default_unlocked(root, target)
+    with _migration_lock(target):
+        return _prepare_installed_db_default_unlocked(root, target)
+
+
+def _configured_db_path(root: Path = _PROJECT_ROOT) -> str:
+    """Resolve an explicit override or prepare the safe installed default."""
+    configured = _env("ENGRAPHIS_DB_PATH", "")
+    if configured:
+        return configured
+    target = Path(_default_db_path(root))
+    parts = {p.lower() for p in root.parts}
+    if "site-packages" in parts or "dist-packages" in parts:
+        target = _prepare_installed_db_default(root, target)
+    return str(target)
+
 
 #: Vendor-hosted managed service for sync, leases, trials, and invite delivery. This is
 #: the default target when ``ENGRAPHIS_RELAY_URL`` is not overridden.
@@ -51,7 +257,7 @@ class Settings:
     port: int = field(default_factory=lambda: _env_int("ENGRAPHIS_PORT", 8700))
 
     # Optional bearer token. When non-empty, the REST API requires
-    # `Authorization: Bearer <token>` on all routes except health/docs/dashboard.
+    # `Authorization: Bearer <token>` on protected routes; health and the page shell stay public.
     api_token: str = field(default_factory=lambda: _env("ENGRAPHIS_API_TOKEN", ""))
     # Comma-separated CORS allow-list. Defaults to loopback only (local-first).
     cors_origins: list = field(
@@ -80,10 +286,7 @@ class Settings:
         "ENGRAPHIS_RELAY_URL", DEFAULT_RELAY_URL))
 
     db_path: str = field(
-        default_factory=lambda: _env(
-            "ENGRAPHIS_DB_PATH",
-            str(_PROJECT_ROOT / "engraphis.db"),
-        )
+        default_factory=_configured_db_path
     )
 
     embed_model: str = field(

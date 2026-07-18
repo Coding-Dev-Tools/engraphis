@@ -12,9 +12,26 @@ def test_embedder_factory_falls_back_offline():
     assert isinstance(get_embedder("definitely-not-a-real-model-xyz", 128), DeterministicEmbedder)
 
 
-def test_vector_index_factory_modes():
+def test_vector_index_factory_modes(monkeypatch):
+    """prefer="numpy" always forces the reference index; prefer="auto" returns the
+    best AVAILABLE backend — asserted for both availability branches explicitly
+    (sqlite-vec is a [test] dependency now, so its absence must be simulated)."""
+    import engraphis.backends.vector_sqlitevec as vs
+
     s = Store(":memory:")
     assert isinstance(get_vector_index(s, dim=128, prefer="numpy"), NumpyVectorIndex)
+    try:
+        import sqlite_vec  # noqa: F401
+        assert isinstance(get_vector_index(s, dim=128, prefer="auto"),
+                          vs.SqliteVecVectorIndex)
+    except ImportError:
+        pass
+
+    class _Unavailable:
+        def __init__(self, *a, **k):
+            raise ImportError("sqlite_vec not installed (simulated)")
+
+    monkeypatch.setattr(vs, "SqliteVecVectorIndex", _Unavailable)
     assert isinstance(get_vector_index(s, dim=128, prefer="auto"), NumpyVectorIndex)
     s.close()
 
