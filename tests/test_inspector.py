@@ -94,6 +94,7 @@ def test_graph_endpoint_serves_the_same_data_as_the_dashboard():
         {"from": "e1", "to": "e2", "label": "works_at", "layer": "entity"}
     ]
     assert g["stats"] == {"entities": 2, "edges": 1, "connected": 2, "isolated": 0}
+    assert c.get("/api/graph?workspace=acme&layers=").json()["edges"] == []
 
 
 def test_graph_endpoint_rejects_workspace_outside_the_binding():

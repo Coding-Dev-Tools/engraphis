@@ -1012,7 +1012,9 @@ def graph(workspace: Optional[str] = None, limit: int = 2000,
     service closes that gap.
     """
     ws = workspace or _default_ws()
-    selected = [x.strip() for x in layers.split(",") if x.strip()] if layers else None
+    selected = None if layers is None else [
+        x.strip() for x in layers.split(",") if x.strip()
+    ]
     return _run(
         service().graph, workspace=ws, limit=limit, layers=selected,
         include_code=include_code, repo=repo,
