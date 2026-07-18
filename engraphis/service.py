@@ -1717,11 +1717,12 @@ class MemoryService:
         """Workspace/repo names with live-memory counts. On a bound instance only the
         permitted workspaces are listed — same boundary as every other read.
 
-        Each entry carries ``visibility`` (``'shared'``/``'personal'``) and, for personal
-        folders, ``owner``. In team mode a **personal** folder owned by someone other than
-        the current user is omitted entirely — you can't see, count, or select a folder
-        that isn't yours — mirroring the access check in ``_authorize_workspace``. Outside
-        team mode there is no current user, so every folder is listed as before."""
+        Each entry carries ``visibility`` (``'shared'``/``'personal'``), plus whether the
+        current user may change that access. In team mode a **personal** folder owned by
+        someone other than the current user is omitted entirely — you can't see, count, or
+        select a folder that isn't yours — mirroring the access check in
+        ``_authorize_workspace``. Outside team mode there is no current user, so every
+        folder is listed as before."""
         import time as _time
         now = _time.time()
         rows = self.store.conn.execute(
@@ -1752,6 +1753,10 @@ class MemoryService:
                 "SELECT name FROM repos WHERE workspace_id=? ORDER BY name", (r["id"],))]
             entry = {"name": r["name"], "memories": int(r["n"]), "description": _desc,
                      "visibility": _vis, "repos": [x["name"] for x in repos]}
+            if user:
+                entry["can_change_access"] = bool(
+                    _owner == my_email or user.get("role") == "admin"
+                )
             if _vis == "personal":
                 entry["owner"] = _owner
                 entry["mine"] = bool(my_email and _owner == my_email)
@@ -1785,26 +1790,27 @@ class MemoryService:
             raise ValidationError("visibility must be 'personal' or 'shared'")
         if visibility == "shared" and confirmed is not True:
             raise ValidationError("sharing a folder requires explicit confirmation")
-        owner = ""
-        if visibility == "personal":
-            u = current_user()
-            owner = (u or {}).get("email") or ""
-            if not owner:
-                visibility = "shared"  # no identity to own it — don't orphan the folder
+        u = current_user() or {}
+        owner = u.get("email") or ""
+        if visibility == "personal" and not owner:
+            visibility = "shared"  # no identity to own it — don't orphan the folder
         if self._lookup_workspace(ws) is not None:
             raise ValidationError(f"a workspace named '{ws}' already exists")
         ws_settings: dict = {}
         if description:
             ws_settings["description"] = description
-        if visibility == "personal":
-            ws_settings["visibility"] = "personal"
+        ws_settings["visibility"] = visibility
+        if owner:
+            # For personal folders this is the access boundary. For deliberately shared
+            # folders it records who may reverse the sharing decision later.
             ws_settings["owner"] = owner
         wid = self.store.create_workspace(ws, settings=ws_settings or None)
         self.store.audit(actor, "workspace_create", wid,
                          "%s (%s%s)" % (ws, visibility, ("; owner=" + owner) if owner else ""))
         self.store.conn.commit()
         return {"workspace": ws, "id": wid, "description": description,
-                "visibility": visibility, "owner": owner, "created": True}
+                "visibility": visibility,
+                "owner": owner if visibility == "personal" else "", "created": True}
 
     def set_workspace_visibility(self, workspace: str, visibility: str, *,
                                  confirmed: bool = False, actor: str = "user") -> dict:
@@ -1831,18 +1837,25 @@ class MemoryService:
                 workspace_settings = {}
         except Exception:
             workspace_settings = {}
-        previous, _ = self._workspace_visibility(ws)
-        if previous == "shared" and target == "personal" and user.get("role") != "admin":
+        previous, previous_owner = self._workspace_visibility(ws)
+        if previous == "shared" and target == "personal" \
+                and previous_owner != owner and user.get("role") != "admin":
             # Making a team-visible folder private removes it from every other member.
-            # A regular member must not be able to claim an existing shared workspace.
-            raise ValidationError("only an admin can make a shared folder personal")
+            # The user who deliberately shared it may reverse that decision; otherwise
+            # only an admin may claim a legacy/team-owned shared workspace.
+            raise ValidationError(
+                "only the original sharer or an admin can make a shared folder personal")
         if target == "personal":
             workspace_settings["visibility"] = "personal"
             workspace_settings["owner"] = owner
             action = "workspace_unshare"
         else:
             workspace_settings["visibility"] = "shared"
-            workspace_settings.pop("owner", None)
+            if previous == "personal":
+                # Keep a controller while the folder is shared so its creator can undo
+                # their own sharing decision. Ownership is not an access restriction while
+                # visibility is shared and is not exposed by list_workspaces.
+                workspace_settings["owner"] = previous_owner or owner
             action = "workspace_share"
         self.store.conn.execute("UPDATE workspaces SET settings=? WHERE id=?",
                                 (json.dumps(workspace_settings), wid))
