@@ -182,10 +182,11 @@ def create_app(service: Optional[MemoryService] = None,
             if user is None:
                 user = auth().resolve_session(request.cookies.get(COOKIE_NAME, ""))
             if user is None and _bearer_ok(request):
-                # The deployment service token remains the global automation escape
-                # hatch: attribute it for audit, but do not turn it into a personal owner.
-                request.state.user = {
-                    "id": "service-token", "email": "service-token", "role": "admin"}
+                # Keep the deployment token as an admin service account, but bind a
+                # synthetic identity so personal-folder ownership still fails closed.
+                user = {"id": "service-token", "email": "service-token", "role": "admin"}
+                request.state.user = user
+                set_current_user(user)
                 return await call_next(request)
             if user is None:
                 return JSONResponse({"error": "authentication required", "auth": "team"},

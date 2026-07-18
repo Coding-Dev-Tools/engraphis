@@ -20,10 +20,11 @@ Follow-up audit of the graph, Team / Pro / licensing, and relay surfaces after 0
   identifiers previously remained reachable through persisted code-memory links from a
   repo-level caller. Reindexing still rebuilds those links for the owning session, but
   every read now filters them by caller-visible scope.
-- Auth-bound dashboard users can no longer omit `workspace` to reach global recall, and
-  Inspector per-user bearer tokens now bind the resolved user before personal receipt
-  reads. The standalone read-only graph endpoint also disables lazy write-on-read
-  backfill.
+- Auth-bound dashboard users can no longer omit `workspace` to reach global recall.
+  Inspector per-user and deployment bearer tokens now bind real or synthetic identities
+  before personal receipt reads, so the deployment service account remains available for
+  shared automation without bypassing personal-folder ownership. The standalone
+  read-only graph endpoint also disables lazy write-on-read backfill.
 
 ### Fixed
 
