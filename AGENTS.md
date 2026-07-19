@@ -15,9 +15,9 @@ imports it. Read §0 before editing anything.
 There are **two parallel codebases** under `engraphis/`. Confusing them is the single
 most common mistake here.
 
-| | **v2 — the target (build here)** | **v1 — legacy reference server (running server)** |
+| | **v2 — current architecture (build here)** | **v1 — legacy reference server** |
 |---|---|---|
-| Status | The v2 target design. Phases 0–1 done; parts of 2/3/5 done (see §6). | Working reference implementation; flat namespaces. |
+| Status | Primary scoped, bi-temporal, interface-driven implementation. | Compatibility/reference implementation with flat namespaces. |
 | Model | Scoped + bi-temporal + typed; interface-driven. | Single flat `namespace` string per memory. |
 | Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/`, `static/` |
 | Data | new v2 schema (`SCHEMA_VERSION = 3`) | `engraphis_v1.db` |
@@ -51,7 +51,7 @@ python -m eval.external --dataset locomo10.json --format locomo --offline --limi
 
 # ── Unified dashboard + memory inspector ──
 python -m scripts.start_dashboard    # http://127.0.0.1:8700
-# The standalone scripts.inspector launcher and :8710 were retired 2026-07-10.
+# Use this unified launcher; there is no separate Inspector service.
 
 # ── Onboarding (writes .env with an absolute DB path; doctor mode verifies install) ──
 engraphis-init                   # or: python -m scripts.init
@@ -195,114 +195,7 @@ These are pure, unit-tested functions — change them only with a corresponding 
 
 ---
 
-## 6. Status — what's real vs planned
-
-- **Done — Phase 0:** interface contracts, scoped + bi-temporal schema, v1→v2 migration, eval
-  harness + CI.
-- **Done — Phase 1:** hybrid recall, six-term score, RRF, rerank; SentenceTransformer embedder +
-  `sqlite-vec` index, each with an offline fallback.
-- **Done — Phase 2:** deterministic (no-LLM) write-path conflict resolution
-  (`core/resolve.py`, ADD/NOOP/INVALIDATE, two signals: token-Jaccard + embedding cosine — see
-  §2); **LLM-based fact extraction** behind the `Extractor` protocol
-  (`backends/extractor.py`, offline default = passthrough, `ENGRAPHIS_EXTRACTOR=llm` to
-  enable, `MemoryEngine.ingest()` / `engraphis_ingest`); **Personalized PageRank** graph arm
-  (`core/graphrank.py`, default; `graph_mode="1hop"` retained for ablation); **A-MEM-style
-  evolution** (`MemoryEngine._evolve`: new writes auto-link to related live neighbors and
-  reinforce them — bounded, idempotent, audited).
-- **Done — expanded Phase 3:** **MCP server exists** (`engraphis/mcp_server.py`, 28 tools:
-  write/read (incl. **grounded recall** — `engraphis_recall_grounded`: cited answer or abstain)/
-  governance/code/session — do not assume only `remember`/`recall` exist, check the
-  tool list) and a **code-symbol graph** (`backends/codegraph.py`, tree-sitter with a
-  dependency-free regex fallback; `MemoryEngine.index_repo()` / `engraphis_search_code`).
-  Languages: Python, JavaScript, TypeScript, Go, Rust, Java, C#, C, C++, SQL, and Terraform
-  (unsupported AST grammars route to the regex backend). Definitions, calls, imports,
-  ownership, inheritance/implementation, variables, and docstrings/comments are indexed.
-  An unknown `languages=` filter is rejected with an
-  actionable error instead of silently indexing nothing. Traversal prunes build/dep dirs
-  *during* the walk and honours a root `.engraphisignore` (gitignore-style; hardcoded
-  default excludes are non-negotiable — an untrusted repo can't `!`-re-expose them);
-  symlinked files are not followed out of root. Call-graph edges are name-based, not
-  type-resolved (best-effort, documented as such in `backends/codegraph.py`). Content hashes
-  provide incremental per-file indexing; code↔memory links, layered unified graph overlays,
-  weighted communities/hotspots, path queries, git/PR impact, portable JSON/HTML/Markdown
-  exports, and a union merge driver are implemented. **Not done:** live file-watcher
-  re-indexing and git-as-world-time validity.
-- **Done — intent-native/layered memory protocol:** the transport-neutral service exposes
-  `remember` / `link` / intent-aware `recall`; edges are tagged as temporal/entity/causal/
-  semantic inside the same database; the dashboard can filter layers and overlay code plus
-  linked experience. Optional host/LLM retention supervision is advisory, bounded, audited,
-  and never silently drops a write.
-- **Done — local resource ingestion + privacy receipts:** stdlib text/code/HTML/DOCX ingestion,
-  optional PDF/image OCR/audio-video transcription/PostgreSQL catalog adapters, content-free
-  SHA-256-chained operation receipts, receipt verification/export, and the read-only
-  `engraphis-graph-server` team surface.
-- **Done — partial Phase 5:** input validation/sanitization, optional bearer auth, CORS
-  allow-list, governance tools (`forget`/`pin`/`correct`, audited, never a hard delete),
-  Apache-2.0 licensing/packaging, and optional SQLCipher encryption at rest.
-  **Not done:** built-in rate limiting and per-token tenant authorization — see `SECURITY.md`.
-- **Done — manual merge (N→1 governance op):** `MemoryEngine.merge()` /
-  `MemoryService.merge()` combine several selected memories into one — the multi-input
-  generalization of `correct`. Sources are bi-temporally closed (retired into history,
-  never hard-deleted), the new memory records `supersedes` on every source (so the
-  supersession chain renders — `service._chain_for` now walks *all* predecessors, not a
-  single line) plus a `merges` link back to each. Safety-inherits the strictest of its
-  sources: `trusted:false` if any source is untrusted (no laundering) and the highest
-  `sensitivity`; pinned if any source was pinned. Audited on both sides with a
-  token-compaction number. Exposed on the dashboard (`POST /api/merge`, multi-select +
-  merge modal in the Memories tab) over the shared `MemoryService`; not yet an MCP tool.
-  Distinct from `consolidate`, which is automatic, episodic-only, and *non-destructive*
-  (sources stay live). Tests: `tests/test_merge.py`.
-- **Done — Phase 4 (first shipping cut):** the consolidation loop
-  (`core/consolidate.py` + `scripts/consolidate.py` + `engraphis_consolidate` MCP tool +
-  dashboard button): recurring episodics → semantic digests (linked `consolidates`, audited),
-  decayed transients archived bi-temporally; deterministic offline, optional LLM summarizer.
-  Every sweep reports **compaction** — estimated context tokens before/after
-  (`textutil.estimate_tokens`, ~4 chars/token, offline) — under `report["compaction"]`, so the
-  payoff is a number (§3.7). Opt-in **entity profiles** (`consolidate_profiles`, `profiles=True`,
-  `--profiles`): roll every live memory mentioning an entity (`store.list_entities` + name match)
-  into one durable `semantic` profile digest, linked `profiles`, provenance
-  `source='profile_consolidation'`, idempotent + audited — the local-first analog of a
-  per-subject knowledge profile. Framed local-first: a user-schedulable job, not a cloud service.
-  First-class **scope promotion** is implemented (`MemoryEngine.promote()` /
-  `MemoryService.promote()` / `engraphis_promote` / HTTP): it only widens scope, writes the
-  wider record before retiring the narrow source, safety-inherits pin/sensitivity/stability,
-  and preserves an audited/linked bi-temporal history. Contextual recall is hierarchy-aware:
-  repo reads inherit workspace/user facts and session reads inherit their repo/workspace while
-  excluding other sessions. **Not done:** procedural distillation.
-- **Done — unified dashboard with built-in memory inspector** (`engraphis/inspector/`
-  internals mounted by `python -m scripts.start_dashboard`, :8700): product UI over
-  `MemoryService` (same layer as the MCP server, so UI and tools can't drift). The
-  standalone :8710 launcher is retired. Flagship screen: the supersession chain with
-  word-level diffs — rendering
-  `resolve()`'s decision history. Accessible (ARIA tabs/labels, keyboard nav, text+color
-  status), no build step, content rendered via textContent only. Optional bearer auth
-  (`ENGRAPHIS_API_TOKEN`) and Team-mode multi-user auth are enforced server-side.
-- **Done — Cloud sync (Pro, first cut):** convergent multi-device / team sync over any
-  shared folder. `core/sync.py::SyncEngine` is a state-based CRDT merge over memory rows
-  (bi-temporal, deterministic, idempotent) that reuses the `resolve()`/validity machinery —
-  union by ULID, earliest-invalidation + max-reinforcement lattice, deterministic LWW with
-  a content-hash tiebreak; scope reconciled *by name* on apply. `SyncTransport` interface
-  (`core/interfaces.py`) + two backends: `FolderTransport` (`backends/sync_folder.py`, works
-  over Dropbox/iCloud/Syncthing/git) and the managed `RelayTransport`
-  (`backends/sync_relay.py`) against the license-gated server (`inspector/sync_relay.py`,
-  mounted by `inspector/cloud_mount.py` on both `app.py` and `dashboard_app.py`; Team seat
-  enforcement is server-side). `get_transport("folder"|"relay", …)` selects between them;
-  gated CLI `python -m scripts.sync --remote <dir>` **or** `--relay [<url>]`
-  (`require_feature("sync")` lives in the script — `core/` stays license-free). The
-  untrusted-bundle apply path is validated/clamped and **scope-confined** (a bundle can't
-  cross a workspace/repo boundary; `secret` memories aren't exported or remotely mutated;
-  Team personal folders are never sent to the shared-account relay; provenance is stamped).
-  See `docs/SYNC.md`.
-  **Not done:** end-to-end encryption of relay bundles (client-side encrypt/decrypt; the
-  relay already stores opaque bytes), HLC per-field clock, entity/edge graph sync,
-  `engraphis_sync` MCP tool + Inspector "Devices" panel.
-- **Not done at all:** Phase 6 — Rust hot path.
-- The **v1 FastAPI server** is the legacy reference server and still runs; treat it as a
-  compatibility/reference surface, not the place for new capability.
-
----
-
-## 7. Gotchas
+## 6. Gotchas
 
 - **Offline by default in core:** `MemoryEngine.create()` uses a deterministic hashing
   embedder + NumPy index, so tests need no model download or network. Real models load only
@@ -312,11 +205,8 @@ These are pure, unit-tested functions — change them only with a corresponding 
   (`self.has_fts5`). Don't assume BM25 is available.
 - **Secrets & data are git-ignored:** `.env`, `engraphis_v1.db`, `*.db-wal`, `*.db-shm`. Never
   commit, print, or paste their contents.
-- **Real commit history exists as of 2026-07-08** — the "single Initial commit, everything else
-  uncommitted" state described here through 2026-07-01 is resolved; work since has landed as
-  logical, descriptive commits (see `git log`). `CHANGELOG.md` is still worth reading for a
-  higher-level summary, but `git log`/`blame` are reliable again for recent work. Keep committing
-  in logical chunks rather than letting changes pile up uncommitted.
+- **Git history is authoritative:** use `git log` / `git blame` for implementation history and
+  `CHANGELOG.md` for release-level summaries. Keep commits logical and descriptive.
 - **Synced-folder flakiness:** if the repo sits on OneDrive (or any host-to-sandbox mount), a
   transient `SyntaxError`, `AttributeError` for a method you just added, or a shell command
   reading back fewer lines than you just wrote is mid-sync, not your code. A single re-run is
@@ -327,9 +217,11 @@ These are pure, unit-tested functions — change them only with a corresponding 
 
 ---
 
-## 8. Source-of-truth docs
+## 7. Source-of-truth docs
 
-- **`README.md`** — v1 server usage + the REST API table.
+- **`README.md`** — installation, product surfaces, configuration, and public API usage.
+- **`CHANGELOG.md`** — shipped capability and release history. Keep phase/status ledgers out of
+  this operating manual.
 - **`docs/SYNC.md`** — cloud sync (Pro): architecture, the convergent merge, CLI usage, the
   untrusted-bundle security model, and positioning vs. file-syncers like Obsidian Sync.
 - **`AGENTS.md`** (this file) + **`CLAUDE.md`** — how to work in the repo.
@@ -340,5 +232,3 @@ These are pure, unit-tested functions — change them only with a corresponding 
   you change that file — this is a docs-drift surface like `README.md`.
 
 > When code and docs disagree, the code wins — then fix the doc in the same change.
-
-## Imported Claude Cowork project instructions
