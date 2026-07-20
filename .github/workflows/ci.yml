@@ -74,7 +74,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[test]" "uvicorn[standard]>=0.29"
-          npm install
+          npm ci
           npx playwright install --with-deps chromium
       - name: Playwright desktop/mobile, keyboard, CSP, console, and axe checks
         run: npx playwright test
