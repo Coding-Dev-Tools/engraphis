@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from engraphis.core.interfaces import (
@@ -9,7 +11,7 @@ from engraphis.core.interfaces import (
     Scope,
     SearchFilter,
 )
-from engraphis.core.store import Store
+from engraphis.core.store import Store, normalize_entity_name
 
 
 @pytest.fixture()
@@ -20,7 +22,51 @@ def store():
 
 
 def test_schema_version(store):
-    assert store.schema_version == 3
+    assert store.schema_version == 4
+
+
+def test_entity_normalization_preserves_meaningful_punctuation():
+    assert normalize_entity_name("  OpenAI\tPlatform  ") == "openai platform"
+    assert normalize_entity_name("C++") != normalize_entity_name("C#")
+    assert normalize_entity_name("AT&T") != normalize_entity_name("ATT")
+
+
+def test_replacing_edge_closes_removed_normalized_support(store):
+    wid = store.get_or_create_workspace("w")
+    first = store.add_memory(MemoryRecord(id="mem_first", content="first",
+                                          workspace_id=wid))
+    second = store.add_memory(MemoryRecord(id="mem_second", content="second",
+                                           workspace_id=wid))
+    store.upsert_edge(Edge(
+        id="edge_replace", src="a", dst="b", relation="rel", workspace_id=wid,
+        provenance={"memory_id": first, "memory_ids": [first]},
+    ))
+    store.upsert_edge(Edge(
+        id="edge_replace", src="a", dst="b", relation="rel", workspace_id=wid,
+        provenance={"memory_id": second, "memory_ids": [second]},
+    ))
+
+    rows = [dict(row) for row in store.conn.execute(
+        "SELECT memory_id, valid_to FROM edge_supports "
+        "WHERE edge_id='edge_replace' ORDER BY id"
+    )]
+    assert [row["memory_id"] for row in rows] == [first, second]
+    assert rows[0]["valid_to"] is not None
+    assert rows[1]["valid_to"] is None
+
+
+def test_edge_provenance_preserves_declared_primary_memory_order(store):
+    wid = store.get_or_create_workspace("w")
+    store.upsert_edge(Edge(
+        id="edge_order", src="a", dst="b", relation="rel", workspace_id=wid,
+        provenance={"memory_id": "mem_z", "memory_ids": ["mem_z", "mem_a"]},
+    ))
+
+    provenance = json.loads(store.conn.execute(
+        "SELECT provenance FROM edges WHERE id='edge_order'"
+    ).fetchone()["provenance"])
+    assert provenance["memory_id"] == "mem_z"
+    assert provenance["memory_ids"] == ["mem_z", "mem_a"]
 
 
 def test_concurrent_writes_do_not_corrupt_or_lose_data(tmp_path):
@@ -103,7 +149,7 @@ def test_v3_migration_classifies_existing_graph_layers_once(tmp_path):
     row = migrated.conn.execute(
         "SELECT layer FROM edges WHERE id='edge_old'"
     ).fetchone()
-    assert migrated.schema_version == 3
+    assert migrated.schema_version == 4
     assert row["layer"] == "entity"
     migrated.conn.execute(
         "UPDATE edges SET layer='causal' WHERE id='edge_old'"

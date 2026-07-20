@@ -104,6 +104,8 @@ def main(argv=None) -> None:
         db = settings.db_path
         import uvicorn
         from engraphis.dashboard_app import app as dashboard_app
+        from engraphis.observability import configure_structured_logging
+        structured_logs = configure_structured_logging()
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - convert startup failures to UX
         ap.exit(1, "Error: %s\n" % _startup_error(exc, db))
 
@@ -124,9 +126,17 @@ def main(argv=None) -> None:
     # the rightmost forwarded hop itself; letting Uvicorn rewrite request.client first
     # destroys that evidence and makes a preseeded X-Forwarded-For spoofable.
     try:
-        uvicorn.run(
-            dashboard_app, host=args.host, port=args.port, proxy_headers=False,
-        )
+        run_options = {
+            "host": args.host,
+            "port": args.port,
+            "proxy_headers": False,
+        }
+        if structured_logs:
+            # Uvicorn's default log_config replaces every uvicorn.access formatter after
+            # create_app() installs the redacting JSON formatter. Keeping the existing
+            # logging graph is therefore part of the credential-redaction boundary.
+            run_options["log_config"] = None
+        uvicorn.run(dashboard_app, **run_options)
     except (Exception, SystemExit) as exc:  # noqa: BLE001
         ap.exit(1, "Error: %s\n" % _startup_error(exc, db))
 

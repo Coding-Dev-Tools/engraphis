@@ -10,6 +10,7 @@ wiring on MemoryEngine.remember (regex on -> graph populated; default -> empty).
 from __future__ import annotations
 
 
+from engraphis.backends import graph_extractor as graph_extractor_module
 from engraphis.backends.graph_extractor import (
     GraphExtraction, NullGraphExtractor, RegexGraphExtractor, feed, get_graph_extractor,
 )
@@ -58,6 +59,22 @@ def test_factory_and_null_default():
     assert isinstance(get_graph_extractor("none"), NullGraphExtractor)
     assert isinstance(get_graph_extractor(""), NullGraphExtractor)
     assert NullGraphExtractor().extract("Alice Johnson works at Acme.").entities == []
+
+
+def test_regex_and_feed_bound_per_memory_entity_fanout():
+    content = " ".join(f"person{index}@example.com" for index in range(5_000))
+    extraction = RegexGraphExtractor().extract(content)
+    store = Store(":memory:")
+
+    written = feed(
+        store, content, workspace_id="w1", extractor=RegexGraphExtractor()
+    )
+
+    assert len(extraction.entities) == graph_extractor_module._MAX_ENTITIES
+    assert written["entities"] == graph_extractor_module._MAX_ENTITIES
+    assert store.conn.execute(
+        "SELECT COUNT(*) AS n FROM entities WHERE workspace_id='w1'"
+    ).fetchone()["n"] == graph_extractor_module._MAX_ENTITIES
 
 
 # ── the feed() writer (scoped graph) ──────────────────────────────────────────

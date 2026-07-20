@@ -19,6 +19,7 @@ from typing import Any, Optional
 from engraphis.config import settings
 from engraphis.stores import get_conn, now_ts
 from engraphis.stores import vectors as mem_store
+from engraphis.core.store import _escape_like
 
 _INTERACTION_BOOST = {
     "view": 0.05,
@@ -89,9 +90,9 @@ def boost_entity_memories(namespace: str, entity_name: str,
     if not name:
         return 0
     conn = get_conn()
-    like = "%" + name + "%"
+    like = "%" + _escape_like(name) + "%"
     rows = conn.execute(
-        "SELECT id FROM memories WHERE namespace=? AND (title LIKE ? OR content LIKE ?) "
+        "SELECT id FROM memories WHERE namespace=? AND (title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\') "
         "LIMIT 100",
         (namespace, like, like),
     ).fetchall()

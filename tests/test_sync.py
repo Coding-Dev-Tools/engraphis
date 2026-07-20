@@ -1089,7 +1089,33 @@ def test_sync_round_reports_incomplete_when_a_bundle_is_refused():
     assert store.get_memory("mem_p1") is not None
     assert result["complete"] is False
     assert result["peers_applied"] == 1
-    assert any("unsupported bundle version" in e["error"] for e in result["errors"])
+    assert result["errors"] == [{
+        "bundle": "bundle-bad.json",
+        "error": "bundle rejected",
+        "error_type": "SyncError",
+    }]
+
+
+def test_sync_report_does_not_expose_exception_text():
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    secret = "https://relay.example/path?token=do-not-log"
+
+    class _Transport:
+        def push(self, name, data):
+            pass
+
+        def pull(self):
+            raise RuntimeError(secret)
+            yield  # pragma: no cover - make this a generator
+
+    result = SyncEngine(store).sync(_Transport(), wid)
+
+    rendered = json.dumps(result)
+    assert secret not in rendered
+    assert result["errors"] == [{
+        "bundle": "?", "error": "transport failure", "error_type": "RuntimeError"
+    }]
 
 
 def test_sync_round_is_complete_when_every_bundle_applies():

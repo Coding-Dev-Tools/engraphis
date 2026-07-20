@@ -48,6 +48,7 @@ def test_llm_extractor_parses_facts_with_hints():
     assert len(facts) == 2
     assert facts[0].mtype == MemoryType.SEMANTIC and facts[0].importance == 0.8
     assert facts[0].keywords == ["paseto", "auth"]
+    assert facts[0].metadata["llm_extraction"]["mode"] == "llm"
     assert facts[1].mtype == MemoryType.EPISODIC
 
 
@@ -132,5 +133,8 @@ def test_engine_ingest_preserves_structured_extractor_metadata():
                      metadata={"source": "test"})
     rec = eng.store.get_memory(out["facts"][0]["id"])
     assert rec.metadata["source"] == "test"
+    assert rec.metadata["llm_extraction"]["mode"] == "llm_structured"
+    assert rec.metadata["llm_extraction"]["fact_count"] == 1
+    assert len(rec.metadata["llm_extraction"]["source_sha256"]) == 64
     assert rec.metadata["entities"] == ["Engraphis", "SQLite"]
     assert rec.metadata["relations"][0]["target"] == "SQLite"

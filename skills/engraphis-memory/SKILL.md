@@ -113,6 +113,20 @@ engraphis_end_session(session_id=..., outcome="shipped",
                       open_threads=[])
 ```
 
+## Visual investigation
+
+For human-led graph analysis, open the dashboard's **Knowledge Graph** tab. The Analytical Galaxy
+searches the complete canonical index, then returns bounded systems, neighborhoods, and
+strongest-evidence paths. Treat labels and inspector evidence as authoritative; proximity means
+weighted connectivity, node size means evidence-weighted mass, and overview bridges are
+aggregates—not raw factual edges. Use the synchronized List view when exact keyboard or
+screen-reader access is more useful than spatial navigation. Graph reads never backfill data;
+run an explicit graph-index dry-run/job through the dashboard API when legacy memories need
+indexing. When linking directly to the graph API, keep the same investigation context on scene,
+suggestion, entity-detail, and path requests: `repo`, comma-separated `memory_types`, Unix-second
+`as_of`, `time_from`/`time_to`, and `include_weak_cooccurrence`. The UI stores shareable scene
+state in the URL hash, so filters and selected IDs are not sent to the server as opaque state.
+
 ## Setup
 
 The skill needs the Engraphis MCP server running. Install and register it once:

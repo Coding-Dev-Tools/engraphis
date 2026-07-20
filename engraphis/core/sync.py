@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import re
 from typing import Any, Optional
@@ -49,6 +50,9 @@ from typing import Any, Optional
 from engraphis.core.graph_layers import merge_graph_layers, normalize_graph_layer
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
 from engraphis.core.store import Store, now_ts
+
+
+logger = logging.getLogger("engraphis.sync")
 
 # ── bundle format ─────────────────────────────────────────────────────────────
 SYNC_FORMAT = "engraphis-sync"
@@ -446,16 +450,7 @@ class SyncEngine:
         self.embedder = embedder
         self.index = vector_index
         self.device_id = device_id or store.device_id()
-        
-        # Default allowed_workspaces to global settings to prevent accidental bypass of ENGRAPHIS_WORKSPACES
-        if allowed_workspaces is None:
-            try:
-                from engraphis.config import settings
-                if settings.allowed_workspaces:
-                    allowed_workspaces = settings.allowed_workspaces
-            except (ImportError, AttributeError):
-                pass
-                
+
         # Same hard boundary MemoryService enforces (SECURITY.md §3): when set, a bundle
         # may only be applied into one of these workspaces, so the folder transport can
         # never be steered into writing a workspace the operator never authorized.
@@ -779,7 +774,7 @@ class SyncEngine:
 
     # ── one round-trip over a transport ─────────────────────────────────────────
     def sync(self, transport, workspace_id: str, *, repo_id: Optional[str] = None,
-             dry_run: bool = False) -> dict:
+             dry_run: bool = False, push: bool = True) -> dict:
         """Push this device's snapshot, then pull and apply every *other* device's.
 
         Full-state and idempotent, so it is safe to run on any cadence (cron, a
@@ -789,7 +784,7 @@ class SyncEngine:
 
         own_name = "bundle-%s.json" % self.device_id
         pushed = False
-        if not dry_run:
+        if not dry_run and push:
             transport.push(own_name, json.dumps(bundle).encode("utf-8"))
             pushed = True
 
@@ -813,7 +808,9 @@ class SyncEngine:
             except StopIteration:
                 break
             except Exception as exc:  # noqa: BLE001 — transport failure, not a bad bundle
-                applied.append({"bundle": "?", "error": "transport: %s" % exc})
+                logger.warning("sync transport pull failed (%s)", type(exc).__name__)
+                applied.append({"bundle": "?", "error": "transport failure",
+                                "error_type": type(exc).__name__})
                 # A generator that raised is closed and cannot be resumed; a list-backed
                 # transport keeps going. Either way we stop here rather than abort the run.
                 break
@@ -830,7 +827,9 @@ class SyncEngine:
                 rep = self.apply_bundle(remote, into_workspace=ws_name,
                                         only_repo_id=repo_id, dry_run=dry_run)
             except Exception as exc:  # one hostile bundle must never abort the whole sync
-                applied.append({"bundle": name, "error": str(exc)})
+                logger.warning("sync bundle rejected (%s)", type(exc).__name__)
+                applied.append({"bundle": name, "error": "bundle rejected",
+                                "error_type": type(exc).__name__})
                 continue
             rep["from_device"] = remote.get("device_id", "?")
             applied.append(rep)
@@ -840,6 +839,7 @@ class SyncEngine:
         errors = [a for a in applied if "error" in a]
         return {"pushed": own_name if pushed else None, "workspace": ws_name,
                 "device_id": self.device_id, "exported_memories": len(bundle["memories"]),
+                "read_only": bool(not push and not dry_run),
                 "peers_applied": len(applied) - len(errors),
                 # Explicit: the round must NOT read as a success when bundles were dropped
                 # (refused for signature/authorization, unreadable, or never delivered).

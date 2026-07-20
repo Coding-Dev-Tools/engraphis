@@ -1,6 +1,9 @@
 """Launcher configuration regressions."""
 
 import argparse
+import io
+import json
+import logging
 import sys
 import types
 
@@ -41,3 +44,41 @@ def test_launcher_preserves_socket_peer_for_forwarded_header_validation(monkeypa
     start_dashboard.main(["--no-open"])
     assert captured["proxy_headers"] is False
     assert "forwarded_allow_ips" not in captured
+
+
+def test_json_launcher_preserves_redacted_uvicorn_access_formatter(monkeypatch):
+    uvicorn = pytest.importorskip("uvicorn")
+    stream = io.StringIO()
+    root = logging.getLogger()
+    handler = logging.StreamHandler(stream)
+    monkeypatch.setattr(root, "handlers", [handler])
+    monkeypatch.setattr(root, "level", logging.INFO)
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logger = logging.getLogger(name)
+        monkeypatch.setattr(logger, "handlers", [])
+        monkeypatch.setattr(logger, "propagate", True)
+
+    monkeypatch.setenv("ENGRAPHIS_JSON_LOGS", "1")
+    captured = {}
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: captured.update(kwargs))
+    fake = types.ModuleType("engraphis.dashboard_app")
+    fake.app = object()
+    monkeypatch.setitem(sys.modules, "engraphis.dashboard_app", fake)
+
+    start_dashboard.main(["--no-open"])
+
+    assert captured["log_config"] is None
+    # Exercise the same Config initialization uvicorn.run performs. A future launcher
+    # change that restores Uvicorn's default dictConfig will replace our formatter here.
+    uvicorn.Config(fake.app, log_config=captured["log_config"], log_level="info")
+    logging.getLogger("uvicorn.access").info(
+        '%s - "%s %s HTTP/%s" %d',
+        "127.0.0.1:1234", "GET",
+        "/?invite_token=invite-secret&key=provider-secret", "1.1", 200,
+    )
+
+    event = json.loads(stream.getvalue().splitlines()[-1])
+    assert event["logger"] == "uvicorn.access"
+    assert event["event"].count("[redacted]") == 2
+    assert "invite-secret" not in stream.getvalue()
+    assert "provider-secret" not in stream.getvalue()

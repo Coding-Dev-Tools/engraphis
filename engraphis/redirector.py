@@ -25,9 +25,10 @@ def _redirect_base() -> str:
     if base:
         return base
     from engraphis.netutil import display_base_url
+    port = int(os.environ.get("ENGRAPHIS_PORT", "8700"))
     # ENGRAPHIS_HOST is a BIND host — display_base_url maps a wildcard (0.0.0.0/::) to
     # loopback and brackets IPv6, so the redirect target is always connectable.
-    return display_base_url(os.environ.get("ENGRAPHIS_HOST", "127.0.0.1"), 8700)
+    return display_base_url(os.environ.get("ENGRAPHIS_HOST", "127.0.0.1"), port)
 
 
 def create_app() -> FastAPI:

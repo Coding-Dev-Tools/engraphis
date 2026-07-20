@@ -5,6 +5,8 @@ precision win on top of hybrid retrieval) can be turned on by config
 instead of only in code. The default must stay empty so the offline/numpy-only CI path is
 unchanged (empty -> None -> IdentityReranker, no torch).
 """
+import pytest
+
 from engraphis import config
 from engraphis.config import Settings
 
@@ -62,10 +64,18 @@ def test_embed_dim_defaults_to_default_model_dimension(monkeypatch):
     assert Settings().embed_dim == 384
 
 
+def test_galaxy_ui_rollout_flag_defaults_on_and_can_restore_legacy(monkeypatch):
+    monkeypatch.delenv("ENGRAPHIS_GRAPH_UI_V2", raising=False)
+    assert Settings().graph_ui_v2 is True
+    monkeypatch.setenv("ENGRAPHIS_GRAPH_UI_V2", "0")
+    assert Settings().graph_ui_v2 is False
+
+
 def test_license_server_url_precedence(monkeypatch):
+    # Relay routing and commercial control-plane routing are intentionally independent.
     monkeypatch.setattr(config.settings, "relay_url", "https://relay.example/")
     monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
-    assert config.resolve_license_server_url() == "https://relay.example"
+    assert config.resolve_license_server_url() == config.DEFAULT_LICENSE_SERVER_URL
     assert config.resolve_license_server_url(
         "https://signed.example/",
     ) == "https://signed.example"
@@ -81,18 +91,37 @@ def test_license_server_url_migrates_retired_signed_host(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
     assert config.resolve_license_server_url(
         "https://engraphis-production.up.railway.app/",
-    ) == config.DEFAULT_RELAY_URL
+    ) == config.DEFAULT_LICENSE_SERVER_URL
 
 
 def test_retired_cloud_url_override_is_canonicalized(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", RETIRED_RELAY_URL + "/")
     assert (
         config.resolve_license_server_url("https://signed.example")
-        == config.DEFAULT_RELAY_URL
+        == config.DEFAULT_LICENSE_SERVER_URL
     )
 
 
-def test_retired_relay_url_override_is_canonicalized(monkeypatch):
-    monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
-    monkeypatch.setattr(config.settings, "relay_url", RETIRED_RELAY_URL)
-    assert config.resolve_license_server_url() == config.DEFAULT_RELAY_URL
+def test_retired_relay_url_override_is_canonicalized():
+    assert config.canonicalize_relay_url(RETIRED_RELAY_URL) == config.DEFAULT_RELAY_URL
+
+def test_invalid_service_mode_exits_process(monkeypatch):
+    """Invalid service modes fail closed instead of selecting another role."""
+    monkeypatch.setenv("ENGRAPHIS_SERVICE_MODE", "bogus")
+    with pytest.raises(SystemExit):
+        Settings()
+
+
+def test_service_mode_defaults_to_customer_trust_domain(monkeypatch):
+    monkeypatch.delenv("ENGRAPHIS_SERVICE_MODE", raising=False)
+    configured = Settings()
+
+    assert configured.service_mode == "customer"
+    assert configured.customer_service is True
+
+
+def test_private_service_modes_are_not_available_in_the_public_package(monkeypatch):
+    for mode in ("relay", "vendor", "combined"):
+        monkeypatch.setenv("ENGRAPHIS_SERVICE_MODE", mode)
+        with pytest.raises(SystemExit):
+            Settings()
