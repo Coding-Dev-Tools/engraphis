@@ -92,8 +92,13 @@ test('hosted Team onboarding is scanner-safe, keyboard operable, mobile, and str
   expect(csp).toBeTruthy();
   expect(csp).not.toContain("'unsafe-inline'");
 
+  // Wait for boot() to complete before calling showHostedBootstrap
+  await page.waitForFunction(() => typeof LIC !== 'undefined' && LIC !== null, { timeout: 10000 });
   await page.evaluate(() => showHostedBootstrap('Complete hosted onboarding to continue.'));
-  await page.getByRole('button', { name: 'Start Team trial' }).click();
+  // Wait for the button to be visible before clicking
+  const startTrialBtn = page.getByRole('button', { name: 'Start Team trial' });
+  await expect(startTrialBtn).toBeVisible({ timeout: 10000 });
+  await startTrialBtn.click();
 
   const dialog = page.getByRole('dialog', { name: 'Start Team trial' });
   await expect(dialog).toBeVisible();
