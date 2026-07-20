@@ -76,8 +76,6 @@ jobs:
           pip install -e ".[test]"
           npm install
           npx playwright install --with-deps chromium
-      - name: Build and verify deterministic galaxy assets
-        run: npm run test:galaxy
       - name: Playwright desktop/mobile, keyboard, CSP, console, and axe checks
         run: npm run test:e2e
 

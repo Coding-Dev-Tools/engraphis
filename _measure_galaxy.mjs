@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { chromium } from "playwright";
-const staticDir = "/sessions/relaxed-stoic-hamilton/mnt/engraphis/engraphis/static";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+const staticDir = resolve(dirname(fileURLToPath(import.meta.url)), "engraphis", "static");
 const source = await readFile(`${staticDir}/galaxy-explorer.js`, "utf8");
 const systemCount = 12, members = 8;
 const nodes = [], communities = [], bridges = [], edges = [];

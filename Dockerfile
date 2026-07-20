@@ -36,7 +36,7 @@ COPY engraphis ./engraphis
 COPY scripts ./scripts
 
 # Full stack (REST + MCP + embeddings). Drop to .[server] or .[mcp] to slim the image.
-RUN pip install --upgrade pip && pip install ".[all]"
+RUN pip install --upgrade pip "setuptools>=83" && pip install ".[all]"
 
 # Create the non-root app user and pre-own /data. NOTE: the container starts as root so
 # docker-entrypoint.sh can chown a freshly-mounted (root-owned) persistent volume, then

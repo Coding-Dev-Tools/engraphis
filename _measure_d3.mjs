@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { chromium } from "playwright";
-const root = "/sessions/relaxed-stoic-hamilton/mnt/engraphis/engraphis/static";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "engraphis", "static");
 const d3src = await readFile(`${root}/vendor/d3.min.js`, "utf8");
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage();
