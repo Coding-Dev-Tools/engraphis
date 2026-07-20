@@ -101,7 +101,7 @@ embeddings. You bring an LLM only for optional chat, synthesis, structured extra
 or structured consolidation.
 
 - **Local-first & private** — runs offline; the core depends only on `numpy`.
-- **MCP-native** — 28 tools for Claude Code, Command Code, Cursor, Cline, Zed, Windsurf.
+- **MCP-native** — 29 tools for Claude Code, Command Code, Cursor, Cline, Zed, Windsurf.
 - **Self-maintaining facts** — writes are deterministically conflict-resolved (no LLM required).
 - **Advisory retention supervision** — an optional LLM can label writes as ephemeral, normal,
   or critical; outputs are bounded, clamped, audited, and can never silently drop a write.
@@ -294,10 +294,10 @@ claude mcp add engraphis -- engraphis-mcp
 cmd mcp add engraphis -- engraphis-mcp  # Command Code CLI
 ```
 
-Your agent now has 28 tools — remember, recall (grounded + proactive), proactive context,
+Your agent now has 29 tools — remember, recall (grounded + proactive), proactive context,
 grounded answer alias, why, timeline, forget, pin, correct, promote, ingest, consolidate, index_repo,
 search/code path/impact/export, privacy receipts, PostgreSQL schema ingestion, link,
-record_event, start/end_session, and stats. See the [MCP tools table](#mcp-tools) below.
+record_event, start/end_session, stats, and check_update. See the [MCP tools table](#mcp-tools) below.
 
 For unattended jobs, `engraphis_start_session`, `engraphis_remember`, and
 `engraphis_record_event` use workspace `default` when `workspace` is omitted.
@@ -684,7 +684,7 @@ engraphis/
 │   ├── core/                # v2 engine — interfaces, store, recall, scoring, schema, sync
 │   ├── backends/            # pluggable embedder / vector index / reranker / codegraph / sync transports / encryption
 │   ├── service.py           # validated MemoryService facade
-│   ├── mcp_server.py        # MCP server — 28 tools
+│   ├── mcp_server.py        # MCP server — 29 tools
 │   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
 │   ├── read_only_api.py     # token-protected recall/repository-graph HTTP surface
 │   ├── autosync.py          # background auto-sync loop (Pro/Team)

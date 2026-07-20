@@ -1,6 +1,6 @@
 # Engraphis MCP tools — reference
 
-All 28 tools, grouped by job. Parameters are `name (type, default)` — no default means required.
+All 29 tools, grouped by job. Parameters are `name (type, default)` — no default means required.
 Every tool returns a JSON string; on failure it returns `"Error: <reason>"` instead of raising.
 Governance tools (`forget`/`pin`/`correct`/`link`) verify the memory actually belongs to the
 `workspace`/`repo` you pass **before** changing anything, so you can't touch memories outside a
@@ -314,6 +314,15 @@ Memory counts (overall or for one workspace) — handy for onboarding/health che
 - `workspace (str, None)`.
 
 Returns `{memories, by_type, workspaces, sessions, schema_version}`.
+
+### `engraphis_check_update`
+Report whether a newer Engraphis release is available, so an agent can proactively remind the
+user to upgrade. Cached ~24h and fail-silent; honors `ENGRAPHIS_UPDATE_CHECK=0` (then `enabled`
+is false). The default GitHub source is overridable via `ENGRAPHIS_UPDATE_URL`.
+
+- `force (bool, false)` — bypass the ~24h cache and re-check the release source now.
+
+Returns `{enabled, current, latest, update_available, url, notice}`.
 
 ---
 
