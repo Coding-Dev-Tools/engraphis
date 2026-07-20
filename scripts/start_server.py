@@ -33,11 +33,13 @@ def main(argv=None) -> None:
     try:
         import uvicorn
         from engraphis.config import settings
+        from engraphis.observability import configure_structured_logging
         if args.reload:
             app_target = "engraphis.app:app"
         else:
             from engraphis.app import app
             app_target = app
+        structured_logs = configure_structured_logging()
     except (ImportError, ModuleNotFoundError):
         ap.exit(1, "Error: the server extra is required: pip install \"engraphis[server]\""
                    " (needs Python 3.10+)\n")
@@ -52,15 +54,18 @@ def main(argv=None) -> None:
     print(f"  SDK base URL: {settings.base_url}")
     print(f"  OpenAPI:      {settings.base_url}/openapi.json")
     print()
-    uvicorn.run(
-        app_target,
-        host=args.host,
-        port=args.port,
-        reload=args.reload,
+    run_options = {
+        "host": args.host,
+        "port": args.port,
+        "reload": args.reload,
         # Keep the socket peer intact; Engraphis validates trusted forwarded headers and
         # the rightmost hop itself (see engraphis.netutil.client_ip).
-        proxy_headers=False,
-    )
+        "proxy_headers": False,
+    }
+    if structured_logs:
+        # Preserve the redacting formatter installed by the app/launcher.
+        run_options["log_config"] = None
+    uvicorn.run(app_target, **run_options)
 
 
 if __name__ == "__main__":

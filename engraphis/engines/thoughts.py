@@ -45,9 +45,18 @@ def synthesize_thoughts(
                 temperature=temperature,
                 thought_prompt=thought_prompt,
             )
-    except Exception as e:
-        logger.error("Thought synthesis failed: %s", e)
-        return {"thought": None, "source_count": len(chunks), "persisted": False, "error": str(e)}
+    except Exception as exc:
+        # Provider exceptions may embed request URLs, credentials, or excerpts. Keep
+        # both logs and the returned status content-free while retaining a useful class.
+        error_type = type(exc).__name__
+        logger.error("Thought synthesis failed (%s)", error_type)
+        return {
+            "thought": None,
+            "source_count": len(chunks),
+            "persisted": False,
+            "error": "LLM synthesis failed",
+            "error_type": error_type,
+        }
 
     persisted_id = None
     if persist and thought:

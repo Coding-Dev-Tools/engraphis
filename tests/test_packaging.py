@@ -14,6 +14,14 @@ def test_distribution_configuration_excludes_runtime_bytecode():
     assert "global-exclude *.pyo" in manifest
 
 
+def test_distribution_configuration_includes_external_dashboard_assets():
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    package_data = pyproject[pyproject.index('[tool.setuptools.package-data]'):
+                             pyproject.index('[tool.setuptools.exclude-package-data]')]
+    for pattern in ('"*.html"', '"*.css"', '"*.js"'):
+        assert pattern in package_data
+
+
 def test_every_vendored_browser_library_has_redistribution_notice():
     vendor = ROOT / "engraphis" / "static" / "vendor"
     required = {
@@ -28,7 +36,13 @@ def test_every_vendored_browser_library_has_redistribution_notice():
             text = (vendor / license_name).read_text(encoding="utf-8")
             assert "Copyright" in text and len(text) > 500
     notice = (ROOT / "NOTICE").read_text(encoding="utf-8")
-    assert all(name in notice for name in ("D3 7.9.0", "Marked 12.0.2", "DOMPurify 3.4.11"))
+    assert all(name in notice for name in (
+        "D3 7.9.0", "Marked 12.0.2", "force-graph 1.51.4", "DOMPurify 3.4.11",
+    ))
+    assert "Trademark Policy" not in notice
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "license does not grant trademark rights" in readme
+    assert "license does not grant trademark rights" in notice
 
 
 def test_manual_release_dispatch_cannot_publish():
@@ -110,4 +124,5 @@ def test_customer_sync_relay_docs_keep_vendor_license_service_separate():
     for document in (hosting, template):
         assert "ENGRAPHIS_RELAY_URL" in document
         assert "ENGRAPHIS_CLOUD_URL" in document
-        assert "https://team.engraphis.com" in document
+        assert "https://license.engraphis.com" in document
+        assert "ENGRAPHIS_RELAY_URL=https://license.engraphis.com" not in document

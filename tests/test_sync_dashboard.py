@@ -146,3 +146,30 @@ def test_sync_never_pushes_personal_folders(monkeypatch, tmp_path):
         assert "team-shared" in synced           # shared folders sync
         assert "demo" in synced                   # the seeded shared folder too
         assert "my-personal" not in synced        # ...personal folders never do
+
+
+def test_sync_fails_closed_on_invalid_workspace_visibility(monkeypatch, tmp_path):
+    synced = []
+
+    def fake_get_transport(kind="folder", **kw):
+        synced.append(kw.get("workspace_id"))
+        return _FakeTransport()
+
+    monkeypatch.setattr("engraphis.backends.sync_folder.get_transport", fake_get_transport)
+    with _client(monkeypatch, tmp_path, key=_key()) as c:
+        from engraphis.routes import v2_api
+        svc = v2_api.service()
+        svc.store.conn.execute(
+            "UPDATE workspaces SET settings=? WHERE name='demo'",
+            ('{"visibility":"corrupt-value"}',),
+        )
+        svc.store.conn.commit()
+
+        response = c.post("/api/sync/run", json={})
+        assert response.status_code == 200
+        summary = response.json()["summary"]
+        assert "demo" not in synced
+        assert any(
+            error["workspace"] == "demo" and "visibility is invalid" in error["error"]
+            for error in summary["errors"]
+        )
