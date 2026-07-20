@@ -1428,7 +1428,8 @@ def test_send_team_invite_client_roundtrip(monkeypatch):
     _wire_urlopen_to(c, monkeypatch)
     sent, reason = cloud_license.send_team_invite(
         "http://127.0.0.1", _key(plan="team"), "new@corp.com", "Mo", "member",
-        "admin@corp.com")
+        "admin@corp.com",
+        invite_url="https://team.customer.test/#invite_token=one-time-secret")
     assert sent is True and reason == ""
     assert captured["to"] == "new@corp.com"
 
@@ -1437,7 +1438,8 @@ def test_send_team_invite_client_reports_reason_on_402(monkeypatch):
     c = _app()
     _wire_urlopen_to(c, monkeypatch)
     sent, reason = cloud_license.send_team_invite(
-        "http://127.0.0.1", _key(plan="pro"), "new@corp.com", "Mo", "member", "a@b.com")
+        "http://127.0.0.1", _key(plan="pro"), "new@corp.com", "Mo", "member", "a@b.com",
+        invite_url="https://team.customer.test/#invite_token=one-time-secret")
     assert sent is False and "team" in reason.lower()
 
 
