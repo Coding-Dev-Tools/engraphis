@@ -798,7 +798,6 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = None, limit: in
     """List memories directly from the store (no embedding) so browsing works even
     without sentence-transformers. Live memories only (not superseded/expired)."""
     import json as _json
-    import sqlite3 as _sql
     ws = workspace or _default_ws()
     if not ws:
         # No workspace exists yet (fresh install) — nothing to list. Return an empty
@@ -808,27 +807,23 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = None, limit: in
         ws = service()._clean_ws(ws)
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
-    conn = _sql.connect("file:%s?mode=ro" % settings.db_path, uri=True)
-    conn.row_factory = _sql.Row
-    try:
-        row = conn.execute("SELECT id FROM workspaces WHERE name=?", (ws,)).fetchone()
-        if row is None:
-            return {"workspace": ws, "count": 0, "memories": []}
-        sql = ("SELECT id, scope, mtype, title, content, summary, importance, pinned, "
-               "valid_from, valid_to, provenance FROM memories WHERE workspace_id=? "
-               "AND valid_to IS NULL AND expired_at IS NULL")
-        args = [row["id"]]
-        if q:
-            sql += " AND (title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\')"
-            like = "%" + _escape_like(q) + "%"
-            args += [like, like]
-        # Manually dragged rows (sort_order set) come first, in the order they were
-        # dropped in; everything never touched by drag-to-reorder falls back to recency.
-        sql += " ORDER BY (sort_order IS NULL), sort_order ASC, COALESCE(last_access, valid_from) DESC LIMIT ?"
-        args.append(max(1, min(1000, int(limit))))
-        rows = conn.execute(sql, args).fetchall()
-    finally:
-        conn.close()
+    conn = service().store.conn
+    row = conn.execute("SELECT id FROM workspaces WHERE name=?", (ws,)).fetchone()
+    if row is None:
+        return {"workspace": ws, "count": 0, "memories": []}
+    sql = ("SELECT id, scope, mtype, title, content, summary, importance, pinned, "
+           "valid_from, valid_to, provenance FROM memories WHERE workspace_id=? "
+           "AND valid_to IS NULL AND expired_at IS NULL")
+    args = [row["id"]]
+    if q:
+        sql += " AND (title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\')"
+        like = "%" + _escape_like(q) + "%"
+        args += [like, like]
+    # Manually dragged rows (sort_order set) come first, in the order they were
+    # dropped in; everything never touched by drag-to-reorder falls back to recency.
+    sql += " ORDER BY (sort_order IS NULL), sort_order ASC, COALESCE(last_access, valid_from) DESC LIMIT ?"
+    args.append(max(1, min(1000, int(limit))))
+    rows = conn.execute(sql, args).fetchall()
 
     def _prov(p):
         try:
