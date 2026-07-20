@@ -319,34 +319,6 @@ def engraphis_recall_grounded(
 
 
 @mcp.tool(
-    name="engraphis_answer",
-    annotations={"title": "Grounded answer (compatibility alias)",
-                 "readOnlyHint": True, "destructiveHint": False,
-                 "idempotentHint": True, "openWorldHint": False},
-)
-def engraphis_answer(
-    query: Annotated[str, Field(description="The question to answer from memory.",
-                                min_length=1, max_length=10_000)],
-    workspace: Annotated[str, Field(description="Workspace to search.",
-                                    min_length=1, max_length=200)] = "default",
-    repo: Annotated[Optional[str], Field(description="Repository scope within the workspace.",
-                                         max_length=200)] = None,
-    k: Annotated[int, Field(description="Max memories to consider (1-50).", ge=1, le=50)] = 8,
-    min_support: Annotated[float, Field(description="Absolute support floor 0..1. Memories below this don't count as evidence.", ge=0.0, le=1.0)] = 0.25,
-    synthesize: Annotated[bool, Field(description="If true, ask configured LLM for cited prose; otherwise deterministic/extractive.")] = False,
-) -> str:
-    """Backward-compatible alias for ``engraphis_recall_grounded``.
-
-    Kept so existing agent configs that adopted the answer tool continue to work; new
-    integrations should prefer ``engraphis_recall_grounded`` for the clearer name.
-    """
-    return engraphis_recall_grounded(
-        query=query, workspace=workspace, repo=repo, session_id=None, mtypes=None, k=k,
-        min_support=min_support, synthesize=synthesize,
-    )
-
-
-@mcp.tool(
     name="engraphis_why",
     annotations={"title": "Explain the rationale behind a fact", "readOnlyHint": True,
                  "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
