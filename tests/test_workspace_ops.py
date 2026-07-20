@@ -498,13 +498,16 @@ def test_copy_clones_vectors_fts_links_entities_and_edges():
     assert [r["name"] for r in repos] == ["infra"]
     assert repos[0]["id"] != src_repo_id
     # every copied memory points at the cloned repo, not the source repo
-    repo_ids = {c.execute("SELECT repo_id FROM memories WHERE id=?", (r["id"],)).fetchone()["repo_id"]
-                for r in new_mem}
+    repo_ids = {
+        c.execute("SELECT repo_id FROM memories WHERE id=?", (r["id"],)).fetchone()["repo_id"]
+        for r in new_mem
+    }
     assert repo_ids == {repos[0]["id"]}
 
     # the mem_links row was cloned onto the two new memory ids
     id_map = {r["content"]: r["id"] for r in new_mem}
-    new_a, new_b = id_map["Postgres 16 is the primary database."], id_map["Deploys run Fridays at noon."]
+    new_a = id_map["Postgres 16 is the primary database."]
+    new_b = id_map["Deploys run Fridays at noon."]
     linked = c.execute(
         "SELECT layer, reason FROM mem_links WHERE (a=? AND b=?) OR (a=? AND b=?)",
         (new_a, new_b, new_b, new_a)).fetchone()
