@@ -1,11 +1,12 @@
-"""Relay transport — the managed cloud-sync client (headline Pro upsell).
+"""Relay transport — the managed cloud-sync client.
 
 Implements the ``SyncTransport`` protocol (``core/interfaces.py``) over HTTPS against the
-vendor-hosted relay (``engraphis.inspector.sync_relay``). It carries the device's license
-key as a bearer token; the server verifies that key *server-side* before accepting or
-returning bundles, so — unlike a purely local feature check — patching the client cannot
-unlock sync. It plugs into ``SyncEngine.sync`` exactly like ``FolderTransport``; the sync
-engine is unchanged and still treats every pulled bundle as untrusted.
+customer-hosted relay (``engraphis.inspector.sync_relay``). It carries an expiring,
+revocable, per-user token as a bearer credential; the server verifies its owner, role,
+scope, and the account entitlement before accepting or returning bundles. A license-key
+fallback exists only for the documented customer migration window. It plugs into
+``SyncEngine.sync`` exactly like ``FolderTransport``; the sync engine is unchanged and
+still treats every pulled bundle as untrusted.
 
 Dependency-light on purpose: stdlib ``urllib`` only, no ``requests``.
 """
@@ -16,9 +17,12 @@ import binascii
 import ipaddress
 import json
 import math
+import os
 import re
+import tempfile
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -67,9 +71,120 @@ def _urlopen_no_redirect(req, *, timeout: float):
 
 
 def _current_key() -> str:
-    """The license key configured on this device (env or ~/.engraphis/license.key)."""
+    """A scoped user sync token, falling back to a legacy license during migration."""
+    configured = os.environ.get("ENGRAPHIS_SYNC_TOKEN", "").strip()
+    if configured:
+        return configured
+    path = _sync_token_path()
+    try:
+        stored = path.read_text(encoding="utf-8").strip()
+        if stored:
+            return stored
+    except OSError:
+        pass
     from engraphis import licensing
     return licensing._read_key_material()
+
+
+def _sync_token_path() -> Path:
+    state = os.environ.get("ENGRAPHIS_STATE_DIR", "").strip()
+    root = Path(state).expanduser() if state else Path.home() / ".engraphis"
+    return root / "sync.token"
+
+
+def _sync_read_only_path() -> Path:
+    return _sync_token_path().with_name("sync.read_only")
+
+
+def _atomic_private_text(path: Path, value: str) -> None:
+    """Atomically write one owner-only state value next to the sync credential."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=".%s." % path.name, dir=str(path.parent))
+    temp_path = Path(temp_name)
+    try:
+        try:
+            os.chmod(temp_path, 0o600)
+        except OSError:
+            pass
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(value + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(str(temp_path), str(path))
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def save_sync_token(token: str) -> None:
+    """Atomically persist a per-user bearer token with owner-only permissions."""
+    value = str(token or "").strip()
+    if (len(value) < 24 or len(value) > 8192
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+        raise ValueError("sync token must be a bounded single-line bearer token")
+    _atomic_private_text(_sync_token_path(), value)
+
+
+def save_sync_read_only(enabled: bool) -> None:
+    """Persist the no-upload policy beside the token, independent of project ``.env``.
+
+    This state is deliberately separate from the token so it can be inspected without
+    touching credential material. The API writes the restrictive value before replacing
+    a token and the permissive value afterwards, so a partial update fails read-only.
+    """
+    _atomic_private_text(_sync_read_only_path(), "1" if enabled else "0")
+
+
+def sync_read_only() -> bool:
+    """Return the durable upload policy; malformed/unreadable saved state fails closed."""
+    configured = os.environ.get("ENGRAPHIS_SYNC_READ_ONLY")
+    if configured is not None and configured.strip():
+        raw = configured.strip().lower()
+        if raw in ("1", "true", "yes", "on"):
+            return True
+        if raw in ("0", "false", "no", "off"):
+            return False
+        return True
+    path = _sync_read_only_path()
+    try:
+        raw = path.read_text(encoding="utf-8").strip().lower()
+    except FileNotFoundError:
+        raw = ""
+    except OSError:
+        return True
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off", ""):
+        return False
+    # Corrupt policy files must never turn uploads back on.
+    return True
+
+
+def clear_sync_token() -> None:
+    for path in (_sync_token_path(), _sync_read_only_path()):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def has_sync_token() -> bool:
+    if os.environ.get("ENGRAPHIS_SYNC_TOKEN", "").strip():
+        return True
+    try:
+        return bool(_sync_token_path().read_text(encoding="utf-8").strip())
+    except OSError:
+        return False
 
 
 def _current_machine_id() -> str:
@@ -98,16 +213,36 @@ def _validated_base_url(value: str) -> str:
         raise ValueError("relay URL must be an absolute http(s) URL")
     try:
         parts.port
-    except ValueError as exc:
-        raise ValueError("relay URL has an invalid port") from exc
+    except ValueError:
+        raise ValueError("relay URL has an invalid port") from None
     if parts.username is not None or parts.password is not None:
         raise ValueError("relay URL must not contain embedded credentials")
     if "\\" in parts.netloc or any(char.isspace() for char in parts.netloc):
         raise ValueError("relay URL contains an invalid host")
     if parts.query or parts.fragment:
         raise ValueError("relay URL must not contain a query string or fragment")
-    if scheme != "https" and not _is_loopback_host(parts.hostname.lower()):
+    hostname = parts.hostname.lower()
+    if scheme != "https" and not _is_loopback_host(hostname):
         raise ValueError("relay URL must use HTTPS unless it targets loopback")
+    # SSRF protection: block private/reserved IP ranges on HTTPS too. Prevents
+    # targeting cloud metadata endpoints (169.254.169.254), corporate networks, etc.
+    if not _is_loopback_host(hostname):
+        import socket as _socket
+        try:
+            addrinfos = _socket.getaddrinfo(
+                hostname, None, _socket.AF_UNSPEC, _socket.SOCK_STREAM)
+            for family, _, _, _, sockaddr in addrinfos:
+                ip = sockaddr[0]
+                try:
+                    ip_obj = ipaddress.ip_address(ip)
+                except ValueError:
+                    continue  # sockaddr wasn't a parseable IP; skip
+                if (ip_obj.is_private or ip_obj.is_reserved or ip_obj.is_link_local
+                        or ip_obj.is_multicast or ip_obj.is_unspecified):
+                    raise ValueError(
+                        "relay URL must not target private/reserved IP ranges")
+        except (_socket.gaierror, OSError):
+            pass  # DNS resolution failure; let the actual request fail later
     return urlunsplit((scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
 
 
@@ -123,11 +258,12 @@ def _safe_bundle_name(name: object) -> str:
 
 
 class RelayTransport:
-    """A ``SyncTransport`` backed by the vendor relay.
+    """A ``SyncTransport`` backed by the customer sync relay.
 
     ``base_url`` is the relay root (e.g. ``https://team.engraphis.com``). ``workspace_id``
-    scopes bundles to one workspace. ``license_key`` defaults to this device's configured
-    key. All three protocol calls send ``Authorization: Bearer <key>``.
+    scopes bundles to one workspace. The compatibility parameter ``license_key`` accepts
+    the scoped token and defaults to ``ENGRAPHIS_SYNC_TOKEN`` or the locally saved token.
+    All protocol calls send ``Authorization: Bearer <token>``.
     """
 
     def __init__(self, base_url: str, workspace_id: str, *,
@@ -150,7 +286,7 @@ class RelayTransport:
             len(key) > 8192
             or any(ord(char) < 32 or ord(char) == 127 for char in key)
         ):
-            raise ValueError("relay license key must be a bounded single-line value")
+            raise ValueError("relay bearer token must be a bounded single-line value")
         self.key = key
         machine_id = str(_current_machine_id() or "").strip()
         self.machine_id = machine_id if (
@@ -159,8 +295,8 @@ class RelayTransport:
         ) else ""
         try:
             timeout_value = float(timeout)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("relay timeout must be a number") from exc
+        except (TypeError, ValueError):
+            raise ValueError("relay timeout must be a number") from None
         if not math.isfinite(timeout_value) or timeout_value <= 0:
             raise ValueError("relay timeout must be a positive finite number")
         self.timeout = min(timeout_value, 300.0)
@@ -185,22 +321,17 @@ class RelayTransport:
                     raise RelayError("relay response exceeded the client safety limit")
                 return body
         except urllib.error.HTTPError as exc:
-            body = b""
-            try:
-                body = exc.read(MAX_RELAY_NAMES_BYTES + 1)
-                if len(body) > MAX_RELAY_NAMES_BYTES:
-                    body = body[:MAX_RELAY_NAMES_BYTES]
-            except Exception:
-                pass
-            msg = body.decode("utf-8", "replace") if body else str(exc)
+            # Never propagate an untrusted relay response body or the HTTPError's
+            # request URL. Either can contain PII, signed query data, or reflected
+            # credentials and these errors are surfaced by sync APIs and CLIs.
             if exc.code == 402:
-                raise RelayError("relay rejected the license (upgrade/renew required): %s"
-                                 % msg, status=402) from exc
-            raise RelayError("relay request failed (%s): %s" % (exc.code, msg),
-                             status=exc.code) from exc
-        except urllib.error.URLError as exc:
-            raise RelayUnreachable(
-                "could not reach the relay at %s: %s" % (self.base, exc.reason))
+                raise RelayError(
+                    "relay rejected the license (upgrade/renew required)", status=402
+                ) from None
+            raise RelayError("relay request failed (HTTP %s)" % exc.code,
+                             status=exc.code) from None
+        except urllib.error.URLError:
+            raise RelayUnreachable("could not reach the relay") from None
 
     # ── SyncTransport protocol ───────────────────────────────────────────────────────
     def push(self, name: str, data: bytes) -> None:

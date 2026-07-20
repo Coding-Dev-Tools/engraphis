@@ -416,8 +416,11 @@ def test_m5_api_token_is_never_returned_as_the_vendor_token(monkeypatch):
     monkeypatch.setattr(_settings, "api_token", "service-account-token", raising=False)
     monkeypatch.delenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", raising=False)
     assert license_cloud._vendor_admin_token() != "service-account-token"
-    monkeypatch.setenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", "vendor-only-secret")
-    assert license_cloud._vendor_admin_token() == "vendor-only-secret"
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", "short")
+    assert license_cloud._vendor_admin_token() == ""
+    token = "vendor-only-secret-at-least-32-characters"
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", token)
+    assert license_cloud._vendor_admin_token() == token
 
 
 def test_m5_admin_routes_fail_closed_with_the_api_token(monkeypatch):
@@ -430,10 +433,11 @@ def test_m5_admin_routes_fail_closed_with_the_api_token(monkeypatch):
 
 
 def test_m5_dedicated_token_still_works(monkeypatch):
-    monkeypatch.setenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", "vendor-only-secret")
+    token = "vendor-only-secret-at-least-32-characters"
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", token)
     client = _relay_client()
     r = client.post("/license/v1/revoke/deadbeefcafe",
-                    headers={"Authorization": "Bearer vendor-only-secret"})
+                    headers={"Authorization": "Bearer " + token})
     assert r.status_code != 401
 
 

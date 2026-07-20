@@ -3,15 +3,17 @@
 Skips on the numpy-only CI gate (needs fastapi/httpx), like the other v1 tests. Uses the
 deterministic embedder so recall works without torch, and a fresh DB per test.
 """
+import re
 import time
 from html.parser import HTMLParser
+from pathlib import Path
 
 import pytest
 
 pytest.importorskip("fastapi", reason="full-stack extra not installed")
 pytest.importorskip("httpx", reason="httpx not installed")
 
-from fastapi.testclient import TestClient  # noqa: E402
+from tests.team_client import InvitationTestClient as TestClient  # noqa: E402
 
 from engraphis import licensing as lic  # noqa: E402
 from engraphis.config import settings  # noqa: E402
@@ -35,10 +37,13 @@ def _client(monkeypatch, tmp_path, *, team=False, key=None,
     db = str(tmp_path / "dash.db")
     monkeypatch.setattr(settings, "db_path", db)
     monkeypatch.setattr(settings, "embed_model", "")
+    monkeypatch.setattr(settings, "allowed_workspaces", [])
     monkeypatch.setenv("ENGRAPHIS_EMBED_MODEL", "")
     monkeypatch.setenv("ENGRAPHIS_TEAM_MODE", "1" if team else "0")
     monkeypatch.setenv("ENGRAPHIS_TEAM_INVITES", "0")
     monkeypatch.setenv("ENGRAPHIS_TEST_AUTH_ITERATIONS", "1000")
+    monkeypatch.setenv("ENGRAPHIS_DEPLOYMENT_TOKEN", "d" * 32)
+    monkeypatch.setenv("ENGRAPHIS_DASHBOARD_URL", "https://memory.example.com")
     monkeypatch.setattr(settings, "api_token", api_token)
     monkeypatch.setattr(lic, "_LICENSE_FILE", tmp_path / "license.key")
     if key:
@@ -60,6 +65,24 @@ def _team_key(seats=5):
                         "expires": int(time.time() + 365 * 86400)}, _SECRET)
 
 
+def test_sync_only_user_token_cannot_authenticate_general_api(monkeypatch, tmp_path):
+    """Token scopes are authority, not metadata: sync-only credentials stay on relay APIs."""
+    with _client(monkeypatch, tmp_path, team=True, key=_team_key()) as c:
+        assert c.post(
+            "/api/auth/setup",
+            json={"email": "w@x.co", "name": "W", "password": "correct-horse-1"},
+            headers={"Authorization": "Bearer " + "d" * 32},
+        ).status_code == 200
+        user = c.app.state.auth_store.list_users()[0]
+        token = c.app.state.auth_store.create_api_token(
+            user["id"], scopes=["sync:read"], ttl=600)["token"]
+
+        response = TestClient(c.app).get(
+            "/api/workspaces", headers={"Authorization": "Bearer " + token})
+        assert response.status_code == 403
+        assert response.json()["error"] == "token lacks agent scope"
+
+
 # ── a broken team mount must not degrade into "no auth at all" ────────────────────────
 # `except Exception: pass` around v2_team.attach left team_enabled=False/auth_store=None,
 # which makes _auth_gate skip the ENTIRE role layer and personal-folder isolation
@@ -76,6 +99,7 @@ def _dashboard_module(monkeypatch, tmp_path):
     """
     monkeypatch.setattr(settings, "db_path", str(tmp_path / "dash.db"))
     monkeypatch.setattr(settings, "embed_model", "")
+    monkeypatch.setattr(settings, "allowed_workspaces", [])
     monkeypatch.setenv("ENGRAPHIS_EMBED_MODEL", "")
     monkeypatch.setattr(settings, "api_token", "")
     monkeypatch.setattr(lic, "_LICENSE_FILE", tmp_path / "license.key")
@@ -143,7 +167,25 @@ def test_dashboard_serves_and_bootstraps(monkeypatch, tmp_path):
         b = c.get("/api/bootstrap").json()
         assert b["stats"]["memories"] >= 2
         assert any(w["name"] == "demo" for w in b["workspaces"])
+        assert b["features"]["graph_ui_v2"] is True
         assert b["license"]["plan"] == "free"
+
+
+def test_workspace_bound_dashboard_bootstrap_uses_an_authorized_workspace(monkeypatch,
+                                                                          tmp_path):
+    """Bootstrap must establish the initial workspace before requesting scoped stats."""
+    with _client(monkeypatch, tmp_path) as c:
+        from engraphis.routes import v2_api
+
+        svc = v2_api.service()
+        svc.allowed_workspaces = frozenset({"demo"})
+        svc.store.allowed_workspaces = svc.allowed_workspaces
+
+        response = c.get("/api/bootstrap")
+        assert response.status_code == 200
+        body = response.json()
+        assert [workspace["name"] for workspace in body["workspaces"]] == ["demo"]
+        assert body["stats"]["memories"] == 2
 
 
 def test_dashboard_markup_offers_explicit_folder_access_and_graph_views(monkeypatch,
@@ -166,7 +208,7 @@ def test_dashboard_markup_offers_explicit_folder_access_and_graph_views(monkeypa
                 self.sections.append("")
                 self.current_section = len(self.sections) - 1
                 self.section_text = self.current_section
-            elif tag == "div" and "nav-item" in classes and attrs.get("data-view"):
+            elif tag in ("div", "button") and "nav-item" in classes and attrs.get("data-view"):
                 self.nav_sections[attrs["data-view"]] = self.current_section
             elif tag == "select":
                 self.select_id = attrs.get("id")
@@ -221,8 +263,10 @@ def test_same_graph_data_refreshes_component_centers_after_layout_changes(monkey
     with _client(monkeypatch, tmp_path) as c:
         response = c.get("/")
         assert response.status_code == 200
+        script = c.get("/static/dashboard.js")
+        assert script.status_code == 200
 
-    html = response.text
+    html = script.text
     refresh = html[html.index("function graphRefreshComponentCenters"):
                    html.index("function graphAlpha")]
     render = html[html.index("function graphRender"):
@@ -241,6 +285,57 @@ def test_same_graph_data_refreshes_component_centers_after_layout_changes(monkey
     assert ("if(key==='link'&&GACTIVE_DATA)"
             "graphRefreshComponentCenters(GACTIVE_DATA.nodes)" in graph_set)
     assert "if(FG)graphRender(true,true)" in preset
+
+
+def test_dashboard_assets_are_external_for_strict_csp(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        html = client.get("/").text
+        css_response = client.get("/static/dashboard.css")
+        assert css_response.status_code == 200
+        assert client.get("/static/dashboard.js").status_code == 200
+
+    assert '<link rel="stylesheet" href="/static/dashboard.css">' in html
+    assert '<script src="/static/dashboard.js"></script>' in html
+    assert "<style" not in html
+    assert " style=" not in html
+    assert " onclick=" not in html
+    assert "<script>" not in html
+
+    settings = html[html.index('<div class="view" id="view-settings">'):html.index("</main>")]
+    assert settings.count('<div class="settings-column">') == 2
+    for heading in (
+        "Cloud sync",
+        "Connect an LLM",
+        "License &amp; Plan",
+        "Appearance &amp; Engine",
+        "Connect an agent",
+    ):
+        assert heading in settings
+    assert settings.count('class="settings-account-panel ') == 2
+    account = settings[settings.index('class="card settings-account-card"'):
+                       settings.index('<div class="card"><div class="card-head">Cloud sync')]
+    assert account.index("License &amp; Plan") < account.index("Appearance &amp; Engine")
+
+    css = css_response.text
+    assert ".settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))" in css
+    assert "#view-settings .card{margin:0;padding:var(--space-2) 0" in css
+    assert ".settings-account-grid{display:grid;grid-template-columns:minmax(0,1.15fr)" in css
+    assert ".settings-account-panel .cfg-row{display:grid;grid-template-columns:max-content" in css
+    assert "@container (max-width:460px)" in css
+    assert ".settings-grid{grid-template-columns:1fr}" in css
+
+
+def test_dashboard_csp_listener_registry_covers_all_declarative_handlers():
+    root = Path(__file__).resolve().parents[1]
+    html = (root / "engraphis" / "static" / "index.html").read_text(encoding="utf-8")
+    script = (root / "engraphis" / "static" / "dashboard.js").read_text(encoding="utf-8")
+    refs = set(re.findall(r'data-on[a-z]+=["\'](h\d+)["\']', html + "\n" + script))
+    definitions = set(re.findall(r'^\s*(h\d+):function\(event\)\{', script, re.MULTILINE))
+    assert refs
+    assert refs <= definitions
+    assert not re.search(r"\.(?:style|cssText)\b", script)
+    assert "cssText" not in script
+    assert "[onclick" not in script
 
 def test_unconfigured_remote_api_is_refused_but_loopback_is_allowed(monkeypatch, tmp_path):
     remote = ("203.0.113.8", 50000)
@@ -275,6 +370,31 @@ def test_remote_api_token_opens_the_single_user_api(monkeypatch, tmp_path):
         assert c.get(
             "/api/bootstrap", headers={"Authorization": "Bearer secret"}
         ).status_code == 200
+
+
+def test_deployment_token_cannot_bypass_the_api_after_bootstrap(monkeypatch, tmp_path):
+    """The hosted ownership proof is not an unrestricted service-account credential."""
+    deployment = "d" * 32
+    with _client(
+        monkeypatch, tmp_path, team=True, key=_team_key(),
+        client=("203.0.113.8", 50000), api_token="service-api-secret",
+    ) as c:
+        setup = c.post("/api/auth/setup", json={
+            "email": "w@x.co", "name": "W", "password": "supersecret1",
+        }, headers={"Authorization": "Bearer " + deployment})
+        assert setup.status_code == 200, setup.text
+        c.cookies.clear()
+
+        denied = c.get(
+            "/api/workspaces", headers={"Authorization": "Bearer " + deployment})
+        assert denied.status_code == 401
+        assert c.get(
+            "/api/memories?workspace=demo",
+            headers={"Authorization": "Bearer " + deployment},
+        ).status_code == 401
+        allowed = c.get(
+            "/api/workspaces", headers={"Authorization": "Bearer service-api-secret"})
+        assert allowed.status_code == 200
 
 
 def test_forwarding_header_never_turns_a_proxied_request_into_loopback(monkeypatch, tmp_path):
@@ -377,6 +497,60 @@ def test_automation_policy_round_trips_dream_knobs(monkeypatch, tmp_path):
         assert p["dream_min_new"] == 7
         assert p["dream_idle_minutes"] == 0   # 0 is valid and must survive (not coerced)
         assert p["infer"] is True            # the inference pass is Pro-gated via automation
+
+
+def test_live_llm_extractor_swap_defers_close_and_reports_persistence_failure(
+        monkeypatch, tmp_path):
+    """An ingest holding the old extractor must not lose its provider mid-request."""
+    import gc
+    import os
+
+    from engraphis import config
+    from engraphis.routes import v2_api
+
+    class FakeLLM:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class FakeExtractor:
+        def __init__(self, llm):
+            self.llm = llm
+
+    monkeypatch.setattr(
+        config, "persist_project_env",
+        lambda values: (_ for _ in ()).throw(OSError("read-only application directory")),
+    )
+    with _client(monkeypatch, tmp_path) as _:
+        engine = v2_api.service().engine
+        previous = engine.extractor
+        previous_settings = (settings.extractor, settings.llm_auto_extract)
+        previous_env = {
+            name: os.environ.get(name) if name in os.environ else None
+            for name in ("ENGRAPHIS_EXTRACTOR", "ENGRAPHIS_LLM_AUTO_EXTRACT")
+        }
+        fake_llm = FakeLLM()
+        in_flight = FakeExtractor(fake_llm)
+        engine.extractor = in_flight
+        try:
+            result = v2_api._set_llm_extractor(False)
+            assert result["extractor_enabled"] is False
+            assert result["persisted"] is False
+            assert engine.extractor is not None  # no check-then-None ingest race
+            assert fake_llm.closed is False
+            del in_flight
+            gc.collect()
+            assert fake_llm.closed is True
+        finally:
+            engine.extractor = previous
+            settings.extractor, settings.llm_auto_extract = previous_settings
+            for name, value in previous_env.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
 
 def test_consolidate_inference_pass_is_pro_gated(monkeypatch, tmp_path):
@@ -535,6 +709,7 @@ def test_viewer_role_denied_on_governance_and_admin_routes(monkeypatch, tmp_path
         assert viewer.get("/api/export?workspace=demo").status_code == 403
         assert viewer.post("/api/license/activate",
                            json={"key": _team_key()}).status_code == 403
+        assert viewer.get("/api/license/trials/claim-id").status_code == 403
         # a viewer can't create a folder either — creating a workspace is a member+ action
         assert viewer.post("/api/workspaces/create",
                            json={"workspace": "viewer-folder"}).status_code == 403
@@ -565,6 +740,14 @@ def test_viewer_role_denied_on_governance_and_admin_routes(monkeypatch, tmp_path
         }).status_code == 403
         assert member.post("/api/resources/postgres", json={
             "workspace": "demo", "dsn": "postgresql://example.invalid/db",
+        }).status_code == 403
+        assert member.post("/api/llm/test").status_code == 403
+        assert member.post("/api/llm/extractor", json={"enabled": False}).status_code == 403
+        assert member.post("/api/license/trials", json={
+            "email": "member@x.co", "plan": "team", "deployment_token": "x" * 32,
+        }).status_code == 403
+        assert member.post("/api/sync/token", json={
+            "token": "engr_ut_" + "x" * 32, "read_only": True,
         }).status_code == 403
         assert admin.post("/api/workspaces/create",
                           json={"workspace": "admin-folder"}).status_code == 200
@@ -806,34 +989,25 @@ def test_advertised_api_root_is_real(monkeypatch, tmp_path):
 
 
 def test_trial_start_and_rejection(monkeypatch, tmp_path):
-    """Trial starts. Re-calling during active trial is a no-op (returns current status).
-
-    Since 0.8.4 the Pro trial is a REAL server-issued key (``licensing.start_trial`` ->
-    ``cloud_license.request_trial_key``), not a local grant — mock the relay client call
-    so this stays on the offline gate, same as the Team-trial test below. The re-call
-    must NOT hit the relay a second time (there is only one ``request_trial_key`` stub
-    below, good for exactly one call) — ``start_trial`` recognizes the already-active
-    trial key locally and short-circuits before ever reaching the relay client. Since
-    2026-07-14 an email is required in the request body too (the mock below still
-    returns a key synchronously — ``pending=False`` — simulating a relay that short-
-    circuits, so the "activates immediately" shape of this test stays valid)."""
+    """The deprecated route delegates to an idempotent deployment-bound claim."""
     from engraphis import cloud_license
-    monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(_SECRET).hex())
-    trial_key = compose_key(
-        {"v": 1, "plan": "pro", "email": "trial@engraphis.local", "seats": 1,
-         "issued": int(time.time()), "expires": int(time.time() + 3 * 86400),
-         "trial": 1}, _SECRET)
-    monkeypatch.setattr(
-        cloud_license, "request_trial_key",
-        lambda base, mid, plan="pro", email="": (trial_key, "", False))
+    calls = []
+
+    def create(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"claim_id": "claim-1", "status": "pending", "pending": True}
+
+    monkeypatch.setattr(cloud_license, "create_trial_claim", create)
     with _client(monkeypatch, tmp_path) as c:
         r = c.post("/api/license/trial", json={"email": "trial@engraphis.local"})
         assert r.status_code == 200
-        lic = c.get("/api/license").json()
-        assert lic["is_trial"] is True
+        assert r.json()["claim_id"] == "claim-1"
+        assert r.json()["deprecated"] is True
+        assert "key" not in r.json()
         r2 = c.post("/api/license/trial", json={"email": "trial@engraphis.local"})
-        assert r2.status_code == 200  # no-op: already on trial
-        assert r2.json()["is_trial"] is True
+        assert r2.status_code == 200 and r2.json()["claim_id"] == "claim-1"
+        assert c.get("/api/license").json()["plan"] == "free"
+    assert len(calls) == 2
 
 
 def test_trial_start_requires_email(monkeypatch, tmp_path):
@@ -842,8 +1016,8 @@ def test_trial_start_requires_email(monkeypatch, tmp_path):
     from engraphis import cloud_license
     called = []
     monkeypatch.setattr(
-        cloud_license, "request_trial_key",
-        lambda *a, **k: called.append(1) or (None, "should not be called", False))
+        cloud_license, "create_trial_claim",
+        lambda *a, **k: called.append(1) or {"claim_id": "bad"})
     with _client(monkeypatch, tmp_path) as c:
         r = c.post("/api/license/trial", json={})
         assert r.status_code == 400
@@ -856,9 +1030,8 @@ def test_trial_start_route_surfaces_pending_status(monkeypatch, tmp_path):
     key is minted only once the emailed magic link is opened, not from this call."""
     from engraphis import cloud_license
     monkeypatch.setattr(
-        cloud_license, "request_trial_key",
-        lambda base, mid, plan="pro", email="":
-            (None, "check your email to confirm and activate the trial", True))
+        cloud_license, "create_trial_claim",
+        lambda *a, **k: {"claim_id": "claim-2", "status": "pending", "pending": True})
     with _client(monkeypatch, tmp_path) as c:
         r = c.post("/api/license/trial", json={"email": "w@example.com"})
         assert r.status_code == 200
@@ -867,25 +1040,102 @@ def test_trial_start_route_surfaces_pending_status(monkeypatch, tmp_path):
         assert c.get("/api/license").json()["plan"] == "free"
 
 
-def test_team_trial_route_activates_relay_issued_key(monkeypatch, tmp_path):
-    """POST /api/license/team-trial delegates to licensing.start_team_trial(), which
-    needs the vendor relay (unlike the local-only Pro trial) — mock the relay client
-    call so this stays on the offline gate."""
+def test_team_trial_route_starts_deployment_bound_claim(monkeypatch, tmp_path):
     from engraphis import cloud_license
     monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path / "state"))  # isolate machine_id
-    # the relay-minted key is signed with the test keypair, so verification against
-    # the real key needs the same pubkey override _client(key=...) would normally set
-    monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(_SECRET).hex())
-    trial_key = compose_key(
-        {"v": 1, "plan": "team", "email": "trial@engraphis.local", "seats": 1,
-         "issued": int(time.time()), "expires": int(time.time() + 3 * 86400)}, _SECRET)
     monkeypatch.setattr(
-        cloud_license, "request_team_trial_key",
-        lambda base, mid, email="": (trial_key, "", False))
+        cloud_license, "create_trial_claim",
+        lambda *a, **k: {"claim_id": "team-claim", "status": "pending", "pending": True})
     with _client(monkeypatch, tmp_path) as c:
         r = c.post("/api/license/team-trial", json={"email": "trial@engraphis.local"})
-        assert r.status_code == 200 and r.json()["plan"] == "team"
-        assert c.get("/api/license").json()["plan"] == "team"
+        assert r.status_code == 200 and r.json()["claim_id"] == "team-claim"
+        assert r.json()["replacement"] == "/api/license/trials"
+        assert "key" not in r.json()
+
+
+def test_local_trial_needs_no_deployment_token(monkeypatch, tmp_path):
+    """A loopback caller is already trusted by the auth gate, so a self-hosted local
+    instance can start a trial with neither ENGRAPHIS_DEPLOYMENT_TOKEN nor
+    ENGRAPHIS_DASHBOARD_URL configured: the token is derived from the machine id and the
+    dashboard URL defaults to the request origin. This is the local-PC trial fix."""
+    from engraphis import cloud_license
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path / "state"))  # isolate machine_id
+    seen = {}
+
+    def create(base, deployment_token, mid, email, plan, *, dashboard_url="", **kw):
+        seen.update(token=deployment_token, dashboard_url=dashboard_url, plan=plan)
+        return {"claim_id": "local-claim", "status": "pending", "pending": True}
+
+    monkeypatch.setattr(cloud_license, "create_trial_claim", create)
+    with _client(monkeypatch, tmp_path) as c:
+        monkeypatch.delenv("ENGRAPHIS_DEPLOYMENT_TOKEN", raising=False)
+        monkeypatch.delenv("ENGRAPHIS_DASHBOARD_URL", raising=False)
+        r = c.post("/api/license/trials", json={"email": "w@example.com", "plan": "pro"})
+        assert r.status_code == 200, r.text
+        assert r.json()["claim_id"] == "local-claim"
+        assert "key" not in r.json()
+    assert seen["token"].startswith("local-") and len(seen["token"]) > 24
+    assert seen["dashboard_url"].startswith("http://")
+    assert seen["plan"] == "pro"
+
+
+def test_local_trial_poll_needs_no_deployment_token(monkeypatch, tmp_path):
+    """Polling a claim from loopback derives the same machine-bound token, so the
+    create -> confirm -> poll round-trip needs nothing configured locally."""
+    from engraphis import cloud_license
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path / "state"))
+    seen = {}
+
+    def claim(base, claim_id, token, mid, **kw):
+        seen.update(claim_id=claim_id, token=token)
+        return {"claim_id": claim_id, "confirmed": False, "status": "pending"}
+
+    monkeypatch.setattr(cloud_license, "claim_trial", claim)
+    with _client(monkeypatch, tmp_path) as c:
+        monkeypatch.delenv("ENGRAPHIS_DEPLOYMENT_TOKEN", raising=False)
+        r = c.get("/api/license/trials/local-claim")
+        assert r.status_code == 200, r.text
+    assert seen["claim_id"] == "local-claim"
+    assert seen["token"].startswith("local-")
+
+
+def test_remote_trial_still_requires_deployment_token(monkeypatch, tmp_path):
+    """The loopback exemption must not leak to the network. In the zero-user bootstrap
+    window /api/license/trials is reachable remotely, so a proxied/internet caller must
+    still present the configured ownership token — a missing or wrong token is refused
+    before any control-plane call."""
+    from engraphis import cloud_license
+    called = []
+    monkeypatch.setattr(
+        cloud_license, "create_trial_claim",
+        lambda *a, **k: called.append(1) or {"claim_id": "should-not-happen"})
+    with _client(monkeypatch, tmp_path, team=True, client=("203.0.113.7", 40000)) as c:
+        missing = c.post("/api/license/trials", json={"email": "a@x.co", "plan": "pro"})
+        assert missing.status_code == 401
+        wrong = c.post(
+            "/api/license/trials",
+            json={"email": "a@x.co", "plan": "pro", "deployment_token": "z" * 32})
+        assert wrong.status_code == 401
+        ok = c.post(
+            "/api/license/trials",
+            json={"email": "a@x.co", "plan": "pro", "deployment_token": "d" * 32})
+        assert ok.status_code == 200, ok.text
+    assert called == [1]
+
+
+def test_forwarded_trial_is_not_treated_as_local(monkeypatch, tmp_path):
+    """The crux of the loopback exemption's safety: a proxied request (loopback socket peer
+    but an X-Forwarded-* header present) must NOT be treated as local, or a same-host proxy
+    could smuggle an internet caller past the ownership check. It still needs the token."""
+    from engraphis import cloud_license
+    called = []
+    monkeypatch.setattr(cloud_license, "create_trial_claim",
+                        lambda *a, **k: called.append(1) or {"claim_id": "x"})
+    with _client(monkeypatch, tmp_path, team=True) as c:  # default client peer is loopback
+        r = c.post("/api/license/trials", json={"email": "a@x.co", "plan": "pro"},
+                   headers={"X-Forwarded-For": "203.0.113.9"})
+        assert r.status_code == 401
+    assert called == []
 
 
 def test_team_license_routes_are_public_only_during_zero_user_bootstrap(monkeypatch, tmp_path):
@@ -893,12 +1143,9 @@ def test_team_license_routes_are_public_only_during_zero_user_bootstrap(monkeypa
     from engraphis import cloud_license
     monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(_SECRET).hex())
-    trial_key = compose_key(
-        {"v": 1, "plan": "team", "email": "trial@engraphis.local", "seats": 5,
-         "issued": int(time.time()), "expires": int(time.time() + 3 * 86400)}, _SECRET)
     monkeypatch.setattr(
-        cloud_license, "request_team_trial_key",
-        lambda base, mid, email="": (trial_key, "", False))
+        cloud_license, "create_trial_claim",
+        lambda *a, **k: {"claim_id": "team-public", "status": "pending", "pending": True})
 
     with _client(monkeypatch, tmp_path, team=True) as admin:
         # The zero-user bootstrap can inspect status and reach both trial routes logged out.
@@ -907,7 +1154,9 @@ def test_team_license_routes_are_public_only_during_zero_user_bootstrap(monkeypa
         pro_trial = admin.post("/api/license/trial", json={})
         assert pro_trial.status_code == 400 and "email" in pro_trial.text.lower()
         team_trial = admin.post("/api/license/team-trial", json={"email": "w@x.co"})
-        assert team_trial.status_code == 200 and team_trial.json()["plan"] == "team"
+        assert team_trial.status_code == 200 and team_trial.json()["pending"] is True
+        activated = admin.post("/api/license/activate", json={"key": _team_key()})
+        assert activated.status_code == 200 and activated.json()["plan"] == "team"
 
         assert admin.post("/api/auth/setup", json={
             "email": "w@x.co", "name": "W", "password": "supersecret1",
@@ -961,9 +1210,10 @@ def test_license_activate_still_requires_admin_session(monkeypatch, tmp_path):
 def test_team_trial_route_surfaces_relay_denial_as_400(monkeypatch, tmp_path):
     from engraphis import cloud_license
     monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setattr(
-        cloud_license, "request_team_trial_key",
-        lambda base, mid, email="": (None, "the free Team trial has already been used", False))
+    def denied(*args, **kwargs):
+        raise RuntimeError("the free Team trial has already been used")
+
+    monkeypatch.setattr(cloud_license, "create_trial_claim", denied)
     with _client(monkeypatch, tmp_path) as c:
         r = c.post("/api/license/team-trial", json={"email": "w@x.co"})
         assert r.status_code == 400

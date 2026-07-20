@@ -75,12 +75,15 @@ def db_with_workspace(tmp_path):
 def _capture_transport(monkeypatch):
     """Bypass the Pro license gate and capture how the CLI builds its transport."""
     monkeypatch.setattr("engraphis.licensing.require_feature", lambda *a, **k: None)
+    from engraphis.config import settings
+    monkeypatch.setattr(settings, "allowed_workspaces", [])
     captured = {}
 
     def fake_get_transport(kind="folder", **kw):
         captured["kind"] = kind
         captured["kw"] = kw
-        return _FakeTransport()
+        captured["transport"] = _FakeTransport()
+        return captured["transport"]
 
     monkeypatch.setattr("engraphis.backends.sync_folder.get_transport", fake_get_transport)
     return captured
@@ -88,14 +91,52 @@ def _capture_transport(monkeypatch):
 
 def test_cli_selects_relay_and_namespaces_by_workspace_name(db_with_workspace, _capture_transport):
     rc = sync_main(["--db", db_with_workspace, "--workspace", "acme",
-                    "--relay", "https://sync.test", "--relay-key", "ENGR1.a.b"])
+                    "--relay", "https://sync.test", "--relay-token", "user-token-value"])
     assert rc == 0
     assert _capture_transport["kind"] == "relay"
     kw = _capture_transport["kw"]
     assert kw["base_url"] == "https://sync.test"
     # Namespace MUST be the workspace name, not a per-device id, or two devices never meet.
     assert kw["workspace_id"] == "acme"
-    assert kw["license_key"] == "ENGR1.a.b"
+    assert kw["license_key"] == "user-token-value"
+
+
+def test_cli_viewer_token_pulls_without_pushing(db_with_workspace, _capture_transport):
+    rc = sync_main([
+        "--db", db_with_workspace,
+        "--workspace", "acme",
+        "--relay", "https://sync.test",
+        "--relay-token", "viewer-token-value",
+        "--read-only",
+    ])
+    assert rc == 0
+    assert _capture_transport["kind"] == "relay"
+    assert _capture_transport["transport"].pushed == []
+
+
+def test_cli_honors_saved_device_read_only_policy(
+        db_with_workspace, _capture_transport, monkeypatch):
+    monkeypatch.setattr("engraphis.backends.sync_relay.sync_read_only", lambda: True)
+
+    rc = sync_main([
+        "--db", db_with_workspace,
+        "--workspace", "acme",
+        "--relay", "https://sync.test",
+        "--relay-token", "member-token-value",
+    ])
+
+    assert rc == 0
+    assert _capture_transport["transport"].pushed == []
+
+
+def test_cli_rejects_both_relay_credential_flags(db_with_workspace):
+    assert sync_main([
+        "--db", db_with_workspace,
+        "--workspace", "acme",
+        "--relay", "https://sync.test",
+        "--relay-token", "scoped-token",
+        "--relay-key", "legacy-key",
+    ]) == 2
 
 
 def test_cli_selects_folder(db_with_workspace, _capture_transport, tmp_path):
@@ -117,9 +158,32 @@ def test_cli_bare_relay_falls_back_to_config(db_with_workspace, _capture_transpo
 def test_cli_bare_relay_without_config_is_an_error(db_with_workspace, monkeypatch):
     monkeypatch.setattr("engraphis.licensing.require_feature", lambda *a, **k: None)
     from engraphis.config import settings
+    monkeypatch.setattr(settings, "allowed_workspaces", [])
     monkeypatch.setattr(settings, "relay_url", "")
     rc = sync_main(["--db", db_with_workspace, "--workspace", "acme", "--relay"])
     assert rc == 2
+
+
+def test_cli_invalid_relay_does_not_echo_custom_url_secrets(
+        db_with_workspace, monkeypatch, capsys):
+    from engraphis.config import settings
+    monkeypatch.setattr(settings, "allowed_workspaces", [])
+    endpoint_marker = "private-owner@example.com"
+    token_marker = "query-token-secret"
+    relay = "https://relay.test/%s?token=%s" % (endpoint_marker, token_marker)
+
+    rc = sync_main([
+        "--db", db_with_workspace,
+        "--workspace", "acme",
+        "--relay", relay,
+        "--relay-token", "safe-user-token-value",
+    ])
+
+    assert rc == 2
+    error = capsys.readouterr().err
+    assert "could not open relay" in error
+    assert endpoint_marker not in error
+    assert token_marker not in error
 
 
 def test_cli_refuses_to_upload_personal_workspace_to_shared_relay(
@@ -131,6 +195,28 @@ def test_cli_refuses_to_upload_personal_workspace_to_shared_relay(
     engine.store.conn.execute(
         "UPDATE workspaces SET settings=? WHERE id=?",
         (json.dumps({"visibility": "personal", "owner": "owner@example.com"}), row["id"]),
+    )
+    engine.store.conn.commit()
+    engine.store.close()
+
+    rc = sync_main([
+        "--db", db_with_workspace, "--workspace", "acme",
+        "--relay", "https://sync.test",
+    ])
+
+    assert rc == 2
+    assert _capture_transport == {}
+
+
+def test_cli_refuses_invalid_workspace_visibility_for_shared_relay(
+        db_with_workspace, _capture_transport):
+    engine = MemoryEngine.create(db_with_workspace)
+    row = engine.store.conn.execute(
+        "SELECT id FROM workspaces WHERE name='acme'"
+    ).fetchone()
+    engine.store.conn.execute(
+        "UPDATE workspaces SET settings=? WHERE id=?",
+        (json.dumps({"visibility": "corrupt-value"}), row["id"]),
     )
     engine.store.conn.commit()
     engine.store.close()

@@ -8,16 +8,27 @@ engraphis/routes/v2_team.py and is included by the dashboard app.
 from __future__ import annotations
 
 import json
+import hmac
 import logging
+import os
+import threading
 import time
+import weakref
 from typing import Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
-from pydantic import BaseModel
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from pydantic import BaseModel, Field
 
 from engraphis import licensing
 from engraphis.config import DEFAULT_RELAY_URL, canonicalize_relay_url, settings
-from engraphis.service import MemoryService, ValidationError
+from engraphis.netutil import is_local_request
+from engraphis.service import (
+    GraphIndexRebuilding,
+    GraphSceneCapacityExceeded,
+    MemoryService,
+    ValidationError,
+)
+from engraphis.core.store import _escape_like
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 logger = logging.getLogger("engraphis.api")
@@ -66,6 +77,21 @@ def _run(fn, *a, **k):
     """Call a service method, mapping validation errors to 400 and the rest to 500."""
     try:
         return fn(*a, **k)
+    except GraphIndexRebuilding as exc:
+        raise HTTPException(status_code=409, detail={
+            "error": str(exc), "index_state": "rebuilding", "job_id": exc.job_id,
+        })
+    except GraphSceneCapacityExceeded as exc:
+        raise HTTPException(status_code=413, detail={
+            "error": str(exc),
+            "safety_state": "capacity_exceeded",
+            "degraded": True,
+            "truncated": False,
+            "resource": exc.resource,
+            "count": exc.count,
+            "limit": exc.limit,
+            "recommended_action": "narrow repository, time, type, or relation filters",
+        })
     except ValidationError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
     except HTTPException:
@@ -141,9 +167,9 @@ def _keyword_search(ws, q, limit=20):
         args = [row["id"]]
         terms = [t for t in (q or "").split() if len(t) > 2][:6]
         if terms:
-            sql += " AND (" + " OR ".join(["title LIKE ? OR content LIKE ?" for _ in terms]) + ")"
+            sql += " AND (" + " OR ".join(["title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'" for _ in terms]) + ")"
             for t in terms:
-                args += ["%" + t + "%", "%" + t + "%"]
+                args += ["%" + _escape_like(t) + "%", "%" + _escape_like(t) + "%"]
         sql += " ORDER BY COALESCE(last_access, valid_from) DESC LIMIT ?"
         args.append(int(limit))
         rows = conn.execute(sql, args).fetchall()
@@ -185,19 +211,35 @@ def health():
 def bootstrap():
     lic = licensing.current_license(refresh=True).to_public_dict()
     lic["error"] = licensing.license_error()
-    wss = _run(service().list_workspaces).get("workspaces") or []
+    current_service = service()
+    wss = _run(current_service.list_workspaces).get("workspaces") or []
+    # A workspace-bound server rejects global aggregate statistics. Bootstrap must
+    # first choose one of the already-authorized workspaces so the dashboard can
+    # establish WS instead of failing before it renders the workspace switcher.
+    scoped_stats_workspace = None
+    if current_service.allowed_workspaces is not None and wss:
+        scoped_stats_workspace = max(
+            wss,
+            key=lambda item: (int(item.get("memories") or 0), str(item.get("name") or "")),
+        ).get("name")
     emb = None
     try:
         from engraphis.backends import embedder_st as _est
         from engraphis.backends.embedder_deterministic import DeterministicEmbedder
-        e = service().engine.embedder
+        e = current_service.engine.embedder
         d = int(getattr(e, "dim", 0))
         semantic = not isinstance(e, DeterministicEmbedder)
         emb = {"class": type(e).__name__, "dim": d, "semantic": semantic,
                "model": settings.embed_model, "error": getattr(_est, "LAST_EMBEDDER_ERROR", "")}
     except Exception:  # noqa: BLE001
         pass
-    return {"license": lic, "workspaces": wss, "stats": _run(service().stats), "embedder": emb}
+    return {
+        "license": lic,
+        "workspaces": wss,
+        "stats": _run(current_service.stats, workspace=scoped_stats_workspace),
+        "embedder": emb,
+        "features": {"graph_ui_v2": bool(settings.graph_ui_v2)},
+    }
 
 
 # ── workspaces / stats ────────────────────────────────────────────────────────
@@ -217,6 +259,122 @@ _LLM_DEFAULT_MODELS = {
     "openrouter": "openai/gpt-4o-mini",
 }
 
+_llm_connection_state: dict = {
+    "ok": False,
+    "provider": "",
+    "model": "",
+    "tested_at": 0.0,
+}
+_llm_extractor_lock = threading.RLock()
+_sync_token_state_lock = threading.RLock()
+
+
+class _DisabledExtractor:
+    """A race-safe equivalent of ``extractor=None`` for live configuration changes.
+
+    ``MemoryEngine.ingest`` checks the attribute and then reads it again for ``extract``.
+    Replacing a live extractor with ``None`` between those reads can raise AttributeError;
+    a stable no-op object instead returns no facts and lets the engine use its normal
+    passthrough fallback.
+    """
+
+    @staticmethod
+    def extract(text: str, *, context: str = "") -> list:
+        return []
+
+
+_DISABLED_EXTRACTOR = _DisabledExtractor()
+
+
+def _extractor_enabled() -> bool:
+    from engraphis.backends.extractor import LLMExtractor, StructuredLLMExtractor
+    return isinstance(service().engine.extractor, (LLMExtractor, StructuredLLMExtractor))
+
+
+def _close_llm(llm) -> None:
+    if llm is not None and hasattr(llm, "close"):
+        try:
+            llm.close()
+        except Exception:  # noqa: BLE001 - cleanup cannot block a settings change
+            pass
+
+
+def _retire_extractor(extractor) -> None:
+    """Close an old extractor only after every in-flight request releases it."""
+    llm = getattr(extractor, "llm", None)
+    if llm is None or not hasattr(llm, "close"):
+        return
+    try:
+        weakref.finalize(extractor, _close_llm, llm)
+    except TypeError:
+        # A non-weak-referenceable third-party extractor cannot be closed safely here:
+        # another request may still be using it. Prefer a bounded, rare resource leak to
+        # terminating an in-flight provider call.
+        logger.warning("retired LLM extractor could not be finalized safely")
+
+
+def _set_llm_extractor(enabled: bool, *, persist: bool = True) -> dict:
+    """Apply the dashboard extractor switch immediately and, when possible, durably."""
+    with _llm_extractor_lock:
+        return _set_llm_extractor_locked(enabled, persist=persist)
+
+
+def _set_llm_extractor_locked(enabled: bool, *, persist: bool) -> dict:
+    old = service().engine.extractor
+    if enabled:
+        from engraphis.backends.extractor import PassthroughExtractor, get_extractor
+        new = get_extractor("llm_structured")
+        if isinstance(new, PassthroughExtractor):
+            raise RuntimeError("structured LLM extractor could not be initialized")
+        service().engine.extractor = new
+        extractor = "llm_structured"
+    else:
+        service().engine.extractor = _DISABLED_EXTRACTOR
+        extractor = "none"
+    if old is not service().engine.extractor:
+        _retire_extractor(old)
+
+    settings.extractor = extractor
+    settings.llm_auto_extract = bool(enabled)
+    os.environ["ENGRAPHIS_EXTRACTOR"] = extractor
+    os.environ["ENGRAPHIS_LLM_AUTO_EXTRACT"] = "1" if enabled else "0"
+    persisted = False
+    if persist:
+        try:
+            from engraphis.config import persist_project_env
+            persist_project_env({
+                "ENGRAPHIS_EXTRACTOR": extractor,
+                "ENGRAPHIS_LLM_AUTO_EXTRACT": "1" if enabled else "0",
+            })
+            persisted = True
+        except (OSError, ValueError) as exc:
+            logger.warning("could not persist LLM extractor setting (%s)", type(exc).__name__)
+    return {
+        "extractor": extractor,
+        "extractor_enabled": bool(enabled),
+        "auto_extract": bool(enabled),
+        "persisted": persisted,
+    }
+
+
+def _record_llm_test(result: dict) -> None:
+    with _llm_extractor_lock:
+        _llm_connection_state.update({
+            "ok": bool(result.get("ok")),
+            "provider": str(result.get("provider") or settings.llm_provider),
+            "model": str(result.get("model") or settings.llm_model),
+            "tested_at": time.time(),
+        })
+
+
+def _llm_is_verified(provider: str, model: str) -> bool:
+    with _llm_extractor_lock:
+        return bool(
+            _llm_connection_state.get("ok")
+            and _llm_connection_state.get("provider") == provider
+            and _llm_connection_state.get("model") == model
+        )
+
 
 @router.get("/llm/status")
 def llm_status():
@@ -226,13 +384,18 @@ def llm_status():
     provider = settings.llm_provider or "openai"
     model = settings.llm_model or _LLM_DEFAULT_MODELS.get(provider, "")
     key_set = bool(settings.llm_api_key)
+    verified = bool(key_set and _llm_is_verified(provider, model))
     return {
         "provider": provider,
         "model": model,
         "key_set": key_set,
         "base_url": settings.llm_base_url or "",
         "extractor": settings.extractor,
+        "extractor_enabled": _extractor_enabled(),
+        "auto_extract": bool(settings.llm_auto_extract),
         "configured": key_set and bool(model),
+        "working": verified,
+        "tested_at": (_llm_connection_state.get("tested_at") if verified else 0.0),
         "default_models": _LLM_DEFAULT_MODELS,
         # A copy-paste .env block so the user doesn't have to memorise var names.
         "env_snippet": (
@@ -241,6 +404,7 @@ def llm_status():
             f"ENGRAPHIS_LLM_API_KEY=<your-key>\n"
             + (f"ENGRAPHIS_LLM_BASE_URL={settings.llm_base_url}\n" if settings.llm_base_url else "")
             + ("ENGRAPHIS_EXTRACTOR=llm_structured\n" if key_set else "# set ENGRAPHIS_EXTRACTOR=llm_structured to use it\n")
+            + "ENGRAPHIS_LLM_AUTO_EXTRACT=1\n"
         ),
     }
 
@@ -252,17 +416,143 @@ def llm_test():
     instance's API credit, so it's not a viewer action. Returns the ping result; never
     raises (the client's ping() already swallows every failure into ``ok=False``)."""
     if not settings.llm_api_key:
+        _record_llm_test({"ok": False})
         return {"ok": False, "error": "No API key configured. Set ENGRAPHIS_LLM_API_KEY in your .env and restart.",
                 "provider": settings.llm_provider, "model": settings.llm_model}
     try:
         from engraphis.llm.client import LLMClient
         with LLMClient() as llm:
-            return llm.ping()
+            result = llm.ping()
+        _record_llm_test(result)
+        if result.get("ok") and settings.llm_auto_extract:
+            result.update(_set_llm_extractor(True))
+            result["auto_enabled"] = True
+        else:
+            result.update({
+                "extractor": settings.extractor,
+                "extractor_enabled": _extractor_enabled(),
+                "auto_extract": bool(settings.llm_auto_extract),
+                "auto_enabled": False,
+            })
+        return result
     except Exception as exc:  # noqa: BLE001
+        _record_llm_test({"ok": False})
         logger.error("LLM connection test failed (%s)", type(exc).__name__)
         return {"ok": False, "error": "The provider test failed. Check the configured "
                                       "provider, model, and network connection.",
                 "provider": settings.llm_provider, "model": settings.llm_model}
+
+
+class _ExtractorToggleReq(BaseModel):
+    enabled: bool
+
+
+@router.post("/llm/extractor")
+def llm_extractor_toggle(req: _ExtractorToggleReq):
+    """Turn structured extraction on/off immediately; enabling requires a live provider."""
+    if not req.enabled:
+        return {"ok": True, **_set_llm_extractor(False)}
+    if not settings.llm_api_key:
+        raise HTTPException(status_code=400, detail={
+            "error": "Connect an LLM and set its API key before enabling extraction."})
+    try:
+        from engraphis.llm.client import LLMClient
+        with LLMClient() as llm:
+            result = llm.ping()
+    except Exception as exc:  # noqa: BLE001 - provider clients fail in many library-specific ways
+        _record_llm_test({"ok": False})
+        logger.error("LLM extractor verification failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=400, detail={
+            "error": "The configured LLM could not be verified. Check the provider, "
+                     "model, API key, and network connection."}) from None
+    _record_llm_test(result)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail={
+            "error": result.get("error") or "The configured LLM is not working."})
+    return {"ok": True, "provider": result.get("provider"),
+            "model": result.get("model"), **_set_llm_extractor(True)}
+
+
+def _metadata_object(raw) -> dict:
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except (TypeError, ValueError, RecursionError):
+        return {}
+
+
+@router.get("/llm/activity")
+def llm_activity(workspace: Optional[str] = None, limit: int = 100):
+    """List memories the LLM extracted, consolidated, or retention-classified.
+
+    This is intentionally a derived audit view: it exposes stored memory outcomes and
+    bounded metadata, never prompts, API keys, or raw provider responses.
+    """
+    ws = workspace or _default_ws()
+    if not ws:
+        return {"workspace": "", "count": 0, "activities": []}
+    try:
+        ws = service()._clean_ws(ws)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+    row = service().store.conn.execute(
+        "SELECT id FROM workspaces WHERE name=?", (ws,)
+    ).fetchone()
+    if row is None:
+        return {"workspace": ws, "count": 0, "activities": []}
+    rows = service().store.conn.execute(
+        "SELECT id, title, content, mtype, ingested_at, metadata FROM memories "
+        "WHERE workspace_id=? AND valid_to IS NULL AND expired_at IS NULL AND ("
+        "metadata LIKE '%\"llm_extraction\"%' OR "
+        "metadata LIKE '%\"structured_extraction\"%' OR "
+        "metadata LIKE '%\"structured_consolidation\"%' OR "
+        "metadata LIKE '%\"retention_supervision\"%') "
+        "ORDER BY ingested_at DESC LIMIT ?",
+        (row["id"], max(1, min(500, int(limit)))),
+    ).fetchall()
+    activities = []
+    for record in rows:
+        metadata = _metadata_object(record["metadata"])
+        extraction = metadata.get("llm_extraction")
+        consolidation = metadata.get("structured_consolidation")
+        retention = metadata.get("retention_supervision")
+        if isinstance(extraction, dict):
+            action = "extracted"
+            detail = extraction
+        elif isinstance(consolidation, dict):
+            action = "consolidated"
+            detail = consolidation
+        elif isinstance(retention, dict) and retention.get("source") == "llm":
+            action = "retention supervised"
+            detail = retention
+        elif isinstance(metadata.get("structured_extraction"), dict):
+            action = "extracted"
+            detail = {"mode": "llm_structured", "legacy": True}
+        else:
+            continue
+        structured = metadata.get("structured_extraction") or {}
+        entities = metadata.get("entities") or structured.get("entities") or []
+        relations = metadata.get("relations") or structured.get("relations") or []
+        activities.append({
+            "id": record["id"],
+            "title": record["title"] or "",
+            "content": record["content"] or "",
+            "mtype": record["mtype"] or "semantic",
+            "ingested_at": record["ingested_at"],
+            "action": action,
+            "provider": detail.get("provider") or "",
+            "model": detail.get("model") or "",
+            "mode": detail.get("mode") or "",
+            "fact_index": detail.get("fact_index"),
+            "fact_count": detail.get("fact_count"),
+            "confidence": detail.get("confidence", structured.get("confidence")),
+            "entities": entities[:20] if isinstance(entities, list) else [],
+            "relations": relations[:10] if isinstance(relations, list) else [],
+            "source_count": detail.get("source_count"),
+        })
+    return {"workspace": ws, "count": len(activities), "activities": activities}
 
 
 class _CreateWsReq(BaseModel):
@@ -503,8 +793,8 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = None, limit: in
                "AND valid_to IS NULL AND expired_at IS NULL")
         args = [row["id"]]
         if q:
-            sql += " AND (title LIKE ? OR content LIKE ?)"
-            like = "%" + q + "%"
+            sql += " AND (title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\')"
+            like = "%" + _escape_like(q) + "%"
             args += [like, like]
         # Manually dragged rows (sort_order set) come first, in the order they were
         # dropped in; everything never touched by drag-to-reorder falls back to recency.
@@ -1017,7 +1307,157 @@ def graph(workspace: Optional[str] = None, limit: int = 2000,
     ]
     return _run(
         service().graph, workspace=ws, limit=limit, layers=selected,
-        include_code=include_code, repo=repo,
+        include_code=include_code, repo=repo, backfill=False,
+    )
+
+
+def _graph_csv(value: Optional[str]) -> Optional[list[str]]:
+    if value is None:
+        return None
+    items = list(dict.fromkeys(item.strip() for item in value.split(",") if item.strip()))
+    if len(items) > 64 or any(len(item) > 200 for item in items):
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "graph filters allow at most 64 values of 200 characters"},
+        )
+    return items
+
+
+@router.get("/graph/scene")
+def graph_scene(workspace: Optional[str] = None, level: str = "overview",
+                center_id: Optional[str] = None, system_id: Optional[str] = None,
+                seeds: Optional[str] = None, repo: Optional[str] = None,
+                layers: Optional[str] = None, relations: Optional[str] = None,
+                entity_types: Optional[str] = None,
+                memory_types: Optional[str] = None,
+                as_of: Optional[float] = None,
+                time_from: Optional[float] = None,
+                time_to: Optional[float] = None,
+                depth: int = Query(default=1, ge=0, le=2),
+                min_support: int = Query(default=1, ge=0, le=1_000_000),
+                min_confidence: float = Query(default=0.0, ge=0.0, le=1.0),
+                include_code: bool = False, code_overlay: Optional[bool] = None,
+                include_weak_co_occurs: Optional[bool] = None,
+                include_weak_cooccurrence: Optional[bool] = None,
+                node_limit: Optional[int] = Query(default=None, ge=1, le=300),
+                edge_limit: Optional[int] = Query(default=None, ge=0, le=900)):
+    """Complete or focused evidence-backed graph scene with deterministic identity."""
+    ws = workspace or _require_ws()
+    weak_cooccurrence = (
+        include_weak_cooccurrence
+        if include_weak_cooccurrence is not None else
+        include_weak_co_occurs
+        if include_weak_co_occurs is not None else
+        level.strip().lower() == "complete"
+    )
+    code_enabled = include_code if code_overlay is None else code_overlay
+    return _run(
+        service().graph_scene, workspace=ws, level=level,
+        center_id=center_id, system_id=system_id, seeds=_graph_csv(seeds),
+        repo=repo, layers=_graph_csv(layers), relations=_graph_csv(relations),
+        entity_types=_graph_csv(entity_types), memory_types=_graph_csv(memory_types),
+        as_of=as_of, time_from=time_from, time_to=time_to, depth=depth,
+        min_support=min_support, min_confidence=min_confidence,
+        include_weak_cooccurrence=weak_cooccurrence,
+        include_code=code_enabled, node_limit=node_limit, edge_limit=edge_limit,
+    )
+
+
+@router.get("/graph/suggest")
+def graph_suggest(q: str = "", query: Optional[str] = None,
+                  workspace: Optional[str] = None,
+                  repo: Optional[str] = None,
+                  memory_types: Optional[str] = None,
+                  as_of: Optional[float] = None,
+                  time_from: Optional[float] = None,
+                  time_to: Optional[float] = None,
+                  include_weak_cooccurrence: bool = False,
+                  limit: int = Query(default=8, ge=1, le=25)):
+    ws = workspace or _require_ws()
+    return _run(
+        service().graph_suggest, query if query is not None else q,
+        workspace=ws, repo=repo, memory_types=_graph_csv(memory_types),
+        as_of=as_of, time_from=time_from, time_to=time_to,
+        include_weak_cooccurrence=include_weak_cooccurrence, limit=limit,
+    )
+
+
+@router.get("/graph/entities/{canonical_id}")
+def graph_entity(canonical_id: str, workspace: Optional[str] = None,
+                 repo: Optional[str] = None,
+                 memory_types: Optional[str] = None,
+                 as_of: Optional[float] = None,
+                 time_from: Optional[float] = None,
+                 time_to: Optional[float] = None,
+                 include_weak_cooccurrence: bool = True):
+    ws = workspace or _require_ws()
+    return _run(
+        service().graph_entity, canonical_id, workspace=ws, repo=repo,
+        memory_types=_graph_csv(memory_types), as_of=as_of,
+        time_from=time_from, time_to=time_to,
+        include_weak_cooccurrence=include_weak_cooccurrence,
+    )
+
+
+@router.get("/graph/path")
+def graph_path(source: str, target: str, workspace: Optional[str] = None,
+               repo: Optional[str] = None, as_of: Optional[float] = None,
+               memory_types: Optional[str] = None,
+               time_from: Optional[float] = None,
+               time_to: Optional[float] = None,
+               max_hops: int = Query(default=8, ge=1, le=8),
+               max_visits: int = Query(default=10_000, ge=1, le=50_000),
+               include_weak_cooccurrence: bool = False):
+    ws = workspace or _require_ws()
+    return _run(
+        service().graph_path, source, target, workspace=ws, repo=repo,
+        as_of=as_of, memory_types=_graph_csv(memory_types),
+        time_from=time_from, time_to=time_to,
+        max_hops=max_hops, max_visits=max_visits,
+        include_weak_cooccurrence=include_weak_cooccurrence,
+    )
+
+
+class _GraphIndexReq(BaseModel):
+    workspace: str
+    repo: Optional[str] = None
+    dry_run: bool = True
+    extractor: str = Field(default="regex", pattern=r"^regex$")
+
+
+class _GraphIndexCancelReq(BaseModel):
+    workspace: str
+
+
+@router.get("/graph/index/status")
+def graph_index_status(workspace: Optional[str] = None):
+    """Current generation and latest explicit graph-index job for a workspace."""
+    return _run(service().graph_index_status, workspace=workspace or _require_ws())
+
+
+@router.post("/graph/index/jobs")
+def graph_index_start(req: _GraphIndexReq):
+    """Start an idempotent, persisted graph-index job (dry-run by default)."""
+    return _run(
+        service().start_graph_index_job,
+        workspace=req.workspace,
+        repo=req.repo,
+        dry_run=req.dry_run,
+        extractor=req.extractor,
+    )
+
+
+@router.get("/graph/index/jobs/{job_id}")
+def graph_index_job(job_id: str, workspace: Optional[str] = None):
+    return _run(
+        service().graph_index_job, job_id, workspace=workspace or _require_ws()
+    )
+
+
+@router.post("/graph/index/jobs/{job_id}/cancel")
+def graph_index_cancel(job_id: str, req: _GraphIndexCancelReq):
+    return _run(
+        service().cancel_graph_index_job, job_id, workspace=req.workspace
     )
 
 
@@ -1080,11 +1520,19 @@ def code_export(workspace: str, repo: str):
 
 # ── license ───────────────────────────────────────────────────────────────────
 class _KeyReq(BaseModel):
-    key: str
+    key: str = Field(..., min_length=1, max_length=8192)
 
 
 class _TrialReq(BaseModel):
-    email: str = ""
+    email: str = Field(default="", max_length=320)
+
+
+class _TrialClaimReq(BaseModel):
+    email: str = Field(..., min_length=3, max_length=320)
+    plan: str = Field(..., min_length=3, max_length=16)
+    # Optional: a remote caller must still send the configured ownership token (enforced
+    # in the handler), but a trusted loopback caller may omit it — the local UI does.
+    deployment_token: str = Field(default="", max_length=8192)
 
 
 @router.get("/license")
@@ -1114,31 +1562,170 @@ def activate_license(req: _KeyReq):
 
 
 @router.post("/license/trial")
-def start_trial(req: _TrialReq):
-    """Begin the one-time self-serve free Pro trial. Requires ``email`` in the body —
-    since 2026-07-14 a key is no longer issued synchronously; a one-time confirmation
-    link is emailed to it instead (see ``licensing.start_trial``), so a normal
-    response here is ``{"pending": true, ...}``, not an activated license. 400 if the
-    email is missing/invalid, a paid license is active, or the trial is spent."""
-    try:
-        return licensing.start_trial(email=req.email)
-    except licensing.LicenseError as exc:
-        raise HTTPException(status_code=400, detail={"error": str(exc)})
+def start_trial(req: _TrialReq, request: Request):
+    """Deprecated v1.0 wrapper for a deployment-bound Pro claim."""
+    token, fallback = _trial_binding(request)
+    result = _start_bound_trial(req.email, "pro", token, dashboard_url_fallback=fallback)
+    result["deprecated"] = True
+    result["replacement"] = "/api/license/trials"
+    return result
 
 
 @router.post("/license/team-trial")
-def start_team_trial(req: _TrialReq):
-    """Begin the one-time self-serve Team trial (unlocks Team mode, seats, and the
-    invite-email relay — a real signed key from the vendor, no purchase). Requires
-    ``email`` in the body; since 2026-07-14 a normal response is ``{"pending": true,
-    ...}`` — the key is only minted once a confirmation link emailed to it is opened,
-    not returned synchronously here. See ``licensing.start_team_trial``. 400 if the
-    email is missing/invalid, a paid license is active, this device's trial was
-    already claimed, or the relay is unreachable."""
+def start_team_trial(req: _TrialReq, request: Request):
+    """Deprecated v1.0 wrapper for a deployment-bound Team claim."""
+    token, fallback = _trial_binding(request)
+    result = _start_bound_trial(req.email, "team", token, dashboard_url_fallback=fallback)
+    result["deprecated"] = True
+    result["replacement"] = "/api/license/trials"
+    return result
+
+
+def _configured_deployment_token() -> str:
+    return os.environ.get("ENGRAPHIS_DEPLOYMENT_TOKEN", "").strip()
+
+
+def _local_deployment_token() -> str:
+    """A stable, machine-bound trial token for a trusted loopback caller.
+
+    Loopback requests are already fully trusted by the dashboard auth gate (they reach
+    every ``/api`` route without a bearer, and first-admin setup accepts them the same
+    way), so the deployment-token ownership proof adds no security on localhost — it only
+    stops the local operator from starting a trial with a secret that, on a self-hosted
+    box, nobody ever configured. Derive a deterministic value from the machine id so the
+    create -> email-confirm -> poll round-trip binds to a single ``deployment_hash`` even
+    across a process restart, without asking the operator to invent one.
+    """
+    import hashlib
+
+    from engraphis import cloud_license
+    digest = hashlib.sha256(
+        ("engraphis-local-trial:" + cloud_license.machine_id()).encode("utf-8")).hexdigest()
+    return "local-" + digest
+
+
+def _effective_deployment_token(request: Request) -> str:
+    """The configured ownership token, or a machine-bound one for trusted loopback."""
+    configured = _configured_deployment_token()
+    if configured:
+        return configured
+    return _local_deployment_token() if is_local_request(request) else ""
+
+
+def _trial_binding(request: Request) -> "tuple[str, str]":
+    """``(deployment_token, dashboard_url_fallback)`` for a trial from *request*.
+
+    On loopback with nothing configured, the fallback dashboard URL is the request's own
+    origin, so a purely local instance needs neither ``ENGRAPHIS_DEPLOYMENT_TOKEN`` nor
+    ``ENGRAPHIS_DASHBOARD_URL`` set to start a trial. A proxied internet request never
+    looks local (any ``X-Forwarded-*`` header disqualifies it), so this changes nothing
+    for a hosted deployment.
+    """
+    local = is_local_request(request)
+    token = _configured_deployment_token() or (_local_deployment_token() if local else "")
+    fallback = str(request.base_url).rstrip("/") if local else ""
+    return token, fallback
+
+
+def _start_bound_trial(email: str, plan: str, deployment_token: str,
+                       *, dashboard_url_fallback: str = "") -> dict:
+    email = email.strip().lower()
+    if not email or "@" not in email or len(email) > 320:
+        raise HTTPException(status_code=400, detail={
+            "error": "a valid email address is required to start a trial"})
+    if not deployment_token:
+        raise HTTPException(status_code=503, detail={
+            "error": "ENGRAPHIS_DEPLOYMENT_TOKEN is not configured"})
+    dashboard_url = (os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
+                     or (dashboard_url_fallback or "").strip())
+    if not dashboard_url:
+        raise HTTPException(status_code=503, detail={
+            "error": "ENGRAPHIS_DASHBOARD_URL is required for hosted trials"})
+    from engraphis import cloud_license
+    from engraphis.config import resolve_license_server_url
     try:
-        return licensing.start_team_trial(email=req.email)
-    except licensing.LicenseError as exc:
+        result = cloud_license.create_trial_claim(
+            resolve_license_server_url(), deployment_token, cloud_license.machine_id(),
+            email, plan, dashboard_url=dashboard_url)
+    except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
+    result.pop("key", None)
+    return result
+
+
+@router.post("/license/trials")
+def create_deployment_trial(req: _TrialClaimReq, request: Request):
+    """Start a claim after proving ownership of this deployment.
+
+    A remote caller must present the configured ``ENGRAPHIS_DEPLOYMENT_TOKEN`` as an
+    ownership proof. A loopback caller is already trusted (see
+    :func:`_local_deployment_token`), so on localhost the token and dashboard URL are
+    derived automatically and a self-hosted instance can trial with nothing configured.
+    """
+    local = is_local_request(request)
+    configured = _configured_deployment_token()
+    if not configured and not local:
+        raise HTTPException(status_code=503, detail={
+            "error": "ENGRAPHIS_DEPLOYMENT_TOKEN is not configured"})
+    if configured and not local and not hmac.compare_digest(
+            configured, req.deployment_token or ""):
+        raise HTTPException(status_code=401, detail={"error": "invalid deployment token"})
+    plan = req.plan.strip().lower()
+    if plan not in ("pro", "team"):
+        raise HTTPException(status_code=400, detail={"error": "plan must be pro or team"})
+    token = configured or _local_deployment_token()
+    fallback = str(request.base_url).rstrip("/") if local else ""
+    return _start_bound_trial(req.email, plan, token, dashboard_url_fallback=fallback)
+
+
+@router.get("/license/trials/{claim_id}")
+def get_deployment_trial(claim_id: str, request: Request):
+    """Poll, retrieve, persist, and activate a confirmed claim without exposing its key."""
+    token = _effective_deployment_token(request)
+    if not token:
+        raise HTTPException(status_code=503, detail={"error": "deployment token unavailable"})
+    from engraphis import cloud_license
+    from engraphis.config import resolve_license_server_url
+    try:
+        result = cloud_license.claim_trial(
+            resolve_license_server_url(), claim_id, token, cloud_license.machine_id())
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail={"error": str(exc)})
+    key = result.pop("key", None)
+    if key:
+        try:
+            license_public = licensing.activate(key).to_public_dict()
+        except licensing.LicenseError as exc:
+            raise HTTPException(status_code=502, detail={"error": str(exc)})
+        result["license"] = license_public
+        result["active"] = license_public.get("plan") in ("pro", "team")
+    return result
+
+
+@router.post("/ops/backup")
+def run_customer_backup():
+    """Run the configured off-volume backup; authentication is enforced by middleware."""
+    try:
+        from engraphis.commercial import run_configured_backup
+        result = run_configured_backup()
+    except Exception as exc:  # noqa: BLE001 - never expose storage paths or key detail
+        import logging
+        logging.getLogger("engraphis.backup").error(
+            "customer backup failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=503, detail={
+            "ok": False, "verified": False})
+    if not result["verified"]:
+        raise HTTPException(status_code=503, detail=result)
+    return result
+
+
+@router.get("/ops/ready")
+def customer_operations_ready():
+    """Authenticated, boolean-only storage readiness for the managed customer service."""
+    from engraphis.commercial import customer_operations_readiness
+    from fastapi.responses import JSONResponse
+    checks = customer_operations_readiness()
+    return JSONResponse(checks, status_code=200 if checks["ready"] else 503)
 
 
 # ── Cloud sync (Pro) — the dashboard's one-click "Sync now" button ────────────────────
@@ -1160,13 +1747,21 @@ def _relay_url() -> str:
 @router.get("/sync/status")
 def sync_status():
     """Whether one-click cloud sync is ready, plus the last-sync summary for the button."""
+    from engraphis.backends.sync_relay import has_sync_token, sync_read_only
+    has_token = has_sync_token()
     has_key = bool(licensing._read_key_material())
     lic = licensing.current_license(refresh=False)
     return {
         # Ready only when the plan includes sync AND a key is configured. Purchased and
         # trial entitlements are both real server-issued keys.
-        "available": bool(licensing.has_feature("sync") and has_key),
+        "available": bool(has_token or (licensing.has_feature("sync") and has_key)),
         "has_key": has_key,
+        "has_user_token": has_token,
+        "read_only": sync_read_only(),
+        "token_managed_by_environment": bool(
+            os.environ.get("ENGRAPHIS_SYNC_TOKEN", "").strip()),
+        "read_only_managed_by_environment": bool(
+            os.environ.get("ENGRAPHIS_SYNC_READ_ONLY", "").strip()),
         "plan": lic.plan,
         "relay_url": _relay_url(),
         "tier_required": licensing.required_plan("sync"),
@@ -1230,18 +1825,29 @@ def _sync_all(svc) -> dict:
                          "shared relay (the folder could be marked personal)",
             })
             continue
-        if raw_settings.get("visibility") == "personal":
+        visibility = raw_settings.get("visibility")
+        if visibility == "personal":
+            continue
+        if visibility not in (None, "", "shared"):
+            errors.append({
+                "workspace": name,
+                "error": "workspace visibility is invalid; refusing to sync to the "
+                         "shared relay",
+            })
             continue
         try:
             transport = get_transport("relay", base_url=_relay_url(), workspace_id=name)
-            rep = syncer.sync(transport, row["id"])
+            from engraphis.backends.sync_relay import sync_read_only
+            read_only = sync_read_only()
+            rep = syncer.sync(transport, row["id"], push=not read_only)
         except RelayError as exc:
             # Record the HTTP status (402 == relay rejected the key) instead of raising, so
             # one workspace can't abort the sweep; sync_run() promotes a 402 to the button.
             errors.append({"workspace": name, "error": str(exc), "status": exc.status})
             continue
         except Exception as exc:  # noqa: BLE001 — one bad workspace must not abort the rest
-            errors.append({"workspace": name, "error": str(exc)})
+            logger.error("sync workspace failed (%s)", type(exc).__name__)
+            errors.append({"workspace": name, "error": "sync workspace failed"})
             continue
         exported += int(rep.get("exported_memories", 0) or 0)
         for a in rep.get("applied") or []:
@@ -1258,11 +1864,14 @@ def _sync_all(svc) -> dict:
 
 
 @router.post("/sync/run")
-def sync_run():
+async def sync_run():
     """Push this device's memories to the relay and pull every other device's — for every
     workspace. Backs the dashboard 'Sync now' button. Pro/Team; needs a license key."""
-    _paid("sync")   # 402 if the plan doesn't include sync
-    if not licensing._read_key_material():
+    from engraphis.backends.sync_relay import has_sync_token
+    has_token = has_sync_token()
+    if not has_token:
+        _paid("sync")   # legacy paid-key migration path
+    if not has_token and not licensing._read_key_material():
         raise HTTPException(status_code=402, detail={
             "error": "Cloud sync needs your license key. Sign in with it above, then Sync.",
             "upgrade_url": licensing.upgrade_url()})
@@ -1272,7 +1881,8 @@ def sync_run():
         raise HTTPException(status_code=400,
                             detail={"error": "Nothing to sync yet — add a memory first."})
 
-    summary = _sync_all(svc)
+    import asyncio
+    summary = await asyncio.to_thread(_sync_all, svc)
     _SYNC_STATE["last"] = summary
     # If the relay rejected the key for every workspace (nothing exported, a 402 seen),
     # surface it as the button's upgrade/renew prompt rather than a silent partial success.
@@ -1281,6 +1891,56 @@ def sync_run():
         raise HTTPException(status_code=402, detail={
             "error": first["error"], "upgrade_url": licensing.upgrade_url()})
     return {"ok": True, "summary": summary}
+
+
+class _SyncTokenReq(BaseModel):
+    token: str = Field(..., min_length=24, max_length=8192)
+    read_only: bool = False
+
+
+@router.post("/sync/token")
+def configure_sync_token(req: _SyncTokenReq):
+    from engraphis.backends.sync_relay import (
+        save_sync_read_only, save_sync_token, sync_read_only)
+    env_token = os.environ.get("ENGRAPHIS_SYNC_TOKEN", "").strip()
+    if env_token and not hmac.compare_digest(env_token, req.token.strip()):
+        raise HTTPException(status_code=409, detail={
+            "error": "sync token is managed by ENGRAPHIS_SYNC_TOKEN"})
+    env_policy = os.environ.get("ENGRAPHIS_SYNC_READ_ONLY", "").strip()
+    if env_policy and sync_read_only() != bool(req.read_only):
+        raise HTTPException(status_code=409, detail={
+            "error": "read-only policy is managed by ENGRAPHIS_SYNC_READ_ONLY"})
+    try:
+        with _sync_token_state_lock:
+            # A partial update must fail toward no uploads. Persist a restrictive sentinel
+            # before replacing the token; relax it only after token persistence succeeds.
+            save_sync_read_only(True)
+            if not env_token:
+                save_sync_token(req.token)
+            if not req.read_only:
+                save_sync_read_only(False)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+    except OSError:
+        raise HTTPException(status_code=503, detail={
+            "error": "sync token state could not be persisted"})
+    return {"configured": True, "read_only": bool(req.read_only),
+            "token_managed_by_environment": bool(env_token),
+            "read_only_managed_by_environment": bool(env_policy)}
+
+
+@router.delete("/sync/token")
+def remove_sync_token():
+    from engraphis.backends.sync_relay import clear_sync_token, has_sync_token, sync_read_only
+    try:
+        with _sync_token_state_lock:
+            clear_sync_token()
+    except OSError:
+        raise HTTPException(status_code=503, detail={
+            "error": "sync token state could not be removed"})
+    # An explicit deployment environment token cannot be removed by a dashboard file
+    # operation. Report the effective state instead of claiming it disappeared.
+    return {"configured": has_sync_token(), "read_only": sync_read_only()}
 
 
 class _AutoSyncReq(BaseModel):
@@ -1305,7 +1965,9 @@ def sync_auto_set(req: _AutoSyncReq):
     **admin-only** (``inspector/auth.min_role``): auto-sync is an account-wide control.
     The loop itself is licensed-gated too, so a stale toggle can never reach the relay
     after a plan lapses."""
-    _paid("sync")
+    from engraphis.backends.sync_relay import has_sync_token
+    if not has_sync_token():
+        _paid("sync")
     from engraphis import autosync
     cur = autosync.load_policy()
     merged = {k: (getattr(req, k) if getattr(req, k) is not None else cur.get(k))

@@ -19,7 +19,7 @@ on the vendor server (e.g. the sync relay) are truly non-bypassable.
 
 Online-only enforcement (product policy): paid features ALWAYS require a live lease. The
 client resolves a server URL from ``ENGRAPHIS_CLOUD_URL`` -> the key's signed ``cloud_url``
--> the built-in vendor relay (``settings.relay_url``), and fails closed if none resolves.
+-> ``https://license.engraphis.com``, and fails closed if none resolves.
 There is deliberately no offline unlock path for Pro/Team.
 """
 from __future__ import annotations
@@ -82,23 +82,46 @@ def _is_loopback_host(host: str) -> bool:
 
 
 def validate_cloud_base_url(value: str) -> str:
-    """Require HTTPS for remote cloud endpoints; allow HTTP only on loopback."""
+    """Require HTTPS for remote cloud endpoints; allow HTTP only on loopback.
+
+    Also blocks private/reserved IP ranges to prevent SSRF attacks against internal
+    services (cloud metadata endpoints, corporate networks, etc.)."""
     parts = urlsplit(str(value or "").strip())
     scheme = parts.scheme.lower()
     if scheme not in {"http", "https"} or not parts.hostname:
         raise ValueError("license server URL must be an absolute http(s) URL")
     try:
         parts.port
-    except ValueError as exc:
-        raise ValueError("license server URL has an invalid port") from exc
+    except ValueError:
+        raise ValueError("license server URL has an invalid port") from None
     if parts.username is not None or parts.password is not None:
         raise ValueError("license server URL must not contain embedded credentials")
     if "\\" in parts.netloc or any(char.isspace() for char in parts.netloc):
         raise ValueError("license server URL contains an invalid host")
     if parts.query or parts.fragment:
         raise ValueError("license server URL must not contain a query string or fragment")
-    if scheme != "https" and not _is_loopback_host(parts.hostname.lower()):
+    hostname = parts.hostname.lower()
+    if scheme != "https" and not _is_loopback_host(hostname):
         raise ValueError("license server URL must use HTTPS unless it targets loopback")
+    # SSRF protection: block private/reserved IP ranges even on HTTPS. This prevents
+    # targeting cloud metadata endpoints (169.254.169.254), corporate networks, etc.
+    # Note: DNS rebinding can bypass this, but it raises the bar significantly.
+    if not _is_loopback_host(hostname):
+        try:
+            import socket
+            addrinfos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            for family, _, _, _, sockaddr in addrinfos:
+                ip = sockaddr[0]
+                try:
+                    ip_obj = ipaddress.ip_address(ip)
+                except ValueError:
+                    continue  # sockaddr didn't yield a parseable IP; skip
+                if (ip_obj.is_private or ip_obj.is_reserved or ip_obj.is_link_local
+                        or ip_obj.is_multicast or ip_obj.is_unspecified):
+                    raise ValueError(
+                        "license server URL must not target private/reserved IP ranges")
+        except (socket.gaierror, OSError):
+            pass  # DNS resolution failure; let the actual request fail later
     return urlunsplit((scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
 
 
@@ -176,11 +199,10 @@ def machine_id() -> str:
                 pass
         except OSError as exc:
             logger.warning(
-                "machine_id: could not persist device id to %s (%s); using an in-process "
-                "id for this run. Trial and cloud-lease binding need a writable home "
-                "directory — mount a persistent volume for %s (or set HOME to a writable "
-                "path).",
-                _MACHINE_ID_FILE, exc, _MACHINE_ID_FILE.parent)
+                "machine_id: could not persist device id (%s); using an in-process id "
+                "for this run. Trial and cloud-lease binding need a writable persistent "
+                "state directory.",
+                type(exc).__name__)
         _machine_id_cache[key] = mid   # stable for the rest of the process regardless
         return mid
 
@@ -188,20 +210,38 @@ def machine_id() -> str:
 # ── lease token (same ENGR1-style envelope, distinct prefix) ─────────────────────────
 
 def compose_lease(payload: dict, secret: bytes) -> str:
-    """Vendor-side: sign a lease payload. (Server imports this.)"""
-    from engraphis.licensing import _b64u_encode, ed25519_sign
-    body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    """Vendor-side: sign a lease payload and bind it to its signing-key id.
+
+    The payload copy keeps the caller's object immutable. A supplied, mismatched key id
+    is rejected rather than silently corrected so a bad rotation configuration cannot
+    mint a lease whose metadata disagrees with its signature.
+    """
+    from engraphis.licensing import _b64u_encode, ed25519_public_key, ed25519_sign
+    if not isinstance(payload, dict):
+        # Preserve the old ability to compose malformed signed values for verifier tests.
+        body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        sig = ed25519_sign(secret, body)
+        return "%s.%s.%s" % (_LEASE_PREFIX, _b64u_encode(body), _b64u_encode(sig))
+    signed_payload = dict(payload)
+    signing_key_id = ed25519_public_key(secret).hex()[:16]
+    supplied = str(signed_payload.get("signing_key_id", "") or "").strip().lower()
+    if supplied and supplied != signing_key_id:
+        raise ValueError("lease signing-key id does not match the signing secret")
+    signed_payload["signing_key_id"] = signing_key_id
+    body = json.dumps(
+        signed_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     sig = ed25519_sign(secret, body)
     return "%s.%s.%s" % (_LEASE_PREFIX, _b64u_encode(body), _b64u_encode(sig))
 
 
 def verify_lease(token: str, *, now: Optional[float] = None) -> dict:
-    """Verify a lease against the pinned vendor public key. Raise LicenseError if bad.
+    """Verify a lease against the pinned current/rotation keys. Raise LicenseError if bad.
 
     Checks the signature and that the lease has not expired (using the monotonic clock,
     so a rolled-back system clock cannot resurrect an expired lease)."""
     from engraphis.licensing import (
-        LicenseError, _b64u_decode, ed25519_verify, vendor_public_key, _monotonic_now,
+        LicenseError, _b64u_decode, _monotonic_now, ed25519_verify,
+        vendor_public_keys,
     )
     token = (token or "").strip()
     parts = token.split(".")
@@ -212,7 +252,9 @@ def verify_lease(token: str, *, now: Optional[float] = None) -> dict:
         sig = _b64u_decode(parts[2])
     except Exception:
         raise LicenseError("lease is not valid base64url")
-    if not ed25519_verify(vendor_public_key(), body, sig):
+    verified_with = next(
+        (pub for pub in vendor_public_keys() if ed25519_verify(pub, body, sig)), None)
+    if verified_with is None:
         raise LicenseError("lease signature is invalid (tampered or wrong vendor key)")
     try:
         payload = json.loads(body.decode("utf-8"))
@@ -225,6 +267,14 @@ def verify_lease(token: str, *, now: Optional[float] = None) -> dict:
     # not — mirror parse_key's isinstance guard rather than rely on that.
     if not isinstance(payload, dict):
         raise LicenseError("lease payload is not a JSON object")
+    verified_key_id = verified_with.hex()[:16]
+    signing_key_id = str(payload.get("signing_key_id", "") or "").strip().lower()
+    if signing_key_id and signing_key_id != verified_key_id:
+        raise LicenseError("lease signing-key id does not match its signature")
+    # Legacy cached leases did not carry a key id. They remain verifiable only while
+    # their signer is present in the explicitly pinned dual-key set; surface the derived
+    # id to callers so all accepted leases have one consistent representation.
+    payload["signing_key_id"] = verified_key_id
     exp = payload.get("expires")
     now = _monotonic_now() if now is None else now
     if exp is None:
@@ -324,12 +374,12 @@ _INVITE_TIMEOUT = 10.0
 
 
 def send_team_invite(base_url: str, key: str, to: str, name: str, role: str,
-                     invited_by: str, *, dashboard_url: str = "",
+                     invited_by: str, *, dashboard_url: str = "", invite_url: str = "",
                      timeout: float = _INVITE_TIMEOUT) -> Tuple[bool, str]:
-    """POST a team-invite request to the vendor relay's ``/license/v1/team-invite``.
+    """POST a team-invite request to the vendor control plane's ``/license/v1/team-invite``.
 
     Used by a self-hosted Team dashboard (``routes.v2_team.add_user``) that has no
-    email delivery of its own configured — the vendor relay sends the notification
+    email delivery of its own configured — the vendor control plane sends the notification
     through ITS configured mail provider instead, gated server-side by *key*
     actually carrying the ``team`` feature (see
     ``inspector.license_cloud.team_invite``). Returns ``(sent, reason)``: on any
@@ -344,7 +394,8 @@ def send_team_invite(base_url: str, key: str, to: str, name: str, role: str,
         return False, "relay URL must use HTTPS (except loopback) and contain no credentials"
     url = base + "/license/v1/team-invite"
     data = json.dumps({"key": key, "to": to, "name": name, "role": role,
-                       "invited_by": invited_by, "dashboard_url": dashboard_url}
+                       "invited_by": invited_by, "dashboard_url": dashboard_url,
+                       "invite_url": invite_url}
                       ).encode("utf-8")
     req = urllib.request.Request(
         url, data=data, method="POST", headers=_JSON_HEADERS)
@@ -365,12 +416,49 @@ def send_team_invite(base_url: str, key: str, to: str, name: str, role: str,
             return False, "daily relayed-invite limit reached; retry tomorrow"
         return False, "relay rejected invite (HTTP %d)" % exc.code
     except (urllib.error.URLError, ValueError, TimeoutError, OSError):
-        return False, "relay is unreachable; check ENGRAPHIS_RELAY_URL and the network"
+        return False, "license service is unreachable; check ENGRAPHIS_CLOUD_URL and the network"
+
+
+def send_password_reset(base_url: str, key: str, to: str, name: str, reset_url: str,
+                        *, timeout: float = _INVITE_TIMEOUT) -> Tuple[bool, str]:
+    """Ask the control plane to durably queue a deployment-bound reset email.
+
+    The reset token is sent only in the server-to-server request. It is never returned
+    by the control plane or included in this function's failure reason.
+    """
+    try:
+        base = validate_cloud_base_url(base_url)
+    except ValueError:
+        return False, "license server URL is invalid"
+    data = json.dumps({
+        "key": key,
+        "to": to,
+        "name": name,
+        "reset_url": reset_url,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        base + "/license/v1/password-reset", data=data, method="POST",
+        headers=_JSON_HEADERS,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
+            body = json.loads(resp.read().decode("utf-8"))
+            return bool(body.get("queued")), ""
+    except urllib.error.HTTPError as exc:
+        if exc.code == 402:
+            return False, "an active Pro or Team license is required"
+        if exc.code == 409:
+            return False, "dashboard origin does not match this license"
+        if exc.code == 429:
+            return False, "password-reset email rate limit reached"
+        return False, "license service rejected password-reset delivery"
+    except (urllib.error.URLError, ValueError, TimeoutError, OSError):
+        return False, "license service is unreachable"
 
 
 def request_trial_key(base_url: str, mid: str, plan: str = "team", email: str = "", *,
                       timeout: float = _INVITE_TIMEOUT) -> Tuple[Optional[str], str, bool]:
-    """POST to the vendor relay's self-serve ``/license/v1/start-trial`` and return
+    """POST to the vendor control plane's deprecated ``/license/v1/start-trial`` and return
     ``(key, reason, pending)``.
 
     Since 2026-07-14 the relay no longer issues a key synchronously from this call —
@@ -408,9 +496,9 @@ def request_trial_key(base_url: str, mid: str, plan: str = "team", email: str = 
             return None, "the free trial has already been used on this device", False
         if exc.code == 429:
             return None, "too many trial requests; try again later", False
-        return None, "trial relay rejected the request (HTTP %d)" % exc.code, False
+        return None, "trial control plane rejected the request (HTTP %d)" % exc.code, False
     except (urllib.error.URLError, ValueError, TimeoutError, OSError):
-        return None, ("trial relay is unreachable; check ENGRAPHIS_RELAY_URL and the "
+        return None, ("trial control plane is unreachable; check ENGRAPHIS_CLOUD_URL and the "
                       "network"), False
 
 
@@ -421,6 +509,66 @@ def request_team_trial_key(base_url: str, mid: str, email: str = "", *,
     return request_trial_key(base_url, mid, plan="team", email=email, timeout=timeout)
 
 
+def create_trial_claim(base_url: str, deployment_token: str, mid: str,
+                       email: str, plan: str, *, dashboard_url: str = "",
+                       timeout: float = _INVITE_TIMEOUT) -> dict:
+    """Start an idempotent deployment-bound trial claim on the control plane."""
+    base = validate_cloud_base_url(base_url)
+    data = json.dumps({
+        "deployment_token": deployment_token,
+        "machine_id": mid,
+        "email": email,
+        "plan": plan,
+        "dashboard_url": dashboard_url,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        base + "/license/v1/trial-claims", data=data, method="POST",
+        headers=_JSON_HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
+            try:
+                return json.loads(resp.read().decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                raise RuntimeError(
+                    "trial control plane returned an invalid response"
+                ) from None
+    except urllib.error.HTTPError as exc:
+        # The control plane body is untrusted and may reflect email addresses,
+        # deployment tokens, or other request material. Expose only the status.
+        raise RuntimeError(
+            "trial control plane rejected the request (HTTP %d)" % exc.code
+        ) from None
+    except (urllib.error.URLError, ValueError, TimeoutError, OSError):
+        raise RuntimeError("trial control plane is unreachable") from None
+
+
+def claim_trial(base_url: str, claim_id: str, deployment_token: str, mid: str, *,
+                timeout: float = _INVITE_TIMEOUT) -> dict:
+    """Retrieve a confirmed key server-to-server for its bound deployment."""
+    base = validate_cloud_base_url(base_url)
+    data = json.dumps({"deployment_token": deployment_token,
+                       "machine_id": mid}).encode("utf-8")
+    from urllib.parse import quote
+    url = base + "/license/v1/trial-claims/%s/claim" % quote(claim_id, safe="")
+    req = urllib.request.Request(url, data=data, method="POST", headers=_JSON_HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
+            try:
+                return json.loads(resp.read().decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                raise RuntimeError(
+                    "trial control plane returned an invalid response"
+                ) from None
+    except urllib.error.HTTPError as exc:
+        if exc.code == 503:
+            return {"status": "recovery_pending", "ready": False}
+        raise RuntimeError(
+            "trial control plane rejected the claim (HTTP %d)" % exc.code
+        ) from None
+    except (urllib.error.URLError, ValueError, TimeoutError, OSError):
+        raise RuntimeError("trial control plane is unreachable") from None
+
+
 def gate(lic, key_material: str, *, base_url: Optional[str] = None) -> Tuple[bool, str]:
     """Decide whether a validly-signed paid key may unlock features on this device.
 
@@ -428,7 +576,7 @@ def gate(lic, key_material: str, *, base_url: Optional[str] = None) -> Tuple[boo
     override or the URL signed into the key) takes precedence over ``ENGRAPHIS_CLOUD_URL``.
     **With no server resolved at all this fails CLOSED** — there is deliberately no
     offline path to paid features (the caller, ``licensing._cloud_gate``, resolves a
-    default relay URL and also fails closed, so this only bites a deliberately blanked
+    default license-service URL and also fails closed, so this only bites a deliberately blanked
     config — defense in depth). In cloud mode, every cache refresh contacts the server:
     an authoritative denial fails closed immediately, while a transient network failure
     may use an existing unexpired lease as offline grace. Without such a lease, failure
@@ -436,7 +584,7 @@ def gate(lic, key_material: str, *, base_url: Optional[str] = None) -> Tuple[boo
     base = (base_url or "").strip().rstrip("/") or cloud_url()
     if not base:
         # Online-only: no server to verify against ⇒ no offline path to paid features.
-        # (The caller, licensing._cloud_gate, already resolves a default relay URL, so
+        # (The caller, licensing._cloud_gate, already resolves a default license URL, so
         # this only bites a deliberately blanked config — defense in depth. Fail closed.)
         return False, ("server-side license verification is required but no license "
                        "server is configured")
@@ -465,8 +613,10 @@ def gate(lic, key_material: str, *, base_url: Optional[str] = None) -> Tuple[boo
             return True, ""
     if cached is not None:
         return True, ""
-    return False, ("cloud license verification failed — could not reach license server at %s "
-                   "(offline or network error)" % base)
+    # The configured endpoint path can contain customer identifiers even after URL
+    # validation. Do not reflect it through license errors shown by the dashboard.
+    return False, ("cloud license verification failed — could not reach the configured "
+                   "license server (offline or network error)")
 
 
 def revalidate(lic, key_material: str, *, base_url: Optional[str] = None) -> str:

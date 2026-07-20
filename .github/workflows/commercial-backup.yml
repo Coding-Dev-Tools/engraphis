@@ -1,0 +1,48 @@
+name: commercial encrypted backups
+
+on:
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CUSTOMER_URL: ${{ secrets.ENGRAPHIS_CUSTOMER_URL }}
+      # Use the permanent, independently revocable service credential. The deployment
+      # token is only for ownership proof and first-admin setup.
+      CUSTOMER_TOKEN: ${{ secrets.ENGRAPHIS_CUSTOMER_OPS_TOKEN }}
+      LICENSE_URL: ${{ secrets.ENGRAPHIS_LICENSE_URL }}
+      VENDOR_TOKEN: ${{ secrets.ENGRAPHIS_VENDOR_ADMIN_TOKEN }}
+    steps:
+      - name: Require production backup targets
+        run: |
+          test -n "$CUSTOMER_URL"
+          test -n "$CUSTOMER_TOKEN"
+          test -n "$LICENSE_URL"
+          test -n "$VENDOR_TOKEN"
+          case "$CUSTOMER_URL" in https://*) ;; *) echo "customer URL must use HTTPS"; exit 1;; esac
+          case "$LICENSE_URL" in https://*) ;; *) echo "license URL must use HTTPS"; exit 1;; esac
+      - name: Back up managed customer service
+        run: |
+          printf 'Authorization: Bearer %s\n' "$CUSTOMER_TOKEN" |
+            curl --fail --silent --show-error --max-time 300 --proto '=https' \
+              -X POST --header @- --url "${CUSTOMER_URL%/}/api/ops/backup"
+      - name: Back up license control plane
+        run: |
+          printf 'Authorization: Bearer %s\n' "$VENDOR_TOKEN" |
+            curl --fail --silent --show-error --max-time 300 --proto '=https' \
+              -X POST --header @- --url "${LICENSE_URL%/}/ops/backup"
+      - name: Require fresh readiness after backup
+        run: |
+          printf 'Authorization: Bearer %s\n' "$CUSTOMER_TOKEN" |
+            curl --fail --silent --show-error --max-time 20 --proto '=https' \
+              --header @- --url "${CUSTOMER_URL%/}/api/ops/ready"
+          printf 'Authorization: Bearer %s\n' "$VENDOR_TOKEN" |
+            curl --fail --silent --show-error --max-time 20 --proto '=https' \
+              --header @- --url "${LICENSE_URL%/}/ops/ready"

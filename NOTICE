@@ -10,8 +10,7 @@ You may obtain a copy of the License at
     http://www.apache.org/licenses/LICENSE-2.0
 
 "Engraphis" and the Engraphis logo are trademarks of the Engraphis project.
-Use of the trademarks is subject to the Engraphis Trademark Policy; the
-Apache-2.0 license does not grant trademark rights (see LICENSE, section 6).
+The Apache-2.0 license does not grant trademark rights (see LICENSE, section 6).
 
 Third-party browser assets distributed with this product:
 
@@ -19,7 +18,11 @@ Third-party browser assets distributed with this product:
   engraphis/static/vendor/d3.LICENSE.
 - Marked 12.0.2, Copyright MarkedJS, Christopher Jeffrey, and Markdown's
   contributors, MIT and BSD-style licenses. See engraphis/static/vendor/marked.LICENSE.
-- force-graph, Copyright 2018 Vasco Asturiano, MIT license. See
+- force-graph 1.51.4, Copyright 2018 Vasco Asturiano, MIT license. See
   engraphis/static/vendor/force-graph.LICENSE.
+- Sigma.js 3.0.3, Graphology 0.26.0, graphology-utils, and events, distributed
+  under their MIT licenses. The exact dependency hashes and combined license
+  texts are shipped in engraphis/static/vendor/galaxy-dependencies.json and
+  engraphis/static/vendor/galaxy-vendor.LICENSE.txt.
 - DOMPurify 3.4.11, Copyright Cure53 and contributors, distributed under the
   Apache License 2.0 option stated in its embedded license header; see LICENSE.

@@ -167,9 +167,11 @@ def run_once(service: Any = None, *, now: Optional[float] = None,
     when the plan/key isn't ready (so the loop no-ops cheaply instead of hammering the
     relay)."""
     from engraphis import licensing
-    if not licensing.has_feature("sync"):
+    from engraphis.backends.sync_relay import has_sync_token
+    has_token = has_sync_token()
+    if not has_token and not licensing.has_feature("sync"):
         return {"skipped": "unlicensed"}
-    if not licensing._read_key_material():
+    if not has_token and not licensing._read_key_material():
         return {"skipped": "no-key"}
     from engraphis.routes import v2_api
     svc = service if service is not None else v2_api.service()

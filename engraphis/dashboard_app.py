@@ -27,10 +27,10 @@ _INDEX = _STATIC / "index.html"
 
 # Reachable without any session/token in every mode: the page shell, liveness, and
 # auth endpoints needed while logged out. First-admin setup is handled separately below:
-# it is safe from loopback, or remotely when the deployment API token authenticates it.
+# it is safe from loopback, or remotely when the deployment bootstrap token authenticates it.
 _PUBLIC = {"/", "/api/health", "/api/ready", "/api/auth/state", "/api/auth/login",
            "/api/auth/logout", "/api/auth/forgot", "/api/auth/reset",
-           "/webhooks/polar"}
+           "/api/auth/invitations/accept", "/webhooks/polar"}
 
 # A zero-user Team install must be able to inspect entitlement before its first admin
 # exists. Trial creation is deliberately NOT public: on a hosted instance the deployment
@@ -38,6 +38,7 @@ _PUBLIC = {"/", "/api/health", "/api/ready", "/api/auth/state", "/api/auth/login
 # This route stops being public as soon as any user is created.
 _TEAM_BOOTSTRAP_PUBLIC = {
     "/api/license",
+    "/api/license/trials",
 }
 
 
@@ -79,6 +80,13 @@ def _mcp_transport_security(mcp):
 
 
 def create_app() -> FastAPI:
+    from engraphis.observability import configure_structured_logging
+    configure_structured_logging()
+    from engraphis.commercial import service_mode
+    mode = service_mode()
+    if mode == "vendor":
+        from engraphis.vendor_app import create_app as create_vendor_app
+        return create_vendor_app()
     # MCP-over-HTTP agent connect: build the streamable-http ASGI app up front so we can
     # give the dashboard a lifespan that initializes its session manager (a mounted
     # sub-app's own lifespan does NOT run in Starlette - only the root app's does -
@@ -117,7 +125,9 @@ def create_app() -> FastAPI:
         # A server-only install intentionally has no MCP SDK; that expected shape stays
         # silent. If an installed SDK fails to mount, retain a warning for operators.
         _level = _logging.INFO if importlib.util.find_spec("mcp") is None else _logging.WARNING
-        _logging.getLogger("engraphis").log(_level, "MCP /mcp mount skipped: %s", _exc)
+        _logging.getLogger("engraphis").log(
+            _level, "MCP /mcp mount skipped (%s)", type(_exc).__name__
+        )
 
     @_contextlib.asynccontextmanager
     async def _lifespan(app: FastAPI):
@@ -159,6 +169,10 @@ def create_app() -> FastAPI:
         settings.db_path, embed_model=settings.embed_model,
         embed_dim=settings.embed_dim or 384,
         allowed_workspaces=settings.allowed_workspaces)
+    # The customer-side sync relay uses this same service to enforce the folder boundary
+    # for scoped Team tokens. In particular, personal and unknown workspaces must never be
+    # addressable through the account-wide relay namespace merely by guessing a name.
+    app.state.service = svc
     try:
         import sys as _sys
         _ed = svc.engine.embedder
@@ -175,6 +189,8 @@ def create_app() -> FastAPI:
     # after the standalone Inspector was retired. Route lives in engraphis.billing so all
     # entrypoints share identical signature-verification + idempotency.
     try:
+        if not settings.vendor_service:
+            raise ImportError("billing webhook disabled in customer service mode")
         from engraphis.billing import router as billing_router
         app.include_router(billing_router)
     except Exception:  # noqa: BLE001 - billing stays optional (e.g. minimal installs)
@@ -185,7 +201,14 @@ def create_app() -> FastAPI:
     # revocation and serve Pro sync. Endpoints live outside /api (license-key auth),
     # so the _auth_gate below (which only guards /api/*) leaves them alone.
     from engraphis.inspector.cloud_mount import mount_cloud_endpoints
-    mount_cloud_endpoints(app)
+    mount_cloud_endpoints(
+        app, include_license=settings.vendor_service,
+        include_sync=settings.customer_service)
+    # Pre-split keys have team.engraphis.com/license/v1/* signed into them. Customer mode
+    # keeps that public surface as a bounded 90-day proxy to license.engraphis.com;
+    # combined development mode continues serving the local license router above.
+    from engraphis.inspector.license_compat_proxy import mount_license_compat_proxy
+    mount_license_compat_proxy(app)
 
     # Team auth plumbing is mounted whenever team mode is configured. The request gate
     # activates for a live Team license or an already-provisioned user database, so a
@@ -194,7 +217,7 @@ def create_app() -> FastAPI:
     try:
         from engraphis.routes import v2_team
         team_enabled, auth_store = v2_team.attach(app, svc)
-    except Exception:  # noqa: BLE001 - team stays optional on minimal installs
+    except Exception as exc:  # noqa: BLE001 - team stays optional on minimal installs
         # Swallowing this silently was an auth downgrade, not a graceful degradation:
         # with team_enabled False and auth_store None, _auth_gate below skips the ENTIRE
         # role layer AND personal-folder isolation (set_current_user is never called), and
@@ -207,18 +230,31 @@ def create_app() -> FastAPI:
         # as a LOCAL of this function, so a module-level alias would be shadowed and
         # unbound on the (normal) path where that block never runs.
         import logging as _log
-        _log.getLogger("engraphis").exception(
+        _log.getLogger("engraphis").error(
             "team auth failed to mount — role enforcement and personal-folder isolation "
-            "are NOT active; /api/* will answer 503 until this is repaired")
+            "are NOT active; /api/* will answer 503 until this is repaired (%s)",
+            type(exc).__name__,
+        )
         team_auth_broken = settings.team_mode
     # Streamable HTTP sessions are process-local in the MCP SDK. Bind each one to the
     # authenticated user that initialized it so another valid member cannot replay a
     # stolen session id with their own bearer token.
     _mcp_session_users: dict[str, str] = {}
 
-    def _bearer_ok(request: Request) -> bool:
+    def _api_bearer_ok(request: Request) -> bool:
         from engraphis.inspector.auth import bearer_ok
         return bearer_ok(request.headers.get("Authorization"), settings.api_token)
+
+    def _bootstrap_bearer_ok(request: Request) -> bool:
+        """Accept either bootstrap secret, but only for the explicit bootstrap paths.
+
+        ``ENGRAPHIS_DEPLOYMENT_TOKEN`` proves ownership during hosted onboarding; it is
+        not a second unrestricted service-account token.
+        """
+        from engraphis.inspector.auth import bearer_ok
+        deployment = _os.environ.get("ENGRAPHIS_DEPLOYMENT_TOKEN", "").strip()
+        return (_api_bearer_ok(request)
+                or bearer_ok(request.headers.get("Authorization"), deployment))
 
     def _bearer_token(request: Request) -> str:
         header = request.headers.get("Authorization") or ""
@@ -242,7 +278,8 @@ def create_app() -> FastAPI:
         if request.method == "OPTIONS":
             return await call_next(request)
         team_bootstrap_public = (
-            path in _TEAM_BOOTSTRAP_PUBLIC
+            (path in _TEAM_BOOTSTRAP_PUBLIC
+             or (request.method == "GET" and path.startswith("/api/license/trials/")))
             and team_enabled
             and auth_store is not None
             and auth_store.count_users() == 0
@@ -253,7 +290,7 @@ def create_app() -> FastAPI:
             and auth_store is not None
             and auth_store.count_users() == 0
             and (is_local_request(request)
-                 or bool(settings.api_token and _bearer_ok(request)))
+                 or _bootstrap_bearer_ok(request))
         )
         # The OpenAPI schema publishes the full route map and therefore passes through
         # the same wall as every other /api path below.
@@ -287,6 +324,8 @@ def create_app() -> FastAPI:
             if mu is None:
                 return JSONResponse({"error": "authentication required", "auth": "team"},
                                     status_code=401)
+            if "agent" not in set(mu.get("token_scopes") or ()):
+                return JSONResponse({"error": "token lacks agent scope"}, status_code=403)
             if not app.state.mcp_over_http:
                 return JSONResponse({"error": "MCP-over-HTTP is unavailable"},
                                     status_code=404)
@@ -333,7 +372,7 @@ def create_app() -> FastAPI:
         # Service-account bearer token bypass — skips team auth entirely,
         # allowing CI/CD scripts and automation to use the same ENGRAPHIS_API_TOKEN
         # regardless of whether team mode is enabled.
-        if settings.api_token and _bearer_ok(request):
+        if settings.api_token and _api_bearer_ok(request):
             return await call_next(request)
         # A new, unlicensed instance with no users remains open for solo use. Once a paid
         # license (Pro or Team) activates the wall—or any users have been provisioned—the
@@ -353,6 +392,8 @@ def create_app() -> FastAPI:
             # workspace-scoped read/write.
             supplied = _bearer_token(request)
             user = auth_store.resolve_api_token(supplied) if supplied else None
+            if user is not None and "agent" not in set(user.get("token_scopes") or ()):
+                return JSONResponse({"error": "token lacks agent scope"}, status_code=403)
             if user is None:
                 user = auth_store.resolve_session(request.cookies.get(_COOKIE, ""))
             if user is None:
@@ -369,7 +410,7 @@ def create_app() -> FastAPI:
             return await call_next(request)
         # Single-user modes: optional bearer token, exactly as before team mode existed.
         if settings.api_token:
-            if not _bearer_ok(request):
+            if not _api_bearer_ok(request):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             return await call_next(request)
 
@@ -383,15 +424,17 @@ def create_app() -> FastAPI:
         # caller-supplied DSN), /api/code/index and /api/workspaces/import-folder
         # (server-local file reads), /api/workspaces/delete.
         #
-        # Hosted first-admin setup requires ENGRAPHIS_API_TOKEN; otherwise any remote
-        # caller could win a deployment race and make themselves the first admin.
+        # Hosted first-admin setup requires ENGRAPHIS_DEPLOYMENT_TOKEN; otherwise any
+        # remote caller could win a deployment race and make themselves the first admin.
+        # The same ownership proof starts the deployment-bound trial from the public
+        # onboarding screen, but it never grants access to ordinary data routes.
         if not is_local_request(request):
             return JSONResponse(
                 {"error": "this instance has no authentication configured, so remote API "
                           "access is refused. For a hosted first boot, set "
-                          "ENGRAPHIS_API_TOKEN (and ENGRAPHIS_LICENSE_KEY for first-admin "
-                          "setup) in the deployment environment, restart, "
-                          "then create the first admin account.",
+                          "ENGRAPHIS_DEPLOYMENT_TOKEN and ENGRAPHIS_DASHBOARD_URL in the "
+                          "deployment environment, then use the hosted setup screen to "
+                          "activate a trial and create the first admin account.",
                  "auth": "unconfigured"},
                 status_code=403)
         return await call_next(request)
@@ -426,6 +469,7 @@ def create_app() -> FastAPI:
     _maybe_start_autosync()
     _maybe_start_dreaming()
     _maybe_start_license_revalidation()
+    _maybe_start_email_outbox()
     return app
 
 
@@ -433,6 +477,55 @@ def create_app() -> FastAPI:
 _AUTOSYNC_STARTED = False
 _DREAMING_STARTED = False
 _REVALIDATE_STARTED = False
+_EMAIL_OUTBOX_STARTED = False
+
+
+def _process_due_email() -> dict:
+    """Run one customer-local outbox pass with the configured mail provider."""
+    from engraphis import email_outbox
+    from engraphis.inspector.webhooks import _deliver_text_email
+    return email_outbox.process_due(_deliver_text_email, limit=20)
+
+
+def _maybe_start_email_outbox() -> None:
+    """Retry locally configured invitation/reset email without blocking requests.
+
+    Production Railway customers normally relay mail to the vendor control plane, whose
+    ASGI lifespan owns its worker. A self-hosted customer may configure Resend/SMTP
+    locally; immediate sends already persist failures in the durable outbox, so this loop
+    makes the bounded retry policy effective there too.
+    """
+    global _EMAIL_OUTBOX_STARTED
+    if _EMAIL_OUTBOX_STARTED:
+        return
+    import sys
+    if "pytest" in sys.modules or _os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    if _os.environ.get("ENGRAPHIS_EMAIL_OUTBOX_LOOP", "1").strip().lower() in (
+            "0", "false", "no", "off"):
+        return
+    from engraphis.inspector.webhooks import email_configured
+    if not email_configured():
+        return
+    import logging
+    import threading
+    import time
+
+    logger = logging.getLogger("engraphis.email_outbox")
+
+    def _loop() -> None:
+        time.sleep(10)
+        while True:
+            try:
+                _process_due_email()
+            except Exception as exc:  # noqa: BLE001 - retry loop must survive one bad iteration
+                logger.error(
+                    "customer email outbox iteration failed (%s)", type(exc).__name__
+                )
+            time.sleep(30)
+
+    threading.Thread(target=_loop, name="engraphis-email-outbox", daemon=True).start()
+    _EMAIL_OUTBOX_STARTED = True
 
 
 def _maybe_start_autosync() -> None:

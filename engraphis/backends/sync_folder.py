@@ -179,8 +179,9 @@ def get_transport(kind: str = "folder", **kw):
     - ``folder`` (default): shared-directory sync. Requires ``root=<shared directory>``.
     - ``relay``: the managed Pro relay transport (``RelayTransport``). Requires
       ``base_url=<relay root>`` and ``workspace_id=<namespace>`` (use the workspace
-      *name*, so every device on the account shares one namespace); ``license_key`` and
-      ``timeout`` are optional (the key defaults to this device's configured license).
+      *name*, so every authorized device on the account shares one namespace);
+      ``license_key`` is a compatibility parameter for a scoped bearer token and
+      ``timeout`` is optional. The token defaults to the saved per-user sync token.
 
     Both implement the ``SyncTransport`` protocol (``core/interfaces.py``) and plug into
     ``SyncEngine.sync`` unchanged. ``relay`` is imported lazily so a folder-only install

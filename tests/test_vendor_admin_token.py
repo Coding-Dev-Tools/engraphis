@@ -67,14 +67,15 @@ def test_vendor_token_wins_and_api_token_stops_working(monkeypatch):
     authorize vendor admin actions any more — that separation is the whole point."""
     c = _app()
     kid = _issued_kid()
-    monkeypatch.setenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", "vendor-secret")
+    token = "vendor-secret-at-least-32-characters"
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", token)
     monkeypatch.setenv("ENGRAPHIS_API_TOKEN", "instance-token")
     denied = c.post("/license/v1/revoke/%s" % kid,
                     headers={"Authorization": "Bearer instance-token"})
     assert denied.status_code == 401
     assert reg.is_revoked(kid) is False
     ok = c.post("/license/v1/revoke/%s" % kid,
-                headers={"Authorization": "Bearer vendor-secret"})
+                headers={"Authorization": "Bearer " + token})
     assert ok.status_code == 200 and reg.is_revoked(kid) is True
 
 
@@ -103,10 +104,11 @@ def test_no_tokens_configured_fails_closed(monkeypatch):
 def test_every_vendor_admin_route_uses_the_vendor_token(monkeypatch):
     c = _app()
     kid = _issued_kid()
-    monkeypatch.setenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", "vendor-secret")
+    token = "vendor-secret-at-least-32-characters"
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", token)
     monkeypatch.setenv("ENGRAPHIS_API_TOKEN", "instance-token")
     bad = {"Authorization": "Bearer instance-token"}
-    good = {"Authorization": "Bearer vendor-secret"}
+    good = {"Authorization": "Bearer " + token}
     probes = [
         ("GET", "/license/v1/keys?email=buyer@example.com", None),
         ("POST", "/license/v1/revoke-by-email", {"email": "buyer@example.com"}),

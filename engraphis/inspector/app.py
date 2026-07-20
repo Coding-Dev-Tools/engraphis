@@ -20,6 +20,7 @@ Free single-user behaviour is byte-for-byte unchanged when team mode is off.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from typing import Optional
@@ -51,7 +52,7 @@ COOKIE_NAME = "engraphis_session"
 # Reachable without any auth in every mode: the page shell, liveness/readiness, and
 # the auth bootstrap endpoints themselves (state/login/setup must work while logged out).
 _PUBLIC = {"/", "/api/health", "/api/ready", "/api/auth/state", "/api/auth/login",
-           "/api/auth/setup", "/webhooks/polar"}
+           "/api/auth/setup", "/api/auth/invitations/accept", "/webhooks/polar"}
 
 
 # _min_role is now engraphis.inspector.auth.min_role (imported above as _min_role) —
@@ -125,6 +126,11 @@ def _users_db_path(db_path: str) -> str:
 def create_app(service: Optional[MemoryService] = None,
                auth_store: Optional[AuthStore] = None) -> FastAPI:
     configure_logging()
+    from engraphis.commercial import service_mode
+    mode = service_mode()
+    if mode == "vendor":
+        from engraphis.vendor_app import create_app as create_vendor_app
+        return create_vendor_app()
     app = FastAPI(title="Engraphis Memory Inspector", docs_url=None, redoc_url=None)
     app.state.service = service
     app.state.auth_store = auth_store
@@ -154,7 +160,12 @@ def create_app(service: Optional[MemoryService] = None,
         return app.state.auth_store
 
     def team_active() -> bool:
-        return bool(settings.team_mode) and licensing.has_feature("team")
+        # A live Team entitlement enables first-time setup. Once any users exist, the
+        # authentication wall is permanent even if the entitlement lapses; otherwise an
+        # expired key would silently turn a private Inspector into an open API. Feature
+        # routes still enforce the current license independently.
+        return bool(settings.team_mode) and (
+            auth().count_users() > 0 or licensing.has_feature("team"))
 
     def _bearer_ok(request: Request) -> bool:
         return bearer_ok(request.headers.get("Authorization"), settings.api_token)
@@ -179,6 +190,8 @@ def create_app(service: Optional[MemoryService] = None,
             # sessions. Resolve them first, then fall back to the session cookie.
             supplied = _bearer_token(request)
             user = auth().resolve_api_token(supplied) if supplied else None
+            if user is not None and "agent" not in set(user.get("token_scopes") or ()):
+                return JSONResponse({"error": "token lacks agent scope"}, status_code=403)
             if user is None:
                 user = auth().resolve_session(request.cookies.get(COOKIE_NAME, ""))
             if user is None and _bearer_ok(request):
@@ -236,8 +249,10 @@ def create_app(service: Optional[MemoryService] = None,
         whoever's debugging it. Log the exception type server-side without copying
         potentially sensitive exception text, and return a sanitized JSON message
         client-side so the failure remains visible and structured."""
-        logger.error("unhandled exception on %s %s (%s)", request.method,
-                     request.url.path, type(exc).__name__)
+        path_ref = hashlib.sha256(
+            request.url.path.encode("utf-8", "replace")).hexdigest()[:12]
+        logger.error("unhandled exception on %s path_ref=%s (%s)", request.method,
+                     path_ref, type(exc).__name__)
         return JSONResponse({"error": "internal error -- see server logs"}, status_code=500)
 
     def _actor(request: Request) -> str:
@@ -444,7 +459,7 @@ def create_app(service: Optional[MemoryService] = None,
         ]
         return svc().graph(
             workspace=workspace, limit=limit, layers=selected,
-            include_code=include_code, repo=repo,
+            include_code=include_code, repo=repo, backfill=False,
         )
 
     # ── Pro: analytics & compliance export (the 402 upgrade path) ───────────
@@ -508,9 +523,13 @@ def create_app(service: Optional[MemoryService] = None,
     # ── Polar webhook: auto-fulfill license keys on purchase ────────────────
     # Route lives in engraphis.billing so the public server (engraphis/app.py) and
     # this Inspector serve identical fulfillment logic — no drift between the two.
-    app.include_router(billing_router)
-    app.include_router(sync_relay_router)
-    app.include_router(license_cloud_router)
+    if settings.vendor_service:
+        app.include_router(billing_router)
+        app.include_router(license_cloud_router)
+    if settings.customer_service:
+        app.include_router(sync_relay_router)
+    from engraphis.inspector.license_compat_proxy import mount_license_compat_proxy
+    mount_license_compat_proxy(app)
 
     # Baseline security response headers — see engraphis.http_security. Registered last
     # so it wraps the auth middleware above and also covers its 401/402 short-circuits.

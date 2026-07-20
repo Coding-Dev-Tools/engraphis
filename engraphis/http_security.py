@@ -16,14 +16,16 @@ Design notes
   ``127.0.0.1`` to HTTPS in the developer's browser for a year and break every other
   local project on that origin. The proxy case is handled by honouring the forwarded
   proto, which is what Railway presents.
-* **CSP is tuned to the dashboard as it actually is**, not to an ideal: ``static/index.html``
-  carries inline ``<script>``/``<style>`` blocks, so ``'unsafe-inline'`` is allowed. Its
-  only external origin is a ``https://github.com`` hyperlink (navigation, which no
-  fetch directive governs) — every script, style, and font is same-origin, so the policy
-  needs no third-party allowances at all. That is weaker than a nonce policy but still
-  blocks what matters here: third-party script injection, framing, form hijacking, plugin
-  content, and ``<base>`` rewriting. Tightening to nonces is a follow-up that requires
-  editing the template, not this module.
+* **Two policies, chosen by content type.** The JSON API and every error short-circuit
+  get the strict :data:`DEFAULT_CSP` — they render no markup, so an ``unsafe-inline``
+  allowance would buy an attacker nothing there. The dashboard assets are fully
+  externalized (``dashboard.js``, ``dashboard.css``, vendored libs loaded via
+  ``<script src>`` / ``<link rel="stylesheet">``), with event handlers delegated
+  through ``data-on*`` attributes — so ``text/html`` responses get
+  :data:`DASHBOARD_CSP`, which is identical to :data:`DEFAULT_CSP` (no
+  ``unsafe-inline``). DOMPurify remains the sanitization boundary for ingested
+  memory content. An explicit ``ENGRAPHIS_CSP`` override still wins wholesale,
+  for both.
 """
 from __future__ import annotations
 
@@ -38,12 +40,12 @@ logger = logging.getLogger("engraphis.http")
 #: empty string to omit the header entirely (e.g. when a fronting proxy sets its own).
 DEFAULT_CSP = "; ".join([
     "default-src 'self'",
-    # The dashboard's inline <script> and <style> blocks need 'unsafe-inline'. Nothing
-    # else is third-party: the vendored d3/marked/DOMPurify bundles are served from
-    # /static, and the Google webfonts were removed from index.html — allowlisting
-    # origins the page no longer contacts would only widen the policy for nothing.
-    "script-src 'self' 'unsafe-inline'",
-    "style-src 'self' 'unsafe-inline'",
+    # Vendored d3/marked/DOMPurify and the dashboard assets are all served from /static.
+    "script-src 'self'",
+    "script-src-attr 'none'",
+    "worker-src 'self'",
+    "style-src 'self'",
+    "style-src-attr 'none'",
     "font-src 'self'",
     "img-src 'self' data:",
     "connect-src 'self'",
@@ -54,6 +56,10 @@ DEFAULT_CSP = "; ".join([
     "base-uri 'self'",
     "form-action 'self'",
 ])
+
+#: Alias for backward compatibility. The dashboard is now fully externalized
+#: (no inline scripts/styles/handlers), so the same strict policy applies everywhere.
+DASHBOARD_CSP = DEFAULT_CSP
 
 #: 1 year, and explicitly NOT preload — a preload commitment is the operator's call to
 #: make for their own domain, not something a library should make on their behalf.
@@ -87,8 +93,9 @@ def install(app) -> None:
         return
     app.state._security_headers_installed = True
 
-    csp = os.environ.get("ENGRAPHIS_CSP")
-    csp = DEFAULT_CSP if csp is None else csp.strip()
+    csp_override = os.environ.get("ENGRAPHIS_CSP")
+    csp = DEFAULT_CSP if csp_override is None else csp_override.strip()
+
     hsts = os.environ.get("ENGRAPHIS_HSTS")
     hsts = DEFAULT_HSTS if hsts is None else hsts.strip()
 

@@ -10,6 +10,9 @@ and engraphis/routes/v2_api.py). This package is kept because:
 
 It is a library surface, not an entrypoint. Use ``python -m scripts.start_dashboard``.
 """
-from engraphis.inspector.app import create_app
+def create_app(*args, **kwargs):
+    """Load the legacy FastAPI binding only when a caller actually starts it."""
+    from engraphis.inspector.app import create_app as factory
+    return factory(*args, **kwargs)
 
 __all__ = ["create_app"]

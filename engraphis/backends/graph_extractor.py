@@ -49,13 +49,26 @@ _STOPWORDS = {
     "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
     "January", "February", "March", "April", "May", "June", "July", "August",
     "September", "October", "November", "December",
+    # Common capitalized sentence/workflow fragments. They are not stable identities
+    # and otherwise become high-degree co-occurrence hubs in technical memories.
+    "Active", "Action", "Actions", "Add", "Added", "All", "Also", "Artifact",
+    "Artifacts", "Author", "Because", "Check", "Checked", "Comment", "Comments",
+    "Commit", "Connection", "Connections", "Detail", "Details", "False", "Input",
+    "Key", "Keys", "Local", "Manifest", "Merge", "Merged", "Missing", "Only",
+    "Outcome", "Output", "Per", "Possible", "Reason", "Request", "Response", "Result",
+    "Results", "Run", "Running", "Scan", "Scanned", "Status", "Test", "Tests",
+    "Title", "True", "Verdict", "Approval", "Approved", "Categories", "Degraded",
+    "Error", "Errors", "Failed", "Passed", "Rejected", "Skipped", "Success", "Verify",
+    "Warning", "Warnings",
 }
+_STOPWORD_KEYS = {value.casefold() for value in _STOPWORDS}
 
 # Extracted text is untrusted: strip the same control chars service.py strips from
 # direct writes so an entity name can't smuggle a hidden-instruction / escape payload
 # into the graph, and cap length so a pathological match can't bloat a node.
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _MAX_NAME = 200
+_MAX_ENTITIES = 128
 _MAX_RELATIONS = 20
 _MAX_COOCCUR_ENTITIES = 8      # cap pairwise co-occurrence per memory (<= 28 edges)
 _COOCCUR_WEIGHT = 0.5          # weaker than a specific relation so PPR prefers real edges
@@ -96,7 +109,9 @@ def _extract_entities(text: str) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for m in _ENTITY_RE.finditer(text or ""):
         raw = (m.group(0) or "").strip()
-        if not raw or raw in _STOPWORDS or raw.lower() in ("user", "the user"):
+        if not raw or raw.casefold() in _STOPWORD_KEYS or raw.casefold() in (
+            "user", "the user"
+        ):
             continue
         if raw.startswith("#"):
             ent, etype = raw, "hashtag"
@@ -106,12 +121,14 @@ def _extract_entities(text: str) -> list[tuple[str, str]]:
             ent, etype = raw, "email"
         else:
             ent, etype = _canon_concept(raw), "person_or_concept"
-            if len(ent) < 2 or ent in _STOPWORDS:
+            if len(ent) < 2 or ent.casefold() in _STOPWORD_KEYS:
                 continue
         key = ent.lower()
         if key not in seen:
             seen.add(key)
             out.append((ent, etype))
+            if len(out) >= _MAX_ENTITIES:
+                break
     return out
 
 
@@ -132,6 +149,8 @@ def _extract_entities_from_doc(title: str, content: str) -> list[tuple[str, str]
             if key not in seen:
                 seen.add(key)
                 out.append((ent, etype))
+                if len(out) >= _MAX_ENTITIES:
+                    return out
     return out
 
 
@@ -241,7 +260,8 @@ def get_graph_extractor(kind: str = "none"):
 
 def feed(store: Any, content: str, *, workspace_id: str, repo_id: Optional[str] = None,
          title: str = "", extractor: Any = None,
-         provenance: Optional[dict] = None) -> dict:
+         provenance: Optional[dict] = None, commit: bool = True,
+         extraction: Any = None) -> dict:
     """Extract entities/relations from free text and write them into the knowledge
     graph, scoped to ``(workspace_id, repo_id)``.
 
@@ -256,16 +276,17 @@ def feed(store: Any, content: str, *, workspace_id: str, repo_id: Optional[str] 
     Returns ``{"entities": <written>, "relations": <written>}``.
     """
     extractor = extractor or NullGraphExtractor()
-    result = extractor.extract(content, title=title)
+    result = extraction if extraction is not None else extractor.extract(content, title=title)
 
     name_to_id: dict[str, str] = {}
-    for name, etype in result.entities:
+    for name, etype in result.entities[:_MAX_ENTITIES]:
         clean = _defang(name)
         if not clean or clean in name_to_id:
             continue
         name_to_id[clean] = store.upsert_entity(
             Node(id="", name=clean, ntype=_defang(etype),
-                 workspace_id=workspace_id, repo_id=repo_id)
+                 workspace_id=workspace_id, repo_id=repo_id),
+            commit=commit,
         )
 
     prov = dict(provenance or {})
@@ -291,11 +312,11 @@ def feed(store: Any, content: str, *, workspace_id: str, repo_id: Optional[str] 
         specific_pairs.add(frozenset((sid, did)))
         existing = edge_by_key.get(key)
         if existing is not None:
-            store.add_edge_support(existing.id, prov)
+            store.add_edge_support(existing.id, prov, commit=commit)
             continue
         eid = store.upsert_edge(Edge(id="", src=sid, dst=did, relation=relation,
                                      workspace_id=workspace_id, repo_id=repo_id,
-                                     provenance=prov))
+                                     provenance=prov), commit=commit)
         edge_by_key[key] = Edge(id=eid, src=sid, dst=did, relation=relation)
         written_relations += 1
 
@@ -315,13 +336,13 @@ def feed(store: Any, content: str, *, workspace_id: str, repo_id: Optional[str] 
                 key = (lo, hi, "co_occurs")
                 existing = edge_by_key.get(key)
                 if existing is not None:
-                    store.add_edge_support(existing.id, prov)
+                    store.add_edge_support(existing.id, prov, commit=commit)
                     continue
                 eid = store.upsert_edge(Edge(
                     id="", src=lo, dst=hi, relation="co_occurs",
                     weight=_COOCCUR_WEIGHT, workspace_id=workspace_id,
                     repo_id=repo_id, provenance=prov,
-                ))
+                ), commit=commit)
                 edge_by_key[key] = Edge(id=eid, src=lo, dst=hi, relation="co_occurs")
                 written_relations += 1
 

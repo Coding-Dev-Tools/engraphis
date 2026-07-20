@@ -107,6 +107,18 @@ _EXTRACT_SYSTEM_PROMPT = (
 )
 
 
+def _llm_activity_metadata(llm: Any, mode: str) -> dict[str, str]:
+    """Describe a successful extraction without storing prompts or provider responses."""
+    activity = {"mode": mode}
+    provider = _defang(str(getattr(llm, "provider", "") or ""), 128)
+    model = _defang(str(getattr(llm, "model", "") or ""), 256)
+    if provider:
+        activity["provider"] = provider
+    if model:
+        activity["model"] = model
+    return activity
+
+
 class PassthroughExtractor:
     """The offline default: one fact, the text as given."""
 
@@ -168,7 +180,9 @@ class LLMExtractor:
             out.append(ExtractedFact(content=content,
                                      title=_defang(str(item.get("title") or ""), 1_000),
                                      mtype=mtype, importance=importance,
-                                     keywords=[k for k in keywords if k]))
+                                     keywords=[k for k in keywords if k],
+                                     metadata={"llm_extraction":
+                                               _llm_activity_metadata(self.llm, "llm")}))
         return out
 
 
@@ -289,7 +303,9 @@ class StructuredLLMExtractor:
             extra = {k: v for k, v in fact.items() if k not in {
                 "content", "title", "mtype", "importance", "keywords",
             }}
-            metadata: dict[str, Any] = {}
+            metadata: dict[str, Any] = {
+                "llm_extraction": _llm_activity_metadata(self.llm, "llm_structured")
+            }
             if extra:
                 metadata["structured_extraction"] = extra
             if entities:

@@ -18,7 +18,7 @@ pytest.importorskip("fastapi", reason="full-stack extra not installed")
 pytest.importorskip("httpx", reason="httpx not installed")
 pytest.importorskip("mcp", reason="mcp extra not installed")
 
-from fastapi.testclient import TestClient  # noqa: E402
+from tests.team_client import InvitationTestClient as TestClient  # noqa: E402
 
 from engraphis import licensing as lic  # noqa: E402
 from engraphis.config import settings  # noqa: E402

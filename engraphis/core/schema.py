@@ -8,7 +8,7 @@ with a plain-table fallback so the schema initializes on any SQLite build).
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -100,6 +100,9 @@ CREATE TABLE IF NOT EXISTS entities (
     name         TEXT,
     etype        TEXT,
     canonical_id TEXT,                              -- cross-repo entity resolution
+    normalized_name TEXT NOT NULL DEFAULT '',
+    canonical_method TEXT NOT NULL DEFAULT 'exact',
+    canonical_confidence REAL NOT NULL DEFAULT 1.0,
     created_at   REAL,
     UNIQUE(workspace_id, repo_id, name, etype)
 );
@@ -127,6 +130,131 @@ CREATE INDEX IF NOT EXISTS idx_edge_dst ON edges(workspace_id, dst);
 -- workspace-scoped candidate scan in Store.invalidate_edges_for_memory().
 CREATE INDEX IF NOT EXISTS idx_edge_workspace_repo
     ON edges(workspace_id, repo_id, valid_to, expired_at);
+
+-- Evidence is normalized into an indexed, bi-temporal table. ``edges.provenance``
+-- remains populated for one compatibility release and for legacy exports.
+CREATE TABLE IF NOT EXISTS edge_supports (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    edge_id      TEXT NOT NULL,
+    memory_id    TEXT NOT NULL,
+    source_kind  TEXT NOT NULL DEFAULT 'legacy_unknown',
+    confidence   REAL NOT NULL DEFAULT 0.5,
+    valid_from   REAL,
+    valid_to     REAL,
+    ingested_at  REAL,
+    expired_at   REAL,
+    provenance   TEXT DEFAULT '{}',
+    FOREIGN KEY(edge_id) REFERENCES edges(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_support_live_unique
+    ON edge_supports(edge_id, memory_id, source_kind)
+    WHERE valid_to IS NULL AND expired_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_edge_support_edge
+    ON edge_supports(edge_id, valid_to, expired_at);
+CREATE INDEX IF NOT EXISTS idx_edge_support_memory
+    ON edge_supports(memory_id, valid_to, expired_at);
+
+-- Explicit, persisted derived-index work. Graph reads never backfill implicitly;
+-- writers run one of these bounded jobs and readers receive a rebuilding state while
+-- a mutating job is active. ``jobs`` is generic enough for later v2 maintenance jobs,
+-- while ``graph_index_state`` is the cheap generation/state lookup used by scene caches.
+CREATE TABLE IF NOT EXISTS jobs (
+    id               TEXT PRIMARY KEY,
+    workspace_id     TEXT NOT NULL,
+    repo_id          TEXT,
+    kind             TEXT NOT NULL,
+    state            TEXT NOT NULL DEFAULT 'queued',
+    dry_run          INTEGER NOT NULL DEFAULT 1,
+    total_items      INTEGER NOT NULL DEFAULT 0,
+    processed_items  INTEGER NOT NULL DEFAULT 0,
+    counts           TEXT NOT NULL DEFAULT '{}',
+    errors           TEXT NOT NULL DEFAULT '[]',
+    request          TEXT NOT NULL DEFAULT '{}',
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    runner_id        TEXT,
+    heartbeat_at     REAL,
+    created_at       REAL NOT NULL,
+    started_at       REAL,
+    finished_at      REAL
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_scope_state
+    ON jobs(workspace_id, kind, state, created_at);
+
+CREATE TABLE IF NOT EXISTS graph_index_state (
+    workspace_id  TEXT PRIMARY KEY,
+    generation    INTEGER NOT NULL DEFAULT 1,
+    state         TEXT NOT NULL DEFAULT 'ready',
+    active_job_id TEXT,
+    updated_at    REAL NOT NULL,
+    last_error    TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_graph_generation_entity_insert
+AFTER INSERT ON entities WHEN NEW.workspace_id IS NOT NULL BEGIN
+    INSERT INTO graph_index_state(workspace_id, generation, state, updated_at)
+    VALUES(NEW.workspace_id, 1, 'ready', CAST(strftime('%s','now') AS REAL))
+    ON CONFLICT(workspace_id) DO UPDATE SET
+        generation=graph_index_state.generation+1, updated_at=excluded.updated_at;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_graph_generation_entity_update
+AFTER UPDATE ON entities WHEN NEW.workspace_id IS NOT NULL BEGIN
+    INSERT INTO graph_index_state(workspace_id, generation, state, updated_at)
+    VALUES(NEW.workspace_id, 1, 'ready', CAST(strftime('%s','now') AS REAL))
+    ON CONFLICT(workspace_id) DO UPDATE SET
+        generation=graph_index_state.generation+1, updated_at=excluded.updated_at;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_graph_generation_entity_delete
+AFTER DELETE ON entities WHEN OLD.workspace_id IS NOT NULL BEGIN
+    INSERT INTO graph_index_state(workspace_id, generation, state, updated_at)
+    VALUES(OLD.workspace_id, 1, 'ready', CAST(strftime('%s','now') AS REAL))
+    ON CONFLICT(workspace_id) DO UPDATE SET
+        generation=graph_index_state.generation+1, updated_at=excluded.updated_at;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_graph_generation_edge_insert
+AFTER INSERT ON edges WHEN NEW.workspace_id IS NOT NULL BEGIN
+    INSERT INTO graph_index_state(workspace_id, generation, state, updated_at)
+    VALUES(NEW.workspace_id, 1, 'ready', CAST(strftime('%s','now') AS REAL))
+    ON CONFLICT(workspace_id) DO UPDATE SET
+        generation=graph_index_state.generation+1, updated_at=excluded.updated_at;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_graph_generation_edge_update
+AFTER UPDATE ON edges WHEN NEW.workspace_id IS NOT NULL BEGIN
+    INSERT INTO graph_index_state(workspace_id, generation, state, updated_at)
+    VALUES(NEW.workspace_id, 1, 'ready', CAST(strftime('%s','now') AS REAL))
+    ON CONFLICT(workspace_id) DO UPDATE SET
+        generation=graph_index_state.generation+1, updated_at=excluded.updated_at;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_graph_generation_edge_delete
+AFTER DELETE ON edges WHEN OLD.workspace_id IS NOT NULL BEGIN
+    INSERT INTO graph_index_state(workspace_id, generation, state, updated_at)
+    VALUES(OLD.workspace_id, 1, 'ready', CAST(strftime('%s','now') AS REAL))
+    ON CONFLICT(workspace_id) DO UPDATE SET
+        generation=graph_index_state.generation+1, updated_at=excluded.updated_at;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_graph_generation_support_insert
+AFTER INSERT ON edge_supports BEGIN
+    INSERT INTO graph_index_state(workspace_id, generation, state, updated_at)
+    SELECT workspace_id, 1, 'ready', CAST(strftime('%s','now') AS REAL)
+    FROM edges WHERE id=NEW.edge_id
+    ON CONFLICT(workspace_id) DO UPDATE SET
+        generation=graph_index_state.generation+1, updated_at=excluded.updated_at;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_graph_generation_support_update
+AFTER UPDATE ON edge_supports BEGIN
+    INSERT INTO graph_index_state(workspace_id, generation, state, updated_at)
+    SELECT workspace_id, 1, 'ready', CAST(strftime('%s','now') AS REAL)
+    FROM edges WHERE id=NEW.edge_id
+    ON CONFLICT(workspace_id) DO UPDATE SET
+        generation=graph_index_state.generation+1, updated_at=excluded.updated_at;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_graph_generation_support_delete
+AFTER DELETE ON edge_supports BEGIN
+    INSERT INTO graph_index_state(workspace_id, generation, state, updated_at)
+    SELECT workspace_id, 1, 'ready', CAST(strftime('%s','now') AS REAL)
+    FROM edges WHERE id=OLD.edge_id
+    ON CONFLICT(workspace_id) DO UPDATE SET
+        generation=graph_index_state.generation+1, updated_at=excluded.updated_at;
+END;
 
 CREATE TABLE IF NOT EXISTS mem_links (
     a          TEXT,

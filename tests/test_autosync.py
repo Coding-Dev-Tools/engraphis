@@ -75,9 +75,14 @@ def test_sync_auto_toggle_is_admin_only_but_members_still_write():
     assert min_role("GET", "/api/sync/auto") == "viewer"
     # Choosing a server-local repository path is an admin operation; graph reads are not.
     assert min_role("POST", "/api/code/index") == "admin"
+    assert min_role("POST", "/api/graph/index/jobs") == "admin"
+    assert min_role("POST", "/api/graph/index/jobs/job_123/cancel") == "admin"
+    assert min_role("GET", "/api/graph/index/jobs/job_123") == "viewer"
     assert min_role("POST", "/api/workspaces/import-folder") == "admin"
     assert min_role("POST", "/api/resources/postgres") == "admin"
     assert min_role("POST", "/api/sync/run") == "admin"
+    assert min_role("POST", "/api/ops/backup") == "admin"
+    assert min_role("GET", "/api/ops/ready") == "admin"
     assert min_role("POST", "/api/code/path") == "viewer"
     # Irreversibly destroying/combining a whole shared workspace is admin-only, not an
     # ordinary member action (a plain member must not be able to delete/merge everyone's

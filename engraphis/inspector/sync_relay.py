@@ -1,20 +1,20 @@
-"""Gated cloud-sync relay — the server-side half of the managed Pro sync transport.
+"""Gated cloud-sync relay — the server-side half of managed Pro/Team sync.
 
-Stores opaque per-account sync bundles and serves them only to a device that presents a
-valid, unexpired, non-revoked license whose plan includes ``sync``. The gate
-(:func:`license_registry.verify_for_feature`) runs here, on vendor hardware, so a client
-that has patched its local feature check still cannot push or pull: no valid key, no
-bundles. Bundles are namespaced by an account id derived from the license, so one
-customer's devices never see another customer's data.
+Stores opaque per-account sync bundles and serves them only to a device presenting an
+unexpired, non-revoked, per-user token with the required sync scope. The customer server
+also verifies its active Pro/Team entitlement before every request. A legacy license-key
+path is retained only for the configured migration window. Bundles remain namespaced by
+the account entitlement, so one customer never sees another customer's data.
 
-Mounted OUTSIDE the ``/api/`` prefix so the dashboard's admin-token auth gate does not
-apply — authentication here IS the license key, carried as ``Authorization: Bearer``.
+Mounted OUTSIDE the ``/api/`` prefix because clients use scoped bearer tokens rather than
+browser sessions; authentication is still enforced inside every relay handler.
 The bundle bytes are opaque to this layer (the sync engine treats every pulled bundle as
 untrusted anyway), so an end-to-end-encrypted client can push ciphertext unchanged.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import sqlite3
@@ -153,7 +153,7 @@ def _rate_limited(request: Request) -> bool:
 
 
 def _authorize(request: Request):
-    """Verify the caller's license server-side. Returns (license, account_id).
+    """Verify the caller's scoped token and account entitlement server-side.
 
     Raises :class:`LicenseError` (rendered as 402 by the app's exception handler) if the
     key is missing, malformed, expired, wrong-plan, or revoked, and
@@ -177,7 +177,52 @@ def _authorize(request: Request):
             status_code=429,
             detail={"error": "too many sync attempts — try again shortly"},
             headers={"Retry-After": "60"})
-    lic = reg.verify_for_feature(_bearer_key(request), SYNC_FEATURE)
+    bearer = _bearer_key(request)
+    # Each Request owns its state, but initialize explicitly so the license-key path can
+    # never inherit the scoped-user marker if an adapter reuses a request-like object.
+    request.state.sync_user = None
+
+    # Customer deployments authenticate Team members with their own hashed, revocable
+    # API token. The active account license remains the entitlement and namespace anchor;
+    # the user token supplies identity, role, and least-privilege sync scopes.
+    auth_store = getattr(request.app.state, "auth_store", None)
+    if auth_store is not None:
+        user = auth_store.resolve_api_token(bearer)
+        if user is not None:
+            write_request = request.method.upper() in ("POST", "PUT", "PATCH", "DELETE")
+            required_scope = "sync:write" if write_request else "sync:read"
+            if required_scope not in set(user.get("token_scopes") or ()):
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error": "sync token lacks %s" % required_scope})
+            # Roles are mutable after token issuance. Re-check the owner's current role on
+            # every write so downgrading a member to viewer immediately revokes write
+            # authority even if an older token still carries the sync:write scope.
+            if write_request and user.get("role") not in ("member", "admin"):
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error": "the current account role is read-only"})
+            from engraphis import licensing
+            lic = licensing.current_license()
+            if not lic.has(SYNC_FEATURE):
+                raise LicenseError("an active Pro or Team license is required for sync",
+                                   feature=SYNC_FEATURE)
+            request.state.sync_user = user
+            return lic, reg.account_id_for(lic)
+        if bearer.startswith("engr_ut_"):
+            raise HTTPException(
+                status_code=401,
+                detail={"error": "sync token is expired, revoked, or invalid"},
+            )
+
+    lic = reg.verify_for_feature(bearer, SYNC_FEATURE)
+    from engraphis.config import settings
+    if lic.plan == "team" and settings.service_mode == "customer" \
+            and os.environ.get("ENGRAPHIS_LEGACY_TEAM_KEY_SYNC", "0").strip().lower() \
+            not in ("1", "true", "yes", "on"):
+        raise LicenseError(
+            "Team license-key sync is disabled; use a per-user scoped device token",
+            feature=SYNC_FEATURE)
     if lic.plan == "team":
         mid = _machine_id(request)
         if not mid:
@@ -191,6 +236,54 @@ def _authorize(request: Request):
         finally:
             conn.close()
     return lic, reg.account_id_for(lic)
+
+
+def _enforce_scoped_workspace(request: Request, workspace: str) -> None:
+    """Keep personal folders out of the account-wide relay namespace.
+
+    A per-user token proves identity, scope, and current role, but the relay database is
+    intentionally shared by the whole licensed account. Therefore a scoped token may only
+    address a workspace that exists on this customer deployment and is explicitly shared
+    (or is a legacy workspace with no visibility flag). Personal, unknown, and malformed
+    workspace records all receive the same denial so names cannot be probed.
+
+    Vendor relay calls authenticated by a license key retain their existing account-level
+    contract: the vendor process has no customer memory database with which to evaluate
+    local folder visibility. Official customer sync already refuses to upload personal
+    folders before using that legacy transport.
+    """
+    request_state = getattr(request, "state", None)
+    scoped_user = getattr(request_state, "sync_user", None)
+    app_state = getattr(getattr(request, "app", None), "state", None)
+    svc = getattr(app_state, "service", None)
+    store = getattr(svc, "store", None)
+    conn = getattr(store, "conn", None)
+    if conn is None:
+        if scoped_user is None:
+            return
+        raise HTTPException(status_code=503, detail={
+            "error": "workspace authorization is unavailable"})
+    try:
+        rows = conn.fetchall(
+            "SELECT settings FROM workspaces WHERE name=?", (workspace,))
+        if len(rows) != 1:
+            if scoped_user is None:
+                # A vendor relay has no copy of each customer's workspace catalog. Its
+                # license-key contract therefore remains account-scoped for unknown names.
+                return
+            raise ValueError("workspace is missing")
+        raw = rows[0]["settings"]
+        settings = {} if not raw else json.loads(raw)
+        visibility = settings.get("visibility") if isinstance(settings, dict) else None
+        if not isinstance(settings, dict) or visibility not in (None, "", "shared"):
+            raise ValueError("workspace is not shared")
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001 - malformed/missing state must fail closed uniformly
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "scoped sync tokens may access existing shared workspaces only"},
+        ) from None
 
 
 router = APIRouter(prefix="/relay/v1", tags=["sync-relay"])
@@ -287,6 +380,7 @@ async def push_bundle(workspace_id: str, name: str, request: Request):
     safe = _safe_name(name)
     if not workspace or not safe:
         return JSONResponse({"error": "invalid workspace or bundle name"}, status_code=400)
+    await asyncio.to_thread(_enforce_scoped_workspace, request, workspace)
     declared = request.headers.get("Content-Length")
     if declared:
         try:
@@ -329,6 +423,7 @@ async def delete_bundle(workspace_id: str, name: str, request: Request):
     safe = _safe_name(name)
     if not workspace or not safe:
         return JSONResponse({"error": "invalid workspace or bundle name"}, status_code=400)
+    await asyncio.to_thread(_enforce_scoped_workspace, request, workspace)
     deleted = await asyncio.to_thread(
         _delete_bundle, account_id, workspace, safe)
     return {"ok": True, "name": safe, "deleted": deleted}
@@ -360,6 +455,7 @@ def pull_bundle(workspace_id: str, name: str, request: Request):
     safe = _safe_name(name)
     if not workspace or not safe:
         return JSONResponse({"error": "invalid workspace or bundle name"}, status_code=400)
+    _enforce_scoped_workspace(request, workspace)
     conn = _conn()
     try:
         row = conn.execute(
@@ -392,9 +488,9 @@ def pull_bundles(workspace_id: str, request: Request):
     workspace = _safe_workspace_id(workspace_id)
     if not workspace:
         return JSONResponse({"error": "invalid workspace"}, status_code=400)
+    _enforce_scoped_workspace(request, workspace)
     conn = _conn()
     try:
-        conn.execute("BEGIN")
         total = conn.execute(
             "SELECT COALESCE(SUM(LENGTH(data)), 0) AS total FROM sync_bundles "
             "WHERE account_id=? AND workspace_id=?",
@@ -426,6 +522,7 @@ def list_names(workspace_id: str, request: Request):
     workspace = _safe_workspace_id(workspace_id)
     if not workspace:
         return JSONResponse({"error": "invalid workspace"}, status_code=400)
+    _enforce_scoped_workspace(request, workspace)
     conn = _conn()
     try:
         rows = conn.execute(

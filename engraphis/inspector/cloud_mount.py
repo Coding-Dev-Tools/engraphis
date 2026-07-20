@@ -38,6 +38,12 @@ def install_license_error_handler(app: FastAPI) -> None:
 
     @app.exception_handler(LicenseError)
     async def _license(request: Request, exc: LicenseError):  # noqa: ANN202
+        if request.url.path.startswith(("/license/v1/", "/relay/v1/")):
+            try:
+                from engraphis.inspector import license_registry
+                license_registry.record_control_plane_event("lease_rejected")
+            except Exception:  # noqa: BLE001 - preserve the original safe 402 response
+                pass
         body = {"error": str(exc), "upgrade": True,
                 "upgrade_url": licensing.upgrade_url(),
                 "purchase_url": licensing.upgrade_url()}  # legacy alias for older UIs
@@ -50,7 +56,8 @@ def install_license_error_handler(app: FastAPI) -> None:
     app.state._license_handler_installed = True
 
 
-def mount_cloud_endpoints(app: FastAPI) -> bool:
+def mount_cloud_endpoints(app: FastAPI, *, include_license: bool = True,
+                          include_sync: bool = True) -> bool:
     """Mount ``/license/v1`` + ``/relay/v1`` and ensure a LicenseError→402 handler.
 
     Returns True if the routers were mounted. Import is done lazily and defensively so a
@@ -58,11 +65,15 @@ def mount_cloud_endpoints(app: FastAPI) -> bool:
     are simply absent, exactly as before)."""
     install_license_error_handler(app)
     try:
-        from engraphis.inspector.sync_relay import router as sync_relay_router
-        from engraphis.inspector.license_cloud import router as license_cloud_router
+        if include_sync:
+            from engraphis.inspector.sync_relay import router as sync_relay_router
+        if include_license:
+            from engraphis.inspector.license_cloud import router as license_cloud_router
     except Exception:  # noqa: BLE001 - cloud endpoints stay optional on minimal installs
         return False
-    app.include_router(sync_relay_router)
-    app.include_router(license_cloud_router)
+    if include_sync:
+        app.include_router(sync_relay_router)
+    if include_license:
+        app.include_router(license_cloud_router)
     app.state._cloud_endpoints_mounted = True
     return True

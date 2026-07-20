@@ -7,14 +7,79 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Added
 
+- A search-first Analytical Galaxy Graph Explorer backed by canonical, evidence-weighted
+  scenes; deterministic hierarchical system gravity; compact edge backbones and aggregate
+  bridges; exact-ID evidence/history inspection; strongest-evidence paths; synchronized
+  accessible tables; responsive list-first mobile behavior; saved/shareable scene state; and
+  local PNG, JSON, and CSV exports.
+- Additive schema-v4 canonical identity and bi-temporal edge-support records, deterministic
+  `/api/graph/scene`, `/api/graph/suggest`, `/api/graph/entities/{canonical_id}`, and
+  `/api/graph/path` contracts with repository, memory-type, evidence-time, historical, and
+  weak-co-occurrence filtering, plus a persisted graph-index job with dry-run, progress,
+  cancellation, generation state, bounded error reporting, audit records, and tamper-evident
+  receipts.
+- Galaxy Explorer: a new Simple view (the default) renders a clean glowing galactic core with
+  soft bloom, plus an Advanced view toggle that keeps the fully decorated explorer available.
+  Default galaxy rotation is now ~10x slower for readability, and a new Freeze control
+  pauses/resumes the live rotation.
+
+### Changed
+
+- Graph rendering now uses pinned, locally bundled Sigma 3.0.3 and Graphology 0.26 assets,
+  a CSP-safe TypeScript worker, evidence-derived rest lengths, and bounded level-of-detail.
+  The legacy API and ForceGraph renderer remain available for one compatibility release via
+  `ENGRAPHIS_GRAPH_UI_V2=0`; the analytical explorer is the validated default.
+- Graph GET requests are strictly read-only. While an explicit mutating index job runs, graph
+  reads return a rebuilding conflict instead of mixing old and partially derived metrics.
+
+## [1.0.0] - 2026-07-19
+
+First commercial GA release for Pro and Team.
+
+### Added
+
 - The Knowledge Graph can color nodes by deterministic communities, entity type, or
   connection count. The selected mode persists and the legend follows the active scale.
+- Vendor signer rotation now has a dry-run-first bulk reissue command that requires exact
+  active-registry coverage, preserves every signed entitlement claim, keeps source keys
+  valid during dual verification, records an atomic migration audit, and enforces the
+  30-day grace period before source-key retirement.
+- Isolated `customer` and `vendor` production service modes, with an authenticated,
+  secret-free commercial readiness surface.
+- Deployment-bound Pro/Team trial claims with scanner-safe confirmation, automatic
+  server-to-server activation, replay/abuse protection, and recovery after a closed tab.
+- Atomic 72-hour Team invitations with resend, revoke, seat reservations, recipient-chosen
+  passwords, and immediate session/token invalidation for disabled users.
+- Hashed, scoped, 90-day per-user tokens for agent and sync access, including viewer
+  read-only sync.
+- Durable transactional-email outbox, verified Resend delivery events, redacted operations
+  state, bounded retries, and bounce/backlog readiness gates.
+- Canonical commercial product manifest, exact Polar product mapping, Railway customer
+  template descriptor, encrypted off-volume backup/restore tooling, and production
+  synthetics.
+
+### Changed
+
+- Paid licenses default to `https://license.engraphis.com`; the former license path is a
+  90-day compatibility surface.
+- The dashboard is auth-first when hosted, uses accessible dialogs instead of browser
+  prompts, and serves external same-origin assets under a CSP with no `unsafe-inline`.
+- The three-day no-card application trial is the only trial mechanism; Polar is paid
+  monthly/annual checkout only.
 
 ### Fixed
 
-- GitHub Release publication now supplies explicit repository context to `gh` in jobs
-  without a checkout. A workflow-dispatch repair path can reuse the tagged run's
-  validated distribution artifact if PyPI succeeds before release creation fails.
+- GitHub Release publication supplies explicit repository context to `gh` in jobs without
+  a checkout. A workflow-dispatch repair path can reuse the tagged run's validated
+  distribution artifact if PyPI succeeds before release creation fails.
+
+### Security
+
+- The browser and invitation emails never receive the account-wide Team license key.
+- Trial invitation URLs are restricted to the dashboard origin bound into the initiating
+  deployment claim.
+- Production issuance rejects unknown Polar products and wrong organizations; signer
+  readiness remains fail-closed until the offline rotation ceremony is approved.
 
 ## [0.9.9] - 2026-07-18
 

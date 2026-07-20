@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -80,7 +82,11 @@ def _provenance_memory_ids(provenance: Any) -> list[str]:
         return []
     values = [provenance.get("memory_id")]
     many = provenance.get("memory_ids")
-    if isinstance(many, (list, tuple, set)):
+    if isinstance(many, set):
+        # Sets are tolerated for compatibility but have no declared order. Sort them
+        # so they cannot make persisted provenance vary across interpreter processes.
+        values.extend(sorted(many, key=lambda value: str(value)))
+    elif isinstance(many, (list, tuple)):
         values.extend(many)
     out: list[str] = []
     for value in values:
@@ -90,13 +96,105 @@ def _provenance_memory_ids(provenance: Any) -> list[str]:
     return out
 
 
+def _merge_edge_provenance(values: Iterable[Any], *, merged_ids: Iterable[str] = ()) -> dict:
+    """Merge compatibility provenance while normalized supports remain authoritative."""
+    documents = [value for value in values if isinstance(value, dict)]
+    merged = dict(documents[0]) if documents else {}
+    memory_ids: list[str] = []
+    sources: set[str] = set()
+    confidences: list[float] = []
+    for document in documents:
+        for key, value in document.items():
+            merged.setdefault(key, value)
+        for memory_id in _provenance_memory_ids(document):
+            if memory_id not in memory_ids:
+                memory_ids.append(memory_id)
+        source = str(document.get("source") or "")
+        if source:
+            sources.add(source)
+        try:
+            if document.get("confidence") is not None:
+                confidences.append(float(document["confidence"]))
+        except (TypeError, ValueError):
+            pass
+    if memory_ids:
+        # ``memory_id`` is the declared primary source, not the lexicographically
+        # smallest ULID. ULIDs created in one millisecond do not have a meaningful
+        # random-suffix order, so sorting here could silently change provenance.
+        merged["memory_id"] = memory_ids[0]
+        merged["memory_ids"] = memory_ids
+    if sources:
+        merged.setdefault("source", sorted(sources)[0])
+        if len(sources) > 1:
+            merged["sources"] = sorted(sources)
+    if confidences:
+        merged["confidence"] = max(confidences)
+    merged_from = sorted({str(value) for value in merged_ids if value})
+    if merged_from:
+        merged["canonical_deduplicated_from"] = merged_from
+    return merged
+
+
+def normalize_entity_name(value: str) -> str:
+    """Conservative canonicalization key used by schema v4.
+
+    It deliberately performs no fuzzy or semantic matching: exact Unicode NFKC,
+    case-folded, whitespace-normalized variants may share a canonical entity, while
+    punctuation, type, and workspace remain hard boundaries.  Preserving punctuation is
+    important for names such as ``C++``/``C#`` and ``AT&T``/``ATT``; deleting it would
+    silently conflate distinct entities.
+    """
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return re.sub(r"\s+", " ", text).strip()
+
+
+_SUPPORT_CONFIDENCE = {
+    "manual": 1.0,
+    "schema": 1.0,
+    "structured": 0.80,
+    "regex_proximity": 0.55,
+    "legacy_unknown": 0.50,
+    "co_occurrence": 0.25,
+}
+
+
+def _edge_source_kind(provenance: Any, relation: str = "") -> str:
+    if relation == "co_occurs":
+        return "co_occurrence"
+    if not isinstance(provenance, dict):
+        return "legacy_unknown"
+    raw = str(
+        provenance.get("source_kind") or provenance.get("source") or ""
+    ).casefold()
+    if "manual" in raw:
+        return "manual"
+    if "schema" in raw:
+        return "schema"
+    if "structured" in raw:
+        return "structured"
+    if "regex" in raw or "proximity" in raw or "backfill" in raw:
+        return "regex_proximity"
+    return "legacy_unknown"
+
+
+def _edge_support_confidence(provenance: Any, source_kind: str) -> float:
+    raw = provenance.get("confidence") if isinstance(provenance, dict) else None
+    try:
+        if raw is not None:
+            return max(0.0, min(1.0, float(raw)))
+    except (TypeError, ValueError):
+        pass
+    return _SUPPORT_CONFIDENCE.get(source_kind, 0.50)
+
+
 def _receipt_metadata(metadata: dict) -> dict:
     """Keep receipt metadata useful but content-free and bounded."""
     allowed = {
         "mtype", "scope", "resolution", "retention", "extracted", "intent", "k",
         "result_count", "grounded", "citations", "relation", "layer", "graph_layers",
         "files_scanned", "files_indexed", "files_removed", "symbols", "edges",
-        "entities", "relations", "tables",
+        "entities", "relations", "tables", "dry_run", "error_count",
+        "entities_added", "relations_added",
     }
     out: dict[str, Any] = {}
     for key in sorted(metadata, key=lambda item: str(item))[:24]:
@@ -371,11 +469,16 @@ class Store:
         for stmt in (
             "ALTER TABLE memories ADD COLUMN sort_order REAL",
             "ALTER TABLE edges ADD COLUMN layer TEXT DEFAULT 'semantic'",
+            "ALTER TABLE entities ADD COLUMN normalized_name TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE entities ADD COLUMN canonical_method TEXT NOT NULL DEFAULT 'exact'",
+            "ALTER TABLE entities ADD COLUMN canonical_confidence REAL NOT NULL DEFAULT 1.0",
             "ALTER TABLE mem_links ADD COLUMN layer TEXT DEFAULT 'semantic'",
             "ALTER TABLE mem_links ADD COLUMN reason TEXT DEFAULT ''",
             "ALTER TABLE code_edges ADD COLUMN layer TEXT DEFAULT 'entity'",
             "ALTER TABLE symbols ADD COLUMN docstring TEXT DEFAULT ''",
             "ALTER TABLE receipt_chain_heads ADD COLUMN integrity_error TEXT DEFAULT ''",
+            "ALTER TABLE jobs ADD COLUMN runner_id TEXT",
+            "ALTER TABLE jobs ADD COLUMN heartbeat_at REAL",
         ):
             try:
                 self.conn.execute(stmt)
@@ -397,6 +500,43 @@ class Store:
                             f"UPDATE {table} SET layer=? WHERE rowid=?",
                             (inferred, row["rowid"]),
                         )
+        # v4 makes canonical identity and edge evidence explicit and indexed. Run the
+        # backfills before creating representative-only uniqueness indexes so exact
+        # normalized aliases can safely converge onto one deterministic canonical id.
+        self._backfill_entity_canonicalization()
+        self.conn.executescript(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_workspace_canonical "
+            "ON entities(workspace_id, normalized_name, etype) "
+            "WHERE repo_id IS NULL AND canonical_id=id AND normalized_name<>'';"
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_repo_canonical "
+            "ON entities(workspace_id, repo_id, normalized_name, etype) "
+            "WHERE repo_id IS NOT NULL AND canonical_id=id AND normalized_name<>'';"
+            "CREATE INDEX IF NOT EXISTS idx_entity_canonical "
+            "ON entities(workspace_id, canonical_id);"
+            "CREATE INDEX IF NOT EXISTS idx_entity_normalized "
+            "ON entities(workspace_id, normalized_name, etype);"
+        )
+        self._backfill_edge_supports()
+        self._deduplicate_live_edges()
+        self.conn.executescript(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_workspace_live_unique "
+            "ON edges(workspace_id, src, dst, relation, layer) "
+            "WHERE workspace_id IS NOT NULL AND repo_id IS NULL "
+            "AND valid_to IS NULL AND expired_at IS NULL;"
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_repo_live_unique "
+            "ON edges(workspace_id, repo_id, src, dst, relation, layer) "
+            "WHERE workspace_id IS NOT NULL AND repo_id IS NOT NULL "
+            "AND valid_to IS NULL AND expired_at IS NULL;"
+        )
+        # Every workspace has a cheap graph generation/state row, including databases
+        # that already contained graph data before the v4 explorer tables were added.
+        # Triggers in SCHEMA_SQL advance the generation on subsequent graph mutations.
+        self.conn.execute(
+            "INSERT OR IGNORE INTO graph_index_state "
+            "(workspace_id, generation, state, active_job_id, updated_at, last_error) "
+            "SELECT id, 1, 'ready', NULL, ?, '' FROM workspaces",
+            (now_ts(),),
+        )
         # Backfill the independent receipt anchor for databases created before the
         # anchor table existed. From this point onward every append updates it atomically,
         # allowing verification to detect deletion of the newest receipt as well as an
@@ -423,6 +563,230 @@ class Store:
             (SCHEMA_VERSION, now_ts()),
         )
         self.conn.commit()
+
+    def _backfill_entity_canonicalization(self) -> None:
+        rows = [dict(row) for row in self.conn.execute(
+            "SELECT id, workspace_id, name, etype, canonical_id, normalized_name, "
+            "canonical_method, canonical_confidence FROM entities "
+            "ORDER BY workspace_id, etype, id"
+        ).fetchall()]
+        groups: dict[tuple[str, str, str], list[dict]] = {}
+        for row in rows:
+            normalized = normalize_entity_name(row.get("name") or "")
+            row["_normalized"] = normalized
+            key = (str(row.get("workspace_id") or ""), str(row.get("etype") or ""), normalized)
+            groups.setdefault(key, []).append(row)
+        for members in groups.values():
+            # Existing canonical ids win when present; otherwise the oldest typed id
+            # is the deterministic representative. Exact variants never cross a
+            # workspace or entity-type boundary.
+            existing = sorted({str(row.get("canonical_id") or "") for row in members
+                               if row.get("canonical_id")})
+            canonical_id = existing[0] if existing else min(row["id"] for row in members)
+            merged = len(members) > 1
+            for row in members:
+                method = row.get("canonical_method") or (
+                    "exact_normalized" if merged else "identity"
+                )
+                if not row.get("canonical_id"):
+                    method = "exact_normalized" if merged else "identity"
+                # A pre-release v4 build briefly stripped all punctuation. Reopening
+                # such a database with the conservative normalizer can split a false
+                # merge (for example C++ vs C#). A singleton that was joined only by
+                # that automatic method must become its own representative again;
+                # caller-provided canonical ids remain authoritative.
+                if not merged and method == "exact_normalized" \
+                        and row.get("canonical_id") != row["id"]:
+                    canonical_id = row["id"]
+                    method = "identity"
+                confidence = float(row.get("canonical_confidence") or 1.0)
+                if (
+                    row.get("normalized_name") == row["_normalized"]
+                    and row.get("canonical_id") == canonical_id
+                    and row.get("canonical_method") == method
+                    and float(row.get("canonical_confidence") or 0.0) == confidence
+                ):
+                    continue
+                self.conn.execute(
+                    "UPDATE entities SET normalized_name=?, canonical_id=?, "
+                    "canonical_method=?, canonical_confidence=? WHERE id=?",
+                    (row["_normalized"], canonical_id, method, confidence, row["id"]),
+                )
+
+    def _backfill_edge_supports(self) -> None:
+        rows = self.conn.execute(
+            "SELECT id, relation, valid_from, valid_to, ingested_at, expired_at, provenance "
+            "FROM edges"
+        ).fetchall()
+        for row in rows:
+            provenance = _loads(row["provenance"], {})
+            source_kind = _edge_source_kind(provenance, row["relation"] or "")
+            confidence = _edge_support_confidence(provenance, source_kind)
+            for memory_id in _provenance_memory_ids(provenance):
+                # This migration backfill is intentionally append-once.  The live-row
+                # uniqueness index cannot make an ``INSERT OR IGNORE`` idempotent for
+                # historical supports because partial indexes exclude closed rows.  In
+                # addition to inflating the graph generation on every process start,
+                # blindly inserting here would resurrect evidence that was explicitly
+                # invalidated.  Any row for this legacy edge/memory/source triple proves
+                # that its provenance has already been normalized; later lifecycle
+                # changes remain authoritative.
+                existing = self.conn.execute(
+                    "SELECT 1 FROM edge_supports WHERE edge_id=? AND memory_id=? "
+                    "AND source_kind=? LIMIT 1",
+                    (row["id"], memory_id, source_kind),
+                ).fetchone()
+                if existing is not None:
+                    continue
+                self.conn.execute(
+                    "INSERT INTO edge_supports "
+                    "(edge_id, memory_id, source_kind, confidence, valid_from, valid_to, "
+                    "ingested_at, expired_at, provenance) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (row["id"], memory_id, source_kind, confidence,
+                     row["valid_from"], row["valid_to"], row["ingested_at"],
+                     row["expired_at"], _dumps(provenance)),
+                )
+
+    def _deduplicate_live_edges(self) -> None:
+        """Converge equivalent live relations without discarding temporal history."""
+        rows = [dict(row) for row in self.conn.execute(
+            "SELECT id, workspace_id, repo_id, src, dst, relation, layer, weight, "
+            "valid_from, ingested_at, provenance FROM edges "
+            "WHERE workspace_id IS NOT NULL AND valid_to IS NULL AND expired_at IS NULL "
+            "ORDER BY workspace_id, repo_id, src, dst, relation, layer, "
+            "COALESCE(valid_from, ingested_at), id"
+        ).fetchall()]
+        groups: dict[tuple, list[dict]] = {}
+        for row in rows:
+            source, target = row["src"], row["dst"]
+            if row["relation"] in {"co_occurs", "related", "associated_with"} \
+                    and target < source:
+                source, target = target, source
+            row["_normalized_src"] = source
+            row["_normalized_dst"] = target
+            key = (
+                row["workspace_id"], row["repo_id"], source, target,
+                row["relation"], row["layer"],
+            )
+            groups.setdefault(key, []).append(row)
+        closed_at = now_ts()
+        workspace_counts: dict[str, int] = {}
+        for duplicates in groups.values():
+            if len(duplicates) < 2:
+                row = duplicates[0]
+                if (row["src"], row["dst"]) != (
+                        row["_normalized_src"], row["_normalized_dst"]):
+                    self.conn.execute(
+                        "UPDATE edges SET src=?, dst=? WHERE id=?",
+                        (row["_normalized_src"], row["_normalized_dst"], row["id"]),
+                    )
+                continue
+            duplicates.sort(key=lambda row: (
+                row["valid_from"] if row["valid_from"] is not None
+                else row["ingested_at"] if row["ingested_at"] is not None
+                else float("inf"),
+                row["id"],
+            ))
+            survivor, retired = duplicates[0], duplicates[1:]
+            retired_ids = [row["id"] for row in retired]
+            all_ids = [survivor["id"], *retired_ids]
+            marks = ",".join("?" for _ in all_ids)
+            support_rows = self.conn.execute(
+                "SELECT memory_id, source_kind, confidence, valid_from, ingested_at, "
+                "provenance FROM edge_supports WHERE edge_id IN (" + marks + ") "
+                "AND valid_to IS NULL AND expired_at IS NULL ORDER BY id",
+                all_ids,
+            ).fetchall()
+            for support in support_rows:
+                current = self.conn.execute(
+                    "SELECT id, confidence, valid_from, ingested_at, provenance "
+                    "FROM edge_supports WHERE edge_id=? "
+                    "AND memory_id=? AND source_kind=? AND valid_to IS NULL "
+                    "AND expired_at IS NULL",
+                    (survivor["id"], support["memory_id"], support["source_kind"]),
+                ).fetchone()
+                if current is None:
+                    self.conn.execute(
+                        "INSERT INTO edge_supports "
+                        "(edge_id, memory_id, source_kind, confidence, valid_from, "
+                        "ingested_at, provenance) VALUES (?,?,?,?,?,?,?)",
+                        (
+                            survivor["id"], support["memory_id"],
+                            support["source_kind"], support["confidence"],
+                            support["valid_from"], support["ingested_at"],
+                            support["provenance"],
+                        ),
+                    )
+                else:
+                    confidence = max(
+                        float(support["confidence"] or 0.0),
+                        float(current["confidence"] or 0.0),
+                    )
+                    provenance = _merge_edge_provenance([
+                        _loads(current["provenance"], {}),
+                        _loads(support["provenance"], {}),
+                    ])
+                    provenance["confidence"] = confidence
+                    support_valid = [value for value in (
+                        current["valid_from"], support["valid_from"]
+                    ) if value is not None]
+                    support_ingested = [value for value in (
+                        current["ingested_at"], support["ingested_at"]
+                    ) if value is not None]
+                    self.conn.execute(
+                        "UPDATE edge_supports SET confidence=?, valid_from=?, "
+                        "ingested_at=?, provenance=? WHERE id=?",
+                        (
+                            confidence, min(support_valid) if support_valid else None,
+                            min(support_ingested) if support_ingested else None,
+                            _dumps(provenance), current["id"],
+                        ),
+                    )
+            provenances = [_loads(row["provenance"], {}) for row in duplicates]
+            merged_provenance = _merge_edge_provenance(
+                provenances, merged_ids=retired_ids
+            )
+            valid_values = [float(row["valid_from"]) for row in duplicates
+                            if row["valid_from"] is not None]
+            ingested_values = [float(row["ingested_at"]) for row in duplicates
+                               if row["ingested_at"] is not None]
+            for row in retired:
+                provenance = _loads(row["provenance"], {})
+                if not isinstance(provenance, dict):
+                    provenance = {}
+                provenance["canonical_deduplicated_into"] = survivor["id"]
+                self.conn.execute(
+                    "UPDATE edges SET valid_to=?, provenance=? WHERE id=?",
+                    (closed_at, _dumps(provenance), row["id"]),
+                )
+            retired_marks = ",".join("?" for _ in retired_ids)
+            self.conn.execute(
+                "UPDATE edge_supports SET valid_to=? WHERE edge_id IN ("
+                + retired_marks + ") AND valid_to IS NULL AND expired_at IS NULL",
+                (closed_at, *retired_ids),
+            )
+            # Retire duplicates before normalizing the survivor endpoints. A pre-release
+            # v4 database may already have the partial unique index; reversing the
+            # survivor first would temporarily collide with its still-live twin.
+            self.conn.execute(
+                "UPDATE edges SET src=?, dst=?, weight=?, valid_from=?, ingested_at=?, "
+                "provenance=? WHERE id=?",
+                (
+                    survivor["_normalized_src"], survivor["_normalized_dst"],
+                    max(float(row["weight"] or 0.0) for row in duplicates),
+                    min(valid_values) if valid_values else None,
+                    min(ingested_values) if ingested_values else None,
+                    _dumps(merged_provenance), survivor["id"],
+                ),
+            )
+            workspace_counts[survivor["workspace_id"]] = (
+                workspace_counts.get(survivor["workspace_id"], 0) + len(retired)
+            )
+        for workspace_id, count in workspace_counts.items():
+            self.audit(
+                "system", "graph_relation_deduplicate", workspace_id,
+                f"closed {count} duplicate live relations", commit=False,
+            )
 
     @property
     def schema_version(self) -> int:
@@ -778,21 +1142,38 @@ class Store:
         return [(r["id"], 0.5) for r in rows]
 
     # ── graph ─────────────────────────────────────────────────────────────────
-    def upsert_entity(self, node: Node) -> str:
+    def upsert_entity(self, node: Node, *, commit: bool = True) -> str:
+        normalized = normalize_entity_name(node.name)
         existing = self.conn.execute(
-            "SELECT id FROM entities WHERE workspace_id=? AND repo_id IS ? AND name=? AND etype IS ?",
-            (node.workspace_id, node.repo_id, node.name, node.ntype),
+            "SELECT id FROM entities WHERE workspace_id=? AND repo_id IS ? "
+            "AND normalized_name=? AND etype IS ? ORDER BY id LIMIT 1",
+            (node.workspace_id, node.repo_id, normalized, node.ntype),
         ).fetchone()
         if existing:
             return existing["id"]
         nid = node.id or ids.new_id("entity")
+        canonical_id = node.canonical_id
+        method = "provided" if canonical_id else "identity"
+        if not canonical_id:
+            canonical = self.conn.execute(
+                "SELECT COALESCE(canonical_id, id) AS canonical_id FROM entities "
+                "WHERE workspace_id=? AND normalized_name=? AND etype IS ? "
+                "ORDER BY id LIMIT 1",
+                (node.workspace_id, normalized, node.ntype),
+            ).fetchone()
+            if canonical:
+                canonical_id = canonical["canonical_id"]
+                method = "exact_normalized"
+        canonical_id = canonical_id or nid
         self.conn.execute(
-            "INSERT INTO entities(id, workspace_id, repo_id, name, etype, canonical_id, created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO entities(id, workspace_id, repo_id, name, etype, canonical_id, "
+            "normalized_name, canonical_method, canonical_confidence, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (nid, node.workspace_id, node.repo_id, node.name, node.ntype,
-             node.canonical_id, now_ts()),
+             canonical_id, normalized, method, 1.0, now_ts()),
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return nid
 
     def list_entities(self, flt: Optional[SearchFilter] = None,
@@ -819,27 +1200,216 @@ class Store:
                      workspace_id=r["workspace_id"], repo_id=r["repo_id"],
                      canonical_id=r["canonical_id"]) for r in rows]
 
-    def upsert_edge(self, edge: Edge) -> str:
+    def upsert_edge(self, edge: Edge, *, commit: bool = True) -> str:
         eid = edge.id or ids.new_id("edge")
         layer = normalize_graph_layer(edge.layer, edge.relation).value
+        source, target = edge.src, edge.dst
+        if edge.relation in {"co_occurs", "related", "associated_with"} and target < source:
+            source, target = target, source
+        incoming_provenance = _merge_edge_provenance([edge.provenance])
+        existing = self.conn.execute(
+            "SELECT id, workspace_id, repo_id, src, dst, relation, layer, weight, "
+            "valid_from, valid_to, ingested_at, expired_at, provenance "
+            "FROM edges WHERE id=?", (eid,)
+        ).fetchone()
+        replacing = existing is not None
+        stored_provenance = _loads(existing["provenance"], {}) if existing else {}
+        incoming_supports = {
+            (memory_id, _edge_source_kind(incoming_provenance, edge.relation))
+            for memory_id in _provenance_memory_ids(incoming_provenance)
+        }
+        stored_supports = {
+            (memory_id, _edge_source_kind(stored_provenance, edge.relation))
+            for memory_id in _provenance_memory_ids(stored_provenance)
+        }
+        if existing is not None and edge.valid_to is None and edge.expired_at is None \
+                and existing["valid_to"] is None and existing["expired_at"] is None \
+                and incoming_supports == stored_supports \
+                and (
+                    existing["workspace_id"], existing["repo_id"],
+                    existing["src"], existing["dst"], existing["relation"], existing["layer"],
+                ) == (
+                    edge.workspace_id, edge.repo_id, source, target, edge.relation, layer,
+                ):
+            merged_provenance = _merge_edge_provenance(
+                [stored_provenance, incoming_provenance]
+            )
+            desired_weight = max(
+                float(existing["weight"] or 0.0), float(edge.weight or 0.0)
+            )
+            desired_valid_from = existing["valid_from"]
+            if edge.valid_from is not None:
+                desired_valid_from = min(
+                    value for value in (existing["valid_from"], edge.valid_from)
+                    if value is not None
+                )
+            serialized_provenance = _dumps(merged_provenance)
+            if desired_weight != float(existing["weight"] or 0.0) \
+                    or desired_valid_from != existing["valid_from"] \
+                    or serialized_provenance != (existing["provenance"] or "{}"):
+                self.conn.execute(
+                    "UPDATE edges SET weight=?, valid_from=?, provenance=? WHERE id=?",
+                    (desired_weight, desired_valid_from, serialized_provenance, eid),
+                )
+            self._write_edge_supports(
+                eid, edge.relation, incoming_provenance,
+                valid_from=edge.valid_from, valid_to=edge.valid_to,
+                ingested_at=edge.ingested_at, expired_at=edge.expired_at,
+            )
+            if commit:
+                self.conn.commit()
+            return eid
+        equivalent = None
+        if edge.valid_to is None and edge.expired_at is None:
+            equivalent = self.conn.execute(
+                "SELECT id, weight, valid_from, provenance FROM edges "
+                "WHERE workspace_id IS ? AND repo_id IS ? AND src=? AND dst=? "
+                "AND relation=? AND layer=? AND valid_to IS NULL AND expired_at IS NULL "
+                "AND id<>? ORDER BY id LIMIT 1",
+                (
+                    edge.workspace_id, edge.repo_id, source, target,
+                    edge.relation, layer, eid,
+                ),
+            ).fetchone()
+        if equivalent is not None:
+            if replacing:
+                closed_at = now_ts()
+                self.conn.execute(
+                    "UPDATE edges SET valid_to=? WHERE id=? AND valid_to IS NULL",
+                    (closed_at, eid),
+                )
+                self.conn.execute(
+                    "UPDATE edge_supports SET valid_to=? WHERE edge_id=? "
+                    "AND valid_to IS NULL AND expired_at IS NULL",
+                    (closed_at, eid),
+                )
+            existing_provenance = _loads(equivalent["provenance"], {})
+            merged_provenance = _merge_edge_provenance(
+                [existing_provenance, incoming_provenance],
+                merged_ids=[eid] if replacing else [],
+            )
+            valid_values = [value for value in (
+                equivalent["valid_from"], edge.valid_from
+            ) if value is not None]
+            self.conn.execute(
+                "UPDATE edges SET weight=?, valid_from=?, provenance=? WHERE id=?",
+                (
+                    max(float(equivalent["weight"] or 0.0), float(edge.weight or 0.0)),
+                    min(valid_values) if valid_values else now_ts(),
+                    _dumps(merged_provenance), equivalent["id"],
+                ),
+            )
+            self._write_edge_supports(
+                equivalent["id"], edge.relation, incoming_provenance,
+                valid_from=edge.valid_from, valid_to=edge.valid_to,
+                ingested_at=edge.ingested_at, expired_at=edge.expired_at,
+            )
+            if commit:
+                self.conn.commit()
+            return str(equivalent["id"])
+        if replacing:
+            # ``upsert_edge`` replaces the supplied edge record. Close its previous
+            # normalized evidence before writing the replacement so sources removed
+            # from the new provenance cannot remain live invisibly.
+            self.conn.execute(
+                "UPDATE edge_supports SET valid_to=? WHERE edge_id=? "
+                "AND valid_to IS NULL AND expired_at IS NULL",
+                (now_ts(), eid),
+            )
         self.conn.execute(
-            "INSERT OR REPLACE INTO edges(id, workspace_id, repo_id, src, dst, relation, layer, "
+            "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation, layer, "
             "weight, valid_from, valid_to, ingested_at, expired_at, provenance) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (eid, edge.workspace_id, edge.repo_id, edge.src, edge.dst, edge.relation, layer,
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id, "
+            "repo_id=excluded.repo_id, src=excluded.src, dst=excluded.dst, "
+            "relation=excluded.relation, layer=excluded.layer, weight=excluded.weight, "
+            "valid_from=excluded.valid_from, valid_to=excluded.valid_to, "
+            "ingested_at=excluded.ingested_at, expired_at=excluded.expired_at, "
+            "provenance=excluded.provenance",
+            (eid, edge.workspace_id, edge.repo_id, source, target, edge.relation, layer,
              edge.weight, edge.valid_from if edge.valid_from is not None else now_ts(),
              edge.valid_to, edge.ingested_at or now_ts(), edge.expired_at,
-             _dumps(edge.provenance)),
+             _dumps(incoming_provenance)),
         )
-        self.conn.commit()
+        self._write_edge_supports(
+            eid, edge.relation, incoming_provenance,
+            valid_from=edge.valid_from, valid_to=edge.valid_to,
+            ingested_at=edge.ingested_at, expired_at=edge.expired_at,
+        )
+        if commit:
+            self.conn.commit()
         return eid
 
     def invalidate_edge(self, edge_id: str, at: Optional[float] = None) -> None:
+        ts = now_ts() if at is None else at
         self.conn.execute("UPDATE edges SET valid_to=? WHERE id=? AND valid_to IS NULL",
-                          (now_ts() if at is None else at, edge_id))
+                          (ts, edge_id))
+        self.conn.execute(
+            "UPDATE edge_supports SET valid_to=? WHERE edge_id=? "
+            "AND valid_to IS NULL AND expired_at IS NULL", (ts, edge_id)
+        )
         self.conn.commit()
 
-    def add_edge_support(self, edge_id: str, provenance: dict) -> None:
+    def _write_edge_supports(self, edge_id: str, relation: str, provenance: dict,
+                             *, valid_from: Optional[float] = None,
+                             valid_to: Optional[float] = None,
+                             ingested_at: Optional[float] = None,
+                             expired_at: Optional[float] = None) -> None:
+        source_kind = _edge_source_kind(provenance, relation)
+        confidence = _edge_support_confidence(provenance, source_kind)
+        support_provenance = _merge_edge_provenance([provenance])
+        support_provenance["confidence"] = confidence
+        timestamp = now_ts()
+        support_valid_from = valid_from if valid_from is not None else timestamp
+        support_ingested_at = ingested_at if ingested_at is not None else timestamp
+        for memory_id in _provenance_memory_ids(provenance):
+            if valid_to is None and expired_at is None:
+                current = self.conn.execute(
+                    "SELECT id, confidence, valid_from, ingested_at, provenance "
+                    "FROM edge_supports WHERE edge_id=? AND memory_id=? AND source_kind=? "
+                    "AND valid_to IS NULL AND expired_at IS NULL",
+                    (edge_id, memory_id, source_kind),
+                ).fetchone()
+                if current is not None:
+                    current_provenance = _loads(current["provenance"], {})
+                    merged_provenance = _merge_edge_provenance(
+                        [current_provenance, support_provenance]
+                    )
+                    desired_confidence = max(
+                        float(current["confidence"] or 0.0), confidence
+                    )
+                    merged_provenance["confidence"] = desired_confidence
+                    desired_valid_from = min(
+                        value for value in (current["valid_from"], support_valid_from)
+                        if value is not None
+                    )
+                    desired_ingested_at = min(
+                        value for value in (current["ingested_at"], support_ingested_at)
+                        if value is not None
+                    )
+                    serialized = _dumps(merged_provenance)
+                    if desired_confidence != float(current["confidence"] or 0.0) \
+                            or desired_valid_from != current["valid_from"] \
+                            or desired_ingested_at != current["ingested_at"] \
+                            or serialized != (current["provenance"] or "{}"):
+                        self.conn.execute(
+                            "UPDATE edge_supports SET confidence=?, valid_from=?, "
+                            "ingested_at=?, provenance=? WHERE id=?",
+                            (desired_confidence, desired_valid_from,
+                             desired_ingested_at, serialized, current["id"]),
+                        )
+                    continue
+            self.conn.execute(
+                "INSERT OR IGNORE INTO edge_supports "
+                "(edge_id, memory_id, source_kind, confidence, valid_from, valid_to, "
+                "ingested_at, expired_at, provenance) VALUES (?,?,?,?,?,?,?,?,?)",
+                (edge_id, memory_id, source_kind, confidence,
+                 support_valid_from, valid_to, support_ingested_at, expired_at,
+                 _dumps(support_provenance)),
+            )
+
+    def add_edge_support(self, edge_id: str, provenance: dict, *,
+                         commit: bool = True) -> None:
         """Record another source memory supporting an existing graph edge."""
         incoming = _provenance_memory_ids(provenance)
         if not incoming:
@@ -850,15 +1420,22 @@ class Store:
         stored = _loads(row["provenance"], {})
         if not isinstance(stored, dict):
             stored = {}
-        supports = _provenance_memory_ids(stored)
-        merged = supports + [mid for mid in incoming if mid not in supports]
-        if merged == supports:
-            return
-        stored["memory_id"] = merged[0]
-        stored["memory_ids"] = merged
-        self.conn.execute("UPDATE edges SET provenance=? WHERE id=?",
-                          (_dumps(stored), edge_id))
-        self.conn.commit()
+        merged_provenance = _merge_edge_provenance([stored, provenance])
+        if _dumps(merged_provenance) != _dumps(stored):
+            self.conn.execute("UPDATE edges SET provenance=? WHERE id=?",
+                              (_dumps(merged_provenance), edge_id))
+        edge_row = self.conn.execute(
+            "SELECT relation, valid_from, valid_to, ingested_at, expired_at "
+            "FROM edges WHERE id=?", (edge_id,)
+        ).fetchone()
+        if edge_row:
+            self._write_edge_supports(
+                edge_id, edge_row["relation"] or "", provenance,
+                valid_from=edge_row["valid_from"], valid_to=edge_row["valid_to"],
+                ingested_at=edge_row["ingested_at"], expired_at=edge_row["expired_at"],
+            )
+        if commit:
+            self.conn.commit()
 
     def invalidate_edges_for_memory(self, memory_id: str, *, at: Optional[float] = None,
                                     commit: bool = True) -> None:
@@ -883,22 +1460,43 @@ class Store:
         owner = self.conn.fetchall(
             "SELECT workspace_id FROM memories WHERE id=?", (memory_id,))
         workspace_id = owner[0]["workspace_id"] if owner else None
-        sql = ("SELECT id, provenance FROM edges "
-               "WHERE valid_to IS NULL AND provenance LIKE ? ESCAPE '\\'")
-        params: list[Any] = [f"%{_escape_like(memory_id)}%"]
+        indexed_sql = (
+            "SELECT DISTINCT e.id, e.provenance FROM edge_supports s "
+            "JOIN edges e ON e.id=s.edge_id WHERE s.memory_id=? "
+            "AND s.valid_to IS NULL AND s.expired_at IS NULL AND e.valid_to IS NULL"
+        )
+        indexed_params: list[Any] = [memory_id]
         if workspace_id is not None:
-            # NULL workspace_id = a global/unscoped edge; it stays in scope so this keeps
-            # closing exactly the edges it closed before, minus other tenants' rows.
-            sql += " AND (workspace_id=? OR workspace_id IS NULL)"
-            params.append(workspace_id)
-        rows = self.conn.fetchall(sql, params)
+            indexed_sql += " AND (e.workspace_id=? OR e.workspace_id IS NULL)"
+            indexed_params.append(workspace_id)
+        rows = self.conn.fetchall(indexed_sql, indexed_params)
+        if not rows:
+            # Compatibility fallback for a direct legacy SQL writer. Canonical write
+            # paths populate edge_supports, so normal invalidation is indexed.
+            sql = ("SELECT id, provenance FROM edges "
+                   "WHERE valid_to IS NULL AND provenance LIKE ? ESCAPE '\\'")
+            params: list[Any] = [f"%{_escape_like(memory_id)}%"]
+            if workspace_id is not None:
+                sql += " AND (workspace_id=? OR workspace_id IS NULL)"
+                params.append(workspace_id)
+            rows = self.conn.fetchall(sql, params)
         ids_to_close: list[str] = []
         for row in rows:
             prov = _loads(row["provenance"], {})
             supports = _provenance_memory_ids(prov)
             if memory_id not in supports:
                 continue
-            remaining = [mid for mid in supports if mid != memory_id]
+            self.conn.execute(
+                "UPDATE edge_supports SET valid_to=? WHERE edge_id=? AND memory_id=? "
+                "AND valid_to IS NULL AND expired_at IS NULL",
+                (ts, row["id"], memory_id),
+            )
+            normalized_remaining = [r["memory_id"] for r in self.conn.execute(
+                "SELECT DISTINCT memory_id FROM edge_supports WHERE edge_id=? "
+                "AND valid_to IS NULL AND expired_at IS NULL ORDER BY memory_id",
+                (row["id"],),
+            ).fetchall()]
+            remaining = normalized_remaining or [mid for mid in supports if mid != memory_id]
             if not remaining:
                 ids_to_close.append(row["id"])
                 continue
@@ -910,10 +1508,58 @@ class Store:
             marks = ",".join("?" for _ in ids_to_close)
             self.conn.execute(f"UPDATE edges SET valid_to=? WHERE id IN ({marks})",
                               (ts, *ids_to_close))
+            self.conn.execute(
+                f"UPDATE edge_supports SET valid_to=? WHERE edge_id IN ({marks}) "
+                "AND valid_to IS NULL AND expired_at IS NULL",
+                (ts, *ids_to_close),
+            )
         if commit:
             self.conn.commit()
 
     # ── memory-to-memory links (A-MEM style) ────────────────────────────────────
+    def edge_supports_in_scope(self, edge_ids: Optional[list[str]] = None, *,
+                               at: Optional[float] = None,
+                               limit: Optional[int] = None) -> list[dict]:
+        """Return live normalized evidence rows for graph inspection/scene scoring."""
+        t = at if at is not None else now_ts()
+        row_cap = None if limit is None else max(0, int(limit))
+        if row_cap == 0:
+            return []
+        sql = (
+            "SELECT id, edge_id, memory_id, source_kind, confidence, valid_from, "
+            "valid_to, ingested_at, expired_at, provenance FROM edge_supports "
+            "WHERE (valid_from IS NULL OR valid_from<=?) "
+            "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL"
+        )
+        params: list[Any] = [t, t]
+        if edge_ids is not None:
+            if not edge_ids:
+                return []
+            rows: list[dict] = []
+            for start in range(0, len(edge_ids), IN_CLAUSE_CHUNK):
+                if row_cap is not None and len(rows) >= row_cap:
+                    break
+                chunk = edge_ids[start:start + IN_CLAUSE_CHUNK]
+                marks = ",".join("?" for _ in chunk)
+                statement = sql + f" AND edge_id IN ({marks}) ORDER BY edge_id, memory_id, id"
+                statement_params: tuple[Any, ...] = (*params, *chunk)
+                if row_cap is not None:
+                    statement += " LIMIT ?"
+                    statement_params = (*statement_params, row_cap - len(rows))
+                found = self.conn.execute(
+                    statement, statement_params,
+                ).fetchall()
+                rows.extend(dict(row) for row in found)
+            return rows
+        statement = sql + " ORDER BY edge_id, memory_id, id"
+        statement_params: tuple[Any, ...] = tuple(params)
+        if row_cap is not None:
+            statement += " LIMIT ?"
+            statement_params = (*statement_params, row_cap)
+        return [dict(row) for row in self.conn.execute(
+            statement, statement_params
+        ).fetchall()]
+
     def add_link(self, a: str, b: str, relation: str = "related",
                  layer: Optional[GraphLayer] = None, reason: str = "",
                  *, commit: bool = True) -> None:
@@ -1202,9 +1848,9 @@ class Store:
 
     def search_symbols(self, repo_id: str, query: str, *, limit: int = 20) -> list[dict]:
         """Substring match on name/fqname (no embedding yet — v1 is lexical)."""
-        like = f"%{query}%"
+        like = f"%{_escape_like(query)}%"
         rows = self.conn.execute(
-            "SELECT * FROM symbols WHERE repo_id=? AND (name LIKE ? OR fqname LIKE ?) "
+            "SELECT * FROM symbols WHERE repo_id=? AND (name LIKE ? ESCAPE '\\' OR fqname LIKE ? ESCAPE '\\') "
             "ORDER BY name LIMIT ?",
             (repo_id, like, like, limit),
         ).fetchall()

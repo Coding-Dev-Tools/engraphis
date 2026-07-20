@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from engraphis import cloud_license, licensing
-from engraphis.config import DEFAULT_RELAY_URL, settings
+from engraphis.config import DEFAULT_LICENSE_SERVER_URL, settings
 from engraphis.inspector import license_cloud
 from engraphis.inspector import license_registry as reg
 from engraphis.licensing import LicenseError, ed25519_public_key, parse_key
@@ -77,6 +77,7 @@ def test_register_issues_valid_machine_bound_lease():
     payload = cloud_license.verify_lease(lease)             # verifies signature + expiry
     assert payload["machine_id"] == "m-1" and payload["plan"] == "pro"
     assert "sync" in payload["features"]
+    assert payload["signing_key_id"] == ed25519_public_key(SECRET).hex()[:16]
 
 
 @pytest.mark.parametrize("body", [
@@ -95,6 +96,15 @@ def test_license_json_body_is_bounded_before_decode():
         headers={"Content-Type": "application/json"},
     )
     assert response.status_code == 413
+
+
+def test_license_json_body_rejects_excessive_nesting_without_500():
+    nested = b"[" * 1100 + b"0" + b"]" * 1100
+    response = _app().post(
+        "/license/v1/register", content=nested,
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 400
 
 
 def test_register_crypto_work_is_rate_limited(monkeypatch):
@@ -179,6 +189,129 @@ def test_pro_register_is_not_device_capped():
         assert r.json()["plan"] == "pro"
 
 
+# -- vendor-relayed password reset ----------------------------------------------------
+
+def test_password_reset_relay_queues_once_and_pins_paid_origin(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+
+    queued = []
+
+    def enqueue(to, name, reset_url, *, idempotency_key):
+        queued.append((to, name, reset_url, idempotency_key))
+        return "eml_test"
+
+    monkeypatch.setattr(WH, "queue_password_reset_email", enqueue)
+    key = _key(plan="pro")
+    body = {
+        "key": key,
+        "to": "Owner@Example.com",
+        "name": "Owner",
+        "reset_url": "https://team.customer.test/#reset_token=one-time-secret",
+    }
+    client = _app()
+    first = client.post("/license/v1/password-reset", json=body)
+    replay = client.post("/license/v1/password-reset", json=body)
+
+    assert first.status_code == replay.status_code == 200
+    assert first.json() == replay.json() == {"queued": True}
+    assert len(queued) == 1
+    assert queued[0][0] == "owner@example.com"
+    assert queued[0][3].startswith("password-reset-relay:")
+    assert "one-time-secret" not in first.text
+
+    moved = dict(body, reset_url="https://other.customer.test/#reset_token=new-secret")
+    denied = client.post("/license/v1/password-reset", json=moved)
+    assert denied.status_code == 409
+    assert "new-secret" not in denied.text
+
+
+def test_password_reset_relay_accepts_canonical_dashboard_subpath(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+
+    queued = []
+    monkeypatch.setattr(
+        WH, "queue_password_reset_email",
+        lambda *args, **kwargs: queued.append((args, kwargs)) or "eml_subpath",
+    )
+    response = _app().post("/license/v1/password-reset", json={
+        "key": _key(plan="pro", email="subpath@corp.com"),
+        "to": "subpath@corp.com",
+        "name": "Subpath",
+        "reset_url": "https://customer.example/memory/#reset_token=subpath-secret",
+    })
+    assert response.status_code == 200 and response.json() == {"queued": True}
+    assert queued[0][0][2].startswith("https://customer.example/memory/#")
+
+
+def test_password_reset_relay_requires_bound_trial_origin(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+
+    # A free trial may only relay vendor-branded mail to the relay's OWN configured
+    # dashboard origin (never a caller-attested one) — the operator sets that here.
+    monkeypatch.setenv("ENGRAPHIS_DASHBOARD_URL", "https://trial.customer.test")
+    queued = []
+    monkeypatch.setattr(
+        WH, "queue_password_reset_email",
+        lambda *args, **kwargs: queued.append((args, kwargs)) or "eml_trial",
+    )
+    key = _trial_team_key()
+    now = time.time()
+    conn = reg.connect()
+    try:
+        conn.executescript(license_cloud._TRIAL_CLAIM_SCHEMA)
+        conn.execute(
+            "INSERT INTO trial_claims(claim_id,confirmation_hash,deployment_hash,"
+            "machine_id,email,plan,dashboard_url,created_at,expires_at,confirmed_at,"
+            "license_key) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("claim-test", "confirm-test", "deploy-test", "machine-test",
+             "trial@corp.com", "team", "https://trial.customer.test", now,
+             now + 1800, now, key),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    good = _app().post("/license/v1/password-reset", json={
+        "key": key, "to": "owner@example.com", "name": "Owner",
+        "reset_url": "https://trial.customer.test/#reset_token=trial-secret",
+    })
+    assert good.status_code == 200 and good.json() == {"queued": True}
+    assert len(queued) == 1
+
+
+def test_password_reset_relay_survives_provider_outage_as_pending_outbox(monkeypatch):
+    from engraphis import email_outbox
+
+    monkeypatch.delenv("ENGRAPHIS_RESEND_API_KEY", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_SMTP_HOST", raising=False)
+    response = _app().post("/license/v1/password-reset", json={
+        "key": _key(plan="team"), "to": "owner@example.com", "name": "Owner",
+        "reset_url": "https://outage.customer.test/#reset_token=pending-secret",
+    })
+
+    assert response.status_code == 200 and response.json() == {"queued": True}
+    assert "pending-secret" not in response.text
+    assert email_outbox.health()["backlog"] == 1
+
+
+@pytest.mark.parametrize("reset_url", [
+    "https://team.customer.test/reset",
+    "https://team.customer.test/reset#reset_token=x",
+    "https://team.customer.test/#reset_token=",
+    "https://team.customer.test/#reset_token=x&next=https://evil.test",
+    "https://team.customer.test/?reset_token=query-secret",
+    "https://team.customer.test/?next=x#reset_token=fragment-secret",
+    "https://team.customer.test/#reset_token=x%2Dy",
+    "https://user:pass@team.customer.test/#reset_token=x",
+])
+def test_password_reset_relay_rejects_unsafe_reset_urls(reset_url):
+    response = _app().post("/license/v1/password-reset", json={
+        "key": _key(), "to": "owner@example.com", "reset_url": reset_url,
+    })
+    assert response.status_code == 400
+    assert "reset_token" not in response.text
+
+
 def test_verify_endpoint_reflects_status():
     c = _app()
     key = _key()
@@ -202,9 +335,11 @@ def test_revoke_endpoint_requires_admin_token(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", raising=False)
     denied = c.post("/license/v1/revoke/%s" % kid, headers={"Authorization": "Bearer adm1n"})
     assert denied.status_code == 401 and reg.is_revoked(kid) is False
-    monkeypatch.setenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", "vendor-adm1n")
+    monkeypatch.setenv(
+        "ENGRAPHIS_VENDOR_ADMIN_TOKEN", "vendor-admin-token-at-least-32-characters")
     ok = c.post("/license/v1/revoke/%s" % kid,
-                headers={"Authorization": "Bearer vendor-adm1n"})
+                headers={"Authorization": (
+                    "Bearer vendor-admin-token-at-least-32-characters")})
     assert ok.status_code == 200 and reg.is_revoked(kid) is True
 
 
@@ -215,6 +350,54 @@ def test_forged_lease_is_rejected():
         b"\x09" * 32)                                        # attacker's own key
     with pytest.raises(LicenseError, match="signature"):
         cloud_license.verify_lease(forged)
+
+
+def test_cached_lease_accepts_pinned_previous_signer_and_derives_legacy_id(monkeypatch):
+    import json
+
+    old_secret = bytes(reversed(range(32)))
+    old_public = ed25519_public_key(old_secret)
+    new_public = ed25519_public_key(SECRET)
+    monkeypatch.setattr(licensing, "_TEST_MODE_PUBKEY_OVERRIDE", False)
+    monkeypatch.setattr(licensing, "_VENDOR_PUBKEY_HEX", new_public.hex())
+    monkeypatch.setattr(
+        licensing, "_PREVIOUS_VENDOR_PUBKEY_HEXES", (old_public.hex(),))
+    now = int(time.time())
+    payload = {"v": 1, "key_id": "old", "plan": "pro", "features": ["sync"],
+               "machine_id": "machine", "issued": now, "expires": now + 300}
+
+    # Pre-v1 leases had no signed key id. The explicitly pinned previous verifier keeps
+    # their outage-grace cache valid and supplies the verified id to callers.
+    body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    legacy = "%s.%s.%s" % (
+        cloud_license._LEASE_PREFIX, licensing._b64u_encode(body),
+        licensing._b64u_encode(licensing.ed25519_sign(old_secret, body)))
+    verified = cloud_license.verify_lease(legacy, now=now)
+    assert verified["signing_key_id"] == old_public.hex()[:16]
+
+    # Once the old verifier is removed, the same cached lease fails closed.
+    monkeypatch.setattr(licensing, "_PREVIOUS_VENDOR_PUBKEY_HEXES", ())
+    with pytest.raises(LicenseError, match="signature"):
+        cloud_license.verify_lease(legacy, now=now)
+
+
+def test_lease_signing_key_id_must_match_verified_signer(monkeypatch):
+    import json
+
+    public = ed25519_public_key(SECRET)
+    monkeypatch.setattr(licensing, "_TEST_MODE_PUBKEY_OVERRIDE", False)
+    monkeypatch.setattr(licensing, "_VENDOR_PUBKEY_HEX", public.hex())
+    monkeypatch.setattr(licensing, "_PREVIOUS_VENDOR_PUBKEY_HEXES", ())
+    now = int(time.time())
+    payload = {"v": 1, "key_id": "bad-kid", "plan": "pro", "features": ["sync"],
+               "machine_id": "machine", "issued": now, "expires": now + 300,
+               "signing_key_id": "0" * 16}
+    body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    lease = "%s.%s.%s" % (
+        cloud_license._LEASE_PREFIX, licensing._b64u_encode(body),
+        licensing._b64u_encode(licensing.ed25519_sign(SECRET, body)))
+    with pytest.raises(LicenseError, match="signing-key id"):
+        cloud_license.verify_lease(lease, now=now)
 
 
 def test_expired_lease_is_rejected():
@@ -632,8 +815,9 @@ def test_pro_trial_never_grants_team(monkeypatch):
 def _admin(monkeypatch):
     """Vendor admin credential. Deliberately NOT settings.api_token — those are separate
     secrets and the fallback between them was removed 2026-07-18 (audit finding M5)."""
-    monkeypatch.setenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", "vendor-adm1n")
-    return {"Authorization": "Bearer vendor-adm1n"}
+    monkeypatch.setenv(
+        "ENGRAPHIS_VENDOR_ADMIN_TOKEN", "vendor-admin-token-at-least-32-characters")
+    return {"Authorization": "Bearer vendor-admin-token-at-least-32-characters"}
 
 
 def test_revoke_by_email_kills_all_customer_keys(monkeypatch):
@@ -849,7 +1033,7 @@ def test_retired_baked_in_url_migrates_to_current_relay(monkeypatch):
     monkeypatch.setattr(cloud_license, "register", fake_register)
     monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
     got = licensing.current_license(refresh=True)
-    assert calls["base"] == DEFAULT_RELAY_URL == "https://team.engraphis.com"
+    assert calls["base"] == DEFAULT_LICENSE_SERVER_URL == "https://license.engraphis.com"
     assert got.plan == "pro" and got.has("sync")
 
 
@@ -900,22 +1084,24 @@ def test_team_invite_relay_sends_with_valid_team_key(monkeypatch):
     from engraphis.inspector import webhooks as WH
     captured = {}
     monkeypatch.setattr(
-        WH, "send_team_invite_email",
-        lambda to, name, role, invited_by="", key="", dashboard_url=None:
+        WH, "queue_team_invite_email",
+        lambda to, name, role, invited_by="", invite_url="", dashboard_url=None, **kwargs:
             captured.update(to=to, name=name, role=role, invited_by=invited_by,
-                            key=key, dashboard_url=dashboard_url))
+                            invite_url=invite_url, dashboard_url=dashboard_url, **kwargs))
     team_key = _key(plan="team", seats=3)
     c = _app()
     r = c.post("/license/v1/team-invite",
                json={"key": team_key, "to": "new@corp.com",
-                     "name": "Mo", "role": "member", "invited_by": "admin@corp.com"})
+                     "name": "Mo", "role": "member", "invited_by": "admin@corp.com",
+                     "dashboard_url": "https://team.customer.test",
+                     "invite_url":
+                         "https://team.customer.test/#invite_token=one-time-secret"})
     assert r.status_code == 200 and r.json()["sent"] is True
-    # The relay now echoes the just-verified Team key into the email so the member
-    # can activate Pro on their own machine; dashboard_url is "" when the caller
-    # does not supply one.
     assert captured["to"] == "new@corp.com" and captured["invited_by"] == "admin@corp.com"
-    assert captured["key"] == team_key
-    assert captured["dashboard_url"] == ""
+    assert "key" not in captured
+    assert captured["invite_url"] == (
+        "https://team.customer.test/#invite_token=one-time-secret")
+    assert captured["dashboard_url"] == "https://team.customer.test"
 
 
 def test_team_invite_relay_rejects_non_team_key():
@@ -927,7 +1113,7 @@ def test_team_invite_relay_rejects_non_team_key():
 
 def test_team_invite_relay_rejects_revoked_key(monkeypatch):
     from engraphis.inspector import webhooks as WH
-    monkeypatch.setattr(WH, "send_team_invite_email", lambda *a, **k: None)
+    monkeypatch.setattr(WH, "queue_team_invite_email", lambda *a, **k: None)
     c = _app()
     key = _key(plan="team")
     reg.record_issued(key)                      # must be a known row for revoke to apply
@@ -956,16 +1142,41 @@ def test_team_invite_relay_rejects_malformed_invited_by():
     ("role", "owner"),
     ("dashboard_url", "javascript:alert(1)"),
     ("dashboard_url", "https://user:pass@example.com"),
+    ("invite_url", "https://team.example/?invite_token=once"),
+    ("invite_url", "https://team.example/?invite_token=once&next=https://evil.test"),
+    ("invite_url", "https://team.example/other#invite_token=once"),
+    ("invite_url", "https://team.example/%2e%2e/#invite_token=once"),
+    ("invite_url", "https://team.example/#invite_token=once&next=evil"),
+    ("invite_url", "https://team.example/?next=evil#invite_token=once"),
+    ("invite_url", "https://team.example/#invite_token=once%2Dencoded"),
 ])
 def test_team_invite_relay_rejects_hostile_fields(field, value):
     body = {"key": _key(plan="team"), "to": "new@corp.com", field: value}
     assert _app().post("/license/v1/team-invite", json=body).status_code == 400
 
 
+def test_team_invite_relay_accepts_canonical_dashboard_subpath(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+
+    queued = []
+    monkeypatch.setattr(
+        WH, "queue_team_invite_email",
+        lambda *args, **kwargs: queued.append((args, kwargs)) or "eml_subpath",
+    )
+    response = _app().post("/license/v1/team-invite", json={
+        "key": _key(plan="team", email="subpath@corp.com"),
+        "to": "new@corp.com",
+        "dashboard_url": "https://customer.example/memory",
+        "invite_url": "https://customer.example/memory/#invite_token=subpath-secret",
+    })
+    assert response.status_code == 200 and response.json()["queued"] is True
+    assert queued[0][1]["dashboard_url"] == "https://customer.example/memory"
+
+
 def test_team_invite_relay_enforces_daily_cap_per_key(monkeypatch):
     from engraphis.inspector import license_cloud
     from engraphis.inspector import webhooks as WH
-    monkeypatch.setattr(WH, "send_team_invite_email", lambda *a, **k: None)
+    monkeypatch.setattr(WH, "queue_team_invite_email", lambda *a, **k: None)
     monkeypatch.setattr(license_cloud, "_invite_daily_cap", lambda: 2)
     c = _app()
     key = _key(plan="team")
@@ -981,14 +1192,14 @@ def test_team_invite_relay_enforces_daily_cap_per_key(monkeypatch):
     assert other.status_code == 200
 
 
-def test_team_invite_relay_surfaces_delivery_failure_as_502(monkeypatch):
+def test_team_invite_relay_surfaces_queue_failure_as_502(monkeypatch):
     from engraphis.inspector import webhooks as WH
     from engraphis.inspector import license_cloud
 
     def boom(*a, **k):
         raise RuntimeError("api_key=RESEND_SECRET_123 C:/private/customer.db")
 
-    monkeypatch.setattr(WH, "send_team_invite_email", boom)
+    monkeypatch.setattr(WH, "queue_team_invite_email", boom)
     monkeypatch.setattr(license_cloud, "_invite_daily_cap", lambda: 1)
     c = _app()
     key = _key(plan="team")
@@ -996,11 +1207,39 @@ def test_team_invite_relay_surfaces_delivery_failure_as_502(monkeypatch):
                json={"key": key, "to": "new@corp.com"})
     assert r.status_code == 502
     assert "RESEND_SECRET_123" not in r.text and "private" not in r.text
-    # Failed delivery does not consume the successful-send cap.
-    monkeypatch.setattr(WH, "send_team_invite_email", lambda *a, **k: None)
+    # A failed durable enqueue does not consume the accepted-message cap.
+    monkeypatch.setattr(WH, "queue_team_invite_email", lambda *a, **k: None)
     retry = c.post("/license/v1/team-invite",
                    json={"key": key, "to": "new@corp.com"})
     assert retry.status_code == 200
+
+
+def test_team_invite_request_retry_reuses_one_durable_outbox_operation(monkeypatch):
+    from engraphis import email_outbox
+
+    for name in (
+        "ENGRAPHIS_RESEND_API_KEY", "ENGRAPHIS_SMTP_HOST", "ENGRAPHIS_SMTP_USER",
+        "ENGRAPHIS_SMTP_PASSWORD",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    c = _app()
+    body = {"key": _key(plan="team"), "to": "new@corp.com", "role": "member"}
+
+    first = c.post("/license/v1/team-invite", json=body)
+    retry = c.post("/license/v1/team-invite", json=body)
+
+    assert first.status_code == 200
+    assert retry.status_code == 200
+    conn = email_outbox._connect()
+    try:
+        rows = conn.execute(
+            "SELECT idempotency_key,status FROM email_outbox WHERE kind='invitation'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    assert rows[0]["idempotency_key"].startswith("team-invite-relay:")
+    assert rows[0]["status"] == "pending"
 
 
 def test_team_invite_refund_failure_keeps_provider_error_sanitized(monkeypatch):
@@ -1008,7 +1247,7 @@ def test_team_invite_refund_failure_keeps_provider_error_sanitized(monkeypatch):
     from engraphis.inspector import license_cloud
 
     monkeypatch.setattr(
-        WH, "send_team_invite_email",
+        WH, "queue_team_invite_email",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("token=SECRET")))
     monkeypatch.setattr(
         license_cloud, "_refund_invite_count",
@@ -1054,26 +1293,28 @@ def test_trial_key_cannot_choose_the_dashboard_url_in_a_vendor_email(monkeypatch
     from engraphis.inspector import webhooks as WH
     captured = {}
     monkeypatch.setattr(
-        WH, "send_team_invite_email",
-        lambda to, name, role, invited_by="", key="", dashboard_url=None:
-            captured.update(dashboard_url=dashboard_url))
+        WH, "queue_team_invite_email",
+        lambda to, name, role, invited_by="", invite_url="", dashboard_url=None, **kwargs:
+            captured.update(dashboard_url=dashboard_url, invite_url=invite_url))
     key = _trial_team_key()
     assert parse_key(key).is_trial is True
     r = _app().post("/license/v1/team-invite",
                     json={"key": key, "to": "victim@corp.com",
                           "dashboard_url": "https://engraphis-team.attacker.test/"})
-    # Still delivered (trials must work), but pointing at the relay's OWN dashboard:
-    # send_team_invite_email resolves "" to ENGRAPHIS_DASHBOARD_URL / the hosted default.
-    assert r.status_code == 200
-    assert captured["dashboard_url"] == ""
+    # A legacy/unbound trial key has no verified deployment origin, so it cannot use the
+    # vendor's mail reputation to send any link at all. Deployment-bound trials pass an
+    # invite URL whose origin is checked against their confirmed claim.
+    assert r.status_code == 409
+    assert "dashboard origin" in r.json()["error"]
+    assert captured == {}
 
 
 def test_paid_key_pins_its_dashboard_url_on_first_use(monkeypatch):
     from engraphis.inspector import webhooks as WH
     seen = []
     monkeypatch.setattr(
-        WH, "send_team_invite_email",
-        lambda to, name, role, invited_by="", key="", dashboard_url=None:
+        WH, "queue_team_invite_email",
+        lambda to, name, role, invited_by="", invite_url="", dashboard_url=None, **kwargs:
             seen.append(dashboard_url))
     c = _app()
     key = _key(plan="team")
@@ -1099,7 +1340,7 @@ def test_paid_key_pins_its_dashboard_url_on_first_use(monkeypatch):
 def test_rejected_dashboard_url_does_not_consume_the_daily_invite_cap(monkeypatch):
     from engraphis.inspector import license_cloud
     from engraphis.inspector import webhooks as WH
-    monkeypatch.setattr(WH, "send_team_invite_email", lambda *a, **k: None)
+    monkeypatch.setattr(WH, "queue_team_invite_email", lambda *a, **k: None)
     monkeypatch.setattr(license_cloud, "_invite_daily_cap", lambda: 2)
     c = _app()
     key = _key(plan="team")
@@ -1116,23 +1357,21 @@ def test_rejected_dashboard_url_does_not_consume_the_daily_invite_cap(monkeypatc
                         "dashboard_url": "https://team.corp.example/"}).status_code == 200
 
 
-def test_relay_invite_withholds_the_license_key_from_a_viewer(monkeypatch):
-    """The relay composes the email, so the viewer rule is enforced HERE — a self-hosted
-    dashboard relaying through us cannot opt out of it."""
+def test_relay_invite_never_forwards_the_license_key(monkeypatch):
     from engraphis.inspector import webhooks as WH
     seen = {}
     monkeypatch.setattr(
-        WH, "send_team_invite_email",
-        lambda to, name, role, invited_by="", key="", dashboard_url=None:
-            seen.__setitem__(role, key))
+        WH, "queue_team_invite_email",
+        lambda to, name, role, **kwargs:
+            seen.__setitem__(role, kwargs))
     c = _app()
     key = _key(plan="team")
     for role in ("viewer", "member"):
         assert c.post("/license/v1/team-invite",
                       json={"key": key, "to": "new@corp.com",
                             "role": role}).status_code == 200
-    assert seen["viewer"] == ""
-    assert seen["member"] == key
+    assert "key" not in seen["viewer"]
+    assert "key" not in seen["member"]
 
 
 # ── team-invite relay: client function, end-to-end against the real endpoint ───────────
@@ -1162,8 +1401,8 @@ def test_send_team_invite_client_roundtrip(monkeypatch):
     from engraphis.inspector import webhooks as WH
     captured = {}
     monkeypatch.setattr(
-        WH, "send_team_invite_email",
-        lambda to, name, role, invited_by="", key="", dashboard_url=None:
+        WH, "queue_team_invite_email",
+        lambda to, name, role, **kwargs:
             captured.update(to=to))
     c = _app()
     _wire_urlopen_to(c, monkeypatch)
@@ -1192,6 +1431,26 @@ def test_send_team_invite_client_fails_closed_on_network_error(monkeypatch):
     assert sent is False and "unreachable" in reason.lower()
 
 
+def test_send_password_reset_client_roundtrip(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+
+    captured = {}
+    monkeypatch.setattr(
+        WH, "queue_password_reset_email",
+        lambda to, name, reset_url, **kwargs:
+            captured.update(to=to, reset_url=reset_url) or "eml_roundtrip",
+    )
+    client = _app()
+    _wire_urlopen_to(client, monkeypatch)
+    sent, reason = cloud_license.send_password_reset(
+        "http://127.0.0.1", _key(plan="team"), "owner@corp.com", "Owner",
+        "https://team.corp.test/#reset_token=server-secret",
+    )
+    assert sent is True and reason == ""
+    assert captured["to"] == "owner@corp.com"
+    assert captured["reset_url"].endswith("reset_token=server-secret")
+
+
 # ── self-serve Team trial: real signed key, one-per-device, must work with the ─────────
 # team-invite relay above (that's the whole point — a trial user needs the "click
 # button, send invite" experience to actually work, or they never see the value).
@@ -1217,7 +1476,9 @@ def _capture_verify_url(monkeypatch):
 
 
 def _token_from_url(url: str) -> str:
-    return urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["token"][0]
+    parts = urllib.parse.urlsplit(url)
+    assert parts.query == "", "one-time trial token must never enter an HTTP query"
+    return urllib.parse.parse_qs(parts.fragment)["token"][0]
 
 
 def _key_from_verify_html(html: str) -> str:
@@ -1233,7 +1494,7 @@ def _start_and_confirm(c, captured, machine_id, email="dev@example.com", plan="t
                json={"machine_id": machine_id, "email": email, "plan": plan})
     assert r.status_code == 200 and r.json().get("pending") is True
     token = _token_from_url(captured["url"])
-    v = c.post("/license/v1/start-trial/verify", params={"token": token})
+    v = c.post("/license/v1/start-trial/verify", json={"token": token})
     assert v.status_code == 200, v.text
     return _key_from_verify_html(v.text)
 
@@ -1255,10 +1516,10 @@ def test_trial_signing_failure_does_not_consume_magic_link(monkeypatch):
         lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("signing failed")))
 
     with pytest.raises(RuntimeError, match="signing failed"):
-        c.post("/license/v1/start-trial/verify", params={"token": token})
+        c.post("/license/v1/start-trial/verify", json={"token": token})
 
     monkeypatch.setattr(WH, "issue_key", issue_key)
-    retry = c.post("/license/v1/start-trial/verify", params={"token": token})
+    retry = c.post("/license/v1/start-trial/verify", json={"token": token})
     assert retry.status_code == 200
     assert parse_key(_key_from_verify_html(retry.text)).is_trial is True
 
@@ -1288,7 +1549,7 @@ def test_start_team_trial_grants_five_seats_regardless_of_request_body(monkeypat
     assert r.status_code == 200
     token = _token_from_url(captured["url"])
     key = _key_from_verify_html(
-        c.post("/license/v1/start-trial/verify", params={"token": token}).text)
+        c.post("/license/v1/start-trial/verify", json={"token": token}).text)
     assert parse_key(key).seats == 5
 
     r2 = c.post("/license/v1/start-trial",
@@ -1297,7 +1558,7 @@ def test_start_team_trial_grants_five_seats_regardless_of_request_body(monkeypat
     assert r2.status_code == 200
     token2 = _token_from_url(captured["url"])
     key2 = _key_from_verify_html(
-        c.post("/license/v1/start-trial/verify", params={"token": token2}).text)
+        c.post("/license/v1/start-trial/verify", json={"token": token2}).text)
     assert parse_key(key2).seats == 5
 
 
@@ -1362,10 +1623,10 @@ def test_start_team_trial_resend_supersedes_earlier_unclicked_link(monkeypatch):
     new_token = _token_from_url(captured["url"])
     assert new_token != old_token
 
-    stale = c.post("/license/v1/start-trial/verify", params={"token": old_token})
+    stale = c.post("/license/v1/start-trial/verify", json={"token": old_token})
     assert stale.status_code == 400
 
-    fresh = c.post("/license/v1/start-trial/verify", params={"token": new_token})
+    fresh = c.post("/license/v1/start-trial/verify", json={"token": new_token})
     assert fresh.status_code == 200
 
 
@@ -1420,7 +1681,7 @@ def test_start_trial_sweeps_expired_pending_links(monkeypatch):
 
     # The swept link is genuinely dead, not merely hidden.
     assert c.post("/license/v1/start-trial/verify",
-                 params={"token": abandoned_token}).status_code == 400
+                  json={"token": abandoned_token}).status_code == 400
 
 
 def test_get_on_magic_link_does_not_redeem_it(monkeypatch):
@@ -1441,8 +1702,9 @@ def test_get_on_magic_link_does_not_redeem_it(monkeypatch):
 
     # The prescanner sweeps the link — possibly more than once.
     for _ in range(3):
-        peek = c.get("/license/v1/start-trial/verify", params={"token": token})
+        peek = c.get("/license/v1/start-trial/verify")
         assert peek.status_code == 200, peek.text[:200]
+        assert token not in peek.text
 
     # No grant was recorded by any of that.
     conn = reg.connect()
@@ -1456,19 +1718,13 @@ def test_get_on_magic_link_does_not_redeem_it(monkeypatch):
         conn.close()
 
     # ...so the human's click still works and yields a real key.
-    confirmed = c.post("/license/v1/start-trial/verify", params={"token": token})
+    confirmed = c.post("/license/v1/start-trial/verify", json={"token": token})
     assert confirmed.status_code == 200, confirmed.text[:300]
     assert parse_key(_key_from_verify_html(confirmed.text)).is_trial is True
 
 
-def test_confirm_form_action_survives_a_sub_path_relay(monkeypatch):
-    """The confirm form must post back to wherever the page was actually served from.
-
-    validate_cloud_base_url PRESERVES the path component (it only rejects query and
-    fragment), so ENGRAPHIS_RELAY_PUBLIC_URL=https://example.com/relay is valid config.
-    A root-absolute form action would render fine and then POST to a 404, stranding the
-    customer with a token that expires in 30 minutes and no diagnostic. A query-only
-    relative reference resolves against the current document instead."""
+def test_fragment_confirmation_survives_a_sub_path_relay(monkeypatch):
+    """The browser posts to its current path, including a configured relay sub-path."""
     monkeypatch.setenv("ENGRAPHIS_RELAY_PUBLIC_URL", "https://example.test/relay")
     c = _app()
     captured = _capture_verify_url(monkeypatch)
@@ -1479,43 +1735,32 @@ def test_confirm_form_action_survives_a_sub_path_relay(monkeypatch):
     assert url.startswith("https://example.test/relay/license/v1/start-trial/verify")
 
     token = _token_from_url(url)
-    body = c.get("/license/v1/start-trial/verify", params={"token": token}).text
-    action = re.search(r'action="([^"]*)"', body)
-    assert action, "confirm page has no form action: %s" % body[:300]
-    assert not action.group(1).startswith("/"), (
-        "form action must be relative so it resolves against the served path, got %r"
-        % action.group(1))
-    # And it must still carry the token.
-    assert token in action.group(1)
+    body = c.get("/license/v1/start-trial/verify").text
+    assert "fetch(window.location.pathname" in body
+    assert token not in body
+    assert "<form" not in body.lower()
 
 
 def test_trial_verify_routes_are_rate_limited(monkeypatch):
-    """Both /start-trial/verify handlers hit SQLite before they can know the token is
-    junk — and the POST takes BEGIN IMMEDIATE, a write lock on the same relay.db that
-    carries seat claims and sync bundles. Flooding either with garbage tokens is a
-    bigger lever than the single indexed SELECT behind /verify/{key_id}."""
+    """Verification POSTs share a gate; scanner-safe GETs remain static and cheap."""
     monkeypatch.setattr(license_cloud, "REGISTER_RATE_PER_MINUTE", 2)
     license_cloud._REGISTER_BUCKETS.clear()
     c = _app()
     assert c.post("/license/v1/start-trial/verify",
-                  params={"token": "junk"}).status_code == 400
-    assert c.get("/license/v1/start-trial/verify",
-                 params={"token": "junk"}).status_code == 400
-    # Budget spent — and it is SHARED across both handlers, so alternating buys nothing.
-    limited = c.post("/license/v1/start-trial/verify", params={"token": "junk"})
+                  json={"token": "junk"}).status_code == 400
+    assert c.post("/license/v1/start-trial/verify",
+                  json={"token": "junk"}).status_code == 400
+    limited = c.post("/license/v1/start-trial/verify", json={"token": "junk"})
     assert limited.status_code == 429 and limited.headers["Retry-After"] == "60"
-    assert c.get("/license/v1/start-trial/verify",
-                 params={"token": "junk"}).status_code == 429
+    assert c.get("/license/v1/start-trial/verify").status_code == 200
 
 
 def test_every_trial_verify_response_is_uncacheable(monkeypatch):
     """EVERY /start-trial/verify response — success, each error, and the 429 — must carry
     the no-store/no-referrer headers, on both the GET and the POST.
 
-    The request URL itself carries the one-time token, so an error page is just as
-    Referer-leaky as the success page that holds the key. This pins the invariant across
-    all of them because the success path and the error paths previously used separate
-    inline header literals and drifted apart."""
+    The URL fragment is removed before POST, while the success body contains a full key.
+    This pins no-store/no-referrer across both static and dynamic responses."""
     def _assert_locked_down(r, label):
         assert "no-store" in r.headers.get("Cache-Control", ""), \
             "%s (%s) is cacheable" % (label, r.status_code)
@@ -1525,13 +1770,16 @@ def test_every_trial_verify_response_is_uncacheable(monkeypatch):
     c = _app()
     captured = _capture_verify_url(monkeypatch)
 
-    # Both handlers, missing + bogus token.
+    # Static page plus missing/bogus POST bodies.
     _assert_locked_down(c.get("/license/v1/start-trial/verify"), "GET no token")
     _assert_locked_down(c.post("/license/v1/start-trial/verify"), "POST no token")
-    for method in (c.get, c.post):
-        _assert_locked_down(
-            method("/license/v1/start-trial/verify", params={"token": "nope"}),
-            "%s bogus token" % method.__name__.upper())
+    _assert_locked_down(
+        c.post("/license/v1/start-trial/verify", json={"token": "nope"}),
+        "POST bogus token")
+    # A query-string credential is deliberately ignored and rejected.
+    _assert_locked_down(
+        c.post("/license/v1/start-trial/verify", params={"token": "nope"}),
+        "POST query token")
 
     # Confirm page and success page.
     assert c.post("/license/v1/start-trial",
@@ -1539,8 +1787,8 @@ def test_every_trial_verify_response_is_uncacheable(monkeypatch):
                   ).status_code == 200
     token = _token_from_url(captured["url"])
     _assert_locked_down(
-        c.get("/license/v1/start-trial/verify", params={"token": token}), "confirm page")
-    granted = c.post("/license/v1/start-trial/verify", params={"token": token})
+        c.get("/license/v1/start-trial/verify"), "confirm page")
+    granted = c.post("/license/v1/start-trial/verify", json={"token": token})
     assert granted.status_code == 200
     _assert_locked_down(granted, "success page (contains the key)")
 
@@ -1552,16 +1800,15 @@ def test_every_trial_verify_response_is_uncacheable(monkeypatch):
     # And the 429, which must keep Retry-After as well.
     monkeypatch.setattr(license_cloud, "REGISTER_RATE_PER_MINUTE", 1)
     license_cloud._REGISTER_BUCKETS.clear()
-    c.get("/license/v1/start-trial/verify", params={"token": "nope"})
-    throttled = c.get("/license/v1/start-trial/verify", params={"token": "nope"})
+    c.post("/license/v1/start-trial/verify", json={"token": "nope"})
+    throttled = c.post("/license/v1/start-trial/verify", json={"token": "nope"})
     assert throttled.status_code == 429
     assert throttled.headers["Retry-After"] == "60"
     _assert_locked_down(throttled, "429")
 
 
-def test_confirm_page_posts_the_token_back(monkeypatch):
-    """The GET page must actually offer the POST that redeems — otherwise the split
-    above would leave users with no way to finish."""
+def test_confirm_page_keeps_token_out_of_server_html(monkeypatch):
+    """The static page uses fragment-to-body JS without reflecting secret or customer."""
     c = _app()
     captured = _capture_verify_url(monkeypatch)
     assert c.post("/license/v1/start-trial",
@@ -1569,19 +1816,22 @@ def test_confirm_page_posts_the_token_back(monkeypatch):
                         "email": "form@example.com"}).status_code == 200
     token = _token_from_url(captured["url"])
 
-    page = c.get("/license/v1/start-trial/verify", params={"token": token})
+    page = c.get("/license/v1/start-trial/verify")
     assert page.status_code == 200
     body = page.text
-    assert 'method="post"' in body.lower()
-    assert token in body, "the form must post the token back"
-    assert "form@example.com" in body, "confirm page should name the account it activates"
+    assert 'id="trial-confirm"' in body
+    assert "JSON.stringify({token:token})" in body
+    assert "window.history.replaceState" in body
+    assert token not in body
+    assert "form@example.com" not in body
+    assert "form-action 'none'" in page.headers["Content-Security-Policy"]
 
 
 @pytest.mark.parametrize("bad", ["", "not-a-real-token"])
 def test_confirm_page_reports_a_bad_token_without_mutating(bad):
-    """GET mirrors the POST's diagnostics, and stays read-only doing it."""
+    """Only the bounded POST performs token diagnostics or state access."""
     c = _app()
-    r = c.get("/license/v1/start-trial/verify", params={"token": bad})
+    r = c.post("/license/v1/start-trial/verify", json={"token": bad})
     assert r.status_code == 400
     assert "invalid" in r.text.lower() or "missing" in r.text.lower()
 
@@ -1602,15 +1852,15 @@ def test_confirm_page_reports_an_expired_link_as_expired(monkeypatch):
     finally:
         conn.close()
 
-    r = c.get("/license/v1/start-trial/verify", params={"token": token})
+    r = c.post("/license/v1/start-trial/verify", json={"token": token})
     assert r.status_code == 400
     assert "expired" in r.text.lower()
-    # Read-only: the lapsed row is left for the retention sweep, not deleted here.
+    # A human POST consumed the expired one-time row; static GET never touches it.
     conn = reg.connect()
     try:
         assert conn.execute(
             "SELECT COUNT(*) FROM trial_pending WHERE machine_id=?",
-            ("dev-lapsed-peek",)).fetchone()[0] == 1
+            ("dev-lapsed-peek",)).fetchone()[0] == 0
     finally:
         conn.close()
 
@@ -1645,7 +1895,7 @@ def test_expired_link_keeps_saying_expired_after_an_unrelated_reservation(monkey
                   json={"machine_id": "dev-unrelated",
                         "email": "unrelated@example.com"}).status_code == 200
 
-    late = c.post("/license/v1/start-trial/verify", params={"token": token})
+    late = c.post("/license/v1/start-trial/verify", json={"token": token})
     assert late.status_code == 400
     assert "expired" in late.text.lower(), (
         "expired link must still report EXPIRED after an unrelated reservation, got: %s"
@@ -1665,13 +1915,29 @@ def test_start_team_trial_rejects_grant_after_device_already_confirmed(monkeypat
 
     # a DIFFERENT device is unaffected
     r3 = c.post("/license/v1/start-trial",
-               json={"machine_id": "dev-2", "email": "other@example.com"})
+                json={"machine_id": "dev-2", "email": "other@example.com"})
     assert r3.status_code == 200
+
+
+def test_legacy_trial_migration_flow_allows_only_one_grant_per_normalized_email(
+        monkeypatch):
+    """An explicitly enabled legacy flow must retain the GA one-trial-per-email gate."""
+    c = _app()
+    captured = _capture_verify_url(monkeypatch)
+    assert _start_and_confirm(
+        c, captured, "dev-email-1", email="Person@Example.com")
+
+    second = c.post(
+        "/license/v1/start-trial",
+        json={"machine_id": "dev-email-2", "email": "person@example.com"},
+    )
+    assert second.status_code == 409
+    assert "already been used" in second.json()["error"]
 
 
 def test_start_team_trial_verify_rejects_unknown_token():
     c = _app()
-    r = c.post("/license/v1/start-trial/verify", params={"token": "not-a-real-token"})
+    r = c.post("/license/v1/start-trial/verify", json={"token": "not-a-real-token"})
     assert r.status_code == 400
 
 
@@ -1681,9 +1947,9 @@ def test_start_team_trial_verify_link_is_one_time_use(monkeypatch):
     c.post("/license/v1/start-trial",
           json={"machine_id": "dev-1", "email": "dev@example.com"})
     token = _token_from_url(captured["url"])
-    first = c.post("/license/v1/start-trial/verify", params={"token": token})
+    first = c.post("/license/v1/start-trial/verify", json={"token": token})
     assert first.status_code == 200
-    replay = c.post("/license/v1/start-trial/verify", params={"token": token})
+    replay = c.post("/license/v1/start-trial/verify", json={"token": token})
     assert replay.status_code == 400
 
 
@@ -1695,7 +1961,7 @@ def test_start_team_trial_verify_rejects_expired_token(monkeypatch):
                json={"machine_id": "dev-1", "email": "dev@example.com"})
     assert r.status_code == 200
     token = _token_from_url(captured["url"])
-    v = c.post("/license/v1/start-trial/verify", params={"token": token})
+    v = c.post("/license/v1/start-trial/verify", json={"token": token})
     assert v.status_code == 400
     assert "expired" in v.text.lower()
 
@@ -1779,22 +2045,25 @@ def test_start_team_trial_ignores_forwarded_source_from_untrusted_peer(monkeypat
     assert over.status_code == 429
 
 
-def test_start_team_trial_key_actually_works_with_team_invite_relay(monkeypatch):
-    """The regression this whole feature exists for: a trial key must be usable
-    everywhere a purchased key is, specifically including the invite relay — an
-    offline/local-only trial claim never could be."""
+def test_legacy_team_trial_key_cannot_use_deployment_bound_invite_relay(monkeypatch):
+    """Legacy trial issuance is intentionally not enough to send branded invite links.
+
+    Only the deployment-bound claim flow records a verified dashboard origin; the
+    explicitly retained legacy flow therefore fails closed at the invite relay.
+    """
     from engraphis.inspector import webhooks as WH
     captured_invite = {}
     monkeypatch.setattr(
-        WH, "send_team_invite_email",
-        lambda to, name, role, invited_by="", key="", dashboard_url=None:
+        WH, "queue_team_invite_email",
+        lambda to, name, role, **kwargs:
             captured_invite.update(to=to))
     c = _app()
     captured = _capture_verify_url(monkeypatch)
     key = _start_and_confirm(c, captured, "dev-1")
     r = c.post("/license/v1/team-invite", json={"key": key, "to": "teammate@corp.com"})
-    assert r.status_code == 200 and r.json()["sent"] is True
-    assert captured_invite["to"] == "teammate@corp.com"
+    assert r.status_code == 409
+    assert "dashboard origin" in r.json()["error"]
+    assert captured_invite == {}
 
 
 def test_request_team_trial_key_client_returns_pending(monkeypatch):
@@ -1814,7 +2083,7 @@ def test_request_team_trial_key_client_reports_already_used(monkeypatch):
         "http://127.0.0.1", "dev-1", email="dev@example.com"
     )
     token = _token_from_url(captured["url"])
-    confirmed = c.post("/license/v1/start-trial/verify", params={"token": token})
+    confirmed = c.post("/license/v1/start-trial/verify", json={"token": token})
     assert confirmed.status_code == 200                 # the device now holds a grant
     key, reason, pending = cloud_license.request_team_trial_key(
         "http://127.0.0.1", "dev-1", email="dev@example.com")
@@ -1958,4 +2227,21 @@ def test_trial_requests_migrate_retired_server_override(
     monkeypatch.setattr(cloud_license, client_name, pending)
 
     assert starter(email="me@example.com")["pending"] is True
-    assert captured["base"] == DEFAULT_RELAY_URL
+    assert captured["base"] == DEFAULT_LICENSE_SERVER_URL
+
+
+def test_rejected_lease_counter_is_content_free_and_thresholded(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_REJECTED_LEASE_ALERT_THRESHOLD", "2")
+    now = time.time()
+    assert reg.rejected_lease_health(now=now) is True
+    reg.record_control_plane_event("lease_rejected", now=now - 1)
+    assert reg.rejected_lease_health(now=now) is True
+    reg.record_control_plane_event("lease_rejected", now=now)
+    assert reg.rejected_lease_health(now=now) is False
+    conn = reg.connect()
+    try:
+        columns = [row[1] for row in conn.execute(
+            "PRAGMA table_info(control_plane_events)").fetchall()]
+    finally:
+        conn.close()
+    assert columns == ["id", "kind", "occurred_at"]

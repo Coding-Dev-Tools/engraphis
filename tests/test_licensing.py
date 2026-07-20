@@ -1,6 +1,7 @@
 """Licensing tests — RFC 8032 vectors, issue/verify roundtrip, gates. Runs on the
 numpy-only CI gate (pure stdlib, like the module under test)."""
 import json
+import sqlite3
 import time
 
 import pytest
@@ -122,6 +123,17 @@ def test_expired_key_rejected_with_renewal_hint():
     key = _issue("pro", days=1)
     with pytest.raises(LicenseError, match="expired"):
         parse_key(key, now=time.time() + 2 * 86400)
+
+
+@pytest.mark.parametrize("invalid_expiry", [float("nan"), float("inf"), float("-inf")])
+def test_nonfinite_signed_expiry_is_rejected(invalid_expiry):
+    key = compose_key(
+        {"v": 1, "plan": "pro", "email": "buyer@example.com",
+         "expires": invalid_expiry},
+        SECRET,
+    )
+    with pytest.raises(LicenseError, match="invalid expiry"):
+        parse_key(key)
 
 
 def test_perpetual_key_never_expires():
@@ -253,16 +265,21 @@ def test_default_vendor_key_is_detected_and_warned(monkeypatch):
 
 def test_shipped_pinned_key_is_not_the_compromised_dev_key():
     # Rotation guard: the verify key pinned in the repo must NOT equal the old dev
-    # sentinel. If this fails, someone re-pinned the known-compromised dev key — rotate
-    # again (`python -m scripts.license_admin keygen --force`).
+    # sentinel. If this fails, generate into a new secure key file and repeat the
+    # reviewed rotation ceremony; never overwrite the seed that issued customer keys.
     assert lic._VENDOR_PUBKEY_HEX != lic._DEV_VENDOR_PUBKEY_HEX
 
 
 def test_rotated_vendor_key_clears_the_dev_key_warning(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(b"\x09" * 32).hex())
     monkeypatch.setenv("ENGRAPHIS_UPGRADE_URL", "https://buy.example.com/engraphis")
+    monkeypatch.setattr(lic, "VENDOR_SIGNER_RELEASE_READY", True)
     assert lic.is_default_vendor_key() is False
     assert lic.production_warnings() == []
+
+
+def test_pre_sale_signer_blocks_production_readiness():
+    assert any("pre-sale" in warning for warning in lic.production_warnings())
 
 
 def test_production_warnings_flag_placeholder_checkout(monkeypatch):
@@ -356,3 +373,219 @@ def test_revoke_clears_cache_immediately(monkeypatch, tmp_path):
     # No lingering entitlement from the stale cache — the dead key stops granting at once.
     assert current_license().plan == "free"
     assert not has_feature("team")
+
+
+def test_vendor_cli_issues_for_license_host_and_records_inventory(
+        monkeypatch, tmp_path, capsys):
+    from scripts import license_admin
+    from engraphis.inspector.license_registry import inventory
+
+    key_file = tmp_path / "signer.key"
+    registry = tmp_path / "relay.db"
+    key_file.write_text(SECRET.hex(), encoding="utf-8")
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(SECRET).hex())
+    monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(registry))
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
+
+    license_admin.main([
+        "issue", "--email", "buyer@example.com", "--plan", "pro",
+        "--days", "30", "--key-file", str(key_file),
+    ])
+    key = capsys.readouterr().out.strip()
+    parsed = parse_key(key)
+    assert parsed.cloud_url == "https://license.engraphis.com"
+    payload = json.loads(lic._b64u_decode(key.split(".")[1]).decode("utf-8"))
+    assert payload["signing_key_id"] == ed25519_public_key(SECRET).hex()[:16]
+    assert inventory(str(registry)) == {
+        "issued_total": 1,
+        "active": 1,
+        "revoked": 0,
+        "other_status": 0,
+        "plans": {"pro": 1},
+        "active_key_ids": [parsed.key_id],
+        "signing_key_ids": {ed25519_public_key(SECRET).hex()[:16]: 1},
+        "registered_machines": 0,
+        "rotation_reissues": 0,
+        "rotation_requires_migration": True,
+    }
+
+
+def test_registry_migrates_old_rows_and_marks_unknown_signers(tmp_path):
+    from engraphis.inspector.license_registry import connect, inventory
+
+    registry = tmp_path / "legacy-registry.db"
+    conn = sqlite3.connect(str(registry))
+    conn.execute(
+        "CREATE TABLE issued_licenses (key_id TEXT PRIMARY KEY,email TEXT,plan TEXT,"
+        "seats INTEGER,issued REAL,expires REAL,subscription_id TEXT,order_id TEXT,"
+        "status TEXT NOT NULL DEFAULT 'active',created_at REAL NOT NULL,revoked_at REAL)")
+    conn.execute(
+        "INSERT INTO issued_licenses(key_id,plan,status,created_at) VALUES(?,?,?,?)",
+        ("legacy-key", "team", "active", time.time()))
+    conn.commit()
+    conn.close()
+
+    migrated = connect(str(registry))
+    columns = {
+        row[1] for row in migrated.execute("PRAGMA table_info(issued_licenses)").fetchall()}
+    migrated.close()
+
+    assert "signing_key_id" in columns
+    assert inventory(str(registry))["signing_key_ids"] == {"unknown": 1}
+
+
+def test_rotation_reissue_preserves_payload_and_retires_only_after_grace(
+        monkeypatch, tmp_path, capsys):
+    from scripts import license_admin
+    from engraphis.inspector import license_registry as registry
+
+    old_secret = b"\x31" * 32
+    new_secret = b"\x32" * 32
+    old_public = ed25519_public_key(old_secret).hex()
+    new_public = ed25519_public_key(new_secret).hex()
+    monkeypatch.setattr(lic, "_TEST_MODE_PUBKEY_OVERRIDE", False)
+    monkeypatch.setattr(lic, "_VENDOR_PUBKEY_HEX", new_public)
+    monkeypatch.setattr(lic, "_PREVIOUS_VENDOR_PUBKEY_HEXES", (old_public,))
+
+    now = int(time.time())
+    original_payload = {
+        "v": 1,
+        "plan": "team",
+        "email": "rotation-buyer@example.com",
+        "seats": 7,
+        "issued": now - 86400,
+        "expires": now + 90 * 86400,
+        "features": ["contract-export"],
+        "enforce": "cloud",
+        "cloud_url": "https://license.engraphis.com",
+        "subscription_id": "sub_rotation",
+        "order_id": "order_rotation",
+        "signing_key_id": old_public[:16],
+        "future_contract_field": {"preserve": True},
+    }
+    old_key = compose_key(original_payload, old_secret)
+    database = tmp_path / "relay.db"
+    registry.record_issued(old_key, db_path=str(database))
+    source_file = tmp_path / "active-keys.txt"
+    source_file.write_text(old_key + "\n", encoding="utf-8")
+    new_seed_file = tmp_path / "new-signer.key"
+    new_seed_file.write_text(new_secret.hex() + "\n", encoding="utf-8")
+    output_file = tmp_path / "replacement-keys.json"
+    command = [
+        "rotation-reissue",
+        "--db-path", str(database),
+        "--source-file", str(source_file),
+        "--new-key-file", str(new_seed_file),
+        "--output-file", str(output_file),
+    ]
+
+    license_admin.main(command)
+    dry_run = json.loads(capsys.readouterr().out)
+    assert dry_run["applied"] is False
+    assert dry_run["reissued"] == 1
+    assert not output_file.exists()
+    assert registry.inventory(str(database))["active"] == 1
+
+    license_admin.main(command + ["--apply"])
+    applied_text = capsys.readouterr().out
+    applied = json.loads(applied_text)
+    assert applied["applied"] is True
+    assert applied["registry_reissues_recorded"] == 1
+    assert old_key not in applied_text
+    assert "rotation-buyer@example.com" not in applied_text
+
+    manifest = json.loads(output_file.read_text(encoding="utf-8"))
+    replacement_key = manifest["reissues"][0]["license_key"]
+    replacement_payload = json.loads(
+        lic._b64u_decode(replacement_key.split(".")[1]).decode("utf-8"))
+    expected_payload = dict(original_payload)
+    expected_payload["signing_key_id"] = new_public[:16]
+    assert replacement_payload == expected_payload
+    assert parse_key(old_key).signing_key_id == old_public[:16]
+    replacement = parse_key(replacement_key)
+    assert replacement.signing_key_id == new_public[:16]
+    assert replacement.expires == original_payload["expires"]
+    assert replacement.subscription_id == "sub_rotation"
+    assert replacement.order_id == "order_rotation"
+
+    rotation_inventory = registry.inventory(str(database))
+    assert rotation_inventory["active"] == 2
+    assert rotation_inventory["rotation_reissues"] == 1
+    assert rotation_inventory["signing_key_ids"] == {
+        old_public[:16]: 1,
+        new_public[:16]: 1,
+    }
+    assert registry.is_revoked(parse_key(old_key, now=0).key_id, db_path=str(database)) is False
+    assert registry.is_revoked(replacement.key_id, db_path=str(database)) is False
+
+    retire_command = [
+        "rotation-retire",
+        "--db-path", str(database),
+        "--manifest-file", str(output_file),
+    ]
+    license_admin.main(retire_command)
+    retirement_dry_run = json.loads(capsys.readouterr().out)
+    assert retirement_dry_run["applied"] is False
+    with pytest.raises(SystemExit, match="30-day"):
+        license_admin.main(retire_command + ["--confirm-activated", "--apply"])
+
+    state = registry.signer_rotation_state(new_public[:16], db_path=str(database))
+    audit_created_at = state["completed"][0]["created_at"]
+    monkeypatch.setattr(registry.time, "time", lambda: audit_created_at + 30 * 86400 + 1)
+    license_admin.main(retire_command + ["--confirm-activated", "--apply"])
+    retired = json.loads(capsys.readouterr().out)
+    assert retired["applied"] is True
+    assert retired["revoked"] == 1
+    assert registry.is_revoked(parse_key(old_key, now=0).key_id, db_path=str(database)) is True
+    assert registry.is_revoked(replacement.key_id, db_path=str(database)) is False
+
+
+def test_rotation_reissue_refuses_incomplete_active_key_inventory(
+        monkeypatch, tmp_path):
+    from scripts import license_admin
+    from engraphis.inspector import license_registry as registry
+
+    old_secret = b"\x41" * 32
+    new_secret = b"\x42" * 32
+    old_public = ed25519_public_key(old_secret).hex()
+    new_public = ed25519_public_key(new_secret).hex()
+    monkeypatch.setattr(lic, "_TEST_MODE_PUBKEY_OVERRIDE", False)
+    monkeypatch.setattr(lic, "_VENDOR_PUBKEY_HEX", new_public)
+    monkeypatch.setattr(lic, "_PREVIOUS_VENDOR_PUBKEY_HEXES", (old_public,))
+
+    database = tmp_path / "relay.db"
+    now = int(time.time())
+    keys = []
+    for index in range(2):
+        payload = {
+            "v": 1,
+            "plan": "pro",
+            "email": f"buyer-{index}@example.com",
+            "seats": 1,
+            "issued": now,
+            "expires": now + 30 * 86400,
+            "signing_key_id": old_public[:16],
+        }
+        key = compose_key(payload, old_secret)
+        registry.record_issued(key, db_path=str(database))
+        keys.append(key)
+
+    source_file = tmp_path / "incomplete-keys.txt"
+    source_file.write_text(keys[0] + "\n", encoding="utf-8")
+    seed_file = tmp_path / "new-signer.key"
+    seed_file.write_text(new_secret.hex() + "\n", encoding="utf-8")
+    output_file = tmp_path / "replacements.json"
+    with pytest.raises(SystemExit, match="missing registry key ids"):
+        license_admin.main([
+            "rotation-reissue",
+            "--db-path", str(database),
+            "--source-file", str(source_file),
+            "--new-key-file", str(seed_file),
+            "--output-file", str(output_file),
+            "--apply",
+        ])
+
+    assert not output_file.exists()
+    post_failure = registry.inventory(str(database))
+    assert post_failure["active"] == 2
+    assert post_failure["rotation_reissues"] == 0

@@ -24,12 +24,14 @@ from __future__ import annotations
 import hashlib
 import hmac
 import math
+import os
 import re
 import secrets
 import sqlite3
 import threading
 import time
 from functools import wraps
+from pathlib import Path
 from typing import Optional
 
 PBKDF2_ITERATIONS = 600_000
@@ -50,6 +52,9 @@ MAX_THROTTLE_KEYS = 10_000       # bound unique-email memory use under credentia
 MAX_SESSIONS_PER_USER = 20
 MAX_ACTIVE_API_TOKENS = 100
 MAX_REVOKED_API_TOKENS = 100
+API_TOKEN_TTL_SECONDS = 90 * 86400
+INVITATION_TTL_SECONDS = 72 * 3600
+API_TOKEN_SCOPES = frozenset({"agent", "sync:read", "sync:write"})
 
 ROLES = ("viewer", "member", "admin")
 _ROLE_RANK = {r: i for i, r in enumerate(ROLES)}
@@ -90,11 +95,29 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     label        TEXT NOT NULL DEFAULT '',
     token_hash   TEXT NOT NULL UNIQUE,
     created_at   REAL NOT NULL,
+    expires_at   REAL,
+    scopes       TEXT NOT NULL DEFAULT 'agent',
     last_used_at REAL,
     revoked      INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_api_token_user ON api_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_api_token_hash ON api_tokens(token_hash);
+CREATE TABLE IF NOT EXISTS team_invitations (
+    id                  TEXT PRIMARY KEY,
+    email               TEXT NOT NULL,
+    name                TEXT NOT NULL DEFAULT '',
+    role                TEXT NOT NULL CHECK (role IN ('viewer','member','admin')),
+    token_hash          TEXT NOT NULL UNIQUE,
+    created_by          TEXT NOT NULL,
+    created_at          REAL NOT NULL,
+    expires_at          REAL NOT NULL,
+    accepted_at         REAL,
+    revoked_at          REAL,
+    delivery_state      TEXT NOT NULL DEFAULT 'pending',
+    last_delivery_error TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_team_invite_email ON team_invitations(email);
+CREATE INDEX IF NOT EXISTS idx_team_invite_expiry ON team_invitations(expires_at);
 CREATE TABLE IF NOT EXISTS audit_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts          REAL NOT NULL,
@@ -154,6 +177,25 @@ def min_role(method: str, path: str) -> str:
         # get more options"); anyone signed in may READ the current state (the dashboard
         # renders the toggle disabled for non-admins). GET stays viewer, writes are admin.
         return "admin" if method != "GET" else "viewer"
+    if path == "/api/sync/token":
+        # This changes the server process's device-wide relay credential.
+        return "admin"
+    if path in ("/api/ops/backup", "/api/ops/ready"):
+        return "admin"
+    if path in ("/api/llm/test", "/api/llm/extractor"):
+        # Both routes operate on the server-wide provider/extractor configuration.
+        # Testing spends the account's provider credit and the toggle also persists
+        # process settings, so neither is an ordinary member mutation.
+        return "admin"
+    if path.startswith("/api/graph/index/jobs"):
+        # Persisted rebuilds consume server-wide worker/SQLite capacity and mutating
+        # jobs temporarily gate graph reads for the whole shared workspace. Status and
+        # job polling remain ordinary reads; start/cancel are administrative controls.
+        return "viewer" if method in ("GET", "HEAD") else "admin"
+    if path.startswith("/api/license/trials"):
+        # Zero-user hosted bootstrap is explicitly exempted by dashboard_app. Once an
+        # account exists, starting or claiming a deployment license is admin-only.
+        return "admin"
     if path == "/api/auth/token" or path.startswith("/api/auth/token/"):
         # A signed-in user's OWN agent API tokens: mint (POST /api/auth/token) and revoke
         # (DELETE /api/auth/token/{id}). Every operation is scoped to the caller's user id
@@ -161,6 +203,8 @@ def min_role(method: str, path: str) -> str:
         # just POST, so the member-by-default fall-through below cannot lock a viewer out
         # of revoking their own credential.
         return "viewer"
+    if path.startswith("/api/auth/invitations"):
+        return "admin"
     if path in ("/api/intent/recall", "/api/code/path", "/api/code/impact"):
         return "viewer"
     if path in (
@@ -243,11 +287,24 @@ class AuthStore:
 
     def __init__(self, db_path: str, *, iterations: int = PBKDF2_ITERATIONS) -> None:
         self._lock = threading.RLock()
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        connection_path = db_path
+        if db_path != ":memory:":
+            database = Path(db_path).expanduser()
+            database.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            # Password/session/API-token hashes and user PII must never inherit a
+            # permissive process umask. Tighten existing beta databases on upgrade too.
+            descriptor = os.open(str(database), os.O_RDWR | os.O_CREAT, 0o600)
+            os.close(descriptor)
+            try:
+                os.chmod(database, 0o600)
+            except OSError:
+                pass
+            connection_path = str(database)
+        self.conn = sqlite3.connect(connection_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.execute("PRAGMA foreign_keys=ON")
-        if db_path != ":memory:":
+        if connection_path != ":memory:":
             try:
                 self.conn.execute("PRAGMA journal_mode=WAL")
             except sqlite3.OperationalError as exc:
@@ -256,12 +313,33 @@ class AuthStore:
                     raise
             self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(_SCHEMA)
+        self._migrate_schema()
         self.iterations = int(iterations)
         self._failures: dict = {}   # email -> list[fail_ts] (in-memory throttle)
         self._ip_failures: dict = {}  # ip -> list[fail_ts] (cross-email stuffing throttle)
         self._reset_requests: dict = {}   # email -> list[req_ts] (forgot-password throttle)
         self._last_prune: float = 0.0
         self._last_throttle_prune: float = 0.0
+
+    def _migrate_schema(self) -> None:
+        """Idempotent auth migrations for databases created before v1.0."""
+        token_columns = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(api_tokens)").fetchall()
+        }
+        if "expires_at" not in token_columns:
+            self.conn.execute("ALTER TABLE api_tokens ADD COLUMN expires_at REAL")
+        if "scopes" not in token_columns:
+            self.conn.execute(
+                "ALTER TABLE api_tokens ADD COLUMN scopes TEXT NOT NULL DEFAULT 'agent'")
+        # The v1.0 token contract is a bounded 90-day credential. Databases upgraded
+        # from the beta schema otherwise retain NULL here and silently keep every old
+        # bearer token valid forever. Anchor the migration to its original creation time
+        # so upgrading cannot extend an already-old credential by another full window.
+        self.conn.execute(
+            "UPDATE api_tokens SET expires_at=created_at+? WHERE expires_at IS NULL",
+            (API_TOKEN_TTL_SECONDS,),
+        )
+        self.conn.commit()
 
     # ── users ──────────────────────────────────────────────────────────────────
     @staticmethod
@@ -361,6 +439,181 @@ class AuthStore:
         return int(self.conn.execute(
             "SELECT COUNT(*) AS n FROM users WHERE disabled=0").fetchone()["n"])
 
+    # -- one-time team invitations ---------------------------------------------
+
+    @staticmethod
+    def _invitation_public(row, *, token: str = "") -> dict:
+        out = dict(row)
+        out.pop("token_hash", None)
+        if token:
+            out["token"] = token
+        return out
+
+    @_serialized
+    def create_invitation(self, email: str, name: str, role: str, *, created_by: str,
+                          seat_limit: int,
+                          ttl: int = INVITATION_TTL_SECONDS) -> dict:
+        from engraphis.licensing import require_feature
+        require_feature("team")
+        email = self._clean_email(email)
+        name = (name or "").strip()[:120]
+        if role not in ROLES:
+            raise AuthError("role must be one of: %s" % ", ".join(ROLES))
+        token = secrets.token_urlsafe(32)
+        token_hash = _hash_token(token)
+        invite_id = "inv_" + secrets.token_hex(8)
+        now = time.time()
+        expires_at = now + max(300, int(ttl))
+        conn = self.conn
+        started = not conn.in_transaction
+        try:
+            if started:
+                conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE team_invitations SET revoked_at=? "
+                "WHERE accepted_at IS NULL AND revoked_at IS NULL AND expires_at<?",
+                (now, now))
+            if conn.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
+                raise AuthError("a user with that email already exists")
+            if conn.execute(
+                    "SELECT 1 FROM team_invitations WHERE email=? AND accepted_at IS NULL "
+                    "AND revoked_at IS NULL", (email,)).fetchone():
+                raise AuthError("an active invitation already exists for that email")
+            active = int(conn.execute(
+                "SELECT COUNT(*) FROM users WHERE disabled=0").fetchone()[0])
+            pending = int(conn.execute(
+                "SELECT COUNT(*) FROM team_invitations WHERE accepted_at IS NULL "
+                "AND revoked_at IS NULL AND expires_at>=?", (now,)).fetchone()[0])
+            if active + pending >= max(1, int(seat_limit)):
+                raise AuthError(
+                    "seat limit reached (%d) - revoke an invitation or upgrade Team"
+                    % seat_limit)
+            conn.execute(
+                "INSERT INTO team_invitations(id,email,name,role,token_hash,created_by,"
+                "created_at,expires_at) VALUES (?,?,?,?,?,?,?,?)",
+                (invite_id, email, name, role, token_hash, created_by, now, expires_at))
+            if started:
+                conn.commit()
+        except BaseException:
+            if started and conn.in_transaction:
+                conn.rollback()
+            raise
+        row = conn.execute("SELECT * FROM team_invitations WHERE id=?", (invite_id,)).fetchone()
+        return self._invitation_public(row, token=token)
+
+    @_serialized
+    def list_invitations(self) -> list:
+        now = time.time()
+        self.conn.execute(
+            "UPDATE team_invitations SET revoked_at=? WHERE accepted_at IS NULL "
+            "AND revoked_at IS NULL AND expires_at<?", (now, now))
+        self.conn.commit()
+        rows = self.conn.execute(
+            "SELECT * FROM team_invitations ORDER BY created_at DESC").fetchall()
+        return [self._invitation_public(row) for row in rows]
+
+    @_serialized
+    def resend_invitation(self, invite_id: str, *, ttl: int = INVITATION_TTL_SECONDS) -> dict:
+        token = secrets.token_urlsafe(32)
+        now = time.time()
+        expires_at = now + max(300, int(ttl))
+        cur = self.conn.execute(
+            "UPDATE team_invitations SET token_hash=?, expires_at=?, delivery_state='pending', "
+            "last_delivery_error='' WHERE id=? AND accepted_at IS NULL AND revoked_at IS NULL "
+            "AND expires_at>=?",
+            (_hash_token(token), expires_at, invite_id, now))
+        if cur.rowcount != 1:
+            raise AuthError("invitation is missing, expired, accepted, or revoked")
+        self.conn.commit()
+        row = self.conn.execute("SELECT * FROM team_invitations WHERE id=?", (invite_id,)).fetchone()
+        return self._invitation_public(row, token=token)
+
+    @_serialized
+    def revoke_invitation(self, invite_id: str) -> bool:
+        cur = self.conn.execute(
+            "UPDATE team_invitations SET revoked_at=? WHERE id=? AND accepted_at IS NULL "
+            "AND revoked_at IS NULL", (time.time(), invite_id))
+        self.conn.commit()
+        return cur.rowcount == 1
+
+    @_serialized
+    def set_invitation_delivery(self, invite_id: str, state: str, error: str = "") -> None:
+        state = state if state in ("pending", "sent", "failed") else "failed"
+        self.conn.execute(
+            "UPDATE team_invitations SET delivery_state=?, last_delivery_error=? WHERE id=?",
+            (state, (error or "")[:200], invite_id))
+        self.conn.commit()
+
+    @_serialized
+    def accept_invitation(self, token: str, password: str, *,
+                          seat_limit: Optional[int] = None) -> dict:
+        from engraphis import licensing
+        licensing.require_feature("team")
+        _validate_password(password)
+        token_hash = _hash_token(token)
+        # Invitation tokens carry 256 bits of entropy and are not enumerable account
+        # identifiers. Reject an invalid token before the intentionally expensive PBKDF2
+        # so an unauthenticated caller cannot turn this public endpoint into a CPU DoS.
+        candidate = self.conn.execute(
+            "SELECT 1 FROM team_invitations WHERE token_hash=? AND accepted_at IS NULL "
+            "AND revoked_at IS NULL AND expires_at>=?",
+            (token_hash, time.time()),
+        ).fetchone()
+        if candidate is None:
+            raise AuthError("invalid or expired invitation")
+        password_hash = _hash_password(password, iterations=self.iterations)
+        licensing.require_feature("team")
+        # Acceptance normally converts one already-reserved invitation into one active
+        # user, so it does not increase the store's occupied-seat count. The HTTP caller
+        # supplies the *current* entitlement to handle a license downgrade between issue
+        # and acceptance; direct/internal callers may omit it and retain the reservation
+        # semantics established by create_invitation(..., seat_limit=...).
+        current_seat_limit = None if seat_limit is None else max(1, int(seat_limit))
+        now = time.time()
+        conn = self.conn
+        started = not conn.in_transaction
+        try:
+            if started:
+                conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM team_invitations WHERE token_hash=? AND accepted_at IS NULL "
+                "AND revoked_at IS NULL AND expires_at>=?",
+                (token_hash, now)).fetchone()
+            if row is None:
+                raise AuthError("invalid or expired invitation")
+            if conn.execute("SELECT 1 FROM users WHERE email=?", (row["email"],)).fetchone():
+                raise AuthError("an account already exists for this email")
+            # Invitations reserve a seat when issued, but the license can be reduced
+            # before the recipient accepts. Re-check the *current* entitlement inside
+            # the same write transaction as user creation; pending reservations from an
+            # older, larger license must never oversubscribe the downgraded account.
+            active = int(conn.execute(
+                "SELECT COUNT(*) FROM users WHERE disabled=0").fetchone()[0])
+            if current_seat_limit is not None and active >= current_seat_limit:
+                raise AuthError(
+                    "seat limit reached (%d) — ask an admin to free a seat or upgrade Team"
+                    % current_seat_limit)
+            uid = "usr_" + secrets.token_hex(8)
+            conn.execute(
+                "INSERT INTO users(id,email,name,role,pw_hash,created_at) VALUES (?,?,?,?,?,?)",
+                (uid, row["email"], row["name"], row["role"], password_hash, now))
+            consumed = conn.execute(
+                "UPDATE team_invitations SET accepted_at=? WHERE id=? AND accepted_at IS NULL",
+                (now, row["id"]))
+            if consumed.rowcount != 1:
+                raise AuthError("invalid or expired invitation")
+            if started:
+                conn.commit()
+            return self.get_user(uid)
+        except sqlite3.IntegrityError:
+            if started and conn.in_transaction:
+                conn.rollback()
+            raise AuthError("an account already exists for this email")
+        except BaseException:
+            if started and conn.in_transaction:
+                conn.rollback()
+            raise
+
     @_serialized
     def _count_active_admins(self) -> int:
         return int(self.conn.execute(
@@ -398,11 +651,19 @@ class AuthStore:
             # Re-enabling consumes a seat. Keep the count check and update in one write
             # transaction so concurrent admin requests cannot oversubscribe the license.
             reenabling = disabled is False and bool(user["disabled"])
-            if reenabling and seat_limit is not None \
-                    and self.count_active_users() >= seat_limit:
-                raise AuthError(
-                    "seat limit reached (%d) — upgrade your Team license for more seats"
-                    % seat_limit)
+            if reenabling and seat_limit is not None:
+                # Pending invitations already reserve seats. Counting only active users
+                # here would let an admin re-enable a disabled account after issuing an
+                # invitation, stranding its recipient or oversubscribing the license.
+                now = time.time()
+                pending = int(conn.execute(
+                    "SELECT COUNT(*) FROM team_invitations WHERE accepted_at IS NULL "
+                    "AND revoked_at IS NULL AND expires_at>=?", (now,)
+                ).fetchone()[0])
+                if self.count_active_users() + pending >= seat_limit:
+                    raise AuthError(
+                        "seat limit reached (%d) — revoke an invitation or upgrade Team"
+                        % seat_limit)
             if role is not None:
                 conn.execute("UPDATE users SET role=? WHERE id=?", (role, user_id))
             if disabled is not None:
@@ -663,8 +924,17 @@ class AuthStore:
         caller can sign the user straight back in.
         """
         _validate_password(new_password)
-        password_hash = _hash_password(new_password, iterations=self.iterations)
         reset_hash = _hash_token(token)
+        candidate = self.conn.execute(
+            "SELECT 1 FROM password_resets r JOIN users u ON u.id=r.user_id "
+            "WHERE r.token_hash=? AND r.used=0 AND r.expires_at>=? AND u.disabled=0",
+            (reset_hash, time.time()),
+        ).fetchone()
+        if candidate is None:
+            raise AuthError("invalid or expired reset link")
+        # As with invitations, only a proven high-entropy token reaches PBKDF2. Invalid
+        # public requests remain a bounded indexed lookup rather than a CPU-amplifier.
+        password_hash = _hash_password(new_password, iterations=self.iterations)
         new_token = secrets.token_urlsafe(32)
         new_token_hash = _hash_token(new_token)
         now = time.time()
@@ -764,20 +1034,30 @@ class AuthStore:
 
     # ── per-user API tokens (agent connect) ─────────────────────────────────────
     @_serialized
-    def create_api_token(self, user_id: str, *, label: str = "") -> dict:
+    def create_api_token(self, user_id: str, *, label: str = "", scopes=None,
+                         ttl: int = API_TOKEN_TTL_SECONDS) -> dict:
         """Mint a long-lived per-user bearer token for an agent/automation client.
 
         The raw token is returned ONCE; only its SHA-256 hash is persisted (see
         :data:`api_tokens`), so a stolen users DB yields no usable secrets. Bound to
         ``user_id``; a disabled user's tokens are refused by :meth:`resolve_api_token`.
         """
-        tok = secrets.token_urlsafe(32)
+        # A stable non-secret prefix lets non-browser endpoints distinguish a revoked or
+        # expired user token from the temporary legacy license-key migration path. The
+        # random value remains 256 bits and only its hash is persisted.
+        tok = "engr_ut_" + secrets.token_urlsafe(32)
         tid = "tok_" + secrets.token_hex(8)
         now = time.time()
+        expires_at = now + max(300, int(ttl))
         label = (label or "")[:120]
+        requested = set(("agent", "sync:read") if scopes is None else scopes)
+        if not requested or not requested.issubset(API_TOKEN_SCOPES):
+            raise AuthError("invalid API token scopes")
+        scope_text = " ".join(sorted(requested))
         active = int(self.conn.execute(
-            "SELECT COUNT(*) FROM api_tokens WHERE user_id=? AND revoked=0",
-            (user_id,),
+            "SELECT COUNT(*) FROM api_tokens WHERE user_id=? AND revoked=0 "
+            "AND (expires_at IS NULL OR expires_at>=?)",
+            (user_id, now),
         ).fetchone()[0])
         if active >= MAX_ACTIVE_API_TOKENS:
             raise AuthError(
@@ -785,10 +1065,12 @@ class AuthStore:
                 % MAX_ACTIVE_API_TOKENS
             )
         self.conn.execute(
-            "INSERT INTO api_tokens (id, user_id, label, token_hash, created_at) "
-            "VALUES (?,?,?,?,?)", (tid, user_id, label, _hash_token(tok), now))
+            "INSERT INTO api_tokens (id, user_id, label, token_hash, created_at, "
+            "expires_at, scopes) VALUES (?,?,?,?,?,?,?)",
+            (tid, user_id, label, _hash_token(tok), now, expires_at, scope_text))
         self.conn.commit()
         return {"id": tid, "label": label, "created_at": now,
+                "expires_at": expires_at, "scopes": sorted(requested),
                 "last_used_at": None, "revoked": 0, "token": tok}
 
     @_serialized
@@ -798,10 +1080,12 @@ class AuthStore:
         if not token:
             return None
         row = self.conn.execute(
-            "SELECT t.id, t.user_id, t.revoked, u.disabled FROM api_tokens t "
+            "SELECT t.id, t.user_id, t.revoked, t.expires_at, t.scopes, u.disabled "
+            "FROM api_tokens t "
             "JOIN users u ON u.id = t.user_id WHERE t.token_hash=?",
             (_hash_token(token),)).fetchone()
-        if row is None or row["revoked"] or row["disabled"]:
+        if row is None or row["revoked"] or row["disabled"] \
+                or (row["expires_at"] is not None and row["expires_at"] < time.time()):
             return None
         try:
             self.conn.execute("UPDATE api_tokens SET last_used_at=? WHERE id=?",
@@ -809,14 +1093,24 @@ class AuthStore:
             self.conn.commit()
         except sqlite3.Error:
             pass
-        return self.get_user(row["user_id"])
+        user = self.get_user(row["user_id"])
+        if user is not None:
+            user["token_id"] = row["id"]
+            user["token_scopes"] = (row["scopes"] or "agent").split()
+        return user
 
     @_serialized
     def list_api_tokens(self, user_id: str) -> list:
         rows = self.conn.execute(
-            "SELECT id, label, created_at, last_used_at, revoked FROM api_tokens "
+            "SELECT id, label, created_at, expires_at, scopes, last_used_at, revoked "
+            "FROM api_tokens "
             "WHERE user_id=? ORDER BY created_at DESC", (user_id,)).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["scopes"] = (item.get("scopes") or "agent").split()
+            out.append(item)
+        return out
 
     def _prune_revoked_api_tokens(self, user_id: str) -> None:
         self.conn.execute(
