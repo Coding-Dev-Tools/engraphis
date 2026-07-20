@@ -947,13 +947,16 @@ async def team_invite(request: Request):
             dashboard_url = cloud_license.validate_cloud_base_url(dashboard_url)
         except ValueError:
             return JSONResponse({"error": "invalid dashboard URL"}, status_code=400)
-    if invite_url:
-        invite_origin = _auth_link_origin(invite_url, "invite_token")
-        if invite_origin is None:
-            return JSONResponse({"error": "invalid invitation URL"}, status_code=400)
-        if dashboard_url and dashboard_url.rstrip("/") != invite_origin.rstrip("/"):
-            return JSONResponse({"error": "invitation URL origin mismatch"}, status_code=400)
-        dashboard_url = invite_origin
+    if not invite_url:
+        return JSONResponse(
+            {"error": "invite_url with a one-time invite_token is required"},
+            status_code=400)
+    invite_origin = _auth_link_origin(invite_url, "invite_token")
+    if invite_origin is None:
+        return JSONResponse({"error": "invalid invitation URL"}, status_code=400)
+    if dashboard_url and dashboard_url.rstrip("/") != invite_origin.rstrip("/"):
+        return JSONResponse({"error": "invitation URL origin mismatch"}, status_code=400)
+    dashboard_url = invite_origin
 
     # Burst-cap before the verify below, for the same reason /register does: this is an
     # unauthenticated Ed25519 verify on a caller-supplied key. The bucket is deliberately
