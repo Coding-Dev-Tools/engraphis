@@ -175,8 +175,8 @@ def test_notice_line(monkeypatch):
     assert u.notice_line({"enabled": True, "update_available": False}) is None
 
 
-# ── API endpoint wrapper (fail-silent, offline) ───────────────────────────────
 def test_api_update_endpoint(monkeypatch):
+    pytest.importorskip("fastapi", reason="v2_api requires fastapi (extras)")
     from engraphis.routes import v2_api
     monkeypatch.setattr(u, "snapshot",
                         lambda: {"enabled": True, "update_available": True, "latest": "1.4.0"})
@@ -185,6 +185,7 @@ def test_api_update_endpoint(monkeypatch):
 
 
 def test_api_update_never_raises(monkeypatch):
+    pytest.importorskip("fastapi", reason="v2_api requires fastapi (extras)")
     from engraphis.routes import v2_api
 
     def boom():
