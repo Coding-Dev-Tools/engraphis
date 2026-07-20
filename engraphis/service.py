@@ -2359,8 +2359,9 @@ class MemoryService:
                         )
                 closed_at = time.time()
                 c.execute(
-                    "UPDATE edges SET valid_to=? WHERE id=? AND valid_to IS NULL",
-                    (closed_at, ed["id"]),
+                    "UPDATE edges SET workspace_id=?, repo_id=?, src=?, dst=?, valid_to=? "
+                    "WHERE id=? AND valid_to IS NULL",
+                    (wid_dst, new_repo, new_src, new_dst, closed_at, ed["id"]),
                 )
                 c.execute(
                     "UPDATE edge_supports SET valid_to=? WHERE edge_id=? "
