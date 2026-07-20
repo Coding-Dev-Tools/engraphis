@@ -1107,7 +1107,7 @@ def test_team_invite_relay_sends_with_valid_team_key(monkeypatch):
 def test_team_invite_relay_rejects_non_team_key():
     c = _app()
     r = c.post("/license/v1/team-invite",
-               json={"key": _key(plan="pro"), "to": "new@corp.com"})
+               json={"key": _key(plan="pro"), "to": "new@corp.com", "invite_url": "https://team.customer.test/#invite_token=ok"})
     assert r.status_code == 402 and "team" in r.json()["error"].lower()
 
 
@@ -1118,7 +1118,7 @@ def test_team_invite_relay_rejects_revoked_key(monkeypatch):
     key = _key(plan="team")
     reg.record_issued(key)                      # must be a known row for revoke to apply
     reg.revoke(parse_key(key).key_id)
-    r = c.post("/license/v1/team-invite", json={"key": key, "to": "new@corp.com"})
+    r = c.post("/license/v1/team-invite", json={"key": key, "to": "new@corp.com", "invite_url": "https://team.customer.test/#invite_token=ok"})
     assert r.status_code == 402
 
 
@@ -1181,14 +1181,14 @@ def test_team_invite_relay_enforces_daily_cap_per_key(monkeypatch):
     c = _app()
     key = _key(plan="team")
     for _ in range(2):
-        r = c.post("/license/v1/team-invite", json={"key": key, "to": "new@corp.com"})
+        r = c.post("/license/v1/team-invite", json={"key": key, "to": "new@corp.com", "invite_url": "https://team.customer.test/#invite_token=ok"})
         assert r.status_code == 200
-    over = c.post("/license/v1/team-invite", json={"key": key, "to": "new@corp.com"})
+    over = c.post("/license/v1/team-invite", json={"key": key, "to": "new@corp.com", "invite_url": "https://team.customer.test/#invite_token=ok"})
     assert over.status_code == 429 and "limit" in over.json()["error"].lower()
     # a DIFFERENT key is unaffected by another key's cap
     other = c.post("/license/v1/team-invite",
                    json={"key": _key(plan="team", email="other@corp.com"),
-                         "to": "new@corp.com"})
+                         "to": "new@corp.com", "invite_url": "https://team.customer.test/#invite_token=ok"})
     assert other.status_code == 200
 
 
@@ -1204,13 +1204,13 @@ def test_team_invite_relay_surfaces_queue_failure_as_502(monkeypatch):
     c = _app()
     key = _key(plan="team")
     r = c.post("/license/v1/team-invite",
-               json={"key": key, "to": "new@corp.com"})
+               json={"key": key, "to": "new@corp.com", "invite_url": "https://team.customer.test/#invite_token=ok"})
     assert r.status_code == 502
     assert "RESEND_SECRET_123" not in r.text and "private" not in r.text
     # A failed durable enqueue does not consume the accepted-message cap.
     monkeypatch.setattr(WH, "queue_team_invite_email", lambda *a, **k: None)
     retry = c.post("/license/v1/team-invite",
-                   json={"key": key, "to": "new@corp.com"})
+                   json={"key": key, "to": "new@corp.com", "invite_url": "https://team.customer.test/#invite_token=ok"})
     assert retry.status_code == 200
 
 
@@ -1223,7 +1223,7 @@ def test_team_invite_request_retry_reuses_one_durable_outbox_operation(monkeypat
     ):
         monkeypatch.delenv(name, raising=False)
     c = _app()
-    body = {"key": _key(plan="team"), "to": "new@corp.com", "role": "member"}
+    body = {"key": _key(plan="team"), "to": "new@corp.com", "role": "member", "invite_url": "https://team.customer.test/#invite_token=ok"}
 
     first = c.post("/license/v1/team-invite", json=body)
     retry = c.post("/license/v1/team-invite", json=body)
@@ -1254,7 +1254,7 @@ def test_team_invite_refund_failure_keeps_provider_error_sanitized(monkeypatch):
         lambda *a: (_ for _ in ()).throw(OSError("C:/private/relay.db")))
     response = _app().post(
         "/license/v1/team-invite",
-        json={"key": _key(plan="team"), "to": "new@corp.com"})
+        json={"key": _key(plan="team"), "to": "new@corp.com", "invite_url": "https://team.customer.test/#invite_token=ok"})
     assert response.status_code == 502
     assert "SECRET" not in response.text and "private" not in response.text
 
@@ -1408,7 +1408,7 @@ def test_send_team_invite_client_roundtrip(monkeypatch):
     _wire_urlopen_to(c, monkeypatch)
     sent, reason = cloud_license.send_team_invite(
         "http://127.0.0.1", _key(plan="team"), "new@corp.com", "Mo", "member",
-        "admin@corp.com")
+        "admin@corp.com", invite_url="http://127.0.0.1/#invite_token=rt")
     assert sent is True and reason == ""
     assert captured["to"] == "new@corp.com"
 
@@ -1417,7 +1417,7 @@ def test_send_team_invite_client_reports_reason_on_402(monkeypatch):
     c = _app()
     _wire_urlopen_to(c, monkeypatch)
     sent, reason = cloud_license.send_team_invite(
-        "http://127.0.0.1", _key(plan="pro"), "new@corp.com", "Mo", "member", "a@b.com")
+        "http://127.0.0.1", _key(plan="pro"), "new@corp.com", "Mo", "member", "a@b.com", invite_url="http://127.0.0.1/#invite_token=402")
     assert sent is False and "team" in reason.lower()
 
 
