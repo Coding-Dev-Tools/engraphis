@@ -135,7 +135,7 @@ def _dedup_path() -> Optional[str]:
             raise WebhookStateError("vendor webhook state cannot use an in-memory store")
         return override
     db = os.environ.get("ENGRAPHIS_DB_PATH", "").strip()
-    if not vendor_mode and db and db != ":memory:":
+    if db and db != ":memory:":
         try:
             return str(Path(db).expanduser().resolve().parent / ".engraphis_webhooks.db")
         except (OSError, RuntimeError) as exc:

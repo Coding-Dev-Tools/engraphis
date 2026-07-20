@@ -40,7 +40,12 @@ from engraphis.core.graph_scene import (
 from engraphis.core.graph_layers import normalize_graph_layer
 from engraphis.core.ids import new_id as make_id
 from engraphis.core.interfaces import Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter
-from engraphis.core.store import normalize_entity_name
+from engraphis.core.store import (
+    _dumps,
+    _loads,
+    _merge_edge_provenance,
+    normalize_entity_name,
+)
 from engraphis.graphdata import build_graph_payload, empty_graph
 
 # ── validation limits (memory-poisoning / resource-exhaustion guards) ──────────
@@ -2311,7 +2316,8 @@ class MemoryService:
         #    on the unique index (workspace_id, [repo_id,] src, dst, relation, layer),
         #    merge its evidence rows into the survivor and drop the duplicate.
         src_edges = [dict(x) for x in c.execute(
-            "SELECT id, repo_id, src, dst, relation, layer, valid_to, expired_at "
+            "SELECT id, repo_id, src, dst, relation, layer, weight, provenance, "
+            "valid_to, expired_at "
             "FROM edges WHERE workspace_id=?", (wid_src,))]
         for ed in src_edges:
             new_src = entity_remap.get(ed["src"], ed["src"])
@@ -2321,20 +2327,39 @@ class MemoryService:
             if is_live:
                 if new_repo is None:
                     collision = c.execute(
-                        "SELECT id FROM edges WHERE workspace_id=? AND repo_id IS NULL "
+                        "SELECT id, weight, provenance FROM edges "
+                        "WHERE workspace_id=? AND repo_id IS NULL "
                         "AND src=? AND dst=? AND relation=? AND layer=? "
                         "AND valid_to IS NULL AND expired_at IS NULL LIMIT 1",
                         (wid_dst, new_src, new_dst, ed["relation"], ed["layer"]),
                     ).fetchone()
                 else:
                     collision = c.execute(
-                        "SELECT id FROM edges WHERE workspace_id=? AND repo_id=? "
+                        "SELECT id, weight, provenance FROM edges "
+                        "WHERE workspace_id=? AND repo_id=? "
                         "AND src=? AND dst=? AND relation=? AND layer=? "
                         "AND valid_to IS NULL AND expired_at IS NULL LIMIT 1",
                         (wid_dst, new_repo, new_src, new_dst, ed["relation"], ed["layer"]),
                     ).fetchone()
                 if collision:
-                    # Merge evidence: re-point supports, skip duplicates.
+                    # Fold the source relation into the surviving live target edge,
+                    # mirroring Store._deduplicate_live_edges(): keep the stronger
+                    # weight and merge provenance so a higher manual weight or unique
+                    # audit context on the source is never silently discarded.
+                    merged_provenance = _merge_edge_provenance(
+                        [_loads(collision["provenance"], {}),
+                         _loads(ed["provenance"], {})],
+                        merged_ids=[ed["id"]],
+                    )
+                    c.execute(
+                        "UPDATE edges SET weight=?, provenance=? WHERE id=?",
+                        (
+                            max(float(collision["weight"] or 0.0),
+                                float(ed["weight"] or 0.0)),
+                            _dumps(merged_provenance), collision["id"],
+                        ),
+                    )
+                    # Re-point evidence rows onto the survivor, skipping duplicates.
                     c.execute(
                         "UPDATE OR IGNORE edge_supports SET edge_id=? WHERE edge_id=?",
                         (collision["id"], ed["id"]),
