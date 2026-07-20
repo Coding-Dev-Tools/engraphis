@@ -10,9 +10,6 @@ permissions:
 
 jobs:
   readiness:
-    # Skip silently when production secrets are not yet configured (pre-GA repos).
-    # Scheduled runs turn green (skipped) instead of failing every hour.
-    if: ${{ secrets.ENGRAPHIS_CUSTOMER_URL != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
@@ -23,7 +20,17 @@ jobs:
       LICENSE_URL: ${{ secrets.ENGRAPHIS_LICENSE_URL }}
       OPS_TOKEN: ${{ secrets.ENGRAPHIS_VENDOR_ADMIN_TOKEN }}
     steps:
+      - name: Gate on secret availability
+        id: gate
+        run: |
+          if [ -z "$CUSTOMER_URL" ] || [ -z "$CUSTOMER_TOKEN" ] || [ -z "$LICENSE_URL" ] || [ -z "$OPS_TOKEN" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::Production synthetics skipped — monitoring secrets not yet configured (pre-GA)."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Require monitored endpoints
+        if: steps.gate.outputs.skip != 'true'
         run: |
           test -n "$CUSTOMER_URL"
           test -n "$CUSTOMER_TOKEN"
@@ -32,24 +39,29 @@ jobs:
           case "$CUSTOMER_URL" in https://*) ;; *) echo "customer URL must use HTTPS"; exit 1;; esac
           case "$LICENSE_URL" in https://*) ;; *) echo "license URL must use HTTPS"; exit 1;; esac
       - name: Customer readiness
+        if: steps.gate.outputs.skip != 'true'
         run: >-
           curl --fail --silent --show-error --max-time 20 --proto '=https'
           --url "${CUSTOMER_URL%/}/api/ready"
       - name: Authenticated customer storage readiness
+        if: steps.gate.outputs.skip != 'true'
         run: |
           printf 'Authorization: Bearer %s\n' "$CUSTOMER_TOKEN" |
             curl --fail --silent --show-error --max-time 20 --proto '=https' \
               --header @- --url "${CUSTOMER_URL%/}/api/ops/ready"
       - name: Control-plane readiness
+        if: steps.gate.outputs.skip != 'true'
         run: >-
           curl --fail --silent --show-error --max-time 20 --proto '=https'
           --url "${LICENSE_URL%/}/api/ready"
       - name: Authenticated dependency detail
+        if: steps.gate.outputs.skip != 'true'
         run: |
           printf 'Authorization: Bearer %s\n' "$OPS_TOKEN" |
             curl --fail --silent --show-error --max-time 20 --proto '=https' \
               --header @- --url "${LICENSE_URL%/}/ops/ready"
       - name: Non-mutating trial dependency synthetic
+        if: steps.gate.outputs.skip != 'true'
         run: |
           printf 'Authorization: Bearer %s\n' "$OPS_TOKEN" |
             curl --fail --silent --show-error --max-time 20 --proto '=https' \
