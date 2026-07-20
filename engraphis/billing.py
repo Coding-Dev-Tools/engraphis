@@ -518,24 +518,28 @@ def _revoke_refunded_order(data: dict, webhook_id: str) -> JSONResponse:
                              "type": "order.refunded"}, status_code=202)
 
     delivery_claim = "dlv:" + webhook_id
-    if not reserve_webhook(delivery_claim):
+    claim_state = claim_webhook(delivery_claim)
+    if claim_state == "fulfilled":
         logger.info("polar webhook: duplicate refund delivery %s ignored", webhook_id)
         return JSONResponse({"status": "duplicate", "revoked": 0}, status_code=202)
+    if claim_state == "in_flight":
+        return JSONResponse({"status": "processing", "revoked": 0}, status_code=503)
 
     try:
         from engraphis.inspector.license_registry import (
             revoke_by_order, revoke_by_subscription)
-        if subscription_id:
-            revoked = revoke_by_subscription(subscription_id)
-            target = {"subscription_id": subscription_id}
-        else:
+        if order_id:
             revoked = revoke_by_order(order_id)
             target = {"order_id": order_id}
+        else:
+            revoked = revoke_by_subscription(subscription_id)
+            target = {"subscription_id": subscription_id}
     except Exception:  # noqa: BLE001 — force Polar to retry if durable revoke failed
         release_webhook(delivery_claim)
         logger.exception("polar webhook: refund revocation failed")
         return JSONResponse({"error": "revocation failed"}, status_code=503)
 
+    complete_webhook(delivery_claim)
     logger.warning("polar webhook: refund revoked %d license key(s) for %s",
                    revoked, target)
     return JSONResponse({"status": "revoked", "reason": "refund",
@@ -551,9 +555,12 @@ def _revoke_subscription_event(data: dict, webhook_id: str, *,
                              "type": "subscription.revoked"}, status_code=202)
 
     delivery_claim = "dlv:" + webhook_id
-    if not reserve_webhook(delivery_claim):
+    claim_state = claim_webhook(delivery_claim)
+    if claim_state == "fulfilled":
         logger.info("polar webhook: duplicate revocation delivery %s ignored", webhook_id)
         return JSONResponse({"status": "duplicate", "revoked": 0}, status_code=202)
+    if claim_state == "in_flight":
+        return JSONResponse({"status": "processing", "revoked": 0}, status_code=503)
 
     try:
         from engraphis.inspector.license_registry import revoke_by_subscription
@@ -563,6 +570,7 @@ def _revoke_subscription_event(data: dict, webhook_id: str, *,
         logger.exception("polar webhook: subscription revocation failed")
         return JSONResponse({"error": "revocation failed"}, status_code=503)
 
+    complete_webhook(delivery_claim)
     logger.warning("polar webhook: %s revoked %d license key(s) for subscription %s",
                    reason, revoked, subscription_id)
     return JSONResponse({"status": "revoked", "reason": reason, "revoked": revoked,
