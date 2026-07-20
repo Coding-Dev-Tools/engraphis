@@ -1336,7 +1336,8 @@ def test_trial_key_cannot_choose_the_dashboard_url_in_a_vendor_email(monkeypatch
     assert parse_key(key).is_trial is True
     r = _app().post("/license/v1/team-invite",
                     json={"key": key, "to": "victim@corp.com",
-                          "dashboard_url": "https://engraphis-team.attacker.test/"})
+                          "dashboard_url": "https://engraphis-team.attacker.test/",
+                          "invite_url": "https://engraphis-team.attacker.test/#invite_token=trial-secret"})
     # A legacy/unbound trial key has no verified deployment origin, so it cannot use the
     # vendor's mail reputation to send any link at all. Deployment-bound trials pass an
     # invite URL whose origin is checked against their confirmed claim.
@@ -1354,12 +1355,14 @@ def test_paid_key_pins_its_dashboard_url_on_first_use(monkeypatch):
             seen.append(dashboard_url))
     c = _app()
     key = _key(plan="team")
-    body = {"key": key, "to": "new@corp.com", "dashboard_url": "https://team.corp.example/"}
+    body = {"key": key, "to": "new@corp.com", "dashboard_url": "https://team.corp.example/",
+            "invite_url": "https://team.corp.example/#invite_token=pin-secret"}
     assert c.post("/license/v1/team-invite", json=body).status_code == 200
     # the same URL keeps working...
     assert c.post("/license/v1/team-invite", json=body).status_code == 200
     # ...a different one is refused, and never reaches the mail provider
-    moved = dict(body, dashboard_url="https://engraphis-team.attacker.test/")
+    moved = dict(body, dashboard_url="https://engraphis-team.attacker.test/",
+                 invite_url="https://engraphis-team.attacker.test/#invite_token=moved-secret")
     r = c.post("/license/v1/team-invite", json=moved)
     assert r.status_code == 409 and "dashboard url" in r.json()["error"].lower()
     # validate_cloud_base_url canonicalizes before the pin is taken, so an equivalent
@@ -1369,7 +1372,8 @@ def test_paid_key_pins_its_dashboard_url_on_first_use(monkeypatch):
     other = c.post("/license/v1/team-invite",
                    json={"key": _key(plan="team", email="other@corp.com"),
                          "to": "new@corp.com",
-                         "dashboard_url": "https://other.example/"})
+                         "dashboard_url": "https://other.example/",
+                         "invite_url": "https://other.example/#invite_token=other-secret"})
     assert other.status_code == 200
 
 
@@ -1382,15 +1386,18 @@ def test_rejected_dashboard_url_does_not_consume_the_daily_invite_cap(monkeypatc
     key = _key(plan="team")
     assert c.post("/license/v1/team-invite",
                   json={"key": key, "to": "a@corp.com",
-                        "dashboard_url": "https://team.corp.example/"}).status_code == 200
+                        "dashboard_url": "https://team.corp.example/",
+                        "invite_url": "https://team.corp.example/#invite_token=cap-pin-secret"}).status_code == 200
     for _ in range(3):
         assert c.post("/license/v1/team-invite",
                       json={"key": key, "to": "a@corp.com",
-                            "dashboard_url": "https://evil.test/"}).status_code == 409
+                            "dashboard_url": "https://evil.test/",
+                            "invite_url": "https://evil.test/#invite_token=evil-secret"}).status_code == 409
     # the one remaining legitimate send is still available
     assert c.post("/license/v1/team-invite",
                   json={"key": key, "to": "b@corp.com",
-                        "dashboard_url": "https://team.corp.example/"}).status_code == 200
+                        "dashboard_url": "https://team.corp.example/",
+                        "invite_url": "https://team.corp.example/#invite_token=cap-pin-secret"}).status_code == 200
 
 
 def test_relay_invite_never_forwards_the_license_key(monkeypatch):
@@ -1405,7 +1412,8 @@ def test_relay_invite_never_forwards_the_license_key(monkeypatch):
     for role in ("viewer", "member"):
         assert c.post("/license/v1/team-invite",
                       json={"key": key, "to": "new@corp.com",
-                            "role": role}).status_code == 200
+                            "role": role,
+                            "invite_url": "https://team.customer.test/#invite_token=key-secret"}).status_code == 200
     assert "key" not in seen["viewer"]
     assert "key" not in seen["member"]
 
@@ -1444,7 +1452,8 @@ def test_send_team_invite_client_roundtrip(monkeypatch):
     _wire_urlopen_to(c, monkeypatch)
     sent, reason = cloud_license.send_team_invite(
         "http://127.0.0.1", _key(plan="team"), "new@corp.com", "Mo", "member",
-        "admin@corp.com")
+        "admin@corp.com",
+        invite_url="https://team.customer.test/#invite_token=client-secret")
     assert sent is True and reason == ""
     assert captured["to"] == "new@corp.com"
 
@@ -1453,7 +1462,8 @@ def test_send_team_invite_client_reports_reason_on_402(monkeypatch):
     c = _app()
     _wire_urlopen_to(c, monkeypatch)
     sent, reason = cloud_license.send_team_invite(
-        "http://127.0.0.1", _key(plan="pro"), "new@corp.com", "Mo", "member", "a@b.com")
+        "http://127.0.0.1", _key(plan="pro"), "new@corp.com", "Mo", "member", "a@b.com",
+        invite_url="http://127.0.0.1/#invite_token=402")
     assert sent is False and "team" in reason.lower()
 
 
@@ -2096,7 +2106,9 @@ def test_legacy_team_trial_key_cannot_use_deployment_bound_invite_relay(monkeypa
     c = _app()
     captured = _capture_verify_url(monkeypatch)
     key = _start_and_confirm(c, captured, "dev-1")
-    r = c.post("/license/v1/team-invite", json={"key": key, "to": "teammate@corp.com"})
+    r = c.post("/license/v1/team-invite",
+               json={"key": key, "to": "teammate@corp.com",
+                     "invite_url": "https://team.customer.test/#invite_token=legacy-secret"})
     assert r.status_code == 409
     assert "dashboard origin" in r.json()["error"]
     assert captured_invite == {}
