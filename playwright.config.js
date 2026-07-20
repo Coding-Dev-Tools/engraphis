@@ -13,4 +13,15 @@ module.exports = defineConfig({
   projects: [
     { name: 'chromium', use: { browserName: 'chromium' } },
   ],
+  webServer: {
+    command: 'engraphis-dashboard --no-open',
+    port: 8700,
+    timeout: 60_000,
+    reuseExistingServer: true,
+    env: {
+      ENGRAPHIS_EMBED_MODEL: '',
+      ENGRAPHIS_LOOP_INTERVAL: '0',
+      ENGRAPHIS_HOST: '127.0.0.1',
+    },
+  },
 });
