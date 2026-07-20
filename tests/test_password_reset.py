@@ -163,6 +163,34 @@ def test_remote_forgot_never_builds_a_reset_link_from_the_host_header(
     assert after == before
 
 
+def test_loopback_peer_forged_host_builds_only_a_loopback_reset_link(monkeypatch, tmp_path):
+    """A reverse proxy forwarding from a loopback socket without X-Forwarded-* makes a remote
+    visitor look local; the Host it supplies must NOT become the reset-link target. The local
+    fallback emits only a localhost origin, so a forged Host is defused."""
+    from engraphis.inspector import webhooks as WH
+
+    sent = []
+    monkeypatch.delenv("ENGRAPHIS_DASHBOARD_URL", raising=False)
+    monkeypatch.setattr(WH, "email_configured", lambda: True)
+    monkeypatch.setattr(
+        WH, "send_password_reset_email",
+        lambda to, name, reset_url: sent.append(reset_url),
+    )
+    c = _client(monkeypatch, tmp_path)
+    _admin(c)
+
+    local = TestClient(c.app, client=("127.0.0.1", 50000))
+    response = local.post(
+        "/api/auth/forgot", json={"email": "admin@x.co"},
+        headers={"Host": "reset-token.attacker.example"},
+    )
+    assert response.status_code == 200 and response.json() == {"ok": True}
+    assert len(sent) == 1
+    assert "attacker.example" not in sent[0]
+    assert sent[0].startswith("http://localhost")
+    assert "#reset_token=" in sent[0]
+
+
 def test_forgot_disabled_account_responds_identically_and_sends_nothing(monkeypatch, tmp_path):
     c = _client(monkeypatch, tmp_path)
     _admin(c)

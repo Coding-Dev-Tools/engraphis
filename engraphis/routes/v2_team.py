@@ -61,19 +61,28 @@ def _dashboard_base_url(request: Request) -> str:
     if not is_local_request(request):
         raise ValueError("ENGRAPHIS_DASHBOARD_URL is required for remote email links")
 
+    # Genuinely local + unproxied: emit a LOOPBACK origin built from the server's OWN bound
+    # port, never from the client-supplied Host. A reverse proxy that forwards from
+    # 127.0.0.1 without X-Forwarded-* can make is_local_request() true for a remote visitor,
+    # whose attacker-controlled Host would otherwise become the reset/invite link target
+    # (account takeover). The zero-config fallback only ever needs to reach the user's own
+    # machine, so localhost is the only correct — and only safe — destination here; the Host
+    # header is deliberately not consulted.
     from urllib.parse import urlsplit, urlunsplit
     parts = urlsplit(str(request.base_url).strip())
-    if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+    scheme = parts.scheme.lower()
+    if scheme not in ("http", "https"):
         raise ValueError("request origin is not an absolute HTTP URL")
-    try:
-        parts.port
-    except ValueError:
-        raise ValueError("request origin has an invalid port") from None
-    if parts.username is not None or parts.password is not None \
-            or "\\" in parts.netloc or any(char.isspace() for char in parts.netloc):
-        raise ValueError("request origin contains an invalid authority")
-    return urlunsplit((parts.scheme.lower(), parts.netloc,
-                       parts.path.rstrip("/"), "", ""))
+    server = tuple((getattr(request, "scope", None) or {}).get("server") or ())
+    port = None
+    if len(server) == 2 and server[1] is not None:
+        try:
+            port = int(server[1])
+        except (TypeError, ValueError):
+            port = None
+    default_port = 443 if scheme == "https" else 80
+    netloc = "localhost" if port in (None, default_port) else "localhost:%d" % port
+    return urlunsplit((scheme, netloc, "", "", ""))
 
 
 def _send_invite(invitation: dict, admin: dict, request: Request) -> tuple:
