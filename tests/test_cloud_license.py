@@ -1107,7 +1107,8 @@ def test_team_invite_relay_sends_with_valid_team_key(monkeypatch):
 def test_team_invite_relay_rejects_non_team_key():
     c = _app()
     r = c.post("/license/v1/team-invite",
-               json={"key": _key(plan="pro"), "to": "new@corp.com"})
+               json={"key": _key(plan="pro"), "to": "new@corp.com",
+                     "invite_url": "https://team.customer.test/#invite_token=one-time-secret"})
     assert r.status_code == 402 and "team" in r.json()["error"].lower()
 
 
