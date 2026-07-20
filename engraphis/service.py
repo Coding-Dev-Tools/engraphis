@@ -2317,7 +2317,7 @@ class MemoryService:
         #    merge its evidence rows into the survivor and drop the duplicate.
         src_edges = [dict(x) for x in c.execute(
             "SELECT id, repo_id, src, dst, relation, layer, weight, provenance, "
-            "valid_to, expired_at "
+            "valid_from, ingested_at, valid_to, expired_at "
             "FROM edges WHERE workspace_id=?", (wid_src,))]
         for ed in src_edges:
             new_src = entity_remap.get(ed["src"], ed["src"])
@@ -2327,7 +2327,7 @@ class MemoryService:
             if is_live:
                 if new_repo is None:
                     collision = c.execute(
-                        "SELECT id, weight, provenance FROM edges "
+                        "SELECT id, weight, valid_from, ingested_at, provenance FROM edges "
                         "WHERE workspace_id=? AND repo_id IS NULL "
                         "AND src=? AND dst=? AND relation=? AND layer=? "
                         "AND valid_to IS NULL AND expired_at IS NULL LIMIT 1",
@@ -2335,7 +2335,7 @@ class MemoryService:
                     ).fetchone()
                 else:
                     collision = c.execute(
-                        "SELECT id, weight, provenance FROM edges "
+                        "SELECT id, weight, valid_from, ingested_at, provenance FROM edges "
                         "WHERE workspace_id=? AND repo_id=? "
                         "AND src=? AND dst=? AND relation=? AND layer=? "
                         "AND valid_to IS NULL AND expired_at IS NULL LIMIT 1",
@@ -2351,11 +2351,25 @@ class MemoryService:
                          _loads(ed["provenance"], {})],
                         merged_ids=[ed["id"]],
                     )
+                    # Keep the earliest temporal anchor so the surviving relation is
+                    # never reported as newer than it truly is, mirroring
+                    # Store._deduplicate_live_edges().
+                    valid_values = [
+                        float(v) for v in (collision["valid_from"], ed["valid_from"])
+                        if v is not None
+                    ]
+                    ingested_values = [
+                        float(v) for v in (collision["ingested_at"], ed["ingested_at"])
+                        if v is not None
+                    ]
                     c.execute(
-                        "UPDATE edges SET weight=?, provenance=? WHERE id=?",
+                        "UPDATE edges SET weight=?, valid_from=?, ingested_at=?, "
+                        "provenance=? WHERE id=?",
                         (
                             max(float(collision["weight"] or 0.0),
                                 float(ed["weight"] or 0.0)),
+                            min(valid_values) if valid_values else None,
+                            min(ingested_values) if ingested_values else None,
                             _dumps(merged_provenance), collision["id"],
                         ),
                     )
