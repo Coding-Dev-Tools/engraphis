@@ -1128,7 +1128,8 @@ def test_team_invite_relay_rejects_revoked_key(monkeypatch):
 def test_team_invite_relay_rejects_invalid_recipient_email():
     c = _app()
     r = c.post("/license/v1/team-invite",
-               json={"key": _key(plan="team"), "to": "not-an-email"})
+               json={"key": _key(plan="team"), "to": "not-an-email",
+                     "invite_url": "https://team.customer.test/#invite_token=test-secret"})
     assert r.status_code == 400
 
 
@@ -1136,8 +1137,29 @@ def test_team_invite_relay_rejects_malformed_invited_by():
     c = _app()
     r = c.post("/license/v1/team-invite",
                json={"key": _key(plan="team"), "to": "new@corp.com",
-                     "invited_by": "garbage"})
+                     "invited_by": "garbage",
+                     "invite_url": "https://team.customer.test/#invite_token=test-secret"})
     assert r.status_code == 400
+
+
+def test_team_invite_relay_rejects_missing_invite_url(monkeypatch):
+    from engraphis.inspector import license_cloud
+    from engraphis.inspector import webhooks as WH
+    queued = []
+    monkeypatch.setattr(WH, "queue_team_invite_email", lambda *a, **k: queued.append(1))
+    monkeypatch.setattr(license_cloud, "_invite_daily_cap", lambda: 1)
+    c = _app()
+    key = _key(plan="team")
+    r = c.post("/license/v1/team-invite",
+               json={"key": key, "to": "new@corp.com", "role": "member"})
+    assert r.status_code == 400
+    assert "invite_token" in r.json()["error"]
+    assert queued == []
+    # the daily cap was not consumed by the rejected request
+    ok = c.post("/license/v1/team-invite",
+                json={"key": key, "to": "new@corp.com", "role": "member",
+                      "invite_url": "https://team.customer.test/#invite_token=ok"})
+    assert ok.status_code == 200
 
 
 @pytest.mark.parametrize("field,value", [
@@ -1154,7 +1176,9 @@ def test_team_invite_relay_rejects_malformed_invited_by():
     ("invite_url", "https://team.example/#invite_token=once%2Dencoded"),
 ])
 def test_team_invite_relay_rejects_hostile_fields(field, value):
-    body = {"key": _key(plan="team"), "to": "new@corp.com", field: value}
+    body = {"key": _key(plan="team"), "to": "new@corp.com",
+            "invite_url": "https://team.customer.test/#invite_token=test-secret",
+            field: value}
     assert _app().post("/license/v1/team-invite", json=body).status_code == 400
 
 

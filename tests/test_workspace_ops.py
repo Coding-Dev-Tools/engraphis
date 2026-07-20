@@ -672,3 +672,55 @@ def test_inspect_chain_backward_pointer_does_not_cross_workspace():
 
     result = svc.inspect(forged_id, workspace="a")
     assert {m["id"] for m in result["chain"]} == {forged_id}
+
+# ── merge_workspaces: colliding live edges ────────────────────────────────────
+def test_merge_deduplicates_colliding_live_edges():
+    """When both workspaces hold a live edge between same-named entities (same
+    relation + layer), the blind relabel UPDATE would violate the partial unique
+    index ``idx_edge_workspace_live_unique``.  The fix merges the source edge's
+    ``edge_supports`` into the surviving target edge and expires the duplicate."""
+    svc = _svc()
+    svc.create_workspace("src-ws")
+    svc.create_workspace("dst-ws")
+    src_wid = _wsid(svc, "src-ws")
+    dst_wid = _wsid(svc, "dst-ws")
+
+    # Same-named entities in each workspace → folded during merge step 2.
+    svc.store.upsert_entity(
+        Node(id="ent-src-a", name="Alice", ntype="person", workspace_id=src_wid))
+    svc.store.upsert_entity(
+        Node(id="ent-src-b", name="Bob", ntype="person", workspace_id=src_wid))
+    svc.store.upsert_entity(
+        Node(id="ent-dst-a", name="Alice", ntype="person", workspace_id=dst_wid))
+    svc.store.upsert_entity(
+        Node(id="ent-dst-b", name="Bob", ntype="person", workspace_id=dst_wid))
+
+    # Live edges with the same relation + layer in both workspaces.
+    svc.store.upsert_edge(Edge(
+        id="edge-src", src="ent-src-a", dst="ent-src-b", relation="knows",
+        layer=GraphLayer.SEMANTIC, workspace_id=src_wid,
+        provenance={"memory_ids": ["mem-src-1"]}))
+    svc.store.upsert_edge(Edge(
+        id="edge-dst", src="ent-dst-a", dst="ent-dst-b", relation="knows",
+        layer=GraphLayer.SEMANTIC, workspace_id=dst_wid,
+        provenance={"memory_ids": ["mem-dst-1"]}))
+
+    svc.merge_workspaces("src-ws", "dst-ws")
+
+    # Exactly one live edge survives in the target workspace.
+    live = svc.store.conn.execute(
+        "SELECT id FROM edges WHERE workspace_id=? AND valid_to IS NULL "
+        "AND expired_at IS NULL", (dst_wid,)).fetchall()
+    assert len(live) == 1
+    survivor = live[0]["id"]
+
+    # The survivor's supports include evidence from BOTH source memories.
+    supports = {r["memory_id"] for r in svc.store.conn.execute(
+        "SELECT memory_id FROM edge_supports WHERE edge_id=? "
+        "AND valid_to IS NULL AND expired_at IS NULL", (survivor,))}
+    assert supports == {"mem-src-1", "mem-dst-1"}
+
+    # The source edge is expired, not deleted (bi-temporal history preserved).
+    src_edge = svc.store.conn.execute(
+        "SELECT valid_to FROM edges WHERE id=?", ("edge-src",)).fetchone()
+    assert src_edge["valid_to"] is not None

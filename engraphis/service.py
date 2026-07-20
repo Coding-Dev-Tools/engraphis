@@ -2307,14 +2307,70 @@ class MemoryService:
             )
 
         # 3) Edges: relabel workspace/repo, remapping any entity ids folded in step 2.
+        #    Before relabeling, check for a live collision on the partial unique index
+        #    (workspace_id, [repo_id,] src, dst, relation, layer).  On collision the
+        #    source edge's supports merge into the surviving target edge and the source
+        #    duplicate is expired instead of violating the constraint.
         src_edges = [dict(x) for x in c.execute(
-            "SELECT id, repo_id, src, dst FROM edges WHERE workspace_id=?", (wid_src,))]
+            "SELECT id, repo_id, src, dst, relation, layer FROM edges WHERE workspace_id=?",
+            (wid_src,))]
         for ed in src_edges:
-            c.execute(
-                "UPDATE edges SET workspace_id=?, repo_id=?, src=?, dst=? WHERE id=?",
-                (wid_dst, _new_repo(ed["repo_id"]),
-                 entity_remap.get(ed["src"], ed["src"]), entity_remap.get(ed["dst"], ed["dst"]),
-                 ed["id"]))
+            new_repo = _new_repo(ed["repo_id"])
+            new_src = entity_remap.get(ed["src"], ed["src"])
+            new_dst = entity_remap.get(ed["dst"], ed["dst"])
+            if new_repo is not None:
+                collision = c.execute(
+                    "SELECT id FROM edges WHERE workspace_id=? AND repo_id=? "
+                    "AND src=? AND dst=? AND relation=? AND layer=? "
+                    "AND valid_to IS NULL AND expired_at IS NULL AND id<>?",
+                    (wid_dst, new_repo, new_src, new_dst,
+                     ed["relation"], ed["layer"], ed["id"]),
+                ).fetchone()
+            else:
+                collision = c.execute(
+                    "SELECT id FROM edges WHERE workspace_id=? AND repo_id IS NULL "
+                    "AND src=? AND dst=? AND relation=? AND layer=? "
+                    "AND valid_to IS NULL AND expired_at IS NULL AND id<>?",
+                    (wid_dst, new_src, new_dst,
+                     ed["relation"], ed["layer"], ed["id"]),
+                ).fetchone()
+            if collision:
+                # Merge live edge_supports from the source duplicate into the survivor.
+                for sup in c.execute(
+                    "SELECT memory_id, source_kind, confidence, valid_from, "
+                    "ingested_at, provenance FROM edge_supports "
+                    "WHERE edge_id=? AND valid_to IS NULL AND expired_at IS NULL",
+                    (ed["id"],),
+                ).fetchall():
+                    if c.execute(
+                        "SELECT 1 FROM edge_supports WHERE edge_id=? "
+                        "AND memory_id=? AND source_kind=? "
+                        "AND valid_to IS NULL AND expired_at IS NULL",
+                        (collision["id"], sup["memory_id"], sup["source_kind"]),
+                    ).fetchone() is None:
+                        c.execute(
+                            "INSERT INTO edge_supports "
+                            "(edge_id, memory_id, source_kind, confidence, "
+                            "valid_from, ingested_at, provenance) "
+                            "VALUES (?,?,?,?,?,?,?)",
+                            (collision["id"], sup["memory_id"], sup["source_kind"],
+                             sup["confidence"], sup["valid_from"],
+                             sup["ingested_at"], sup["provenance"]),
+                        )
+                closed_at = time.time()
+                c.execute(
+                    "UPDATE edges SET valid_to=? WHERE id=? AND valid_to IS NULL",
+                    (closed_at, ed["id"]),
+                )
+                c.execute(
+                    "UPDATE edge_supports SET valid_to=? WHERE edge_id=? "
+                    "AND valid_to IS NULL AND expired_at IS NULL",
+                    (closed_at, ed["id"]),
+                )
+            else:
+                c.execute(
+                    "UPDATE edges SET workspace_id=?, repo_id=?, src=?, dst=? WHERE id=?",
+                    (wid_dst, new_repo, new_src, new_dst, ed["id"]))
 
         # 4) Memories / sessions / events: relabel workspace/repo per distinct repo_id
         #    bucket (ids, content and history are untouched).
