@@ -468,6 +468,16 @@ def _polar_subscription_id(data: dict, *, object_is_subscription: bool = False) 
 
 def _polar_order_id(data: dict) -> str:
     """Extract a Polar order id from direct or nested event data."""
+    from engraphis.inspector.webhooks import _extract_order_id
+    order_id = _extract_order_id(data)
+    if order_id:
+        return order_id
+    order = data.get("order") or {}
+    if isinstance(order, dict):
+        return _extract_order_id(order)
+    return ""
+
+
 def _release_claims(*claim_ids: str) -> None:
     """Best-effort rollback used only while returning a retryable failure."""
     for claim_id in claim_ids:
@@ -557,6 +567,8 @@ def _revoke_subscription_event(data: dict, webhook_id: str, *,
                    reason, revoked, subscription_id)
     return JSONResponse({"status": "revoked", "reason": reason, "revoked": revoked,
                          "subscription_id": subscription_id}, status_code=202)
+
+
 def _event_modified_at(data: dict) -> Optional[float]:
     """Epoch of the event object's own last-modification time, if the payload carries
     one (Polar sends ``modified_at`` on Subscription objects). Used to reject an
