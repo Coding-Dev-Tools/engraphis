@@ -361,9 +361,6 @@ def create_app() -> FastAPI:
                         return JSONResponse({"error": "requires the %s role" % minimum},
                                             status_code=403)
             request.state.user = mu
-            if not role_at_least(mu["role"], "member"):
-                return JSONResponse({"error": "role member required", "auth": "team"},
-                                    status_code=403)
             set_current_user(mu)
             response = await call_next(request)
             response_session = (response.headers.get("Mcp-Session-Id") or "").strip()

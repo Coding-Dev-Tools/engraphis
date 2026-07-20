@@ -142,7 +142,7 @@ def test_mcp_requires_team_license_402(monkeypatch, tmp_path):
 
 
 
-def test_mcp_rejects_viewer_token(monkeypatch, tmp_path):
+def test_mcp_viewer_token_can_initialize(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path, key=_team_key()) as c:
         _setup_admin(c)
         member = c.post("/api/auth/users", json={"email": "viewer@x.co", "name": "Viewer",
@@ -161,7 +161,8 @@ def test_mcp_rejects_viewer_token(monkeypatch, tmp_path):
                   "params": {"protocolVersion": _PROTO, "capabilities": {},
                              "clientInfo": {"name": "t", "version": "1"}}},
                    headers=_h(token))
-        assert r.status_code == 403
+        assert r.status_code == 200
+
 def test_mcp_rejects_unconfigured_host(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path, key=_team_key()) as c:
         _setup_admin(c)

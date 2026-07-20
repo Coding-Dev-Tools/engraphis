@@ -893,8 +893,8 @@ async def polar_webhook(request: Request):
         if status == "revoked":
             return _revoke_subscription_event(data, webhook_id,
                                               reason="subscription_revoked")
-        if status not in ("active", "trialing") or not sub_id:
-            return JSONResponse({"status": "ignored", "reason": "not an active/trialing "
+        if status != "active" or not sub_id:
+            return JSONResponse({"status": "ignored", "reason": "not an active "
                                  "subscription", "type": event_type}, status_code=202)
         # Different subscription.updated deliveries have different idempotency keys, so
         # delivery-level claims do not serialize them. Hold one durable per-subscription
