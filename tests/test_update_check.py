@@ -177,6 +177,7 @@ def test_notice_line(monkeypatch):
 
 # ── API endpoint wrapper (fail-silent, offline) ───────────────────────────────
 def test_api_update_endpoint(monkeypatch):
+    pytest.importorskip("fastapi")
     from engraphis.routes import v2_api
     monkeypatch.setattr(u, "snapshot",
                         lambda: {"enabled": True, "update_available": True, "latest": "1.4.0"})
@@ -185,6 +186,7 @@ def test_api_update_endpoint(monkeypatch):
 
 
 def test_api_update_never_raises(monkeypatch):
+    pytest.importorskip("fastapi")
     from engraphis.routes import v2_api
 
     def boom():
