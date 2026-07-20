@@ -131,6 +131,13 @@ def create_app() -> FastAPI:
 
     @_contextlib.asynccontextmanager
     async def _lifespan(app: FastAPI):
+        try:  # one-line "update available" notice (background, fail-silent, opt-out)
+            import logging as _logging
+
+            from engraphis import update_check
+            update_check.emit_startup_notice(_logging.getLogger("engraphis").info)
+        except Exception:  # noqa: BLE001 - never block dashboard startup
+            pass
         if _mcp_asgi is not None:
             async with _mcp_mgr.run():
                 yield

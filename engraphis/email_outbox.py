@@ -244,7 +244,7 @@ def deliver_now(message_id: str,
         now = time.time()
         updated = conn.execute(
             "UPDATE email_outbox SET status='sent',provider=?,provider_message_id=?,"
-            "last_error='',sent_at=?,updated_at=? "
+            "last_error='',sent_at=?,updated_at=?,text_body='',reply_to=NULL "
             "WHERE id=? AND status='sending' AND attempts=?",
             (provider_name, provider_message_id, now, now,
              message_id, int(message["attempts"])))

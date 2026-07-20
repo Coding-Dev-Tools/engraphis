@@ -2307,14 +2307,44 @@ class MemoryService:
             )
 
         # 3) Edges: relabel workspace/repo, remapping any entity ids folded in step 2.
+        #    When a remapped source edge would collide with an existing live edge
+        #    on the unique index (workspace_id, [repo_id,] src, dst, relation, layer),
+        #    merge its evidence rows into the survivor and drop the duplicate.
         src_edges = [dict(x) for x in c.execute(
-            "SELECT id, repo_id, src, dst FROM edges WHERE workspace_id=?", (wid_src,))]
+            "SELECT id, repo_id, src, dst, relation, layer, valid_to, expired_at "
+            "FROM edges WHERE workspace_id=?", (wid_src,))]
         for ed in src_edges:
+            new_src = entity_remap.get(ed["src"], ed["src"])
+            new_dst = entity_remap.get(ed["dst"], ed["dst"])
+            new_repo = _new_repo(ed["repo_id"])
+            is_live = ed["valid_to"] is None and ed["expired_at"] is None
+            if is_live:
+                if new_repo is None:
+                    collision = c.execute(
+                        "SELECT id FROM edges WHERE workspace_id=? AND repo_id IS NULL "
+                        "AND src=? AND dst=? AND relation=? AND layer=? "
+                        "AND valid_to IS NULL AND expired_at IS NULL LIMIT 1",
+                        (wid_dst, new_src, new_dst, ed["relation"], ed["layer"]),
+                    ).fetchone()
+                else:
+                    collision = c.execute(
+                        "SELECT id FROM edges WHERE workspace_id=? AND repo_id=? "
+                        "AND src=? AND dst=? AND relation=? AND layer=? "
+                        "AND valid_to IS NULL AND expired_at IS NULL LIMIT 1",
+                        (wid_dst, new_repo, new_src, new_dst, ed["relation"], ed["layer"]),
+                    ).fetchone()
+                if collision:
+                    # Merge evidence: re-point supports, skip duplicates.
+                    c.execute(
+                        "UPDATE OR IGNORE edge_supports SET edge_id=? WHERE edge_id=?",
+                        (collision["id"], ed["id"]),
+                    )
+                    c.execute("DELETE FROM edge_supports WHERE edge_id=?", (ed["id"],))
+                    c.execute("DELETE FROM edges WHERE id=?", (ed["id"],))
+                    continue
             c.execute(
                 "UPDATE edges SET workspace_id=?, repo_id=?, src=?, dst=? WHERE id=?",
-                (wid_dst, _new_repo(ed["repo_id"]),
-                 entity_remap.get(ed["src"], ed["src"]), entity_remap.get(ed["dst"], ed["dst"]),
-                 ed["id"]))
+                (wid_dst, new_repo, new_src, new_dst, ed["id"]))
 
         # 4) Memories / sessions / events: relabel workspace/repo per distinct repo_id
         #    bucket (ids, content and history are untouched).
