@@ -10,6 +10,9 @@ permissions:
 
 jobs:
   readiness:
+    # Skip silently when production secrets are not yet configured (pre-GA repos).
+    # Scheduled runs turn green (skipped) instead of failing every hour.
+    if: ${{ secrets.ENGRAPHIS_CUSTOMER_URL != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
