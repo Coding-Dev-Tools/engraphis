@@ -456,45 +456,6 @@ def revoke(key_id: str, *, db_path: Optional[str] = None) -> bool:
     finally:
         conn.close()
 
-def revoke_by_subscription(subscription_id: str, *, db_path: Optional[str] = None) -> int:
-    """Revoke every active key issued for a subscription. Returns keys changed.
-
-    Use this for refunds or definitive subscription revocation. Do NOT call it for an
-    ordinary cancellation-at-period-end: the signed key's expiry already honors the paid
-    period the customer bought.
-    """
-    subscription_id = (subscription_id or "").strip()[:128]
-    if not subscription_id:
-        return 0
-    conn = connect(db_path)
-    try:
-        cur = conn.execute(
-            "UPDATE issued_licenses SET status='revoked', revoked_at=? "
-            "WHERE subscription_id=? AND status!='revoked'",
-            (time.time(), subscription_id),
-        )
-        conn.commit()
-        return cur.rowcount
-    finally:
-        conn.close()
-
-
-def revoke_by_order(order_id: str, *, db_path: Optional[str] = None) -> int:
-    """Revoke every active key issued for a Polar order. Returns keys changed."""
-    order_id = (order_id or "").strip()[:128]
-    if not order_id:
-        return 0
-    conn = connect(db_path)
-    try:
-        cur = conn.execute(
-            "UPDATE issued_licenses SET status='revoked', revoked_at=? "
-            "WHERE order_id=? AND status!='revoked'",
-            (time.time(), order_id),
-        )
-        conn.commit()
-        return cur.rowcount
-    finally:
-        conn.close()
 
 
 def revoke_superseded(subscription_id: str, keep_key_id: str, *,

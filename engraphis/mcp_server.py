@@ -318,33 +318,6 @@ def engraphis_recall_grounded(
                 pass
 
 
-@mcp.tool(
-    name="engraphis_why",
-    annotations={"title": "Explain the rationale behind a fact", "readOnlyHint": True,
-                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
-)
-def engraphis_why(
-    query: Annotated[str, Field(description="The decision or fact to explain, e.g. "
-                                "'why did we migrate to PASETO?' or just 'rate limit'.",
-                                min_length=1, max_length=100_000)],
-    workspace: Annotated[str, Field(description="Workspace to search.", min_length=1,
-                                    max_length=200)],
-    repo: Annotated[Optional[str], Field(description="Restrict to this repo.",
-                                         max_length=200)] = None,
-    k: Annotated[int, Field(description="Max results (1-50).", ge=1, le=50)] = 5,
-) -> str:
-    """Surface the current answer *and* what it superseded, if anything.
-
-    Use this for "why is it like this" / "what did we used to do" questions — it
-    deliberately looks past the live view into bi-temporal history, which plain recall
-    does not. The "supersedes" list is what makes this different from a vector search:
-    those memories are no longer current but are not deleted, so the rationale chain
-    ("we used to do X, then switched to Y because Z") stays answerable.
-
-    Returns:
-        str: JSON ``{"query","answer":[...live memories...],"supersedes":[...what they
-        replaced, if anything...]}``. Raises an actionable error if the workspace/repo
-        is unknown.
     """
     try:
         return _ok(service().why(query, workspace=workspace, repo=repo, k=k))
