@@ -1,0 +1,61 @@
+{
+  "format": "engraphis-railway-template-composer-source/v1",
+  "name": "Engraphis Pro or Team",
+  "description": "Customer-mode Engraphis dashboard with persistent memory, secure hosted trial activation, and scoped Team sync tokens.",
+  "source": {
+    "repository": "https://github.com/Coding-Dev-Tools/engraphis",
+    "branch": "main",
+    "dockerfile": "Dockerfile"
+  },
+  "service": {
+    "healthcheck": "/api/ready",
+    "public_domain": true,
+    "volume": {
+      "mount_path": "/data"
+    }
+  },
+  "variables": {
+    "ENGRAPHIS_SERVICE_MODE": {
+      "value": "customer",
+      "required": true
+    },
+    "ENGRAPHIS_DB_PATH": {
+      "value": "/data/engraphis.db",
+      "required": true
+    },
+    "ENGRAPHIS_STATE_DIR": {
+      "value": "/data/.engraphis",
+      "required": true
+    },
+    "ENGRAPHIS_TEAM_MODE": {
+      "value": "1",
+      "required": true
+    },
+    "ENGRAPHIS_JSON_LOGS": {
+      "value": "1",
+      "required": true
+    },
+    "ENGRAPHIS_FORWARDED_ALLOW_IPS": {
+      "value": "*",
+      "required": true
+    },
+    "ENGRAPHIS_CLOUD_URL": {
+      "value": "https://license.engraphis.com",
+      "required": true
+    },
+    "ENGRAPHIS_DASHBOARD_URL": {
+      "value": "https://${{RAILWAY_PUBLIC_DOMAIN}}",
+      "required": true
+    },
+    "ENGRAPHIS_RELAY_URL": {
+      "value": "https://${{RAILWAY_PUBLIC_DOMAIN}}",
+      "required": true
+    },
+    "ENGRAPHIS_DEPLOYMENT_TOKEN": {
+      "value": "${{ secret(48) }}",
+      "secret": true,
+      "prompt": "Railway generates this unique ownership secret. Copy it into the hosted onboarding wizard, then seal it after the first admin is created.",
+      "required": true
+    }
+  }
+}

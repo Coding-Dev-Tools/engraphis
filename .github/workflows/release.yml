@@ -11,6 +11,9 @@ on:
         required: false
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build distributions
@@ -22,14 +25,18 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
 
-      - name: Install release gate
-        run: python -m pip install --upgrade "pip>=26.1.2" "setuptools>=83" build twine pip-audit ".[test]"
+      - name: Install release gate and the production dependency set
+        run: >-
+          python -m pip install --upgrade "pip>=26.1.2" "setuptools>=83"
+          build twine pip-audit ".[all,test]"
 
       - name: Require tag and package version to match
         if: github.event_name == 'push'
@@ -40,8 +47,17 @@ jobs:
           test "$GITHUB_REF_NAME" = "v$actual"
           test "$expected" = "$actual"
 
+      - name: Require release tag commit to be on protected main
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
       - name: Full release gate
         run: |
+          python scripts/check_commercial_manifest.py
+          python scripts/externalize_dashboard_assets.py
           ruff check .
           python -m pytest tests/ -q
           python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
@@ -61,9 +77,96 @@ jobs:
           name: python-package-distributions
           path: dist/
 
+  python-matrix:
+    name: Python ${{ matrix.python-version }} release gate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install version-appropriate gate
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          if [ "${{ matrix.python-version }}" = "3.9" ]; then
+            python -m pip install numpy pytest ruff
+          else
+            python -m pip install -e ".[test]"
+          fi
+      - name: Unit, lint, and retrieval gates
+        run: |
+          ruff check .
+          python -m pytest tests/ -q
+          python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
+          python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5
+          python -m eval.ablation
+
+  browser-accessibility:
+    name: Browser accessibility release gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install browser gate
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Playwright desktop/mobile, keyboard, CSP, console, and axe checks
+        run: npm run test:e2e
+
+  docker-smoke:
+    name: Production image release gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - name: Build production image
+        run: docker build -t engraphis:release .
+      - name: Verify production image OCR runtime
+        run: >-
+          docker run --rm --entrypoint sh engraphis:release -c
+          'python -c "import PIL, pytesseract" && command -v tesseract >/dev/null &&
+          tesseract --version | head -n 1'
+      - name: Audit production image dependencies
+        run: >-
+          docker run --rm --entrypoint sh engraphis:release -c
+          'python -m pip install --no-cache-dir pip-audit &&
+          python -m pip_audit --local'
+      - name: Run customer-mode readiness smoke
+        shell: bash
+        run: |
+          docker run -d --name engraphis-release -p 8700:8700 \
+            -e ENGRAPHIS_EMBED_MODEL= \
+            -e ENGRAPHIS_LOOP_INTERVAL=0 \
+            -e ENGRAPHIS_HOST=0.0.0.0 \
+            engraphis:release
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8700/api/ready; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs engraphis-release
+          exit 1
+      - name: Teardown
+        if: always()
+        run: docker rm -f engraphis-release || true
+
   publish:
     name: Publish to PyPI
-    needs: build
+    needs: [build, python-matrix, browser-accessibility, docker-smoke]
     # Manual dispatch is intentionally build/check-only. Publication requires a pushed
     # semver tag, whose value was matched to pyproject.toml in the build job above.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -80,7 +183,7 @@ jobs:
           path: dist/
 
       - name: Publish distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
 
   github-release:
     name: Publish GitHub Release

@@ -25,6 +25,10 @@ build/
 /engraphis-[0-9]*/
 .pytest_cache/
 .ruff_cache/
+node_modules/
+.playwright/
+playwright-report/
+test-results/
 models_cache/
 .secrets/
 internal/

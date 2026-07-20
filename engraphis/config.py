@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import sys
 from contextlib import contextmanager
@@ -221,14 +222,28 @@ def _configured_db_path(root: Path = _PROJECT_ROOT) -> str:
     return str(target)
 
 
-#: Vendor-hosted managed service for sync, leases, trials, and invite delivery. This is
-#: the default target when ``ENGRAPHIS_RELAY_URL`` is not overridden.
+#: Vendor-hosted managed sync service. Customer deployments normally override this with
+#: their own dashboard URL; local Pro clients retain the managed default.
 DEFAULT_RELAY_URL = "https://team.engraphis.com"
+
+#: Isolated commercial control plane for paid-license leases, trials, fulfillment, and
+#: transactional mail. Keeping this distinct from the dashboard removes the signing seed
+#: and billing webhook secret from the customer-facing memory service.
+DEFAULT_LICENSE_SERVER_URL = "https://license.engraphis.com"
+
+SERVICE_MODES = ("customer", "vendor", "combined")
 
 # Keys issued before the custom domain migration carry this URL inside their signed
 # payload. Preserve the signature, but route that one retired vendor host to the current
 # managed service. Arbitrary signed URLs remain authoritative.
 RETIRED_RELAY_URLS = frozenset({
+    "https://engraphis-production.up.railway.app",
+})
+
+# Existing signed keys point at the old combined host. License verification may migrate
+# that exact vendor URL without altering arbitrary customer-signed endpoints.
+RETIRED_LICENSE_SERVER_URLS = frozenset({
+    "https://team.engraphis.com",
     "https://engraphis-production.up.railway.app",
 })
 
@@ -249,6 +264,73 @@ def _env_float(key: str, default: float) -> float:
         return float(_env(key, str(default)))
     except ValueError:
         return default
+
+
+def persist_project_env(values: dict[str, str], path: Optional[Path] = None) -> Path:
+    """Upsert non-secret runtime settings in the project-local ``.env`` atomically.
+
+    Dashboard controls use this for settings that must survive a restart. Explicit
+    process-environment values still remain authoritative on the next launch because
+    python-dotenv loads with ``override=False``.
+    """
+    target = Path(path) if path is not None else Path.cwd() / ".env"
+    clean: dict[str, str] = {}
+    for key, value in values.items():
+        name = str(key or "").strip()
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+            raise ValueError("environment setting names must be uppercase identifiers")
+        text = str(value)
+        if "\n" in text or "\r" in text:
+            raise ValueError("environment setting values must be single-line")
+        clean[name] = text
+
+    existed = target.exists()
+    existing = target.read_text(encoding="utf-8") if existed else ""
+    # Replacing an existing .env through a fresh default-mode file can silently widen
+    # permissions from 0600 to 0644 while the preserved lines still contain API keys.
+    # Carry the original mode forward; new files start private regardless of umask.
+    try:
+        mode = target.stat().st_mode & 0o777 if existed else 0o600
+    except OSError:
+        mode = 0o600
+    lines = existing.splitlines()
+    found: set[str] = set()
+    rendered: list[str] = []
+    for line in lines:
+        match = re.match(r"^(\s*)(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=", line)
+        if match and match.group(2) in clean:
+            key = match.group(2)
+            if key not in found:
+                rendered.append(f"{match.group(1)}{key}={clean[key]}")
+                found.add(key)
+            continue
+        rendered.append(line)
+    if rendered and rendered[-1].strip():
+        rendered.append("")
+    for key, value in clean.items():
+        if key not in found:
+            rendered.append(f"{key}={value}")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(
+        f".{target.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
+    )
+    try:
+        with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write("\n".join(rendered).rstrip() + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(temporary, mode)
+        except OSError:
+            pass
+        os.replace(temporary, target)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return target
 
 
 @dataclass
@@ -277,6 +359,13 @@ class Settings:
     team_mode: bool = field(
         default_factory=lambda: _env("ENGRAPHIS_TEAM_MODE", "").lower()
         not in ("0", "false", "no", "off")
+    )
+
+    # Production roles are isolated. ``combined`` preserves local development and legacy
+    # self-host behavior; the official Railway template sets ``customer`` and the vendor
+    # control plane sets ``vendor``.
+    service_mode: str = field(
+        default_factory=lambda: _env("ENGRAPHIS_SERVICE_MODE", "combined").lower()
     )
 
     # Managed relay base URL. Client sync uses it when `--relay-url` is omitted, and paid
@@ -314,6 +403,13 @@ class Settings:
     llm_extra_headers: dict = field(
         default_factory=lambda: _parse_headers(_env("ENGRAPHIS_LLM_EXTRA_HEADERS", ""))
     )
+    # A successful dashboard connection test enables schema-validated extraction unless
+    # the user explicitly turned it off. The separate flag is what makes an automatic
+    # default and a durable on/off control compatible.
+    llm_auto_extract: bool = field(
+        default_factory=lambda: _env("ENGRAPHIS_LLM_AUTO_EXTRACT", "1").lower()
+        not in ("0", "false", "no", "off")
+    )
 
     # Optional cross-encoder reranker model. Empty (default) -> IdentityReranker (offline).
     rerank_model: str = field(default_factory=lambda: _env("ENGRAPHIS_RERANK_MODEL", ""))
@@ -322,6 +418,12 @@ class Settings:
     # heuristic NER, no API key, populated on every ingest; "none" disables graph
     # population. Defaults on so the Graph tab works out of the box for every install.
     graph_extractor: str = field(default_factory=lambda: _env("ENGRAPHIS_GRAPH_EXTRACTOR", "regex").lower())
+    # Analytical Galaxy v2 is the validated default; setting the rollout flag to 0
+    # restores the legacy ForceGraph surface for one compatibility release.
+    graph_ui_v2: bool = field(
+        default_factory=lambda: _env("ENGRAPHIS_GRAPH_UI_V2", "1").lower()
+        not in ("0", "false", "no", "off")
+    )
 
     # Optional host-LLM importance/retention classification. "none" keeps the fully
     # deterministic local write path; "llm" asks the configured provider for a bounded
@@ -347,6 +449,14 @@ class Settings:
         bracketed — ``host='::'`` must not yield the malformed ``http://:::8700``)."""
         from engraphis.netutil import display_base_url
         return display_base_url(self.host, self.port)
+
+    @property
+    def customer_service(self) -> bool:
+        return self.service_mode in ("customer", "combined")
+
+    @property
+    def vendor_service(self) -> bool:
+        return self.service_mode in ("vendor", "combined")
 
 
 def _parse_headers(raw: str) -> dict:
@@ -382,9 +492,15 @@ def canonicalize_relay_url(url: str) -> str:
     return DEFAULT_RELAY_URL if normalized in RETIRED_RELAY_URLS else normalized
 
 
+def canonicalize_license_server_url(url: str) -> str:
+    """Normalize a license-server URL and migrate the retired combined host."""
+    normalized = (url or "").strip().rstrip("/")
+    return (DEFAULT_LICENSE_SERVER_URL
+            if normalized in RETIRED_LICENSE_SERVER_URLS else normalized)
+
+
 def resolve_license_server_url(signed_url: str = "") -> str:
     """Resolve the license server, including known vendor-host migrations."""
-    override = canonicalize_relay_url(_env("ENGRAPHIS_CLOUD_URL", ""))
-    signed = canonicalize_relay_url(signed_url)
-    relay = canonicalize_relay_url(settings.relay_url)
-    return override or signed or relay
+    override = canonicalize_license_server_url(_env("ENGRAPHIS_CLOUD_URL", ""))
+    signed = canonicalize_license_server_url(signed_url)
+    return override or signed or DEFAULT_LICENSE_SERVER_URL

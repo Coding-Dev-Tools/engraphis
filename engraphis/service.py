@@ -21,13 +21,26 @@ import json
 import hashlib
 import contextvars
 import math
+import copy
+import time
+import threading
+from collections import Counter, OrderedDict
+from functools import wraps
 from pathlib import Path
 from typing import Any, Optional
 
 from engraphis.backends.extractor import ChunkingExtractor
 from engraphis.core.engine import MemoryEngine
+from engraphis.core.graph_scene import (
+    build_canonical_graph,
+    build_graph_scene,
+    is_broad_search_fragment,
+    strongest_path,
+)
 from engraphis.core.graph_layers import normalize_graph_layer
+from engraphis.core.ids import new_id as make_id
 from engraphis.core.interfaces import Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter
+from engraphis.core.store import normalize_entity_name
 from engraphis.graphdata import build_graph_payload, empty_graph
 
 # ── validation limits (memory-poisoning / resource-exhaustion guards) ──────────
@@ -47,6 +60,31 @@ MAX_IMPORT_FILES = 500
 MAX_IMPORT_FILE_BYTES = 2_000_000
 MAX_IMPORT_RESOURCE_BYTES = 100_000_000
 MAX_IMPORT_TOTAL_BYTES = 250_000_000
+# Analytical graph scenes rank the candidate graph before applying the much smaller
+# browser scene budget. Keep that server-side candidate set finite as well: graph rows
+# are user/sync writable, and an unbounded Louvain/PageRank request would otherwise be a
+# straightforward authenticated resource-exhaustion path.
+MAX_GRAPH_ANALYSIS_ENTITIES = 20_000
+MAX_GRAPH_ANALYSIS_EDGES = 100_000
+MAX_GRAPH_ANALYSIS_SUPPORTS = 250_000
+# Complete scenes are intentionally not representative samples.  These are hard
+# refusal ceilings, not render caps: callers receive an explicit capacity error rather
+# than a silently incomplete chart.
+MAX_GRAPH_COMPLETE_MEMORIES = 50_000
+MAX_GRAPH_COMPLETE_MEMORY_LINKS = 150_000
+MAX_GRAPH_COMPLETE_CODE_MEMORY_LINKS = 150_000
+MAX_GRAPH_COMPLETE_PAYLOAD_BYTES = 64 * 1024 * 1024
+MAX_GRAPH_INDEX_MEMORIES = 20_000
+MAX_GRAPH_INDEX_WORKERS = 2
+GRAPH_INDEX_BATCH_SIZE = 100
+GRAPH_INDEX_LEASE_SECONDS = 60.0
+GRAPH_INDEX_JOB_HISTORY = 100
+# Inspector payloads are deliberately smaller than analysis payloads. The endpoint
+# reports complete counts, but bounds the returned detail so selecting a hub cannot
+# produce a multi-megabyte response or lock the inspector's DOM.
+GRAPH_ENTITY_RELATION_LIMIT = 200
+GRAPH_ENTITY_EVIDENCE_LIMIT = 100
+GRAPH_ENTITY_HISTORY_LIMIT = 50
 
 # control characters except tab/newline/carriage-return
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -55,6 +93,54 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9._\-/ ]{1,%d}$" % MAX_NAME_CHARS)
 
 class ValidationError(ValueError):
     """Raised when untrusted input fails a guard. Message is safe to surface."""
+
+
+class GraphSceneCapacityExceeded(ValidationError):
+    """A complete scene crossed a hard safety ceiling and was not sampled."""
+
+    def __init__(self, *, resource: str, count: int, limit: int) -> None:
+        self.resource = resource
+        self.count = int(count)
+        self.limit = int(limit)
+        super().__init__(
+            f"complete graph exceeds the {resource} safety limit "
+            f"({self.count} > {self.limit}); narrow the workspace filters"
+        )
+
+
+def _rollback_service_transaction(method):
+    """Roll back a failed multi-statement service mutation on the shared connection.
+
+    The serialized SQLite wrapper pins its write lock until commit or rollback. Workspace
+    lifecycle operations contain many dependent statements, so an unexpected storage or
+    constraint failure must release both the partial transaction and that lock.
+    """
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        started = not self.store.conn.in_transaction
+        try:
+            if started:
+                self.store.conn.execute("BEGIN IMMEDIATE")
+            result = method(self, *args, **kwargs)
+            if started and self.store.conn.in_transaction:
+                self.store.conn.commit()
+            return result
+        except BaseException:
+            if self.store.conn.in_transaction:
+                try:
+                    self.store.conn.rollback()
+                except Exception:  # noqa: BLE001 - preserve the original failure
+                    pass
+            raise
+    return wrapped
+
+
+class GraphIndexRebuilding(ValidationError):
+    """Raised when a graph read would observe a partially rebuilt derived index."""
+
+    def __init__(self, job_id: str) -> None:
+        self.job_id = job_id
+        super().__init__(f"graph index rebuilding (job {job_id})")
 
 
 # ── current dashboard user (request-scoped, team mode only) ────────────────────
@@ -350,6 +436,43 @@ class MemoryService:
         # ``graph()``. Guards against rescanning a workspace whose memories genuinely
         # yield no entities on every Graph-tab open.
         self._graph_backfilled: set = set()
+        # Graph scenes are expensive derived views over the full canonical graph. Cache
+        # a small number per service instance, keyed by both request parameters and the
+        # SQLite connection revision. ``total_changes`` catches writes performed through
+        # this connection; ``data_version`` catches commits from another connection.
+        # Consequently a memory/entity/edge mutation invalidates cached scenes without a
+        # stale TTL window, while repeated pan/filter/navigation reads stay comfortably
+        # inside the dashboard's warm-response budget. Each value also carries the next
+        # bi-temporal validity boundary: time passing can change a current-time scene even
+        # when no connection writes, so such an entry expires exactly at that boundary.
+        self._graph_scene_cache: "OrderedDict[tuple, tuple[float, dict]]" = OrderedDict()
+        self._graph_job_lock = threading.RLock()
+        self._graph_job_threads: dict[str, threading.Thread] = {}
+        self._graph_runner_id = make_id("device")
+
+    def _graph_scene_revision(self) -> tuple[int, int, int]:
+        row = self.store.conn.execute("PRAGMA data_version").fetchone()
+        data_version = int(row[0]) if row is not None else 0
+        return (int(self.store.conn.total_changes), data_version,
+                int(self.store.schema_version))
+
+    def _graph_scene_valid_until(self, workspace_id: str, at: float) -> float:
+        """Earliest future world-time boundary that can change a current graph scene."""
+        row = self.store.conn.execute(
+            "SELECT MIN(boundary) FROM ("
+            "SELECT valid_from AS boundary FROM edges "
+            "WHERE workspace_id=? AND valid_from>? AND expired_at IS NULL "
+            "UNION ALL SELECT valid_to FROM edges "
+            "WHERE workspace_id=? AND valid_to>? AND expired_at IS NULL "
+            "UNION ALL SELECT s.valid_from FROM edge_supports s "
+            "JOIN edges e ON e.id=s.edge_id WHERE e.workspace_id=? "
+            "AND s.valid_from>? AND s.expired_at IS NULL "
+            "UNION ALL SELECT s.valid_to FROM edge_supports s "
+            "JOIN edges e ON e.id=s.edge_id WHERE e.workspace_id=? "
+            "AND s.valid_to>? AND s.expired_at IS NULL)",
+            (workspace_id, at, workspace_id, at, workspace_id, at, workspace_id, at),
+        ).fetchone()
+        return float(row[0]) if row is not None and row[0] is not None else math.inf
 
     @classmethod
     def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
@@ -398,7 +521,9 @@ class MemoryService:
 
     def _lookup_repo(self, workspace_id: str, name: str) -> Optional[str]:
         row = self.store.conn.execute(
-            "SELECT id FROM repos WHERE workspace_id=? AND name=?", (workspace_id, name)
+            "SELECT id FROM repos WHERE workspace_id=? AND (name=? OR id=?) "
+            "ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END LIMIT 1",
+            (workspace_id, name, name, name),
         ).fetchone()
         return row["id"] if row else None
 
@@ -1926,6 +2051,7 @@ class MemoryService:
         self.store.conn.commit()
         return {"workspace": ws, "description": description}
 
+    @_rollback_service_transaction
     def delete_workspace(self, workspace: str, *, actor: str = "user") -> dict:
         """HARD-delete a workspace and everything scoped to it (memories, vectors, FTS rows,
         entities/edges, sessions, events, repos + their code graph). Unlike ``forget`` this is
@@ -1935,11 +2061,30 @@ class MemoryService:
         wid = self._lookup_workspace(ws)
         if wid is None:
             raise ValidationError(f"no workspace named '{ws}' yet")
+        self._assert_no_active_graph_job(wid)
         c = self.store.conn
-        n_mem = c.execute("SELECT COUNT(*) AS n FROM memories WHERE workspace_id=?", (wid,)).fetchone()["n"]
+        memory_ids = [row["id"] for row in c.execute(
+            "SELECT id FROM memories WHERE workspace_id=?", (wid,)
+        ).fetchall()]
+        n_mem = len(memory_ids)
         msub = "(SELECT id FROM memories WHERE workspace_id=?)"
         rsub = "(SELECT id FROM repos WHERE workspace_id=?)"
         ssub = f"(SELECT id FROM symbols WHERE repo_id IN {rsub})"
+        # Retire each memory's evidence before the hard delete. This removes the
+        # memory from any global/legacy edge it supported and closes an edge whose last
+        # source is disappearing. Then delete the normalized evidence rows themselves:
+        # hard deletion must not leave orphaned provenance behind.
+        for memory_id in memory_ids:
+            self.store.invalidate_edges_for_memory(memory_id, commit=False)
+        c.execute(
+            "DELETE FROM edge_supports WHERE memory_id IN " + msub,
+            (wid,),
+        )
+        c.execute(
+            "DELETE FROM edge_supports WHERE edge_id IN "
+            "(SELECT id FROM edges WHERE workspace_id=?)",
+            (wid,),
+        )
         c.execute(
             f"DELETE FROM code_memory_links WHERE repo_id IN {rsub} "
             f"OR memory_id IN {msub} OR symbol_id IN {ssub}",
@@ -1961,11 +2106,15 @@ class MemoryService:
         c.execute(f"DELETE FROM code_edges WHERE repo_id IN {rsub}", (wid,))
         c.execute(f"DELETE FROM symbols WHERE repo_id IN {rsub}", (wid,))
         c.execute("DELETE FROM repos WHERE workspace_id=?", (wid,))
+        c.execute("DELETE FROM jobs WHERE workspace_id=?", (wid,))
+        # Entity/edge delete triggers may have recreated this generation row.
+        c.execute("DELETE FROM graph_index_state WHERE workspace_id=?", (wid,))
         c.execute("DELETE FROM workspaces WHERE id=?", (wid,))
         self.store.audit(actor, "workspace_delete", wid, f"{ws} ({int(n_mem)} memories)")
         c.commit()
         return {"workspace": ws, "deleted": True, "memories_removed": int(n_mem)}
 
+    @_rollback_service_transaction
     def merge_workspaces(self, source: str, target: str, *, actor: str = "user") -> dict:
         """Fold ``source`` into ``target``, then remove the now-empty ``source``
         workspace. This is the workspace-level counterpart to ``merge`` — and the
@@ -1988,6 +2137,7 @@ class MemoryService:
             raise ValidationError(f"no workspace named '{src}' yet")
         if wid_dst is None:
             raise ValidationError(f"no workspace named '{dst}' yet")
+        self._assert_no_active_graph_job(wid_src, wid_dst)
         c = self.store.conn
         n_mem = c.execute("SELECT COUNT(*) AS n FROM memories WHERE workspace_id=?",
                           (wid_src,)).fetchone()["n"]
@@ -2105,19 +2255,38 @@ class MemoryService:
         # 2) Entities: fold same name+type+repo together, else relabel.
         entity_remap: dict = {}
         src_entities = [dict(x) for x in c.execute(
-            "SELECT id, repo_id, name, etype FROM entities WHERE workspace_id=?", (wid_src,))]
+            "SELECT id, repo_id, name, etype, canonical_id, normalized_name "
+            "FROM entities WHERE workspace_id=?", (wid_src,))]
         for e in src_entities:
             nrid = _new_repo(e["repo_id"])
+            normalized = e.get("normalized_name") or normalize_entity_name(e["name"])
             existing = c.execute(
-                "SELECT id FROM entities WHERE workspace_id=? AND repo_id IS ? AND name=? AND etype IS ?",
-                (wid_dst, nrid, e["name"], e["etype"])
+                "SELECT id, canonical_id FROM entities WHERE workspace_id=? AND repo_id IS ? "
+                "AND normalized_name=? AND etype IS ? ORDER BY id LIMIT 1",
+                (wid_dst, nrid, normalized, e["etype"])
             ).fetchone()
             if existing:
                 entity_remap[e["id"]] = existing["id"]
                 c.execute("DELETE FROM entities WHERE id=?", (e["id"],))
             else:
-                c.execute("UPDATE entities SET workspace_id=?, repo_id=? WHERE id=?",
-                          (wid_dst, nrid, e["id"]))
+                canonical = c.execute(
+                    "SELECT COALESCE(canonical_id, id) AS canonical_id FROM entities "
+                    "WHERE workspace_id=? AND normalized_name=? AND etype IS ? "
+                    "ORDER BY id LIMIT 1",
+                    (wid_dst, normalized, e["etype"]),
+                ).fetchone()
+                c.execute(
+                    "UPDATE entities SET workspace_id=?, repo_id=?, normalized_name=?, "
+                    "canonical_id=?, canonical_method=? WHERE id=?",
+                    (wid_dst, nrid, normalized,
+                     canonical["canonical_id"] if canonical else (e["canonical_id"] or e["id"]),
+                     "exact_normalized" if canonical else "exact", e["id"]),
+                )
+        for old_id, new_id in entity_remap.items():
+            c.execute(
+                "UPDATE entities SET canonical_id=? WHERE workspace_id=? AND canonical_id=?",
+                (new_id, wid_dst, old_id),
+            )
 
         # 3) Edges: relabel workspace/repo, remapping any entity ids folded in step 2.
         src_edges = [dict(x) for x in c.execute(
@@ -2131,7 +2300,7 @@ class MemoryService:
 
         # 4) Memories / sessions / events: relabel workspace/repo per distinct repo_id
         #    bucket (ids, content and history are untouched).
-        for table in ("memories", "sessions", "events"):
+        for table in ("memories", "sessions", "events", "jobs"):
             buckets = [dict(x) for x in c.execute(
                 f"SELECT DISTINCT repo_id FROM {table} WHERE workspace_id=?", (wid_src,))]
             for b in buckets:
@@ -2141,6 +2310,7 @@ class MemoryService:
                     (wid_dst, _new_repo(b["repo_id"]), wid_src, b["repo_id"]))
 
         # 5) The source workspace is now empty — drop it.
+        c.execute("DELETE FROM graph_index_state WHERE workspace_id=?", (wid_src,))
         c.execute("DELETE FROM workspaces WHERE id=?", (wid_src,))
         self.store.audit(actor, "workspace_merge", wid_dst, f"{src} ({int(n_mem)} memories) -> {dst}")
         c.commit()
@@ -2160,6 +2330,7 @@ class MemoryService:
                 return candidate
             n += 1
 
+    @_rollback_service_transaction
     def copy_workspace(self, source: str, new_name: Optional[str] = None, *,
                        actor: str = "user") -> dict:
         """Duplicate ``source`` into a brand-new workspace: repos (+ their code graph),
@@ -2175,6 +2346,7 @@ class MemoryService:
         wid_src = self._lookup_workspace(src)
         if wid_src is None:
             raise ValidationError(f"no workspace named '{src}' yet")
+        self._assert_no_active_graph_job(wid_src)
         if new_name:
             dst = _clean_name(new_name, field="new_name")
             if self._lookup_workspace(dst) is not None:
@@ -2244,25 +2416,42 @@ class MemoryService:
             return repo_remap.get(old_repo_id, old_repo_id) if old_repo_id is not None else None
 
         # 2) Entities, cloned with fresh ids.
-        entity_remap: dict = {}
-        for e in [dict(x) for x in c.execute(
-                "SELECT * FROM entities WHERE workspace_id=?", (wid_src,))]:
-            neid = ids.new_id("entity")
-            entity_remap[e["id"]] = neid
+        source_entities = [dict(x) for x in c.execute(
+            "SELECT * FROM entities WHERE workspace_id=?", (wid_src,)
+        )]
+        entity_remap: dict = {
+            entity["id"]: ids.new_id("entity") for entity in source_entities
+        }
+        for e in source_entities:
+            neid = entity_remap[e["id"]]
+            old_canonical_id = e.get("canonical_id")
+            canonical_id = entity_remap.get(old_canonical_id, neid)
+            canonical_method = (
+                (e.get("canonical_method") or "identity")
+                if old_canonical_id in entity_remap else "identity"
+            )
             c.execute(
                 "INSERT INTO entities(id, workspace_id, repo_id, name, etype, canonical_id, "
-                "created_at) VALUES (?,?,?,?,?,?,?)",
+                "normalized_name, canonical_method, canonical_confidence, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (neid, wid_dst, _new_repo(e["repo_id"]), e["name"], e["etype"],
-                 e["canonical_id"], ts))
+                 canonical_id, e.get("normalized_name") or normalize_entity_name(e["name"]),
+                 canonical_method,
+                 e.get("canonical_confidence") or 1.0, ts))
 
         # 3) Entity-graph edges, remapped onto the cloned entities/repos.
-        for ed in [dict(x) for x in c.execute(
-                "SELECT * FROM edges WHERE workspace_id=?", (wid_src,))]:
+        source_edges = [dict(x) for x in c.execute(
+            "SELECT * FROM edges WHERE workspace_id=?", (wid_src,)
+        )]
+        edge_remap: dict = {}
+        for ed in source_edges:
+            new_edge_id = ids.new_id("edge")
+            edge_remap[ed["id"]] = new_edge_id
             c.execute(
                 "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation, layer, "
                 "weight, valid_from, valid_to, ingested_at, expired_at, provenance) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (ids.new_id("edge"), wid_dst, _new_repo(ed["repo_id"]),
+                (new_edge_id, wid_dst, _new_repo(ed["repo_id"]),
                  entity_remap.get(ed["src"], ed["src"]), entity_remap.get(ed["dst"], ed["dst"]),
                  ed["relation"], ed["layer"] or "semantic", ed["weight"],
                  ed["valid_from"], ed["valid_to"], ed["ingested_at"],
@@ -2284,11 +2473,48 @@ class MemoryService:
 
         # 5) Memories, cloned with fresh ids — plus their full-text and vector mirrors,
         #    which key off the memory id and so need the same new id.
-        memory_remap: dict = {}
-        for m in [dict(x) for x in c.execute(
-                "SELECT * FROM memories WHERE workspace_id=?", (wid_src,))]:
-            nmid = ids.new_id("memory")
-            memory_remap[m["id"]] = nmid
+        source_memories = [dict(x) for x in c.execute(
+            "SELECT * FROM memories WHERE workspace_id=?", (wid_src,)
+        )]
+        memory_remap = {
+            memory["id"]: ids.new_id("memory") for memory in source_memories
+        }
+
+        def _remap_json_memory_ids(raw):
+            try:
+                value = json.loads(raw or "{}")
+            except (TypeError, ValueError):
+                return raw
+
+            def walk(item):
+                if isinstance(item, dict):
+                    remapped = {}
+                    for key, child in item.items():
+                        if key in ("memory_id", "corrects"):
+                            replacement = memory_remap.get(str(child or ""))
+                            if replacement:
+                                remapped[key] = replacement
+                            continue
+                        if key in ("memory_ids", "supersedes") and isinstance(child, list):
+                            replacements = [
+                                memory_remap[str(old)] for old in child
+                                if str(old) in memory_remap
+                            ]
+                            if replacements:
+                                remapped[key] = list(dict.fromkeys(replacements))
+                            continue
+                        remapped[key] = walk(child)
+                    return remapped
+                if isinstance(item, list):
+                    return [walk(child) for child in item]
+                if isinstance(item, str):
+                    return memory_remap.get(item, item)
+                return item
+
+            return json.dumps(walk(value), ensure_ascii=False, separators=(",", ":"))
+
+        for m in source_memories:
+            nmid = memory_remap[m["id"]]
             c.execute(
                 "INSERT INTO memories (id, workspace_id, repo_id, session_id, scope, mtype, "
                 "title, content, summary, keywords, metadata, importance, surprise, stability, "
@@ -2297,10 +2523,11 @@ class MemoryService:
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (nmid, wid_dst, _new_repo(m["repo_id"]), session_remap.get(m["session_id"]),
                  m["scope"], m["mtype"], m["title"], m["content"], m["summary"], m["keywords"],
-                 m["metadata"], m["importance"], m["surprise"], m["stability"],
+                 _remap_json_memory_ids(m["metadata"]), m["importance"],
+                 m["surprise"], m["stability"],
                  m["access_count"], m["last_access"], m["valid_from"], m["valid_to"],
                  m["ingested_at"], m["expired_at"], m["pinned"], m["sensitivity"],
-                 m["provenance"], m["sort_order"]))
+                 _remap_json_memory_ids(m["provenance"]), m["sort_order"]))
             fts_row = c.execute(
                 "SELECT title, content, keywords FROM mem_fts WHERE id=?", (m["id"],)).fetchone()
             if fts_row:
@@ -2322,6 +2549,50 @@ class MemoryService:
 
         # 6) Cross-memory links where *both* endpoints were copied — a link to a memory
         #    outside this workspace can't be meaningfully cloned, so those are dropped.
+        # Remap legacy provenance and normalized evidence only after memory ids exist.
+        # Opaque canonical/support ids never cross the workspace boundary unchanged.
+        for source_edge in source_edges:
+            new_edge_id = edge_remap[source_edge["id"]]
+            edge_provenance = _remap_json_memory_ids(
+                source_edge.get("provenance") or "{}"
+            )
+            c.execute(
+                "UPDATE edges SET provenance=? WHERE id=?",
+                (edge_provenance, new_edge_id),
+            )
+            source_supports = [dict(row) for row in c.execute(
+                "SELECT * FROM edge_supports WHERE edge_id=? ORDER BY id",
+                (source_edge["id"],),
+            )]
+            for support in source_supports:
+                new_memory_id = memory_remap.get(support["memory_id"])
+                if new_memory_id is None:
+                    continue
+                support_provenance = _remap_json_memory_ids(
+                    support.get("provenance") or "{}"
+                )
+                c.execute(
+                    "INSERT INTO edge_supports(edge_id, memory_id, source_kind, confidence, "
+                    "valid_from, valid_to, ingested_at, expired_at, provenance) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (new_edge_id, new_memory_id, support["source_kind"],
+                     support["confidence"], support["valid_from"], support["valid_to"],
+                     support["ingested_at"], support["expired_at"], support_provenance),
+                )
+            if not source_supports:
+                try:
+                    fallback_provenance = json.loads(edge_provenance or "{}")
+                except (TypeError, ValueError):
+                    fallback_provenance = {}
+                if isinstance(fallback_provenance, dict):
+                    self.store._write_edge_supports(
+                        new_edge_id, source_edge["relation"], fallback_provenance,
+                        valid_from=source_edge["valid_from"],
+                        valid_to=source_edge["valid_to"],
+                        ingested_at=source_edge["ingested_at"],
+                        expired_at=source_edge["expired_at"],
+                    )
+
         if memory_remap:
             old_ids = list(memory_remap.keys())
             marks = ",".join("?" for _ in old_ids)
@@ -2366,7 +2637,8 @@ class MemoryService:
                 "INSERT INTO events(id, workspace_id, repo_id, session_id, kind, content, refs, "
                 "interaction_level, ts) VALUES (?,?,?,?,?,?,?,?,?)",
                 (ids.new_id("event"), wid_dst, _new_repo(ev["repo_id"]),
-                 session_remap.get(ev["session_id"]), ev["kind"], ev["content"], ev["refs"],
+                 session_remap.get(ev["session_id"]), ev["kind"], ev["content"],
+                 _remap_json_memory_ids(ev["refs"]),
                  ev["interaction_level"], ev["ts"]))
 
         self.store.audit(actor, "workspace_copy", wid_dst,
@@ -2615,6 +2887,1705 @@ class MemoryService:
                 "memories": memories, "sessions": sessions, "audit": audit,
                 "receipts": receipts}
 
+    def _recover_stale_graph_jobs(self, workspace_id: Optional[str] = None) -> int:
+        """Fail expired process-local workers and release their rebuilding gate.
+
+        Jobs are persisted but Python threads are not. A process crash must therefore
+        become a bounded interruption rather than leaving graph reads and all future
+        jobs blocked forever. The heartbeat lease also keeps this safe when separate
+        service processes share the database.
+        """
+        now = time.time()
+        cutoff = now - GRAPH_INDEX_LEASE_SECONDS
+        where = "state IN ('queued','running') AND COALESCE(heartbeat_at, created_at)<?"
+        params: list[Any] = [cutoff]
+        if workspace_id:
+            where += " AND workspace_id=?"
+            params.append(workspace_id)
+        stale = self.store.conn.execute(
+            f"SELECT 1 FROM jobs WHERE {where} LIMIT 1", params
+        ).fetchone()
+        if stale is None:
+            return 0
+        owns_transaction = not self.store.conn.in_transaction
+        if owns_transaction:
+            self.store.conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self.store.conn.execute(
+                f"SELECT id, workspace_id, counts, errors FROM jobs WHERE {where}",
+                params,
+            ).fetchall()
+            for row in rows:
+                counts = self._graph_job_json(row["counts"], {})
+                counts["error_count"] = int(counts.get("error_count") or 0) + 1
+                errors = self._graph_job_json(row["errors"], [])
+                if len(errors) < 25:
+                    errors.append({
+                        "item": int(counts.get("memories_scanned") or 0),
+                        "code": "worker_lease_expired",
+                    })
+                self.store.conn.execute(
+                    "UPDATE jobs SET state='failed', counts=?, errors=?, finished_at=?, "
+                    "heartbeat_at=? WHERE id=? AND state IN ('queued','running')",
+                    (json.dumps(counts, sort_keys=True), json.dumps(errors, sort_keys=True),
+                     now, now, row["id"]),
+                )
+                self.store.conn.execute(
+                    "UPDATE graph_index_state SET state='ready', active_job_id=NULL, "
+                    "updated_at=?, last_error='worker_lease_expired' "
+                    "WHERE workspace_id=? AND active_job_id=?",
+                    (now, row["workspace_id"], row["id"]),
+                )
+            if owns_transaction:
+                self.store.conn.commit()
+        except BaseException:
+            if owns_transaction and self.store.conn.in_transaction:
+                self.store.conn.rollback()
+            raise
+        return len(rows)
+
+    def _assert_no_active_graph_job(self, *workspace_ids: str) -> None:
+        for workspace_id in dict.fromkeys(value for value in workspace_ids if value):
+            self._recover_stale_graph_jobs(workspace_id)
+            row = self.store.conn.execute(
+                "SELECT id FROM jobs WHERE workspace_id=? AND kind='graph_index' "
+                "AND state IN ('queued','running') LIMIT 1",
+                (workspace_id,),
+            ).fetchone()
+            if row is not None:
+                raise ValidationError(
+                    f"workspace graph index job '{row['id']}' is still active"
+                )
+
+    def _graph_index_info(self, workspace_id: str) -> dict:
+        row = self.store.conn.execute(
+            "SELECT generation, state, active_job_id, updated_at, last_error "
+            "FROM graph_index_state WHERE workspace_id=?",
+            (workspace_id,),
+        ).fetchone()
+        if row is None:
+            return {
+                "generation": self.store.schema_version,
+                "state": "ready",
+                "active_job_id": None,
+                "updated_at": None,
+                "last_error": "",
+            }
+        return dict(row)
+
+    def _assert_graph_index_ready(self, workspace_id: str) -> dict:
+        self._recover_stale_graph_jobs(workspace_id)
+        info = self._graph_index_info(workspace_id)
+        if info["state"] == "rebuilding" and info.get("active_job_id"):
+            raise GraphIndexRebuilding(str(info["active_job_id"]))
+        return info
+
+    @staticmethod
+    def _graph_job_json(value: Any, fallback: Any) -> Any:
+        try:
+            parsed = json.loads(value or "")
+        except (TypeError, ValueError, RecursionError):
+            return fallback
+        return parsed if isinstance(parsed, type(fallback)) else fallback
+
+    def _graph_job_dict(self, row: Any, *, reused: bool = False) -> dict:
+        data = dict(row)
+        total = int(data.get("total_items") or 0)
+        processed = int(data.get("processed_items") or 0)
+        return {
+            "id": data["id"],
+            "workspace_id": data["workspace_id"],
+            "repo_id": data.get("repo_id"),
+            "kind": data["kind"],
+            "state": data["state"],
+            "dry_run": bool(data.get("dry_run")),
+            "total_items": total,
+            "processed_items": processed,
+            "progress": (
+                1.0 if data["state"] == "completed"
+                else round(min(1.0, processed / total), 6) if total else 0.0
+            ),
+            "counts": self._graph_job_json(data.get("counts"), {}),
+            "errors": self._graph_job_json(data.get("errors"), []),
+            "cancel_requested": bool(data.get("cancel_requested")),
+            "created_at": data.get("created_at"),
+            "started_at": data.get("started_at"),
+            "finished_at": data.get("finished_at"),
+            "reused": reused,
+        }
+
+    def graph_index_job(self, job_id: str, *, workspace: str) -> dict:
+        wid, _rid = self._require_scope(workspace, None)
+        self._recover_stale_graph_jobs(wid)
+        clean_id = _clean_text(job_id, field="job_id", max_chars=MAX_NAME_CHARS)
+        row = self.store.conn.execute(
+            "SELECT * FROM jobs WHERE id=? AND workspace_id=? AND kind='graph_index'",
+            (clean_id, wid),
+        ).fetchone()
+        if row is None:
+            raise ValidationError(f"no graph index job '{clean_id}' in workspace '{workspace}'")
+        return self._graph_job_dict(row)
+
+    def graph_index_status(self, *, workspace: str) -> dict:
+        wid, _rid = self._require_scope(workspace, None)
+        self._recover_stale_graph_jobs(wid)
+        owns_transaction = not self.store.conn.in_transaction
+        if owns_transaction:
+            self.store.conn.execute("BEGIN")
+        try:
+            info = self._graph_index_info(wid)
+            row = self.store.conn.execute(
+                "SELECT * FROM jobs WHERE workspace_id=? AND kind='graph_index' "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                (wid,),
+            ).fetchone()
+            result = {
+                "workspace": workspace,
+                "index": info,
+                "job": self._graph_job_dict(row) if row is not None else None,
+            }
+            if owns_transaction:
+                self.store.conn.commit()
+            return result
+        except BaseException:
+            if owns_transaction and self.store.conn.in_transaction:
+                self.store.conn.rollback()
+            raise
+
+    def start_graph_index_job(self, *, workspace: str, repo: Optional[str] = None,
+                              dry_run: bool = True, extractor: str = "regex") -> dict:
+        wid, rid = self._require_scope(workspace, repo)
+        clean_extractor = _clean_text(
+            extractor, field="extractor", max_chars=32
+        ).lower()
+        if clean_extractor != "regex":
+            raise ValidationError("extractor must be 'regex'")
+        with self._graph_job_lock:
+            self._recover_stale_graph_jobs()
+            self._graph_job_threads = {
+                key: value for key, value in self._graph_job_threads.items()
+                if value.is_alive()
+            }
+            self.store.conn.execute("BEGIN IMMEDIATE")
+            try:
+                current_scope = self.store.conn.execute(
+                    "SELECT 1 FROM workspaces WHERE id=?", (wid,)
+                ).fetchone()
+                if current_scope is None:
+                    raise ValidationError("workspace was removed before the job could start")
+                if rid is not None and self.store.conn.execute(
+                    "SELECT 1 FROM repos WHERE id=? AND workspace_id=?", (rid, wid)
+                ).fetchone() is None:
+                    raise ValidationError("repository was removed before the job could start")
+                active = self.store.conn.execute(
+                    "SELECT * FROM jobs WHERE workspace_id=? AND kind='graph_index' "
+                    "AND state IN ('queued','running') ORDER BY created_at DESC LIMIT 1",
+                    (wid,),
+                ).fetchone()
+                if active is not None:
+                    self.store.conn.commit()
+                    return self._graph_job_dict(active, reused=True)
+                global_active = int(self.store.conn.execute(
+                    "SELECT COUNT(*) AS n FROM jobs WHERE kind='graph_index' "
+                    "AND state IN ('queued','running')"
+                ).fetchone()["n"])
+                if (global_active >= MAX_GRAPH_INDEX_WORKERS
+                        or len(self._graph_job_threads) >= MAX_GRAPH_INDEX_WORKERS):
+                    raise ValidationError(
+                        "too many graph index jobs are active; retry after one finishes"
+                    )
+                live_where = (
+                    "workspace_id=? AND expired_at IS NULL AND valid_to IS NULL"
+                    + (" AND repo_id=?" if rid else "")
+                )
+                params: tuple[Any, ...] = (wid, rid) if rid else (wid,)
+                snapshot = self.store.conn.execute(
+                    f"SELECT COUNT(*) AS n, MAX(id) AS upper_id FROM memories "
+                    f"WHERE {live_where}", params,
+                ).fetchone()
+                total = int(snapshot["n"] or 0)
+                if total > MAX_GRAPH_INDEX_MEMORIES:
+                    raise ValidationError(
+                        "graph index job exceeds the memory candidate limit; filter by repository"
+                    )
+                entity_before = int(self.store.conn.execute(
+                    "SELECT COUNT(*) AS n FROM entities WHERE workspace_id=?", (wid,)
+                ).fetchone()["n"])
+                edge_before = int(self.store.conn.execute(
+                    "SELECT COUNT(*) AS n FROM edges WHERE workspace_id=?", (wid,)
+                ).fetchone()["n"])
+                # Bound maintenance metadata even if a client repeatedly starts dry runs.
+                self.store.conn.execute(
+                    "DELETE FROM jobs WHERE id IN (SELECT id FROM jobs "
+                    "WHERE workspace_id=? AND kind='graph_index' "
+                    "AND state NOT IN ('queued','running') "
+                    "ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?)",
+                    (wid, GRAPH_INDEX_JOB_HISTORY - 1),
+                )
+                job_id = make_id("job")
+                now = time.time()
+                counts = {
+                    "memories_scanned": 0,
+                    "entity_mentions": 0,
+                    "relation_mentions": 0,
+                    "entities_before": entity_before,
+                    "relations_before": edge_before,
+                    "entities_after": entity_before,
+                    "relations_after": edge_before,
+                    "entities_added": 0,
+                    "relations_added": 0,
+                    "error_count": 0,
+                }
+                request = {
+                    "workspace": workspace,
+                    "repo": repo,
+                    "extractor": clean_extractor,
+                    "dry_run": bool(dry_run),
+                    "upper_memory_id": snapshot["upper_id"] or "",
+                }
+                self.store.conn.execute(
+                    "INSERT INTO jobs(id, workspace_id, repo_id, kind, state, dry_run, "
+                    "total_items, processed_items, counts, errors, request, "
+                    "cancel_requested, runner_id, heartbeat_at, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        job_id, wid, rid, "graph_index", "queued", int(bool(dry_run)),
+                        total, 0, json.dumps(counts, sort_keys=True), "[]",
+                        json.dumps(request, sort_keys=True), 0, self._graph_runner_id,
+                        now, now,
+                    ),
+                )
+                if not dry_run:
+                    self.store.conn.execute(
+                        "INSERT INTO graph_index_state "
+                        "(workspace_id, generation, state, active_job_id, updated_at, "
+                        "last_error) VALUES(?, 1, 'rebuilding', ?, ?, '') "
+                        "ON CONFLICT(workspace_id) DO UPDATE SET "
+                        "state='rebuilding', active_job_id=excluded.active_job_id, "
+                        "updated_at=excluded.updated_at, last_error=''",
+                        (wid, job_id, now),
+                    )
+                self.store.conn.commit()
+            except BaseException:
+                if self.store.conn.in_transaction:
+                    self.store.conn.rollback()
+                raise
+            worker = threading.Thread(
+                target=self._run_graph_index_job,
+                args=(job_id,),
+                name=f"engraphis-graph-index-{job_id[-8:]}",
+                daemon=True,
+            )
+            self._graph_job_threads[job_id] = worker
+            try:
+                worker.start()
+            except BaseException:
+                self._graph_job_threads.pop(job_id, None)
+                failed_at = time.time()
+                self.store.conn.execute(
+                    "UPDATE jobs SET state='failed', finished_at=?, heartbeat_at=? "
+                    "WHERE id=?", (failed_at, failed_at, job_id),
+                )
+                self.store.conn.execute(
+                    "UPDATE graph_index_state SET state='ready', active_job_id=NULL, "
+                    "updated_at=?, last_error='worker_start_failed' "
+                    "WHERE workspace_id=? AND active_job_id=?",
+                    (failed_at, wid, job_id),
+                )
+                self.store.conn.commit()
+                raise
+            row = self.store.conn.execute(
+                "SELECT * FROM jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            return self._graph_job_dict(row)
+
+    def cancel_graph_index_job(self, job_id: str, *, workspace: str) -> dict:
+        wid, _rid = self._require_scope(workspace, None)
+        self._recover_stale_graph_jobs(wid)
+        clean_id = _clean_text(job_id, field="job_id", max_chars=MAX_NAME_CHARS)
+        row = self.store.conn.execute(
+            "SELECT * FROM jobs WHERE id=? AND workspace_id=? AND kind='graph_index'",
+            (clean_id, wid),
+        ).fetchone()
+        if row is None:
+            raise ValidationError(f"no graph index job '{clean_id}' in workspace '{workspace}'")
+        if row["state"] in {"queued", "running"}:
+            self.store.conn.execute(
+                "UPDATE jobs SET cancel_requested=1 WHERE id=?", (clean_id,)
+            )
+            self.store.conn.commit()
+            row = self.store.conn.execute(
+                "SELECT * FROM jobs WHERE id=?", (clean_id,)
+            ).fetchone()
+        return self._graph_job_dict(row)
+
+    def _run_graph_index_job(self, job_id: str) -> None:
+        from engraphis.backends.graph_extractor import (
+            StructuredMetadataGraphExtractor,
+            feed as graph_feed,
+            get_graph_extractor,
+        )
+
+        row = self.store.conn.execute(
+            "SELECT * FROM jobs WHERE id=? AND runner_id=?",
+            (job_id, self._graph_runner_id),
+        ).fetchone()
+        if row is None:
+            return
+        wid, rid, dry_run = row["workspace_id"], row["repo_id"], bool(row["dry_run"])
+        request = self._graph_job_json(row["request"], {})
+        counts = {
+            "memories_scanned": 0,
+            "entity_mentions": 0,
+            "relation_mentions": 0,
+            "entities_before": 0,
+            "relations_before": 0,
+            "entities_after": 0,
+            "relations_after": 0,
+            "entities_added": 0,
+            "relations_added": 0,
+            "error_count": 0,
+            **self._graph_job_json(row["counts"], {}),
+        }
+        errors: list[dict] = []
+        final_state = "failed"
+        error_code = ""
+        try:
+            started = time.time()
+            claimed = self.store.conn.execute(
+                "UPDATE jobs SET state='running', started_at=?, heartbeat_at=? "
+                "WHERE id=? AND runner_id=? AND state='queued'",
+                (started, started, job_id, self._graph_runner_id),
+            )
+            self.store.conn.commit()
+            if claimed.rowcount != 1:
+                return
+            regex_extractor = get_graph_extractor(str(request.get("extractor") or "regex"))
+            upper_memory_id = str(request.get("upper_memory_id") or "")
+            last_memory_id = ""
+            processed = 0
+            stop = False
+            while not stop:
+                cancellation = self.store.conn.execute(
+                    "SELECT cancel_requested, state, runner_id FROM jobs WHERE id=?",
+                    (job_id,),
+                ).fetchone()
+                if (cancellation is None or bool(cancellation["cancel_requested"])
+                        or cancellation["state"] != "running"
+                        or cancellation["runner_id"] != self._graph_runner_id):
+                    final_state = "cancelled"
+                    break
+                id_sql = (
+                    "SELECT id FROM memories WHERE workspace_id=? "
+                    "AND expired_at IS NULL AND valid_to IS NULL AND id>?"
+                )
+                id_params: list[Any] = [wid, last_memory_id]
+                if rid:
+                    id_sql += " AND repo_id=?"
+                    id_params.append(rid)
+                if upper_memory_id:
+                    id_sql += " AND id<=?"
+                    id_params.append(upper_memory_id)
+                id_sql += " ORDER BY id LIMIT ?"
+                id_params.append(GRAPH_INDEX_BATCH_SIZE)
+                memory_ids = [row["id"] for row in self.store.conn.execute(
+                    id_sql, id_params
+                ).fetchall()]
+                if not memory_ids:
+                    final_state = "completed"
+                    break
+                for memory_id in memory_ids:
+                    last_memory_id = memory_id
+                    cancelled = self.store.conn.execute(
+                        "SELECT cancel_requested, state, runner_id FROM jobs WHERE id=?",
+                        (job_id,),
+                    ).fetchone()
+                    if (cancelled is None or bool(cancelled["cancel_requested"])
+                            or cancelled["state"] not in {"queued", "running"}
+                            or cancelled["runner_id"] != self._graph_runner_id):
+                        final_state = "cancelled"
+                        stop = True
+                        break
+                    transaction_started = False
+                    try:
+                        if not dry_run:
+                            self.store.conn.execute("BEGIN IMMEDIATE")
+                            transaction_started = True
+                        memory_sql = (
+                            "SELECT id, repo_id, title, content, metadata FROM memories "
+                            "WHERE id=? AND workspace_id=? AND expired_at IS NULL "
+                            "AND valid_to IS NULL"
+                        )
+                        memory_params: list[Any] = [memory_id, wid]
+                        if rid:
+                            memory_sql += " AND repo_id=?"
+                            memory_params.append(rid)
+                        memory = self.store.conn.execute(
+                            memory_sql, memory_params
+                        ).fetchone()
+                        if memory is not None:
+                            try:
+                                metadata = json.loads(memory["metadata"] or "{}")
+                            except (TypeError, ValueError, RecursionError):
+                                metadata = {}
+                            extractors: list[tuple[str, Any]] = []
+                            if (isinstance(metadata, dict)
+                                    and self.engine._has_structured_graph_metadata(metadata)):
+                                extractors.append((
+                                    "structured_index",
+                                    StructuredMetadataGraphExtractor(metadata),
+                                ))
+                            extractors.append(("regex_index", regex_extractor))
+                            for source, selected_extractor in extractors:
+                                extraction = selected_extractor.extract(
+                                    memory["content"] or "", title=memory["title"] or ""
+                                )
+                                counts["entity_mentions"] += len(extraction.entities)
+                                counts["relation_mentions"] += len(extraction.relations)
+                                if not dry_run:
+                                    graph_feed(
+                                        self.store,
+                                        memory["content"] or "",
+                                        workspace_id=wid,
+                                        repo_id=memory["repo_id"],
+                                        title=memory["title"] or "",
+                                        extractor=selected_extractor,
+                                        extraction=extraction,
+                                        provenance={
+                                            "source": source,
+                                            "memory_id": memory["id"],
+                                            "job_id": job_id,
+                                        },
+                                        commit=False,
+                                    )
+                        processed += 1
+                        counts["memories_scanned"] = processed
+                        heartbeat = time.time()
+                        progress = self.store.conn.execute(
+                            "UPDATE jobs SET processed_items=?, counts=?, errors=?, "
+                            "heartbeat_at=? WHERE id=? AND runner_id=? AND state='running'",
+                            (
+                                processed,
+                                json.dumps(counts, sort_keys=True),
+                                json.dumps(errors, sort_keys=True),
+                                heartbeat,
+                                job_id,
+                                self._graph_runner_id,
+                            ),
+                        )
+                        self.store.conn.commit()
+                        transaction_started = False
+                        if progress.rowcount != 1:
+                            final_state = "cancelled"
+                            stop = True
+                            break
+                    except Exception as exc:  # noqa: BLE001 - isolate one bad memory
+                        if transaction_started or self.store.conn.in_transaction:
+                            self.store.conn.rollback()
+                        counts["error_count"] += 1
+                        if len(errors) < 25:
+                            errors.append({
+                                "item": processed + 1,
+                                "code": type(exc).__name__[:80],
+                            })
+                        processed += 1
+                        counts["memories_scanned"] = processed
+                        heartbeat = time.time()
+                        self.store.conn.execute(
+                            "UPDATE jobs SET processed_items=?, counts=?, errors=?, "
+                            "heartbeat_at=? WHERE id=? AND runner_id=? AND state='running'",
+                            (
+                                processed,
+                                json.dumps(counts, sort_keys=True),
+                                json.dumps(errors, sort_keys=True),
+                                heartbeat,
+                                job_id,
+                                self._graph_runner_id,
+                            ),
+                        )
+                        self.store.conn.commit()
+
+            entity_after = int(self.store.conn.execute(
+                "SELECT COUNT(*) AS n FROM entities WHERE workspace_id=?", (wid,)
+            ).fetchone()["n"])
+            edge_after = int(self.store.conn.execute(
+                "SELECT COUNT(*) AS n FROM edges WHERE workspace_id=?", (wid,)
+            ).fetchone()["n"])
+            counts.update({
+                "entities_after": entity_after,
+                "relations_after": edge_after,
+                "entities_added": entity_after - int(counts["entities_before"]),
+                "relations_added": edge_after - int(counts["relations_before"]),
+            })
+        except Exception as exc:  # noqa: BLE001 - persist a safe terminal job state
+            error_code = type(exc).__name__[:80]
+            counts["error_count"] = int(counts.get("error_count") or 0) + 1
+            errors.append({"item": int(counts.get("memories_scanned") or 0),
+                           "code": error_code})
+            final_state = "failed"
+        finally:
+            try:
+                status = "ok" if final_state == "completed" else final_state
+                self.store.audit(
+                    "system", f"graph_index_{final_state}", wid,
+                    f"job={job_id}; dry_run={int(dry_run)}; "
+                    f"processed={int(counts.get('memories_scanned') or 0)}",
+                )
+                self.store.record_receipt(
+                    "graph_index",
+                    workspace_id=wid,
+                    repo_id=rid or "",
+                    actor="system",
+                    target_count=int(counts.get("memories_scanned") or 0),
+                    status=status,
+                    metadata={
+                        "dry_run": bool(dry_run),
+                        "error_count": int(counts.get("error_count") or 0),
+                        "entities_added": int(counts.get("entities_added") or 0),
+                        "relations_added": int(counts.get("relations_added") or 0),
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 - terminal state must still persist
+                error_code = type(exc).__name__[:80]
+                counts["error_count"] = int(counts.get("error_count") or 0) + 1
+                errors.append({"item": int(counts.get("memories_scanned") or 0),
+                               "code": error_code})
+                final_state = "failed"
+            finally:
+                finished = time.time()
+                terminal = self.store.conn.execute(
+                    "UPDATE jobs SET state=?, processed_items=?, counts=?, errors=?, "
+                    "finished_at=?, heartbeat_at=? WHERE id=? AND runner_id=? "
+                    "AND state IN ('queued','running')",
+                    (
+                        final_state,
+                        int(counts.get("memories_scanned") or 0),
+                        json.dumps(counts, sort_keys=True),
+                        json.dumps(errors[:25], sort_keys=True),
+                        finished,
+                        finished,
+                        job_id,
+                        self._graph_runner_id,
+                    ),
+                )
+                if not dry_run and terminal.rowcount == 1:
+                    self.store.conn.execute(
+                        "UPDATE graph_index_state SET state='ready', active_job_id=NULL, "
+                        "updated_at=?, last_error=? "
+                        "WHERE workspace_id=? AND active_job_id=? "
+                        "AND EXISTS(SELECT 1 FROM workspaces WHERE id=?)",
+                        (finished, error_code, wid, job_id, wid),
+                    )
+                self.store.conn.commit()
+                self._graph_scene_cache.clear()
+                with self._graph_job_lock:
+                    self._graph_job_threads.pop(job_id, None)
+
+    def _graph_scene_rows(self, *, workspace: str, repo: Optional[str] = None,
+                          as_of: Optional[float] = None,
+                          entity_types: Optional[list[str]] = None,
+                          memory_types: Optional[list[str]] = None,
+                          time_from: Optional[float] = None,
+                          time_to: Optional[float] = None,
+                          include_weak_cooccurrence: bool = True,
+                          include_code: bool = False,
+                          include_complete_rows: bool = False) -> tuple:
+        """Load one transactionally consistent graph snapshot and generation state."""
+        clean_workspace = self._clean_ws(workspace)
+        workspace_id = self._lookup_workspace(clean_workspace)
+        if workspace_id:
+            self._recover_stale_graph_jobs(workspace_id)
+        owns_transaction = not self.store.conn.in_transaction
+        if owns_transaction:
+            self.store.conn.execute("BEGIN")
+        try:
+            rows = self._graph_scene_rows_unlocked(
+                workspace=clean_workspace,
+                repo=repo,
+                as_of=as_of,
+                entity_types=entity_types,
+                memory_types=memory_types,
+                time_from=time_from,
+                time_to=time_to,
+                include_weak_cooccurrence=include_weak_cooccurrence,
+                include_code=include_code,
+                include_complete_rows=include_complete_rows,
+            )
+            index_info = self._graph_index_info(rows[1]) if rows[1] else {
+                "generation": self.store.schema_version,
+                "state": "ready",
+                "active_job_id": None,
+                "updated_at": None,
+                "last_error": "",
+            }
+            if owns_transaction:
+                self.store.conn.commit()
+            return (*rows, index_info)
+        except BaseException:
+            if owns_transaction and self.store.conn.in_transaction:
+                self.store.conn.rollback()
+            raise
+
+    def _graph_scene_rows_unlocked(self, *, workspace: str, repo: Optional[str] = None,
+                                   as_of: Optional[float] = None,
+                                   entity_types: Optional[list[str]] = None,
+                                   memory_types: Optional[list[str]] = None,
+                                   time_from: Optional[float] = None,
+                                   time_to: Optional[float] = None,
+                                   include_weak_cooccurrence: bool = True,
+                                   include_code: bool = False,
+                                   include_complete_rows: bool = False) -> tuple:
+        """Load the complete scoped graph for deterministic server-side ranking.
+
+        This is intentionally read-only. Graph population is an explicit write/index
+        concern; no GET path calls the legacy lazy backfill helpers.
+        """
+        ws = self._clean_ws(workspace)
+        wid = self._lookup_workspace(ws)
+        if wid is None:
+            return ws, "", [], [], [], [], [], []
+        self._assert_graph_index_ready(wid)
+        clean_entity_types = (
+            _clean_string_list(
+                entity_types, field="entity_types", max_items=64,
+                max_chars=MAX_NAME_CHARS,
+            )
+            if entity_types is not None else []
+        )
+        clean_memory_types = sorted({
+            _enum(value, MemoryType, "memory_type").value
+            for value in _clean_string_list(
+                memory_types, field="memory_types", max_items=4,
+                max_chars=MAX_NAME_CHARS,
+            )
+        }) if memory_types is not None else []
+        repo_id = None
+        if repo:
+            repo_name = _clean_name(repo, field="repo")
+            repo_id = self._lookup_repo(wid, repo_name)
+            if repo_id is None:
+                raise ValidationError(f"no repo named '{repo_name}' in workspace '{ws}'")
+        entity_sql = (
+            "SELECT id, workspace_id, repo_id, name, etype, canonical_id, "
+            "normalized_name, canonical_method, canonical_confidence, created_at "
+            "FROM entities WHERE workspace_id=?"
+        )
+        entity_params: list[Any] = [wid]
+        if repo_id:
+            entity_sql += " AND (repo_id=? OR repo_id IS NULL)"
+            entity_params.append(repo_id)
+        if clean_entity_types:
+            clean_types = sorted(set(clean_entity_types))
+            if clean_types:
+                marks = ",".join("?" for _ in clean_types)
+                entity_sql += f" AND etype IN ({marks})"
+                entity_params.extend(clean_types)
+        entity_sql += " ORDER BY canonical_id, id LIMIT ?"
+        entity_params.append(MAX_GRAPH_ANALYSIS_ENTITIES + 1)
+        entity_rows = [dict(row) for row in self.store.conn.execute(
+            entity_sql, entity_params
+        ).fetchall()]
+        if len(entity_rows) > MAX_GRAPH_ANALYSIS_ENTITIES:
+            if include_complete_rows:
+                raise GraphSceneCapacityExceeded(
+                    resource="entity rows", count=len(entity_rows),
+                    limit=MAX_GRAPH_ANALYSIS_ENTITIES,
+                )
+            raise ValidationError(
+                "graph analysis exceeds the entity candidate limit; filter by repository"
+            )
+
+        try:
+            t = float(as_of) if as_of is not None else __import__("time").time()
+        except (TypeError, ValueError, OverflowError):
+            raise ValidationError("as_of must be a finite timestamp")
+        if not math.isfinite(t):
+            raise ValidationError("as_of must be a finite timestamp")
+        try:
+            lower_time = float(time_from) if time_from is not None else None
+            upper_time = float(time_to) if time_to is not None else None
+        except (TypeError, ValueError, OverflowError):
+            raise ValidationError("time range values must be finite timestamps")
+        if ((lower_time is not None and not math.isfinite(lower_time))
+                or (upper_time is not None and not math.isfinite(upper_time))):
+            raise ValidationError("time range values must be finite timestamps")
+        if lower_time is not None and upper_time is not None and lower_time > upper_time:
+            raise ValidationError("time_from must be less than or equal to time_to")
+        edge_sql = (
+            "SELECT id, workspace_id, repo_id, src, dst, relation, layer, weight, "
+            "valid_from, valid_to, ingested_at, expired_at, provenance FROM edges "
+            "WHERE workspace_id=? AND (valid_from IS NULL OR valid_from<=?) "
+            "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL"
+        )
+        edge_params: list[Any] = [wid, t, t]
+        if repo_id:
+            edge_sql += " AND (repo_id=? OR repo_id IS NULL)"
+            edge_params.append(repo_id)
+        # Weak co-occurrence is evaluated after canonical endpoint/relation bundling in
+        # ``build_canonical_graph``. Filtering each physical edge here would incorrectly
+        # discard two independent one-support alias edges whose canonical bundle has two
+        # supports and is therefore eligible for the default scene.
+        evidence_filter = bool(
+            clean_memory_types or lower_time is not None or upper_time is not None
+        )
+        if evidence_filter:
+            edge_sql += (
+                " AND EXISTS (SELECT 1 FROM edge_supports graph_support "
+                "JOIN memories graph_memory ON graph_memory.id=graph_support.memory_id "
+                "WHERE graph_support.edge_id=edges.id "
+                "AND (graph_support.valid_from IS NULL OR graph_support.valid_from<=?) "
+                "AND (graph_support.valid_to IS NULL OR ?<graph_support.valid_to) "
+                "AND graph_support.expired_at IS NULL "
+                "AND graph_memory.workspace_id=? "
+                "AND (graph_memory.valid_from IS NULL OR graph_memory.valid_from<=?) "
+                "AND (graph_memory.valid_to IS NULL OR ?<graph_memory.valid_to) "
+                "AND graph_memory.expired_at IS NULL"
+            )
+            edge_params.extend((t, t, wid, t, t))
+            if clean_memory_types:
+                marks = ",".join("?" for _ in clean_memory_types)
+                edge_sql += f" AND graph_memory.mtype IN ({marks})"
+                edge_params.extend(clean_memory_types)
+            if lower_time is not None:
+                edge_sql += " AND COALESCE(graph_memory.valid_from, graph_memory.ingested_at, 0)>=?"
+                edge_params.append(lower_time)
+            if upper_time is not None:
+                edge_sql += " AND COALESCE(graph_memory.valid_from, graph_memory.ingested_at, 0)<=?"
+                edge_params.append(upper_time)
+            edge_sql += ")"
+        edge_sql += " ORDER BY id LIMIT ?"
+        edge_params.append(MAX_GRAPH_ANALYSIS_EDGES + 1)
+        edge_rows = [dict(row) for row in self.store.conn.execute(
+            edge_sql, edge_params
+        ).fetchall()]
+        if len(edge_rows) > MAX_GRAPH_ANALYSIS_EDGES:
+            if include_complete_rows:
+                raise GraphSceneCapacityExceeded(
+                    resource="raw relations", count=len(edge_rows),
+                    limit=MAX_GRAPH_ANALYSIS_EDGES,
+                )
+            raise ValidationError(
+                "graph analysis exceeds the relation candidate limit; filter by repository"
+            )
+
+        if include_code:
+            repo_sql = "SELECT id, name FROM repos WHERE workspace_id=?"
+            repo_params: list[Any] = [wid]
+            if repo_id:
+                repo_sql += " AND id=?"
+                repo_params.append(repo_id)
+            repo_rows = self.store.conn.execute(
+                repo_sql + " ORDER BY name, id", repo_params
+            ).fetchall()
+            for repo_row in repo_rows:
+                remaining_entities = MAX_GRAPH_ANALYSIS_ENTITIES - len(entity_rows)
+                symbol_rows = [dict(row) for row in self.store.conn.execute(
+                    "SELECT id, kind, name, fqname, file FROM symbols "
+                    "WHERE repo_id=? ORDER BY id LIMIT ?",
+                    (repo_row["id"], remaining_entities + 1),
+                ).fetchall()]
+                if len(symbol_rows) > remaining_entities:
+                    if include_complete_rows:
+                        raise GraphSceneCapacityExceeded(
+                            resource="entity rows",
+                            count=MAX_GRAPH_ANALYSIS_ENTITIES + 1,
+                            limit=MAX_GRAPH_ANALYSIS_ENTITIES,
+                        )
+                    raise ValidationError(
+                        "graph analysis exceeds the entity candidate limit; "
+                        "filter the code overlay by repository"
+                    )
+                endpoint: dict[str, str] = {}
+                for symbol in symbol_rows:
+                    node_id = f"code:{symbol['id']}"
+                    label = symbol.get("fqname") or symbol.get("name") or symbol["id"]
+                    entity_rows.append({
+                        "id": node_id, "workspace_id": wid, "repo_id": repo_row["id"],
+                        "name": f"{repo_row['name']}:{label}",
+                        "etype": f"code_{symbol.get('kind') or 'symbol'}",
+                        "canonical_id": node_id,
+                        "normalized_name": normalize_entity_name(label),
+                        "canonical_method": "code_identity", "canonical_confidence": 1.0,
+                    })
+                    for key in (symbol.get("id"), symbol.get("fqname"), symbol.get("name")):
+                        if key:
+                            endpoint.setdefault(str(key), node_id)
+                remaining_edges = MAX_GRAPH_ANALYSIS_EDGES - len(edge_rows)
+                code_edges = self.store.conn.execute(
+                    "SELECT id, src, dst, relation, layer FROM code_edges "
+                    "WHERE repo_id=? ORDER BY id LIMIT ?",
+                    (repo_row["id"], remaining_edges + 1),
+                ).fetchall()
+                if len(code_edges) > remaining_edges:
+                    if include_complete_rows:
+                        raise GraphSceneCapacityExceeded(
+                            resource="raw relations",
+                            count=MAX_GRAPH_ANALYSIS_EDGES + 1,
+                            limit=MAX_GRAPH_ANALYSIS_EDGES,
+                        )
+                    raise ValidationError(
+                        "graph analysis exceeds the relation candidate limit; "
+                        "filter the code overlay by repository"
+                    )
+                for code_edge in code_edges:
+                    source = endpoint.get(str(code_edge["src"] or ""))
+                    target = endpoint.get(str(code_edge["dst"] or ""))
+                    if source and target and source != target:
+                        edge_rows.append({
+                            "id": f"code-edge:{code_edge['id']}", "workspace_id": wid,
+                            "repo_id": repo_row["id"], "src": source, "dst": target,
+                            "relation": code_edge["relation"] or "references",
+                            "layer": code_edge["layer"] or "entity", "weight": 1.0,
+                            "valid_from": None, "valid_to": None, "ingested_at": None,
+                            "expired_at": None,
+                            "provenance": json.dumps({"source": "code_index"}),
+                        })
+        if evidence_filter:
+            endpoints = {
+                str(edge.get(key) or "") for edge in edge_rows
+                for key in ("src", "dst") if edge.get(key)
+            }
+            canonical_by_member = {
+                str(entity.get("id") or ""): str(
+                    entity.get("canonical_id") or entity.get("id") or ""
+                )
+                for entity in entity_rows
+            }
+            endpoint_canonicals = {
+                canonical_by_member.get(endpoint, endpoint) for endpoint in endpoints
+            }
+            entity_rows = [
+                entity for entity in entity_rows
+                if str(entity.get("canonical_id") or entity.get("id") or "")
+                in endpoint_canonicals
+            ]
+        edge_ids = [row["id"] for row in edge_rows if not str(row["id"]).startswith("code-edge:")]
+        # Bounded IN chunks avoid a second scan of the relation table while preserving
+        # the exact selected edge ids. Weak co-occurrence is filtered after canonical
+        # relation bundling, once its aggregate support is known.
+        support_rows = self.store.edge_supports_in_scope(
+            edge_ids, at=t, limit=MAX_GRAPH_ANALYSIS_SUPPORTS + 1
+        )
+        if len(support_rows) > MAX_GRAPH_ANALYSIS_SUPPORTS:
+            if include_complete_rows:
+                raise GraphSceneCapacityExceeded(
+                    resource="evidence rows", count=len(support_rows),
+                    limit=MAX_GRAPH_ANALYSIS_SUPPORTS,
+                )
+            raise ValidationError(
+                "graph analysis exceeds the evidence candidate limit; filter by repository"
+            )
+        # Attach only public analytical metadata from supporting memories. This both
+        # makes the memory/time facets evidence-backed and ensures requested evidence
+        # filters cannot be bypassed by another support row on the same relation.
+        support_memory_ids = sorted({
+            str(row.get("memory_id") or "") for row in support_rows
+            if row.get("memory_id")
+        })
+        support_memory_meta: dict[str, tuple[str, float]] = {}
+        for start in range(0, len(support_memory_ids), 500):
+            chunk = support_memory_ids[start:start + 500]
+            marks = ",".join("?" for _ in chunk)
+            memory_sql = (
+                "SELECT id, mtype, COALESCE(valid_from, ingested_at, 0) AS support_time "
+                "FROM memories WHERE workspace_id=? AND id IN (" + marks + ") "
+                "AND (valid_from IS NULL OR valid_from<=?) "
+                "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL"
+            )
+            memory_params: list[Any] = [wid, *chunk, t, t]
+            if clean_memory_types:
+                type_marks = ",".join("?" for _ in clean_memory_types)
+                memory_sql += f" AND mtype IN ({type_marks})"
+                memory_params.extend(clean_memory_types)
+            if lower_time is not None:
+                memory_sql += " AND COALESCE(valid_from, ingested_at, 0)>=?"
+                memory_params.append(lower_time)
+            if upper_time is not None:
+                memory_sql += " AND COALESCE(valid_from, ingested_at, 0)<=?"
+                memory_params.append(upper_time)
+            for memory in self.store.conn.execute(memory_sql, memory_params).fetchall():
+                support_memory_meta[str(memory["id"])] = (
+                    str(memory["mtype"] or ""), float(memory["support_time"] or 0.0)
+                )
+        enriched_supports = []
+        for support in support_rows:
+            memory_id = str(support.get("memory_id") or "")
+            metadata = support_memory_meta.get(memory_id)
+            if evidence_filter and metadata is None:
+                continue
+            enriched = dict(support)
+            if metadata is not None:
+                enriched["memory_type"] = metadata[0]
+                enriched["support_time"] = metadata[1]
+            enriched_supports.append(enriched)
+
+        memory_rows: list[dict] = []
+        memory_link_rows: list[dict] = []
+        code_memory_link_rows: list[dict] = []
+        if include_complete_rows:
+            memory_where = [
+                "workspace_id=?",
+                "(valid_from IS NULL OR valid_from<=?)",
+                "(valid_to IS NULL OR ?<valid_to)",
+                "expired_at IS NULL",
+            ]
+            memory_params: list[Any] = [wid, t, t]
+            if repo_id:
+                memory_where.append("(repo_id=? OR repo_id IS NULL)")
+                memory_params.append(repo_id)
+            if clean_memory_types:
+                marks = ",".join("?" for _ in clean_memory_types)
+                memory_where.append(f"mtype IN ({marks})")
+                memory_params.extend(clean_memory_types)
+            if lower_time is not None:
+                memory_where.append("COALESCE(valid_from, ingested_at, 0)>=?")
+                memory_params.append(lower_time)
+            if upper_time is not None:
+                memory_where.append("COALESCE(valid_from, ingested_at, 0)<=?")
+                memory_params.append(upper_time)
+            scoped_memory_sql = "SELECT id FROM memories WHERE " + " AND ".join(memory_where)
+            memory_rows = [dict(row) for row in self.store.conn.execute(
+                "SELECT id, repo_id, session_id, scope, mtype, title, "
+                "substr(content, 1, 160) AS content, substr(summary, 1, 160) AS summary, "
+                "importance, valid_from, ingested_at, pinned FROM memories WHERE "
+                + " AND ".join(memory_where) + " ORDER BY id LIMIT ?",
+                [*memory_params, MAX_GRAPH_COMPLETE_MEMORIES + 1],
+            ).fetchall()]
+            if len(memory_rows) > MAX_GRAPH_COMPLETE_MEMORIES:
+                raise GraphSceneCapacityExceeded(
+                    resource="memory nodes", count=len(memory_rows),
+                    limit=MAX_GRAPH_COMPLETE_MEMORIES,
+                )
+
+            memory_link_rows = [dict(row) for row in self.store.conn.execute(
+                "WITH selected_memory AS (" + scoped_memory_sql + ") "
+                "SELECT links.a, links.b, links.relation, links.layer, links.reason, "
+                "links.created_at FROM mem_links links "
+                "JOIN selected_memory source ON source.id=links.a "
+                "JOIN selected_memory target ON target.id=links.b "
+                "ORDER BY links.a, links.b, links.relation, links.layer, links.created_at "
+                "LIMIT ?",
+                [*memory_params, MAX_GRAPH_COMPLETE_MEMORY_LINKS + 1],
+            ).fetchall()]
+            if len(memory_link_rows) > MAX_GRAPH_COMPLETE_MEMORY_LINKS:
+                raise GraphSceneCapacityExceeded(
+                    resource="memory connectors", count=len(memory_link_rows),
+                    limit=MAX_GRAPH_COMPLETE_MEMORY_LINKS,
+                )
+
+            if include_code:
+                code_sql = (
+                    "WITH selected_memory AS (" + scoped_memory_sql + ") "
+                    "SELECT links.id, links.repo_id, links.symbol_id, links.memory_id, "
+                    "links.relation, links.confidence FROM code_memory_links links "
+                    "JOIN selected_memory memory ON memory.id=links.memory_id "
+                    "JOIN repos repo ON repo.id=links.repo_id WHERE repo.workspace_id=?"
+                )
+                code_params: list[Any] = [*memory_params, wid]
+                if repo_id:
+                    code_sql += " AND links.repo_id=?"
+                    code_params.append(repo_id)
+                code_sql += " ORDER BY links.id LIMIT ?"
+                code_params.append(MAX_GRAPH_COMPLETE_CODE_MEMORY_LINKS + 1)
+                code_memory_link_rows = [dict(row) for row in self.store.conn.execute(
+                    code_sql, code_params,
+                ).fetchall()]
+                if len(code_memory_link_rows) > MAX_GRAPH_COMPLETE_CODE_MEMORY_LINKS:
+                    raise GraphSceneCapacityExceeded(
+                        resource="code-memory connectors",
+                        count=len(code_memory_link_rows),
+                        limit=MAX_GRAPH_COMPLETE_CODE_MEMORY_LINKS,
+                    )
+        return (
+            ws, wid, entity_rows, edge_rows, enriched_supports,
+            memory_rows, memory_link_rows, code_memory_link_rows,
+        )
+
+    def graph_scene(self, *, workspace: str, level: str = "overview",
+                    center_id: Optional[str] = None,
+                    system_id: Optional[str] = None,
+                    seeds: Optional[list[str]] = None,
+                    repo: Optional[str] = None,
+                    layers: Optional[list[str]] = None,
+                     relations: Optional[list[str]] = None,
+                     entity_types: Optional[list[str]] = None,
+                     memory_types: Optional[list[str]] = None,
+                     as_of: Optional[float] = None, depth: int = 1,
+                     time_from: Optional[float] = None,
+                     time_to: Optional[float] = None,
+                    min_support: int = 1, min_confidence: float = 0.0,
+                    include_weak_cooccurrence: bool = False,
+                    include_code: bool = False,
+                    node_limit: Optional[int] = None,
+                    edge_limit: Optional[int] = None) -> dict:
+        started = time.perf_counter()
+        clean_workspace = self._clean_ws(workspace)
+        clean_level = _clean_text(
+            level, field="level", max_chars=32
+        ).lower()
+        if clean_level not in {"overview", "system", "neighborhood", "path", "complete"}:
+            raise ValidationError(
+                "level must be one of: overview, system, neighborhood, path, complete"
+            )
+        clean_center_id = (
+            _clean_text(center_id, field="center_id", max_chars=MAX_NAME_CHARS)
+            if center_id is not None else None
+        )
+        clean_system_id = (
+            _clean_text(system_id, field="system_id", max_chars=MAX_NAME_CHARS)
+            if system_id is not None else None
+        )
+        clean_seeds = list(dict.fromkeys(_clean_string_list(
+            seeds, field="seeds", max_items=64, max_chars=MAX_NAME_CHARS,
+        ))) if seeds is not None else []
+        clean_repo = _clean_name(repo, field="repo") if repo is not None else None
+        clean_relations = sorted(set(_clean_string_list(
+            relations, field="relations", max_items=64, max_chars=MAX_NAME_CHARS,
+        ))) if relations is not None else []
+        clean_entity_types = sorted(set(_clean_string_list(
+            entity_types, field="entity_types", max_items=64,
+            max_chars=MAX_NAME_CHARS,
+        ))) if entity_types is not None else []
+        clean_memory_types = sorted({
+            _enum(value, MemoryType, "memory_type").value
+            for value in _clean_string_list(
+                memory_types, field="memory_types", max_items=4,
+                max_chars=MAX_NAME_CHARS,
+            )
+        }) if memory_types is not None else []
+        clean_layers = None
+        if layers is not None:
+            layer_values = _clean_string_list(
+                layers, field="layers", max_items=64, max_chars=MAX_NAME_CHARS,
+            )
+            clean_layers = sorted({
+                _enum(value, GraphLayer, "layer").value for value in layer_values
+            })
+
+        def bounded_int(value: Any, field: str, minimum: int, maximum: int) -> int:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError, OverflowError):
+                raise ValidationError(f"{field} must be an integer")
+            if parsed < minimum or parsed > maximum:
+                raise ValidationError(f"{field} must be between {minimum} and {maximum}")
+            return parsed
+
+        clean_depth = bounded_int(depth, "depth", 0, 2)
+        clean_min_support = bounded_int(min_support, "min_support", 0, 1_000_000)
+        clean_node_limit = (
+            bounded_int(node_limit, "node_limit", 1, 300)
+            if node_limit is not None else None
+        )
+        clean_edge_limit = (
+            bounded_int(edge_limit, "edge_limit", 0, 900)
+            if edge_limit is not None else None
+        )
+        if clean_level == "complete" and (
+            clean_node_limit is not None or clean_edge_limit is not None
+        ):
+            raise ValidationError(
+                "complete scenes do not accept node_limit or edge_limit; "
+                "use graph filters instead of silently truncating the chart"
+            )
+        try:
+            clean_min_confidence = float(min_confidence)
+        except (TypeError, ValueError, OverflowError):
+            raise ValidationError("min_confidence must be a finite number")
+        if not math.isfinite(clean_min_confidence) or not 0.0 <= clean_min_confidence <= 1.0:
+            raise ValidationError("min_confidence must be between 0 and 1")
+        try:
+            clean_as_of = float(as_of) if as_of is not None else None
+        except (TypeError, ValueError, OverflowError):
+            raise ValidationError("as_of must be a finite timestamp")
+        if clean_as_of is not None and not math.isfinite(clean_as_of):
+            raise ValidationError("as_of must be a finite timestamp")
+        try:
+            clean_time_from = float(time_from) if time_from is not None else None
+            clean_time_to = float(time_to) if time_to is not None else None
+        except (TypeError, ValueError, OverflowError):
+            raise ValidationError("time range values must be finite timestamps")
+        if ((clean_time_from is not None and not math.isfinite(clean_time_from))
+                or (clean_time_to is not None and not math.isfinite(clean_time_to))):
+            raise ValidationError("time range values must be finite timestamps")
+        if (clean_time_from is not None and clean_time_to is not None
+                and clean_time_from > clean_time_to):
+            raise ValidationError("time_from must be less than or equal to time_to")
+
+        cache_workspace_id = self._lookup_workspace(clean_workspace)
+        if cache_workspace_id:
+            self._assert_graph_index_ready(cache_workspace_id)
+        revision = self._graph_scene_revision()
+        cache_key = (
+            revision, clean_workspace, clean_level, clean_center_id or "",
+            clean_system_id or "", tuple(clean_seeds), clean_repo or "",
+            tuple(clean_layers or ()), tuple(clean_relations), tuple(clean_entity_types),
+            tuple(clean_memory_types), clean_as_of, clean_time_from, clean_time_to,
+            clean_depth, clean_min_support,
+            clean_min_confidence, bool(include_weak_cooccurrence),
+            bool(include_code), clean_node_limit, clean_edge_limit,
+        )
+        cached = self._graph_scene_cache.get(cache_key)
+        if cached is not None and (clean_as_of is not None or time.time() < cached[0]):
+            self._graph_scene_cache.move_to_end(cache_key)
+            scene = copy.deepcopy(cached[1])
+            scene["meta"]["cache_hit"] = True
+            scene["meta"]["query_ms"] = round(
+                (time.perf_counter() - started) * 1000.0, 3
+            )
+            return scene
+        if cached is not None:
+            del self._graph_scene_cache[cache_key]
+        query_at = clean_as_of if clean_as_of is not None else time.time()
+        (ws, _wid, entities, edges, supports, memories, memory_links,
+         code_memory_links, index_info) = self._graph_scene_rows(
+            workspace=clean_workspace, repo=clean_repo, as_of=query_at,
+            entity_types=clean_entity_types, memory_types=clean_memory_types,
+            time_from=clean_time_from, time_to=clean_time_to,
+            include_weak_cooccurrence=include_weak_cooccurrence,
+            include_code=include_code,
+            include_complete_rows=clean_level == "complete",
+        )
+        selected_layers = set(clean_layers) if clean_layers is not None else None
+        selected_relations = set(clean_relations) or None
+        filters = {
+            "repo": clean_repo,
+            "layers": sorted(selected_layers) if selected_layers is not None else None,
+            "relations": sorted(selected_relations) if selected_relations else None,
+            "entity_types": clean_entity_types,
+            "memory_types": clean_memory_types,
+            "as_of": clean_as_of,
+            "time_from": clean_time_from,
+            "time_to": clean_time_to,
+            "min_support": clean_min_support,
+            "min_confidence": clean_min_confidence,
+            "include_weak_cooccurrence": bool(include_weak_cooccurrence),
+            "include_code": bool(include_code),
+        }
+        filters = {key: value for key, value in filters.items()
+                   if value not in (None, [], False)}
+        scene = build_graph_scene(
+            ws, entities, edges, supports, level=clean_level,
+            memory_rows=memories, memory_link_rows=memory_links,
+            code_memory_link_rows=code_memory_links,
+            center_id=clean_center_id, system_id=clean_system_id,
+            seeds=clean_seeds, depth=clean_depth,
+            node_limit=clean_node_limit, edge_limit=clean_edge_limit,
+            include_weak_cooccurrence=include_weak_cooccurrence,
+            layers=selected_layers, relations=selected_relations,
+            min_support=clean_min_support, min_confidence=clean_min_confidence,
+            filters=filters, index_generation=int(index_info["generation"]),
+        )
+        scene["meta"]["index_state"] = index_info["state"]
+        scene["meta"]["query_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
+        scene["meta"]["cache_hit"] = False
+        if clean_level == "complete":
+            scene["meta"]["safety_limits"] = {
+                "entity_rows": MAX_GRAPH_ANALYSIS_ENTITIES,
+                "raw_relations": MAX_GRAPH_ANALYSIS_EDGES,
+                "evidence_rows": MAX_GRAPH_ANALYSIS_SUPPORTS,
+                "memory_nodes": MAX_GRAPH_COMPLETE_MEMORIES,
+                "memory_connectors": MAX_GRAPH_COMPLETE_MEMORY_LINKS,
+                "code_memory_connectors": MAX_GRAPH_COMPLETE_CODE_MEMORY_LINKS,
+                "payload_bytes": MAX_GRAPH_COMPLETE_PAYLOAD_BYTES,
+            }
+            payload_bytes = len(json.dumps(
+                scene, ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8"))
+            if payload_bytes > MAX_GRAPH_COMPLETE_PAYLOAD_BYTES:
+                raise GraphSceneCapacityExceeded(
+                    resource="payload bytes", count=payload_bytes,
+                    limit=MAX_GRAPH_COMPLETE_PAYLOAD_BYTES,
+                )
+            scene["meta"]["payload_bytes_estimate"] = payload_bytes
+        valid_until = (
+            math.inf if clean_as_of is not None or not _wid
+            else self._graph_scene_valid_until(_wid, query_at)
+        )
+        # One complete scene can be many megabytes.  Keep at most one in the shared
+        # LRU while retaining the normal 16-entry budget for compact analytical views.
+        if clean_level == "complete":
+            for key in [key for key in self._graph_scene_cache if key[2] == "complete"]:
+                self._graph_scene_cache.pop(key, None)
+        self._graph_scene_cache[cache_key] = (valid_until, copy.deepcopy(scene))
+        self._graph_scene_cache.move_to_end(cache_key)
+        while len(self._graph_scene_cache) > 16:
+            self._graph_scene_cache.popitem(last=False)
+        return scene
+
+    def graph_suggest(self, query: str, *, workspace: str, limit: int = 8,
+                      repo: Optional[str] = None,
+                      memory_types: Optional[list[str]] = None,
+                      as_of: Optional[float] = None,
+                      time_from: Optional[float] = None,
+                      time_to: Optional[float] = None,
+                      include_weak_cooccurrence: bool = False) -> dict:
+        clean_query = _clean_text(
+            query, field="query", max_chars=1_000, required=False
+        )
+        ws = self._clean_ws(workspace)
+        wid = self._lookup_workspace(ws)
+        limit = max(1, min(25, int(limit)))
+        needle = normalize_entity_name(clean_query)
+        empty_groups = {
+            "systems": [], "entities": [], "memories": [], "repositories": [],
+            "relations": [], "code_symbols": [],
+        }
+        if not wid:
+            return {"workspace": ws, "query": clean_query, "groups": empty_groups}
+        self._assert_graph_index_ready(wid)
+        repo_id = None
+        if repo:
+            clean_repo = _clean_name(repo, field="repo")
+            repo_id = self._lookup_repo(wid, clean_repo)
+            if repo_id is None:
+                raise ValidationError(f"no repo named '{clean_repo}' in workspace '{ws}'")
+        try:
+            suggestion_at = float(as_of) if as_of is not None else time.time()
+            lower_time = float(time_from) if time_from is not None else None
+            upper_time = float(time_to) if time_to is not None else None
+        except (TypeError, ValueError, OverflowError):
+            raise ValidationError("graph suggestion times must be finite timestamps")
+        if (not math.isfinite(suggestion_at)
+                or (lower_time is not None and not math.isfinite(lower_time))
+                or (upper_time is not None and not math.isfinite(upper_time))):
+            raise ValidationError("graph suggestion times must be finite timestamps")
+        if lower_time is not None and upper_time is not None and lower_time > upper_time:
+            raise ValidationError("time_from must be less than or equal to time_to")
+        clean_memory_types = sorted({
+            _enum(value, MemoryType, "memory_type").value
+            for value in _clean_string_list(
+                memory_types, field="memory_types", max_items=4,
+                max_chars=MAX_NAME_CHARS,
+            )
+        }) if memory_types is not None else []
+        escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{escaped}%"
+        prefix = f"{escaped}%"
+
+        # Search identity rows directly instead of rebuilding Louvain/PageRank for each
+        # keystroke. A canonical entity id also resolves to its current deterministic
+        # community in ``build_graph_scene``, so the same stable result can represent an
+        # entity or a system without maintaining a second search index.
+        entity_sql = (
+            "SELECT id, canonical_id, name, normalized_name, etype, repo_id "
+            "FROM entities WHERE workspace_id=? AND ("
+            "normalized_name LIKE ? ESCAPE '\\' OR canonical_id=? OR id=?)"
+        )
+        entity_params: list[Any] = [wid, like, clean_query, clean_query]
+        if repo_id:
+            entity_sql += " AND (repo_id=? OR repo_id IS NULL)"
+            entity_params.append(repo_id)
+        entity_sql += (
+            " ORDER BY CASE WHEN canonical_id=? OR id=? THEN -1 "
+            "WHEN normalized_name=? THEN 0 "
+            "WHEN normalized_name LIKE ? ESCAPE '\\' THEN 1 ELSE 2 END, "
+            "length(normalized_name), normalized_name, id LIMIT 500"
+        )
+        entity_params.extend((clean_query, clean_query, needle, prefix))
+        matched_rows = [dict(row) for row in self.store.conn.execute(
+            entity_sql, entity_params,
+        ).fetchall()]
+        matched_by_canonical: dict[str, list[dict]] = {}
+        for row in matched_rows:
+            canonical_id = str(row.get("canonical_id") or row["id"])
+            matched_by_canonical.setdefault(canonical_id, []).append(row)
+
+        def entity_rank(item: tuple[str, list[dict]]) -> tuple:
+            canonical_id, rows = item
+            exact_id = canonical_id == clean_query or any(
+                str(row["id"]) == clean_query for row in rows
+            )
+            best = min(rows, key=lambda row: (
+                0 if row["normalized_name"] == needle else
+                1 if str(row["normalized_name"]).startswith(needle) else 2,
+                len(str(row["normalized_name"])), str(row["normalized_name"]), row["id"],
+            ))
+            return (
+                -1 if exact_id else
+                0 if best["normalized_name"] == needle else
+                1 if str(best["normalized_name"]).startswith(needle) else 2,
+                len(str(best["normalized_name"])),
+                str(best["normalized_name"]), canonical_id,
+            )
+
+        ranked_identity_items = sorted(matched_by_canonical.items(), key=entity_rank)
+
+        def useful_identity(item: tuple[str, list[dict]]) -> bool:
+            """Keep search useful without making extractor fragments undiscoverable.
+
+            Exact label queries remain available by stable canonical id.  For broader
+            prefix/substring searches, however, sentence fragments such as ``If Python``
+            and ``Python-based`` must not crowd out the actual ``Python`` entity.
+            """
+            _canonical_id, rows = item
+            best = min(rows, key=lambda row: (
+                0 if row["normalized_name"] == needle else
+                1 if str(row["normalized_name"]).startswith(needle) else 2,
+                len(str(row["normalized_name"])), str(row["normalized_name"]), row["id"],
+            ))
+            exact = (
+                _canonical_id == clean_query
+                or any(str(row["id"]) == clean_query for row in rows)
+                or str(best["normalized_name"]) == needle
+            )
+            return exact or not is_broad_search_fragment(
+                str(best.get("name") or ""),
+                str(best.get("etype") or "person_or_concept"),
+            )
+
+        selected_canonical_ids = [item[0] for item in ranked_identity_items
+                                  if useful_identity(item)][:limit]
+        member_rows: list[dict] = []
+        if selected_canonical_ids:
+            marks = ",".join("?" for _ in selected_canonical_ids)
+            member_sql = (
+                "SELECT id, canonical_id, name, normalized_name, etype, repo_id "
+                f"FROM entities WHERE workspace_id=? AND canonical_id IN ({marks})"
+            )
+            member_params: list[Any] = [wid, *selected_canonical_ids]
+            if repo_id:
+                member_sql += " AND (repo_id=? OR repo_id IS NULL)"
+                member_params.append(repo_id)
+            member_sql += " ORDER BY canonical_id, normalized_name, id"
+            member_rows = [dict(row) for row in self.store.conn.execute(
+                member_sql, member_params,
+            ).fetchall()]
+        members_by_canonical: dict[str, list[dict]] = {}
+        member_to_canonical: dict[str, str] = {}
+        for row in member_rows:
+            canonical_id = str(row.get("canonical_id") or row["id"])
+            members_by_canonical.setdefault(canonical_id, []).append(row)
+            member_to_canonical[str(row["id"])] = canonical_id
+        support_counts: Counter = Counter()
+        member_ids = sorted(member_to_canonical)
+        if member_ids:
+            seen_supports: dict[str, set[str]] = {}
+            for start in range(0, len(member_ids), 400):
+                chunk = member_ids[start:start + 400]
+                marks = ",".join("?" for _ in chunk)
+                support_sql = (
+                    "SELECT endpoint, memory_id FROM ("
+                    "SELECT relation.src AS endpoint, support.memory_id FROM edges relation "
+                    "JOIN edge_supports support ON support.edge_id=relation.id "
+                    f"WHERE relation.workspace_id=? AND relation.src IN ({marks}) "
+                    "AND relation.valid_to IS NULL AND relation.expired_at IS NULL "
+                    "AND support.valid_to IS NULL AND support.expired_at IS NULL "
+                    "UNION ALL "
+                    "SELECT relation.dst AS endpoint, support.memory_id FROM edges relation "
+                    "JOIN edge_supports support ON support.edge_id=relation.id "
+                    f"WHERE relation.workspace_id=? AND relation.dst IN ({marks}) "
+                    "AND relation.valid_to IS NULL AND relation.expired_at IS NULL "
+                    "AND support.valid_to IS NULL AND support.expired_at IS NULL)"
+                )
+                rows = self.store.conn.execute(
+                    support_sql, (wid, *chunk, wid, *chunk)
+                ).fetchall()
+                for row in rows:
+                    canonical_id = member_to_canonical.get(str(row["endpoint"]), "")
+                    if canonical_id:
+                        seen_supports.setdefault(canonical_id, set()).add(
+                            str(row["memory_id"])
+                        )
+            support_counts.update({key: len(value) for key, value in seen_supports.items()})
+        entity_results = []
+        for canonical_id in selected_canonical_ids:
+            rows = members_by_canonical.get(canonical_id) or matched_by_canonical[canonical_id]
+            best = min(rows, key=lambda row: (
+                0 if row["normalized_name"] == needle else
+                1 if str(row["normalized_name"]).startswith(needle) else 2,
+                len(str(row["normalized_name"])), str(row["normalized_name"]), row["id"],
+            ))
+            aliases = sorted({str(row["name"]) for row in rows}, key=lambda value: (
+                normalize_entity_name(value), value,
+            ))
+            types = Counter(str(row.get("etype") or "person_or_concept") for row in rows)
+            entity_results.append({
+                "id": canonical_id, "label": best["name"], "kind": "entity",
+                "type": min(types, key=lambda value: (-types[value], value)),
+                "aliases": aliases,
+                "repo_ids": sorted({str(row["repo_id"]) for row in rows if row.get("repo_id")}),
+                "support_count": int(support_counts.get(canonical_id, 0)),
+            })
+        system_results = [{
+            "id": item["id"], "label": f"{item['label']} System", "kind": "system",
+            "anchor_id": item["id"],
+            "member_count": len(members_by_canonical.get(item["id"], [])) or 1,
+            "mass": float(item["support_count"]),
+        } for item in entity_results]
+
+        memories = []
+        repositories = []
+        relations_out = []
+        code_symbols = []
+        if wid:
+            memory_sql = (
+                "SELECT id, title, content, mtype, repo_id FROM memories "
+                "WHERE workspace_id=? AND (valid_from IS NULL OR valid_from<=?) "
+                "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL "
+                "AND (lower(title) LIKE ? ESCAPE '\\' OR lower(content) LIKE ? ESCAPE '\\')"
+            )
+            memory_params: list[Any] = [wid, suggestion_at, suggestion_at, like, like]
+            if clean_memory_types:
+                marks = ",".join("?" for _ in clean_memory_types)
+                memory_sql += f" AND mtype IN ({marks})"
+                memory_params.extend(clean_memory_types)
+            if lower_time is not None:
+                memory_sql += " AND COALESCE(valid_from, ingested_at, 0)>=?"
+                memory_params.append(lower_time)
+            if upper_time is not None:
+                memory_sql += " AND COALESCE(valid_from, ingested_at, 0)<=?"
+                memory_params.append(upper_time)
+            if repo_id:
+                memory_sql += " AND (repo_id=? OR repo_id IS NULL)"
+                memory_params.append(repo_id)
+            memory_sql += (
+                " ORDER BY COALESCE(last_access, valid_from, ingested_at) DESC, id LIMIT ?"
+            )
+            memory_params.append(limit)
+            memory_rows = self.store.conn.execute(
+                memory_sql, memory_params,
+            ).fetchall()
+            memories = [{
+                "id": row["id"], "label": row["title"] or str(row["content"] or "")[:80],
+                "kind": "memory", "type": row["mtype"], "repo_id": row["repo_id"],
+            } for row in memory_rows]
+            repo_rows = self.store.conn.execute(
+                "SELECT id, name FROM repos WHERE workspace_id=? AND lower(name) LIKE ? ESCAPE '\\' "
+                "ORDER BY name, id LIMIT ?", (wid, like, limit)
+            ).fetchall()
+            repositories = [{"id": row["id"], "label": row["name"], "kind": "repository"}
+                            for row in repo_rows]
+            relation_sql = (
+                "SELECT relation, COUNT(*) AS count FROM edges WHERE workspace_id=? "
+                "AND relation LIKE ? ESCAPE '\\' AND (valid_from IS NULL OR valid_from<=?) "
+                "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL"
+            )
+            relation_params: list[Any] = [wid, like, suggestion_at, suggestion_at]
+            if repo_id:
+                relation_sql += " AND (repo_id=? OR repo_id IS NULL)"
+                relation_params.append(repo_id)
+            relation_sql += " GROUP BY relation ORDER BY count DESC, relation LIMIT ?"
+            relation_params.append(limit)
+            relations_out = [{
+                "id": row["relation"], "label": row["relation"], "kind": "relation",
+                "count": int(row["count"]),
+            } for row in self.store.conn.execute(relation_sql, relation_params).fetchall()]
+            symbol_sql = (
+                "SELECT s.id, s.name, s.fqname, s.kind, s.repo_id, r.name AS repo_name "
+                "FROM symbols s JOIN repos r ON r.id=s.repo_id "
+                "WHERE r.workspace_id=? AND (lower(s.name) LIKE ? ESCAPE '\\' "
+                "OR lower(s.fqname) LIKE ? ESCAPE '\\')"
+            )
+            symbol_params: list[Any] = [wid, like, like]
+            if repo_id:
+                symbol_sql += " AND s.repo_id=?"
+                symbol_params.append(repo_id)
+            symbol_sql += " ORDER BY s.name, s.id LIMIT ?"
+            symbol_params.append(limit)
+            symbol_rows = self.store.conn.execute(symbol_sql, symbol_params).fetchall()
+            code_symbols = [{
+                "id": row["id"], "label": row["fqname"] or row["name"],
+                "kind": "code_symbol", "type": row["kind"],
+                "repo_id": row["repo_id"], "repo": row["repo_name"],
+            } for row in symbol_rows]
+        return {
+            "workspace": ws, "query": clean_query,
+            "groups": {
+                "systems": system_results, "entities": entity_results,
+                "memories": memories, "repositories": repositories,
+                "relations": relations_out, "code_symbols": code_symbols,
+            },
+        }
+
+    def graph_entity(self, canonical_id: str, *, workspace: str,
+                     repo: Optional[str] = None,
+                     memory_types: Optional[list[str]] = None,
+                     as_of: Optional[float] = None,
+                     time_from: Optional[float] = None,
+                     time_to: Optional[float] = None,
+                     include_weak_cooccurrence: bool = True) -> dict:
+        clean_canonical_id = _clean_text(
+            canonical_id, field="canonical_id", max_chars=MAX_NAME_CHARS
+        )
+        (ws, wid, entities, edges, supports, _memories, _memory_links,
+         _code_memory_links, _index_info) = self._graph_scene_rows(
+            workspace=workspace, repo=repo, as_of=as_of,
+            memory_types=memory_types, time_from=time_from, time_to=time_to,
+            include_weak_cooccurrence=include_weak_cooccurrence,
+        )
+        graph = build_canonical_graph(
+            entities, edges, supports,
+            include_weak_cooccurrence=include_weak_cooccurrence, min_support=0,
+        )
+        resolved = graph["member_to_canonical"].get(
+            clean_canonical_id, clean_canonical_id
+        )
+        node = graph["nodes"].get(resolved)
+        if node is None:
+            raise ValidationError(
+                f"no entity '{clean_canonical_id}' in workspace '{ws}'"
+            )
+        repo_names = {row["id"]: row["name"] for row in self.store.conn.execute(
+            "SELECT id, name FROM repos WHERE workspace_id=?", (wid,)
+        ).fetchall()} if wid else {}
+        relations_out = []
+        connected_edge_ids: set[str] = set()
+        memory_ids: set[str] = set()
+        for edge in graph["edges"]:
+            if resolved not in {edge["source"], edge["target"]}:
+                continue
+            direction = "outgoing" if edge["source"] == resolved else "incoming"
+            other_id = edge["target"] if direction == "outgoing" else edge["source"]
+            relations_out.append({
+                **{key: value for key, value in edge.items()
+                   if key not in {"support_memory_ids"} and not key.startswith("_")},
+                "direction": direction, "other_id": other_id,
+                "other_label": graph["nodes"][other_id]["label"],
+            })
+            connected_edge_ids.update(edge["_underlying_edge_ids_all"])
+            memory_ids.update(edge["_support_ids_all"])
+        support_map: dict[str, dict] = {}
+        for row in supports:
+            if row["edge_id"] not in connected_edge_ids:
+                continue
+            memory_id = str(row["memory_id"])
+            current = support_map.get(memory_id)
+            if current is None or float(row.get("confidence") or 0.0) > float(
+                    current.get("confidence") or 0.0):
+                support_map[memory_id] = row
+        relation_total = len(relations_out)
+        layer_order = {"causal": 0, "entity": 1, "temporal": 2, "semantic": 3}
+        relations_out = sorted(relations_out, key=lambda item: (
+            item["relation"] == "co_occurs",
+            layer_order.get(item["layer"], 4),
+            item["direction"],
+            -item["strength"],
+            item["id"],
+        ))[:GRAPH_ENTITY_RELATION_LIMIT]
+        evidence = []
+        if memory_ids:
+            ordered_ids = sorted(memory_ids, key=lambda memory_id: (
+                -float(support_map.get(memory_id, {}).get("confidence") or 0.0),
+                memory_id,
+            ))[:GRAPH_ENTITY_EVIDENCE_LIMIT]
+            for start in range(0, len(ordered_ids), 500):
+                chunk = ordered_ids[start:start + 500]
+                marks = ",".join("?" for _ in chunk)
+                for memory in self.store.conn.execute(
+                    "SELECT id, title, content, mtype, valid_from, valid_to, ingested_at, "
+                    "expired_at, provenance FROM memories WHERE workspace_id=? "
+                    "AND id IN (" + marks + ") "
+                    "ORDER BY id", (wid, *chunk)
+                ).fetchall():
+                    support = support_map.get(memory["id"], {})
+                    try:
+                        memory_provenance = json.loads(memory["provenance"] or "{}")
+                    except (TypeError, ValueError, RecursionError):
+                        memory_provenance = {}
+                    if not isinstance(memory_provenance, dict):
+                        memory_provenance = {}
+                    evidence.append({
+                        "memory_id": memory["id"], "title": memory["title"] or "",
+                        "excerpt": str(memory["content"] or "")[:500],
+                        "memory_type": memory["mtype"],
+                        "source_kind": support.get("source_kind", "legacy_unknown"),
+                        "confidence": float(support.get("confidence", 0.5)),
+                        "valid_from": memory["valid_from"], "valid_to": memory["valid_to"],
+                        "ingested_at": memory["ingested_at"], "expired_at": memory["expired_at"],
+                        "provenance": memory_provenance,
+                    })
+        evidence.sort(key=lambda item: (
+            -float(item["confidence"]),
+            -float(item.get("valid_from") or item.get("ingested_at") or 0.0),
+            item["memory_id"],
+        ))
+        member_ids = node["member_ids"]
+        history_filter = (
+            "workspace_id=? AND (valid_to IS NOT NULL OR expired_at IS NOT NULL) "
+            "AND (src IN (SELECT id FROM entities WHERE workspace_id=? AND canonical_id=?) "
+            "OR dst IN (SELECT id FROM entities WHERE workspace_id=? AND canonical_id=?))"
+        )
+        history_params = (wid, wid, resolved, wid, resolved)
+        history_total = int(self.store.conn.execute(
+            f"SELECT COUNT(*) AS n FROM edges WHERE {history_filter}", history_params
+        ).fetchone()["n"])
+        history = [dict(row) for row in self.store.conn.execute(
+            "SELECT id, src, dst, relation, layer, weight, valid_from, valid_to, "
+            "ingested_at, expired_at FROM edges WHERE " + history_filter + " "
+            "ORDER BY COALESCE(valid_to, expired_at, valid_from, ingested_at) DESC, id DESC "
+            "LIMIT ?",
+            (*history_params, GRAPH_ENTITY_HISTORY_LIMIT),
+        ).fetchall()]
+        for item in history:
+            item["event"] = "Relation invalidated" if item.get("valid_to") is not None else (
+                "Relation expired"
+            )
+        return {
+            "workspace": ws, "canonical_id": resolved, "label": node["label"],
+            "type": node["type"], "member_ids": member_ids,
+            "aliases": node.get("aliases", []),
+            "repositories": [{"id": repo_id, "name": repo_names.get(repo_id, repo_id)}
+                             for repo_id in node["repo_ids"]],
+            "mass": {key: node[key] for key in (
+                "mass_score", "gravity_mass", "visual_radius", "weighted_degree",
+                "pagerank", "support_count", "anchor_role", "core_affinity"
+            )},
+            "relations": relations_out,
+            "evidence": evidence, "history": history,
+            "totals": {
+                "relations": relation_total,
+                "evidence": len(memory_ids),
+                "history": history_total,
+            },
+            "truncation": {
+                "relations": relation_total > len(relations_out),
+                "evidence": len(memory_ids) > len(evidence),
+                "history": history_total > len(history),
+            },
+            "as_of": as_of,
+        }
+
+    def graph_path(self, source: str, target: str, *, workspace: str,
+                   repo: Optional[str] = None, as_of: Optional[float] = None,
+                   memory_types: Optional[list[str]] = None,
+                   time_from: Optional[float] = None,
+                   time_to: Optional[float] = None,
+                   max_hops: int = 8, max_visits: int = 10_000,
+                   include_weak_cooccurrence: bool = False) -> dict:
+        clean_source = _clean_text(
+            source, field="source", max_chars=MAX_NAME_CHARS
+        )
+        clean_target = _clean_text(
+            target, field="target", max_chars=MAX_NAME_CHARS
+        )
+        try:
+            clean_max_hops = int(max_hops)
+            clean_max_visits = int(max_visits)
+        except (TypeError, ValueError, OverflowError):
+            raise ValidationError("max_hops and max_visits must be integers")
+        if not 1 <= clean_max_hops <= 8:
+            raise ValidationError("max_hops must be between 1 and 8")
+        if not 1 <= clean_max_visits <= 50_000:
+            raise ValidationError("max_visits must be between 1 and 50000")
+        (ws, _wid, entities, edges, supports, _memories, _memory_links,
+         _code_memory_links, _index_info) = self._graph_scene_rows(
+            workspace=workspace, repo=repo, as_of=as_of,
+            memory_types=memory_types, time_from=time_from, time_to=time_to,
+            include_weak_cooccurrence=include_weak_cooccurrence,
+        )
+        graph = build_canonical_graph(
+            entities, edges, supports,
+            include_weak_cooccurrence=include_weak_cooccurrence, min_support=0,
+        )
+        result = strongest_path(
+            graph, clean_source, clean_target, max_hops=clean_max_hops,
+            max_visits=clean_max_visits,
+        )
+        return {
+            "workspace": ws, "source": clean_source, "target": clean_target, **result,
+        }
+
     def graph(self, *, workspace: str, limit: int = 2000,
               layers: Optional[list] = None, include_code: bool = False,
               repo: Optional[str] = None, backfill: bool = True) -> dict:
@@ -2630,6 +4601,7 @@ class MemoryService:
         wid = self._lookup_workspace(ws)
         if wid is None:
             return empty_graph(ws)
+        self._assert_graph_index_ready(wid)
         limit = max(1, min(5000, int(limit)))
         conn = self.store.conn
         ents = conn.execute(

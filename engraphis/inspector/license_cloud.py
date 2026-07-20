@@ -16,12 +16,15 @@ see :func:`_relay_public_base`.
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import os
 import secrets
 import time
 from typing import Optional
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -95,7 +98,7 @@ async def _bounded_json_object(request: Request) -> dict:
         body = json.loads(raw)
     except _JsonBodyError:
         raise
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         raise _JsonBodyError("invalid JSON body") from None
     if not isinstance(body, dict):
         raise _JsonBodyError("JSON body must be an object")
@@ -119,8 +122,8 @@ def _single_line(value: object, *, max_chars: int, required: bool = True) -> Opt
     return text
 
 
-#: Per-IP burst cap on the unauthenticated, CPU-bound relay endpoints (``/register`` and
-#: ``/team-invite``, which share one budget).
+#: Per-IP burst cap on the unauthenticated, CPU-bound relay endpoints (``/register``,
+#: ``/team-invite``, and ``/password-reset``, which share one budget).
 #: Ed25519 verification here is the pure-Python RFC-8032 reference implementation at
 #: ~3 ms a call, and ``/register`` performs two (parse_key + record_issued) — roughly
 #: 165 registrations/second/core. Without a cap, a few hundred requests per second of
@@ -348,9 +351,13 @@ def _vendor_admin_token() -> str:
     set the variable but can never cost a customer their license."""
     global _VENDOR_UNSET_WARNED
     token = os.environ.get("ENGRAPHIS_VENDOR_ADMIN_TOKEN", "").strip()
+    from engraphis.commercial import vendor_admin_token_ready
+    if not vendor_admin_token_ready():
+        token = ""
     if not token and not _VENDOR_UNSET_WARNED:
         logger.warning(
-            "ENGRAPHIS_VENDOR_ADMIN_TOKEN is not set — vendor admin routes "
+            "ENGRAPHIS_VENDOR_ADMIN_TOKEN is missing or weaker than 32 characters — "
+            "vendor admin routes "
             "(/license/v1 revoke/keys/deactivate) are DISABLED. Set that variable to a "
             "dedicated secret (not ENGRAPHIS_API_TOKEN) to re-enable them.")
         _VENDOR_UNSET_WARNED = True
@@ -611,6 +618,296 @@ def _refund_invite_count(key_id: str, day: Optional[str] = None) -> None:
         conn.close()
 
 
+def _trial_dashboard_for_key(key: str) -> str:
+    """Return the dashboard origin bound when this deployment claimed its trial."""
+    conn = reg.connect()
+    try:
+        conn.executescript(_TRIAL_CLAIM_SCHEMA)
+        _ensure_trial_claim_columns(conn)
+        row = conn.execute(
+            "SELECT dashboard_url FROM trial_claims WHERE license_key=? "
+            "AND confirmed_at IS NOT NULL", (key,)).fetchone()
+        return str(row["dashboard_url"] or "") if row else ""
+    finally:
+        conn.close()
+
+
+_PASSWORD_RESET_SCHEMA = """
+CREATE TABLE IF NOT EXISTS password_reset_relay_requests (
+    request_hash   TEXT PRIMARY KEY,
+    key_id         TEXT NOT NULL,
+    recipient_hash TEXT NOT NULL,
+    day            TEXT NOT NULL,
+    hour           TEXT NOT NULL,
+    created_at     REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS password_reset_key_sends (
+    key_id TEXT NOT NULL,
+    day    TEXT NOT NULL,
+    count  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (key_id, day)
+);
+CREATE TABLE IF NOT EXISTS password_reset_recipient_sends (
+    recipient_hash TEXT NOT NULL,
+    hour           TEXT NOT NULL,
+    count          INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (recipient_hash, hour)
+);
+"""
+
+
+def _password_reset_caps() -> tuple[int, int]:
+    try:
+        per_key = max(1, int(os.environ.get(
+            "ENGRAPHIS_PASSWORD_RESET_DAILY_CAP", "20")))
+    except ValueError:
+        per_key = 20
+    try:
+        per_recipient = max(1, int(os.environ.get(
+            "ENGRAPHIS_PASSWORD_RESET_RECIPIENT_HOURLY_CAP", "5")))
+    except ValueError:
+        per_recipient = 5
+    return per_key, per_recipient
+
+
+def _reset_windows(now: Optional[float] = None) -> tuple[str, str]:
+    import datetime as _dt
+    current = _dt.datetime.fromtimestamp(
+        time.time() if now is None else now, tz=_dt.timezone.utc)
+    return current.strftime("%Y-%m-%d"), current.strftime("%Y-%m-%dT%H")
+
+
+def _reserve_password_reset(key_id: str, recipient: str, reset_url: str) -> tuple[str, str]:
+    """Atomically reserve an idempotent reset send and both abuse budgets."""
+    now = time.time()
+    day, hour = _reset_windows(now)
+    recipient_hash = hashlib.sha256(recipient.encode("utf-8")).hexdigest()
+    request_hash = hashlib.sha256(
+        (key_id + "\0" + reset_url).encode("utf-8")).hexdigest()
+    per_key, per_recipient = _password_reset_caps()
+    conn = reg.connect()
+    previous = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        conn.executescript(_PASSWORD_RESET_SCHEMA)
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "DELETE FROM password_reset_relay_requests WHERE created_at<?",
+            (now - 86400,))
+        if conn.execute(
+                "SELECT 1 FROM password_reset_relay_requests WHERE request_hash=?",
+                (request_hash,)).fetchone():
+            conn.execute("COMMIT")
+            return "duplicate", request_hash
+        key_row = conn.execute(
+            "SELECT count FROM password_reset_key_sends WHERE key_id=? AND day=?",
+            (key_id, day)).fetchone()
+        recipient_row = conn.execute(
+            "SELECT count FROM password_reset_recipient_sends "
+            "WHERE recipient_hash=? AND hour=?", (recipient_hash, hour)).fetchone()
+        if key_row and int(key_row["count"]) >= per_key:
+            conn.execute("COMMIT")
+            return "key_limit", request_hash
+        if recipient_row and int(recipient_row["count"]) >= per_recipient:
+            conn.execute("COMMIT")
+            return "recipient_limit", request_hash
+        conn.execute(
+            "INSERT INTO password_reset_key_sends(key_id,day,count) VALUES(?,?,1) "
+            "ON CONFLICT(key_id,day) DO UPDATE SET count=count+1", (key_id, day))
+        conn.execute(
+            "INSERT INTO password_reset_recipient_sends(recipient_hash,hour,count) "
+            "VALUES(?,?,1) ON CONFLICT(recipient_hash,hour) "
+            "DO UPDATE SET count=count+1", (recipient_hash, hour))
+        conn.execute(
+            "INSERT INTO password_reset_relay_requests(request_hash,key_id,"
+            "recipient_hash,day,hour,created_at) VALUES(?,?,?,?,?,?)",
+            (request_hash, key_id, recipient_hash, day, hour, now))
+        conn.execute("DELETE FROM password_reset_key_sends WHERE day<?", (day,))
+        conn.execute("DELETE FROM password_reset_recipient_sends WHERE hour<?", (hour,))
+        conn.execute("COMMIT")
+        return "reserved", request_hash
+    except BaseException:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.isolation_level = previous
+        conn.close()
+
+
+def _refund_password_reset(request_hash: str) -> None:
+    """Release a reservation only when durable outbox enqueue itself failed."""
+    conn = reg.connect()
+    previous = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        conn.executescript(_PASSWORD_RESET_SCHEMA)
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT key_id,recipient_hash,day,hour FROM password_reset_relay_requests "
+            "WHERE request_hash=?", (request_hash,)).fetchone()
+        if row:
+            conn.execute(
+                "DELETE FROM password_reset_relay_requests WHERE request_hash=?",
+                (request_hash,))
+            conn.execute(
+                "UPDATE password_reset_key_sends SET count=MAX(0,count-1) "
+                "WHERE key_id=? AND day=?", (row["key_id"], row["day"]))
+            conn.execute(
+                "UPDATE password_reset_recipient_sends SET count=MAX(0,count-1) "
+                "WHERE recipient_hash=? AND hour=?",
+                (row["recipient_hash"], row["hour"]))
+        conn.execute("COMMIT")
+    except BaseException:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.isolation_level = previous
+        conn.close()
+
+
+def _relay_trusted_origin() -> str:
+    """The relay's OWN operator-configured dashboard origin — never a caller value.
+
+    A free trial key costs nothing to obtain, so honoring a caller-attested origin let a
+    trial turn the vendor's signed-mail sender into a branded phishing relay (arbitrary
+    recipient + attacker-chosen link domain). Vendor-branded TRIAL emails may therefore
+    only target this operator-controlled origin (``ENGRAPHIS_DASHBOARD_URL``, else the
+    hosted default) — exactly the origin ``send_*_email`` already falls back to when no
+    caller origin is supplied. Paid keys keep their self-service first-use pin."""
+    from engraphis.inspector.webhooks import DEFAULT_TEAM_DASHBOARD_URL
+    raw = (os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
+           or DEFAULT_TEAM_DASHBOARD_URL)
+    try:
+        return cloud_license.validate_cloud_base_url(raw)
+    except ValueError:
+        return DEFAULT_TEAM_DASHBOARD_URL.rstrip("/")
+
+
+def _auth_link_origin(link: str, token_name: str) -> Optional[str]:
+    """Validate a canonical fragment-only invitation/reset link and return its base.
+
+    Fragments never cross the HTTP request boundary, so keeping the one-time credential
+    there prevents Uvicorn and reverse-proxy access logs from recording it. The vendor
+    mail relay accepts exactly one bounded URL-safe token in the fragment, no query
+    parameters. A canonical deployment subpath (``/memory/``) is allowed, while encoded,
+    empty, or traversal-like path segments are refused. Returning ``None`` keeps both
+    public endpoints' failure response generic and free of credential material.
+    """
+    parsed = urlsplit(link)
+    path = parsed.path
+    if path not in ("", "/"):
+        if not path.startswith("/") or not path.endswith("/"):
+            return None
+        segments = path[1:-1].split("/")
+        if any(not segment or segment in (".", "..") or not all(
+                char.isascii() and (char.isalnum() or char in "-._~")
+                for char in segment) for segment in segments):
+            return None
+    base = urlunsplit((parsed.scheme, parsed.netloc, path.rstrip("/"), "", ""))
+    try:
+        base = cloud_license.validate_cloud_base_url(base)
+        pairs = parse_qsl(parsed.fragment, keep_blank_values=True, strict_parsing=True)
+    except (ValueError, UnicodeError):
+        return None
+    if parsed.query or len(pairs) != 1:
+        return None
+    name, token = pairs[0]
+    if name != token_name or not token or len(token) > 1024:
+        return None
+    if any(char not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+           for char in token):
+        return None
+    # Reject alternate percent-encoded or delimiter-bearing spellings. The customer
+    # routes generate this exact form, which makes the accepted contract unambiguous.
+    if parsed.fragment != "%s=%s" % (token_name, token):
+        return None
+    return base
+
+
+@router.post("/password-reset")
+async def password_reset(request: Request):
+    """Durably queue a reset email for an active paid/trial deployment."""
+    try:
+        body = await _bounded_json_object(request)
+    except _JsonBodyError as exc:
+        return _json_error(exc)
+    key = _single_line(body.get("key"), max_chars=8192)
+    to = _single_line(body.get("to"), max_chars=384)
+    name = _single_line(body.get("name", ""), max_chars=120, required=False)
+    reset_url = _single_line(body.get("reset_url"), max_chars=4096)
+    if None in (key, to, name, reset_url):
+        return JSONResponse(
+            {"error": "password-reset fields must be bounded single-line strings"},
+            status_code=400,
+        )
+    to = to.lower()
+    if not _EMAIL_RE.match(to):
+        return JSONResponse({"error": "invalid recipient email"}, status_code=400)
+
+    reset_origin = _auth_link_origin(reset_url, "reset_token")
+    if reset_origin is None:
+        return JSONResponse({"error": "invalid password-reset URL"}, status_code=400)
+
+    # Share the unauthenticated crypto budget with registration and invitations.
+    if not _register_rate_ok(_register_rate_key(request)):
+        return JSONResponse(
+            {"error": "too many password-reset attempts; try again shortly"},
+            status_code=429, headers={"Retry-After": "60"})
+
+    lic = await asyncio.to_thread(reg.verify_for_feature, key, "sync")
+    if lic.plan not in ("pro", "team"):
+        return JSONResponse({"error": "an active Pro or Team license is required"},
+                            status_code=402)
+    if lic.is_trial:
+        # A FREE trial key may never aim a vendor-branded email at a caller-chosen origin
+        # (branded phishing relay). Trials must target the relay's own trusted dashboard
+        # origin; the accept/reset token in the URL is preserved, only the origin is pinned.
+        if reset_origin.rstrip("/") != _relay_trusted_origin():
+            return JSONResponse(
+                {"error": "trial password-reset links must target the deployment's own "
+                          "dashboard origin (set ENGRAPHIS_DASHBOARD_URL on the relay)"},
+                status_code=409)
+    elif not await asyncio.to_thread(
+            _pin_invite_dashboard_url, lic.key_id, reset_origin):
+        return JSONResponse(
+            {"error": "this license is bound to a different dashboard origin"},
+            status_code=409)
+
+    reservation, request_hash = await asyncio.to_thread(
+        _reserve_password_reset, lic.key_id, to, reset_url)
+    if reservation == "duplicate":
+        return {"queued": True}
+    if reservation in ("key_limit", "recipient_limit"):
+        return JSONResponse(
+            {"error": "password-reset email rate limit reached"}, status_code=429,
+            headers={"Retry-After": "3600"})
+
+    from engraphis.inspector.webhooks import queue_password_reset_email
+    try:
+        await asyncio.to_thread(
+            queue_password_reset_email, to, name, reset_url,
+            idempotency_key="password-reset-relay:" + request_hash,
+        )
+    except Exception as exc:  # noqa: BLE001 - redact recipient, URL, token, provider details
+        try:
+            await asyncio.to_thread(_refund_password_reset, request_hash)
+        except Exception as refund_exc:  # noqa: BLE001
+            logger.error("password-reset reservation refund failed (%s)",
+                         type(refund_exc).__name__)
+        logger.error("password-reset outbox enqueue failed (%s)", type(exc).__name__)
+        return JSONResponse(
+            {"error": "password-reset delivery is temporarily unavailable; retry later"},
+            status_code=503,
+        )
+    return {"queued": True}
+
+
 @router.post("/team-invite")
 async def team_invite(request: Request):
     """Send a team-invite notification through the vendor's own mail provider, on
@@ -619,8 +916,8 @@ async def team_invite(request: Request):
     verify_for_feature` — the same server-side gate every other licensed feature
     uses); 400 for a malformed recipient; 409 if a paid key tries to re-aim its invites
     at a different ``dashboard_url`` than the one it pinned on first use; 429 for a
-    per-IP burst or past the per-key daily cap; 502 if the vendor's own mail provider
-    rejects the send. Trial keys never choose the link (see below), and a ``viewer``
+    per-IP burst or past the per-key daily cap. Accepted messages are durably queued and
+    retried by the vendor outbox. Trial keys never choose the link (see below), and a ``viewer``
     invite never carries the license key."""
     try:
         body = await _bounded_json_object(request)
@@ -634,7 +931,9 @@ async def team_invite(request: Request):
         body.get("invited_by", ""), max_chars=384, required=False)
     dashboard_url = _single_line(
         body.get("dashboard_url", ""), max_chars=2048, required=False)
-    if None in (key, to, name, role, invited_by, dashboard_url):
+    invite_url = _single_line(
+        body.get("invite_url", ""), max_chars=4096, required=False)
+    if None in (key, to, name, role, invited_by, dashboard_url, invite_url):
         return JSONResponse(
             {"error": "invite fields must be bounded single-line strings"},
             status_code=400,
@@ -648,6 +947,13 @@ async def team_invite(request: Request):
             dashboard_url = cloud_license.validate_cloud_base_url(dashboard_url)
         except ValueError:
             return JSONResponse({"error": "invalid dashboard URL"}, status_code=400)
+    if invite_url:
+        invite_origin = _auth_link_origin(invite_url, "invite_token")
+        if invite_origin is None:
+            return JSONResponse({"error": "invalid invitation URL"}, status_code=400)
+        if dashboard_url and dashboard_url.rstrip("/") != invite_origin.rstrip("/"):
+            return JSONResponse({"error": "invitation URL origin mismatch"}, status_code=400)
+        dashboard_url = invite_origin
 
     # Burst-cap before the verify below, for the same reason /register does: this is an
     # unauthenticated Ed25519 verify on a caller-supplied key. The bucket is deliberately
@@ -668,16 +974,18 @@ async def team_invite(request: Request):
     if invited_by and not _EMAIL_RE.match(invited_by):
         return JSONResponse({"error": "invalid inviter email"}, status_code=400)
 
-    # Who gets to choose the link inside a vendor-domain email. ``key`` is the ONLY
-    # authentication here, and a free self-serve trial key satisfies ``team`` — so
-    # unrestricted caller-supplied ``dashboard_url`` made this an open, branded phishing
-    # relay for the price of one throwaway email address.
+    # Who gets to choose the link inside a vendor-domain email. ``key`` is the only
+    # request credential, so trial links must match the dashboard origin recorded in the
+    # deployment-bound claim; paid keys keep their first-use origin pin.
     if lic.is_trial:
-        # Costs nothing to obtain, therefore gets no say: fall back to the relay's own
-        # ENGRAPHIS_DASHBOARD_URL and then DEFAULT_TEAM_DASHBOARD_URL, both resolved
-        # inside send_team_invite_email. A trial is a hosted-dashboard evaluation; a
-        # self-hoster with their own dashboard URL is exactly who should be paying.
-        dashboard_url = ""
+        # A FREE trial key may never aim a vendor-branded invitation at a caller-chosen
+        # origin (branded phishing relay). Trials must target the relay's own trusted
+        # dashboard origin; the one-time accept token in invite_url is preserved.
+        if not invite_url or dashboard_url.rstrip("/") != _relay_trusted_origin():
+            return JSONResponse(
+                {"error": "trial invitations must target the deployment's own dashboard "
+                          "origin (set ENGRAPHIS_DASHBOARD_URL on the relay)"},
+                status_code=409)
     elif dashboard_url and not await asyncio.to_thread(
             _pin_invite_dashboard_url, lic.key_id, dashboard_url):
         return JSONResponse(
@@ -693,35 +1001,29 @@ async def team_invite(request: Request):
                       "to send directly instead of relaying"},
             status_code=429)
 
-    from engraphis.inspector.webhooks import send_team_invite_email
+    from engraphis.inspector.webhooks import queue_team_invite_email
+    invite_request_hash = hashlib.sha256(
+        (lic.key_id + "\0" + to + "\0" + role + "\0" + invite_url
+         + "\0" + dashboard_url).encode("utf-8")
+    ).hexdigest()
     try:
-        # Echo the just-verified Team key into the email so the relay-delivered invite
-        # also carries Pro activation (the key is this account's shared team key — the
-        # same one the caller already proved they hold). dashboard_url is forwarded from
-        # the admin; when empty, send_team_invite_email falls back to the relay's own
-        # ENGRAPHIS_DASHBOARD_URL and then the hosted DEFAULT_TEAM_DASHBOARD_URL, so a
-        # relay-delivered invite always carries a clickable sign-in link.
-        #
-        # NOT for a viewer. Holding this key is write access to the team's relay
-        # namespace — the relay authorizes on the key alone and cannot see dashboard
-        # roles — so mailing it to a read-only account silently promotes them past every
-        # dashboard check (see ``routes.v2_team._send_invite``). The withholding is
-        # enforced HERE, server-side, because this is the code that composes the email:
-        # a self-hosted dashboard relaying through us cannot opt out of it.
-        echo_key = "" if role == "viewer" else key
-        await asyncio.to_thread(send_team_invite_email, to, name, role,
-                                invited_by=invited_by, key=echo_key,
-                                dashboard_url=dashboard_url)
+        # Invitations contain only the one-time account-acceptance URL. The account-wide
+        # license key is never passed to the recipient; agent and sync access use each
+        # user's scoped, expiring bearer token instead.
+        await asyncio.to_thread(queue_team_invite_email, to, name, role,
+                                invited_by=invited_by, invite_url=invite_url,
+                                dashboard_url=dashboard_url,
+                                idempotency_key="team-invite-relay:" + invite_request_hash)
     except Exception as exc:  # noqa: BLE001 — surface a safe message, don't leak internals
         try:
             await asyncio.to_thread(_refund_invite_count, lic.key_id, reservation_day)
         except Exception as refund_exc:  # noqa: BLE001 - retain the safe provider response
             logger.error("invite quota refund failed (%s)", type(refund_exc).__name__)
-        logger.error("team invite delivery failed (%s)", type(exc).__name__)
+        logger.error("team invite queueing failed (%s)", type(exc).__name__)
         return JSONResponse(
-            {"error": "invite delivery failed; check the relay mail configuration and retry"},
+            {"error": "invite queueing failed; retry the request"},
             status_code=502)
-    return {"sent": True}
+    return {"sent": True, "queued": True}
 
 
 # ── self-serve Team trial: a REAL signed key, no purchase, no Polar checkout ───────────
@@ -801,6 +1103,41 @@ CREATE TABLE IF NOT EXISTS trial_start_attempts (
     PRIMARY KEY (ip, window)
 );
 """
+
+_TRIAL_CLAIM_SCHEMA = """
+CREATE TABLE IF NOT EXISTS trial_claims (
+    claim_id TEXT PRIMARY KEY,
+    confirmation_hash TEXT UNIQUE NOT NULL,
+    deployment_hash TEXT UNIQUE NOT NULL,
+    machine_id TEXT UNIQUE NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    plan TEXT NOT NULL,
+    dashboard_url TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    confirmed_at REAL,
+    claimed_at REAL,
+    license_key TEXT,
+    delivery_state TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE INDEX IF NOT EXISTS trial_claims_expires_idx ON trial_claims(expires_at);
+CREATE TABLE IF NOT EXISTS trial_email_attempts (
+    email TEXT NOT NULL,
+    window TEXT NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (email, window)
+);
+"""
+
+
+def _ensure_trial_claim_columns(conn) -> None:
+    """Idempotently extend pre-v1.0 claim tables without dropping customer state."""
+    columns = {row[1] for row in conn.execute(
+        "PRAGMA table_info(trial_claims)").fetchall()}
+    if "dashboard_url" not in columns:
+        conn.execute(
+            "ALTER TABLE trial_claims ADD COLUMN dashboard_url TEXT NOT NULL DEFAULT ''")
+        conn.commit()
 
 
 def _ensure_trial_plan_column(conn) -> None:
@@ -912,7 +1249,7 @@ def _relay_public_base() -> str:
     except ValueError as exc:
         logger.error(
             "ENGRAPHIS_RELAY_PUBLIC_URL is set but unusable (%s) — trial signup is "
-            "disabled until it is corrected", exc)
+            "disabled until it is corrected", type(exc).__name__)
         return ""
 
 
@@ -948,42 +1285,23 @@ def _trial_verify_error_html(message: str) -> str:
 </body></html>"""
 
 
-def _trial_confirm_html(token: str, plan: str, email: str) -> str:
-    """The interstitial a human sees before the trial is actually granted.
-
-    Exists so that redemption needs a deliberate POST rather than the bare GET an email
-    link-prescanner performs on the recipient's behalf — see :func:`confirm_team_trial`.
-    The form posts back to this same URL with the token in the query string, so there is
-    no request body to parse."""
-    import html as _html
-    label = _html.escape(plan.title())
-    # A QUERY-ONLY relative reference, deliberately: it resolves against the current
-    # document's own path, so the form posts back to wherever this page was actually
-    # served from. A root-absolute "/license/v1/start-trial/verify?..." would silently
-    # break every sub-path deployment — validate_cloud_base_url PRESERVES the path
-    # component (it only rejects query/fragment), so ENGRAPHIS_RELAY_PUBLIC_URL=
-    # https://example.com/relay is valid config; the emailed link would render fine and
-    # then POST to a 404, stranding the customer with a token that expires in 30 minutes
-    # and no diagnostic. Same breakage behind a root_path reverse proxy.
-    # The token goes into an attribute, so escape it with quote=True (the default).
-    action = "?token=%s" % _html.escape(token)
+def _trial_confirm_html() -> str:
+    """Static legacy interstitial; its fragment token never enters HTTP or HTML."""
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
-<title>Confirm your Engraphis {label} trial</title></head>
+<title>Confirm your Engraphis trial</title></head>
 <body style="font-family:system-ui,sans-serif;max-width:640px;margin:48px auto;padding:0 16px">
-<h2>Confirm your {label} trial</h2>
-<p>You're one click away. This will activate a trial for
-<strong>{_html.escape(email)}</strong>.</p>
-<form method="post" action="{action}">
-<button type="submit" style="font:inherit;font-weight:600;padding:12px 20px;border:0;
-border-radius:8px;background:#5941c2;color:#fff;cursor:pointer">
-Activate my {label} trial</button>
-</form>
+<h2>Confirm your Engraphis trial</h2>
+<p>You're one click away. A signed trial key will be shown after activation.</p>
+<button id="trial-confirm" type="button" disabled style="font:inherit;font-weight:600;
+padding:12px 20px;border:0;border-radius:8px;background:#5941c2;color:#fff;cursor:pointer">
+Activate my trial</button>
+<p id="trial-status">Preparing this one-time confirmation link...</p>
 <p style="color:#666;font-size:13px;margin-top:24px">This link can only be used once.
 If you didn't request a trial, you can ignore this page — nothing happens until you
 click the button.</p>
-</body></html>"""
+<script>{_TRIAL_CONFIRM_SCRIPT}</script></body></html>"""
 
 
 def _reserve_trial(mid: str, email: str, plan: str) -> Optional[str]:
@@ -1000,7 +1318,8 @@ def _reserve_trial(mid: str, email: str, plan: str) -> Optional[str]:
         try:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
-                "SELECT 1 FROM trial_grants WHERE machine_id=?", (mid,)).fetchone()
+                "SELECT 1 FROM trial_grants WHERE machine_id=? OR lower(email)=?",
+                (mid, email)).fetchone()
             if existing:
                 conn.execute("COMMIT")
                 return None
@@ -1050,6 +1369,23 @@ async def start_team_trial(request: Request):
     default 5/hour); 400 for a missing machine_id, an unknown plan, or a missing/
     malformed email; 409 if this device already holds a trial grant; 502 if the
     verification email could not be sent."""
+    # The v1 route remains executable only in development/combined mode so old tests and
+    # explicitly enabled customer migrations can finish. The production vendor service
+    # must use deployment-bound claims: the legacy flow eventually displayed a signed
+    # key in a browser and required a redeploy, which is not a GA-safe onboarding path.
+    from engraphis.commercial import service_mode
+    legacy_enabled = os.environ.get(
+        "ENGRAPHIS_ENABLE_LEGACY_TRIAL_FLOW", "").strip().lower() in (
+            "1", "true", "yes", "on")
+    if service_mode() == "vendor" and not legacy_enabled:
+        return JSONResponse(
+            {
+                "error": "legacy trial issuance is disabled",
+                "replacement": "/license/v1/trial-claims",
+            },
+            status_code=410,
+            headers={"Deprecation": "true"},
+        )
     try:
         body = await _bounded_json_object(request)
     except _JsonBodyError as exc:
@@ -1097,7 +1433,9 @@ async def start_team_trial(request: Request):
             {"error": "the free trial has already been used on this device"},
             status_code=409)
 
-    verify_url = "%s/license/v1/start-trial/verify?token=%s" % (public_base, token)
+    # Fragments never reach reverse-proxy, CDN, or application access logs. The static
+    # confirmation page clears it immediately and sends the token only in a bounded body.
+    verify_url = "%s/license/v1/start-trial/verify#token=%s" % (public_base, token)
     from engraphis.inspector.webhooks import send_trial_verification_email
     try:
         await asyncio.to_thread(
@@ -1114,27 +1452,50 @@ async def start_team_trial(request: Request):
             "expires_in": _TRIAL_TOKEN_TTL_SECONDS}
 
 
-#: Applied to EVERY /start-trial/verify response, not just the success page: the request
-#: URL itself carries the one-time token, so even an error page must stay out of shared
-#: caches and out of the Referer of anything the reader clicks from there.
+_TRIAL_CONFIRM_SCRIPT = """(function(){
+"use strict";
+const status=document.getElementById("trial-status");
+const button=document.getElementById("trial-confirm");
+const token=new URLSearchParams(window.location.hash.slice(1)).get("token")||"";
+window.history.replaceState(null,"",window.location.pathname);
+if(!token){status.textContent="This confirmation link is missing its token.";return;}
+button.disabled=false;
+status.textContent="Nothing happens until you activate the trial.";
+button.addEventListener("click",async function(){
+button.disabled=true;status.textContent="Activating your trial...";
+try{
+const response=await fetch(window.location.pathname,{method:"POST",headers:{
+"Accept":"text/html","Content-Type":"application/json"},body:JSON.stringify({token:token}),
+credentials:"omit",cache:"no-store",redirect:"error"});
+const page=await response.text();document.open();document.write(page);document.close();
+}catch(_error){button.disabled=false;status.textContent="Activation failed. Please retry.";}
+});
+})();"""
+_TRIAL_CONFIRM_SCRIPT_HASH = base64.b64encode(
+    hashlib.sha256(_TRIAL_CONFIRM_SCRIPT.encode("utf-8")).digest()).decode("ascii")
+
+
+#: Applied to every trial-confirmation response. Both compatibility and deployment-bound
+#: links carry the secret in a URL fragment (never sent in HTTP/access logs), clear it
+#: immediately in the browser, and submit it only in a bounded JSON body. A hash-pinned
+#: inline script is the sole executable content; no caller value is interpolated here.
 _TRIAL_PAGE_HEADERS = {
     "Cache-Control": "no-store, no-cache, must-revalidate, private",
     "Pragma": "no-cache",
     "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": (
+        "default-src 'none'; script-src 'sha256-%s'; connect-src 'self'; "
+        "style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; "
+        "form-action 'none'" % _TRIAL_CONFIRM_SCRIPT_HASH),
 }
 
 
 def _trial_verify_rate_limited(request: Request) -> Optional[HTMLResponse]:
-    """Shared burst gate for both /start-trial/verify handlers, or None when allowed.
+    """Shared burst gate for both trial-verification POST routes, or None when allowed.
 
-    Both are unauthenticated and both hit SQLite before they can know whether the token
-    is even real: the GET runs connect + two executescripts + a PRAGMA + a SELECT, and
-    the POST additionally takes BEGIN IMMEDIATE — a RESERVED write lock on the same
-    relay.db that carries seat claims and sync bundles — BEFORE it discovers the token is
-    garbage. Flooding either one with junk tokens is therefore a bigger lever than the
-    single indexed SELECT behind /verify/{key_id}. Both are sync defs, so each request
-    also pins a threadpool worker. Answers HTML, not JSON: these routes are opened by a
-    human in a browser."""
+    Both are unauthenticated and take a write transaction on relay.db before a valid token
+    is known. GET pages are deliberately static and do not spend this budget or touch the
+    database. Answers HTML because these routes are opened by a human in a browser."""
     if _register_rate_ok(_register_rate_key(request)):
         return None
     return HTMLResponse(
@@ -1143,77 +1504,43 @@ def _trial_verify_rate_limited(request: Request) -> Optional[HTMLResponse]:
 
 
 @router.get("/start-trial/verify")
-def confirm_team_trial(request: Request, token: str = ""):
-    """Render the confirmation page for a magic-link token — WITHOUT redeeming it.
+def confirm_team_trial():
+    """Render a scanner-safe confirmation page without receiving or redeeming a token.
 
-    Redemption lives in the POST companion below, and this split is load-bearing rather
-    than cosmetic. Corporate mail gateways and antivirus link-prescanners (Outlook Safe
-    Links, Proofpoint URL Defense, and friends) routinely GET every URL they find in an
-    email body before the recipient ever sees it. When a bare GET redeemed the token, a
-    prescanner silently burned the one-time grant, and the human who then clicked the
-    link got "this link is invalid or has already been used" on a completely legitimate
-    first attempt — and it hit hardest at exactly the corporate mail estates most likely
-    to be buying Team.
-
-    So: GET is safe and idempotent (it only reads), and the actual grant happens on a
-    POST that a human has to click a button to send. Prescanners do not submit forms.
-    The token still rides in the query string, which is what the form posts back to, so
-    no request body parsing — and therefore no multipart dependency — is involved."""
-    limited = _trial_verify_rate_limited(request)
-    if limited is not None:
-        return limited
-    token = (token or "").strip()
-    if not token:
-        return HTMLResponse(_trial_verify_error_html("Missing token."),
-                            status_code=400, headers=_TRIAL_PAGE_HEADERS)
-
-    conn = reg.connect()
-    try:
-        conn.executescript(_TRIAL_SCHEMA)
-        _ensure_trial_plan_column(conn)
-        conn.executescript(_TRIAL_PENDING_SCHEMA)
-        row = conn.execute(
-            "SELECT machine_id, email, plan, expires_at FROM trial_pending "
-            "WHERE token_hash=?", (_hash_token(token),)).fetchone()
-    finally:
-        conn.close()
-
-    # Mirror the POST's diagnostics so a user learns the real problem before clicking,
-    # not after. Read-only: a lapsed row is left for the retention sweep in
-    # _reserve_trial, never deleted here (deleting on GET would hand a prescanner a way
-    # to destroy the row it cannot redeem).
-    if row is None:
-        return HTMLResponse(
-            _trial_verify_error_html("This link is invalid or has already been used."),
-            status_code=400, headers=_TRIAL_PAGE_HEADERS)
-    if row["expires_at"] < time.time():
-        return HTMLResponse(
-            _trial_verify_error_html(
-                "This link has expired — request a new trial from the dashboard."),
-            status_code=400, headers=_TRIAL_PAGE_HEADERS)
-
-    return HTMLResponse(_trial_confirm_html(token, row["plan"], row["email"]),
-                        headers=_TRIAL_PAGE_HEADERS)
+    The secret remains in the URL fragment, which HTTP does not transmit. Corporate mail
+    scanners can GET this page repeatedly without seeing or consuming the grant."""
+    return HTMLResponse(_trial_confirm_html(), headers=_TRIAL_PAGE_HEADERS)
 
 
 @router.post("/start-trial/verify")
-def verify_team_trial(request: Request, token: str = ""):
+async def verify_team_trial(request: Request):
     """Redeem a magic-link token from :func:`start_team_trial` — mints and displays the
     real signed trial key. Answers a small HTML page, not JSON: this is meant to be
     reached by a human clicking the confirm button on the GET page above, who needs to
     read and copy a key, not parse a response body. One-time: the token is deleted on
     first use (success OR a stale/losing race), so replaying it never mints twice.
 
-    Takes the token from the QUERY STRING, not a form body: the GET page posts back to
-    its own URL, so there is nothing to parse and no python-multipart dependency (which
-    has broken the [server] extra before)."""
-    limited = _trial_verify_rate_limited(request)
+    The browser submits a bounded JSON body after clearing the URL fragment, so access
+    logs and Referer headers never carry the one-time credential."""
+    limited = await asyncio.to_thread(_trial_verify_rate_limited, request)
     if limited is not None:
         return limited
-    token = (token or "").strip()
-    if not token:
-        return HTMLResponse(_trial_verify_error_html("Missing token."),
+    try:
+        body = await _bounded_json_object(request)
+    except _JsonBodyError:
+        return HTMLResponse(_trial_verify_error_html("Invalid confirmation request."),
                             status_code=400, headers=_TRIAL_PAGE_HEADERS)
+    raw_token = body.get("token")
+    token = raw_token.strip() if isinstance(raw_token, str) else ""
+    if not token or len(token) > 512 \
+            or any(ord(char) < 33 or ord(char) == 127 for char in token):
+        return HTMLResponse(_trial_verify_error_html("Invalid confirmation link."),
+                            status_code=400, headers=_TRIAL_PAGE_HEADERS)
+    return await asyncio.to_thread(_verify_team_trial_token, token)
+
+
+def _verify_team_trial_token(token: str):
+    """Consume one validated legacy token and return its locked-down HTML response."""
 
     conn = reg.connect()
     try:
@@ -1244,7 +1571,8 @@ def verify_team_trial(request: Request, token: str = ""):
                     status_code=400, headers=_TRIAL_PAGE_HEADERS)
             mid, email, plan = row["machine_id"], row["email"], row["plan"]
             existing = conn.execute(
-                "SELECT 1 FROM trial_grants WHERE machine_id=?", (mid,)).fetchone()
+                "SELECT 1 FROM trial_grants WHERE machine_id=? OR lower(email)=?",
+                (mid, email)).fetchone()
             if existing:
                 conn.execute(
                     "DELETE FROM trial_pending WHERE token_hash=?", (token_hash,))
@@ -1279,9 +1607,339 @@ def verify_team_trial(request: Request, token: str = ""):
         reg.record_issued(key)
     except Exception:
         pass
-    # This body contains the full signed license key and the URL still carries the
-    # one-time token, so keep both out of shared caches and out of Referer headers on
-    # any link the reader clicks from here. Uses the shared constant rather than an
-    # inline copy so the success page and the error pages can never drift apart.
+    # This body contains the full signed license key. Keep it out of shared caches and
+    # Referer headers using the same headers as every confirmation/error response.
     return HTMLResponse(_trial_verify_success_html(key, plan, TRIAL_DAYS),
                         headers=_TRIAL_PAGE_HEADERS)
+
+
+# ── v1.0 deployment-bound trial claims ───────────────────────────────────────
+
+def _deployment_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _valid_trial_claim_id(value: str) -> bool:
+    return (value.startswith("clm_") and 8 <= len(value) <= 64
+            and all(char.isascii() and (char.isalnum() or char in "_-") for char in value))
+
+
+def _claim_confirmation_html() -> str:
+    """Generic scanner-safe page; the fragment token never enters server-rendered HTML."""
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Confirm Engraphis trial</title></head><body>
+<main><h1>Confirm your Engraphis trial</h1>
+<p>The signed license will be delivered directly to your deployment. It will not be
+shown in this browser or sent by email.</p>
+<button id="trial-confirm" type="button" disabled>Activate trial</button>
+<p id="trial-status">Preparing this one-time confirmation link...</p>
+<p>If you did not request this trial, close this page.</p></main>
+<script>{_TRIAL_CONFIRM_SCRIPT}</script></body></html>"""
+
+
+def _claim_success_html(plan: str) -> str:
+    import html as _html
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="robots" content="noindex,nofollow"><title>Trial confirmed</title></head>
+<body><main><h1>{_html.escape(plan.title())} trial confirmed</h1>
+<p>Return to your Engraphis deployment. It will retrieve and store the license
+automatically; no key copying or redeploy is required.</p></main></body></html>"""
+
+
+def _reserve_trial_claim(machine_id: str, email: str, plan: str,
+                         deployment_token: str, dashboard_url: str
+                         ) -> tuple[str, Optional[str], str]:
+    """Return ``(claim_id, confirmation_token, state)`` under one write lock."""
+    conn = reg.connect()
+    conn.executescript(_TRIAL_SCHEMA)
+    _ensure_trial_plan_column(conn)
+    conn.executescript(_TRIAL_CLAIM_SCHEMA)
+    _ensure_trial_claim_columns(conn)
+    now = time.time()
+    deployment_hash = _deployment_hash(deployment_token)
+    confirmation = secrets.token_urlsafe(32)
+    claim_id = "clm_" + secrets.token_urlsafe(18)
+    window = time.strftime("%Y-%m-%d", time.gmtime(now))
+    previous = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        # Expired, unconfirmed reservations must not permanently squat on an email,
+        # machine, or deployment token. Remove every stale collision before deciding
+        # whether the new tuple is already used; confirmed claims remain permanent.
+        conn.execute(
+            "DELETE FROM trial_claims WHERE confirmed_at IS NULL AND expires_at<? AND "
+            "(deployment_hash=? OR machine_id=? OR email=?)",
+            (now, deployment_hash, machine_id, email),
+        )
+        existing = conn.execute(
+            "SELECT * FROM trial_claims WHERE deployment_hash=? OR machine_id=? "
+            "OR email=? LIMIT 1", (deployment_hash, machine_id, email)).fetchone()
+        if existing:
+            same = (existing["deployment_hash"] == deployment_hash
+                    and existing["machine_id"] == machine_id
+                    and existing["email"] == email
+                    and existing["plan"] == plan
+                    and existing["dashboard_url"].rstrip("/")
+                    == dashboard_url.rstrip("/"))
+            if not same or existing["confirmed_at"] is not None:
+                conn.execute("COMMIT")
+                return str(existing["claim_id"]), None, (
+                    "confirmed" if same and existing["confirmed_at"] else "used")
+            if float(existing["expires_at"]) >= now:
+                conn.execute("COMMIT")
+                return str(existing["claim_id"]), None, "pending"
+            claim_id = str(existing["claim_id"])
+        prior_grant = conn.execute(
+            "SELECT 1 FROM trial_grants WHERE machine_id=? OR lower(email)=? LIMIT 1",
+            (machine_id, email)).fetchone()
+        if prior_grant:
+            conn.execute("COMMIT")
+            return "", None, "used"
+
+        rate = conn.execute(
+            "SELECT count FROM trial_email_attempts WHERE email=? AND window=?",
+            (email, window)).fetchone()
+        if rate and int(rate["count"]) >= 3:
+            conn.execute("COMMIT")
+            return claim_id, None, "rate_limited"
+        conn.execute(
+            "INSERT INTO trial_email_attempts(email,window,count) VALUES (?,?,1) "
+            "ON CONFLICT(email,window) DO UPDATE SET count=count+1", (email, window))
+        conn.execute("DELETE FROM trial_email_attempts WHERE window<?", (window,))
+        expires = now + _TRIAL_TOKEN_TTL_SECONDS
+        if existing:
+            conn.execute(
+                "UPDATE trial_claims SET confirmation_hash=?,created_at=?,expires_at=?,"
+                "dashboard_url=?,delivery_state='pending' WHERE claim_id=?",
+                (_hash_token(confirmation), now, expires, dashboard_url, claim_id))
+        else:
+            conn.execute(
+                "INSERT INTO trial_claims(claim_id,confirmation_hash,deployment_hash,"
+                "machine_id,email,plan,dashboard_url,created_at,expires_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (claim_id, _hash_token(confirmation), deployment_hash, machine_id,
+                 email, plan, dashboard_url, now, expires))
+        conn.execute("COMMIT")
+        return claim_id, confirmation, "created"
+    except BaseException:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.isolation_level = previous
+        conn.close()
+
+
+@router.post("/trial-claims")
+async def create_trial_claim(request: Request):
+    """Start an email-confirmed claim bound to a deployment secret and machine."""
+    try:
+        body = await _bounded_json_object(request)
+    except _JsonBodyError as exc:
+        return _json_error(exc)
+    machine_id = str(body.get("machine_id") or "").strip()
+    deployment_token = str(body.get("deployment_token") or "").strip()
+    email = str(body.get("email") or "").strip().lower()
+    plan = str(body.get("plan") or "").strip().lower()
+    dashboard_url = str(body.get("dashboard_url") or "").strip()
+    if (not machine_id or len(machine_id) > 128 or not deployment_token
+            or len(deployment_token) < 24 or len(deployment_token) > 512):
+        return JSONResponse({"error": "valid deployment credentials are required"},
+                            status_code=400)
+    if not _EMAIL_RE.match(email) or plan not in ("pro", "team"):
+        return JSONResponse({"error": "valid email and trial plan are required"},
+                            status_code=400)
+    try:
+        dashboard_url = cloud_license.validate_cloud_base_url(dashboard_url)
+    except ValueError:
+        return JSONResponse({"error": "valid dashboard URL is required"}, status_code=400)
+    public_base = _relay_public_base()
+    if not public_base:
+        return JSONResponse({"error": "trial signup is not configured"}, status_code=503)
+    if not await asyncio.to_thread(_bump_trial_rate, _client_ip(request)):
+        return JSONResponse({"error": "too many trial requests"}, status_code=429)
+    claim_id, confirmation, state = await asyncio.to_thread(
+        _reserve_trial_claim, machine_id, email, plan, deployment_token, dashboard_url)
+    if state == "used":
+        return JSONResponse({"error": "the free trial has already been used"},
+                            status_code=409)
+    if state == "rate_limited":
+        return JSONResponse({"error": "too many trial emails"}, status_code=429)
+    if state in ("pending", "confirmed"):
+        return {"claim_id": claim_id, "status": state, "pending": state == "pending"}
+
+    # URL fragments are handled entirely by the browser and never reach reverse-proxy,
+    # CDN, or application access logs. The confirmation page clears the fragment before
+    # submitting this one-time token in a bounded JSON body.
+    verify_url = "%s/license/v1/trial-claims/verify#token=%s" % (
+        public_base, confirmation)
+    from engraphis.inspector.webhooks import send_trial_claim_email
+    delivery = "sent"
+    try:
+        await asyncio.to_thread(
+            send_trial_claim_email, email, verify_url, plan,
+            minutes=_TRIAL_TOKEN_TTL_SECONDS // 60,
+            idempotency_key="trial-claim:%s:%s" % (claim_id, _hash_token(confirmation)))
+    except Exception as exc:  # durable outbox retains the retry
+        logger.error("trial claim confirmation queued after delivery failure (%s)",
+                     type(exc).__name__)
+        delivery = "retry"
+    conn = reg.connect()
+    try:
+        conn.executescript(_TRIAL_CLAIM_SCHEMA)
+        conn.execute("UPDATE trial_claims SET delivery_state=? WHERE claim_id=?",
+                     (delivery, claim_id))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"claim_id": claim_id, "status": "pending", "pending": True,
+            "delivery_state": delivery, "expires_in": _TRIAL_TOKEN_TTL_SECONDS}
+
+
+@router.get("/trial-claims/verify")
+def confirm_trial_claim():
+    # The token lives in the URL fragment, which HTTP never transmits. GET is therefore
+    # completely static, read-only, and safe for corporate link scanners. The hash-pinned
+    # script clears the fragment and waits for a deliberate human click.
+    return HTMLResponse(_claim_confirmation_html(), headers=_TRIAL_PAGE_HEADERS)
+
+
+@router.post("/trial-claims/verify")
+async def verify_trial_claim(request: Request):
+    limited = await asyncio.to_thread(_trial_verify_rate_limited, request)
+    if limited is not None:
+        return limited
+    try:
+        body = await _bounded_json_object(request)
+    except _JsonBodyError:
+        return HTMLResponse(_trial_verify_error_html("Invalid confirmation request."),
+                            status_code=400, headers=_TRIAL_PAGE_HEADERS)
+    raw_token = body.get("token")
+    token = raw_token.strip() if isinstance(raw_token, str) else ""
+    if not token or len(token) > 512 \
+            or any(ord(char) < 33 or ord(char) == 127 for char in token):
+        return HTMLResponse(_trial_verify_error_html("Invalid confirmation link."),
+                            status_code=400, headers=_TRIAL_PAGE_HEADERS)
+    return await asyncio.to_thread(_verify_trial_claim_token, token)
+
+
+def _verify_trial_claim_token(token: str):
+    conn = reg.connect()
+    conn.executescript(_TRIAL_CLAIM_SCHEMA)
+    previous = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM trial_claims WHERE confirmation_hash=?",
+            (_hash_token(token),)).fetchone() if token else None
+        if row is None:
+            conn.execute("COMMIT")
+            return HTMLResponse(_trial_verify_error_html("Invalid confirmation link."),
+                                status_code=400, headers=_TRIAL_PAGE_HEADERS)
+        if row["confirmed_at"] is not None:
+            conn.execute("COMMIT")
+            return HTMLResponse(_claim_success_html(row["plan"]),
+                                headers=_TRIAL_PAGE_HEADERS)
+        now = time.time()
+        if float(row["expires_at"]) < now:
+            conn.execute("COMMIT")
+            return HTMLResponse(_trial_verify_error_html(
+                "This confirmation link has expired."), status_code=400,
+                headers=_TRIAL_PAGE_HEADERS)
+        from engraphis.inspector.webhooks import issue_key
+        from engraphis.licensing import TRIAL_DAYS
+        seats = TEAM_TRIAL_SEATS if row["plan"] == "team" else 1
+        key = issue_key(
+            row["email"], product_name=row["plan"], seats=seats,
+            days=TRIAL_DAYS, trial=True, record=False)
+        conn.execute(
+            "UPDATE trial_claims SET confirmed_at=?,license_key=?,delivery_state='confirmed' "
+            "WHERE claim_id=? AND confirmed_at IS NULL", (now, key, row["claim_id"]))
+        conn.execute(
+            "INSERT OR IGNORE INTO trial_grants(machine_id,email,plan,issued_at) "
+            "VALUES (?,?,?,?)", (row["machine_id"], row["email"], row["plan"], now))
+        conn.execute("COMMIT")
+        return HTMLResponse(_claim_success_html(row["plan"]),
+                            headers=_TRIAL_PAGE_HEADERS)
+    except BaseException:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.isolation_level = previous
+        conn.close()
+
+
+@router.get("/trial-claims/{claim_id}")
+def trial_claim_status(claim_id: str):
+    if not _valid_trial_claim_id(claim_id):
+        return JSONResponse({"error": "claim not found"}, status_code=404)
+    conn = reg.connect()
+    try:
+        conn.executescript(_TRIAL_CLAIM_SCHEMA)
+        row = conn.execute(
+            "SELECT plan,expires_at,confirmed_at,claimed_at,delivery_state "
+            "FROM trial_claims WHERE claim_id=?", (claim_id,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return JSONResponse({"error": "claim not found"}, status_code=404)
+    status = ("active" if row["claimed_at"] is not None else
+              "confirmed" if row["confirmed_at"] is not None else
+              "expired" if float(row["expires_at"]) < time.time() else "pending")
+    return {"claim_id": claim_id, "plan": row["plan"], "status": status,
+            "confirmed": row["confirmed_at"] is not None,
+            "active": row["claimed_at"] is not None,
+            "delivery_state": row["delivery_state"]}
+
+
+@router.post("/trial-claims/{claim_id}/claim")
+async def claim_trial_license(claim_id: str, request: Request):
+    """Return key material only to the deployment that initiated this claim."""
+    try:
+        body = await _bounded_json_object(request)
+    except _JsonBodyError as exc:
+        return _json_error(exc)
+    deployment_token = str(body.get("deployment_token") or "").strip()
+    machine_id = str(body.get("machine_id") or "").strip()
+    if not _valid_trial_claim_id(claim_id) \
+            or not 24 <= len(deployment_token) <= 512 \
+            or not 1 <= len(machine_id) <= 128 \
+            or any(ord(char) < 32 or ord(char) == 127 for char in machine_id):
+        return JSONResponse({"error": "deployment credentials required"}, status_code=401)
+    conn = reg.connect()
+    try:
+        conn.executescript(_TRIAL_CLAIM_SCHEMA)
+        row = conn.execute(
+            "SELECT * FROM trial_claims WHERE claim_id=? AND deployment_hash=? "
+            "AND machine_id=?", (claim_id, _deployment_hash(deployment_token),
+                                  machine_id)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return JSONResponse({"error": "claim not found"}, status_code=404)
+    if row["confirmed_at"] is None or not row["license_key"]:
+        status = "expired" if float(row["expires_at"]) < time.time() else "pending"
+        return {"claim_id": claim_id, "status": status, "ready": False}
+    try:
+        await asyncio.to_thread(reg.record_issued, row["license_key"])
+    except Exception:
+        return JSONResponse({"status": "recovery_pending", "ready": False},
+                            status_code=503)
+    conn = reg.connect()
+    try:
+        conn.execute("UPDATE trial_claims SET claimed_at=?,delivery_state='claimed' "
+                     "WHERE claim_id=?", (time.time(), claim_id))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"claim_id": claim_id, "status": "ready", "ready": True,
+            "key": row["license_key"]}

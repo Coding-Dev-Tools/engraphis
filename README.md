@@ -1,6 +1,6 @@
 # Engraphis
 
-[![Version](https://img.shields.io/badge/version-0.9.9-blue.svg)](https://github.com/Coding-Dev-Tools/engraphis)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/Coding-Dev-Tools/engraphis)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/Coding-Dev-Tools/engraphis/blob/main/LICENSE)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://buymeacoffee.com/Jaixii)
 
@@ -22,11 +22,11 @@ https://discord.com/invite/Wfr2ejBmY
 
 ---
 
->Open-Source users: Remember to Update regularly! Improvements and fixes twice a day. Invite your friends!
+> Open-source users: update regularly for the latest fixes and improvements.
 >
-> **Beta:** the **Team** layer (multi-user dashboard, seats, roles, audit log, team invite
-> emails, cloud sync relay) is **early-access beta** — expect rough edges and breaking
-> changes before it stabilizes. The single-user engine, dashboard, and MCP server are stable.
+> **Version 1.0:** the core engine, dashboard, MCP server, Pro features, and Team layer
+> are generally available. Team includes multi-user authentication, roles, seat management,
+> invitation and password-reset flows, audit history, and scoped cloud-sync tokens.
 
 ## The WebUI — one command, local-first
 
@@ -59,8 +59,8 @@ a color palette and layout preset; or change the colors used for each type of no
 | **Consolidate** | Run a consolidation sweep on demand — see what got distilled and what got pruned |
 | **Automation** *(Pro)* | Scheduled consolidation + retention policies on autopilot — plus **auto-dreaming**: a background consolidation + cross-cluster inference loop that fires when the store has accumulated enough new memories *and* gone idle. Configurable from the dashboard (cadence, dream trigger, idle threshold, inference toggle) or the `GET/POST /api/automation` API, and via `scripts/auto_maintain` for cron / Task Scheduler |
 | **Workspaces** | Create, rename, describe, copy, merge, and delete workspaces; import files & folders; drag-and-drop upload |
-| **Team** *(beta)* | Multi-user access with PBKDF2 logins, password reset, admin / member / viewer roles, seat management, and team audit log (Team) — **early-access beta** |
-| **Settings** | License activation (Pro/Team), cloud sync, LLM provider setup/test, Agent Connect token management, appearance, and engine/store info |
+| **Team** *(Team plan)* | Multi-user access with PBKDF2 logins, password reset, admin / member / viewer roles, seat management, scoped agent/sync tokens, and team audit history |
+| **Settings** | License activation (Pro/Team), cloud sync, LLM provider setup/test, a live structured-extraction switch and activity viewer, Agent Connect token management, appearance, and engine/store info |
 
 The dashboard is powered by the v2 engine — the same `MemoryService` that backs the MCP server
 and the Python library. What you see in the UI is what your agents get.
@@ -119,8 +119,42 @@ or structured consolidation.
 - **Scoped** — `workspace → repo → session` hierarchy.
 - **Encryption at rest** — optional SQLCipher (AES-256) whole-database encryption via `ENGRAPHIS_DB_KEY`. No plaintext fallback when a key is set.
 - **Cloud sync** — cross-device and cross-team memory sync with deterministic CRDT merge (folder transport for self-hosting, managed relay for zero-setup). One-click "Sync now" or automatic cadence in the dashboard.
-- **Import & ingest** — local documents/code/DOCX plus optional PDF OCR, image OCR,
+- **Import & ingest** — local documents/code/DOCX plus optional PDF text extraction, image OCR,
   audio/video transcription, and live PostgreSQL schema introspection.
+
+### Connect an LLM and inspect exactly what it changed
+
+The memory engine, embeddings, conflict resolution, and normal recall remain local and do not
+need an LLM. Connecting one adds optional structured extraction, cited prose synthesis,
+structured consolidation, and retention supervision.
+
+Open **Settings → Connect an LLM**, configure the provider/model/key in `.env`, restart, and
+click **Test connection**. When that live test succeeds, Engraphis automatically turns
+`llm_structured` extraction on unless you previously chose **Turn extraction off**. The adjacent
+button changes the live engine immediately and persists both the extractor mode and your
+automatic-extraction preference to the project `.env` when it is writable; no restart is required
+for the running dashboard. Explicit deployment environment variables remain authoritative after
+a restart. Turning extraction off does not disconnect the provider, so explicitly requested
+synthesis or consolidation can still use it.
+
+Structured extraction applies to `engraphis_ingest` and to file/folder imports where **Derive
+discrete facts with the configured extractor** is explicitly selected. It does not silently send
+ordinary `engraphis_remember` writes, existing memories, or every imported file to the provider.
+For each successful source, the validated output becomes one or more individually recallable
+memories with typed facts, keywords, entities, and relations. A provider/schema failure falls
+back to deterministic local chunking so the source write is not lost.
+
+Click **View LLM memory activity** to open a workspace-scoped window listing memories the LLM
+extracted, structurally consolidated, or retention-classified. Extraction entries show the
+provider/model when recorded, fact position within the source batch, extracted entities and
+relations, and a link to the resulting memory. The activity API and window expose stored outcomes
+only—never the API key, prompt, original provider payload, or raw response. Older structured
+memories created before provider/model activity metadata was introduced still appear as legacy
+structured-extraction entries.
+
+> Privacy boundary: text sent through structured extraction leaves the local process and is
+> handled under the selected provider/model's data terms. Keep extraction off for material that
+> must remain entirely local, or use the offline `chunk` extractor instead.
 
 ---
 
@@ -143,20 +177,23 @@ or structured consolidation.
 
 ## Host on Railway (Pro solo or Team)
 
-The dashboard ships as a Docker image that defaults to the v2 dashboard (multi-user auth,
-roles, seats, cloud-license revocation). Deploy one instance on Railway and access your
-memories from any browser. Two supported paths:
+The official template runs the shared image in `customer` mode, mounts `/data`, checks
+`/api/ready`, and generates a 48-character deployment token. Deploy one instance and use the
+hosted wizard: verify deployment ownership → choose Pro or Team → confirm email → automatic
+activation → create the first admin. The signed key never appears in the browser and the
+service does not redeploy during activation.
 
 - **Pro solo** — a Pro member deploys a single-admin cloud instance: browser dashboard
   (analytics, automation, export) + a self-hosted sync relay. Activate the same Pro key
   on each local instance, set `ENGRAPHIS_RELAY_URL` on both the hosted service and local
-  instances to **your Railway deployment URL**, then enable auto-sync (or run **Sync now**).
-  Keep `ENGRAPHIS_CLOUD_URL=https://team.engraphis.com` on the hosted service so trials,
-  revocable leases, and fallback invite delivery continue to use the managed issuer.
-  One admin, no member seats.
+  instances to **your Railway deployment URL**, then connect with an expiring scoped sync
+  token and enable auto-sync (or run **Sync now**). Keep
+  `ENGRAPHIS_CLOUD_URL=https://license.engraphis.com` for trials and license leases. One
+  admin, no member seats.
 - **Team admin** — a Team administrator deploys one instance and invites members (email +
-  password + role). Members sign in at your URL and connect their agents over HTTP/MCP —
-  no local install for members.
+  role). The recipient chooses their own password from a 72-hour invitation. Members sign
+  in at your URL and create scoped agent/sync tokens; member invitations never contain the
+  purchaser's account-wide Team license key.
 
 See [`docs/HOSTING_RAILWAY.md`](docs/HOSTING_RAILWAY.md) for the 5-minute guide covering
 both paths (volume, custom domain, activate Pro/Team, create the first admin, invite
@@ -164,23 +201,23 @@ members, and connect agents).
 
 **→ [Deploy on Railway (5-minute guide)](docs/HOSTING_RAILWAY.md)**
 
-> Deploying from this repo's `Dockerfile` takes about five minutes: create the service,
-> attach a persistent `/data` volume (so activated keys + memories survive redeploys),
-> and set `ENGRAPHIS_FORWARDED_ALLOW_IPS=*`, `ENGRAPHIS_DASHBOARD_URL`, and a strong
-> `ENGRAPHIS_API_TOKEN` for hosted bootstrap. `railway.json`
-> in this repo already supplies the build and healthcheck config. The hosting guide walks
-> through each step with the exact values.
+> Until the public Railway template code is published, deploy from this repository and
+> apply [`deploy/railway-template.json`](deploy/railway-template.json) exactly: persistent
+> `/data`, customer service mode, generated public-domain references, and a unique
+> `ENGRAPHIS_DEPLOYMENT_TOKEN`. `railway.json` supplies the build and `/api/ready` check.
 >
 > *(A one-click "Deploy on Railway" button previously sat here pointing at
 > `railway.app/new?template=<raw railway.json URL>`. Railway ignores that parameter —
 > `railway.json` is per-service build config, not a publishable template — so the button
-> only ever landed people on a generic project chooser. It was removed on 2026-07-18
-> rather than left looking functional. `docs/RAILWAY_TEMPLATE.md` contains the spec to
-> publish a real template; once published, its button can go back here.)*
+> only ever landed people on a generic project chooser. It remains removed until the
+> source descriptor is published through Railway and passes the logged-out acceptance
+> suite. `docs/RAILWAY_TEMPLATE.md` is the publication runbook.)*
 
-Hosted **Agent Connect** tokens are per-user, shown only once, and stored only as SHA-256
-digests. Roles are rechecked on every HTTP/MCP call; disabling a member or resetting their
-password permanently revokes existing agent tokens. The hosted `/mcp` endpoint exposes the same
+Hosted **Agent Connect** tokens are per-user and shown only once; the server stores only
+SHA-256 digests. A local sync device necessarily retains its raw bearer in an owner-only
+credential file so it can authenticate future rounds. Roles are rechecked on every HTTP/MCP
+call; disabling a member or resetting their password permanently revokes existing agent tokens.
+The hosted `/mcp` endpoint exposes the same
 28-tool service as local `engraphis-mcp`. See [the Agent Connect guide](docs/AGENT_CONNECT.md).
 
 ## Install
@@ -195,6 +232,10 @@ pip install "engraphis[postgres]"   # PostgreSQL schema introspection
 pip install "engraphis[encryption]" # SQLCipher encryption-at-rest extra
 pip install engraphis               # core library — numpy only, fully offline
 ```
+
+The official Docker image includes the local Tesseract executable for image OCR. Outside
+Docker, the `documents` extra installs its Python bindings; install Tesseract through your
+operating system as well if you enable image OCR.
 
 The NumPy-only core library supports Python 3.9+. Current patched releases of the WebUI
 stack, MCP SDK, and image parser require Python 3.10+, so use Python 3.10 or newer for
@@ -355,15 +396,14 @@ pinned. The full multi-predecessor chain remains visible through inspection, Why
 The core engine, single-user dashboard, standalone MCP server, and governance tools are
 free and Apache-2.0, permanently. Paid Pro/Team keys are **server-authoritative**: the
 vendor signature is checked locally, then the key must hold a current machine-bound lease
-from the configured/vendor relay. Revoked, expired, or seat-exceeded keys fail closed;
+from the configured license service. Revoked, expired, or seat-exceeded keys fail closed;
 an unexpired lease provides bounded grace for transient network failures. **Pro is $10/mo
 ($100/yr), Team is $20/seat/mo ($200/seat/yr)**, and the dashboard offers a **3-day
 server-issued Pro or Team trial** after email confirmation — no card required.
 
-> **Team is early-access beta.** Multi-user logins, seats, roles, the team audit log,
-> team invite emails, and the cloud-sync relay are all in active development — expect
-> rough edges and breaking changes. Pro (single-user paid features) is stable. Free is
-> stable.
+Pro and Team are GA in v1.0.0. Cloud sync is opt-in and transported over HTTPS; Engraphis
+does not advertise end-to-end encryption. Paid entitlements require online lease renewal,
+while the Free core remains fully local and offline-capable.
 
 | | Free (available now) | Pro — $10/mo or $100/yr | Team — $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
@@ -377,9 +417,10 @@ server-issued Pro or Team trial** after email confirmation — no card required.
 | Automated maintenance: scheduled consolidation + retention policies + **auto-dreaming** | | ✓ | ✓ |
 | Signed compliance export (checksummed bi-temporal bundle) | | ✓ | ✓ |
 | Priority support | | ✓ | ✓ |
-| Multi-user dashboard: logins, roles, seat management *(beta)* | | | ✓ |
-| Team audit log + CSV export *(beta)* | | | ✓ |
-| Team invite emails (vendor relay, zero email setup) *(beta)* | | | ✓ |
+| Multi-user dashboard: invitations, logins, roles, seat management | | | ✓ |
+| Team audit log + CSV export | | | ✓ |
+| 72-hour pending invitations (resend/revoke) | | | ✓ |
+| Scoped, expiring per-user agent and sync tokens | | | ✓ |
 
 ---
 
@@ -451,8 +492,9 @@ tier, across a group — without giving up local-first ownership. It ships two t
 
 - **Folder transport** — any shared directory (Dropbox, iCloud, Syncthing, a git repo, a
   mounted drive). Zero infrastructure.
-- **Managed relay** — HTTPS against the Engraphis relay, authenticated by your license key.
-  One-click in the dashboard or `python -m scripts.sync --relay`.
+- **Managed relay** — HTTPS against the customer service, authenticated by an expiring,
+  revocable per-user token. One-click in the dashboard or
+  `python -m scripts.sync --relay --relay-token <token>`; viewers use `--read-only`.
 
 Sync is a **state-based CRDT**: deterministic merge, no conflict copies, no data loss.
 Every field resolves by a commutative, idempotent rule so `merge(A, B) == merge(B, A)`.
@@ -544,8 +586,9 @@ Drag-and-drop or server-side import, role-gated and bounded:
   the bundled eval: `python -m eval.chunking_eval --dataset eval/datasets/longdoc.jsonl --k 5`
   (whole-file vs. chunked, same recall pipeline, offline).
 - **Structured LLM extraction** — `ENGRAPHIS_EXTRACTOR=llm_structured` validates typed
-  facts, entities, relations, keywords, and confidence before storage. Its preserved
-  entity/relation metadata feeds the knowledge graph automatically.
+  facts, entities, relations, and keywords before storage. Its preserved entity/relation
+  metadata feeds the knowledge graph automatically. A successful dashboard connection test
+  enables this mode by default; the Settings switch can disable or re-enable it immediately.
 
 Files imported through the dashboard or `import_folder()` are marked **untrusted** by
 default; MCP ingest remains an authenticated agent write.
@@ -596,7 +639,9 @@ All via environment (or `.env`):
 | `ENGRAPHIS_DB_PATH` | Source: `<repo>/engraphis.db`; installed: platform user-data directory | SQLite database file. Installed defaults are `%LOCALAPPDATA%\engraphis\engraphis.db` (Windows), `~/Library/Application Support/engraphis/engraphis.db` (macOS), and `$XDG_DATA_HOME/engraphis/engraphis.db` or `~/.local/share/engraphis/engraphis.db` (Linux). The environment variable overrides every default. |
 | `ENGRAPHIS_HOST` | `127.0.0.1` | Server bind address |
 | `ENGRAPHIS_PORT` | `8700` | Dashboard port |
-| `ENGRAPHIS_API_TOKEN` | — | Protects REST API routes with `Authorization: Bearer <token>` and proves deployment ownership during hosted trial and remote first-admin setup; leave unset only for loopback-only use |
+| `ENGRAPHIS_SERVICE_MODE` | `combined` | `customer` for hosted dashboards, `vendor` for the isolated license control plane, and `combined` for development only |
+| `ENGRAPHIS_API_TOKEN` | — | Optional service-wide REST bearer credential; per-user tokens are preferred for hosted agent access |
+| `ENGRAPHIS_DEPLOYMENT_TOKEN` | — | Secret ownership proof required by hosted trial activation and remote first-admin setup |
 | `ENGRAPHIS_CORS_ORIGINS` | loopback on `ENGRAPHIS_PORT` | Comma-separated REST CORS allow-list; defaults to `127.0.0.1` and `localhost` on the configured port |
 | `ENGRAPHIS_WORKSPACES` | — | Optional comma-separated server-side workspace allow-list |
 | `ENGRAPHIS_DB_KEY` | — | Encrypt the database at rest (SQLCipher). Or use `ENGRAPHIS_DB_KEY_FILE` |
@@ -614,6 +659,7 @@ All via environment (or `.env`):
 | `ENGRAPHIS_LLM_MODEL` | `gpt-4o-mini` | Model name (provider-specific) |
 | `ENGRAPHIS_LLM_API_KEY` | — | API key for chat/synthesis, `llm` / `llm_structured` extraction, and structured consolidation |
 | `ENGRAPHIS_LLM_BASE_URL` | — | Base URL for openrouter / custom OpenAI-compatible endpoints |
+| `ENGRAPHIS_LLM_AUTO_EXTRACT` | `1` | After a successful live connection test, automatically switch the running engine to `llm_structured`; the dashboard's extraction Off button persists `0`, and its On button restores `1` |
 | `ENGRAPHIS_LICENSE_KEY` | — | Pro/Team key (or `~/.engraphis/license.key`) |
 | `ENGRAPHIS_TEAM_MODE` | `1` | Mount hosted auth/team plumbing; any active Pro/Team license activates the login wall and first-admin setup, and existing users keep the wall active after lapse. Set `0` to disable hosted user auth for single-user mode |
 | `ENGRAPHIS_DASHBOARD_URL` | — | Canonical public dashboard URL used in invites, reset links, redirects, and the hosted MCP Host/Origin allow-list |
@@ -622,7 +668,7 @@ All via environment (or `.env`):
 | `ENGRAPHIS_FORWARDED_ALLOW_IPS` | *(none)* | Proxies trusted for forwarded client/TLS headers (`*` only when the service is reachable exclusively through that proxy) |
 | `ENGRAPHIS_LOCAL_TRUSTED_PEERS` | *(none)* | Exact peers/CIDRs treated as local without forwarding headers; intended for the shipped loopback-published Compose bridge, not public deployments |
 | `ENGRAPHIS_RELAY_URL` | `https://team.engraphis.com` | Sync relay target (Pro/Team); set to a customer deployment for self-hosted sync |
-| `ENGRAPHIS_CLOUD_URL` | signed key issuer, then relay URL | License/trial/invite service override; keep `https://team.engraphis.com` when `ENGRAPHIS_RELAY_URL` points at a customer-operated sync relay |
+| `ENGRAPHIS_CLOUD_URL` | `https://license.engraphis.com` | License/trial/invite control plane; keep separate from a customer-operated `ENGRAPHIS_RELAY_URL` |
 | `ENGRAPHIS_AUTOSYNC_LOOP` | `1` | Kill switch for the in-process auto-sync loop (0 = off) |
 
 See `.env.example` for the full list including commercial/vendor, email delivery, and

@@ -232,8 +232,10 @@ async def chat_memory_context(req: ChatRequest):
                 temperature=req.temperature,
                 max_tokens=req.maxTokens or req.max_tokens,
             )
-    except Exception as e:
-        logger.warning("LLM chat error: %s", e)
+    except Exception as exc:
+        # Some provider errors include a credentialed request URL. The client already
+        # receives a generic response, so keep the log equally content-free.
+        logger.warning("LLM chat error (%s)", type(exc).__name__)
         raise HTTPException(500, "LLM service unavailable")
     return _ok({"answer": answer, "context": ctx.get("chunks", []), "context_count": ctx["count"]})
 

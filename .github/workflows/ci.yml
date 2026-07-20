@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: test + lint (full offline stack)
@@ -14,8 +17,8 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install (core + server/mcp/code extras; no torch — the offline gate)
@@ -24,6 +27,10 @@ jobs:
           pip install -e ".[test]"
       - name: Lint (ruff)
         run: ruff check .
+      - name: Commercial manifest + strict-CSP drift gate
+        run: |
+          python scripts/check_commercial_manifest.py
+          python scripts/externalize_dashboard_assets.py
       - name: Unit tests (full suite — extras-gated tests included)
         run: python -m pytest tests/ -q
       - name: Retrieval eval gate
@@ -37,8 +44,8 @@ jobs:
     name: core floor (numpy-only, Python 3.9)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.9"
       - name: Install (numpy-only core — the minimum supported runtime)
@@ -52,16 +59,39 @@ jobs:
       - name: Ablation
         run: python -m eval.ablation
 
+  browser-accessibility:
+    name: browser accessibility smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install dashboard and browser test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Build and verify deterministic galaxy assets
+        run: npm run test:galaxy
+      - name: Playwright desktop/mobile, keyboard, CSP, console, and axe checks
+        run: npm run test:e2e
+
   docker-gate:
     # Keeps CI fast: the docker job always runs on push to main, but on PRs only
-    # when image-relevant paths changed (Dockerfile, engraphis/**, scripts/**,
+    # when image/deployment paths changed (Dockerfile, entrypoint, Railway, source,
     # pyproject.toml, or this workflow). No third-party actions — plain git diff.
     name: docker smoke — path gate
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.decide.outputs.run }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
       - id: decide
@@ -69,7 +99,7 @@ jobs:
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           elif git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.sha }}" \
-              | grep -qE '^(Dockerfile|\.dockerignore|engraphis/|scripts/|pyproject\.toml|\.github/workflows/ci\.yml)'; then
+              | grep -qE '^(Dockerfile|docker-entrypoint\.sh|docker-compose\.yml|railway\.json|deploy/|\.dockerignore|engraphis/|scripts/|pyproject\.toml|\.github/workflows/ci\.yml)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -81,15 +111,26 @@ jobs:
     needs: docker-gate
     if: needs.docker-gate.outputs.run == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Build image
         run: docker build -t engraphis:ci .
+      - name: Verify production image OCR runtime
+        run: >-
+          docker run --rm --entrypoint sh engraphis:ci -c
+          'python -c "import PIL, pytesseract" && command -v tesseract >/dev/null &&
+          tesseract --version | head -n 1'
+      - name: Audit the exact production image dependency set
+        run: >-
+          docker run --rm --entrypoint sh engraphis:ci -c
+          'python -m pip install --no-cache-dir pip-audit &&
+          python -m pip_audit --local'
       - name: Run container (offline deterministic embedder — no model downloads)
         run: |
           docker run -d --name engraphis -p 8700:8700 \
             -e ENGRAPHIS_EMBED_MODEL= \
             -e ENGRAPHIS_LOOP_INTERVAL=0 \
             -e ENGRAPHIS_HOST=0.0.0.0 \
+            -e ENGRAPHIS_SERVICE_MODE=customer \
             engraphis:ci
       - name: Wait for /api/health, then check /api/ready
         run: |
@@ -113,13 +154,17 @@ jobs:
     name: build + install wheel
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
       - name: Build sdist + wheel and verify a clean install
         run: |
-          python -m pip install --upgrade pip build
+          python -m pip install --upgrade pip build pip-audit
           python -m build
-          pip install dist/*.whl
-          python -c "import engraphis; print('wheel import OK')"
+          python -m venv .audit-venv
+          .audit-venv/bin/python -m pip install --upgrade "pip>=26.1.2" "setuptools>=83"
+          .audit-venv/bin/python -m pip install dist/*.whl
+          AUDIT_SITE=$(.audit-venv/bin/python -c "import site; print(site.getsitepackages()[0])")
+          python -m pip_audit --path "$AUDIT_SITE"
+          .audit-venv/bin/python -c "import engraphis; print('wheel import OK')"

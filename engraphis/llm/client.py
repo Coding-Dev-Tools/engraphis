@@ -42,6 +42,19 @@ _CHAT_SYSTEM_PROMPT = (
 )
 
 
+class _LLMProviderError(RuntimeError):
+    """Sanitized provider failure safe to expose outside this client boundary."""
+
+    def __init__(self, *, status: Optional[int] = None, unreachable: bool = False) -> None:
+        self.status = status
+        self.unreachable = unreachable
+        if status is not None:
+            message = "LLM provider rejected the request (HTTP %d)" % status
+        else:
+            message = "Could not reach the configured LLM provider"
+        super().__init__(message)
+
+
 class LLMClient:
     """Thin REST client for multiple LLM providers."""
 
@@ -85,7 +98,7 @@ class LLMClient:
         if not self.api_key:
             raise ValueError(
                 "No LLM API key configured. Set ENGRAPHIS_LLM_API_KEY in .env "
-                f"or pass api_key= when constructing LLMClient (provider={self.provider})."
+                "or pass api_key= when constructing LLMClient."
             )
         if self.provider == "anthropic":
             return self._chat_anthropic(messages, system, temperature, max_tokens)
@@ -159,11 +172,11 @@ class LLMClient:
                     "error": "", "provider": self.provider, "model": self.model}
         except Exception as exc:  # noqa: BLE001 - external-provider boundary
             logger.error("LLM connection test failed (%s)", type(exc).__name__)
-            if isinstance(exc, httpx.HTTPStatusError):
-                status = exc.response.status_code
+            if isinstance(exc, _LLMProviderError) and exc.status is not None:
+                status = exc.status
                 error = ("Provider rejected the request (HTTP %d). Check the API key, "
                          "model name, and provider settings." % status)
-            elif isinstance(exc, httpx.RequestError):
+            elif isinstance(exc, _LLMProviderError) and exc.unreachable:
                 error = ("Could not reach the configured provider. Check the base URL "
                          "and network connection.")
             else:
@@ -189,14 +202,15 @@ class LLMClient:
         headers.update(self.extra_headers)
 
         url = f"{self.base_url}/chat/completions"
-        logger.debug("LLM POST %s model=%s", url, self.model)
-        resp = self._http.post(url, json=body, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
+        # Custom provider URLs (and Google's URL below) may carry credentials in
+        # their query string.  Keep debug logging useful without ever emitting the
+        # configured endpoint verbatim.
+        logger.debug("LLM provider request started")
+        data = self._post_json(url, body, headers)
         try:
             return data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise ValueError(f"Unexpected LLM response format: {data}") from exc
+        except (KeyError, IndexError, TypeError):
+            raise ValueError("Unexpected LLM response format") from None
 
     def _chat_anthropic(self, messages, system, temperature, max_tokens) -> str:
         """Anthropic Messages API."""
@@ -218,14 +232,12 @@ class LLMClient:
         headers.update(self.extra_headers)
 
         url = f"{self.base_url}/messages"
-        logger.debug("LLM POST %s model=%s", url, self.model)
-        resp = self._http.post(url, json=body, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
+        logger.debug("LLM provider request started")
+        data = self._post_json(url, body, headers)
         try:
             return data["content"][0]["text"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise ValueError(f"Unexpected Anthropic response format: {data}") from exc
+        except (KeyError, IndexError, TypeError):
+            raise ValueError("Unexpected Anthropic response format") from None
 
     def _chat_google(self, messages, system, temperature, max_tokens) -> str:
         """Google Gemini generateContent API."""
@@ -251,14 +263,26 @@ class LLMClient:
             f"{self.base_url}/models/{self.model}:generateContent"
             f"?key={self.api_key}"
         )
-        logger.debug("LLM POST %s model=%s", url, self.model)
-        resp = self._http.post(url, json=body, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
+        logger.debug("LLM provider request started")
+        data = self._post_json(url, body, headers)
         try:
             return data["candidates"][0]["content"]["parts"][0]["text"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise ValueError(f"Unexpected Google response format: {data}") from exc
+        except (KeyError, IndexError, TypeError):
+            raise ValueError("Unexpected Google response format") from None
+
+    def _post_json(self, url: str, body: dict[str, Any], headers: dict[str, str]) -> Any:
+        """POST once and discard provider URLs/bodies before an error crosses the boundary."""
+        try:
+            resp = self._http.post(url, json=body, headers=headers)
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise _LLMProviderError(status=exc.response.status_code) from None
+        except httpx.RequestError:
+            raise _LLMProviderError(unreachable=True) from None
+        try:
+            return resp.json()
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError("Unexpected LLM response format") from None
 
 
 def _anthropic_msg(m: dict[str, str]) -> dict[str, str]:

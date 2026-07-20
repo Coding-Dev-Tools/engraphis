@@ -1,11 +1,42 @@
 import pytest
 from engraphis import cloud_license, licensing
+from engraphis.config import settings
+from engraphis.inspector import license_registry
 
 # Opt the licensing module into honoring ENGRAPHIS_LICENSE_PUBKEY, which is otherwise
 # dead in a shipped process. Set at import time so it covers both collection and
 # execution. This is the ONLY place that flips the switch — production never imports
 # this conftest, so the vendor-key override stays non-overridable in the field.
 licensing._TEST_MODE_PUBKEY_OVERRIDE = True
+
+
+@pytest.fixture(autouse=True)
+def _deployment_settings_isolation(monkeypatch, tmp_path):
+    """Keep a developer's project-local deployment binding out of the test process.
+
+    ``config.settings`` is constructed during collection and intentionally reads ``.env``.
+    Tests that build in-memory services must not inherit a real instance's workspace
+    allow-list or customer/vendor role; focused tests can still override either value.
+    """
+    monkeypatch.setattr(settings, "allowed_workspaces", [])
+    monkeypatch.setattr(settings, "service_mode", "combined")
+    # Every file-backed default used by commercial, licensing, webhook, outbox, sync,
+    # backup, and dashboard code must resolve inside this test's private directory.
+    # Environment-only isolation is insufficient because some modules cache their default
+    # paths at import time, while individual tests deliberately delete env overrides to
+    # exercise fallback resolution.
+    state_dir = tmp_path / ".engraphis"
+    database = tmp_path / "engraphis.db"
+    relay = state_dir / "relay.db"
+    webhooks = state_dir / "polar-webhooks.db"
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("ENGRAPHIS_DB_PATH", str(database))
+    monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(relay))
+    monkeypatch.setenv("ENGRAPHIS_WEBHOOK_STATE", str(webhooks))
+    monkeypatch.setattr(settings, "db_path", str(database))
+    monkeypatch.setattr(license_registry, "_DEFAULT_DB", str(relay))
+    monkeypatch.setattr(licensing, "_STATE_DIR", state_dir)
+    monkeypatch.setattr(cloud_license, "_DIR", state_dir)
 
 
 def pytest_configure(config):

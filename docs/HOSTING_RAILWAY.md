@@ -1,223 +1,163 @@
-# Host on Railway (5 minutes)
+# Host Engraphis on Railway
 
-Deploy **one** Engraphis instance on Railway and access your memories from any browser,
-on any device. Two paths, one repository workflow:
+The v1.0 customer deployment is one persistent dashboard for Pro or Team. It does not
+issue licenses, process Polar events, or hold the vendor signing key; those responsibilities
+belong only to `license.engraphis.com`.
 
-| | **Pro solo** | **Team admin** |
-|---|---|---|
-| Who | A Pro member (individual) | A Team administrator |
-| License | Pro key or Pro trial | Team key or Team trial |
-| Users | One admin (you) | Admin + invited members (seats) |
-| Agent connect | Local agents sync to your Railway relay | Members connect agents directly to the cloud instance |
-| Cost | ~$10–25/mo infra + $10/mo Pro | ~$10–25/mo infra + $20/mo/seat Team |
+## Preferred: official template
 
-Both paths use the same Docker image and the same volume + proxy
-setup. The only difference is the license key you activate and whether you invite members.
+The composer worksheet is
+[`deploy/railway-template.json`](../deploy/railway-template.json). It is not an importable
+Railway schema. Once Railway assigns the reviewed public template code, use the button in
+the README. Until then, deploy this GitHub repository and apply the same settings manually.
 
-For the solo/local-first lane (agent runs on your machine, optional cloud sync) see
-[SYNC.md](./SYNC.md); for how agents connect to a hosted Team instance see
-[AGENT_CONNECT.md](./AGENT_CONNECT.md).
+The template must create:
 
----
+- one service built from `Dockerfile`;
+- one persistent volume mounted at `/data`;
+- a generated public HTTPS domain;
+- `/api/ready` as the health check; and
+- an `ENGRAPHIS_DEPLOYMENT_TOKEN` generated with Railway's `${{ secret(48) }}` template
+  function. Copy it into onboarding, then seal the variable after first-admin setup.
 
-## Pro solo path (cloud dashboard + sync relay)
+## Manual deployment
 
-A Pro member deploys one instance to get a cloud-accessible dashboard (analytics,
-automation, export) and a self-hosted sync relay — your local agents sync through your
-own Railway instance instead of the vendor relay. One admin, no member seats.
+1. Create a Railway project and deploy `Coding-Dev-Tools/engraphis` from GitHub.
+2. Add a persistent volume mounted at `/data` before completing onboarding.
+3. Generate a Railway public domain for the service.
+4. Set these variables, replacing the domain and deployment token:
 
-### What you need
-- A Railway account. Roughly **~$10–25/mo** for one small always-on service + a persistent
-  volume.
-- A **Pro license key** (purchase, or start a Pro trial from the dashboard once it's up).
-
-### 1. Deploy
-In Railway choose **New Project → Deploy from GitHub repo**, select your Engraphis fork
-or `Coding-Dev-Tools/engraphis`, and deploy it. Railway builds the Dockerfile, which
-defaults to the v2 dashboard on port `8700` and runs as a non-root user.
-
-### 2. Add a persistent volume (required)
-Without this, activated license keys, the one-time trial, and **all memories** are lost
-on every redeploy. In Railway: **service → Settings → Volumes → New Volume → mount path
-`/data`**. Allocate at least **3 GiB** with the default 2 GiB per-account relay quota;
-the database, license registry, and model cache need additional headroom. The Dockerfile
-already writes the DB and license state under `/data`.
-
-### 3. Trust Railway's proxy and set the public URL
-Railway fronts the container with a TLS proxy. In Railway: **service → Variables → add**:
-
-```
+```dotenv
+ENGRAPHIS_SERVICE_MODE=customer
+ENGRAPHIS_DB_PATH=/data/engraphis.db
+ENGRAPHIS_STATE_DIR=/data/.engraphis
+ENGRAPHIS_TEAM_MODE=1
+ENGRAPHIS_JSON_LOGS=1
 ENGRAPHIS_FORWARDED_ALLOW_IPS=*
-ENGRAPHIS_DASHBOARD_URL=https://<your Railway public domain>
-ENGRAPHIS_RELAY_URL=https://<your Railway public domain>
-ENGRAPHIS_CLOUD_URL=https://team.engraphis.com
-ENGRAPHIS_API_TOKEN=<a random 32-byte-or-longer secret>
+ENGRAPHIS_CLOUD_URL=https://license.engraphis.com
+ENGRAPHIS_DASHBOARD_URL=https://YOUR-DOMAIN.up.railway.app
+ENGRAPHIS_RELAY_URL=https://YOUR-DOMAIN.up.railway.app
+ENGRAPHIS_DEPLOYMENT_TOKEN=YOUR-UNIQUE-32+-CHARACTER-SECRET
 ```
 
-Use the generated Railway domain first, or a custom domain you own. This is the canonical
-URL **for your deployment**; `team.engraphis.com` is Engraphis's managed service, not a
-customer-owned hostname. `ENGRAPHIS_DASHBOARD_URL` drives reset links,
-redirects, and hosted MCP Host/Origin checks. `ENGRAPHIS_RELAY_URL` makes the cloud
-dashboard exchange data through the relay mounted on this same instance.
-`ENGRAPHIS_CLOUD_URL` keeps license leases, hosted trials, and fallback invite delivery on
-Engraphis's managed issuer instead of sending those requests to the customer sync relay.
-`ENGRAPHIS_API_TOKEN` proves deployment ownership when you start a hosted trial or create
-the first admin; enter it in the corresponding hosted setup field. You may remove it after
-setup unless service automation uses it.
+Do not add any of these to a customer service:
 
-### 4. Activate Pro
-Add `ENGRAPHIS_LICENSE_KEY=<your-pro-key>` in Railway Variables and redeploy. The key is
-server-validated. Alternatively, open the dashboard, choose **Start Pro trial**, and open
-the confirmation link sent to your email. For a hosted first boot, copy the confirmed key
-into the private `ENGRAPHIS_LICENSE_KEY` Railway variable and redeploy; browser activation
-remains admin-only so an arbitrary key holder cannot claim a fresh public instance.
+- `ENGRAPHIS_VENDOR_SIGNING_KEY`
+- `ENGRAPHIS_VENDOR_ADMIN_TOKEN`
+- `POLAR_WEBHOOK_SECRET`
+- `POLAR_ORGANIZATION_ID`
+- `POLAR_*_PRODUCT_ID`
+- `ENGRAPHIS_RESEND_API_KEY` for Engraphis-operated transactional mail
 
-### 5. Create your admin account
-Once `/api/license` reports `plan: "pro"`, the dashboard presents **Create admin
-account**. Enter the `ENGRAPHIS_API_TOKEN` from Railway along with the account fields.
-This is a single-admin instance — you can't invite members (that requires
-Team). The admin account gives you a browser session (session cookie) and the ability to
-mint a per-user bearer token for API access.
+Those are control-plane secrets. Customer deployments use the signed license service URL
+and can optionally configure their own mail provider. Without one, invitations and password
+resets are relayed server-to-server through the control plane using the active Pro/Team key;
+reset tokens never appear in browser API responses or deployment logs.
 
-### 6. Use it
-- **Browser dashboard:** sign in at your Railway deployment URL with email + password.
-  All Pro features are unlocked: analytics, export, automation, cloud sync.
-- **Sync relay:** enable auto-sync in the cloud dashboard (or use **Sync now**). Activate
-  the same Pro key on each local instance, then set
-  `ENGRAPHIS_RELAY_URL=https://<your Railway public domain>`. Your local agents write locally;
-  each sync pass exchanges changes through the hosted relay, and the cloud dashboard
-  shows them after its next sync pass.
-- **API access:** sign in, open **Settings → Connect your agent → Create token**, and use
-  the bearer token for HTTP API access (`GET /api/recall` is read-enabled; write
-  endpoints like `POST /api/remember` require a Team license — Pro solo uses cloud sync
-  for writes, not direct agent-connect).
+Operators of a separate vendor control plane must follow
+[`COMMERCIAL_OPERATIONS.md`](COMMERCIAL_OPERATIONS.md): the vendor admin token is an
+independent 32+-character secret, Polar/Resend webhook signing material provides at least
+16 raw/decoded bytes, and a file-backed Ed25519 seed is a regular file no larger than 1 KiB
+with owner-only (`0600`) permissions on POSIX. These requirements do not change the
+prohibition above for customer services.
 
-### 7. Configure the canonical domain
-Follow the Team custom-domain steps below. Set both
-`ENGRAPHIS_DASHBOARD_URL` and `ENGRAPHIS_RELAY_URL` to that domain, then update local instances to use
-that relay URL so links, password resets, and sync all use the canonical domain.
+## Hosted onboarding
 
----
+Open the generated HTTPS domain while signed out. The wizard performs this sequence:
 
-## Team admin path (multi-user, members join with credentials)
+1. enter the deployment token;
+2. choose a Pro or Team three-day trial;
+3. enter and confirm an email address;
+4. return to the deployment after confirmation; and
+5. create the first admin with a chosen password.
 
-Deploy one instance for your team; members sign in at your URL and connect their agents
-over HTTP/MCP — **no local install for members**. The admin does a one-time deploy;
-everyone else just logs in. A Team license (the instance's) is required for agent-connect;
-members never need a key to log in.
+The confirmation link uses scanner-safe GET/POST semantics. The browser never receives the
+signed key: the customer server claims it server-to-server, stores it under
+`/data/.engraphis`, and activates it without a Railway redeploy. A pending claim identifier
+is safe to keep in browser storage, so closing and reopening the page recovers activation.
 
-### What you need
-- A Railway account (the **admin's** — Railway hosting is billed to the admin's account,
-  not yours). Roughly **~$10–25/mo** for one small always-on service + a persistent volume.
-- A **Team license key** (purchase, or start a Team trial from the dashboard once it's up).
+For an existing paid license, set `ENGRAPHIS_LICENSE_KEY` as a Railway secret. Paid Pro and
+Team licenses renew online leases at `license.engraphis.com`; Free usage remains local and
+does not call the license service.
 
-### 1. Deploy
-In Railway choose **New Project → Deploy from GitHub repo → select your Engraphis fork
-or `Coding-Dev-Tools/engraphis`**. Railway builds from the
-Dockerfile, which defaults to the v2 **team** dashboard on port `8700` and runs as a
-non-root user. (`railway.json` tells Railway the healthcheck at `/api/health`.)
+## Team invitations and sync
 
-The canonical public URL is the generated Railway domain or a custom domain **you own**.
-Set `ENGRAPHIS_DASHBOARD_URL` to that URL so invites, password resets, redirects, and
-hosted MCP checks agree. Set `ENGRAPHIS_RELAY_URL` to the same URL when local Pro clients
-will sync through this deployment. `team.engraphis.com` remains the managed vendor
-license/relay service; do not point customer DNS at it.
+Admins invite an email and role; they do not choose a temporary password. The invitation
+reserves a seat for 72 hours. Resend invalidates the old link, revoke or expiry releases the
+seat, and the user is created only when the recipient chooses a password.
 
-### 2. Add a persistent volume (required)
-Without this, activated license keys, the one-time trial, and **all memories** are lost
-on every redeploy. In Railway: **service → Settings → Volumes → New Volume → mount path
-`/data`**. Allocate at least **3 GiB** with the default 2 GiB per-account relay quota;
-the DB, registry, and model cache need headroom. The Dockerfile writes the DB and license
-state under `/data`.
+Each user creates their own 90-day bearer token. The server stores only a hash and the
+credential is revocable:
 
-### 3. Trust Railway's forwarded headers
-Railway fronts the container with a TLS proxy that isn't at `127.0.0.1`. Trust that proxy
-so the application interprets the external scheme and client address correctly. In Railway:
-**service → Variables → add**:
+- viewers: agent read plus `sync:read`;
+- members/admins: agent read/write plus `sync:read` and `sync:write`.
 
-```
-ENGRAPHIS_FORWARDED_ALLOW_IPS=*
-ENGRAPHIS_CLOUD_URL=https://team.engraphis.com
-ENGRAPHIS_API_TOKEN=<a random 32-byte-or-longer secret>
+Paste a scoped token into Settings → Cloud sync on each local device. The account-wide Team
+license key is never included in member invitations or used as the normal per-user sync
+credential. The purchaser receives it only for initial deployment activation and recovery.
+Each sync device keeps the raw bearer it must send in an owner-only
+`$ENGRAPHIS_STATE_DIR/sync.token` file; protect that file like any other API credential.
+
+## Persistence and recovery
+
+The `/data` volume contains memories, auth state, machine identity, activated license, and
+customer relay data. A redeploy without this volume is data loss.
+
+Volume snapshots alone are not enough. Schedule a daily encrypted off-volume backup:
+
+```bash
+export ENGRAPHIS_BACKUP_KEY=<64-hex-secret-from-the-production-secret-store>
+python -m scripts.commercial_backup backup \
+  --output-dir /mounted-off-volume/engraphis \
+  --marker /data/.engraphis/backup-status.json \
+  --retention-days 30
 ```
 
-(You can scope this to Railway's egress range instead of `*` if you prefer.)
-Keep `ENGRAPHIS_CLOUD_URL` on the managed issuer if this deployment also sets
-`ENGRAPHIS_RELAY_URL` to itself for customer-operated sync.
-The API token is required only as proof that you control the deployment while creating
-the first admin. Keep it if service automation needs a shared credential; otherwise
-remove it from Railway after setup.
+Set `ENGRAPHIS_BACKUP_STATUS_FILE=/data/.engraphis/backup-status.json`. Verify the newest
+artifact daily and run a monthly restore drill into an empty directory:
 
-> **Port:** Railway auto-detects `8700` from the Dockerfile's `EXPOSE`. If the deploy
-> shows a port mismatch / 502, set the service's **Port** to `8700`.
+```bash
+python -m scripts.commercial_backup verify /mounted-off-volume/engraphis/NEWEST.egbak
+python -m scripts.commercial_backup restore /mounted-off-volume/engraphis/NEWEST.egbak \
+  --output-dir /tmp/engraphis-restore-drill
+```
 
-### 4. Configure an optional custom domain
-For a domain you control, such as `https://memory.example.com`:
-1. **Railway → service → Settings → Networking → Custom Domain →** add
-   `memory.example.com`; Railway shows a CNAME target.
-2. In your DNS, add `memory.example.com CNAME → <railway target>`. Railway auto-issues the
-   TLS certificate.
-3. **Variables → update:** `ENGRAPHIS_DASHBOARD_URL=https://memory.example.com`
-   (with `https://`, no trailing slash).
+The backup command refuses a destination on the live data device unless explicitly put in
+drill mode. It uses SQLite online backups, checks integrity, encrypts with AES-256-GCM, and
+writes the freshness marker only after decrypting the artifact and rechecking every
+database checksum and SQLite integrity result. The separate monthly drill exercises the
+copy into a new restore directory. Customer backups also preserve a strict allowlist of
+machine/license/lease/trial state and the saved sync credential/policy from
+`ENGRAPHIS_STATE_DIR`; each existing file is bounded, symlinks are rejected, and no directory
+is walked. These credentials remain protected by the encrypted archive.
 
-### 5. Activate Team, then bootstrap the admin
-`POST /api/auth/setup` deliberately refuses to create the first admin until a paid
-entitlement is active. Bootstrap it one of two ways:
+A restore is staged and never overwrites live data. Set the replacement deployment's target
+path environment variables before restoring. The command writes databases at the restore root,
+the allowed state files under `<restore-dir>/.engraphis/`, and an owner-only
+`RESTORE_PLAN.json` that maps every staged file to its resolved live destination. Review the
+plan, stop all writers, then put the databases at those paths and copy the staged `.engraphis`
+content into `ENGRAPHIS_STATE_DIR`. After starting the replacement, create a new encrypted
+backup and require both `/api/ready` and authenticated `/api/ops/ready` to pass.
 
-- **Purchased key:** add `ENGRAPHIS_LICENSE_KEY=<your-key>` in Railway Variables and
-  redeploy. The key is server-validated and sets the seat cap.
-- **Trial:** open the dashboard, enter the deployment's `ENGRAPHIS_API_TOKEN`, choose
-  **Start Team trial**, and open the confirmation link sent to your email. Copy the
-  displayed key into Railway's private `ENGRAPHIS_LICENSE_KEY` variable and redeploy.
-  The trial route works before login but requires the deployment token; activation
-  remains admin-only.
+For an Engraphis-operated managed deployment, configure a separate strong
+`ENGRAPHIS_API_TOKEN` and store the same value in GitHub as
+`ENGRAPHIS_CUSTOMER_OPS_TOKEN`. Scheduled backup and authenticated readiness workflows use
+this revocable operations credential. They must not use `ENGRAPHIS_DEPLOYMENT_TOKEN`, which
+is an ownership/onboarding secret rather than a permanent service-account credential.
 
-Once `/api/license` reports `plan: "team"`, the dashboard presents **Create admin
-account**. Enter the `ENGRAPHIS_API_TOKEN` from Railway in the hosted setup form, create
-the admin, then use **Settings → License** for later key replacement.
-`/api/license/activate` stays admin-only; a purchased key cannot be pasted through that
-route before the first admin exists.
+## Acceptance checklist
 
-### 6. Invite members (seats)
-**Team → Add member** (email + initial password + role: viewer/member/admin). Each member
-is a seat; you can't add more active members than your Team license's seats. Members get an
-invite email pointing at your dashboard URL; they sign in with email + password — **no
-key, no local install**. If the license later lapses, the authentication wall stays active
-and existing users can still sign in, while Team-gated operations return `402`.
+From a logged-out Railway account, prove all of the following before the template is public:
 
-### 7. Members connect their agents
-Each member signs in, opens **Settings → Connect your agent → Create token**, and pastes
-the one-time bearer token into their agent config. Two transports (see
-[AGENT_CONNECT.md](./AGENT_CONNECT.md) for full details):
+- `/api/ready` returns 200 after a clean deploy;
+- Pro and Team confirmation activate automatically without showing a key;
+- first-admin setup rejects an incorrect deployment token;
+- invitation accept, resend, revoke, expiry, and seat limits work;
+- viewer sync is read-only and member/admin sync is read/write;
+- a redeploy preserves users, licenses, tokens, and memories;
+- a verified backup restores databases and the allowlisted `.engraphis` state into a
+  disposable staging deployment; and
+- the browser console has no CSP, accessibility, or network errors.
 
-- **HTTP** (always available): `POST https://<your-domain>/api/remember` and
-  `GET https://<your-domain>/api/recall` with `Authorization: Bearer <token>`.
-- **MCP-over-HTTP:** point an MCP client at `https://<your-domain>/mcp` with the
-  bearer header.
-
-Writes land in the same v2 store the dashboard reads; the instance's Team license is what
-unlocks the write endpoints (`402` without it).
-
----
-
-## Cost & limits
-- **Infra:** one flat instance per team or solo user on the admin's/member's Railway
-  account (~$10–25/mo), amortized across seats for Team — *not* per user. Team seats are
-  $20/mo each; Pro is $10/mo flat ($100/yr).
-- **Embedder:** CPU inference of `all-MiniLM-L6-v2` on every write/recall is the main cost
-  driver. For write-heavy deployments, set `ENGRAPHIS_EMBED_MODEL` to an external embedding
-  API (the config supports an API embedder) to cut Railway CPU and improve latency.
-- **Scale:** the dashboard uses a single SQLite (WAL) store — fine for ~tens of concurrent
-  agents, not hundreds. Cap seat sales accordingly until a Postgres backend exists.
-- **Backups:** Railway volumes are not auto-backed-up. Enable Railway volume backups, or
-  run `GET /api/export?workspace=…` on a cron, so you're not on the hook for data loss.
-
-## Security notes
-- Expose the instance over **HTTPS only** (Railway does this). Bearer tokens and session
-  cookies must not transit cleartext.
-- Per-user tokens are SHA-256 hashed at rest; the raw token is shown once. Disabling a
-  member instantly invalidates their tokens.
-- `/api/remember` and `/mcp` require an active Team license (`402` otherwise).
-  A lapse keeps the authentication wall in place; existing users can still log in.
-- The auth wall activates on any paid license (Pro or Team), closing the pre-bootstrap
-  exposure window on Railway. A free/unlicensed instance stays open for local-only use.
+Publishing the template, changing DNS, and enabling public checkout remain release-operator
+actions and occur only after the production acceptance gates pass.

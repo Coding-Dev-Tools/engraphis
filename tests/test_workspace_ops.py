@@ -5,6 +5,8 @@ fresh ids into a new workspace; reorder_memories writes a per-memory sort_order.
 three are reachable from the authenticated dashboard API, so a silent regression here
 corrupts or leaks data.
 """
+import json
+
 import pytest
 
 from engraphis.core.interfaces import Edge, GraphLayer, Node
@@ -100,6 +102,28 @@ def test_delete_removes_code_file_state_and_memory_bridges():
 
     for table in ("code_memory_links", "code_files", "symbols", "repos"):
         assert c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+
+
+def test_delete_removes_normalized_evidence_without_orphaning_shared_edge():
+    svc = _svc()
+    removed = svc.remember("Source evidence.", workspace="a", scope="workspace")["id"]
+    retained = svc.remember("Other evidence.", workspace="b", scope="workspace")["id"]
+    svc.store.upsert_edge(Edge(
+        id="edge_global", src="x", dst="y", relation="related", workspace_id=None,
+        provenance={"memory_id": removed, "memory_ids": [removed, retained]},
+    ))
+
+    svc.delete_workspace("a")
+
+    edge = svc.store.conn.execute(
+        "SELECT valid_to, provenance FROM edges WHERE id='edge_global'"
+    ).fetchone()
+    assert edge is not None and edge["valid_to"] is None
+    assert json.loads(edge["provenance"])["memory_ids"] == [retained]
+    supports = [dict(row) for row in svc.store.conn.execute(
+        "SELECT memory_id, valid_to FROM edge_supports WHERE edge_id='edge_global'"
+    )]
+    assert supports == [{"memory_id": retained, "valid_to": None}]
 
 
 def test_merge_folds_memories_and_removes_source():
@@ -323,6 +347,86 @@ def test_copy_auto_names_and_leaves_source_untouched():
     assert out2["workspace"] == "a copy 2"
 
 
+def test_copy_remaps_graph_evidence_history_and_event_references():
+    svc = _svc()
+    first = svc.remember("First source fact.", workspace="a", scope="workspace")["id"]
+    second = svc.remember("Second source fact.", workspace="a", scope="workspace")["id"]
+    c = svc.store.conn
+    c.execute(
+        "UPDATE memories SET metadata=?, provenance=? WHERE id=?",
+        (
+            json.dumps({"corrects": first, "supersedes": [first]}),
+            json.dumps({"memory_id": first, "memory_ids": [first, second]}),
+            second,
+        ),
+    )
+    svc.store.append_event(
+        kind="copy.references", content="reference test",
+        workspace_id=_wsid(svc, "a"), refs=[first, second],
+    )
+    source_workspace = _wsid(svc, "a")
+    repo_one = svc.store.get_or_create_repo(source_workspace, "one")
+    repo_two = svc.store.get_or_create_repo(source_workspace, "two")
+    entity_one = svc.store.upsert_entity(Node(
+        id="", name="Shared Entity", ntype="concept",
+        workspace_id=source_workspace, repo_id=repo_one,
+    ))
+    entity_two = svc.store.upsert_entity(Node(
+        id="", name=" shared   entity ", ntype="concept",
+        workspace_id=source_workspace, repo_id=repo_two,
+    ))
+    svc.store.upsert_edge(Edge(
+        id="edge_source", src=entity_one, dst=entity_two, relation="supports",
+        workspace_id=source_workspace,
+        provenance={"memory_id": first, "memory_ids": [first, second]},
+    ))
+
+    svc.copy_workspace("a", new_name="a2")
+
+    copied_workspace = _wsid(svc, "a2")
+    copied_memories = [dict(row) for row in c.execute(
+        "SELECT id, content, metadata, provenance FROM memories WHERE workspace_id=?",
+        (copied_workspace,),
+    )]
+    copied_by_content = {row["content"]: row for row in copied_memories}
+    copied_first = copied_by_content["First source fact."]["id"]
+    copied_second = copied_by_content["Second source fact."]["id"]
+    copied_meta = json.loads(copied_by_content["Second source fact."]["metadata"])
+    assert copied_meta == {"corrects": copied_first, "supersedes": [copied_first]}
+    copied_provenance = json.loads(
+        copied_by_content["Second source fact."]["provenance"]
+    )
+    assert copied_provenance["memory_ids"] == [copied_first, copied_second]
+
+    copied_entities = [dict(row) for row in c.execute(
+        "SELECT id, canonical_id FROM entities WHERE workspace_id=?",
+        (copied_workspace,),
+    )]
+    copied_entity_ids = {row["id"] for row in copied_entities}
+    assert copied_entity_ids
+    assert {row["canonical_id"] for row in copied_entities} <= copied_entity_ids
+    assert copied_entity_ids.isdisjoint({entity_one, entity_two})
+
+    copied_edge = c.execute(
+        "SELECT id, provenance FROM edges WHERE workspace_id=? AND relation='supports'",
+        (copied_workspace,),
+    ).fetchone()
+    edge_provenance = json.loads(copied_edge["provenance"])
+    assert edge_provenance["memory_ids"] == [copied_first, copied_second]
+    copied_supports = {row["memory_id"] for row in c.execute(
+        "SELECT memory_id FROM edge_supports WHERE edge_id=? AND valid_to IS NULL",
+        (copied_edge["id"],),
+    )}
+    assert copied_supports == {copied_first, copied_second}
+    assert copied_supports.isdisjoint({first, second})
+
+    copied_event = c.execute(
+        "SELECT refs FROM events WHERE workspace_id=? AND kind='copy.references'",
+        (copied_workspace,),
+    ).fetchone()
+    assert json.loads(copied_event["refs"]) == [copied_first, copied_second]
+
+
 def test_copy_clones_vectors_fts_links_entities_and_edges():
     svc = _svc()
     m1 = svc.remember("Postgres 16 is the primary database.", workspace="a",
@@ -481,6 +585,28 @@ def test_copy_rejects_missing_source_and_colliding_new_name():
         svc.copy_workspace("ghost")                       # missing source
     with pytest.raises(ValidationError):
         svc.copy_workspace("a", new_name="b")              # explicit name collides
+
+
+def test_copy_rolls_back_partial_workspace_and_releases_write_lock(monkeypatch):
+    svc = _svc()
+    svc.remember("source memory", workspace="a", scope="workspace")
+    connection_type = type(svc.store.conn)
+    original_execute = connection_type.execute
+
+    def fail_during_memory_copy(connection, statement, *args, **kwargs):
+        if str(statement).startswith("INSERT INTO memories"):
+            raise RuntimeError("injected copy failure")
+        return original_execute(connection, statement, *args, **kwargs)
+
+    monkeypatch.setattr(connection_type, "execute", fail_during_memory_copy)
+
+    with pytest.raises(RuntimeError, match="injected copy failure"):
+        svc.copy_workspace("a", new_name="copy-failed")
+
+    assert svc.store.conn.in_transaction is False
+    assert svc._lookup_workspace("copy-failed") is None
+    # A subsequent write succeeds, proving the serialized connection's lock was released.
+    assert svc.create_workspace("after-failure")["created"] is True
 
 
 # ── reorder_memories ────────────────────────────────────────────────────────

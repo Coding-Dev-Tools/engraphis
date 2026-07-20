@@ -485,8 +485,8 @@ class MemoryEngine:
                 self.index.delete([decision.target_id])
             except Exception as exc:  # noqa: BLE001 — merely stale in the index; recall
                 # re-checks validity on read, so log (don't audit) and continue.
-                logger.warning("vector-index delete failed for %s: %s",
-                               decision.target_id, exc)
+                logger.warning("vector-index delete failed for %s (%s)",
+                               decision.target_id, type(exc).__name__)
             self.store.audit("resolver", "invalidate", decision.target_id, decision.reason)
             linked = self._evolve(mid, neighbors, exclude={decision.target_id})
             out = {"id": mid, "op": "invalidate", "superseded": [decision.target_id],
@@ -660,8 +660,19 @@ class MemoryEngine:
 
         results = []
         base_metadata = dict(metadata or {})
-        for f in facts:
-            fact_own = getattr(f, "metadata", {}) or {}
+        source_sha256 = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+        for fact_index, f in enumerate(facts, start=1):
+            fact_own = dict(getattr(f, "metadata", {}) or {})
+            if isinstance(fact_own.get("llm_extraction"), dict):
+                # Group all facts derived from one source without retaining the raw
+                # source or prompt. The dashboard activity viewer can therefore explain
+                # one input -> N memories while keeping provider payloads private.
+                fact_own["llm_extraction"] = {
+                    **fact_own["llm_extraction"],
+                    "source_sha256": source_sha256,
+                    "fact_index": fact_index,
+                    "fact_count": len(facts),
+                }
             # This is the one place that can tell the two apart: ``fact_own`` is computed
             # fresh from the Extractor's real output, while ``base_metadata`` is the
             # caller's argument. The extractor's keys win the merge, so vouching by name

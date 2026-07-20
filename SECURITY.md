@@ -40,7 +40,8 @@ DOMPurify at all render sites. Verified against payloads with `onerror` handlers
 - **Vendor admin separation** (`ENGRAPHIS_VENDOR_ADMIN_TOKEN`): vendor-wide license
   administration on the relay (`/license/v1` revoke/keys/deactivate) uses its own
   secret, so the per-instance service token can never revoke other customers' keys.
-  If the vendor token is unset, those routes fail closed; there is no fallback.
+  It must be 32–4096 printable ASCII characters. If it is absent or weaker, those
+  routes fail closed; there is no fallback.
 - **Login throttling**: per-email lockout plus a per-source-IP failure window
   (cross-email credential-stuffing); lockouts are typed and mapped to HTTP 429.
   Behind a reverse proxy, set `ENGRAPHIS_FORWARDED_ALLOW_IPS` to the proxy address so
@@ -142,8 +143,9 @@ second issuer.
   mean deriving it from the client-supplied `Host` header, which allowed an attacker to
   have a victim emailed a vendor-signed confirmation link pointing at attacker
   infrastructure (fixed 2026-07-18). Unset ⇒ `/license/v1/start-trial` answers 503.
-- `ENGRAPHIS_VENDOR_ADMIN_TOKEN` is **required** for the vendor admin routes and no
-  longer falls back to `ENGRAPHIS_API_TOKEN`. Unset ⇒ those routes are disabled.
+- `ENGRAPHIS_VENDOR_ADMIN_TOKEN` is **required** for the vendor admin routes, must be
+  32–4096 printable ASCII characters, and no longer falls back to
+  `ENGRAPHIS_API_TOKEN`. Absent/invalid ⇒ those routes are disabled.
 - Relay storage is capped per account (`ENGRAPHIS_RELAY_MAX_ACCOUNT_BYTES`,
   `ENGRAPHIS_RELAY_MAX_WORKSPACES_PER_ACCOUNT`), not only per workspace: workspace ids
   are caller-supplied, and the relay DB shares a volume with the revocation registry.

@@ -111,29 +111,33 @@ class TestPolarWebhook:
 
 
 class TestTeamInviteEmailCopy:
-    """Viewers are never sent the shared Team key (they hold no seat), and neither is
-    anyone on an instance without a Team license — so the keyless invite must not read
-    like half of a two-part email."""
+    """Team invitations expose one recipient-owned path and no shared credential."""
 
-    def _text(self, key=""):
-        from engraphis.inspector.webhooks import _team_invite_email_text
-        return _team_invite_email_text(
-            "Dana", "viewer", "https://team.example", invited_by="Admin",
-            key=key, to="dana@example.com")
+    def _text(self):
+        from engraphis.inspector.webhooks import _invitation_email_text
+        return _invitation_email_text(
+            "Dana", "viewer", "https://team.example/#invite_token=once",
+            invited_by="Admin")
 
     def test_keyless_invite_never_advertises_a_missing_second_option(self):
         text = self._text()
         assert "two ways" not in text
         assert "OPTION" not in text            # nothing to number against
         assert "the second is optional" not in text
-        assert "license key" not in text.split("Sign in to the team dashboard")[0]
-        # the one path that does exist is still fully described
-        assert "Sign in to the team dashboard" in text
-        assert "dana@example.com" in text and "https://team.example" in text
+        assert "Choose your password" in text
+        assert "one-time link" in text
+        assert "https://team.example/#invite_token=once" in text
 
-    def test_keyed_invite_still_renders_both_options(self):
-        text = self._text(key="ENG-TEAM-KEY")
-        assert "two ways" in text and "the second is optional" in text
-        assert "OPTION 1 (required to join the team)" in text
-        assert "OPTION 2 (optional)" in text
-        assert "ENG-TEAM-KEY" in text
+    def test_deprecated_key_argument_is_never_rendered(self, monkeypatch):
+        from engraphis.inspector import webhooks
+        captured = {}
+        monkeypatch.setattr(
+            webhooks, "_send_text_email",
+            lambda to, subject, text_body, **kwargs: captured.update(body=text_body),
+        )
+        webhooks.send_team_invite_email(
+            "dana@example.com", "Dana", "member",
+            invite_url="https://team.example/#invite_token=once",
+            key="ENG-TEAM-KEY",
+        )
+        assert "ENG-TEAM-KEY" not in captured["body"]

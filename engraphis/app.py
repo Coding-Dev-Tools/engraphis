@@ -16,7 +16,6 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from engraphis import __version__
-from engraphis.billing import router as billing_router
 from engraphis.inspector.auth import bearer_ok
 from engraphis.inspector.cloud_mount import CLOUD_PREFIXES, mount_cloud_endpoints
 from engraphis.config import settings
@@ -43,8 +42,10 @@ def _embedder_ready() -> bool:
         from engraphis.backends.embedder_st import get_embedder
         emb = get_embedder(settings.embed_model or None, settings.embed_dim or 384)
         _embedder_ok = emb is not None and int(emb.dim) > 0
-    except Exception as e:  # pragma: no cover - defensive; get_embedder falls back itself
-        logger.warning("Readiness: embedder init failed: %s", e)
+    except Exception as exc:  # pragma: no cover - defensive; get_embedder falls back itself
+        # Provider/backend exceptions can contain credentialed URLs or local paths.
+        # Readiness logs need the failure class, not the exception payload.
+        logger.warning("Readiness: embedder init failed (%s)", type(exc).__name__)
         _embedder_ok = False
     return _embedder_ok
 
@@ -77,6 +78,22 @@ async def _lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     """Build and configure the FastAPI application."""
     configure_logging()
+    # Hosted JSON logging is credential-redacting. Keep this after the legacy logging
+    # setup so it replaces that formatter, and pair it with the launcher's log_config=None
+    # so Uvicorn cannot replace it again after app construction.
+    from engraphis.observability import configure_structured_logging
+    configure_structured_logging()
+
+    # The legacy reference entrypoint is still packaged and callable, so it must honor
+    # the same commercial role boundary as the primary dashboard entrypoint. Without
+    # this dispatch a customer-mode process mounted the Polar webhook, signer-backed
+    # issuance routes, and vendor-admin revocation surface merely because an operator
+    # launched ``engraphis-server`` instead of ``engraphis-dashboard``.
+    from engraphis.commercial import service_mode
+    mode = service_mode()
+    if mode == "vendor":
+        from engraphis.vendor_app import create_app as create_vendor_app
+        return create_vendor_app()
 
     app = FastAPI(
         title="Engraphis",
@@ -182,11 +199,19 @@ def create_app() -> FastAPI:
     app.include_router(vault_router)
     # Purchase fulfillment (Polar order.paid → signed key → email). Shared with the
     # Inspector so it works regardless of which entrypoint is deployed.
-    app.include_router(billing_router)
+    if settings.vendor_service:
+        from engraphis.billing import router as billing_router
+        app.include_router(billing_router)
     # Cloud license (register/verify/REVOKE) + gated Pro sync relay. Previously
     # mounted only on the retired Inspector, which made revocation inoperable in
     # production; now served by every shipped entrypoint. See inspector.cloud_mount.
-    mount_cloud_endpoints(app)
+    mount_cloud_endpoints(
+        app, include_license=settings.vendor_service,
+        include_sync=settings.customer_service)
+    # Customer mode preserves the pre-split URL only as a bounded compatibility proxy;
+    # it never mounts the local signer/control-plane implementation.
+    from engraphis.inspector.license_compat_proxy import mount_license_compat_proxy
+    mount_license_compat_proxy(app)
 
     # ── probes (unauthenticated; see _PUBLIC_PREFIXES) ──────────────────────────
     @app.get("/api/health")
@@ -202,8 +227,8 @@ def create_app() -> FastAPI:
         try:
             get_conn().execute("SELECT 1").fetchone()
             checks["db"] = True
-        except Exception as e:
-            logger.warning("Readiness: db check failed: %s", e)
+        except Exception as exc:
+            logger.warning("Readiness: db check failed (%s)", type(exc).__name__)
         checks["embedder"] = _embedder_ready()
         ready = all(checks.values())
         return JSONResponse({"ready": ready, "checks": checks, "version": __version__},
@@ -238,11 +263,15 @@ async def _consciousness_loop() -> None:
                 persist=True,
             )
             if result.get("persisted"):
-                logger.info("Thought synthesized: %s", result.get("thought"))
+                # A synthesized thought is memory content. Never copy it into logs.
+                logger.info(
+                    "Thought synthesized and persisted (sources=%d)",
+                    int(result.get("source_count") or 0),
+                )
         except asyncio.CancelledError:
             raise
-        except Exception as e:
-            logger.error("Consciousness loop error: %s", e)
+        except Exception as exc:
+            logger.error("Consciousness loop error (%s)", type(exc).__name__)
 
 
 app = create_app()

@@ -21,10 +21,10 @@ from pydantic import BaseModel, Field
 
 from engraphis import licensing
 from engraphis.config import resolve_license_server_url, settings
-from engraphis.netutil import client_ip
+from engraphis.netutil import client_ip, is_local_request
 from engraphis.inspector.auth import (
-    PBKDF2_ITERATIONS, SESSION_TTL_SECONDS, AccountLockedError, AuthError, AuthStore,
-    role_at_least)
+    API_TOKEN_SCOPES, PBKDF2_ITERATIONS, SESSION_TTL_SECONDS, AccountLockedError,
+    AuthError, AuthStore, role_at_least)
 
 logger = logging.getLogger("engraphis.team")
 
@@ -43,82 +43,76 @@ def _csv_cell(value) -> str:
     return s
 
 
-def _send_invite(u: dict, admin: dict) -> tuple:
-    """Best-effort onboarding notification for a newly added member. Returns
-    ``(invited, reason, pro_included)`` — never raises, so a delivery hiccup can
-    never fail the account-creation request that already succeeded.
+def _dashboard_base_url(request: Request) -> str:
+    """Return a canonical origin for credential-bearing email links.
 
-    The email always points the member at the team dashboard to sign in. When this
-    instance is genuinely Team-licensed AND the new account can write, it ALSO carries
-    the shared Team license key (``pro_included``) so the member can activate their own
-    local Engraphis and get Pro features + cloud sync, taking one server-enforced seat —
-    that is what turns "you have a dashboard login" into "you are a licensed member of
-    the team". A ``viewer`` never receives the key (see below): for that role
-    ``pro_included`` is False by design, not by failure.
+    A remote request's ``Host`` header is attacker-controlled, so it must never become
+    the destination of a password-reset or invitation email. Hosted deployments must set
+    ``ENGRAPHIS_DASHBOARD_URL``; only a genuinely local, unproxied request may fall back
+    to its request origin for the zero-config loopback experience.
+    """
+    configured = os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
+    if configured:
+        from engraphis.cloud_license import validate_cloud_base_url
+        try:
+            return validate_cloud_base_url(configured).rstrip("/")
+        except ValueError as exc:
+            raise ValueError("ENGRAPHIS_DASHBOARD_URL is invalid") from exc
+    if not is_local_request(request):
+        raise ValueError("ENGRAPHIS_DASHBOARD_URL is required for remote email links")
 
-    Prefers THIS instance's own email delivery (``ENGRAPHIS_RESEND_API_KEY`` /
-    ``ENGRAPHIS_SMTP_*`` in its own env) when configured — the invite then comes
-    from the operator's own address/domain. Without local delivery configured,
-    falls back to the vendor relay (``/license/v1/team-invite``), gated by this
-    instance's own currently-active license key actually carrying the ``team``
-    feature server-side; the relay echoes that same verified key into the email —
-    so self-hosters get a working, license-bearing "Add member" out of the box
-    without setting up their own mail account."""
+    from urllib.parse import urlsplit, urlunsplit
+    parts = urlsplit(str(request.base_url).strip())
+    if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+        raise ValueError("request origin is not an absolute HTTP URL")
+    try:
+        parts.port
+    except ValueError:
+        raise ValueError("request origin has an invalid port") from None
+    if parts.username is not None or parts.password is not None \
+            or "\\" in parts.netloc or any(char.isspace() for char in parts.netloc):
+        raise ValueError("request origin contains an invalid authority")
+    return urlunsplit((parts.scheme.lower(), parts.netloc,
+                       parts.path.rstrip("/"), "", ""))
+
+
+def _send_invite(invitation: dict, admin: dict, request: Request) -> tuple:
+    """Deliver a one-time invitation URL without exposing the Team license key."""
     if os.environ.get("ENGRAPHIS_TEAM_INVITES", "1").strip().lower() in (
             "0", "false", "no", "off"):
-        return False, "team invite delivery is disabled", False
+        return False, "team invite delivery is disabled"
+
+    try:
+        dashboard_url = _dashboard_base_url(request)
+    except ValueError as exc:
+        logger.error("team invite URL is unavailable (%s)", type(exc).__name__)
+        return False, "a trusted dashboard URL is not configured"
+    from urllib.parse import quote
+    # Keep the secret in the URL fragment: browsers never send fragments in HTTP
+    # requests, so Uvicorn/proxy access logs cannot capture the one-time credential.
+    invite_url = dashboard_url + "/#invite_token=" + quote(invitation["token"], safe="")
 
     from engraphis.inspector import webhooks
-    from engraphis.licensing import _read_key_material
-
-    # Only embed a key when this instance really has the ``team`` feature, so we never
-    # email a member a free/absent or non-Team "key" that would not unlock anything.
-    #
-    # …and never for a ``viewer``. The shared Team key is NOT role-aware: the sync relay
-    # authenticates on the key alone (``inspector/sync_relay._authorize``) and knows
-    # nothing about dashboard roles, so any holder can push and delete bundles in the
-    # team's relay namespace. Mailing it to a read-only account would hand that account
-    # team-wide write access out of band of every check the dashboard makes — the
-    # dashboard refuses the viewer's every write while the relay accepts them all. The
-    # key follows the role: viewers get a dashboard-only invite.
-    can_hold_key = u.get("role") != "viewer"
-    team_key = (_read_key_material()
-                if (can_hold_key and licensing.has_feature("team")) else "")
-    dashboard_url = os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
-
     if webhooks.email_configured():
         try:
-            webhooks.send_team_invite_email(u["email"], u["name"], u["role"],
-                                            invited_by=admin["email"], key=team_key,
-                                            dashboard_url=dashboard_url)
-            return True, "", bool(team_key)
-        except Exception as exc:  # noqa: BLE001 — caller logs/audits, never raises further
+            webhooks.send_team_invite_email(
+                invitation["email"], invitation["name"], invitation["role"],
+                invited_by=admin["email"], invite_url=invite_url)
+            return True, ""
+        except Exception as exc:  # noqa: BLE001 - audited by the caller
             logger.error("local team invite delivery failed (%s)", type(exc).__name__)
-            return False, "local email provider rejected delivery", False
+            return False, "local email provider rejected delivery"
 
-    from engraphis import cloud_license
+    from engraphis.licensing import _read_key_material
     key = _read_key_material()
     if not key:
-        return False, ("no local email delivery configured (ENGRAPHIS_RESEND_API_KEY / "
-                       "ENGRAPHIS_SMTP_*) and no active license key to relay through"), False
-    # The relay accepts (and echoes into the email) only a key that verifies as Team
-    # server-side, so a successful relay send means a member got the activation key —
-    # viewers excepted, per the note below.
-    # Sync may target a customer-operated relay while trial issuance and mail delivery
-    # remain vendor services. Prefer the explicit/signed license-server URL so setting
-    # ENGRAPHIS_RELAY_URL to the customer's own deployment does not route invites back
-    # into a relay with no mail-provider credentials.
-    #
-    # ``key`` here is the caller's PROOF OF ENTITLEMENT to the relay, not (necessarily)
-    # the payload: the relay decides what to echo, and it withholds the key for a
-    # ``viewer`` for exactly the reason above (``license_cloud.team_invite``). So a
-    # viewer's relay-delivered invite is dashboard-only too, and ``pro_included`` must
-    # report that rather than assuming "sent == key delivered".
-    sent, reason = cloud_license.send_team_invite(
+        return False, ("no local email delivery configured and no active Team license "
+                       "available for vendor-relayed delivery")
+    from engraphis import cloud_license
+    return cloud_license.send_team_invite(
         resolve_license_server_url(licensing.current_license().cloud_url), key,
-        u["email"], u["name"], u["role"], admin["email"],
-        dashboard_url=dashboard_url)
-    return sent, reason, bool(sent and can_hold_key)
+        invitation["email"], invitation["name"], invitation["role"], admin["email"],
+        invite_url=invite_url)
 
 
 class SetupReq(BaseModel):
@@ -144,8 +138,19 @@ class ResetReq(BaseModel):
 class NewUserReq(BaseModel):
     email: str = Field(..., min_length=5, max_length=254)
     name: str = Field(default="", max_length=120)
-    password: str = Field(..., min_length=10, max_length=128)
+    password: Optional[str] = Field(default=None, min_length=10, max_length=128)
     role: str = Field(default="member", pattern=r'^(viewer|member|admin)$')
+
+
+class InvitationReq(BaseModel):
+    email: str = Field(..., min_length=5, max_length=254)
+    name: str = Field(default="", max_length=120)
+    role: str = Field(default="member", pattern=r'^(viewer|member|admin)$')
+
+
+class InvitationAcceptReq(BaseModel):
+    token: str = Field(..., min_length=10, max_length=256)
+    password: str = Field(..., min_length=10, max_length=128)
 
 
 class UpdUserReq(BaseModel):
@@ -161,6 +166,7 @@ class DelUserReq(BaseModel):
 class TokenReq(BaseModel):
     label: str = Field(default="", max_length=120,
                        description="A memorable name for this agent token (e.g. 'claude-code-laptop').")
+    scopes: Optional[list[str]] = Field(default=None, max_length=len(API_TOKEN_SCOPES))
 
 
 def _enabled() -> bool:
@@ -236,6 +242,7 @@ def attach(app: FastAPI, service):
     # never becomes public. Paid operations and seat growth continue to enforce the
     # live entitlement; adding seats beyond the first admin still requires Team.
     store = AuthStore(_users_db_path(settings.db_path), iterations=_auth_iterations())
+    app.state.auth_store = store
 
     def _user(request: Request) -> Optional[dict]:
         tok = request.cookies.get(_COOKIE)
@@ -314,19 +321,39 @@ def attach(app: FastAPI, service):
         same anti-enumeration reason (see send_password_reset_email's docstring).
         """
         try:
+            base = _dashboard_base_url(request)
+        except ValueError as exc:
+            # Do not issue (and thereby invalidate) a reset token that cannot be sent.
+            # The public response remains identical to the unknown-user path.
+            logger.warning("password reset URL is unavailable (%s)", type(exc).__name__)
+            return {"ok": True}
+        try:
             info = store.request_password_reset(body.email)
         except AuthError:
             info = None
         if info:
-            base = os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip().rstrip("/")
-            reset_url = base + "/?reset_token=" + info["token"]
             try:
-                from engraphis.inspector.webhooks import send_password_reset_email
-                send_password_reset_email(info["email"], info["name"], reset_url)
+                reset_url = base + "/#reset_token=" + info["token"]
+                from engraphis.inspector import webhooks
+                if webhooks.email_configured():
+                    webhooks.send_password_reset_email(
+                        info["email"], info["name"], reset_url)
+                else:
+                    from engraphis import cloud_license
+                    from engraphis.licensing import _read_key_material
+                    key = _read_key_material()
+                    if not key:
+                        raise RuntimeError("no reset-email delivery credential")
+                    queued, reason = cloud_license.send_password_reset(
+                        resolve_license_server_url(licensing.current_license().cloud_url),
+                        key, info["email"], info["name"], reset_url,
+                    )
+                    if not queued:
+                        raise RuntimeError(reason or "reset-email relay rejected delivery")
             except Exception as exc:  # noqa: BLE001 — must never change the response
-                logger.warning(
-                    "password reset email to %s failed (%s)",
-                    info["email"], type(exc).__name__)
+                # Recipient and reset token are deliberately absent from logs.
+                logger.warning("password reset delivery failed (%s)",
+                               type(exc).__name__)
         return {"ok": True}
 
     @router.post("/reset")
@@ -349,6 +376,89 @@ def attach(app: FastAPI, service):
         response.delete_cookie(_COOKIE, path="/")
         return {"ok": True}
 
+    def _create_and_send_invitation(body, request: Request) -> dict:
+        admin = _require(request, "admin")
+        try:
+            invitation = store.create_invitation(
+                body.email, body.name, body.role, created_by=admin["id"],
+                seat_limit=licensing.current_license().seats)
+        except AuthError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)})
+        sent, reason = _send_invite(invitation, admin, request)
+        store.set_invitation_delivery(
+            invitation["id"], "sent" if sent else "failed", reason)
+        ip = client_ip(request)
+        store.record_event(
+            "user.invited", actor_id=admin["id"], actor_email=admin["email"],
+            target=invitation["email"], detail="role=%s" % invitation["role"], ip=ip)
+        if not sent:
+            store.record_event(
+                "user.invite_email_failed", actor_id=admin["id"],
+                actor_email=admin["email"], target=invitation["email"],
+                detail=reason[:200], ip=ip)
+        public = dict(invitation)
+        public.pop("token", None)
+        public["delivery_state"] = "sent" if sent else "failed"
+        public["last_delivery_error"] = "" if sent else reason[:200]
+        return {"invitation": public, "invited": sent}
+
+    @router.post("/invitations/accept")
+    def accept_invitation(body: InvitationAcceptReq, request: Request, response: Response):
+        try:
+            # Re-read the entitlement at acceptance time: an invitation may have been
+            # issued under a larger Team plan and must not oversubscribe a downgrade.
+            accepted = store.accept_invitation(
+                body.token, body.password,
+                seat_limit=licensing.current_license().seats,
+            )
+            store.record_event(
+                "user.invitation_accepted", actor_id=accepted["id"],
+                actor_email=accepted["email"], target=accepted["email"],
+                detail="role=%s" % accepted["role"], ip=client_ip(request))
+            # The one-time invitation token has already authenticated this recipient.
+            # Mint the session directly instead of feeding the new password through the
+            # public login throttle: an attacker must not be able to consume a valid
+            # invitation and then strand its recipient behind an IP lockout.
+            session_token = store.create_session(accepted["id"])
+        except AuthError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)})
+        _set_cookie(response, session_token, secure=_cookie_secure(request))
+        return {"user": accepted}
+
+    @router.post("/invitations")
+    def create_invitation(body: InvitationReq, request: Request):
+        return _create_and_send_invitation(body, request)
+
+    @router.get("/invitations")
+    def invitations(request: Request):
+        _require(request, "admin")
+        return {"invitations": store.list_invitations()}
+
+    @router.post("/invitations/{invite_id}/resend")
+    def resend_invitation(invite_id: str, request: Request):
+        admin = _require(request, "admin")
+        try:
+            invitation = store.resend_invitation(invite_id)
+        except AuthError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)})
+        sent, reason = _send_invite(invitation, admin, request)
+        store.set_invitation_delivery(invite_id, "sent" if sent else "failed", reason)
+        store.record_event(
+            "user.invitation_resent", actor_id=admin["id"], actor_email=admin["email"],
+            target=invitation["email"], detail="sent=%s" % sent, ip=client_ip(request))
+        return {"ok": sent, "delivery_state": "sent" if sent else "failed",
+                "error": "" if sent else reason}
+
+    @router.delete("/invitations/{invite_id}")
+    def revoke_invitation(invite_id: str, request: Request):
+        admin = _require(request, "admin")
+        if not store.revoke_invitation(invite_id):
+            raise HTTPException(status_code=404, detail={"error": "invitation not found"})
+        store.record_event(
+            "user.invitation_revoked", actor_id=admin["id"],
+            actor_email=admin["email"], target=invite_id, ip=client_ip(request))
+        return {"ok": True}
+
     @router.get("/users")
     def users(request: Request):
         # "admin", not "member": auth.min_role() maps every /api/auth/users* path to admin
@@ -362,44 +472,14 @@ def attach(app: FastAPI, service):
 
     @router.post("/users")
     def add_user(body: NewUserReq, request: Request):
-        admin = _require(request, "admin")
-        seats = licensing.current_license().seats
-        try:
-            u = store.create_user(body.email, body.name, body.password, body.role,
-                                  seat_limit=seats)
-        except AuthError as exc:
-            raise HTTPException(status_code=400, detail={"error": str(exc)})
-        ip = client_ip(request)
-        store.record_event("user.created", actor_id=admin["id"], actor_email=admin["email"],
-                           target=u["email"], detail="role=%s" % body.role, ip=ip)
-        invited, fail_reason, pro_included = _send_invite(u, admin)
-        dashboard_configured = bool(os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip())
-        # A viewer is deliberately never mailed the shared Team key (see _send_invite), so
-        # "this invite carried no key" is the correct outcome for that role. Warning the
-        # admin about it would report a working, intentional policy as a licensing
-        # misconfiguration and push them to "fix" it.
-        key_expected = u["role"] != "viewer"
-        if not invited:
-            logger.warning("team invite email to %s failed: %s", u["email"], fail_reason)
-            store.record_event("user.invite_email_failed", actor_id=admin["id"],
-                               actor_email=admin["email"], target=u["email"],
-                               detail=fail_reason[:200], ip=ip)
-        elif not pro_included and key_expected:
-            # Delivered, but the member got a dashboard-only invite with no Pro/team key,
-            # because this instance is not Team-licensed. Tell the admin plainly rather
-            # than letting the invite look like it silently did nothing.
-            logger.warning("team invite to %s carried no Pro activation key: this instance "
-                           "is not Team-licensed", u["email"])
-            store.record_event("user.invite_no_license", actor_id=admin["id"],
-                               actor_email=admin["email"], target=u["email"],
-                               detail="dashboard access emailed, but no team license key "
-                                      "(instance not Team-licensed)", ip=ip)
-        return {"user": u, "invited": invited,
-                "pro_activation_sent": bool(pro_included),
-                # False for a viewer: no license key is expected in that invite, so a UI
-                # can distinguish "we couldn't send the key" from "this role never gets one".
-                "pro_activation_expected": key_expected,
-                "dashboard_url_configured": dashboard_configured}
+        # v1.0 compatibility alias. Password-bearing account creation is intentionally
+        # rejected; callers must send only email/name/role and let the recipient choose
+        # the password through the one-time invitation.
+        if body.password is not None:
+            raise HTTPException(status_code=400, detail={
+                "error": "temporary passwords are no longer accepted; create an invitation"
+            })
+        return _create_and_send_invitation(body, request)
 
     @router.post("/users/update")
     def upd_user(body: UpdUserReq, request: Request):
@@ -494,7 +574,19 @@ def attach(app: FastAPI, service):
     @router.post("/token")
     def create_token(body: TokenReq, request: Request):
         u = _require(request, "viewer")
-        row = store.create_api_token(u["id"], label=body.label)
+        allowed = {"agent", "sync:read"}
+        if role_at_least(u["role"], "member"):
+            allowed.add("sync:write")
+        requested = set(allowed if body.scopes is None else body.scopes)
+        if not requested:
+            raise HTTPException(status_code=400, detail={
+                "error": "at least one token scope is required"})
+        if not requested.issubset(allowed):
+            raise HTTPException(status_code=403, detail={"error": "scope not allowed for role"})
+        try:
+            row = store.create_api_token(u["id"], label=body.label, scopes=requested)
+        except AuthError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)})
         ip = client_ip(request)
         store.record_event("api_token.created", actor_id=u["id"], actor_email=u["email"],
                            detail=row["label"] or "(unlabelled)", ip=ip)

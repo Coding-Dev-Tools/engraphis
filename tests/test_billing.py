@@ -12,10 +12,13 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import sqlite3
+import threading
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -24,7 +27,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from engraphis import billing as B  # noqa: E402
 from engraphis.licensing import ed25519_public_key, parse_key  # noqa: E402
-from engraphis.config import DEFAULT_RELAY_URL  # noqa: E402
+from engraphis.config import DEFAULT_LICENSE_SERVER_URL  # noqa: E402
 
 # Ephemeral test keypair, generated per run. The REAL vendor seed must never live
 # in the repo (only in .secrets/ and the Railway env) — anyone with it could forge
@@ -108,6 +111,62 @@ def test_decode_strips_whsec_prefix():
     assert B._decode_webhook_secret(WHSEC) != naive
 
 
+@pytest.mark.parametrize("raw_secret", [
+    "polar_whs_ovyN6cPrTv56AApvzCaJno08SSmGJmgbWilb33N2JuK",
+    "6t3c8ce2247c493a3ade20aea4484d64",
+])
+def test_polar_raw_secret_formats_verify_live_delivery(monkeypatch, raw_secret):
+    """Polar supplies raw secrets; Standard Webhooks signs their UTF-8 bytes."""
+    client = _inspector_client(monkeypatch, secret=raw_secret)
+    body = (b'{"type":"order.paid","data":{'
+            b'"customer":{"email":"buyer@example.com"},'
+            b'"product":{"name":"Engraphis Pro"}}}')
+    webhook_id = "evt_polar_raw_secret"
+    stamp = str(int(time.time()))
+    signed = f"{webhook_id}.{stamp}.".encode("utf-8") + body
+    signature = "v1," + base64.b64encode(
+        hmac.new(raw_secret.encode("utf-8"), signed, hashlib.sha256).digest()
+    ).decode("ascii")
+
+    response = client.post(
+        "/webhooks/polar", content=body,
+        headers={
+            "Content-Type": "application/json",
+            "webhook-id": webhook_id,
+            "webhook-timestamp": stamp,
+            "webhook-signature": signature,
+        },
+    )
+    assert response.status_code == 202, response.text
+    assert response.json()["key_issued"] is True
+
+
+def test_polar_signature_requires_standard_webhooks_v1_prefix(monkeypatch):
+    client = _inspector_client(monkeypatch)
+    body = _body({"type": "ignored.event", "data": {}})
+    webhook_id = "evt_missing_signature_version"
+    stamp = str(int(time.time()))
+    signature_without_version = _sign(WHSEC, webhook_id, stamp, body).split(",", 1)[1]
+    response = client.post(
+        "/webhooks/polar", content=body,
+        headers={
+            "webhook-id": webhook_id,
+            "webhook-timestamp": stamp,
+            "webhook-signature": signature_without_version,
+        },
+    )
+    assert response.status_code == 403
+    assert response.json()["error"] == "invalid signature format"
+
+
+def test_polar_webhook_rejects_bruteforceable_short_secret(monkeypatch):
+    client = _inspector_client(monkeypatch, secret="short")
+    body = _body({"type": "ignored.event", "data": {}})
+    response = _post(client, base64.b64encode(b"short").decode(), "evt_short", body)
+    assert response.status_code == 500
+    assert response.json()["error"] == "POLAR_WEBHOOK_SECRET is invalid"
+
+
 def test_order_paid_with_whsec_secret_fulfills(monkeypatch):
     client = _inspector_client(monkeypatch)
     body = (b'{"type":"order.paid","data":{'
@@ -128,6 +187,19 @@ def test_inline_hex_seed_issues_valid_key(monkeypatch):
     assert lic.plan == "team" and lic.seats == 4 and "team" in lic.features
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX owner modes")
+def test_signing_seed_file_must_be_owner_only(tmp_path):
+    from engraphis.inspector.webhooks import _read_seed_file
+
+    seed_file = tmp_path / "vendor-signing.key"
+    seed_file.write_text(VENDOR_SEED, encoding="ascii")
+    seed_file.chmod(0o644)
+    with pytest.raises(RuntimeError, match="owner-only"):
+        _read_seed_file(seed_file)
+    seed_file.chmod(0o600)
+    assert _read_seed_file(seed_file) == bytes.fromhex(VENDOR_SEED)
+
+
 def test_issued_key_migrates_retired_relay_url(monkeypatch):
     from engraphis.inspector.webhooks import issue_key
     monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
@@ -136,7 +208,7 @@ def test_issued_key_migrates_retired_relay_url(monkeypatch):
         "https://engraphis-production.up.railway.app/",
     )
     key = issue_key("buyer@example.com", product_name="Engraphis Pro", days=30)
-    assert parse_key(key).cloud_url == DEFAULT_RELAY_URL
+    assert parse_key(key).cloud_url == DEFAULT_LICENSE_SERVER_URL
 
 
 # ── fix 4: redelivered webhook-id does not mint a second key ───────────────────
@@ -232,6 +304,32 @@ def test_oversized_body_rejected(monkeypatch):
     )
     assert r.status_code == 413
 
+
+@pytest.mark.parametrize(
+    "payload, expected_error",
+    [
+        ([], "webhook event must be an object"),
+        ({"type": 7, "data": {}}, "webhook event type must be a string"),
+        ({"type": "order.paid", "data": []},
+         "webhook event data must be an object"),
+    ],
+)
+def test_signed_malformed_event_shapes_are_rejected(monkeypatch, payload, expected_error):
+    """A valid signature does not make a structurally invalid provider event safe."""
+    client = _inspector_client(monkeypatch, secret=WHSEC)
+    response = _post(
+        client, WHSEC, "evt_malformed_shape", json.dumps(payload).encode("utf-8"))
+    assert response.status_code == 400
+    assert response.json()["error"] == expected_error
+
+
+def test_nonfinite_webhook_timestamp_is_rejected(monkeypatch):
+    client = _inspector_client(monkeypatch, secret=WHSEC)
+    body = b'{"type":"order.paid","data":{}}'
+    response = _post(client, WHSEC, "evt_nan_time", body, ts="nan")
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid webhook timestamp"
+
 def test_lengthless_chunked_oversize_stops_streaming(monkeypatch):
     monkeypatch.setenv("POLAR_WEBHOOK_SECRET", WHSEC)
     chunk = b"x" * (B._MAX_BODY_BYTES // 2)
@@ -275,9 +373,11 @@ def test_send_license_email_uses_resend_api_not_smtp(monkeypatch):
     from engraphis.inspector import webhooks as WH
     captured = {}
 
-    def fake_api(to, subject, text_body, from_addr, api_key, reply_to=None):
+    def fake_api(to, subject, text_body, from_addr, api_key, reply_to=None,
+                 idempotency_key=""):
         captured.update(to=to, subject=subject, from_addr=from_addr,
-                        api_key=api_key, has_key="ENGR1" in text_body)
+                        api_key=api_key, has_key="ENGR1" in text_body,
+                        idempotency_key=idempotency_key)
 
     monkeypatch.setattr(WH, "_send_via_resend_api", fake_api)
     monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
@@ -288,6 +388,50 @@ def test_send_license_email_uses_resend_api_not_smtp(monkeypatch):
     assert captured["api_key"] == "re_test"
     assert captured["from_addr"] == "keys@engraphis.com"
     assert captured["has_key"] and "Pro" in captured["subject"]
+    assert captured["idempotency_key"].startswith("eml_")
+
+
+def test_resend_api_sets_stable_idempotency_header(monkeypatch):
+    import httpx
+    from engraphis.inspector import webhooks as WH
+    captured = {}
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"id": "provider-message-id"}
+
+    def fake_post(url, *, json, headers, timeout):
+        captured.update(url=url, json=json, headers=headers, timeout=timeout)
+        return Response()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    provider_id = WH._send_via_resend_api(
+        "buyer@example.com", "Subject", "Body", "keys@engraphis.com", "re_test",
+        idempotency_key="eml_stable123")
+    assert provider_id == "provider-message-id"
+    assert captured["headers"]["Idempotency-Key"] == "eml_stable123"
+
+
+def test_resend_success_without_provider_id_stays_retryable(monkeypatch):
+    import httpx
+    from engraphis.inspector import webhooks as WH
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {}
+
+    monkeypatch.setattr(httpx, "post", lambda *_args, **_kwargs: Response())
+    with pytest.raises(RuntimeError, match="omitted its message id"):
+        WH._send_via_resend_api(
+            "buyer@example.com", "Subject", "Body", "keys@engraphis.com", "re_test",
+            idempotency_key="eml_stable123")
 
 
 def test_email_configured_reflects_resend_or_smtp(monkeypatch):
@@ -311,7 +455,8 @@ def test_team_invite_email_names_inviter_and_sets_reply_to(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         WH, "_send_via_resend_api",
-        lambda to, subject, text_body, from_addr, api_key, reply_to=None: captured.update(
+        lambda to, subject, text_body, from_addr, api_key, reply_to=None,
+        idempotency_key="": captured.update(
             text_body=text_body, reply_to=reply_to))
     monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
     WH.send_team_invite_email("newmember@example.com", "Mo", "member",
@@ -325,7 +470,8 @@ def test_team_invite_email_ignores_malformed_invited_by(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         WH, "_send_via_resend_api",
-        lambda to, subject, text_body, from_addr, api_key, reply_to=None: captured.update(
+        lambda to, subject, text_body, from_addr, api_key, reply_to=None,
+        idempotency_key="": captured.update(
             reply_to=reply_to))
     monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
     WH.send_team_invite_email("newmember@example.com", "Mo", "member",
@@ -333,11 +479,12 @@ def test_team_invite_email_ignores_malformed_invited_by(monkeypatch):
     assert captured["reply_to"] is None
 
 
-def test_team_invite_email_uses_resend_api_and_never_contains_a_password(monkeypatch):
+def test_team_invite_email_uses_resend_api_and_contains_only_password_setup(monkeypatch):
     from engraphis.inspector import webhooks as WH
     captured = {}
 
-    def fake_api(to, subject, text_body, from_addr, api_key, reply_to=None):
+    def fake_api(to, subject, text_body, from_addr, api_key, reply_to=None,
+                 idempotency_key=""):
         captured.update(to=to, subject=subject, text_body=text_body,
                         from_addr=from_addr, api_key=api_key)
 
@@ -346,14 +493,18 @@ def test_team_invite_email_uses_resend_api_and_never_contains_a_password(monkeyp
     monkeypatch.setenv("ENGRAPHIS_SMTP_FROM", "keys@engraphis.com")
     monkeypatch.delenv("ENGRAPHIS_DASHBOARD_URL", raising=False)
     # No SMTP host set — if this fell through to SMTP it would raise instead.
-    WH.send_team_invite_email("newmember@example.com", "Mo", "member")
+    invite_url = "https://team.example/#invite_token=one-time-token"
+    WH.send_team_invite_email(
+        "newmember@example.com", "Mo", "member", invite_url=invite_url)
     assert captured["to"] == "newmember@example.com"
     assert captured["api_key"] == "re_test"
     assert "member" in captured["text_body"]
     assert "Mo" in captured["text_body"]
-    # the whole point: an invite never carries a live credential
-    assert "password" not in captured["text_body"].lower() or \
-        "does not contain it" in captured["text_body"]
+    # The recipient chooses a password through the one-time link; no temporary
+    # credential or account-wide license key is delivered in the message.
+    assert invite_url in captured["text_body"]
+    assert "does not contain a temporary password" in captured["text_body"]
+    assert "account-wide\nlicense key" in captured["text_body"]
 
 
 def test_team_invite_email_includes_dashboard_url_when_configured(monkeypatch):
@@ -361,7 +512,8 @@ def test_team_invite_email_includes_dashboard_url_when_configured(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         WH, "_send_via_resend_api",
-        lambda to, subject, text_body, from_addr, api_key, reply_to=None: captured.update(
+        lambda to, subject, text_body, from_addr, api_key, reply_to=None,
+        idempotency_key="": captured.update(
             text_body=text_body))
     monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
     monkeypatch.setenv("ENGRAPHIS_DASHBOARD_URL", "https://dash.example.com")
@@ -379,47 +531,45 @@ def test_team_invite_email_defaults_to_hosted_team_dashboard(monkeypatch):
     captured = {}
     monkeypatch.setattr(
         WH, "_send_via_resend_api",
-        lambda to, subject, text_body, from_addr, api_key, reply_to=None: captured.update(
+        lambda to, subject, text_body, from_addr, api_key, reply_to=None,
+        idempotency_key="": captured.update(
             text_body=text_body))
     monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
     monkeypatch.delenv("ENGRAPHIS_DASHBOARD_URL", raising=False)
     WH.send_team_invite_email("newmember@example.com", "", "admin")
-    assert WH.DEFAULT_TEAM_DASHBOARD_URL in captured["text_body"]
+    assert WH.DEFAULT_TEAM_DASHBOARD_URL.rstrip("/") in captured["text_body"]
     assert "Ask your admin" not in captured["text_body"]
 
 
-def test_team_invite_email_includes_license_key_when_provided(monkeypatch):
-    # A Team-licensed instance hands the member the shared team key so they can turn on
-    # Pro features on their own machine — this is what makes them a licensed member, not
-    # just a dashboard login.
+def test_team_invite_email_ignores_deprecated_license_key_argument(monkeypatch):
+    # The old compatibility argument is authentication material for the relay, never
+    # recipient content. Agent/sync access now uses per-user scoped device tokens.
     from engraphis.inspector import webhooks as WH
     captured = {}
     monkeypatch.setattr(
         WH, "_send_via_resend_api",
-        lambda to, subject, text_body, from_addr, api_key, reply_to=None: captured.update(
+        lambda to, subject, text_body, from_addr, api_key, reply_to=None,
+        idempotency_key="": captured.update(
             text_body=text_body))
     monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
     monkeypatch.delenv("ENGRAPHIS_DASHBOARD_URL", raising=False)
     WH.send_team_invite_email("newmember@example.com", "Mo", "member",
                               key="ENGR-TEAM-ABC123")
     body = captured["text_body"]
-    assert "ENGR-TEAM-ABC123" in body           # the actual activation key
-    assert "Settings -> License" in body        # how to activate it
-    assert "Pro features" in body
+    assert "ENGR-TEAM-ABC123" not in body
+    assert "Settings -> Connect an agent" in body
+    assert "account-wide\nlicense key" in body
 
 
 def test_team_invite_email_omits_activation_when_no_key(monkeypatch):
-    # Without a key (instance not Team-licensed), the invite is dashboard-only and must
-    # not advertise a Pro-activation section it can't back up — no OPTION 2 block, no
-    # "Settings -> License" activation steps, and no key value. Option 1 may still
-    # mention the words "license key" as a reassurance ("no license key is needed"),
-    # which is the opposite of advertising activation, so the assertion targets the
-    # activation section specifically rather than the literal phrase.
+    # Invitations never advertise shared-key activation. The recipient gets only the
+    # account-acceptance path and can later mint a scoped device token.
     from engraphis.inspector import webhooks as WH
     captured = {}
     monkeypatch.setattr(
         WH, "_send_via_resend_api",
-        lambda to, subject, text_body, from_addr, api_key, reply_to=None: captured.update(
+        lambda to, subject, text_body, from_addr, api_key, reply_to=None,
+        idempotency_key="": captured.update(
             text_body=text_body))
     monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
     monkeypatch.delenv("ENGRAPHIS_DASHBOARD_URL", raising=False)
@@ -431,9 +581,9 @@ def test_team_invite_email_omits_activation_when_no_key(monkeypatch):
     assert "Pro features" not in body
 
 
-def test_team_invite_relay_forwards_key_and_dashboard_url(monkeypatch):
-    # cloud_license.send_team_invite must POST the key AND dashboard_url to the relay so a
-    # relay-delivered invite can carry both activation and the admin's own dashboard link.
+def test_team_invite_relay_forwards_auth_key_and_one_time_url(monkeypatch):
+    # The account key authenticates the sending deployment to the vendor relay; it is
+    # never recipient content. The email payload is the one-time invitation URL.
     import json
     from engraphis import cloud_license as CL
 
@@ -455,23 +605,25 @@ def test_team_invite_relay_forwards_key_and_dashboard_url(monkeypatch):
     monkeypatch.setattr(CL.urllib.request, "urlopen", fake_urlopen)
     sent, reason = CL.send_team_invite(
         "https://relay.example", "ENGR-TEAM-XYZ", "m@e.com", "Mo", "member",
-        "admin@corp.com", dashboard_url="https://dash.corp.com")
+        "admin@corp.com",
+        invite_url="https://dash.corp.com/#invite_token=one-time-token")
     assert sent is True
     assert seen["url"].endswith("/license/v1/team-invite")
     assert seen["payload"]["key"] == "ENGR-TEAM-XYZ"
-    assert seen["payload"]["dashboard_url"] == "https://dash.corp.com"
+    assert seen["payload"]["invite_url"] == (
+        "https://dash.corp.com/#invite_token=one-time-token")
 
 
-def test_delivery_failure_persists_key_and_still_202(monkeypatch, tmp_path):
-    # A provider/network failure must NOT lose a paid key: it lands in the 0600
-    # fallback file and the webhook still returns 202 (no Polar retry storm).
+def test_delivery_failure_persists_key_and_still_202(monkeypatch, tmp_path, caplog):
+    # If durable enqueue itself fails, the only paid key lands in the encrypted-backup-
+    # covered 0600 fallback and the webhook still returns 202 (no Polar retry storm).
     from engraphis.inspector import webhooks as WH
+    caplog.set_level("INFO")
 
     def boom(*a, **k):
         raise RuntimeError("simulated Resend outage")
 
-    monkeypatch.setattr(WH, "_send_via_resend_api", boom)
-    monkeypatch.setenv("ENGRAPHIS_RESEND_API_KEY", "re_test")
+    monkeypatch.setattr(WH, "send_license_email", boom)
     client = _inspector_client(monkeypatch)
     body = (b'{"type":"order.paid","data":{"customer":{"email":"buyer@example.com"},'
             b'"product":{"name":"Engraphis Pro"}}}')
@@ -479,6 +631,88 @@ def test_delivery_failure_persists_key_and_still_202(monkeypatch, tmp_path):
     assert r.status_code == 202 and r.json()["key_issued"] is True
     fallback = tmp_path / "undelivered_license_keys.tsv"
     assert fallback.exists() and "buyer@example.com" in fallback.read_text()
+    raw_key = fallback.read_text(encoding="utf-8").rstrip("\n").split("\t")[-1]
+    # Redacting formatters are optional. Sensitive/provider values must already be
+    # absent from records at the source logger call.
+    assert "buyer@example.com" not in caplog.text
+    assert "evt_delivery_fail" not in caplog.text
+    assert raw_key not in caplog.text
+
+
+def test_purchase_stays_retryable_when_all_delivery_persistence_fails(
+        monkeypatch, tmp_path):
+    from engraphis.inspector import webhooks as WH
+
+    def outbox_down(*_args, **_kwargs):
+        raise RuntimeError("outbox down")
+
+    monkeypatch.setattr(WH, "send_license_email", outbox_down)
+    monkeypatch.setattr(WH, "_persist_fallback_key", lambda *_args: None)
+    client = _inspector_client(monkeypatch)
+    body = (b'{"type":"order.paid","data":{"id":"order_recovery_down",'
+            b'"customer":{"email":"buyer@example.com"},'
+            b'"product":{"name":"Engraphis Pro"}}}')
+
+    failed = _post(client, WHSEC, "evt_recovery_down", body)
+    assert failed.status_code == 500
+    assert failed.json()["error"] == "license fulfillment failed; retry delivery"
+    assert not (tmp_path / "undelivered_license_keys.tsv").exists()
+
+    delivered = []
+    monkeypatch.setattr(
+        WH, "send_license_email",
+        lambda _to, key, **_kwargs: delivered.append(key),
+    )
+    retry = _post(client, WHSEC, "evt_recovery_down", body)
+    assert retry.status_code == 202
+    assert retry.json() == {"status": "fulfilled", "key_issued": True}
+    assert len(delivered) == 1
+
+
+def test_provider_outage_keeps_key_only_in_durable_outbox(monkeypatch, tmp_path):
+    from engraphis import email_outbox
+    from engraphis.inspector import webhooks as WH
+
+    def provider_down(*_args, **_kwargs):
+        raise RuntimeError("simulated provider outage")
+
+    monkeypatch.setattr(email_outbox, "deliver_now", provider_down)
+    key = WH._issue_and_email(
+        "buyer@example.com", "Engraphis Pro", 1, 35,
+        order_id="order-outbox-recovery", fulfillment_id="order:outbox-recovery")
+
+    assert key.startswith("ENGR1.")
+    assert not (tmp_path / "undelivered_license_keys.tsv").exists()
+    conn = email_outbox._connect()
+    try:
+        row = conn.execute(
+            "SELECT status,text_body FROM email_outbox WHERE idempotency_key=?",
+            ("purchase-license:order-outbox-recovery",),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row["status"] == "pending"
+    assert key in row["text_body"]
+
+
+def test_manual_key_fallback_rejects_links_and_malformed_keys(monkeypatch, tmp_path):
+    from engraphis.inspector import webhooks as WH
+
+    monkeypatch.setenv("ENGRAPHIS_WEBHOOK_STATE", str(tmp_path / "polar-webhooks.db"))
+    target = tmp_path / "operator-notes.txt"
+    target.write_text("preserve\n", encoding="utf-8")
+    fallback = tmp_path / WH.UNDELIVERED_LICENSE_KEYS_NAME
+    try:
+        fallback.symlink_to(target)
+    except (NotImplementedError, OSError):
+        pytest.skip("this platform cannot create test symlinks")
+    assert WH._persist_fallback_key(
+        "buyer@example.com", "ENGR1.payload.signature", "Pro") is None
+    assert target.read_text(encoding="utf-8") == "preserve\n"
+    fallback.unlink()
+    assert WH._persist_fallback_key(
+        "buyer@example.com", "ENGR1.payload.signature\nsecond-record", "Pro") is None
+    assert not fallback.exists()
 
 
 # ── signature must still be rejected when wrong ────────────────────────────────
@@ -649,6 +883,23 @@ def test_unmappable_revoke_event_converges_instead_of_retrying_forever(monkeypat
     orphan = _body({"type": "subscription.revoked", "data": {"customer": {}}})
 
     assert _post(client, WHSEC, "evt_revoke_converge", orphan).status_code >= 500
+    # Simulate a provider retry arriving after the normal processing-claim TTL. The
+    # first response must have durably latched "seen once" rather than relying on an
+    # in-flight reservation that would be reclaimed and 5xx forever.
+    conn = B._dedup_conn()
+    try:
+        row = conn.execute(
+            "SELECT state FROM processed WHERE webhook_id=?",
+            ("unmappable:evt_revoke_converge",),
+        ).fetchone()
+        assert row[0] == "fulfilled"
+        conn.execute(
+            "UPDATE processed SET ts=0 WHERE webhook_id=?",
+            ("unmappable:evt_revoke_converge",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
     # Same webhook-id redelivered: proven deterministic, so stop the retry loop.
     replay = _post(client, WHSEC, "evt_revoke_converge", orphan)
     assert replay.status_code == 202, (
@@ -718,6 +969,26 @@ def test_subscription_updated_revoked_revokes_keys(monkeypatch):
     assert r.json()["status"] == "revoked"
     assert r.json()["reason"] == "subscription_revoked"
     assert reg.is_revoked(key_id) is True
+
+
+def test_vendor_revoked_subscription_update_does_not_require_product(monkeypatch):
+    from engraphis.inspector import license_registry as reg
+    from engraphis.inspector import webhooks as WH
+
+    product_id = _configure_vendor_product(monkeypatch, "POLAR_PRO_MONTHLY_PRODUCT_ID")
+    client = _inspector_client(monkeypatch)
+    key = WH.issue_key(
+        "buyer@example.com", "Pro", subscription_id="sub_vendor_revoked",
+        product_id=product_id, days=30,
+    )
+    revoked = _body({"type": "subscription.updated", "data": {
+        "id": "sub_vendor_revoked", "status": "revoked",
+        "organization_id": "org_engraphis",
+    }})
+    response = _post(client, WHSEC, "evt_vendor_update_revoke", revoked)
+    assert response.status_code == 202
+    assert response.json()["status"] == "revoked"
+    assert reg.is_revoked(parse_key(key).key_id) is True
 
 
 def test_route_non_trial_subscription_ignored(monkeypatch):
@@ -1250,3 +1521,354 @@ def test_product_map_override_pins_tier(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_POLAR_PRODUCT_MAP", raising=False)
     # without the override an unrecognized product still defaults to Pro (never free)
     assert WH._map_polar_product_to_plan("Engraphis Enterprise") == "pro"
+
+
+# ── GA vendor control-plane gates ─────────────────────────────────────────────
+def _configure_vendor_product(monkeypatch, env_name):
+    from engraphis.commercial import expected_product_ids
+    from engraphis.config import settings
+
+    product_id = expected_product_ids()[env_name]["id"]
+    monkeypatch.setattr(settings, "service_mode", "vendor")
+    monkeypatch.setenv(env_name, product_id)
+    monkeypatch.setenv("POLAR_ORGANIZATION_ID", "org_engraphis")
+    return product_id
+
+
+def test_vendor_exact_product_id_controls_plan_interval_and_retry(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+
+    product_id = _configure_vendor_product(
+        monkeypatch, "POLAR_TEAM_ANNUAL_PRODUCT_ID")
+    sent = []
+    monkeypatch.setattr(
+        WH, "send_license_email",
+        lambda _to, key, **kwargs: sent.append((key, kwargs)),
+    )
+    client = _inspector_client(monkeypatch)
+    body = _body({"type": "order.paid", "data": {
+        "id": "order_vendor_team_annual",
+        "organization_id": "org_engraphis",
+        "customer": {"email": "buyer@example.com"},
+        # The editable display name is intentionally misleading. The validated id wins.
+        "product": {"id": product_id, "name": "Engraphis Pro Monthly"},
+        "subscription": {"id": "sub_vendor_team", "seats": 6},
+    }})
+
+    first = _post(client, WHSEC, "evt_vendor_paid_1", body)
+    retry = _post(client, WHSEC, "evt_vendor_paid_2", body)
+
+    assert first.json() == {"status": "fulfilled", "key_issued": True}
+    assert retry.json() == {"status": "already_fulfilled", "key_issued": False}
+    assert len(sent) == 1
+    license_key, email_options = sent[0]
+    lic = parse_key(license_key)
+    assert lic.plan == "team" and lic.seats == 6
+    assert 390 <= (lic.expires - time.time()) / 86400 <= 396
+    assert email_options["product_name"] == "Team"
+    assert email_options["idempotency_key"] == \
+        "purchase-license:order_vendor_team_annual"
+
+
+def test_vendor_exact_product_interval_cannot_be_overridden_by_metadata(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+
+    product_id = _configure_vendor_product(monkeypatch, "POLAR_PRO_MONTHLY_PRODUCT_ID")
+    assert WH._key_days(
+        "Misleading Annual Name", {"license_days": 36500}, product_id) == 35
+
+
+def test_vendor_rejects_signed_paid_event_with_missing_organization(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+
+    product_id = _configure_vendor_product(monkeypatch, "POLAR_PRO_MONTHLY_PRODUCT_ID")
+    issued = []
+    monkeypatch.setattr(WH, "issue_key", lambda *args, **kwargs: issued.append((args, kwargs)))
+    client = _inspector_client(monkeypatch)
+    body = _body({"type": "order.paid", "data": {
+        "id": "order_missing_org",
+        "customer": {"email": "buyer@example.com"},
+        "product": {"id": product_id, "name": "Engraphis Pro Monthly"},
+    }})
+
+    response = _post(client, WHSEC, "evt_missing_org", body)
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "organization mismatch"
+    assert issued == []
+
+
+def test_vendor_rejects_paid_key_without_revocable_fulfillment_identity(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+
+    product_id = _configure_vendor_product(monkeypatch, "POLAR_PRO_MONTHLY_PRODUCT_ID")
+    issued = []
+    monkeypatch.setattr(WH, "issue_key", lambda *args, **kwargs: issued.append((args, kwargs)))
+    client = _inspector_client(monkeypatch)
+    body = _body({"type": "order.paid", "data": {
+        "organization_id": "org_engraphis",
+        "customer": {"email": "buyer@example.com"},
+        "product": {"id": product_id, "name": "Engraphis Pro Monthly"},
+    }})
+
+    response = _post(client, WHSEC, "evt_missing_fulfillment_identity", body)
+
+    assert response.status_code == 400
+    assert "order or subscription id" in response.json()["error"]
+    assert issued == []
+
+
+def test_paid_order_without_delivery_target_stays_retryable(monkeypatch):
+    product_id = _configure_vendor_product(monkeypatch, "POLAR_PRO_MONTHLY_PRODUCT_ID")
+    client = _inspector_client(monkeypatch)
+    body = _body({"type": "order.paid", "data": {
+        "id": "order_no_email",
+        "organization_id": "org_engraphis",
+        "product": {"id": product_id, "name": "Engraphis Pro Monthly"},
+    }})
+
+    first = _post(client, WHSEC, "evt_no_email", body)
+    retry = _post(client, WHSEC, "evt_no_email", body)
+
+    assert first.status_code == 503 and retry.status_code == 503
+    assert first.json()["error"] == "license fulfillment incomplete; retry delivery"
+
+
+def test_paid_order_with_malformed_email_stays_retryable_without_issuance(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+
+    product_id = _configure_vendor_product(monkeypatch, "POLAR_PRO_MONTHLY_PRODUCT_ID")
+    issued = []
+    monkeypatch.setattr(WH, "issue_key", lambda *args, **kwargs: issued.append((args, kwargs)))
+    client = _inspector_client(monkeypatch)
+    body = _body({"type": "order.paid", "data": {
+        "id": "order_bad_email",
+        "organization_id": "org_engraphis",
+        "customer": {"email": 12345},
+        "product": {"id": product_id, "name": "Engraphis Pro Monthly"},
+    }})
+
+    response = _post(client, WHSEC, "evt_bad_email", body)
+
+    assert response.status_code == 503
+    assert response.json()["error"] == "license fulfillment incomplete; retry delivery"
+    assert issued == []
+
+
+def test_retry_after_finalize_failure_reuses_durable_purchase_email(monkeypatch):
+    from engraphis import email_outbox
+    from engraphis.inspector import webhooks as WH
+
+    product_id = _configure_vendor_product(monkeypatch, "POLAR_PRO_MONTHLY_PRODUCT_ID")
+    monkeypatch.setattr(email_outbox, "deliver_now", lambda *_args, **_kwargs: True)
+    real_issue = WH.issue_key
+    issued = []
+
+    def counted_issue(*args, **kwargs):
+        key = real_issue(*args, **kwargs)
+        issued.append(key)
+        return key
+
+    monkeypatch.setattr(WH, "issue_key", counted_issue)
+    real_finalize = B._finalize_webhook
+    finalize_calls = 0
+
+    def flaky_finalize(*args, **kwargs):
+        nonlocal finalize_calls
+        finalize_calls += 1
+        if finalize_calls == 1:
+            raise B.WebhookStateError("simulated commit failure")
+        return real_finalize(*args, **kwargs)
+
+    monkeypatch.setattr(B, "_finalize_webhook", flaky_finalize)
+    client = _inspector_client(monkeypatch)
+    body = _body({"type": "order.paid", "data": {
+        "id": "order_finalize_retry",
+        "organization_id": "org_engraphis",
+        "customer": {"email": "buyer@example.com"},
+        "product": {"id": product_id, "name": "Engraphis Pro Monthly"},
+    }})
+
+    first = _post(client, WHSEC, "evt_finalize_retry", body)
+    retry = _post(client, WHSEC, "evt_finalize_retry", body)
+
+    assert first.status_code == 503
+    assert retry.json() == {"status": "fulfilled", "key_issued": True}
+    assert len(issued) == 1
+    conn = email_outbox._connect()
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM email_outbox WHERE idempotency_key=?",
+            ("purchase-license:order_finalize_retry",)).fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_seat_change_finalize_retry_reuses_durable_key_and_email(monkeypatch):
+    from engraphis import email_outbox
+    from engraphis.inspector import webhooks as WH
+
+    monkeypatch.setattr(email_outbox, "deliver_now", lambda *_args, **_kwargs: True)
+    real_issue = WH.issue_key
+    issued = []
+
+    def counted_issue(*args, **kwargs):
+        key = real_issue(*args, **kwargs)
+        issued.append(key)
+        return key
+
+    monkeypatch.setattr(WH, "issue_key", counted_issue)
+    B.record_known_seats("sub_seat_finalize", 2)
+    real_finalize = B._finalize_webhook
+    finalize_calls = 0
+
+    def flaky_finalize(*args, **kwargs):
+        nonlocal finalize_calls
+        finalize_calls += 1
+        if finalize_calls == 1:
+            raise B.WebhookStateError("simulated commit failure")
+        return real_finalize(*args, **kwargs)
+
+    monkeypatch.setattr(B, "_finalize_webhook", flaky_finalize)
+    client = _inspector_client(monkeypatch)
+    body = _sub_updated_body("sub_seat_finalize", "active", 7)
+
+    first = _post(client, WHSEC, "evt_seat_finalize", body)
+    retry = _post(client, WHSEC, "evt_seat_finalize", body)
+
+    assert first.status_code == 503
+    assert retry.json() == {"status": "fulfilled", "key_issued": True}
+    assert len(issued) == 1
+    expected = "license-fulfillment:" + hashlib.sha256(
+        b"seatsync:sub_seat_finalize:evt_seat_finalize").hexdigest()
+    conn = email_outbox._connect()
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM email_outbox WHERE idempotency_key=?",
+            (expected,)).fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_concurrent_seat_updates_serialize_before_issuing(monkeypatch):
+    from engraphis.inspector import webhooks as WH
+
+    B.record_known_seats("sub_serial", 2)
+    started = threading.Event()
+    release = threading.Event()
+    issued = []
+
+    def controlled(payload):
+        issued.append(WH._extract_seats(payload))
+        if len(issued) == 1:
+            started.set()
+            assert release.wait(timeout=5)
+        return "signed-key-placeholder"
+
+    monkeypatch.setattr(WH, "handle_subscription_updated", controlled)
+    client = _inspector_client(monkeypatch)
+    first_body = _sub_updated_body("sub_serial", "active", 5)
+    second_body = _sub_updated_body("sub_serial", "active", 7)
+    first_result = {}
+
+    def first_request():
+        first_result["response"] = _post(
+            client, WHSEC, "evt_serial_first", first_body)
+
+    worker = threading.Thread(target=first_request)
+    worker.start()
+    assert started.wait(timeout=5)
+    try:
+        concurrent = _post(client, WHSEC, "evt_serial_second", second_body)
+        assert concurrent.status_code == 503
+        assert concurrent.json()["status"] == "processing"
+        assert issued == [5]
+    finally:
+        release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert first_result["response"].status_code == 202
+
+    retried = _post(client, WHSEC, "evt_serial_second", second_body)
+    assert retried.status_code == 202
+    assert issued == [5, 7]
+    assert B.get_known_seats("sub_serial") == 7
+
+
+def test_vendor_registry_failure_never_emails_unusable_paid_key(monkeypatch):
+    from engraphis.inspector import license_registry as LR
+    from engraphis.inspector import webhooks as WH
+
+    product_id = _configure_vendor_product(monkeypatch, "POLAR_PRO_MONTHLY_PRODUCT_ID")
+
+    def fail_record(_key):
+        raise sqlite3.OperationalError("registry down")
+
+    monkeypatch.setattr(LR, "record_issued", fail_record)
+    sent = []
+    monkeypatch.setattr(
+        WH, "send_license_email",
+        lambda *args, **kwargs: sent.append((args, kwargs)),
+    )
+    client = _inspector_client(monkeypatch)
+    body = _body({"type": "order.paid", "data": {
+        "id": "order_registry_down",
+        "organization_id": "org_engraphis",
+        "customer": {"email": "buyer@example.com"},
+        "product": {"id": product_id, "name": "Engraphis Pro Monthly"},
+    }})
+
+    response = _post(client, WHSEC, "evt_registry_down", body)
+
+    assert response.status_code == 500
+    assert response.json()["error"] == "license fulfillment failed; retry delivery"
+    assert sent == []
+
+
+def test_vendor_webhook_state_defaults_beside_registry(monkeypatch, tmp_path):
+    from engraphis.config import settings
+
+    monkeypatch.setattr(settings, "service_mode", "vendor")
+    monkeypatch.delenv("ENGRAPHIS_WEBHOOK_STATE", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_DB_PATH", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_STATE_DIR", raising=False)
+    monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(tmp_path / "state" / "relay.db"))
+
+    expected = (tmp_path / "state" / "polar-webhooks.db").resolve()
+    assert Path(B._dedup_path()) == expected
+    assert B.webhook_state_ready(require_durable=True) is True
+    assert expected.is_file()
+
+
+def test_vendor_webhook_state_rejects_explicit_memory_override(monkeypatch):
+    from engraphis.config import settings
+
+    monkeypatch.setattr(settings, "service_mode", "vendor")
+    monkeypatch.setenv("ENGRAPHIS_WEBHOOK_STATE", ":memory:")
+    assert B.webhook_state_ready(require_durable=True) is False
+
+
+def test_vendor_readiness_fails_closed_when_polar_ledger_unavailable(monkeypatch):
+    from engraphis import commercial
+    from engraphis.config import settings
+
+    monkeypatch.setattr(settings, "service_mode", "vendor")
+    monkeypatch.setattr(B, "webhook_state_ready", lambda **_kwargs: False)
+
+    checks = commercial.vendor_readiness()
+
+    assert checks["polar_idempotency"] is False
+    assert checks["ready"] is False
+
+
+def test_webhook_backlog_health_fails_on_stale_processing_claim():
+    assert B.webhook_backlog_healthy() is True
+    conn = B._dedup_conn()
+    try:
+        conn.execute(
+            "INSERT INTO processed(webhook_id,ts,state) VALUES (?,?,?)",
+            ("stuck", time.time() - B._RESERVATION_TTL_SECONDS - 1, "processing"))
+        conn.commit()
+    finally:
+        conn.close()
+    assert B.webhook_backlog_healthy() is False

@@ -19,6 +19,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import threading
@@ -189,17 +190,26 @@ def upgrade_url(plan: Optional[str] = None) -> str:
             or DEFAULT_PRO_UPGRADE_URL)
 
 _KEY_PREFIX = "ENGR1"
-# Pinned **production** Ed25519 verify key (32-byte public half). Rotated 2026-07-11
-# to a fresh CSPRNG keypair, retiring BOTH the original dev keypair (see
-# _DEV_VENDOR_PUBKEY_HEX below) and the interim 2026-07-08 key d3520482…9e08, which is
-# now treated as retired out of caution. Any license signed by an older seed no longer
-# verifies. The private seed lives ONLY in the gitignored `.secrets/vendor_signing.key`
-# on the issuance machine — it never ships in this repo, never in .env, never in any agent
-# session. Anyone with only this repo CANNOT forge a valid key. Re-generate on an
-# offline/trusted machine before the first real sale.
-# ROTATE BEFORE SELLING: run `python -m scripts.license_admin keygen --force` and replace
-# this constant with the printed public key.
+# Pinned Ed25519 verifier (32-byte public half). This pre-sale key was generated on a
+# development machine and is not approved for production issuance. The private seed never
+# ships in this repo; production keeps its replacement only in the vendor secret store and
+# an encrypted recovery backup. Anyone with only this repository cannot forge a valid key.
+#
+# ROTATE BEFORE SELLING: inventory and back up the production registry, then generate into
+# a NEW file on a trusted machine:
+#   python -m scripts.license_admin keygen --key-file <secure-offline-path>/vendor_signing.key
+# Pin the printed public key through the reviewed compatibility/reissue ceremony in
+# docs/COMMERCIAL_OPERATIONS.md. Do not overwrite or discard the old seed first.
 _VENDOR_PUBKEY_HEX = "0f9ede880d65184f4615221d03e8127c38e1b7a8f8d789a050780ae50c36421d"
+# Previous production verify keys live here only during an audited rotation window.
+# New issuance always uses ``_VENDOR_PUBKEY_HEX``; remove retired entries after every
+# customer has received a replacement and the announced grace period has elapsed.
+_PREVIOUS_VENDOR_PUBKEY_HEXES = ()
+
+# Readiness intentionally fails until an operator completes the trusted-machine ceremony,
+# updates the verifier pin, validates production issuance, and flips this source-controlled
+# release gate in a separately reviewed change.
+VENDOR_SIGNER_RELEASE_READY = False
 # Frozen fingerprint of the OLD, known-compromised dev keypair. Kept as a sentinel so
 # is_default_vendor_key() / production_warnings() can flag it if anyone ever re-pins it.
 # Its private half does NOT ship in this repo (`.secrets/` is gitignored), but it was
@@ -364,6 +374,10 @@ class License:
     expires: Optional[float] = None
     features: frozenset = field(default_factory=frozenset)
     key_id: str = ""  # short fingerprint for support/display; never the key itself
+    #: Fingerprint of the Ed25519 public key that verified this license. New keys carry
+    #: the same value in their signed payload; legacy keys derive it from the verifier
+    #: that accepted them so a pre-rotation inventory can still identify their signer.
+    signing_key_id: str = ""
     is_trial: bool = False  # True when this is a time-boxed server-issued trial key
     #: Historical signed policy marker. Every paid/trial key now requires a live
     #: server-side lease regardless of this value; it remains for key compatibility.
@@ -454,6 +468,24 @@ def vendor_public_key() -> bytes:
     return raw
 
 
+def vendor_public_keys() -> tuple:
+    """Current plus temporarily trusted rotation keys, current first."""
+    current = vendor_public_key()
+    if _pubkey_override_allowed():
+        return (current,)
+    out = [current]
+    for hexkey in _PREVIOUS_VENDOR_PUBKEY_HEXES:
+        try:
+            raw = bytes.fromhex(hexkey)
+        except ValueError:
+            raise LicenseError("previous vendor public key is not valid hex")
+        if len(raw) != 32:
+            raise LicenseError("previous vendor public key must be 32 bytes")
+        if raw not in out:
+            out.append(raw)
+    return tuple(out)
+
+
 def compose_key(payload: dict, secret: bytes) -> str:
     """Build a signed key from a payload dict (vendor-side; see license_admin)."""
     body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -474,7 +506,9 @@ def parse_key(key: str, *, now: Optional[float] = None) -> License:
         sig = _b64u_decode(parts[2])
     except (ValueError, base64.binascii.Error):
         raise LicenseError("license key is not valid base64url")
-    if not ed25519_verify(vendor_public_key(), body, sig):
+    verified_with = next(
+        (pub for pub in vendor_public_keys() if ed25519_verify(pub, body, sig)), None)
+    if verified_with is None:
         raise LicenseError("license signature is invalid (tampered or wrong vendor key)")
     try:
         payload = json.loads(body.decode("utf-8"))
@@ -482,6 +516,10 @@ def parse_key(key: str, *, now: Optional[float] = None) -> License:
         raise LicenseError("license payload is not valid JSON")
     if not isinstance(payload, dict) or payload.get("v") != 1:
         raise LicenseError("unsupported license payload version")
+    verified_key_id = verified_with.hex()[:16]
+    signing_key_id = str(payload.get("signing_key_id", "") or "").strip().lower()
+    if signing_key_id and signing_key_id != verified_key_id:
+        raise LicenseError("license signing-key id does not match its signature")
 
     plan = str(payload.get("plan", "")).lower()
     if plan not in PLAN_FEATURES:
@@ -492,7 +530,12 @@ def parse_key(key: str, *, now: Optional[float] = None) -> License:
             expires = float(expires)
         except (TypeError, ValueError):
             raise LicenseError("invalid expiry in license")
-        if (now if now is not None else time.time()) > expires:
+        if not math.isfinite(expires):
+            raise LicenseError("invalid expiry in license")
+        current_time = time.time() if now is None else float(now)
+        if not math.isfinite(current_time):
+            raise LicenseError("invalid license validation time")
+        if current_time > expires:
             raise LicenseError("license expired on %s — renew at %s" % (
                 time.strftime("%Y-%m-%d", time.gmtime(expires)), upgrade_url()))
     extra = payload.get("features") or []
@@ -501,12 +544,13 @@ def parse_key(key: str, *, now: Optional[float] = None) -> License:
     features = frozenset(PLAN_FEATURES[plan]) | frozenset(str(f) for f in extra)
     try:
         seats = max(1, int(payload.get("seats", 1)))
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         seats = 1
     return License(
         plan=plan, email=str(payload.get("email", "")), seats=seats,
         issued=payload.get("issued"), expires=expires, features=features,
         key_id=hashlib.sha256(key.encode("ascii")).hexdigest()[:12],
+        signing_key_id=verified_key_id,
         is_trial=bool(payload.get("trial")),
         enforce=str(payload.get("enforce", "") or "").strip().lower(),
         cloud_url=str(payload.get("cloud_url", "") or "").strip().rstrip("/"),
@@ -572,7 +616,7 @@ def _cloud_gate(lic: "License", material: str) -> tuple:
     Online-only by product policy (no offline mode): the verification server is
     ``ENGRAPHIS_CLOUD_URL`` if set, else the URL signed into the key at issuance
     (``lic.cloud_url`` — unforgeable, inside the signed payload), else the built-in
-    vendor relay (``settings.relay_url``). Unlike the previous opt-in design, a paid key
+    isolated license service. Unlike the previous opt-in design, a paid key
     is NEVER unlocked by local signature alone: it must register with the server and hold
     an unexpired lease. If no server URL resolves at all (someone blanked the relay URL),
     we DENY — there is deliberately no offline path to paid features. Revoked / expired /
@@ -585,7 +629,7 @@ def _cloud_gate(lic: "License", material: str) -> tuple:
     if not base:
         return False, ("server-side license verification is required for paid features "
                        "but no license server is configured (ENGRAPHIS_CLOUD_URL and the "
-                       "vendor relay URL are both empty)")
+                       "license service URL and signed server URL are both empty)")
     try:
         from engraphis import cloud_license
         return cloud_license.gate(lic, material, base_url=base)
@@ -921,13 +965,18 @@ def production_warnings() -> list:
     at startup so an operator can't accidentally ship the dev signing key or bill against
     a placeholder checkout link."""
     warns = []
+    if not VENDOR_SIGNER_RELEASE_READY:
+        warns.append(
+            "vendor signer is still marked pre-sale. Audit issued keys, rotate the seed "
+            "on a trusted machine, update the pinned public key, and set "
+            "VENDOR_SIGNER_RELEASE_READY=True in the reviewed rotation release.")
     if is_default_vendor_key():
         warns.append(
             "vendor signing key is the built-in DEV keypair, whose private half has been "
             "on dev boxes / in agent sessions and is treated as compromised. Anyone holding "
-            "that seed can forge Pro/Team keys. Rotate before selling: run "
-            "`python -m scripts.license_admin keygen --force`, then pin the printed public "
-            "key in engraphis/licensing.py (_VENDOR_PUBKEY_HEX).")
+            "that seed can forge Pro/Team keys. Generate a replacement into a new secure "
+            "path, then complete the reviewed compatibility/reissue ceremony in "
+            "docs/COMMERCIAL_OPERATIONS.md.")
     if "github.com" in upgrade_url():
         warns.append(
             "upgrade link still points at the GitHub pricing anchor, not a real checkout. "

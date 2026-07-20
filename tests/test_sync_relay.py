@@ -13,6 +13,7 @@ import urllib.error
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,6 +28,7 @@ from engraphis.licensing import LicenseError, ed25519_public_key
 from engraphis.inspector import license_cloud
 from engraphis.inspector import license_registry as reg
 from engraphis.inspector import sync_relay
+from engraphis.inspector.auth import AuthStore
 from engraphis.backends.sync_relay import RelayError, RelayTransport, RelayUnreachable
 from engraphis.core.store import Store
 from engraphis.core.sync import SYNC_FORMAT, SyncEngine
@@ -65,8 +67,10 @@ def _key(plan="pro", email="buyer@example.com", *, expires_in_days=30,
     return licensing.compose_key(payload, SECRET)
 
 
-def _app():
+def _app(*, service=None):
     app = FastAPI()
+    if service is not None:
+        app.state.service = service
     app.include_router(sync_relay.router)
 
     @app.exception_handler(LicenseError)
@@ -114,6 +118,116 @@ def test_missing_key_is_rejected():
 def test_garbage_key_is_rejected():
     c = _app()
     assert c.get("/relay/v1/ws1/bundles", headers=_auth("ENGR1.!!!.???")).status_code == 402
+
+
+def test_scoped_user_token_can_pull_but_needs_write_scope_to_push(monkeypatch, tmp_path):
+    """Customer relays authorize the user token's scopes without exposing the Team key."""
+    monkeypatch.setattr(licensing, "require_feature", lambda feature: None)
+    active_license = licensing.parse_key(_key(plan="team"))
+    monkeypatch.setattr(licensing, "current_license", lambda *a, **k: active_license)
+
+    store = AuthStore(str(tmp_path / "users.db"), iterations=1_000)
+    user = store.create_user(
+        "member@example.com", "Member", "correct-horse-1", "member", seat_limit=1)
+    read_token = store.create_api_token(
+        user["id"], scopes=["agent", "sync:read"], ttl=600)["token"]
+    write_token = store.create_api_token(
+        user["id"], scopes=["agent", "sync:read", "sync:write"], ttl=600)["token"]
+
+    workspace_store = Store(str(tmp_path / "memories.db"))
+    workspace_store.create_workspace("ws1", settings={"visibility": "shared"})
+    c = _app(service=SimpleNamespace(store=workspace_store))
+    c.app.state.auth_store = store
+    assert c.get("/relay/v1/ws1/names", headers=_auth(read_token)).status_code == 200
+    denied = c.post(
+        "/relay/v1/ws1/bundles/read-only.json", content=b"{}",
+        headers=_auth(read_token))
+    assert denied.status_code == 403 and "sync:write" in denied.text
+    allowed = c.post(
+        "/relay/v1/ws1/bundles/writer.json", content=b"{}",
+        headers=_auth(write_token))
+    assert allowed.status_code == 200
+
+    store.update_user(user["id"], role="viewer")
+    downgraded = c.post(
+        "/relay/v1/ws1/bundles/no-longer-writer.json", content=b"{}",
+        headers=_auth(write_token))
+    assert downgraded.status_code == 403 and "read-only" in downgraded.text
+    assert c.get("/relay/v1/ws1/names", headers=_auth(write_token)).status_code == 200
+
+
+def test_scoped_user_token_cannot_address_personal_or_unknown_workspace(
+        monkeypatch, tmp_path):
+    """A Team token cannot turn the account relay into a personal-folder side channel."""
+    monkeypatch.setattr(licensing, "require_feature", lambda feature: None)
+    active_license = licensing.parse_key(_key(plan="team"))
+    monkeypatch.setattr(licensing, "current_license", lambda *a, **k: active_license)
+
+    auth_store = AuthStore(str(tmp_path / "users.db"), iterations=1_000)
+    user = auth_store.create_user(
+        "member@example.com", "Member", "correct-horse-1", "member", seat_limit=1)
+    token = auth_store.create_api_token(
+        user["id"], scopes=["agent", "sync:read", "sync:write"], ttl=600)["token"]
+
+    workspace_store = Store(str(tmp_path / "memories.db"))
+    workspace_store.create_workspace("team-shared", settings={"visibility": "shared"})
+    workspace_store.create_workspace(
+        "member-private",
+        settings={"visibility": "personal", "owner": "member@example.com"},
+    )
+    workspace_store.create_workspace(
+        "invalid-visibility", settings={"visibility": "unexpected"})
+    c = _app(service=SimpleNamespace(store=workspace_store))
+    c.app.state.auth_store = auth_store
+    headers = _auth(token)
+
+    # Seed a legacy private bundle directly to model data uploaded by an older client.
+    # The HTTP boundary must make it unreachable even to the folder's owner because this
+    # database is account-wide rather than partitioned per user.
+    account_id = reg.account_id_for(active_license)
+    assert sync_relay._store_bundle(
+        account_id, "member-private", "legacy-private.json", b"private",
+    ) == (None, 200)
+
+    assert c.post(
+        "/relay/v1/team-shared/bundles/shared.json", content=b"{}", headers=headers,
+    ).status_code == 200
+
+    personal_paths = [
+        ("GET", "/relay/v1/member-private/names"),
+        ("GET", "/relay/v1/member-private/bundles"),
+        ("GET", "/relay/v1/member-private/bundles/legacy-private.json"),
+        ("POST", "/relay/v1/member-private/bundles/new.json"),
+        ("DELETE", "/relay/v1/member-private/bundles/legacy-private.json"),
+    ]
+    for method, path in personal_paths:
+        response = c.request(method, path, content=b"{}", headers=headers)
+        assert response.status_code == 403
+        assert "existing shared workspaces only" in response.text
+
+    unknown = c.get("/relay/v1/guessed-personal-name/names", headers=headers)
+    assert unknown.status_code == 403
+    assert "existing shared workspaces only" in unknown.text
+    malformed = c.get("/relay/v1/invalid-visibility/names", headers=headers)
+    assert malformed.status_code == 403
+    assert "existing shared workspaces only" in malformed.text
+
+
+def test_expired_prefixed_user_token_never_falls_back_to_license_verification(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(licensing, "require_feature", lambda feature: None)
+    store = AuthStore(str(tmp_path / "users.db"), iterations=1_000)
+    user = store.create_user(
+        "member@example.com", "Member", "correct-horse-1", "member", seat_limit=1)
+    issued = store.create_api_token(user["id"], scopes=["sync:read"], ttl=600)
+    store.conn.execute("UPDATE api_tokens SET expires_at=0 WHERE id=?", (issued["id"],))
+    store.conn.commit()
+
+    c = _app()
+    c.app.state.auth_store = store
+    response = c.get("/relay/v1/ws1/names", headers=_auth(issued["token"]))
+    assert response.status_code == 401
+    assert "expired, revoked, or invalid" in response.json()["detail"]["error"]
 
 
 # ── unauthenticated crypto is rate limited ────────────────────────────────────────────
@@ -435,7 +549,7 @@ def test_relay_transport_requires_https_off_loopback():
         RelayTransport("https://relay host.example", "ws1", license_key="secret")
     with pytest.raises(ValueError, match="workspace_id"):
         RelayTransport("https://relay.example", "nested/workspace", license_key="secret")
-    with pytest.raises(ValueError, match="license key"):
+    with pytest.raises(ValueError, match="bearer token"):
         RelayTransport("https://relay.example", "ws1", license_key="bad\nkey")
 
 
@@ -664,15 +778,17 @@ def test_sync_round_over_the_relay_applies_every_peer_behind_a_broken_bundle(mon
     wid = store.get_or_create_workspace("w")
     transport = RelayTransport("https://relay.example", "w", license_key="secret")
 
-    result = SyncEngine(store).sync(transport, wid)      # must NOT raise
+    result = SyncEngine(store, allowed_workspaces=frozenset()).sync(
+        transport, wid)      # must NOT raise
 
     assert store.get_memory("mem_p1") is not None
     assert store.get_memory("mem_p2") is not None        # was skipped before the fix
     assert result["totals"]["added"] == 2
     assert result["peers_applied"] == 2
     assert result["complete"] is False                   # a bundle was dropped
-    assert any("transport" in e["error"] and "bundle-bad.json" in e["error"]
-               for e in result["errors"])
+    assert result["errors"] == [{
+        "bundle": "?", "error": "transport failure", "error_type": "RelayError"
+    }]
 
 
 def test_relay_transport_does_not_forward_bearer_across_redirects():

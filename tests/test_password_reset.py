@@ -50,12 +50,26 @@ def _admin(c, email="admin@x.co", password="supersecret1"):
                   "password": password}).status_code == 200
 
 
+def _invite_and_accept(c, *, email="m@x.co", name="Mo", role="member",
+                       password="anotherpass1"):
+    response = c.post("/api/auth/invitations", json={
+        "email": email, "name": name, "role": role})
+    assert response.status_code == 200, response.text
+    invite_id = response.json()["invitation"]["id"]
+    invitation = c.app.state.auth_store.resend_invitation(invite_id)
+    accepted = TestClient(c.app).post("/api/auth/invitations/accept", json={
+        "token": invitation["token"], "password": password})
+    assert accepted.status_code == 200, accepted.text
+    return accepted.json()["user"]
+
+
 def _capture_reset_email(monkeypatch):
     """Stub send_password_reset_email and return the list it appends to, so a test
     can grab the token out of the emailed reset_url without the HTTP layer ever
     exposing it (the whole point of the anti-enumeration design)."""
     from engraphis.inspector import webhooks as WH
     sent = []
+    monkeypatch.setattr(WH, "email_configured", lambda: True)
     monkeypatch.setattr(
         WH, "send_password_reset_email",
         lambda to, name, reset_url: sent.append(
@@ -85,17 +99,74 @@ def test_forgot_known_email_sends_link_never_exposed_in_response(monkeypatch, tm
     assert r.status_code == 200 and body == {"ok": True}
     assert len(sent) == 1 and sent[0]["to"] == "admin@x.co"
     assert "reset_token=" in sent[0]["reset_url"]
+    assert "/#reset_token=" in sent[0]["reset_url"]
+    assert "?reset_token=" not in sent[0]["reset_url"]
     # the raw response body must never carry the token itself
     assert _token_from_url(sent[0]["reset_url"]) not in r.text
+
+
+def test_hosted_forgot_relays_server_to_server_when_local_email_is_absent(
+        monkeypatch, tmp_path):
+    from engraphis.inspector import webhooks as WH
+    from tests.vendor_relay import wire_vendor_relay
+
+    queued = []
+    monkeypatch.setattr(WH, "email_configured", lambda: False)
+    monkeypatch.setenv("ENGRAPHIS_DASHBOARD_URL", "https://customer.example")
+    monkeypatch.setattr(
+        WH, "queue_password_reset_email",
+        lambda to, name, reset_url, **kwargs:
+            queued.append({"to": to, "name": name, "reset_url": reset_url,
+                           **kwargs}) or "eml_reset",
+    )
+    wire_vendor_relay(monkeypatch)
+    c = _client(monkeypatch, tmp_path)
+    _admin(c)
+    r = c.post("/api/auth/forgot", json={"email": "admin@x.co"})
+
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert len(queued) == 1 and queued[0]["to"] == "admin@x.co"
+    assert queued[0]["reset_url"].startswith(
+        "https://customer.example/#reset_token=")
+    assert "?reset_token=" not in queued[0]["reset_url"]
+    assert _token_from_url(queued[0]["reset_url"]) not in r.text
+
+
+def test_remote_forgot_never_builds_a_reset_link_from_the_host_header(
+        monkeypatch, tmp_path):
+    """A forged Host must not turn the reset-email endpoint into account takeover."""
+    from engraphis.inspector import webhooks as WH
+
+    sent = []
+    monkeypatch.delenv("ENGRAPHIS_DASHBOARD_URL", raising=False)
+    monkeypatch.setattr(WH, "email_configured", lambda: True)
+    monkeypatch.setattr(
+        WH, "send_password_reset_email",
+        lambda to, name, reset_url: sent.append(reset_url),
+    )
+    c = _client(monkeypatch, tmp_path)
+    _admin(c)
+    before = c.app.state.auth_store.conn.execute(
+        "SELECT COUNT(*) FROM password_resets").fetchone()[0]
+
+    remote = TestClient(c.app, client=("203.0.113.9", 50000))
+    response = remote.post(
+        "/api/auth/forgot", json={"email": "admin@x.co"},
+        headers={"Host": "reset-token.attacker.example"},
+    )
+    assert response.status_code == 200 and response.json() == {"ok": True}
+    assert sent == []
+    # No undeliverable token was issued, so a forged request cannot invalidate a valid
+    # link the account owner requested moments earlier.
+    after = c.app.state.auth_store.conn.execute(
+        "SELECT COUNT(*) FROM password_resets").fetchone()[0]
+    assert after == before
 
 
 def test_forgot_disabled_account_responds_identically_and_sends_nothing(monkeypatch, tmp_path):
     c = _client(monkeypatch, tmp_path)
     _admin(c)
-    c.post("/api/auth/users", json={"email": "m@x.co", "name": "Mo",
-           "password": "anotherpass1", "role": "member"})
-    mid = [u["id"] for u in c.get("/api/auth/users").json()["users"]
-           if u["email"] == "m@x.co"][0]
+    mid = _invite_and_accept(c)["id"]
     c.post("/api/auth/users/update", json={"user_id": mid, "disabled": True})
     sent = _capture_reset_email(monkeypatch)
     r = c.post("/api/auth/forgot", json={"email": "m@x.co"})
@@ -170,6 +241,12 @@ def test_reset_token_is_single_use(monkeypatch, tmp_path):
 def test_reset_rejects_bogus_token(monkeypatch, tmp_path):
     c = _client(monkeypatch, tmp_path)
     _admin(c)
+    import engraphis.inspector.auth as auth_mod
+
+    def expensive_hash_must_not_run(*args, **kwargs):
+        pytest.fail("an invalid public reset token reached PBKDF2")
+
+    monkeypatch.setattr(auth_mod, "_hash_password", expensive_hash_must_not_run)
     r = c.post("/api/auth/reset", json={"token": "not-a-real-token-xxxxxxxxxx",
                                         "password": "brandnewpass1"})
     assert r.status_code == 400
@@ -241,6 +318,7 @@ def test_forgot_email_delivery_failure_does_not_change_the_response(monkeypatch,
     def boom(to, name, reset_url):
         raise RuntimeError("simulated Resend outage")
 
+    monkeypatch.setattr(WH, "email_configured", lambda: True)
     monkeypatch.setattr(WH, "send_password_reset_email", boom)
     c = _client(monkeypatch, tmp_path)
     _admin(c)
