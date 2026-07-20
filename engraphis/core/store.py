@@ -1848,9 +1848,9 @@ class Store:
 
     def search_symbols(self, repo_id: str, query: str, *, limit: int = 20) -> list[dict]:
         """Substring match on name/fqname (no embedding yet — v1 is lexical)."""
-        like = f"%{query}%"
+        like = f"%{_escape_like(query)}%"
         rows = self.conn.execute(
-            "SELECT * FROM symbols WHERE repo_id=? AND (name LIKE ? OR fqname LIKE ?) "
+            "SELECT * FROM symbols WHERE repo_id=? AND (name LIKE ? ESCAPE '\\' OR fqname LIKE ? ESCAPE '\\') "
             "ORDER BY name LIMIT ?",
             (repo_id, like, like, limit),
         ).fetchall()

@@ -251,6 +251,15 @@ RETIRED_LICENSE_SERVER_URLS = frozenset({
 def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default).strip()
 
+def _validate_service_mode(value: str) -> str:
+    """Validate service mode against allowed values, defaulting to combined on invalid input."""
+    normalized = (value or "").strip().lower()
+    if normalized not in SERVICE_MODES:
+        print(f"[engraphis] invalid ENGRAPHIS_SERVICE_MODE '{value}', using 'combined'",
+              file=sys.stderr)
+        return "combined"
+    return normalized
+
 
 def _env_int(key: str, default: int) -> int:
     try:
@@ -365,7 +374,7 @@ class Settings:
     # self-host behavior; the official Railway template sets ``customer`` and the vendor
     # control plane sets ``vendor``.
     service_mode: str = field(
-        default_factory=lambda: _env("ENGRAPHIS_SERVICE_MODE", "combined").lower()
+        default_factory=lambda: _validate_service_mode(_env("ENGRAPHIS_SERVICE_MODE", "combined"))
     )
 
     # Managed relay base URL. Client sync uses it when `--relay-url` is omitted, and paid

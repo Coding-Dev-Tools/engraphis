@@ -401,6 +401,10 @@ def _archive(sources: list[tuple[str, Path]]) -> bytes:
 def _atomic_write(path: Path, payload: bytes, *, mode: int = 0o600) -> None:
     """Durably replace a file without exposing a partial artifact or marker."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.parent.chmod(0o700)
+    except OSError:
+        pass
     temporary = path.with_name(".%s.%s.tmp" % (path.name, secrets.token_hex(8)))
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     descriptor = os.open(str(temporary), flags, mode)
@@ -442,6 +446,10 @@ def _encrypt_path(plain_path: Path, target: Path) -> None:
             os.fsync(output.fileno())
         os.replace(temporary, target)
         _fsync_directory(target.parent)
+        try:
+            target.parent.chmod(0o700)
+        except OSError:
+            pass
         try:
             target.chmod(0o600)
         except OSError:

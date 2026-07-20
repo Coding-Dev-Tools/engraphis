@@ -28,6 +28,7 @@ from engraphis.service import (
     MemoryService,
     ValidationError,
 )
+from engraphis.core.store import _escape_like
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 logger = logging.getLogger("engraphis.api")
@@ -166,9 +167,9 @@ def _keyword_search(ws, q, limit=20):
         args = [row["id"]]
         terms = [t for t in (q or "").split() if len(t) > 2][:6]
         if terms:
-            sql += " AND (" + " OR ".join(["title LIKE ? OR content LIKE ?" for _ in terms]) + ")"
+            sql += " AND (" + " OR ".join(["title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'" for _ in terms]) + ")"
             for t in terms:
-                args += ["%" + t + "%", "%" + t + "%"]
+                args += ["%" + _escape_like(t) + "%", "%" + _escape_like(t) + "%"]
         sql += " ORDER BY COALESCE(last_access, valid_from) DESC LIMIT ?"
         args.append(int(limit))
         rows = conn.execute(sql, args).fetchall()
@@ -792,8 +793,8 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = None, limit: in
                "AND valid_to IS NULL AND expired_at IS NULL")
         args = [row["id"]]
         if q:
-            sql += " AND (title LIKE ? OR content LIKE ?)"
-            like = "%" + q + "%"
+            sql += " AND (title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\')"
+            like = "%" + _escape_like(q) + "%"
             args += [like, like]
         # Manually dragged rows (sort_order set) come first, in the order they were
         # dropped in; everything never touched by drag-to-reorder falls back to recency.
@@ -1863,7 +1864,7 @@ def _sync_all(svc) -> dict:
 
 
 @router.post("/sync/run")
-def sync_run():
+async def sync_run():
     """Push this device's memories to the relay and pull every other device's — for every
     workspace. Backs the dashboard 'Sync now' button. Pro/Team; needs a license key."""
     from engraphis.backends.sync_relay import has_sync_token
@@ -1880,7 +1881,8 @@ def sync_run():
         raise HTTPException(status_code=400,
                             detail={"error": "Nothing to sync yet — add a memory first."})
 
-    summary = _sync_all(svc)
+    import asyncio
+    summary = await asyncio.to_thread(_sync_all, svc)
     _SYNC_STATE["last"] = summary
     # If the relay rejected the key for every workspace (nothing exported, a 402 seen),
     # surface it as the button's upgrade/renew prompt rather than a silent partial success.

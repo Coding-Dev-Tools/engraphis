@@ -73,7 +73,11 @@ class LLMClient:
             self.provider, ""
         )
         self.extra_headers = extra_headers or settings.llm_extra_headers
-        self._http = httpx.Client(timeout=120)
+        self._http = httpx.Client(
+            timeout=120,
+            follow_redirects=False,  # never leak API keys to redirect targets
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=5),
+        )
 
     def close(self) -> None:
         self._http.close()
@@ -271,18 +275,50 @@ class LLMClient:
             raise ValueError("Unexpected Google response format") from None
 
     def _post_json(self, url: str, body: dict[str, Any], headers: dict[str, str]) -> Any:
-        """POST once and discard provider URLs/bodies before an error crosses the boundary."""
-        try:
-            resp = self._http.post(url, json=body, headers=headers)
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise _LLMProviderError(status=exc.response.status_code) from None
-        except httpx.RequestError:
-            raise _LLMProviderError(unreachable=True) from None
-        try:
-            return resp.json()
-        except (ValueError, TypeError, AttributeError):
-            raise ValueError("Unexpected LLM response format") from None
+        """POST with retry for transient provider errors (429, 502, 503, 504)."""
+        import time as _time
+        _RETRYABLE = {429, 502, 503, 504}
+        _MAX_RETRIES = 2
+        last_exc: Optional[Exception] = None
+        for attempt in range(1 + _MAX_RETRIES):
+            try:
+                resp = self._http.post(url, json=body, headers=headers)
+                resp.raise_for_status()
+                try:
+                    return resp.json()
+                except (ValueError, TypeError, AttributeError):
+                    raise ValueError("Unexpected LLM response format") from None
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status in _RETRYABLE and attempt < _MAX_RETRIES:
+                    retry_after = exc.response.headers.get("retry-after", "")
+                    try:
+                        wait = max(1.0, min(float(retry_after), 30.0))
+                    except (ValueError, TypeError):
+                        wait = 2.0 * (attempt + 1)
+                    logger.warning(
+                        "LLM provider returned %d; retrying in %.1fs (attempt %d/%d)",
+                        status, wait, attempt + 1, _MAX_RETRIES)
+                    _time.sleep(wait)
+                    last_exc = exc
+                    continue
+                raise _LLMProviderError(status=status) from None
+            except httpx.RequestError:
+                if attempt < _MAX_RETRIES:
+                    wait = 2.0 * (attempt + 1)
+                    logger.warning(
+                        "LLM provider unreachable; retrying in %.1fs (attempt %d/%d)",
+                        wait, attempt + 1, _MAX_RETRIES)
+                    _time.sleep(wait)
+                    last_exc = None
+                    continue
+                raise _LLMProviderError(unreachable=True) from None
+        # Should not be reached, but satisfy the type checker.
+        if last_exc is not None:
+            raise _LLMProviderError(
+                status=getattr(last_exc, "response", None)
+                and last_exc.response.status_code) from None
+        raise _LLMProviderError(unreachable=True) from None
 
 
 def _anthropic_msg(m: dict[str, str]) -> dict[str, str]:

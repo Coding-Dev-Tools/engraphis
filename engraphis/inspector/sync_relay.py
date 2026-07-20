@@ -491,7 +491,6 @@ def pull_bundles(workspace_id: str, request: Request):
     _enforce_scoped_workspace(request, workspace)
     conn = _conn()
     try:
-        conn.execute("BEGIN")
         total = conn.execute(
             "SELECT COALESCE(SUM(LENGTH(data)), 0) AS total FROM sync_bundles "
             "WHERE account_id=? AND workspace_id=?",

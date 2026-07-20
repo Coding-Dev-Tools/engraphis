@@ -74,7 +74,7 @@ def configure_structured_logging() -> bool:
         return False
     formatter = RedactedJsonFormatter()
     configured = False
-    for name in ("", "uvicorn", "uvicorn.error", "uvicorn.access"):
+    for name in ("", "engraphis", "uvicorn", "uvicorn.error", "uvicorn.access"):
         logger = logging.getLogger(name)
         for handler in logger.handlers:
             handler.setFormatter(formatter)

@@ -72,6 +72,13 @@ async def _send_upstream(method: str, url: str, headers: dict, body: bytes) -> h
 
 def _target_url(compat_path: str, query: str) -> str:
     base = resolve_license_server_url().rstrip("/")
+    # Defense-in-depth: validate the resolved URL blocks private/reserved ranges
+    # (SSRF) even though the source is a server env var, not user input.
+    from engraphis.cloud_license import validate_cloud_base_url
+    try:
+        base = validate_cloud_base_url(base)
+    except ValueError as exc:
+        raise ValueError("license server URL is invalid: %s" % exc) from None
     path = quote(compat_path or "", safe="/-._~")
     target = base + "/license/v1" + (("/" + path) if path else "")
     if query:
@@ -94,7 +101,12 @@ async def _proxy(request: Request, compat_path: str = ""):
         if name.lower() in _REQUEST_HEADERS
     }
     headers["user-agent"] = "Engraphis/%s license-compat-v1" % __version__
-    target = _target_url(compat_path, request.url.query)
+    try:
+        target = _target_url(compat_path, request.url.query)
+    except ValueError:
+        return JSONResponse(
+            {"error": "license server URL is misconfigured"}, status_code=502,
+            headers=_deprecation_headers())
     try:
         upstream = await _send_upstream(request.method, target, headers, body or b"")
     except (httpx.TimeoutException, httpx.NetworkError):

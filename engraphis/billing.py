@@ -169,7 +169,11 @@ def _dedup_conn() -> Optional[sqlite3.Connection]:
     try:
         if path != ":memory:":
             database = Path(path).expanduser()
-            database.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            database.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                database.parent.chmod(0o700)
+            except OSError:
+                pass
             descriptor = os.open(str(database), os.O_RDWR | os.O_CREAT, 0o600)
             os.close(descriptor)
             try:

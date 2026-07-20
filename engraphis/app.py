@@ -251,6 +251,7 @@ def create_app() -> FastAPI:
 
 async def _consciousness_loop() -> None:
     """Phase 2 + Phase 4 background cycle: decay → thought synthesis → reweight."""
+    _consecutive_errors = 0
     while True:
         try:
             await asyncio.sleep(settings.loop_interval)
@@ -268,10 +269,15 @@ async def _consciousness_loop() -> None:
                     "Thought synthesized and persisted (sources=%d)",
                     int(result.get("source_count") or 0),
                 )
+            _consecutive_errors = 0
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.error("Consciousness loop error (%s)", type(exc).__name__)
+            _consecutive_errors += 1
+            backoff = min(60, settings.loop_interval * (2 ** _consecutive_errors))
+            logger.error("Consciousness loop error (%s), backing off %ds",
+                         type(exc).__name__, backoff)
+            await asyncio.sleep(backoff)
 
 
 app = create_app()

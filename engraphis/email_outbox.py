@@ -241,11 +241,12 @@ def deliver_now(message_id: str,
         provider_name = (provider or "unknown")[:40]
         provider_message_id = (provider_id or "")[:160]
         conn.execute("BEGIN IMMEDIATE")
+        now = time.time()
         updated = conn.execute(
             "UPDATE email_outbox SET status='sent',provider=?,provider_message_id=?,"
             "last_error='',sent_at=?,updated_at=? "
             "WHERE id=? AND status='sending' AND attempts=?",
-            (provider_name, provider_message_id, time.time(), time.time(),
+            (provider_name, provider_message_id, now, now,
              message_id, int(message["attempts"])))
         if updated.rowcount == 1:
             state = _provider_state(conn, provider_message_id)

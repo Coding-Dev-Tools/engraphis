@@ -75,7 +75,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[test]"
-          npm ci
+          npm install
           npx playwright install --with-deps chromium
       - name: Build and verify deterministic galaxy assets
         run: npm run test:galaxy

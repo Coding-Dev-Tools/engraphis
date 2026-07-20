@@ -44,8 +44,10 @@ def verify_signature(body: bytes, event_id: str, timestamp: str,
     if len(secret) < 16 or not event_id or not timestamp or not signature_header:
         return False
     try:
-        stamp = int(timestamp)
+        stamp = float(timestamp)
     except ValueError:
+        return False
+    if not math.isfinite(stamp):
         return False
     current_time = time.time() if now is None else now
     if not math.isfinite(current_time) or abs(current_time - stamp) > 300:

@@ -672,6 +672,7 @@ def test_purchase_stays_retryable_when_all_delivery_persistence_fails(
 def test_provider_outage_keeps_key_only_in_durable_outbox(monkeypatch, tmp_path):
     from engraphis import email_outbox
     from engraphis.inspector import webhooks as WH
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
 
     def provider_down(*_args, **_kwargs):
         raise RuntimeError("simulated provider outage")

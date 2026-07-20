@@ -82,7 +82,10 @@ def _is_loopback_host(host: str) -> bool:
 
 
 def validate_cloud_base_url(value: str) -> str:
-    """Require HTTPS for remote cloud endpoints; allow HTTP only on loopback."""
+    """Require HTTPS for remote cloud endpoints; allow HTTP only on loopback.
+
+    Also blocks private/reserved IP ranges to prevent SSRF attacks against internal
+    services (cloud metadata endpoints, corporate networks, etc.)."""
     parts = urlsplit(str(value or "").strip())
     scheme = parts.scheme.lower()
     if scheme not in {"http", "https"} or not parts.hostname:
@@ -97,8 +100,28 @@ def validate_cloud_base_url(value: str) -> str:
         raise ValueError("license server URL contains an invalid host")
     if parts.query or parts.fragment:
         raise ValueError("license server URL must not contain a query string or fragment")
-    if scheme != "https" and not _is_loopback_host(parts.hostname.lower()):
+    hostname = parts.hostname.lower()
+    if scheme != "https" and not _is_loopback_host(hostname):
         raise ValueError("license server URL must use HTTPS unless it targets loopback")
+    # SSRF protection: block private/reserved IP ranges even on HTTPS. This prevents
+    # targeting cloud metadata endpoints (169.254.169.254), corporate networks, etc.
+    # Note: DNS rebinding can bypass this, but it raises the bar significantly.
+    if not _is_loopback_host(hostname):
+        try:
+            import socket
+            addrinfos = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            for family, _, _, _, sockaddr in addrinfos:
+                ip = sockaddr[0]
+                try:
+                    ip_obj = ipaddress.ip_address(ip)
+                except ValueError:
+                    continue  # sockaddr didn't yield a parseable IP; skip
+                if (ip_obj.is_private or ip_obj.is_reserved or ip_obj.is_link_local
+                        or ip_obj.is_multicast or ip_obj.is_unspecified):
+                    raise ValueError(
+                        "license server URL must not target private/reserved IP ranges")
+        except (socket.gaierror, OSError):
+            pass  # DNS resolution failure; let the actual request fail later
     return urlunsplit((scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
 
 

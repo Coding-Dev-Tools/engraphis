@@ -221,8 +221,28 @@ def _validated_base_url(value: str) -> str:
         raise ValueError("relay URL contains an invalid host")
     if parts.query or parts.fragment:
         raise ValueError("relay URL must not contain a query string or fragment")
-    if scheme != "https" and not _is_loopback_host(parts.hostname.lower()):
+    hostname = parts.hostname.lower()
+    if scheme != "https" and not _is_loopback_host(hostname):
         raise ValueError("relay URL must use HTTPS unless it targets loopback")
+    # SSRF protection: block private/reserved IP ranges on HTTPS too. Prevents
+    # targeting cloud metadata endpoints (169.254.169.254), corporate networks, etc.
+    if not _is_loopback_host(hostname):
+        import socket as _socket
+        try:
+            addrinfos = _socket.getaddrinfo(
+                hostname, None, _socket.AF_UNSPEC, _socket.SOCK_STREAM)
+            for family, _, _, _, sockaddr in addrinfos:
+                ip = sockaddr[0]
+                try:
+                    ip_obj = ipaddress.ip_address(ip)
+                except ValueError:
+                    continue  # sockaddr wasn't a parseable IP; skip
+                if (ip_obj.is_private or ip_obj.is_reserved or ip_obj.is_link_local
+                        or ip_obj.is_multicast or ip_obj.is_unspecified):
+                    raise ValueError(
+                        "relay URL must not target private/reserved IP ranges")
+        except (_socket.gaierror, OSError):
+            pass  # DNS resolution failure; let the actual request fail later
     return urlunsplit((scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
 
 

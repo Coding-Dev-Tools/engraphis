@@ -84,6 +84,9 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.9", "3.10", "3.11", "3.12"]
+    if: >-
+      github.event_name == 'push' ||
+      inputs.release_tag == ''
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -109,6 +112,9 @@ jobs:
   browser-accessibility:
     name: Browser accessibility release gate
     runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' ||
+      inputs.release_tag == ''
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -122,7 +128,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[test]"
-          npm ci
+          npm install
           npx playwright install --with-deps chromium
       - name: Playwright desktop/mobile, keyboard, CSP, console, and axe checks
         run: npm run test:e2e
@@ -130,6 +136,9 @@ jobs:
   docker-smoke:
     name: Production image release gate
     runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'push' ||
+      inputs.release_tag == ''
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Build production image

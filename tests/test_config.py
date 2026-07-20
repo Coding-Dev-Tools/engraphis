@@ -102,3 +102,13 @@ def test_retired_cloud_url_override_is_canonicalized(monkeypatch):
 
 def test_retired_relay_url_override_is_canonicalized():
     assert config.canonicalize_relay_url(RETIRED_RELAY_URL) == config.DEFAULT_RELAY_URL
+
+def test_invalid_service_mode_falls_back_to_combined(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_SERVICE_MODE", "bogus")
+    assert Settings().service_mode == "combined"
+
+
+def test_valid_service_modes_accepted(monkeypatch):
+    for mode in ("customer", "vendor", "combined"):
+        monkeypatch.setenv("ENGRAPHIS_SERVICE_MODE", mode)
+        assert Settings().service_mode == mode

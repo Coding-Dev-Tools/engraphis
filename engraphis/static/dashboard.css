@@ -744,3 +744,5 @@ progress.graph-degree[data-graph-node-type="person_or_concept"]::-webkit-progres
 .gx-io{width:32px;height:30px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--color-border);border-radius:7px;background:var(--color-canvas);color:var(--color-text-dim);cursor:pointer;font-size:14px;transition:border-color .15s,color .15s}
 .gx-io:hover{border-color:var(--color-border-strong);color:var(--color-text)}
 .gslider{display:flex;align-items:center;gap:8px;margin:6px 0}.gslider label{width:88px;flex-shrink:0;font-size:12px;color:var(--color-text-mute,var(--color-text-dim))}.gslider input[type=range]{flex:1;min-width:0;accent-color:var(--color-accent)}
+.gx-chip-full{width:100%;justify-content:flex-start;border-radius:7px;margin-bottom:2px}
+.gx-dot-dim{background:var(--color-text-dim,#888)}

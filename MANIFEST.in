@@ -1,2 +1,13 @@
 global-exclude *.pyc
 global-exclude *.pyo
+
+recursive-include engraphis/static *.html *.css *.js *.png *.ico
+recursive-include engraphis/static/vendor *
+include engraphis/commercial_manifest.json
+include LICENSE NOTICE README.md CHANGELOG.md
+include pyproject.toml
+include .env.example requirements.txt
+include docker-entrypoint.sh Dockerfile docker-compose.yml
+include railway.json
+recursive-include eval/datasets *.jsonl
+recursive-include tests *.py
