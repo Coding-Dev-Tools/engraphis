@@ -1,12 +1,12 @@
 # Engraphis MCP tools — reference
 
-All 18 tools, grouped by job. Parameters are `name (type, default)` — no default means required.
+All 28 tools, grouped by job. Parameters are `name (type, default)` — no default means required.
 Every tool returns a JSON string; on failure it returns `"Error: <reason>"` instead of raising.
 Governance tools (`forget`/`pin`/`correct`/`link`) verify the memory actually belongs to the
 `workspace`/`repo` you pass **before** changing anything, so you can't touch memories outside a
 scope you were already given.
 
-Group index: [Write](#write) · [Read](#read) · [History](#history) · [Governance](#governance) ·
+Group index: [Write](#write) · [Read](#read) · [History](#history-bi-temporal) · [Governance](#governance) ·
 [Code](#code) · [Sessions](#sessions) · [Ops](#ops).
 
 ---
@@ -21,7 +21,9 @@ Store a memory so it can be recalled later, across turns, sessions, and repos.
 - `repo (str, None)` — repository scope; omit for workspace-wide facts.
 - `session_id (str, None)` — from `engraphis_start_session`, if this belongs to a session.
 - `mtype (str, "semantic")` — `semantic` | `episodic` | `procedural` | `working`. See CONVENTIONS.
-- `scope (str, "repo")` — `session` | `repo` | `workspace` | `user`. See SCOPING.
+- `scope (str, None)` — `session` | `repo` | `workspace` | `user`; omitted preserves the
+  compatible default (`repo` when `repo` or a repo-backed `session_id` is present, otherwise
+  `workspace`). Session visibility must be explicit. See SCOPING.
 - `title (str, "")` — optional short title.
 - `importance (float, 0.0)` — `0..1`; higher resists decay.
 - `keywords (list[str], None)` — optional, aids lexical recall.
@@ -29,6 +31,9 @@ Store a memory so it can be recalled later, across turns, sessions, and repos.
   **reinforces** the existing one (`op:"noop"`); a same-subject update **supersedes** the old one
   (`op:"invalidate"`, old closed not deleted). Set `False` only for intentionally repeated
   episodic log entries.
+- `retention_class (str, None)` — optional host classification: `ephemeral` | `normal` |
+  `critical`; advisory and bounded, never a silent discard.
+- `retention_reason (str, "")` — short content-free rationale for that classification.
 
 Returns `{id, workspace, repo, scope, mtype, stored:true, op}` where `op` is `add` | `noop` |
 `invalidate` (with `superseded:[old_id,…]`).
@@ -57,6 +62,8 @@ Call it before answering or acting when prior context would help.
 - `query (str)` — natural language, e.g. `"how do we handle auth?"`.
 - `workspace (str, None)` — restrict to this workspace.
 - `repo (str, None)` — restrict to this repo (requires `workspace`).
+- `session_id (str, None)` — exact session context (requires `workspace`); inherits repo/workspace
+  ancestors while excluding every other session.
 - `mtypes (list[str], None)` — restrict to these memory types.
 - `k (int, 8)` — max results, `1..50`.
 
@@ -67,17 +74,23 @@ arm, retention, provenance}]}`. `context` is a token-budgeted pack ready to drop
 ### `engraphis_recall_grounded`
 Answer a question **strictly from** stored memories, with `[n]` citations — or **abstain** when
 nothing in scope supports it. Use when you want a grounded, non-hallucinated answer and would
-rather get "insufficient evidence" than a guess. The answer is extractive (no LLM is called), so it
-never introduces a claim that isn't in a cited memory.
+rather get "insufficient evidence" than a guess. The default answer is deterministic and
+extractive; optional LLM synthesis is accepted only when its claims remain cited.
 
 - `query (str)` — the question, e.g. `"which auth scheme did we standardise on?"`.
-- `workspace (str, None)`, `repo (str, None)`, `mtypes (list[str], None)`, `k (int, 8)`.
+- `workspace (str, None)`, `repo (str, None)`, `session_id (str, None)`,
+  `mtypes (list[str], None)`, `k (int, 8)`.
 - `min_support (float, None)` — absolute support floor `0..1`; raise it to demand stronger
   evidence before answering.
+- `synthesize (bool, false)` — ask a configured LLM for cited prose; falls back safely.
 
 Returns `{query, grounded, abstained, answer, support, reason, synthesized, citations:[{n, id,
 title, content, score, support, provenance}]}`. When `grounded` is false, `answer` is empty and
 `reason` says why (insufficient evidence, or unknown workspace/repo).
+
+### `engraphis_answer`
+Backward-compatible grounded-answer alias. Prefer `engraphis_recall_grounded` for new configs;
+keep using this only if an existing agent already references it.
 
 ### `engraphis_recall_proactive`
 Conscious recall with **no query**: high-importance, recent, well-reinforced memories. Use at the
@@ -87,6 +100,18 @@ start of a task to load context before you know what to ask.
 
 Returns `{memories:[…], last_session:{summary, open_threads, outcome}}`. When `repo` is given,
 `last_session` is the most recent *ended* session for that repo (or `{}` if none) — the handoff.
+
+### `engraphis_proactive_context`
+Build a task-aware context packet from proactive recall, optional current agent state, and the
+last-session handoff. Use at task start when an agent needs ready-to-use, cited context rather
+than the raw queryless memory list.
+
+- `workspace (str)`, `repo (str, None)`, `task (str, "")`, `agent_state (str, "")`,
+  `k (int, 10)`, `synthesize (bool, false)`.
+
+Returns `{context_summary, suggested_memories, citations, suggested_queries, last_session,
+grounded, synthesized, reason}`.
+
 
 ---
 
@@ -110,7 +135,7 @@ Returns `{query, history:[{…memory fields…, valid_from, valid_to}]}`, oldest
 ---
 
 ## Governance
-All four preserve history (bi-temporal close, never a hard delete) and are audited. All verify
+All five preserve history (bi-temporal close, never a hard delete) and are audited. All verify
 ownership against the `workspace`/`repo` you pass.
 
 ### `engraphis_correct`  *(preferred fix)*
@@ -128,6 +153,18 @@ Retire a memory: it stops appearing in recall, history preserved.
 
 Returns `{id, status:"forgotten", reason}`. Use `correct` instead when you have replacement content.
 
+### `engraphis_promote`
+Widen a live memory's visibility without editing it in place. The wider record is stored first;
+the narrow source is then bi-temporally closed and linked, with provenance, pinning, sensitivity,
+and learned stability inherited.
+
+- `memory_id (str)`, `target_scope (str)`, `workspace (str)`, `repo (str, None)`,
+  `reason (str, "")`.
+
+`target_scope` must be strictly wider: session → repo/workspace or repo → workspace. User-scope
+promotion is not yet supported because records remain workspace-bound. Returns
+`{id, promoted_from, from_scope, scope, op, reason, receipt}`.
+
 ### `engraphis_pin`
 Exempt a memory from automatic decay/pruning — for durable conventions and identity facts.
 
@@ -140,24 +177,29 @@ Explicitly connect two memories (A-MEM-style) when a plain recall wouldn't surfa
 
 - `a (str)`, `b (str)`, `workspace (str)`, `repo (str, None)`, `relation (str, "related")` —
   e.g. `caused_by`, `fixed_by`.
+- `layer (str, None)` — `temporal` | `entity` | `causal` | `semantic`; omitted means infer
+  from `relation`.
+- `reason (str, "")` — optional rationale/context for why the relationship exists; persisted
+  with the link and shown by inspection/graph APIs.
 
-Returns `{a, b, relation, linked:true}`.
+Returns `{a, b, relation, layer, reason, linked:true, receipt}`.
 
 ---
 
 ## Code
 
 ### `engraphis_index_repo`
-Parse a repository into the code-symbol graph: function/class/method definitions plus best-effort
-call/import edges. Run once when you start in a repo (or after large changes) so `search_code` has
-something to search. AST via tree-sitter when available, dependency-free regex fallback otherwise.
+Incrementally parse a repository into the code-symbol graph: modules/files, functions, classes,
+methods, variables, docstrings/comments, definitions, calls, imports, inheritance, and
+implementation edges. AST via tree-sitter when available, dependency-free regex fallback
+otherwise. Existing memories that mention symbols are linked into the same traversal graph.
 
 - `workspace (str)`, `repo (str)`, `root_path (str)` — local path to the repo root,
   `languages (list[str], None)` — omit to index every supported language found.
 
-Returns `{files_indexed, symbols, edges, backend}`. Re-indexing is safe (per-file replace, not
-duplicate). Reads local files at `root_path` — same trust boundary as any local tool; nothing is
-sent anywhere.
+Returns `{files_indexed, files_unchanged, files_removed, symbols, edges, code_memory_links,
+backend}`. Re-indexing hashes files, skips unchanged content, and removes deleted files only after
+a complete scan. Reads local files at `root_path`; nothing is sent anywhere.
 
 ### `engraphis_search_code`
 Find definitions by name, with their callers — structural search that costs far fewer tokens than
@@ -166,8 +208,29 @@ grepping or dumping files, and answers "what calls this / what breaks if I chang
 - `query (str)` — symbol or partial name, `workspace (str)`, `repo (str)` (must be indexed first),
   `limit (int, 20)`.
 
-Returns `{query, symbols:[{name, fqname, kind, file, span, signature,
-called_by:[{src, file, line}]}]}`.
+Returns `{query, symbols:[{name, fqname, kind, file, span, signature, docstring,
+called_by:[…], linked_memories:[…]}]}`.
+
+### `engraphis_code_path`
+Find the shortest path across definitions, calls, imports, aliases, and code↔memory links.
+
+- `source (str)`, `target (str)` — symbol, file, or memory id.
+- `workspace (str)`, `repo (str)`, `max_depth (int, 8)`.
+
+Returns `{found, source, target, hops, path, edges}` with direction and provenance fields.
+
+### `engraphis_code_impact`
+Estimate commit/PR impact from repo-relative changed files.
+
+- `changed_files (list[str])`, `workspace (str)`, `repo (str)`.
+
+Returns risk score/level, touched symbols, inbound edges, dependent files, linked memories,
+communities affected, hotspots, and potential conflict zones.
+
+### `engraphis_export_code_graph`
+Return portable `graph.json` data plus a human-readable Markdown report and self-contained HTML.
+
+- `workspace (str)`, `repo (str)`.
 
 ---
 
@@ -202,9 +265,15 @@ crisp fact.
 
 - `content (str, required)`; `workspace (str, required)`; `repo (str, None)`;
   `session_id (str, None)`; `mtype (str, "semantic")` — default type for unclassified facts;
-  `scope (str, "repo")`.
+  `scope (str, None)` — omitted defaults to repo for repo/session context, otherwise workspace.
 
 Returns `{workspace, repo, count, extracted, facts: [{id, op, superseded?}]}`.
+
+### `engraphis_ingest_postgres_schema`
+Inspect a live PostgreSQL catalog into schema memories plus typed database/schema/table/column/
+constraint graph nodes. The DSN is used for the connection only and is never stored or returned.
+
+- `dsn (str)`, `workspace (str)`, `repo (str, None)`, `schemas (list[str], None)`.
 
 ### `engraphis_consolidate`
 One sleep-time consolidation sweep: recurring episodic memories on the same subject become a
@@ -225,6 +294,20 @@ Returns `{clusters_found, digests_created, archived, skipped_already_consolidate
 
 ## Ops
 
+### `engraphis_receipts`
+List content-free, SHA-256-chained operation receipts for a workspace.
+
+- `workspace (str)`, `limit (int, 100)`.
+
+### `engraphis_verify_receipts`
+Recompute hashes and validate chain order plus the independently stored local head/count anchor.
+Optionally pass a previously exported `expected_head` / `expected_count` for verification against
+an anchor kept outside the database. Returns `{valid, count, head, anchored, errors}`.
+
+### `engraphis_export_receipts`
+Return the receipt-only export bundle plus verification result; raw memory/query contents and
+actor/workspace names are excluded.
+
 ### `engraphis_stats`
 Memory counts (overall or for one workspace) — handy for onboarding/health checks.
 
@@ -237,10 +320,12 @@ Returns `{memories, by_type, workspaces, sessions, schema_version}`.
 ## Quick decision guide
 
 - Learned a durable fact → `remember`. Raw thing that happened → `record_event`.
-- Need context and have a question → `recall`. Need context and don't yet → `recall_proactive`.
+- Need raw context and have a question → `recall`. Need raw context and don't yet → `recall_proactive`. Need a task-ready packet → `proactive_context`.
 - "Why?" / "since when?" → `why` / `timeline` (not `recall` — those see history).
 - Fact is wrong → `correct` (keeps the chain). Fact is obsolete with no replacement → `forget`.
+- Fact applies more broadly than first believed → `promote` (widens without duplicate recall).
 - Must never fade → `pin`. Two facts belong together → `link`.
-- Working in code → `index_repo` once, then `search_code`.
+- Working in code → `index_repo`, then `search_code`; use `code_path`/`code_impact` for structural
+  questions and PR triage.
 - Multi-step task → wrap in `start_session` … `end_session`.
 - Have a blob, not a fact → `ingest`. Memory getting noisy → `consolidate` (dry-run first).

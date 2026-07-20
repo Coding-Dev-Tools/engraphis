@@ -91,10 +91,30 @@ def list_documents(
         sql += " LIMIT ?"
         params.append(limit)
     if offset:
+        # SQLite requires LIMIT before OFFSET; without an explicit limit, LIMIT -1 means
+        # "no limit" so an offset alone stays valid SQL instead of a syntax error (500).
+        if not limit:
+            sql += " LIMIT -1"
         sql += " OFFSET ?"
         params.append(offset)
     rows = conn.execute(sql, params).fetchall()
     return [_row_to_mem(r) for r in rows]
+
+
+def find_document(document_id: str, namespace: Optional[str] = None) -> Optional[dict[str, Any]]:
+    """Fetch a memory by ``document_id``. With a namespace, scope to it; without one, return
+    the most recently updated match across all namespaces (document_id is only unique
+    per-namespace, so a bare lookup picks the newest rather than always missing)."""
+    conn = get_conn()
+    if namespace:
+        row = conn.execute(
+            "SELECT * FROM memories WHERE namespace=? AND document_id=?",
+            (namespace, document_id)).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT * FROM memories WHERE document_id=? ORDER BY updated_at DESC LIMIT 1",
+            (document_id,)).fetchone()
+    return _row_to_mem(row) if row else None
 
 
 def delete_memory_document(document_id: str, namespace: str) -> int:
@@ -235,29 +255,47 @@ def set_retention(mem_id: int, stability: float, surprise: float) -> None:
 
 def apply_decay_to_all(namespace: Optional[str], halflife_days: float) -> int:
     """Ebbinghaus decay pass: reduce stability for memories not recently accessed.
-    Returns the number of rows touched."""
+    Returns the number of memories whose stability was reduced.
+
+    Decay is anchored on ``last_decay`` (advanced every pass) rather than recomputed from
+    ``last_access`` each run, so a given interval of not-being-accessed is decayed exactly
+    ONCE. This makes the pass idempotent and FREQUENCY-INDEPENDENT: the per-interval
+    factors multiply to ``0.5 ** (total_elapsed / halflife)``, so running it every 60s or
+    once a day converges to the same stability. The old formula reapplied a fixed
+    days-since-access factor to the already-decayed value on every tick, which — on the
+    ~60s consciousness loop — collapsed every memory's stability to the floor within
+    minutes. Memories reinforced since the last pass keep their boosted stability and just
+    have their anchor moved forward (subconscious forgetting targets the un-recalled)."""
     conn = get_conn()
     now = now_ts()
+    halflife = max(halflife_days, 0.1)
     rows = conn.execute(
-        "SELECT id, stability, last_access, access_count FROM memories"
+        "SELECT id, stability, last_access, last_decay FROM memories"
         + (" WHERE namespace=?" if namespace else ""),
         ([namespace] if namespace else []),
     ).fetchall()
     touched = 0
     for r in rows:
-        days_since = (now - r["last_access"]) / 86400.0
-        if days_since < 1e-6:
+        anchor = r["last_decay"] if r["last_decay"] is not None else r["last_access"]
+        # Reinforced since the last decay: keep the boosted stability, reset the anchor.
+        if r["last_access"] > anchor:
+            conn.execute("UPDATE memories SET last_decay=? WHERE id=?", (now, r["id"]))
             continue
-        decay_factor = 0.5 ** (days_since / max(halflife_days, 0.1))
-        new_stab = max(r["stability"] * (0.5 + 0.5 * decay_factor), 0.01)
-        if abs(new_stab - r["stability"]) > 1e-6:
+        delta_days = (now - anchor) / 86400.0
+        if delta_days <= 1e-6:
+            continue
+        new_stab = max(r["stability"] * (0.5 ** (delta_days / halflife)), 0.01)
+        if abs(new_stab - r["stability"]) > 1e-9:
             conn.execute(
-                "UPDATE memories SET stability=? WHERE id=?",
-                (new_stab, r["id"]),
+                "UPDATE memories SET stability=?, last_decay=? WHERE id=?",
+                (new_stab, now, r["id"]),
             )
             touched += 1
-    if touched:
-        conn.commit()
+        else:
+            # Already at the floor (or no measurable change): still advance the anchor so
+            # the elapsed interval isn't recounted next pass.
+            conn.execute("UPDATE memories SET last_decay=? WHERE id=?", (now, r["id"]))
+    conn.commit()
     return touched
 
 

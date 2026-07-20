@@ -5,12 +5,33 @@ precision win on top of hybrid retrieval) can be turned on by config
 instead of only in code. The default must stay empty so the offline/numpy-only CI path is
 unchanged (empty -> None -> IdentityReranker, no torch).
 """
+from engraphis import config
 from engraphis.config import Settings
+
+
+RETIRED_RELAY_URL = "https://engraphis-production.up.railway.app"
 
 
 def test_rerank_model_defaults_to_empty(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_RERANK_MODEL", raising=False)
     assert Settings().rerank_model == ""
+
+
+def test_cors_default_origins_follow_configured_port():
+    # The empty-CORS default derives loopback origins from the port, so running on a
+    # non-default ENGRAPHIS_PORT doesn't lock the dashboard's own origin out.
+    assert config._parse_origins("", 9000) == [
+        "http://127.0.0.1:9000", "http://localhost:9000"]
+    # Explicit origins pass through unchanged.
+    assert config._parse_origins("https://app.example.com", 9000) == [
+        "https://app.example.com"]
+
+
+def test_cors_origins_use_engraphis_port_env(monkeypatch):
+    monkeypatch.delenv("ENGRAPHIS_CORS_ORIGINS", raising=False)
+    monkeypatch.setenv("ENGRAPHIS_PORT", "9100")
+    assert Settings().cors_origins == [
+        "http://127.0.0.1:9100", "http://localhost:9100"]
 
 
 def test_rerank_model_read_from_env(monkeypatch):
@@ -34,3 +55,60 @@ def test_service_builds_offline_with_default_rerank_model(monkeypatch):
     svc = MemoryService.create(":memory:", rerank_model=(Settings().rerank_model or None))
     assert svc.remember("a durable fact", workspace="w", repo="r")["stored"] is True
     assert svc.recall("a durable fact", workspace="w", repo="r")["count"] >= 1
+
+
+def test_embed_dim_defaults_to_default_model_dimension(monkeypatch):
+    monkeypatch.delenv("ENGRAPHIS_EMBED_DIM", raising=False)
+    assert Settings().embed_dim == 384
+
+
+def test_galaxy_ui_rollout_flag_defaults_on_and_can_restore_legacy(monkeypatch):
+    monkeypatch.delenv("ENGRAPHIS_GRAPH_UI_V2", raising=False)
+    assert Settings().graph_ui_v2 is True
+    monkeypatch.setenv("ENGRAPHIS_GRAPH_UI_V2", "0")
+    assert Settings().graph_ui_v2 is False
+
+
+def test_license_server_url_precedence(monkeypatch):
+    # Relay routing and commercial control-plane routing are intentionally independent.
+    monkeypatch.setattr(config.settings, "relay_url", "https://relay.example/")
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
+    assert config.resolve_license_server_url() == config.DEFAULT_LICENSE_SERVER_URL
+    assert config.resolve_license_server_url(
+        "https://signed.example/",
+    ) == "https://signed.example"
+
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "https://override.example/")
+    assert config.resolve_license_server_url(
+        "https://signed.example/",
+    ) == "https://override.example"
+
+
+def test_license_server_url_migrates_retired_signed_host(monkeypatch):
+    monkeypatch.setattr(config.settings, "relay_url", config.DEFAULT_RELAY_URL)
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
+    assert config.resolve_license_server_url(
+        "https://engraphis-production.up.railway.app/",
+    ) == config.DEFAULT_LICENSE_SERVER_URL
+
+
+def test_retired_cloud_url_override_is_canonicalized(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", RETIRED_RELAY_URL + "/")
+    assert (
+        config.resolve_license_server_url("https://signed.example")
+        == config.DEFAULT_LICENSE_SERVER_URL
+    )
+
+
+def test_retired_relay_url_override_is_canonicalized():
+    assert config.canonicalize_relay_url(RETIRED_RELAY_URL) == config.DEFAULT_RELAY_URL
+
+def test_invalid_service_mode_falls_back_to_combined(monkeypatch):
+    monkeypatch.setenv("ENGRAPHIS_SERVICE_MODE", "bogus")
+    assert Settings().service_mode == "combined"
+
+
+def test_valid_service_modes_accepted(monkeypatch):
+    for mode in ("customer", "vendor", "combined"):
+        monkeypatch.setenv("ENGRAPHIS_SERVICE_MODE", mode)
+        assert Settings().service_mode == mode

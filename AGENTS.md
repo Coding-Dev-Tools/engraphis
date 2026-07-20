@@ -15,12 +15,12 @@ imports it. Read §0 before editing anything.
 There are **two parallel codebases** under `engraphis/`. Confusing them is the single
 most common mistake here.
 
-| | **v2 — the target (build here)** | **v1 — legacy reference server (running server)** |
+| | **v2 — current architecture (build here)** | **v1 — legacy reference server** |
 |---|---|---|
-| Status | The v2 target design. Phases 0–1 done; parts of 2/3/5 done (see §6). | Working reference implementation; flat namespaces. |
+| Status | Primary scoped, bi-temporal, interface-driven implementation. | Compatibility/reference implementation with flat namespaces. |
 | Model | Scoped + bi-temporal + typed; interface-driven. | Single flat `namespace` string per memory. |
 | Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/`, `static/` |
-| Data | new v2 schema (`SCHEMA_VERSION = 2`) | `engraphis_v1.db` |
+| Data | new v2 schema (`SCHEMA_VERSION = 3`) | `engraphis_v1.db` |
 | Entry | `MemoryEngine.create()` → `core/engine.py` | `python -m scripts.start_server` → FastAPI on :8700 |
 
 **Rule:** build new capability on **v2** (`core/` + `backends/`) behind the interfaces.
@@ -49,18 +49,19 @@ python -m eval.external --dataset locomo10.json --format locomo --k 10        # 
 python -m eval.external --dataset longmemeval_s.json --format longmemeval     # LongMemEval
 python -m eval.external --dataset locomo10.json --format locomo --offline --limit 2  # plumbing check
 
-# ── v2 Memory Inspector (product UI over MemoryService; same layer as the MCP server) ──
-python -m scripts.inspector          # http://127.0.0.1:8710 (auth: ENGRAPHIS_API_TOKEN)
+# ── Unified dashboard + memory inspector ──
+python -m scripts.start_dashboard    # http://127.0.0.1:8700
+# Use this unified launcher; there is no separate Inspector service.
 
 # ── Onboarding (writes .env with an absolute DB path; doctor mode verifies install) ──
 engraphis-init                   # or: python -m scripts.init
 engraphis-init --check
 
-# ── Commercial layer (gates live ONLY in inspector/app.py) ──
+# ── Commercial layer (shared dashboard/auth/license modules; never core/) ──
 python -m scripts.license_admin keygen                 # vendor keypair → .secrets/ (gitignored)
 python -m scripts.license_admin issue --email a@b.co --plan team --seats 5 --days 365
 ENGRAPHIS_LICENSE_KEY=ENGR1...   # or ~/.engraphis/license.key; free tier = no key
-# Team mode is ON by default (multi-user Inspector). Set ENGRAPHIS_TEAM_MODE=0 to disable.
+# Team mode is ON by default (multi-user dashboard). Set ENGRAPHIS_TEAM_MODE=0 to disable.
 # A 'team' license is required to add seats beyond the first admin.
 
 # ── Sleep-time consolidation (schedulable local job; also an MCP tool) ────────
@@ -68,10 +69,10 @@ python -m scripts.consolidate --db engraphis.db --workspace acme --dry-run
 
 # ── Cloud sync (Pro; schedulable job over a shared folder OR the managed relay — see docs/SYNC.md) ──
 python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/engraphis --dry-run
-python -m scripts.sync --db engraphis.db --workspace acme --relay https://sync.engraphis.app  # or bare --relay + ENGRAPHIS_RELAY_URL
+python -m scripts.sync --db engraphis.db --workspace acme --relay https://team.engraphis.com  # or bare --relay + ENGRAPHIS_RELAY_URL
 
 # ── Run the v1 server (needs the full install) ───────────────────────────────
-python -m scripts.start_server      # http://127.0.0.1:8700  (dashboard at /, OpenAPI at /docs)
+python -m scripts.start_server      # http://127.0.0.1:8700  (dashboard at /, schema at /openapi.json)
 python -m scripts.test_routes       # HTTP smoke test — requires a running server + httpx
 python -m scripts.cli recall "what do we know about X" -n vault    # CLI: ingest/recall/chat/thoughts/list
 
@@ -177,110 +178,24 @@ These are pure, unit-tested functions — change them only with a corresponding 
 
 ---
 
-## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 2`)
+## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 3`)
 
 - **Scope hierarchy:** `workspace → repo → session → memory`. Scopes: `session|repo|workspace|user`.
 - **Bi-temporal validity on every record:** world-time `valid_from/valid_to` +
   system-time `ingested_at/expired_at`. Reads hide facts outside their validity window
   unless `include_invalid=True` or an `as_of` anchor is given.
 - **IDs:** ULID, time-sortable, **typed prefixes** (`ws_`, `repo_`, `ses_`, `mem_`, `ent_`,
-  `edg_`, `sym_`, `evt_`, `job_`, `aud_`) — `core/ids.py`. Lexicographic sort == chronological.
+  `edg_`, `sym_`, `evt_`, `job_`, `aud_`, `dev_`, `rcpt_`) — `core/ids.py`.
+  Lexicographic sort == chronological.
 - **Tables:** `workspaces`, `repos`, `sessions`, `memories`, `mem_vectors`,
   `mem_fts` (FTS5 + plain-table fallback), `entities`, `edges` (bi-temporal), `mem_links`,
-  `symbols`, `code_edges`, `events`, `audit`, `schema_migrations`.
+  `symbols`, `code_edges`, `code_files`, `code_memory_links`, `operation_receipts`,
+  `events`, `audit`, `schema_migrations`.
 - **Vectors are stored L2-normalized** so cosine similarity == dot product.
 
 ---
 
-## 6. Status — what's real vs planned
-
-- **Done — Phase 0:** interface contracts, scoped + bi-temporal schema, v1→v2 migration, eval
-  harness + CI.
-- **Done — Phase 1:** hybrid recall, six-term score, RRF, rerank; SentenceTransformer embedder +
-  `sqlite-vec` index, each with an offline fallback.
-- **Done — Phase 2:** deterministic (no-LLM) write-path conflict resolution
-  (`core/resolve.py`, ADD/NOOP/INVALIDATE, two signals: token-Jaccard + embedding cosine — see
-  §2); **LLM-based fact extraction** behind the `Extractor` protocol
-  (`backends/extractor.py`, offline default = passthrough, `ENGRAPHIS_EXTRACTOR=llm` to
-  enable, `MemoryEngine.ingest()` / `engraphis_ingest`); **Personalized PageRank** graph arm
-  (`core/graphrank.py`, default; `graph_mode="1hop"` retained for ablation); **A-MEM-style
-  evolution** (`MemoryEngine._evolve`: new writes auto-link to related live neighbors and
-  reinforce them — bounded, idempotent, audited).
-- **Done — partial Phase 3:** **MCP server exists** (`engraphis/mcp_server.py`, 18 tools:
-  write/read (incl. **grounded recall** — `engraphis_recall_grounded`: cited answer or abstain)/
-  governance/code/session — do not assume only `remember`/`recall` exist, check the
-  tool list) and a **code-symbol graph** (`backends/codegraph.py`, tree-sitter with a
-  dependency-free regex fallback; `MemoryEngine.index_repo()` / `engraphis_search_code`).
-  Languages: Python, JavaScript, TypeScript, C#, C, C++ (C#/C/C++ are regex-level today —
-  a `CompositeSymbolIndexer` routes them to the regex backend even when tree-sitter is
-  installed, so no untested AST grammar maps ship; AST maps can move them to the primary
-  later with no caller change). An unknown `languages=` filter is rejected with an
-  actionable error instead of silently indexing nothing. Traversal prunes build/dep dirs
-  *during* the walk and honours a root `.engraphisignore` (gitignore-style; hardcoded
-  default excludes are non-negotiable — an untrusted repo can't `!`-re-expose them);
-  symlinked files are not followed out of root. Call-graph edges are name-based, not
-  type-resolved (best-effort, documented as such in `backends/codegraph.py`).
-  **Not done:** incremental/file-watcher re-indexing (today `index_repo` is a full
-  re-scan; idempotent per file, not incremental), git-as-world-time signal.
-- **Done — partial Phase 5:** input validation/sanitization, optional bearer auth, CORS
-  allow-list, governance tools (`forget`/`pin`/`correct`, audited, never a hard delete),
-  Apache-2.0 licensing/packaging. **Not done:** encryption at rest, built-in rate limiting,
-  per-token tenant authorization — see `SECURITY.md`.
-- **Done — manual merge (N→1 governance op):** `MemoryEngine.merge()` /
-  `MemoryService.merge()` combine several selected memories into one — the multi-input
-  generalization of `correct`. Sources are bi-temporally closed (retired into history,
-  never hard-deleted), the new memory records `supersedes` on every source (so the
-  supersession chain renders — `service._chain_for` now walks *all* predecessors, not a
-  single line) plus a `merges` link back to each. Safety-inherits the strictest of its
-  sources: `trusted:false` if any source is untrusted (no laundering) and the highest
-  `sensitivity`; pinned if any source was pinned. Audited on both sides with a
-  token-compaction number. Exposed on the dashboard (`POST /api/merge`, multi-select +
-  merge modal in the Memories tab) over the shared `MemoryService`; not yet an MCP tool.
-  Distinct from `consolidate`, which is automatic, episodic-only, and *non-destructive*
-  (sources stay live). Tests: `tests/test_merge.py`.
-- **Done — Phase 4 (first shipping cut):** the consolidation loop
-  (`core/consolidate.py` + `scripts/consolidate.py` + `engraphis_consolidate` MCP tool +
-  Inspector button): recurring episodics → semantic digests (linked `consolidates`, audited),
-  decayed transients archived bi-temporally; deterministic offline, optional LLM summarizer.
-  Every sweep reports **compaction** — estimated context tokens before/after
-  (`textutil.estimate_tokens`, ~4 chars/token, offline) — under `report["compaction"]`, so the
-  payoff is a number (§3.7). Opt-in **entity profiles** (`consolidate_profiles`, `profiles=True`,
-  `--profiles`): roll every live memory mentioning an entity (`store.list_entities` + name match)
-  into one durable `semantic` profile digest, linked `profiles`, provenance
-  `source='profile_consolidation'`, idempotent + audited — the local-first analog of a
-  per-subject knowledge profile. Framed local-first: a user-schedulable job, not a cloud service.
-  **Not done:** scope promotion; procedural distillation.
-- **New — v2 Memory Inspector** (`engraphis/inspector/`, `python -m scripts.inspector`,
-  :8710): product UI over `MemoryService` (same layer as the MCP server, so UI and tools
-  can't drift). Flagship screen: the supersession chain with word-level diffs — rendering
-  `resolve()`'s decision history. Accessible (ARIA tabs/labels, keyboard nav, text+color
-  status), no build step, content rendered via textContent only. Optional bearer auth
-  (`ENGRAPHIS_API_TOKEN`); multi-user login is the remaining Pro gate.
-- **Done — Cloud sync (Pro, first cut):** convergent multi-device / team sync over any
-  shared folder. `core/sync.py::SyncEngine` is a state-based CRDT merge over memory rows
-  (bi-temporal, deterministic, idempotent) that reuses the `resolve()`/validity machinery —
-  union by ULID, earliest-invalidation + max-reinforcement lattice, deterministic LWW with
-  a content-hash tiebreak; scope reconciled *by name* on apply. `SyncTransport` interface
-  (`core/interfaces.py`) + two backends: `FolderTransport` (`backends/sync_folder.py`, works
-  over Dropbox/iCloud/Syncthing/git) and the managed `RelayTransport`
-  (`backends/sync_relay.py`) against the license-gated server (`inspector/sync_relay.py`,
-  mounted by `inspector/cloud_mount.py` on both `app.py` and `dashboard_app.py`; Team seat
-  enforcement is server-side). `get_transport("folder"|"relay", …)` selects between them;
-  gated CLI `python -m scripts.sync --remote <dir>` **or** `--relay [<url>]`
-  (`require_feature("sync")` lives in the script — `core/` stays license-free). The
-  untrusted-bundle apply path is validated/clamped and **scope-confined** (a bundle can't
-  cross a workspace/repo boundary; `secret` memories aren't exported; provenance is stamped).
-  See `docs/SYNC.md`.
-  **Not done:** end-to-end encryption of relay bundles (client-side encrypt/decrypt; the
-  relay already stores opaque bytes), HLC per-field clock, entity/edge graph sync,
-  `engraphis_sync` MCP tool + Inspector "Devices" panel.
-- **Not done at all:** Phase 6 — Rust hot path.
-- The **v1 FastAPI server** is the legacy reference server and still runs; treat it as a
-  compatibility/reference surface, not the place for new capability.
-
----
-
-## 7. Gotchas
+## 6. Gotchas
 
 - **Offline by default in core:** `MemoryEngine.create()` uses a deterministic hashing
   embedder + NumPy index, so tests need no model download or network. Real models load only
@@ -290,11 +205,8 @@ These are pure, unit-tested functions — change them only with a corresponding 
   (`self.has_fts5`). Don't assume BM25 is available.
 - **Secrets & data are git-ignored:** `.env`, `engraphis_v1.db`, `*.db-wal`, `*.db-shm`. Never
   commit, print, or paste their contents.
-- **Real commit history exists as of 2026-07-08** — the "single Initial commit, everything else
-  uncommitted" state described here through 2026-07-01 is resolved; work since has landed as
-  logical, descriptive commits (see `git log`). `CHANGELOG.md` is still worth reading for a
-  higher-level summary, but `git log`/`blame` are reliable again for recent work. Keep committing
-  in logical chunks rather than letting changes pile up uncommitted.
+- **Git history is authoritative:** use `git log` / `git blame` for implementation history and
+  `CHANGELOG.md` for release-level summaries. Keep commits logical and descriptive.
 - **Synced-folder flakiness:** if the repo sits on OneDrive (or any host-to-sandbox mount), a
   transient `SyntaxError`, `AttributeError` for a method you just added, or a shell command
   reading back fewer lines than you just wrote is mid-sync, not your code. A single re-run is
@@ -305,9 +217,11 @@ These are pure, unit-tested functions — change them only with a corresponding 
 
 ---
 
-## 8. Source-of-truth docs
+## 7. Source-of-truth docs
 
-- **`README.md`** — v1 server usage + the REST API table.
+- **`README.md`** — installation, product surfaces, configuration, and public API usage.
+- **`CHANGELOG.md`** — shipped capability and release history. Keep phase/status ledgers out of
+  this operating manual.
 - **`docs/SYNC.md`** — cloud sync (Pro): architecture, the convergent merge, CLI usage, the
   untrusted-bundle security model, and positioning vs. file-syncers like Obsidian Sync.
 - **`AGENTS.md`** (this file) + **`CLAUDE.md`** — how to work in the repo.

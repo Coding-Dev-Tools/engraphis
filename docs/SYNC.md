@@ -65,18 +65,17 @@ your memory store (SQLite)                        another device's store
   Syncthing share, a mounted drive, even a git repo. Each device writes one full-state
   bundle (`bundle-<device_id>.json`) and overwrites it each sync, so the folder stays small.
 - **`engraphis/backends/sync_relay.py` — `RelayTransport`.** The managed transport: the
-  same three `SyncTransport` calls over HTTPS against the vendor relay
-  (`engraphis/inspector/sync_relay.py`), carrying the device's license key as a bearer
-  token. The relay verifies that key **server-side** and (on Team) holds each device to a
-  seat, so patching the local feature check can't unlock sync. Bundles are namespaced by an
-  account id derived from the license, so customers never see each other's data.
+  same three `SyncTransport` calls over HTTPS against the customer service
+  (`engraphis/inspector/sync_relay.py`), carrying an expiring, revocable, per-user token.
+  The server verifies owner, scope, role, and the account's active entitlement on every
+  request. Bundles are namespaced by the signed account entitlement, so customers never
+  see each other's data.
 - **`get_transport(kind, **kw)`** (in `sync_folder.py`) selects between them by name —
   `"folder"` (needs `root=`) or `"relay"` (needs `base_url=` + `workspace_id=`) — the same
   factory pattern as `get_embedder`/`get_vector_index`; `relay` is imported lazily so a
   folder-only install stays dependency-light.
-- **`scripts/sync.py` — the CLI** (`--remote <folder>` or `--relay [<url>]`) and the place
-  the **Pro gate** lives (`require_feature("sync")`), exactly like `scripts/consolidate.py`
-  gates `--report`.
+- **`scripts/sync.py` — the CLI** (`--remote <folder>` or `--relay [<url>]`). Folder sync
+  retains the local Pro gate; relay sync is authorized server-side by the scoped token.
 
 ### How the merge converges
 
@@ -123,21 +122,34 @@ python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/eng
 python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/engraphis --repo frontend
 ```
 
-Or use the **managed relay** instead of a shared folder — same command, `--relay` in place
-of `--remote`. The relay authenticates with your license key server-side, so no folder to
-set up and no way to bypass the gate by patching the client:
+Or use the **managed relay** instead of a shared folder. Create your own device token in
+the Team dashboard, then save it in the local dashboard or provide it through
+`ENGRAPHIS_SYNC_TOKEN` / `--relay-token`. The browser and email never receive the account
+license key:
 
 ```bash
 # Point at a relay host explicitly …
-python -m scripts.sync --db engraphis.db --workspace acme --relay https://sync.engraphis.app
+python -m scripts.sync --db engraphis.db --workspace acme \
+  --relay https://team.engraphis.com --relay-token <scoped-token>
 
 # … or set ENGRAPHIS_RELAY_URL once and pass a bare --relay
 python -m scripts.sync --db engraphis.db --workspace acme --relay
+
+# Viewer tokens have sync:read only and must never upload a local bundle
+python -m scripts.sync --db engraphis.db --workspace acme --relay --read-only
 ```
 
 The relay is namespaced by workspace **name**, so every device on the account that syncs
-workspace `acme` shares one bucket; the license key isolates your account from every other
-customer's. `--relay-key` overrides the device's configured license key if needed.
+workspace `acme` shares one bucket. The account entitlement isolates tenants; the user
+token determines who may access it. Viewers have `sync:read`; members and admins also have
+`sync:write`. New tokens default to 90 days. Revoking a token or disabling/deleting its
+owner takes effect immediately. `--relay-key` exists only as a hidden v1.0 migration alias.
+
+The hosted server stores only the token hash. A device configured through the dashboard
+must retain the raw bearer for later sync rounds, so it writes the value atomically to
+`$ENGRAPHIS_STATE_DIR/sync.token` (default `~/.engraphis/sync.token`) with owner-only
+permissions where the platform supports them. Treat that local file and
+`ENGRAPHIS_SYNC_TOKEN` as secrets; revocation makes either copy unusable.
 
 Schedule it like any other local job:
 
@@ -148,7 +160,10 @@ Schedule it like any other local job:
 
 Exactly one of `--remote` / `--relay` is required. Sync is full-state and idempotent, so
 running it on any cadence — or interrupting it — is safe. It's a **Pro** feature; the 3-day
-local trial (Settings → License, one click, no key) unlocks it for evaluation.
+server-issued trial (Settings → License, confirm the emailed link) unlocks it for evaluation.
+The managed relay accepts at most 64 MiB per device bundle and 256 MiB per workspace;
+current clients fetch one raw bundle at a time rather than constructing an unbounded bulk
+base64 response.
 
 ### Automatic sync (no button, no cron)
 
@@ -163,7 +178,7 @@ Team memory should stay converged without anyone remembering to click — but on
   relay traffic (and, on a metered host, cost) to a known ceiling regardless of how much
   the team edits. It is **opt-in** (off by default) and Pro/Team-gated
   (`engraphis.autosync.run_once` re-checks the license + key each tick and no-ops if the
-  plan lapsed).
+  plan lapsed). It uses the saved scoped token and honors its read-only setting.
 - **CLI + cron/Task Scheduler** (headless, dashboard not running): the `python -m
   scripts.sync … --relay` line above, on whatever cadence you like.
 
@@ -180,13 +195,14 @@ admin** can flip these toggles (`/api/sync/auto` POST is admin-gated in
 is orthogonal to who can *write* memories: a **member** keeps "store + view" (create,
 edit, correct, pin, forget, and read), a **viewer** stays read-only, and an **admin** gets
 those plus team management and the auto-sync switches. A member's writes still trigger
-on-change sync when an admin has enabled it — the sync follows the *write*, not the
-writer's role.
+the next scheduled sync when an admin has enabled it; writes never bypass the configured
+cadence based on the writer's role.
 
-The relay is namespaced by an account id derived from the license **email**, so every
-device that syncs with the *same* Team key lands in one shared bucket — that is what makes
-"team memory" a single converged store. The relay holds each Team device to a live seat
-(idle seats are reclaimed), so auto-sync never lets a Team key exceed its seat count.
+The relay namespace comes from the signed account entitlement, while authorization comes
+from each person's scoped token. Team members therefore share one converged store without
+sharing the Team license key. Viewer tokens can list/download only; member/admin tokens
+may upload/delete. The legacy Team-key route is disabled by default in customer mode and
+can be enabled only for a documented migration window.
 
 ---
 
@@ -209,15 +225,19 @@ bundle as hostile:
 - **Fail-safe parsing.** Non-finite JSON (`Infinity`/`NaN`) is rejected, and one malformed
   or hostile bundle is recorded and skipped — it never aborts the whole sync.
 - **No secrets on the wire.** Embeddings are never serialized (rebuilt locally);
-  `secret`-flagged memories are excluded from export by default; the auth/license database
-  is a separate file that is never part of a bundle.
+  `secret`-flagged memories are excluded from export and cannot be overwritten or
+  downgraded by a remote bundle; the auth/license database is a separate file that is
+  never part of a bundle. Dashboard/auto-sync also refuses to upload Team personal folders
+  to the shared-account relay, and the CLI applies the same guard for `--relay`.
 - **Provenance.** Every synced-in memory is tagged `provenance.synced_from_device`, so
   "why is this known?" stays answerable.
 
 **Trust boundary, stated plainly:** within a workspace you *choose* to sync, any peer can
 add, relabel, or invalidate memories — that's what sharing a replica means (like any
 collaborator in a shared doc), and it's bi-temporal and audited, never a hard delete.
-Sync only ever moves data within the scope you pointed it at.
+Sync only ever moves data within the scope you pointed it at. Today's relay encrypts data
+in transit with HTTPS but stores opaque bundle bytes in plaintext at rest; it is not yet
+zero-knowledge/end-to-end encrypted.
 
 ---
 

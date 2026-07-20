@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.interfaces import MemoryType
+from engraphis.core.interfaces import MemoryType, Scope
 from engraphis.service import MemoryService, ValidationError
 
 
@@ -137,6 +137,54 @@ def test_engine_merge_missing_source_raises_keyerror():
     a = eng.remember("alpha", workspace_id=wid, mtype=MemoryType.SEMANTIC, resolve_conflicts=False)
     with pytest.raises(KeyError):
         eng.merge([a, "mem_does_not_exist"], "x")
+
+
+def test_merge_writes_the_result_before_retiring_any_source():
+    """Regression: a failing ``remember()`` used to leave every source retired.
+
+    ``merge`` closed all sources first, so any error on the way back in — an unstorable
+    scope, a bad session, a full disk — destroyed the inputs with nothing to replace
+    them. That is unrecoverable loss from an operation whose entire contract is
+    "retired into history, never a hard delete"."""
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    a = eng.remember("alpha", workspace_id=wid, mtype=MemoryType.SEMANTIC,
+                     resolve_conflicts=False)
+    b = eng.remember("beta", workspace_id=wid, mtype=MemoryType.SEMANTIC,
+                     resolve_conflicts=False)
+
+    def boom(*_args, **_kw):
+        raise RuntimeError("simulated write failure")
+
+    eng.remember = boom
+    with pytest.raises(RuntimeError):
+        eng.merge([a, b], "alpha and beta")
+
+    for sid in (a, b):
+        assert eng.store.get_memory(sid).valid_to is None, "source must survive a failed merge"
+
+
+def test_merge_across_repos_lands_at_workspace_scope():
+    """The documented cross-repo repro: ``repo_id`` resolves to None while the inherited
+    scope stays ``repo``, which ``remember`` rejects. It now widens to ``workspace``."""
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    one = eng.store.get_or_create_repo(wid, "one")
+    two = eng.store.get_or_create_repo(wid, "two")
+    a = eng.remember("Alpha ships from repo one.", workspace_id=wid, repo_id=one,
+                     scope=Scope.REPO, mtype=MemoryType.SEMANTIC, resolve_conflicts=False)
+    b = eng.remember("Beta ships from repo two.", workspace_id=wid, repo_id=two,
+                     scope=Scope.REPO, mtype=MemoryType.SEMANTIC, resolve_conflicts=False)
+
+    out = eng.merge([a, b], "Alpha and Beta ship from separate repos.")
+
+    merged = eng.store.get_memory(out["id"])
+    assert merged.scope == Scope.WORKSPACE and merged.repo_id is None
+    assert merged.valid_to is None and merged.expired_at is None
+    for sid in (a, b):
+        assert eng.store.get_memory(sid).valid_to is not None   # retired, not deleted
+    relations = sorted(link["relation"] for link in eng.store.get_links(out["id"]))
+    assert relations == ["merges", "merges"]
 
 
 def test_merge_is_audited_on_both_sides():

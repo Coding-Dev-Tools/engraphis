@@ -19,6 +19,8 @@ import sys
 import urllib.error
 import urllib.request
 
+from engraphis.cloud_license import validate_cloud_base_url
+
 
 def _req(method, url, *, data=None, headers=None, timeout=15):
     body = json.dumps(data).encode() if data is not None else None
@@ -26,7 +28,7 @@ def _req(method, url, *, data=None, headers=None, timeout=15):
     h.update(headers or {})
     req = urllib.request.Request(url, data=body, method=method, headers=h)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310
             return r.status, json.loads(r.read().decode() or "{}")
     except urllib.error.HTTPError as e:
         try:
@@ -44,7 +46,10 @@ def main(argv=None):
     ap.add_argument("--admin-token", default="")
     ap.add_argument("--revoke", action="store_true")
     args = ap.parse_args(argv)
-    base = args.base_url.rstrip("/")
+    try:
+        base = validate_cloud_base_url(args.base_url)
+    except ValueError as exc:
+        ap.error(str(exc))
     ok = True
 
     def check(name, cond, detail=""):

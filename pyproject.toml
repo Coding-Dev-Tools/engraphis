@@ -1,20 +1,26 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = [
+    # 83.0 fixes CVE-2026-59890 in sdist exclusion handling. Keep the Python 3.9
+    # core installable with the newest compatible backend; release builds run 3.11.
+    "setuptools>=83.0; python_version >= '3.10'",
+    "setuptools>=77.0; python_version < '3.10'",
+    "wheel",
+]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "engraphis"
-version = "0.9.5"
+version = "1.0.0"
 description = "Local-first AI memory engine for agents — Ebbinghaus decay, interaction-aware recall, bi-temporal facts, hybrid retrieval, and an MCP server. You bring the LLM."
 readme = "README.md"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.9"
 authors = [{ name = "The Engraphis Authors" }]
 keywords = ["ai", "agents", "memory", "mcp", "rag", "vector-search", "llm", "retrieval"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
@@ -30,16 +36,36 @@ dependencies = [
 [project.optional-dependencies]
 # The REST server + real embeddings (the full self-hosted stack).
 server = [
-    "fastapi>=0.110",
+    # These floors exclude known request-parsing, StaticFiles/UNC, and URL-boundary
+    # vulnerabilities. Their patched releases require Python 3.10, so the marker is
+    # mandatory: without it `pip install engraphis[server]` cannot RESOLVE AT ALL on
+    # 3.9 (no matching distribution), which is the very command the launcher tells a
+    # 3.9 user to run. Marked, the install succeeds and scripts/start_server.py
+    # reports the 3.10 requirement itself. The NumPy-only core stays 3.9-clean.
+    "fastapi>=0.133.1,<1; python_version >= '3.10'",
+    "starlette>=1.3.1,<2; python_version >= '3.10'",
     "uvicorn[standard]>=0.29",
     "httpx>=0.25",
     "pydantic>=2.0",
     "python-dotenv>=1.0",
+    # fastapi Form/File routes (dashboard import/upload) need this at app-import time;
+    # without it a bare [server] install crashes on startup (mcp only brings it
+    # transitively, which is how CI stayed green while [server] was broken).
+    # Marked for the same reason as fastapi/starlette: every release satisfying this
+    # floor requires 3.10, so an unmarked entry makes the whole extra unresolvable on 3.9.
+    "python-multipart>=0.0.31; python_version >= '3.10'",
     "sentence-transformers>=2.7",
 ]
 # The MCP server — plug Engraphis into Claude Code, Cursor, Cline, Zed, etc.
+# The upstream MCP SDK requires Python 3.10+; the numpy-only core remains Python 3.9.
 mcp = [
-    "mcp>=1.2.0",
+    # 1.28.1 contains the current 1.x transport-security fixes; upstream explicitly
+    # recommends the <2 cap because stable v2 is a breaking line.
+    "mcp>=1.28.1,<2; python_version >= '3.10'",
+    "python-multipart>=0.0.31; python_version >= '3.10'",
+    "starlette>=1.3.1,<2; python_version >= '3.10'",
+    "pydantic-settings>=2.14.2; python_version >= '3.10'",
+    "cryptography>=48.0.1; python_version >= '3.10'",
     "pydantic>=2.0",
     "sentence-transformers>=2.7",
 ]
@@ -49,23 +75,54 @@ code = [
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.2",
 ]
+# Local resource extraction. Text/code/HTML/DOCX remain stdlib-only; this adds PDF
+# extraction and image OCR bindings (the Tesseract executable is installed separately).
+documents = [
+    "pypdf>=4.0",
+    "Pillow>=12.3.0; python_version >= '3.10'",
+    "pytesseract>=0.3.10",
+]
+transcription = [
+    "faster-whisper>=1.0",
+    # onnxruntime 1.24+ dropped CPython 3.10 wheels; keep the advertised 3.10
+    # install path resolvable while faster-whisper still supports it.
+    "onnxruntime<1.24; python_version < '3.11'",
+]
+postgres = [
+    # psycopg is LGPL-3.0 — acceptable as an optional, user-installed, non-vendored
+    # extra of this Apache-2.0 project; noted here for license-audit clarity.
+    "psycopg[binary]>=3.1",
+]
 # Encryption at rest for the memory database (SQLCipher / AES-256). Opt-in: set
 # ENGRAPHIS_DB_KEY (or ENGRAPHIS_DB_KEY_FILE). Without this the DB is plaintext.
 encryption = [
-    "sqlcipher3-binary>=0.5.0",
+    # Upstream publishes CPython manylinux x86-64 wheels only. musl/Alpine is not
+    # machine-detectable in PEP 508; those users must provision a compatible driver.
+    "sqlcipher3-binary>=0.5.0; platform_python_implementation == 'CPython' and platform_system == 'Linux' and platform_machine == 'x86_64'",
 ]
-# Everything, for a full self-hosted install.
+# Everything available on the current platform, for a full self-hosted install.
+# Encryption is intentionally separate: ``all`` must resolve on macOS, Windows, Linux
+# ARM, and musl even though sqlcipher3-binary does not publish wheels for those targets.
 all = [
-    "fastapi>=0.110",
+    "fastapi>=0.133.1,<1; python_version >= '3.10'",
+    "starlette>=1.3.1,<2; python_version >= '3.10'",
     "uvicorn[standard]>=0.29",
     "httpx>=0.25",
     "pydantic>=2.0",
     "python-dotenv>=1.0",
+    "python-multipart>=0.0.31; python_version >= '3.10'",
     "sentence-transformers>=2.7",
-    "mcp>=1.2.0",
+    "mcp>=1.28.1,<2; python_version >= '3.10'",
+    "pydantic-settings>=2.14.2; python_version >= '3.10'",
+    "cryptography>=48.0.1; python_version >= '3.10'",
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.2",
-    "sqlcipher3-binary>=0.5.0",
+    "pypdf>=4.0",
+    "Pillow>=12.3.0; python_version >= '3.10'",
+    "pytesseract>=0.3.10",
+    "faster-whisper>=1.0",
+    "onnxruntime<1.24; python_version < '3.11'",
+    "psycopg[binary]>=3.1",
 ]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.4"]
 # Everything needed to run the FULL offline gate in CI (lint + all extras-gated tests)
@@ -74,12 +131,28 @@ test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.4",
-    "fastapi>=0.110",
+    "python-dotenv>=1.0",
+    "uvicorn[standard]>=0.29",
+    "fastapi>=0.133.1,<1; python_version >= '3.10'",
+    "starlette>=1.3.1,<2; python_version >= '3.10'",
     "httpx>=0.25",
-    "mcp>=1.2.0",
+    # explicit rather than transitive via mcp, so the dependency is stated where it is
+    # used (fastapi Form routes) instead of riding on another extra's resolution.
+    "python-multipart>=0.0.31; python_version >= '3.10'",
+    # exercises the real sqlite-vec ANN backend (k=? KNN + filtered widening) in CI.
+    "sqlite-vec>=0.1.6",
+    "mcp>=1.28.1,<2; python_version >= '3.10'",
+    "pydantic-settings>=2.14.2; python_version >= '3.10'",
+    "cryptography>=48.0.1; python_version >= '3.10'",
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.2",
-    "sqlcipher3-binary>=0.5.0",
+    "pypdf>=4.0",
+    "Pillow>=12.3.0; python_version >= '3.10'",
+    "pytesseract>=0.3.10",
+    "faster-whisper>=1.0",
+    "onnxruntime<1.24; python_version < '3.11'",
+    "psycopg[binary]>=3.1",
+    "sqlcipher3-binary>=0.5.0; platform_python_implementation == 'CPython' and platform_system == 'Linux' and platform_machine == 'x86_64'",
 ]
 
 [project.urls]
@@ -90,23 +163,30 @@ Issues = "https://github.com/Coding-Dev-Tools/engraphis/issues"
 [project.scripts]
 engraphis-server = "scripts.start_server:main"
 engraphis-cli = "scripts.cli:main"
-engraphis-mcp = "engraphis.mcp_server:main"
+engraphis-mcp = "engraphis.mcp_cli:main"
 engraphis-inspector = "scripts.inspector:main"
 engraphis-dashboard = "scripts.start_dashboard:main"
 engraphis-consolidate = "scripts.consolidate:main"
+engraphis-graph = "scripts.graph_cli:main"
+engraphis-graph-server = "scripts.graph_server:main"
 engraphis-init = "scripts.init:main"
 engraphis-update = "scripts.update:main"
+
+[tool.setuptools]
+include-package-data = false
 
 [tool.setuptools.packages.find]
 include = ["engraphis*", "scripts*"]
 
 [tool.setuptools.package-data]
-"engraphis.inspector" = ["index.html"]
-# Recursive glob so the vendored assets under static/vendor/ ship too, not just the
-# top-level files. Requires engraphis/static/__init__.py so the dir is a discovered
-# package — without it these data rules match nothing and index.html is left out of
-# the wheel (dashboard 500s with "index.html does not exist").
-"engraphis.static" = ["**/*"]
+# Keep the shipped dashboard assets explicit. A recursive catch-all also packages ignored
+# runtime artifacts such as static/__pycache__/*.pyc after a local compile check.
+# vendor/**/* covers nested vendor assets too (vendor/* alone doesn't cross "/").
+"engraphis.static" = ["*.html", "*.css", "*.js", "*.png", "*.ico", "vendor/*", "vendor/**/*"]
+"engraphis" = ["commercial_manifest.json"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["*.pyc", "*.pyo", "__pycache__/*"]
 
 [tool.ruff]
 line-length = 100

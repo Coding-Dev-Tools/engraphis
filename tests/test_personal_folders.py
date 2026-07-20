@@ -10,12 +10,15 @@ These run offline on numpy alone (no fastapi/HTTP) by driving the current-user c
 directly — the same value the dashboard's team auth gate binds once per request. The full
 HTTP path (real cookies, two users, one app) is covered in test_dashboard_v2.py.
 """
+from unittest.mock import Mock
+
 import pytest
 
 from engraphis.service import MemoryService, ValidationError, set_current_user
 
 ALICE = {"email": "alice@x.co", "name": "Alice", "role": "member", "id": "u_alice"}
 BOB = {"email": "bob@x.co", "name": "Bob", "role": "admin", "id": "u_bob"}
+CAROL = {"email": "carol@x.co", "name": "Carol", "role": "member", "id": "u_carol"}
 
 
 @pytest.fixture(autouse=True)
@@ -36,13 +39,58 @@ def _names(svc):
 
 
 # ── defaults / creation ───────────────────────────────────────────────────────
-def test_shared_is_the_default_and_visible_to_every_teammate():
+def test_personal_is_the_default_and_hidden_from_every_teammate():
     svc = _svc()
     set_current_user(ALICE)
-    out = svc.create_workspace("team-proj", "shared notes")
-    assert out["visibility"] == "shared"
+    out = svc.create_workspace("team-proj", "private notes")
+    assert out["visibility"] == "personal"
     set_current_user(BOB)  # a different teammate
+    assert "team-proj" not in _names(svc)
+
+
+def test_sharing_requires_confirmation_then_is_visible_to_every_teammate():
+    svc = _svc()
+    set_current_user(ALICE)
+    with pytest.raises(ValidationError, match="explicit confirmation"):
+        svc.create_workspace("team-proj", visibility="shared")
+    out = svc.create_workspace("team-proj", visibility="shared", confirmed=True)
+    assert out["visibility"] == "shared"
+    assert svc.list_workspaces()["workspaces"][0]["can_change_access"] is True
+    assert svc.set_workspace_visibility(
+        "team-proj", "personal", confirmed=True)["visibility"] == "personal"
+    assert svc.set_workspace_visibility(
+        "team-proj", "shared", confirmed=True)["visibility"] == "shared"
+    set_current_user(BOB)
     assert "team-proj" in _names(svc)
+
+
+def test_original_sharer_or_admin_can_unshare_but_another_member_cannot():
+    svc = _svc()
+    set_current_user(ALICE)
+    svc.create_workspace("alice-notes")
+    shared = svc.set_workspace_visibility("alice-notes", "shared", confirmed=True)
+    assert shared["visibility"] == "shared"
+
+    listed = {w["name"]: w for w in svc.list_workspaces()["workspaces"]}
+    assert listed["alice-notes"]["can_change_access"] is True
+
+    set_current_user(CAROL)
+    listed = {w["name"]: w for w in svc.list_workspaces()["workspaces"]}
+    assert listed["alice-notes"]["can_change_access"] is False
+    with pytest.raises(ValidationError, match="original sharer or an admin"):
+        svc.set_workspace_visibility("alice-notes", "personal", confirmed=True)
+
+    set_current_user(ALICE)
+    private = svc.set_workspace_visibility("alice-notes", "personal", confirmed=True)
+    assert private["visibility"] == "personal" and private["owner"] == ALICE["email"]
+
+    # An admin can still govern a legacy shared folder that has no original sharer.
+    set_current_user(None)
+    svc.store.create_workspace("legacy-shared", settings=None)
+    set_current_user(BOB)
+    legacy_private = svc.set_workspace_visibility(
+        "legacy-shared", "personal", confirmed=True)
+    assert legacy_private["owner"] == BOB["email"]
 
 
 def test_personal_is_owned_by_its_creator():
@@ -66,12 +114,34 @@ def test_personal_without_a_current_user_degrades_to_shared():
     assert out["visibility"] == "shared" and out["owner"] == ""
 
 
+def test_index_repo_implicit_workspace_respects_team_privacy_default(tmp_path):
+    (tmp_path / "app.py").write_text("def run():\n    return True\n")
+
+    svc = _svc()
+    set_current_user(ALICE)
+    svc.index_repo(workspace="fresh-code", repo="app", root_path=str(tmp_path))
+    workspace = {w["name"]: w for w in svc.list_workspaces()["workspaces"]}["fresh-code"]
+    assert workspace["visibility"] == "personal"
+    assert workspace["owner"] == ALICE["email"]
+    assert workspace["mine"] is True
+
+    set_current_user(BOB)
+    assert "fresh-code" not in _names(svc)
+
+    anonymous = _svc()
+    set_current_user(None)
+    anonymous.index_repo(workspace="local-code", repo="app", root_path=str(tmp_path))
+    workspace = anonymous.list_workspaces()["workspaces"][0]
+    assert workspace["visibility"] == "shared"
+    assert workspace.get("owner", "") == ""
+
+
 # ── isolation: listing ────────────────────────────────────────────────────────
 def test_personal_folder_is_hidden_from_other_users_even_admins():
     svc = _svc()
     set_current_user(ALICE)
     svc.create_workspace("alice-scratch", visibility="personal")
-    svc.create_workspace("team-proj", visibility="shared")
+    svc.create_workspace("team-proj", visibility="shared", confirmed=True)
     assert _names(svc) == ["alice-scratch", "team-proj"]  # owner sees both
     set_current_user(BOB)  # admin — but personal means personal
     assert _names(svc) == ["team-proj"]  # alice-scratch is omitted entirely
@@ -97,6 +167,30 @@ def test_non_owner_is_refused_read_and_write_access():
             call()
 
 
+def test_current_user_cannot_run_workspace_less_recall(monkeypatch):
+    svc = _svc()
+    engine_recall = Mock(side_effect=AssertionError("global recall executed"))
+    monkeypatch.setattr(svc.engine.recall_engine, "recall", engine_recall)
+    set_current_user(ALICE)
+
+    with pytest.raises(ValidationError, match=r"^workspace is required on this instance$"):
+        svc.recall("private notes")
+
+    engine_recall.assert_not_called()
+
+
+def test_current_user_cannot_run_workspace_less_grounded_recall(monkeypatch):
+    svc = _svc()
+    engine_recall = Mock(side_effect=AssertionError("global grounded recall executed"))
+    monkeypatch.setattr(svc.engine, "grounded_recall", engine_recall)
+    set_current_user(ALICE)
+
+    with pytest.raises(ValidationError, match=r"^workspace is required on this instance$"):
+        svc.grounded_recall("private notes")
+
+    engine_recall.assert_not_called()
+
+
 def test_owner_keeps_full_access_to_their_personal_folder():
     svc = _svc()
     set_current_user(ALICE)
@@ -109,7 +203,7 @@ def test_owner_keeps_full_access_to_their_personal_folder():
 def test_shared_folder_stays_accessible_to_everyone():
     svc = _svc()
     set_current_user(ALICE)
-    svc.create_workspace("team-proj", visibility="shared")
+    svc.create_workspace("team-proj", visibility="shared", confirmed=True)
     set_current_user(BOB)
     assert svc._clean_ws("team-proj") == "team-proj"  # not blocked for a teammate
 
@@ -122,9 +216,17 @@ def test_no_user_context_sees_and_reaches_everything():
     svc = _svc()
     set_current_user(ALICE)
     svc.create_workspace("alice-scratch", visibility="personal")
+    private = svc.remember(
+        "Alice keeps private deployment notes here.",
+        workspace="alice-scratch",
+        scope="workspace",
+    )
     set_current_user(None)
     assert "alice-scratch" in _names(svc)
     assert svc._clean_ws("alice-scratch") == "alice-scratch"
+    global_recall = svc.recall("private deployment notes")
+    assert any(m["id"] == private["id"] for m in global_recall["memories"])
+    assert svc.grounded_recall("private deployment notes")["query"] == "private deployment notes"
 
 
 def test_folders_created_before_the_feature_are_treated_as_shared():
@@ -132,8 +234,23 @@ def test_folders_created_before_the_feature_are_treated_as_shared():
     # feature) must read as shared, never accidentally locked to nobody.
     svc = _svc()
     set_current_user(None)
-    svc.create_workspace("legacy", "old folder")  # stored with no visibility key
+    svc.store.create_workspace("legacy", settings=None)  # stored with no visibility key
     set_current_user(BOB)
     listed = {w["name"]: w for w in svc.list_workspaces()["workspaces"]}
     assert listed["legacy"]["visibility"] == "shared"
     assert svc._clean_ws("legacy") == "legacy"
+
+
+def test_share_and_unshare_require_confirmation_and_are_audited():
+    svc = _svc()
+    set_current_user(ALICE)
+    svc.create_workspace("alice-scratch")
+    with pytest.raises(ValidationError, match="explicit confirmation"):
+        svc.set_workspace_visibility("alice-scratch", "shared")
+    assert svc.set_workspace_visibility("alice-scratch", "shared", confirmed=True)["visibility"] == "shared"
+    set_current_user(BOB)
+    assert "alice-scratch" in _names(svc)
+    result = svc.set_workspace_visibility("alice-scratch", "personal", confirmed=True)
+    assert result["owner"] == BOB["email"]
+    set_current_user(ALICE)
+    assert "alice-scratch" not in _names(svc)

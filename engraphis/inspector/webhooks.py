@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import email.message
 import hashlib
+import hmac
 import logging
 import math
 import os
 import smtplib
+import stat
 import time
 from pathlib import Path
 from typing import Optional
@@ -34,6 +36,11 @@ from engraphis.licensing import (
 )
 
 logger = logging.getLogger("engraphis.webhooks")
+
+
+def _log_ref(value: object) -> str:
+    """Return a non-reversible correlation id for customer/provider values."""
+    return hashlib.sha256(str(value or "").encode("utf-8", "replace")).hexdigest()[:12]
 
 # Canonical public links used in outbound customer-facing email footers. Centralized
 # as constants so the URLs can't drift per-email — a previous invite shipped a
@@ -58,12 +65,21 @@ def _hex_to_seed(value: str, *, source: str) -> bytes:
 
 def _read_seed_file(path: Path) -> bytes:
     try:
-        text = path.read_text(encoding="utf-8").strip()
-    except OSError:
+        resolved = path.expanduser().resolve(strict=True)
+        info = resolved.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size <= 0 or info.st_size > 1024:
+            raise RuntimeError("signing key file must be a small regular file")
+        if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
+            raise RuntimeError("signing key file must be owner-only (chmod 600)")
+        text = resolved.read_text(encoding="utf-8").strip()
+    except RuntimeError:
+        raise
+    except (OSError, UnicodeError):
         raise RuntimeError(
-            f"Signing key not found at {path} — set ENGRAPHIS_VENDOR_SIGNING_KEY to the "
-            f"vendor seed (64 hex chars) or run `python -m scripts.license_admin keygen`")
-    return _hex_to_seed(text, source=str(path))
+            "Signing key file is unavailable — set ENGRAPHIS_VENDOR_SIGNING_KEY to the "
+            "vendor seed (64 hex chars) or run `python -m scripts.license_admin keygen`"
+        ) from None
+    return _hex_to_seed(text, source="signing key file")
 
 
 def _looks_like_hex_seed(value: str) -> bool:
@@ -85,7 +101,7 @@ def _load_signing_secret() -> bytes:
             continue
         if _looks_like_hex_seed(val):
             return _hex_to_seed(val, source=env_name)
-        path = Path(val)
+        path = Path(val).expanduser()
         if path.exists():
             return _read_seed_file(path)
         raise RuntimeError(
@@ -93,56 +109,154 @@ def _load_signing_secret() -> bytes:
     return _read_seed_file(Path(_DEFAULT_KEY_PATH))
 
 
-def _map_polar_product_to_plan(product_name: str) -> str:
+def _product_plan_overrides() -> dict:
+    """Operator-configured exact product-name → plan map (``ENGRAPHIS_POLAR_PRODUCT_MAP``).
+
+    JSON object of ``{"<product name>": "pro"|"team", ...}`` matched case-insensitively
+    and exactly, letting an operator pin tiering precisely instead of relying on the
+    substring heuristic — e.g. a product literally named "Engraphis Enterprise" that
+    should map to ``team``. Consulted before the built-in substring rules. Malformed
+    JSON or unknown plan values are ignored (the substring fallback still applies), so a
+    bad env var can never stiff a paying customer.
+    """
+    raw = os.environ.get("ENGRAPHIS_POLAR_PRODUCT_MAP", "").strip()
+    if not raw:
+        return {}
+    try:
+        import json
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        logger.warning("ENGRAPHIS_POLAR_PRODUCT_MAP is not valid JSON — ignoring")
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out = {}
+    for name, plan in parsed.items():
+        plan = str(plan or "").strip().lower()
+        if plan in PLAN_FEATURES:
+            out[str(name).strip().lower()] = plan
+    return out
+
+
+def _map_polar_product_to_plan(product_name: str, product_id: str = "") -> str:
     """Map Polar product name to an Engraphis plan tier.
 
-    Match on substrings so "Engraphis Pro Monthly" and "Engraphis Pro Annual" both
-    resolve to ``pro``. A paid order with an *unrecognized* product name still
-    resolves to ``pro`` (never free) and logs loudly: a customer who paid must never
-    be silently stiffed with a useless free-tier key. Correct Pro-vs-Team routing
-    depends on the Polar product name containing "pro"/"team" — keep them named so.
+    An operator-configured exact-name override (``ENGRAPHIS_POLAR_PRODUCT_MAP``) wins so
+    tiering can be pinned to real business data rather than inferred. Otherwise match on
+    substrings so "Engraphis Pro Monthly" and "Engraphis Pro Annual" both resolve to
+    ``pro``. A paid order with an *unrecognized* product name still resolves to ``pro``
+    (never free) and logs loudly: a customer who paid must never be silently stiffed with
+    a useless free-tier key. Correct Pro-vs-Team routing depends on the Polar product name
+    containing "pro"/"team" (or an explicit override) — keep them named so.
     """
+    from engraphis.commercial import product_for_id, service_mode
+    configured = product_for_id(product_id)
+    if configured:
+        return configured["plan"]
+    if service_mode() == "vendor":
+        raise RuntimeError("unrecognized Polar product id")
     name = (product_name or "").lower()
+    override = _product_plan_overrides().get(name.strip())
+    if override:
+        return override
     if "team" in name:
         return "team"
     if "pro" in name:
         return "pro"
     logger.warning(
-        "unrecognized paid product '%s' — defaulting to Pro so the buyer still gets a "
+        "unrecognized paid product ref=%s — defaulting to Pro so the buyer still gets a "
         "working key. Name your Polar products with 'Pro'/'Team' for correct tiering.",
-        product_name)
+        _log_ref(product_name))
     return "pro"
 
 
-def _key_days(product_name: str, metadata: dict) -> int:
+def _key_days(product_name: str, metadata: dict, product_id: str = "") -> int:
     """How long an auto-issued key stays valid.
 
-    Precedence: explicit ``license_days`` metadata → annual detection (≈13 months so a
-    late renewal never locks a paying customer out) → monthly default with a 5-day
-    grace over the 30-day cycle (renewal fires a fresh ``order.paid`` each period)."""
+    Exact configured product id wins in the vendor service. Development compatibility
+    then uses explicit ``license_days`` metadata, name-based annual detection, or the
+    35-day monthly default."""
+    # In the isolated control plane, the exact manifest-backed product id is the
+    # authority. Editable Polar metadata must not turn a recognized monthly product into
+    # an arbitrarily long-lived entitlement. Combined-mode compatibility still honors
+    # the historical metadata override when there is no configured exact product id.
+    from engraphis.commercial import product_for_id
+    configured = product_for_id(product_id)
+    if configured:
+        return 395 if configured["interval"] == "annual" else 35
     try:
         explicit = int(metadata.get("license_days") or 0)
     except (TypeError, ValueError):
         explicit = 0
     if explicit > 0:
         return explicit
+    # Compatibility inference only: the production vendor path returned above.
     name = (product_name or "").lower()
     if "annual" in name or "year" in name or "yr" in name:
         return 395
     return 35
 
 
-def _plan_label(product_name: str) -> str:
+# Grace added over a subscription's current_period_end when re-issuing a key mid-cycle,
+# so a slightly-late renewal webhook never briefly locks out a paying customer. Kept
+# small (matches the 5-day grace baked into the 35-day monthly _key_days window) — the
+# whole point of bounding to the period end is that a mid-cycle change must NOT hand out
+# a fresh full 35/395-day window that outlives the paid period.
+_KEY_PERIOD_GRACE_DAYS = 5
+
+
+def _subscription_key_days(payload: dict, product_name: str, metadata: dict,
+                           product_id: str = "", *, now: Optional[float] = None) -> int:
+    """Validity (in days) for a key re-issued from a Subscription object mid-cycle.
+
+    Bounds the key to the subscription's ``current_period_end`` (+ a small fixed grace)
+    rather than a fresh full ``_key_days`` window measured from now. Without this, a
+    late-cycle seat change would mint a key valid a whole extra billing cycle past the
+    paid period (≈12 months for annual) — and since cancellation is enforced by letting
+    the period-bounded key expire, that overrun is unpaid access. Falls back to
+    :func:`_key_days` only when ``current_period_end`` is absent from the payload.
+    """
+    now = now if now is not None else time.time()
+    end = _parse_ts(payload.get("current_period_end"))
+    if end and end > now:
+        return max(1, math.ceil((end - now) / 86400) + _KEY_PERIOD_GRACE_DAYS)
+    return _key_days(product_name, metadata, product_id)
+
+
+def _plan_label(product_name: str, product_id: str = "") -> str:
     """Clean tier label for customer-facing email copy ("Pro"/"Team")."""
-    return _map_polar_product_to_plan(product_name).title()
+    return _map_polar_product_to_plan(product_name, product_id).title()
 
 
 def _extract_email(data: dict) -> Optional[str]:
     """Pull the buyer email from an order OR subscription payload, defensively."""
     cust = data.get("customer") or {}
     user = data.get("user") or {}
-    return (cust.get("email") or data.get("customer_email")
-            or data.get("email") or user.get("email"))
+    if not isinstance(cust, dict):
+        cust = {}
+    if not isinstance(user, dict):
+        user = {}
+    candidate = (cust.get("email") or data.get("customer_email")
+                 or data.get("email") or user.get("email"))
+    if not isinstance(candidate, str):
+        return None
+    normalized = candidate.strip().lower()
+    from engraphis.inspector.auth import _EMAIL_RE
+    return normalized if _EMAIL_RE.match(normalized) else None
+
+def _extract_subscription_id(data: dict, *, object_is_subscription: bool = False) -> str:
+    """Normalized Polar subscription id carried into the signed license payload."""
+    raw = data.get("subscription_id")
+    if not raw:
+        subscription = data.get("subscription")
+        raw = subscription.get("id") if isinstance(subscription, dict) else subscription
+    if not raw and object_is_subscription:
+        raw = data.get("id")
+    return str(raw or "").strip()[:128]
+
+def _extract_order_id(data: dict) -> str:
+    """Normalized Polar order id from an order-shaped payload."""
+    return str(data.get("id") or data.get("order_id") or "").strip()[:128]
 
 def _extract_subscription_id(data: dict, *, object_is_subscription: bool = False) -> str:
     """Normalized Polar subscription id from order, subscription, or nested payload."""
@@ -161,8 +275,14 @@ def _extract_order_id(data: dict) -> str:
 
 
 def _extract_product_name(data: dict) -> str:
-    product = data.get("product") or {}
-    return product.get("name") or data.get("product_name") or "Pro"
+    product = data.get("product")
+    if not isinstance(product, dict):
+        product = {}
+    raw = product.get("name") or data.get("product_name") or "Pro"
+    # Keep provider-controlled labels out of email/TSV control sequences while retaining
+    # ordinary Unicode product names.
+    clean = "".join(ch for ch in str(raw).strip() if ch.isprintable())[:80]
+    return clean or "Pro"
 
 
 def _extract_seats(data: dict) -> int:
@@ -184,9 +304,15 @@ def _extract_seats(data: dict) -> int:
     ``quantity`` and ``metadata.seats`` are kept as defensive fallbacks for
     payload shapes Polar doesn't currently send for this product.
     """
-    product = data.get("product") or {}
+    product = data.get("product")
+    if not isinstance(product, dict):
+        product = {}
     meta = product.get("metadata") or data.get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
     subscription = data.get("subscription") or {}
+    if not isinstance(subscription, dict):
+        subscription = {}
     for candidate in (
         data.get("seats"),
         subscription.get("seats"),
@@ -197,7 +323,7 @@ def _extract_seats(data: dict) -> int:
             n = int(candidate)
             if n > 0:
                 return n
-        except (TypeError, ValueError):
+        except (OverflowError, TypeError, ValueError):
             continue
     return 1
 
@@ -207,11 +333,13 @@ def _parse_ts(value) -> Optional[float]:
     if value in (None, ""):
         return None
     if isinstance(value, (int, float)):
-        return float(value)
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
     try:
         from datetime import datetime
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
-    except (ValueError, TypeError):
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+        return parsed if math.isfinite(parsed) else None
+    except (OverflowError, OSError, ValueError, TypeError):
         return None
 
 
@@ -233,8 +361,9 @@ def _trial_days(period_end, *, now: Optional[float] = None) -> int:
 
 def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
               days: Optional[int] = None, metadata: Optional[dict] = None,
-              *, trial: bool = False, subscription_id: str = "",
-              order_id: str = "") -> str:
+              *, trial: bool = False, record: bool = True,
+              subscription_id: str = "", order_id: str = "",
+              product_id: str = "") -> str:
     """Generate a signed ``ENGR1.xxx.yyy`` key for *email_addr*.
 
     Uses the pinned vendor signing key (``.secrets/vendor_signing.key`` or
@@ -247,15 +376,16 @@ def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
     pub = ed25519_public_key(secret).hex()
     if pub == _DEV_VENDOR_PUBKEY_HEX:
         logger.warning(
-            "signing with DEV keypair — keys are forgeable. Rotate with "
-            "`python -m scripts.license_admin keygen --force` before real sales."
+            "signing with DEV keypair — keys are forgeable. Generate a new signer with "
+            "`python -m scripts.license_admin keygen --key-file <new-secure-path>` "
+            "before real sales."
         )
 
-    plan = _map_polar_product_to_plan(product_name)
+    plan = _map_polar_product_to_plan(product_name, product_id)
     if plan not in PLAN_FEATURES:
         plan = "pro"
     if days is None:
-        days = _key_days(product_name, metadata or {})
+        days = _key_days(product_name, metadata or {}, product_id)
 
     subscription_id = str(subscription_id or "").strip()[:128]
     order_id = str(order_id or "").strip()[:128]
@@ -267,6 +397,7 @@ def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
         "seats": max(1, int(seats)),
         "issued": int(now),
         "expires": int(now + days * 86400),
+        "signing_key_id": pub[:16],
     }
     if subscription_id:
         payload["subscription_id"] = subscription_id
@@ -277,22 +408,38 @@ def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
     # Server-side enforcement (online-only): every minted key carries a signed
     # ``enforce: "cloud"`` claim plus the license-server URL, so the client requires a live
     # lease (register/renew against that URL) and the key is useless offline or after
-    # revocation. The URL is ENGRAPHIS_KEY_CLOUD_URL if set, else the built-in vendor relay
-    # (settings.relay_url) — so keys are cloud-enforced by DEFAULT now, not opt-in. The
+    # revocation. The URL is ENGRAPHIS_KEY_CLOUD_URL if set, else the isolated license
+    # service — so keys are cloud-enforced by DEFAULT now, not opt-in. The
     # claim rides inside the Ed25519-signed payload, so customers cannot strip it.
-    from engraphis.config import settings
-    enforce_url = (os.environ.get("ENGRAPHIS_KEY_CLOUD_URL", "").strip().rstrip("/")
-                   or (settings.relay_url or "").strip().rstrip("/"))
+    from engraphis.config import (
+        DEFAULT_LICENSE_SERVER_URL,
+        canonicalize_license_server_url,
+    )
+    enforce_url = canonicalize_license_server_url(
+        os.environ.get("ENGRAPHIS_KEY_CLOUD_URL", "") or DEFAULT_LICENSE_SERVER_URL)
     if enforce_url:
         payload["enforce"] = "cloud"
         payload["cloud_url"] = enforce_url
     key = compose_key(payload, secret)
-    logger.info("issued %s key for %s (expires in %d days)", plan, email_addr, days)
-    try:  # registry is best-effort; a write failure must never block fulfillment/email
-        from engraphis.inspector.license_registry import record_issued
-        record_issued(key)
-    except Exception as exc:
-        logger.warning("could not record issued key in registry: %s", exc)
+    logger.info(
+        "issued %s key for customer_ref=%s (expires in %d days)",
+        plan, _log_ref(email_addr), days)
+    if record:
+        try:
+            from engraphis.inspector.license_registry import (
+                record_issued, revoke_superseded)
+            key_id = record_issued(key)
+            if subscription_id:
+                revoke_superseded(subscription_id, key_id)
+        except Exception as exc:
+            from engraphis.commercial import service_mode
+            if service_mode() == "vendor":
+                # A cloud-enforced paid key that is absent from the registry cannot
+                # activate. Fail before enqueueing its email so Polar retries instead of
+                # recording a purchase-without-delivery.
+                raise RuntimeError("license registry unavailable") from exc
+            logger.warning("could not record/reconcile issued key in registry (%s)",
+                           type(exc).__name__)
     return key
 
 
@@ -343,7 +490,8 @@ def _resend_api_key() -> str:
 
 
 def _send_via_resend_api(to: str, subject: str, text_body: str, from_addr: str,
-                         api_key: str, *, reply_to: Optional[str] = None) -> None:
+                         api_key: str, *, reply_to: Optional[str] = None,
+                         idempotency_key: str = "") -> str:
     """Send via Resend's HTTPS API (port 443). Works where outbound SMTP is
     blocked (Railway, Fly, many PaaS). Raises RuntimeError on any failure.
 
@@ -363,19 +511,41 @@ def _send_via_resend_api(to: str, subject: str, text_body: str, from_addr: str,
         "Accept": "application/json",
         "User-Agent": "Engraphis/1.0 (+https://engraphis.com)",
     }
+    provider_key = str(idempotency_key or "").strip()
+    if provider_key:
+        # Resend retains POST /emails idempotency keys for 24 hours. The durable
+        # outbox's stable message id closes the crash window where Resend accepted a
+        # send but this process died before recording the provider response.
+        headers["Idempotency-Key"] = provider_key[:256]
     try:
         resp = httpx.post(_RESEND_API_URL, json=payload, headers=headers, timeout=20.0)
-    except httpx.HTTPError as exc:
-        raise RuntimeError("Resend API unreachable: %s" % exc) from exc
+    except httpx.HTTPError:
+        # httpx exceptions retain the request URL and can include provider details.
+        # Keep the delivery boundary useful without reflecting that data outward.
+        raise RuntimeError("Resend API is unreachable") from None
     if resp.status_code not in (200, 201):
-        raise RuntimeError(
-            "Resend API error HTTP %s: %s" % (resp.status_code, resp.text[:200]))
+        # The provider body is untrusted and can echo addresses, message content, or
+        # credentials. Status is sufficient for retry/operations diagnostics.
+        raise RuntimeError("Resend API rejected the request (HTTP %s)" % resp.status_code)
+    try:
+        response_body = resp.json()
+        provider_id = response_body.get("id") if isinstance(response_body, dict) else None
+    except (ValueError, TypeError, AttributeError):
+        provider_id = None
+    if not isinstance(provider_id, str) or not provider_id \
+            or len(provider_id) > 160 \
+            or any(ord(char) < 33 or ord(char) == 127 for char in provider_id):
+        # A successful send without its stable provider id cannot be correlated with
+        # delivery/bounce events. Keep the outbox retryable; its idempotency key makes a
+        # retry safe even when the provider accepted the first request.
+        raise RuntimeError("Resend API response omitted its message id")
+    return provider_id
 
 
 def email_configured() -> bool:
     """True if THIS process has its own outbound email delivery set up (Resend or
     SMTP). Callers use this to decide *before* attempting a send whether to use
-    local delivery or fall back to something else (e.g. the vendor relay's
+    local delivery or fall back to something else (e.g. the vendor control plane's
     ``/license/v1/team-invite`` for a self-hosted dashboard with no mail account
     of its own) — cheaper and clearer than attempting-and-catching."""
     if _resend_api_key():
@@ -385,29 +555,20 @@ def email_configured() -> bool:
                 and os.environ.get("ENGRAPHIS_SMTP_PASSWORD", "").strip())
 
 
-def _send_text_email(to: str, subject: str, text_body: str, *,
-                     reply_to: Optional[str] = None) -> None:
-    """Deliver a plain-text email to *to*. Shared transport for every outbound
-    email this module sends (license keys, team invites, ...).
-
-    Prefers the Resend HTTPS API (``ENGRAPHIS_RESEND_API_KEY`` or the Resend key
-    already in ``ENGRAPHIS_SMTP_PASSWORD``) because many hosts — Railway included —
-    block outbound SMTP ports, which makes ``smtplib`` hang until timeout. Falls
-    back to SMTP (``ENGRAPHIS_SMTP_*``). Raises RuntimeError if nothing is
-    configured, and raises on delivery failure — callers decide how to log/fall
-    back (see :func:`_issue_and_email`'s 0600 fallback file for the license-key
-    case; a team invite has no secret to lose, so it just logs and moves on).
-    ``reply_to``, when given, routes replies to a human (e.g. the admin who sent
-    a team invite) instead of the shared sending address.
-    """
+def _deliver_text_email(to: str, subject: str, text_body: str,
+                        reply_to: Optional[str] = None,
+                        idempotency_key: str = "") -> tuple[str, str]:
+    """Low-level provider call used only by the durable outbox worker."""
     from_addr = os.environ.get("ENGRAPHIS_SMTP_FROM", "keys@engraphis.com").strip()
 
     api_key = _resend_api_key()
     if api_key:
-        logger.info("sending email to %s via Resend API", to)
-        _send_via_resend_api(to, subject, text_body, from_addr, api_key, reply_to=reply_to)
-        logger.info("email delivered to %s (Resend API)", to)
-        return
+        logger.info("sending transactional email via Resend API")
+        provider_id = _send_via_resend_api(
+            to, subject, text_body, from_addr, api_key, reply_to=reply_to,
+            idempotency_key=idempotency_key) or ""
+        logger.info("transactional email accepted by Resend API")
+        return "resend", provider_id
 
     smtp_host = os.environ.get("ENGRAPHIS_SMTP_HOST", "").strip()
     smtp_port = int(os.environ.get("ENGRAPHIS_SMTP_PORT", "587"))
@@ -425,17 +586,45 @@ def _send_text_email(to: str, subject: str, text_body: str, *,
     msg["Subject"] = subject
     if reply_to:
         msg["Reply-To"] = reply_to
+    if idempotency_key:
+        # Resend documents this equivalent header for its SMTP transport. Other SMTP
+        # providers safely preserve or ignore the non-secret extension header.
+        msg["Resend-Idempotency-Key"] = str(idempotency_key)[:256]
     msg.set_content(text_body)
-    logger.info("sending email to %s via %s:%d", to, smtp_host, smtp_port)
+    logger.info("sending transactional email via configured SMTP provider")
     with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as smtp:
         smtp.starttls()
         smtp.login(smtp_user, smtp_pass)
         smtp.send_message(msg)
-    logger.info("email delivered to %s (SMTP)", to)
+    logger.info("transactional email accepted by SMTP provider")
+    return "smtp", ""
+
+
+def _send_text_email(to: str, subject: str, text_body: str, *,
+                     reply_to: Optional[str] = None, kind: str = "transactional",
+                     idempotency_key: str = "") -> str:
+    """Persist and immediately attempt a plain-text transactional email.
+
+    Prefers the Resend HTTPS API (``ENGRAPHIS_RESEND_API_KEY`` or the Resend key
+    already in ``ENGRAPHIS_SMTP_PASSWORD``) because many hosts — Railway included —
+    block outbound SMTP ports, which makes ``smtplib`` hang until timeout. Falls
+    back to SMTP (``ENGRAPHIS_SMTP_*``). Raises RuntimeError if nothing is
+    configured, and raises on delivery failure — callers decide how to log/fall
+    back (see :func:`_issue_and_email`'s 0600 fallback file for the license-key
+    case; a team invite has no secret to lose, so it just logs and moves on).
+    ``reply_to``, when given, routes replies to a human (e.g. the admin who sent
+    a team invite) instead of the shared sending address.
+    """
+    from engraphis import email_outbox
+    message_id = email_outbox.enqueue(
+        kind, to, subject, text_body, reply_to=reply_to,
+        idempotency_key=idempotency_key)
+    email_outbox.deliver_now(message_id, _deliver_text_email)
+    return message_id
 
 
 def send_license_email(to: str, key: str, product_name: str = "Pro",
-                       is_trial: bool = False) -> None:
+                       is_trial: bool = False, *, idempotency_key: str = "") -> None:
     """Deliver a license key to *to*.
 
     Raises RuntimeError if nothing is configured, and raises on delivery
@@ -445,94 +634,9 @@ def send_license_email(to: str, key: str, product_name: str = "Pro",
     subject = ("Your Engraphis %s Trial License Key" if is_trial
                else "Your Engraphis %s License Key") % product_name
     text_body = _license_email_text(key, product_name, is_trial=is_trial)
-    _send_text_email(to, subject, text_body)
-
-
-def _team_invite_email_text(name: str, role: str, dashboard_url: str,
-                            invited_by: str = "", key: str = "",
-                            to: str = "") -> str:
-    greeting = "Hi %s," % name if name else "Hi,"
-    who = "%s has added you" % invited_by if invited_by else "You've been added"
-    where = ("    %s\n\n" % dashboard_url if dashboard_url else
-             "    Ask your admin for your team dashboard's web address.\n\n")
-    reply_note = ("\nQuestions? Just reply to this email — it goes straight to %s.\n"
-                  % invited_by if invited_by else "")
-    login_email = to or "the address this email was sent to"
-    # When this instance is genuinely Team-licensed, the invite carries the *shared*
-    # team license key so the member can turn on Pro features (and cloud sync) on
-    # their OWN machine, taking one server-enforced seat. Built with %-formatting so
-    # the key's own characters are never re-evaluated by the outer .format() below.
-    #
-    # The email is deliberately structured as two clearly-separated options:
-    #   1. JOIN the team dashboard (the hosted/Railway instance) — sign in with email
-    #      + password. NO license key is involved here, and pasting the key on the
-    #      hosted instance is NOT how membership works (it just re-activates a license
-    #      that is already active there). This was a real support confusion: members
-    #      followed the concrete "paste the key" steps on the hosted dashboard and
-    #      thought they'd joined, when joining = logging in with credentials.
-    #   2. OPTIONALLY run Engraphis locally and access the team's shared memories from
-    #      your own machine — THAT is what the shared key is for. It unlocks Pro
-    #      features AND cloud sync; turning on Cloud Sync then pulls the team's
-    #      converged memory store down to your local SQLite file. The key goes into
-    #      your LOCAL dashboard (http://127.0.0.1:8700), never the team dashboard.
-    activate = ("""
-──────────────────────────────────────────────────────────────────────────────
-OPTION 2 (optional): run Engraphis on your OWN computer and access the team's
-memories locally
-──────────────────────────────────────────────────────────────────────────────
-Your team plan also unlocks Pro features (analytics, export, automation, and
-cloud sync) on your own machine. The shared team license key below is for THIS —
-activating Pro on a LOCAL copy of Engraphis you run yourself — NOT for the team
-dashboard above (that instance is already licensed; please don't paste this key
-there).
-
-Shared team license key:
-
-    %s
-
-To activate on your own machine:
-    1. Install and run Engraphis locally (the dashboard opens at
-       http://127.0.0.1:8700)
-    2. Go to Settings -> License
-    3. Paste the key above and click Activate
-
-(Or set the ENGRAPHIS_LICENSE_KEY environment variable, or save the key to
-~/.engraphis/license.key.) The key verifies against our license server on first
-use and takes one of your team's seats — please use it only on your own devices.
-
-To then access the team's shared memories on your machine: after activating, go
-to Settings -> Cloud Sync and turn sync on for the same workspace your team
-uses. Your local store converges with the team's (new memories and edits flow
-both ways); you keep a full local copy that works offline.
-""" % key if key else "")
-    return """{greeting}
-
-{who} to an Engraphis team dashboard as a {role}.
-
-You have two ways to use Engraphis as part of this team. You only need the first
-one to be a member; the second is optional.
-
-──────────────────────────────────────────────────────────────────────────────
-OPTION 1 (required to join the team): sign in to the team dashboard
-──────────────────────────────────────────────────────────────────────────────
-The team's shared memories live on a hosted dashboard. Open it and sign in:
-
-{where}Log in with this email address: {login_email}
-Your admin sets your password directly and will share it with you separately —
-this email does not contain it.
-
-No license key is needed here, and you should NOT paste a license key into this
-dashboard — joining the team means signing in with your email and password,
-nothing else.
-{activate}{reply_note}
-— The Engraphis team
-
-Learn more: {site_url}
-Source & self-hosting: {repo_url}
-""".format(greeting=greeting, who=who, role=role, where=where,
-               login_email=login_email, activate=activate, reply_note=reply_note,
-               site_url=SITE_URL, repo_url=REPO_URL)
-
+    _send_text_email(to, subject, text_body,
+                     kind="trial_license" if is_trial else "purchase_license",
+                     idempotency_key=idempotency_key)
 
 
 def _password_reset_email_text(name: str, reset_url: str) -> str:
@@ -563,7 +667,23 @@ def send_password_reset_email(to: str, name: str, reset_url: str) -> None:
     """
     subject = "Reset your Engraphis dashboard password"
     text_body = _password_reset_email_text(name, reset_url)
-    _send_text_email(to, subject, text_body)
+    _send_text_email(to, subject, text_body, kind="password_reset")
+
+
+def queue_password_reset_email(to: str, name: str, reset_url: str, *,
+                               idempotency_key: str) -> str:
+    """Durably queue a vendor-relayed password-reset email without sending inline.
+
+    The control-plane endpoint uses this path so a temporary provider outage leaves a
+    recoverable pending operation. The outbox worker performs the bounded retries; the
+    caller receives neither the reset URL nor a provider message identifier.
+    """
+    from engraphis import email_outbox
+    return email_outbox.enqueue(
+        "password_reset", to, "Reset your Engraphis dashboard password",
+        _password_reset_email_text(name, reset_url),
+        idempotency_key=idempotency_key,
+    )
 
 
 def _trial_verify_email_text(verify_url: str, plan: str, minutes: int) -> str:
@@ -575,12 +695,13 @@ Confirm it's you and get your trial key here — this link works once and expire
 
     {verify_url}
 
-Opening it mints your trial key and shows it on a confirmation page, with
-instructions to activate it in your dashboard (Settings -> License -> paste key ->
-Activate).
+Opening it shows a confirmation page with an "Activate my {label} trial" button.
+Clicking that button mints your trial key and shows it, with instructions to activate
+it in your dashboard (Settings -> License -> paste key -> Activate).
 
 If you didn't request this, you can safely ignore this email: no trial has been
-issued, and none will be unless this link is opened.
+issued, and none will be unless that button is clicked. Simply opening the link — or
+a mail scanner opening it for you — grants nothing.
 
 — The Engraphis team
 """
@@ -588,13 +709,15 @@ issued, and none will be unless this link is opened.
 
 def send_trial_verification_email(to: str, verify_url: str, plan: str = "team", *,
                                    minutes: int = 30) -> None:
-    """Deliver a one-time magic link that mints a self-serve trial key on click.
+    """Deliver a one-time magic link that mints a self-serve trial key on confirmation.
 
     Part of the 2026-07-14 trial-abuse hardening: ``inspector.license_cloud``'s
     ``POST /license/v1/start-trial`` no longer issues a key synchronously from a bare
     machine_id (trivially reset by deleting one local file — see that module's
-    comment); it emails this link instead, and the matching ``GET .../start-trial/
-    verify`` mints the key only once it's opened. Raises on delivery failure (see
+    comment); it emails this link instead. Opening the link (``GET .../start-trial/
+    verify``) only renders a confirm page — the key is minted by the ``POST`` that
+    page's button sends, so a mail link-prescanner GETting the URL on the recipient's
+    behalf cannot burn the one-time grant. Raises on delivery failure (see
     :func:`_send_text_email`) — unlike the password-reset send above, the caller DOES
     let a failure change the HTTP response (502): trial start is opt-in self-serve
     (no account to enumerate), and silently swallowing the failure would strand the
@@ -602,7 +725,31 @@ def send_trial_verification_email(to: str, verify_url: str, plan: str = "team", 
     """
     subject = "Confirm your Engraphis %s trial" % plan.title()
     text_body = _trial_verify_email_text(verify_url, plan, minutes)
-    _send_text_email(to, subject, text_body)
+    _send_text_email(to, subject, text_body, kind="trial_confirmation")
+
+
+def send_trial_claim_email(to: str, verify_url: str, plan: str = "team", *,
+                           minutes: int = 30, idempotency_key: str = "") -> None:
+    """Send scanner-safe confirmation for a deployment-bound trial claim."""
+    label = plan.title()
+    subject = "Confirm your Engraphis %s trial" % label
+    text_body = f"""Someone requested a free {label} trial for an Engraphis deployment.
+
+Review and confirm the request here. The link expires in {minutes} minutes:
+
+    {verify_url}
+
+Opening the link only displays a confirmation page. The trial activates only after you
+press the confirmation button. The signed license key is delivered directly to the
+requesting deployment and is never displayed in your browser or sent by email.
+
+If you did not request this trial, ignore this message.
+
+— The Engraphis team
+"""
+    _send_text_email(
+        to, subject, text_body, kind="trial_confirmation",
+        idempotency_key=idempotency_key)
 
 
 # The canonical hosted team dashboard (the Railway deployment members sign in
@@ -614,39 +761,69 @@ def send_trial_verification_email(to: str, verify_url: str, plan: str = "team", 
 DEFAULT_TEAM_DASHBOARD_URL = "https://team.engraphis.com/"
 
 
-def send_team_invite_email(to: str, name: str, role: str, *, invited_by: str = "",
-                           key: str = "", dashboard_url: Optional[str] = None) -> None:
-    """Notify a newly added dashboard team member (``/api/auth/users``) that
-    their account exists, and — when ``key`` is given — hand them the shared
-    Team license key so they can turn on Pro features (and cloud sync) on their
-    own machine, taking one of the team's server-enforced seats.
+def _invitation_email_text(name: str, role: str, invite_url: str,
+                           invited_by: str = "") -> str:
+    greeting = "Hi %s," % name if name else "Hi,"
+    inviter = ("%s invited you" % invited_by if invited_by
+               else "You have been invited")
+    return """%s
 
-    Still deliberately carries NO password: the admin sets the initial dashboard
-    password directly in the "Add member" form, so it is already known only to the
-    admin. ``key`` is different in kind — it is the account's *shared* Team key
-    (the same one every member of this team uses; see ``docs/SYNC.md``), not a
-    per-user secret, and seat count is enforced server-side — so including it is
-    what actually makes a member a licensed member rather than just a dashboard
-    login. Callers pass it only for a genuinely Team-licensed instance (see
-    ``routes.v2_team._send_invite``). ``invited_by`` (the admin's own email) is
-    named in the body and set as Reply-To — important when this is sent through
-    the shared vendor relay (see ``inspector.license_cloud.team_invite``), where
-    the visible From address is the vendor's, not the actual team's. ``dashboard_url``
-    overrides ``ENGRAPHIS_DASHBOARD_URL`` when not None (so a relay send can carry
-    the admin's own dashboard URL instead of the relay host's). Raises on delivery
-    failure (see :func:`_send_text_email`); the caller treats this as best-effort
-    and must not let it block account creation.
-    """
+%s to join an Engraphis team as a %s.
+
+Choose your password and accept the invitation here. This one-time link expires in
+72 hours and is replaced if your administrator resends the invitation:
+
+    %s
+
+The invitation does not contain a temporary password or the team's account-wide
+license key. After signing in, create your own scoped, revocable device token from
+Settings -> Connect an agent if you want to use a local client.
+
+If you did not expect this invitation, ignore this message.
+
+— The Engraphis team
+
+Learn more: %s
+Source & self-hosting: %s
+""" % (greeting, inviter, role, invite_url, SITE_URL, REPO_URL)
+
+
+def send_team_invite_email(to: str, name: str, role: str, *, invited_by: str = "",
+                           invite_url: str = "", key: str = "",
+                           dashboard_url: Optional[str] = None,
+                           idempotency_key: str = "") -> None:
+    """Send a one-time invitation URL. The deprecated ``key`` argument is ignored."""
     from engraphis.inspector.auth import _EMAIL_RE
-    subject = "You've been added to an Engraphis team"
-    if not (dashboard_url or "").strip():
-        dashboard_url = os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
-    if not dashboard_url:
-        dashboard_url = DEFAULT_TEAM_DASHBOARD_URL
-    text_body = _team_invite_email_text(name, role, dashboard_url,
-                                        invited_by=invited_by, key=key, to=to)
+    subject = "Accept your Engraphis team invitation"
+    if not invite_url:
+        base = (dashboard_url or os.environ.get("ENGRAPHIS_DASHBOARD_URL", "")
+                or DEFAULT_TEAM_DASHBOARD_URL).strip().rstrip("/")
+        invite_url = base
+    text_body = _invitation_email_text(name, role, invite_url, invited_by=invited_by)
     reply_to = invited_by if invited_by and _EMAIL_RE.match(invited_by) else None
-    _send_text_email(to, subject, text_body, reply_to=reply_to)
+    _send_text_email(
+        to, subject, text_body, reply_to=reply_to, kind="invitation",
+        idempotency_key=idempotency_key)
+
+
+def queue_team_invite_email(to: str, name: str, role: str, *, invited_by: str = "",
+                            invite_url: str = "", dashboard_url: Optional[str] = None,
+                            idempotency_key: str) -> str:
+    """Durably queue a vendor-relayed invitation without a provider call inline."""
+    from engraphis import email_outbox
+    from engraphis.inspector.auth import _EMAIL_RE
+
+    subject = "Accept your Engraphis team invitation"
+    if not invite_url:
+        base = (dashboard_url or os.environ.get("ENGRAPHIS_DASHBOARD_URL", "")
+                or DEFAULT_TEAM_DASHBOARD_URL).strip().rstrip("/")
+        invite_url = base
+    reply_to = invited_by if invited_by and _EMAIL_RE.match(invited_by) else None
+    return email_outbox.enqueue(
+        "invitation", to, subject,
+        _invitation_email_text(name, role, invite_url, invited_by=invited_by),
+        reply_to=reply_to, idempotency_key=idempotency_key,
+    )
 
 
 def _fallback_dir() -> Path:
@@ -660,7 +837,20 @@ def _fallback_dir() -> Path:
             return Path(db).expanduser().resolve().parent
         except Exception:
             pass
+    from engraphis.commercial import service_mode
+    if service_mode() == "vendor":
+        # Match billing._dedup_path's vendor default so paid-key recovery, the Polar
+        # ledger, and commercial_backup all resolve the same managed directory.
+        relay = os.environ.get("ENGRAPHIS_RELAY_DB", "").strip()
+        if relay and relay != ":memory:":
+            return Path(relay).expanduser().resolve().parent
+        state_dir = os.environ.get("ENGRAPHIS_STATE_DIR", "").strip()
+        return (Path(state_dir).expanduser().resolve() if state_dir
+                else (Path.home() / ".engraphis").resolve())
     return Path.cwd()
+
+
+UNDELIVERED_LICENSE_KEYS_NAME = "undelivered_license_keys.tsv"
 
 
 def _persist_fallback_key(email_addr: str, key: str, product_name: str) -> Optional[Path]:
@@ -669,13 +859,33 @@ def _persist_fallback_key(email_addr: str, key: str, product_name: str) -> Optio
     Returns the file path, or None if it couldn't be written. The raw key must not
     hit application logs — log aggregation is usually less protected than this file.
     """
-    path = _fallback_dir() / "undelivered_license_keys.tsv"
+    path = _fallback_dir() / UNDELIVERED_LICENSE_KEYS_NAME
     try:
+        safe_key = str(key)
+        if not safe_key or len(safe_key) > 8192 \
+                or any(ord(char) < 33 or ord(char) == 127 for char in safe_key):
+            return None
         path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_symlink():
+            return None
         # Create with 0600 before writing any key material.
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(path), flags, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as fh:
-            fh.write("%d\t%s\t%s\t%s\n" % (int(time.time()), email_addr, product_name, key))
+            info = os.fstat(fh.fileno())
+            linked = os.lstat(path)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 \
+                    or not stat.S_ISREG(linked.st_mode) \
+                    or not os.path.samestat(info, linked):
+                return None
+            # Both fields originated outside the process. Keep one record per line even
+            # if a future caller bypasses the normal email/product validation helpers.
+            safe_email = " ".join(str(email_addr).split())[:320]
+            safe_product = " ".join(str(product_name).split())[:240]
+            fh.write("%d\t%s\t%s\t%s\n" % (
+                int(time.time()), safe_email, safe_product, safe_key))
+            fh.flush()
+            os.fsync(fh.fileno())
         try:
             os.chmod(path, 0o600)
         except OSError:
@@ -685,28 +895,119 @@ def _persist_fallback_key(email_addr: str, key: str, product_name: str) -> Optio
         return None
 
 
+def manual_fulfillment_clear() -> bool:
+    """Return whether no operator-only undelivered-key record awaits reconciliation."""
+    path = _fallback_dir() / UNDELIVERED_LICENSE_KEYS_NAME
+    try:
+        if path.is_symlink():
+            return False
+        if not path.exists():
+            return True
+        # Operators remove or encrypted-archive the reconciled file. Treat even an empty
+        # leftover as unresolved so backup cannot later fail its non-empty private-file
+        # invariant while operational readiness incorrectly reports green.
+        return False
+    except OSError:
+        return False
+
+
+def _existing_license_delivery(idempotency_key: str) -> Optional[str]:
+    """Return the key already held by a durable purchase-email operation.
+
+    This closes the retry window after a key/email was persisted but before the Polar
+    delivery claims were finalized. The outbox body is the recoverable source of truth;
+    a retry reuses that same signed key instead of minting and potentially emailing a
+    second entitlement for one order.
+    """
+    if not idempotency_key:
+        return None
+    from engraphis import email_outbox
+    conn = email_outbox._connect()
+    try:
+        row = conn.execute(
+            "SELECT text_body FROM email_outbox WHERE idempotency_key=?",
+            (idempotency_key,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    for line in str(row["text_body"] or "").splitlines():
+        candidate = line.strip()
+        if candidate.startswith("ENGR1.") and candidate.count(".") == 2:
+            return candidate
+    raise RuntimeError("durable purchase email is missing its signed key")
+
+
 def _issue_and_email(email_addr: str, product_name: str, seats: int,
                      days: Optional[int], *, is_trial: bool = False,
-                     subscription_id: str = "", order_id: str = "") -> str:
-    """Mint a signed key and email it. On ANY delivery failure, persist the key to
-    the 0600 fallback file (never the log) and still return it, so a paid or trial
-    key is never lost and the webhook can 202 without a Polar retry-storm."""
-    key = issue_key(email_addr, product_name=product_name, seats=seats, days=days,
-                    subscription_id=subscription_id, order_id=order_id)
-    label = _plan_label(product_name)
+                     subscription_id: str = "", order_id: str = "",
+                     product_id: str = "", fulfillment_id: str = "") -> str:
+    """Mint a signed key and create a recoverable delivery operation.
+
+    Provider failures remain in the durable outbox. If the enqueue itself failed, persist
+    the only raw key in the encrypted-backup-covered 0600 operator fallback instead.
+    """
+    email_idempotency_key = ""
+    if order_id:
+        # A renewal has a fresh order id. Reusing this stable key makes a retry converge
+        # on the original durable outbox message rather than enqueueing a second email.
+        email_idempotency_key = "purchase-license:" + order_id
+        existing_key = _existing_license_delivery(email_idempotency_key)
+        if existing_key:
+            return existing_key
+    elif fulfillment_id:
+        # Seat changes and legacy trial lifecycle events have no order id. Hash the
+        # route's server-derived fulfillment identity so a crash after durable outbox
+        # enqueue but before webhook finalization reuses the original key/email instead
+        # of minting a second entitlement on retry.
+        digest = hashlib.sha256(fulfillment_id.encode("utf-8")).hexdigest()
+        email_idempotency_key = "license-fulfillment:" + digest
+        existing_key = _existing_license_delivery(email_idempotency_key)
+        if existing_key:
+            return existing_key
+
+    # Resolve every mapping before minting. In vendor mode a missing product id must not
+    # mint an un-emailable key, release the webhook claim, and mint another on each retry.
+    label = _plan_label(product_name, product_id)
+    key = issue_key(
+        email_addr, product_name=product_name, seats=seats, days=days,
+        trial=is_trial, subscription_id=subscription_id, order_id=order_id,
+        product_id=product_id)
     try:
-        send_license_email(email_addr, key, product_name=label, is_trial=is_trial)
+        send_license_email(
+            email_addr, key, product_name=label, is_trial=is_trial,
+            idempotency_key=email_idempotency_key)
     except Exception as exc:  # noqa: BLE001 — a delivery failure must not lose a key
         fp = hashlib.sha256(key.encode("ascii")).hexdigest()[:12]
+        # A provider outage happens *after* enqueue; the durable outbox already contains
+        # the exact key and will retry it, so creating a second plaintext copy would only
+        # expand secret exposure. The 0600 fallback is reserved for the rarer case where
+        # the durable enqueue itself failed and no recoverable delivery operation exists.
+        try:
+            queued_key = _existing_license_delivery(email_idempotency_key)
+        except Exception:  # noqa: BLE001 - the outbox may be the failing dependency
+            queued_key = None
+        if queued_key and hmac.compare_digest(queued_key, key):
+            logger.warning(
+                "email delivery deferred (%s) — key %s remains in the durable outbox",
+                type(exc).__name__, fp)
+            return key
         saved = _persist_fallback_key(email_addr, key, product_name)
         if saved:
             logger.warning(
-                "email delivery failed (%s) — key %s for %s saved to %s (deliver manually)",
-                exc, fp, email_addr, saved)
+                "email delivery failed (%s) — key %s for customer_ref=%s saved to the private "
+                "fallback file (deliver manually)",
+                type(exc).__name__, fp, _log_ref(email_addr))
         else:
             logger.error(
-                "email delivery failed (%s) AND could not persist key %s for %s — "
-                "reissue via `python -m scripts.license_admin issue`", exc, fp, email_addr)
+                "email delivery failed (%s) AND could not persist key %s for "
+                "customer_ref=%s — Polar delivery remains retryable; use "
+                "`python -m scripts.license_admin issue` only if recovery stays down",
+                type(exc).__name__, fp, _log_ref(email_addr))
+            # No provider delivery, durable outbox row, or operator recovery file exists.
+            # Never acknowledge the purchase in this state: let Polar redeliver so a
+            # later healthy attempt can mint and persist a recoverable entitlement.
+            raise RuntimeError("license delivery could not be persisted") from exc
     return key
 
 
@@ -722,13 +1023,18 @@ def handle_order_paid(payload: dict) -> Optional[str]:
         logger.warning("order.paid missing customer email — cannot issue key")
         return None
     product = payload.get("product") or {}
+    if not isinstance(product, dict):
+        product = {}
     product_name = _extract_product_name(payload)
+    from engraphis.commercial import extract_product_id
+    product_id = extract_product_id(payload)
     seats = _extract_seats(payload)
-    days = _key_days(product_name, product.get("metadata") or {})
+    days = _key_days(product_name, product.get("metadata") or {}, product_id)
     return _issue_and_email(
         email_addr, product_name, seats, days,
         subscription_id=_extract_subscription_id(payload),
-        order_id=_extract_order_id(payload))
+        order_id=_extract_order_id(payload), product_id=product_id,
+        fulfillment_id=str(payload.get("_engraphis_fulfillment_id") or ""))
 
 
 def handle_subscription_updated(payload: dict) -> Optional[str]:
@@ -736,27 +1042,37 @@ def handle_subscription_updated(payload: dict) -> Optional[str]:
     removes seats via the Customer Portal or API).
 
     Polar's ``subscription.updated`` is a catch-all also fired for cancel /
-    uncancel / past-due / revoked transitions, so the caller (``engraphis.billing``)
-    must already have filtered to ``status in (active, trialing)`` AND confirmed
-    the seat count actually changed since the last sighting (tracked durably by
-    subscription id) before invoking this — that guard is what stops this from
-    re-issuing (and re-emailing) a key on every unrelated update, and from ever
-    double-issuing on the update that immediately follows a fresh subscription. This
-    function itself always (re)issues a fresh key reflecting the current seat count.
+    uncancel / trialing / past-due / revoked transitions, so both this function
+    and its route caller require ``status == active`` after a real seat-count
+    change. Trialing replacements must remain trial-bounded and are therefore
+    ignored until payment rather than minted as normal paid-period keys.
     """
+    if str(payload.get("status", "")).strip().lower() != "active":
+        return None
     email_addr = _extract_email(payload)
     if not email_addr:
         logger.warning("subscription.updated missing customer email — cannot re-issue key")
         return None
     product = payload.get("product") or {}
+    if not isinstance(product, dict):
+        product = {}
     product_name = _extract_product_name(payload)
+    from engraphis.commercial import extract_product_id
+    product_id = extract_product_id(payload)
     seats = _extract_seats(payload)
-    days = _key_days(product_name, product.get("metadata") or {})
-    logger.info("seat count changed for %s (%s) -> %d seats, re-issuing key",
-                email_addr, product_name, seats)
+    # Bound the replacement key to the subscription's current paid period, NOT a fresh
+    # full window from now — a mid-cycle seat change must not extend entitlement past the
+    # period the customer has actually paid through.
+    days = _subscription_key_days(
+        payload, product_name, product.get("metadata") or {}, product_id)
+    logger.info(
+        "seat count changed for customer_ref=%s product_ref=%s -> %d seats, re-issuing key",
+        _log_ref(email_addr), _log_ref(product_name), seats)
     return _issue_and_email(
         email_addr, product_name, seats, days,
-        subscription_id=_extract_subscription_id(payload, object_is_subscription=True))
+        subscription_id=_extract_subscription_id(payload, object_is_subscription=True),
+        product_id=product_id,
+        fulfillment_id=str(payload.get("_engraphis_fulfillment_id") or ""))
 
 
 def handle_subscription_created(payload: dict) -> Optional[str]:
@@ -778,10 +1094,15 @@ def handle_subscription_created(payload: dict) -> Optional[str]:
         logger.warning("subscription.created (trial) missing customer email")
         return None
     product_name = _extract_product_name(payload)
+    from engraphis.commercial import extract_product_id
+    product_id = extract_product_id(payload)
     seats = _extract_seats(payload)
     days = _trial_days(payload.get("current_period_end"))
-    logger.info("trial started for %s (%s) — issuing %d-day key",
-                email_addr, product_name, days)
+    logger.info(
+        "trial started for customer_ref=%s product_ref=%s — issuing %d-day key",
+        _log_ref(email_addr), _log_ref(product_name), days)
     return _issue_and_email(
         email_addr, product_name, seats, days, is_trial=True,
-        subscription_id=_extract_subscription_id(payload, object_is_subscription=True))
+        subscription_id=_extract_subscription_id(payload, object_is_subscription=True),
+        product_id=product_id,
+        fulfillment_id=str(payload.get("_engraphis_fulfillment_id") or ""))

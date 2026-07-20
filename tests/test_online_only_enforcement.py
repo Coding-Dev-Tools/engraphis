@@ -13,6 +13,7 @@ These are pure-stdlib (like tests/test_licensing.py), stubbing the vendor server
 monkeypatched ``cloud_license.register`` so no network is touched.
 """
 import json
+import threading
 import time
 
 import pytest
@@ -64,7 +65,7 @@ def _key(plan="pro", days=365, cloud=True, trial=False, seats=1):
         payload["trial"] = 1
     if cloud:                       # a key minted with the server URL signed in
         payload["enforce"] = "cloud"
-        payload["cloud_url"] = "http://vendor.test"
+        payload["cloud_url"] = "https://vendor.test"
     return compose_key(payload, SECRET)
 
 
@@ -136,9 +137,9 @@ def test_cached_lease_survives_server_outage(monkeypatch):
     _grant(monkeypatch)
     monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _key())
     assert has_feature("analytics")                       # obtains + caches the lease
-    def _boom(*a, **k):
-        raise AssertionError("must not re-hit the server while the lease is valid")
-    monkeypatch.setattr(cl, "register", _boom)
+    # A transient outage returns no lease but is not an authoritative denial; the cached
+    # signed lease remains valid offline grace until its TTL expires.
+    monkeypatch.setattr(cl, "register", lambda *a, **k: None)
     lic._cached = None
     lic._cache_recheck_at = 0
     assert has_feature("analytics")                       # served from the cached lease
@@ -163,8 +164,8 @@ def test_trial_key_denied_without_server(monkeypatch):
     assert not has_feature("analytics")
 
 
-def test_request_trial_key_posts_plan(monkeypatch):
-    """The client's trial request carries the plan so the relay mints the right tier."""
+def test_request_trial_key_posts_plan_with_client_headers(monkeypatch):
+    """The trial request carries the selected plan and explicit client identity."""
     captured = {}
 
     class _Resp:
@@ -175,19 +176,72 @@ def test_request_trial_key_posts_plan(monkeypatch):
     def _urlopen(req, timeout=None):
         captured["url"] = req.full_url
         captured.update(json.loads(req.data.decode()))
+        captured["user_agent"] = req.get_header("User-agent")
+        captured["accept"] = req.get_header("Accept")
         return _Resp()
 
     monkeypatch.setattr(cl.urllib.request, "urlopen", _urlopen)
     key, reason, pending = cl.request_trial_key(
-        "http://vendor.test", "mid-1", plan="pro", email="a@b.co")
+        "http://127.0.0.1", "mid-1", plan="pro", email="a@b.co")
     assert key == "ENGR1.fake" and pending is False
     assert captured["plan"] == "pro"
     assert captured["url"].endswith("/license/v1/start-trial")
+    assert captured["user_agent"].startswith("Engraphis/")
+    assert captured["accept"] == "application/json"
 
 
 # ── recheck cadence: every paid license re-validates against the server ───────────────
 
 def test_every_paid_license_gets_rolling_recheck():
-    # Free tier: no rolling recheck; paid licenses re-validate against the server.
-    # TODO: assert free tier skips recheck and paid tier triggers a server recheck.
-    pass
+    now = 1_000.0
+    assert lic._license_recheck_at(License.free(), now=now) == float("inf")
+    assert lic._license_recheck_at(
+        License(plan="pro"), now=now) == now + lic._CLOUD_RECHECK_SECONDS
+    assert lic._license_recheck_at(
+        License(plan="team", expires=now + 30), now=now) == now + 30
+
+
+# ── concurrency: a stale ALLOW must never resurrect a revoked key (lost-update race) ──
+
+def test_stale_allow_does_not_override_newer_denial(monkeypatch):
+    """Lost-update race on the process license cache: two overlapping ``refresh=True``
+    calls straddle a revocation. The OLDER call's cloud gate returns ALLOWED (checked
+    just before the key was revoked) but is slow to store; the NEWER call returns DENIED
+    and stores the free tier first. The older allow must NOT then overwrite it and
+    re-enable the revoked key until the next recheck — the cache carries a generation that
+    the older store detects has moved, and fails closed."""
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _key())
+    lic.invalidate_cache()
+
+    started = threading.Event()
+    release = threading.Event()
+    calls = {"n": 0}
+
+    def fake_gate(license_obj, material):
+        n = calls["n"]
+        calls["n"] += 1
+        if n == 0:  # older refresh: server still says ALLOWED, but this thread stores late
+            started.set()
+            release.wait(5)
+            return True, ""
+        return False, "revoked"  # newer refresh: key has been revoked → DENIED
+
+    monkeypatch.setattr(lic, "_cloud_gate", fake_gate)
+
+    older = {}
+
+    def older_refresh():
+        older["lic"] = lic.current_license(refresh=True)
+
+    thread = threading.Thread(target=older_refresh)
+    thread.start()
+    assert started.wait(5)                          # older refresh is in-flight, pre-store
+    newer = lic.current_license(refresh=True)        # completes first: denial → free tier
+    assert not newer.is_paid
+    release.set()
+    thread.join(5)
+
+    # The older, now-stale allow must have been discarded — not written over the denial.
+    assert not older["lic"].is_paid
+    assert not lic.current_license().is_paid
+    assert not lic.has_feature("analytics")

@@ -1,0 +1,63 @@
+{
+  "schema": "engraphis-commercial/v1",
+  "version": "1.0.0",
+  "license_server": "https://license.engraphis.com",
+  "managed_dashboard": "https://team.engraphis.com",
+  "trial": {
+    "days": 3,
+    "card_required": false,
+    "plans": ["pro", "team"]
+  },
+  "plans": {
+    "free": {
+      "monthly_usd": 0,
+      "annual_usd": 0,
+      "billing_unit": "installation"
+    },
+    "pro": {
+      "monthly_usd": 10,
+      "annual_usd": 100,
+      "billing_unit": "installation",
+      "products": {
+        "monthly": {
+          "id": "6349d29a-b4c0-4b8e-b9e8-071705351c9c",
+          "env": "POLAR_PRO_MONTHLY_PRODUCT_ID",
+          "checkout_url": "https://buy.polar.sh/polar_cl_n6CR3ERqOus2VUhRrGrsRUqOB8yjDTeEU7p1r3CRrae?product_id=6349d29a-b4c0-4b8e-b9e8-071705351c9c"
+        },
+        "annual": {
+          "id": "5e10d5d2-607a-4e9c-ad1c-88cb48c37e11",
+          "env": "POLAR_PRO_ANNUAL_PRODUCT_ID",
+          "checkout_url": "https://buy.polar.sh/polar_cl_n6CR3ERqOus2VUhRrGrsRUqOB8yjDTeEU7p1r3CRrae?product_id=5e10d5d2-607a-4e9c-ad1c-88cb48c37e11"
+        }
+      }
+    },
+    "team": {
+      "monthly_usd": 20,
+      "annual_usd": 200,
+      "billing_unit": "seat",
+      "products": {
+        "monthly": {
+          "id": "6444a48a-7a61-4c8e-8045-07a930f8f381",
+          "env": "POLAR_TEAM_MONTHLY_PRODUCT_ID",
+          "checkout_url": "https://buy.polar.sh/polar_cl_n6CR3ERqOus2VUhRrGrsRUqOB8yjDTeEU7p1r3CRrae?product_id=6444a48a-7a61-4c8e-8045-07a930f8f381"
+        },
+        "annual": {
+          "id": "929d926a-2981-4ad7-95bd-f52dabf0794e",
+          "env": "POLAR_TEAM_ANNUAL_PRODUCT_ID",
+          "checkout_url": "https://buy.polar.sh/polar_cl_n6CR3ERqOus2VUhRrGrsRUqOB8yjDTeEU7p1r3CRrae?product_id=929d926a-2981-4ad7-95bd-f52dabf0794e"
+        }
+      }
+    }
+  },
+  "features": {
+    "offline_free_core": true,
+    "online_paid_license_verification": true,
+    "opt_in_cloud_sync": true,
+    "multi_user_roles": true,
+    "team_audit_export": true,
+    "per_user_agent_tokens": true,
+    "end_to_end_encrypted_sync": false,
+    "sso": false,
+    "contractual_sla": false
+  }
+}

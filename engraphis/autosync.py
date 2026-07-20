@@ -131,7 +131,18 @@ def due(policy: dict, *, now: Optional[float] = None) -> bool:
 def _record(summary: dict, *, now: Optional[float] = None) -> None:
     """Stamp last_run + a compact last_result onto the persisted policy (best-effort)."""
     now = time.time() if now is None else now
-    existing = _read()
+    # Best-effort telemetry must NEVER clobber the policy. Distinguish a fresh install (no
+    # file — safe to create with the default) from a TRANSIENT read failure of an existing
+    # file: normalize_policy({}) is the DISABLED default, so blindly writing it back after a
+    # read hiccup would silently turn auto-sync off (this runs after every pass).
+    path = policy_path()
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return  # exists but unreadable → preserve the saved policy, skip this record
+    else:
+        existing = {}
     try:
         _write({"policy": normalize_policy(existing.get("policy", existing)),
                 "last_run": float(now),
@@ -156,9 +167,11 @@ def run_once(service: Any = None, *, now: Optional[float] = None,
     when the plan/key isn't ready (so the loop no-ops cheaply instead of hammering the
     relay)."""
     from engraphis import licensing
-    if not licensing.has_feature("sync"):
+    from engraphis.backends.sync_relay import has_sync_token
+    has_token = has_sync_token()
+    if not has_token and not licensing.has_feature("sync"):
         return {"skipped": "unlicensed"}
-    if not licensing._read_key_material():
+    if not has_token and not licensing._read_key_material():
         return {"skipped": "no-key"}
     from engraphis.routes import v2_api
     svc = service if service is not None else v2_api.service()

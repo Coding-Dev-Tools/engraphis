@@ -1,0 +1,110 @@
+name: commercial encrypted restore drill
+
+on:
+  schedule:
+    - cron: "19 4 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  restore-drill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+      - name: Install backup encryption dependency
+        run: python -m pip install "cryptography>=48.0.1"
+      - name: Create isolated vendor-state fixtures
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import secrets
+          import sqlite3
+          import uuid
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / (
+              "engraphis-commercial-restore-" + uuid.uuid4().hex)
+          live = root / "live"
+          live.mkdir(parents=True)
+          relay = live / "relay.db"
+          webhooks = live / "polar-webhooks.db"
+
+          with sqlite3.connect(relay) as conn:
+              conn.execute(
+                  "CREATE TABLE issued_licenses("
+                  "key_id TEXT PRIMARY KEY, subscription_id TEXT, order_id TEXT)")
+              conn.execute(
+                  "INSERT INTO issued_licenses VALUES "
+                  "('drill-license', 'drill-subscription', 'drill-order')")
+          with sqlite3.connect(webhooks) as conn:
+              conn.execute(
+                  "CREATE TABLE processed(webhook_id TEXT PRIMARY KEY, state TEXT)")
+              conn.execute(
+                  "INSERT INTO processed VALUES ('drill-delivery', 'fulfilled')")
+              conn.execute(
+                  "CREATE TABLE subscription_seats("
+                  "subscription_id TEXT PRIMARY KEY, seats INTEGER, event_ts REAL)")
+              conn.execute(
+                  "INSERT INTO subscription_seats VALUES ('drill-subscription', 5, 1.0)")
+
+          values = {
+              "DRILL_ROOT": root,
+              "ENGRAPHIS_SERVICE_MODE": "vendor",
+              "ENGRAPHIS_DB_PATH": live / "memory.db",
+              "ENGRAPHIS_RELAY_DB": relay,
+              "ENGRAPHIS_WEBHOOK_STATE": webhooks,
+              "ENGRAPHIS_BACKUP_KEY": secrets.token_hex(32),
+          }
+          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as handle:
+              for name, value in values.items():
+                  handle.write(f"{name}={value}\n")
+          PY
+      - name: Create and restore an encrypted backup
+        shell: bash
+        run: |
+          artifact="$(python -m scripts.commercial_backup backup \
+            --output-dir "$DRILL_ROOT/artifacts" \
+            --marker "$DRILL_ROOT/backup-status.json" \
+            --retention-days 2 --allow-same-device)"
+          test -f "$artifact"
+          python -m scripts.commercial_backup verify "$artifact"
+          python -m scripts.commercial_backup restore "$artifact" \
+            --output-dir "$DRILL_ROOT/restored"
+          echo "DRILL_ARTIFACT=$artifact" >> "$GITHUB_ENV"
+      - name: Verify restored order and seat state
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import sqlite3
+          from pathlib import Path
+
+          restored = Path(os.environ["DRILL_ROOT"]) / "restored"
+          with sqlite3.connect(restored / "relay.db") as conn:
+              assert conn.execute(
+                  "SELECT key_id FROM issued_licenses WHERE order_id='drill-order'"
+              ).fetchone() == ("drill-license",)
+          with sqlite3.connect(restored / "webhooks.db") as conn:
+              assert conn.execute(
+                  "SELECT state FROM processed WHERE webhook_id='drill-delivery'"
+              ).fetchone() == ("fulfilled",)
+              assert conn.execute(
+                  "SELECT seats FROM subscription_seats "
+                  "WHERE subscription_id='drill-subscription'"
+              ).fetchone() == (5,)
+          PY
+      - name: Prove restore never overwrites an existing directory
+        shell: bash
+        run: |
+          if python -m scripts.commercial_backup restore "$DRILL_ARTIFACT" \
+              --output-dir "$DRILL_ROOT/restored"; then
+            echo "restore unexpectedly overwrote existing staging data"
+            exit 1
+          fi

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Literal, Optional, Protocol, runtime_checkable
+from typing import Any, Iterable, Literal, Optional, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -30,6 +30,14 @@ class Scope(str, Enum):
     REPO = "repo"
     WORKSPACE = "workspace"
     USER = "user"
+
+
+class GraphLayer(str, Enum):
+    """Logical graph overlays kept inside the same local SQLite database."""
+    TEMPORAL = "temporal"
+    ENTITY = "entity"
+    CAUSAL = "causal"
+    SEMANTIC = "semantic"
 
 
 # ── Records ──────────────────────────────────────────────────────────────────
@@ -71,7 +79,12 @@ class SearchFilter:
     session_id: Optional[str] = None
     scopes: Optional[list[Scope]] = None
     mtypes: Optional[list[MemoryType]] = None
+    graph_layers: Optional[list[GraphLayer]] = None
     as_of: Optional[float] = None    # bi-temporal time anchor; None = now
+    # Contextual recall sees broader scopes as ancestors: a repo read can see that
+    # repo plus workspace/user memories, and a session read can additionally see its
+    # exact session.  Storage/governance queries stay exact unless they opt in.
+    include_ancestors: bool = False
 
 
 @dataclass
@@ -101,6 +114,7 @@ class Edge:
     src: str
     dst: str
     relation: str
+    layer: Optional[GraphLayer] = None
     weight: float = 1.0
     workspace_id: Optional[str] = None
     repo_id: Optional[str] = None
@@ -116,13 +130,52 @@ class ExtractedFact:
     """One distilled, self-contained fact produced by an ``Extractor`` (§8.2).
 
     ``mtype``/``importance``/``keywords`` are *hints* — the write path may override
-    them; ``content`` is the only required field.
+    them; ``content`` is the only required field. ``metadata`` is optional structured
+    extraction payload (entities/relations/confidence, etc.) and is merged into the
+    stored memory metadata by the ingest path.
     """
     content: str
     title: str = ""
     mtype: Optional[MemoryType] = None
     importance: float = 0.0
     keywords: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RetentionDecision:
+    """Optional host/LLM supervision signal for a new memory.
+
+    ``retain=False`` never hard-deletes or silently drops a write. The engine records
+    the recommendation and applies a short-lived stability preset so normal local
+    retention/consolidation policy can make the eventual governed decision.
+    """
+    label: str = "normal"
+    retain: bool = True
+    importance: Optional[float] = None
+    stability: Optional[float] = None
+    reason: str = ""
+
+
+@dataclass
+class ResourceDocument:
+    """Text and provenance extracted from a local file/media resource."""
+    text: str
+    title: str = ""
+    kind: str = "document"
+    media_type: str = "text/plain"
+    metadata: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SchemaSnapshot:
+    """Portable database-schema graph produced by an optional introspector."""
+    title: str
+    text: str
+    entities: list[dict[str, Any]] = field(default_factory=list)
+    relations: list[dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 # ── Protocols ────────────────────────────────────────────────────────────────
@@ -155,7 +208,8 @@ class GraphStore(Protocol):
     def upsert_node(self, node: Node) -> None: ...
     def upsert_edge(self, edge: Edge) -> None: ...
     def invalidate_edge(self, edge_id: str, at: float) -> None: ...
-    def neighbors(self, node_ids: list[str], *, hops: int = 1, at: Optional[float] = None) -> list[Edge]: ...
+    def neighbors(self, node_ids: list[str], *, hops: int = 1, at: Optional[float] = None,
+                  layers: Optional[list["GraphLayer"]] = None) -> list[Edge]: ...
     def ppr(self, seeds: list[str], *, at: Optional[float] = None) -> dict[str, float]: ...
 
 
@@ -169,7 +223,7 @@ class Reranker(Protocol):
 class LLM(Protocol):
     """External or local model for synthesis and structured extraction (§8.2)."""
     def complete(self, messages: list[dict], **kw: Any) -> str: ...
-    def extract_json(self, prompt: str, schema: dict) -> dict: ...
+    def extract_json(self, prompt: str, schema: dict) -> Any: ...
 
 
 @runtime_checkable
@@ -184,18 +238,38 @@ class Extractor(Protocol):
 
 
 @runtime_checkable
+class RetentionSupervisor(Protocol):
+    """Optional host-controlled importance/retention classifier."""
+    def decide(self, content: str, *, title: str = "", mtype: MemoryType,
+               metadata: Optional[dict] = None) -> RetentionDecision: ...
+
+
+@runtime_checkable
+class ResourceExtractor(Protocol):
+    """Turns local document/media bytes into text without changing memory semantics."""
+    def extract_bytes(self, name: str, data: bytes) -> ResourceDocument: ...
+    def extract_path(self, path: str) -> ResourceDocument: ...
+
+
+@runtime_checkable
+class SchemaIntrospector(Protocol):
+    """Reads a live database catalog and returns a transport-neutral schema graph."""
+    def inspect(self, dsn: str, *, schemas: Optional[list[str]] = None) -> SchemaSnapshot: ...
+
+
+@runtime_checkable
 class SyncTransport(Protocol):
     """Moves opaque sync bundles between devices (cloud-sync layer, core/sync.py).
 
     Deliberately dumb: it stores and retrieves named byte blobs and knows nothing
     about memory semantics, so a shared folder (Dropbox/iCloud/Syncthing/git), an
-    object store, or a managed end-to-end-encrypted relay are interchangeable behind
-    these three calls — same interface-first swap as ``VectorIndex``/``Embedder``.
+    object store, or a managed relay are interchangeable behind these three calls —
+    same interface-first swap as ``VectorIndex``/``Embedder``.
     A transport may encrypt ``data`` in ``push`` and decrypt in ``pull``; the sync
     engine treats every pulled bundle as untrusted regardless.
     """
     def push(self, name: str, data: bytes) -> None: ...
-    def pull(self) -> list[tuple[str, bytes]]: ...
+    def pull(self) -> Iterable[tuple[str, bytes]]: ...
     def list_names(self) -> list[str]: ...
 
 

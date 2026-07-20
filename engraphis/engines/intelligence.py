@@ -93,13 +93,13 @@ def auto_categorize(content: str, title: str = "",
             if "reason" not in result:
                 result["reason"] = ""
             return result
-    except Exception as e:
-        logger.debug("Auto-categorize skipped: %s", e)
+    except Exception as exc:
+        logger.debug("Auto-categorize skipped (%s)", type(exc).__name__)
         return {
             "memory_type": suggested_type,
             "confidence": 0.0,
             "should_split": False,
-            "reason": f"LLM unavailable: {e}",
+            "reason": "LLM unavailable",
             "splits": [],
         }
 
@@ -151,11 +151,11 @@ def check_conflicts(content: str, namespace: str,
             if "explanation" not in result:
                 result["explanation"] = ""
             return result
-    except Exception as e:
-        logger.debug("Conflict check skipped: %s", e)
+    except Exception as exc:
+        logger.debug("Conflict check skipped (%s)", type(exc).__name__)
         return {"has_conflict": False, "conflict_type": "none",
                 "conflicting_memory_id": None, "resolution": "keep_both",
-                "explanation": f"LLM unavailable: {e}"}
+                "explanation": "LLM unavailable"}
 
 
 def _parse_json(raw: str) -> dict[str, Any]:

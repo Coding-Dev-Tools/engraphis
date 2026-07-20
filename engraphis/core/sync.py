@@ -42,12 +42,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import re
 from typing import Any, Optional
 
+from engraphis.core.graph_layers import merge_graph_layers, normalize_graph_layer
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
 from engraphis.core.store import Store, now_ts
+
+
+logger = logging.getLogger("engraphis.sync")
 
 # ── bundle format ─────────────────────────────────────────────────────────────
 SYNC_FORMAT = "engraphis-sync"
@@ -66,6 +71,10 @@ MAX_STABILITY = 1e6                # clamp so a bundle can't dominate retention 
 MAX_ACCESS_COUNT = 1_000_000_000
 MAX_SESSION_ID_CHARS = 128
 MAX_REPOS = 10_000                 # cap repos map so an empty-memories bundle can't bloat
+# Rows applied per transaction / per batched existence lookup. Bounded so applying a
+# MAX_MEMORIES bundle never materializes the whole thing at once (see apply_bundle).
+APPLY_BATCH = 500
+MAX_WORKSPACE_NAME_CHARS = 200
 MAX_REPO_NAME_CHARS = 200
 TS_FUTURE_SKEW = 2 * 86400         # tolerate 2 days of cross-device clock skew, no more
 _VALID_SENSITIVITY = ("normal", "sensitive", "secret")
@@ -159,15 +168,61 @@ def merge_record(local: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
         surprise=winner.surprise, sensitivity=winner.sensitivity,
         session_id=winner.session_id, provenance=dict(winner.provenance or {}),
         valid_from=winner.valid_from,
+        # ``ingested_at`` is a LWW field (_LWW_FIELDS), NOT a lattice field, and it is the
+        # SECOND component of _version_key. Merging it as a min-lattice made
+        # _version_key(merged) < _version_key(winner), so replaying the same bundle re-ran
+        # LWW from a lowered key and fell through to the content-hash tiebreak — silently
+        # reverting the later edit and breaking both merge(merge(a,b),b) == merge(a,b) and
+        # apply_bundle's "a second application reports all-unchanged" contract.
+        # Taking the winner's value makes _version_key(merged) == _version_key(winner)
+        # exactly: last_access is the max (which IS the winner's, since it is the key's
+        # primary component), ingested_at is the winner's, and _label_tuple is built
+        # entirely from the winner.
+        ingested_at=winner.ingested_at,
         # lattice fields: commutative joins (independent of the LWW winner)
         valid_to=_min_nonnull(local.valid_to, incoming.valid_to),
         expired_at=_min_nonnull(local.expired_at, incoming.expired_at),
-        ingested_at=_min_nonnull(local.ingested_at, incoming.ingested_at),
         stability=max(local.stability, incoming.stability),
         access_count=max(local.access_count, incoming.access_count),
         last_access=_max_nonnull(local.last_access, incoming.last_access),
         pinned=bool(local.pinned or incoming.pinned),
     )
+
+
+# Fields ``Store.add_memory`` fills in from the SERVER clock when they arrive as ``None``
+# (store.py: ``ingested_at``/``valid_from``/``last_access`` are each defaulted to ``now_ts()``).
+# For these, "omitted by the bundle" is NOT a competing value — the store has no way to
+# persist an unset one, so the omission can only ever mean "whatever the row already has".
+#
+# ``valid_to``/``expired_at`` are deliberately NOT in this set: there ``None`` is a genuine,
+# persistable value meaning "still valid / not retired", and the earliest-non-null lattice
+# already handles it.
+_STORE_DEFAULTED_FIELDS = ("valid_from", "ingested_at", "last_access")
+
+
+def inherit_store_defaults(existing: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
+    """Fill store-defaulted fields the incoming row OMITTED from ``existing`` (in place).
+
+    Must run before ``merge_record`` whenever the id already exists locally, otherwise
+    ``apply_bundle`` never converges for a bundle that omits one of these fields:
+    ``dict_to_record`` leaves it ``None``, ``add_memory`` then stamps it with ``now()``, so
+    on the next replay the stored and incoming labels differ *only* in that field. When
+    ``last_access`` and ``ingested_at`` tie, the version key falls through to the
+    content-hash tiebreak, which flips a coin — roughly half of all replays reported
+    ``updated``, rewrote the row with a FRESH default, and flipped again next round.
+    Unbounded write amplification and ``sync_overwrite`` audit spam on every sync round,
+    reachable from an untrusted bundle (SECURITY.md — memory poisoning).
+
+    Peer-to-peer bundles never tripped this because ``record_to_dict`` always emits all
+    three; a hand-crafted bundle does. This is NOT done inside ``merge_record``: that
+    function is a pure lattice over two complete records and has no notion of "the store
+    would have defaulted this". A value the incoming row genuinely supplies is untouched,
+    so a legitimately newer ``valid_from`` still wins last-writer-wins normally.
+    """
+    for field_name in _STORE_DEFAULTED_FIELDS:
+        if getattr(incoming, field_name) is None:
+            setattr(incoming, field_name, getattr(existing, field_name))
+    return incoming
 
 
 def _signature(rec: MemoryRecord) -> str:
@@ -228,6 +283,28 @@ def _clamp_ts(v: Any, now: float) -> Optional[float]:
     if f is None:
         return None
     return max(0.0, min(f, now + TS_FUTURE_SKEW))
+
+
+# World-time validity ceiling (year ~2100). ``valid_from``/``valid_to`` are WORLD time — a
+# fact may legitimately be true until a future date. Neither feeds the PRIMARY version-key
+# ordering (last_access, ingested_at — both system time, still clamped by _clamp_ts):
+# ``valid_to`` is a lattice field, and ``valid_from`` participates only in the version key's
+# deterministic content-hash TIEBREAK (clock-independent), so a future value can't pin
+# poisoned content above honest edits. Clamping these to now+skew truncated real future
+# validity, which the earliest-wins merge then spread to every device. Bound only to a sane
+# far-future ceiling to reject absurd/overflow values.
+_WORLD_TS_MAX = 4_102_444_800.0
+
+
+def _clamp_world_ts(v: Any) -> Optional[float]:
+    """Coerce a world-time validity timestamp, allowing legitimate FUTURE values (bounded
+    to a far-future ceiling). Clamping these to ``now + skew`` like the system timestamps
+    truncated real future validity, and the earliest-wins merge then spread the truncation
+    to every device."""
+    f = _as_float(v, None)
+    if f is None:
+        return None
+    return max(0.0, min(f, _WORLD_TS_MAX))
 
 
 def _clamp_str(v: Any, n: int) -> str:
@@ -343,8 +420,10 @@ def dict_to_record(d: dict) -> Optional[MemoryRecord]:
         stability=_clamp_num(d.get("stability"), 0.0, MAX_STABILITY, 1.0),
         access_count=min(MAX_ACCESS_COUNT, max(0, _as_int(d.get("access_count"), 0))),
         last_access=_clamp_ts(d.get("last_access"), now),
-        valid_from=_clamp_ts(d.get("valid_from"), now),
-        valid_to=_clamp_ts(d.get("valid_to"), now),
+        # World-time validity may be in the future; the system timestamps below may not
+        # (they are the version key's primary ordering / anti-poison defense).
+        valid_from=_clamp_world_ts(d.get("valid_from")),
+        valid_to=_clamp_world_ts(d.get("valid_to")),
         ingested_at=_clamp_ts(d.get("ingested_at"), now),
         expired_at=_clamp_ts(d.get("expired_at"), now),
         pinned=bool(d.get("pinned")), sensitivity=sens,
@@ -371,16 +450,7 @@ class SyncEngine:
         self.embedder = embedder
         self.index = vector_index
         self.device_id = device_id or store.device_id()
-        
-        # Default allowed_workspaces to global settings to prevent accidental bypass of ENGRAPHIS_WORKSPACES
-        if allowed_workspaces is None:
-            try:
-                from engraphis.config import settings
-                if settings.allowed_workspaces:
-                    allowed_workspaces = settings.allowed_workspaces
-            except (ImportError, AttributeError):
-                pass
-                
+
         # Same hard boundary MemoryService enforces (SECURITY.md §3): when set, a bundle
         # may only be applied into one of these workspaces, so the folder transport can
         # never be steered into writing a workspace the operator never authorized.
@@ -393,25 +463,39 @@ class SyncEngine:
 
         Includes invalidated memories on purpose: a closed ``valid_to`` is state that
         must propagate so a forget/correct on one device reaches the others."""
+        ws_row = self.store.conn.execute(
+            "SELECT name FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
+        ws_name = ws_row["name"] if ws_row else "default"
+        if self.allowed_workspaces is not None and ws_name not in self.allowed_workspaces:
+            raise SyncError("workspace %r is not authorized for sync" % ws_name)
         flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id)
         # 'secret'-flagged memories never leave the device — sync is the first feature to
         # transmit memory content off-box, so this is the first place the label bites.
         mems = [m for m in self.store.list_memories(flt, include_invalid=True)
                 if m.sensitivity != "secret"]
-        ws_row = self.store.conn.execute(
-            "SELECT name FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
-        repo_rows = self.store.conn.execute(
-            "SELECT id, name FROM repos WHERE workspace_id=?", (workspace_id,)).fetchall()
+        if repo_id is not None:
+            repo_rows = self.store.conn.execute(
+                "SELECT id, name FROM repos WHERE workspace_id=? AND id=?",
+                (workspace_id, repo_id)).fetchall()
+        else:
+            repo_rows = self.store.conn.execute(
+                "SELECT id, name FROM repos WHERE workspace_id=?", (workspace_id,)).fetchall()
         ids_in = [m.id for m in mems]
         links = self.store.links_among(ids_in) if ids_in else []
         return {
             "format": SYNC_FORMAT, "version": SYNC_VERSION,
             "device_id": self.device_id, "created_at": now_ts(),
-            "workspace_name": ws_row["name"] if ws_row else "default",
+            "workspace_name": ws_name,
             "repos": {r["id"]: r["name"] for r in repo_rows},
             "memories": [record_to_dict(m) for m in mems],
-            "mem_links": [{"a": ln["a"], "b": ln["b"], "relation": ln["relation"]}
-                          for ln in links],
+            "mem_links": [
+                {
+                    "a": ln["a"], "b": ln["b"], "relation": ln["relation"],
+                    "layer": ln.get("layer") or "semantic",
+                    "reason": ln.get("reason") or "",
+                }
+                for ln in links
+            ],
         }
 
     # ── apply (the trust boundary) ──────────────────────────────────────────────
@@ -439,112 +523,249 @@ class SyncEngine:
         if len(mem_dicts) > MAX_MEMORIES or len(link_dicts) > MAX_LINKS:
             raise SyncError("bundle exceeds size caps")
 
-        ws_name = into_workspace or bundle.get("workspace_name") or "default"
+        raw_ws_name = into_workspace if into_workspace is not None else bundle.get("workspace_name")
+        if raw_ws_name is not None and not isinstance(raw_ws_name, str):
+            raise SyncError("bundle workspace_name must be a string")
+        ws_name = _clamp_str(raw_ws_name or "default", MAX_WORKSPACE_NAME_CHARS).strip()
+        if not ws_name:
+            ws_name = "default"
         if self.allowed_workspaces is not None and ws_name not in self.allowed_workspaces:
             raise SyncError("workspace %r is not authorized for sync" % ws_name)
         report = {"added": 0, "updated": 0, "unchanged": 0, "rejected": 0,
-                  "links_added": 0, "workspace": ws_name, "dry_run": bool(dry_run)}
+                  "links_added": 0, "links_updated": 0,
+                  "workspace": ws_name, "dry_run": bool(dry_run)}
 
         # Resolve scope by NAME (per-device ids differ; names are the sync key). A
         # dry run must not mutate, so it resolves existing ids only and never creates.
         remote_repos = bundle.get("repos") or {}
-        if isinstance(remote_repos, dict) and len(remote_repos) > MAX_REPOS:
+        if not isinstance(remote_repos, dict):
+            raise SyncError("bundle repos must be an object")
+        if len(remote_repos) > MAX_REPOS:
             raise SyncError("bundle exceeds repo cap")
-        repo_remap: dict[str, str] = {}
+        valid_remote_repos = {
+            rid: _clamp_str(rname, MAX_REPO_NAME_CHARS)
+            for rid, rname in remote_repos.items()
+            if isinstance(rid, str) and isinstance(rname, str) and rname
+        }
+        repo_remap: dict[str, Optional[str]] = {}
         if dry_run:
             row = self.store.conn.execute(
                 "SELECT id FROM workspaces WHERE name=?", (ws_name,)).fetchone()
             local_ws = row["id"] if row else None
+            for rid, rname in valid_remote_repos.items():
+                repo_row = (self.store.conn.execute(
+                    "SELECT id FROM repos WHERE workspace_id=? AND name=?",
+                    (local_ws, rname)).fetchone() if local_ws is not None else None)
+                repo_remap[rid] = repo_row["id"] if repo_row else None
         else:
             local_ws = self.store.get_or_create_workspace(ws_name)
-            if isinstance(remote_repos, dict):
-                for rid, rname in remote_repos.items():
-                    if isinstance(rid, str) and isinstance(rname, str) and rname:
-                        repo_remap[rid] = self.store.get_or_create_repo(
-                            local_ws, _clamp_str(rname, MAX_REPO_NAME_CHARS))
+            for rid, rname in valid_remote_repos.items():
+                repo_remap[rid] = self.store.get_or_create_repo(local_ws, rname)
 
-        for d in mem_dicts:
-            rec = dict_to_record(d)
-            if rec is None:
+        accepted: dict[str, MemoryRecord] = {}
+
+        # Bulk apply. Previously this was N+1: a SELECT per id to test existence, then a
+        # Store.add_memory that did its own dupe-check SELECT, INSERT, FTS delete+insert,
+        # vector upsert AND its own commit() — one durability fsync per row, up to
+        # MAX_MEMORIES times. Now: one batched existence lookup and one transaction per
+        # APPLY_BATCH rows.
+        #
+        # Batching rather than a single bundle-wide transaction is deliberate and preserves
+        # two properties. Peak memory stays bounded at MAX_MEMORIES scale (rows are parsed
+        # a batch at a time, not 200k at once). And a failure part-way through still leaves
+        # the rows that already committed applied — the same partial-apply outcome callers
+        # see today, since SyncEngine.sync catches per-bundle and records the error rather
+        # than retrying; one wide transaction would silently roll the whole bundle back.
+        try:
+            self._apply_memories(mem_dicts, report, accepted, local_ws,
+                                 repo_remap, only_repo_id, src_device, dry_run)
+            self._apply_links(link_dicts, report, accepted, local_ws,
+                              only_repo_id, src_device, dry_run)
+        except BaseException:
+            # Never leave the shared connection pinned in an open transaction — that would
+            # stall every other thread on _SerializedConnection's lock. Keep whatever
+            # already applied, matching the old per-row-commit failure behaviour.
+            try:
+                self.store.conn.commit()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                self.store.conn.rollback()
+            raise
+        return report
+
+    def _apply_memories(self, mem_dicts: list, report: dict,
+                        accepted: dict, local_ws, repo_remap: dict,
+                        only_repo_id, src_device, dry_run: bool) -> None:
+        for start in range(0, len(mem_dicts), APPLY_BATCH):
+            batch = mem_dicts[start:start + APPLY_BATCH]
+            parsed = [dict_to_record(d) for d in batch]
+            # One IN(...) lookup for the whole batch instead of get_memory() per row.
+            # ``known`` doubles as the write-through cache so a duplicate id LATER in the
+            # same batch still sees the row this loop just wrote, exactly as the per-row
+            # get_memory() did.
+            known = self.store.get_memories(
+                [rec.id for rec in parsed if rec is not None])
+            for d, rec in zip(batch, parsed):
+                self._apply_one(d, rec, report, accepted, known, local_ws,
+                                repo_remap, only_repo_id, src_device, dry_run)
+            if not dry_run:
+                self.store.conn.commit()
+
+    def _apply_one(self, d: dict, rec, report: dict, accepted: dict, known: dict,
+                   local_ws, repo_remap: dict, only_repo_id, src_device,
+                   dry_run: bool) -> None:
+        if rec is None:
+            report["rejected"] += 1
+            return
+        # Re-home into local scope, and tag provenance with the origin device so a
+        # synced-in memory stays auditable ("why is this known?" — AGENTS.md §3.6).
+        rec.workspace_id = local_ws
+        remote_repo_id = d.get("repo_id")
+        if remote_repo_id:
+            if remote_repo_id not in repo_remap:
                 report["rejected"] += 1
-                continue
-            # Re-home into local scope, and tag provenance with the origin device so a
-            # synced-in memory stays auditable ("why is this known?" — AGENTS.md §3.6).
-            rec.workspace_id = local_ws
-            rec.repo_id = repo_remap.get(d.get("repo_id")) if d.get("repo_id") else None
-            if only_repo_id is not None and rec.repo_id != only_repo_id:
-                report["rejected"] += 1        # outside the repo this sync is restricted to
-                continue
-            if src_device:
-                prov = dict(rec.provenance or {})
-                prov.setdefault("synced_from_device", _clamp_str(src_device, 128))
-                rec.provenance = prov
-            existing = self.store.get_memory(rec.id)
-            if existing is not None and existing.workspace_id != local_ws:
-                # This id already lives in a DIFFERENT workspace: never let a bundle reach
-                # across the scope boundary (SECURITY.md §3 confinement).
+                return
+            rec.repo_id = repo_remap[remote_repo_id]
+            if rec.repo_id is None and only_repo_id is not None:
                 report["rejected"] += 1
-                continue
-            if existing is None:
+                return
+        else:
+            rec.repo_id = None
+        if only_repo_id is not None and rec.repo_id != only_repo_id:
+            report["rejected"] += 1
+            return
+        if src_device:
+            prov = dict(rec.provenance or {})
+            prov.setdefault("synced_from_device", _clamp_str(src_device, 128))
+            rec.provenance = prov
+        existing = known.get(rec.id)
+        if existing is not None and existing.workspace_id != local_ws:
+            # This id already lives in a DIFFERENT workspace: never let a bundle reach
+            # across the scope boundary (SECURITY.md §3 confinement).
+            report["rejected"] += 1
+            return
+        if existing is not None and existing.sensitivity == "secret":
+            # ``secret`` is device-local by contract. A peer may know this id from an
+            # older sync that happened before the memory was classified secret, but it
+            # must never be able to overwrite, invalidate, or downgrade the local row
+            # back to an exportable sensitivity.
+            report["rejected"] += 1
+            return
+        if (existing is not None and only_repo_id is not None
+                and existing.repo_id != only_repo_id):
+            # The incoming row's claimed repo cannot re-home an existing memory from
+            # another repo during a repo-restricted sync.
+            report["rejected"] += 1
+            return
+        if existing is None:
+            if not dry_run:
+                self._write(rec, commit=False)
+                self.store.audit(
+                    "sync:%s" % _clamp_str(src_device or "peer", 128),
+                    "sync_add", rec.id,
+                    f"new memory created from synced bundle (device: {src_device or 'peer'})",
+                    commit=False)
+                known[rec.id] = rec      # write-through: a duplicate id later in this
+                                         # batch must see what we just persisted
+            report["added"] += 1
+            accepted[rec.id] = rec
+        else:
+            accepted[rec.id] = existing
+            # A field the bundle simply OMITTED is not a competing value: the store would
+            # only stamp it with now() on write, so inherit it from the row we already hold
+            # before merging. Without this, apply_bundle never converges for a bundle that
+            # omits valid_from — see inherit_store_defaults.
+            merged = merge_record(existing, inherit_store_defaults(existing, rec))
+            if _signature(merged) == _signature(existing):
+                report["unchanged"] += 1
+            else:
                 if not dry_run:
-                    self._write(rec)
+                    self._write(merged, commit=False)
+                    # A synced bundle overwriting existing content is exactly the
+                    # memory-poisoning surface (SECURITY.md): record who/what so the
+                    # overwrite is never silent and "why is this known?" stays answerable.
                     self.store.audit(
                         "sync:%s" % _clamp_str(src_device or "peer", 128),
-                        "sync_add", rec.id,
-                        f"new memory created from synced bundle (device: {src_device or 'peer'})")
-                report["added"] += 1
-            else:
-                merged = merge_record(existing, rec)
-                if _signature(merged) == _signature(existing):
-                    report["unchanged"] += 1
-                else:
-                    if not dry_run:
-                        self._write(merged)
-                        # A synced bundle overwriting existing content is exactly the
-                        # memory-poisoning surface (SECURITY.md): record who/what so the
-                        # overwrite is never silent and "why is this known?" stays answerable.
-                        self.store.audit(
-                            "sync:%s" % _clamp_str(src_device or "peer", 128),
-                            "sync_overwrite", merged.id,
-                            "content replaced by synced bundle (last-writer-wins)")
-                    report["updated"] += 1
+                        "sync_overwrite", merged.id,
+                        "content replaced by synced bundle (last-writer-wins)",
+                        commit=False)
+                    known[rec.id] = merged
+                report["updated"] += 1
+                accepted[rec.id] = merged
 
+    def _apply_links(self, link_dicts: list, report: dict, accepted: dict,
+                     local_ws, only_repo_id, src_device, dry_run: bool) -> None:
         # mem_links: grow-only set; endpoints must be memories we actually hold.
+        pending = 0
         for ln in link_dicts:
             if not isinstance(ln, dict):
                 continue
             a, b = ln.get("a"), ln.get("b")
-            rel = ln.get("relation") or "related"
+            rel = _clamp_str(ln.get("relation") or "related", 64) or "related"
+            layer = normalize_graph_layer(ln.get("layer"), rel).value
+            reason = _clamp_str(ln.get("reason") or "", MAX_TITLE_CHARS)
             if not isinstance(a, str) or not isinstance(b, str) or a == b:
                 continue
-            ma, mb = self.store.get_memory(a), self.store.get_memory(b)
-            if ma is None or mb is None:
+            if a not in accepted or b not in accepted:
                 continue
+            ma, mb = accepted[a], accepted[b]
             if local_ws is not None and (ma.workspace_id != local_ws
                                          or mb.workspace_id != local_ws):
-                continue  # never link across the workspace boundary
-            if self.store.has_link(a, b, relation=rel):
+                continue
+            if (only_repo_id is not None
+                    and (ma.repo_id != only_repo_id or mb.repo_id != only_repo_id)):
+                continue
+            pending += 1
+            if pending >= APPLY_BATCH:
+                if not dry_run:
+                    self.store.conn.commit()
+                pending = 0
+            existing_link = self.store.conn.execute(
+                "SELECT layer, reason FROM mem_links "
+                "WHERE ((a=? AND b=?) OR (a=? AND b=?)) AND relation=? LIMIT 1",
+                (a, b, b, a, rel),
+            ).fetchone()
+            if existing_link:
+                # Link metadata has no clock in sync format v1. Resolve concurrent
+                # metadata deterministically so peers converge regardless of arrival.
+                merged_layer = merge_graph_layers(
+                    existing_link["layer"], layer, rel
+                ).value
+                merged_reason = max(existing_link["reason"] or "", reason)
+                if (merged_layer, merged_reason) == (
+                    existing_link["layer"] or "semantic",
+                    existing_link["reason"] or "",
+                ):
+                    continue
+                if not dry_run:
+                    self.store.add_link(
+                        a, b, rel, layer=merged_layer, reason=merged_reason,
+                        commit=False,
+                    )
+                report["links_updated"] += 1
                 continue
             if not dry_run:
-                self.store.add_link(a, b, _clamp_str(rel, 64))
+                self.store.add_link(a, b, rel, layer=layer, reason=reason, commit=False)
                 self.store.audit(
                     "sync:%s" % _clamp_str(src_device or "peer", 128),
                     "sync_link", a,
-                    f"linked to {b} with relation {rel}")
+                    f"linked to {b} with relation {rel}", commit=False)
             report["links_added"] += 1
+        if not dry_run:
+            self.store.conn.commit()
 
-        return report
-
-    def _write(self, rec: MemoryRecord) -> None:
+    def _write(self, rec: MemoryRecord, *, commit: bool = True) -> None:
         """Persist a merged/new record verbatim (ids + timestamps preserved) and keep
-        derived state coherent: re-embed for the vector arm when an embedder is wired."""
+        derived state coherent: re-embed for the vector arm when an embedder is wired.
+
+        ``commit=False`` leaves the transaction open for the caller's batch (apply_bundle)."""
         if self.embedder is not None:
             try:
                 text = f"{rec.title}\n{rec.content}" if rec.title else rec.content
                 rec.embedding = self.embedder.embed([text])[0]
             except Exception:
                 rec.embedding = None
-        self.store.add_memory(rec, audit=False)  # sync logs its own semantic audit (sync_add/sync_overwrite)
+        # sync logs its own semantic audit (sync_add/sync_overwrite), hence audit=False
+        self.store.add_memory(rec, audit=False, commit=commit)
         if rec.embedding is not None and self.index is not None:
             try:
                 self.index.upsert([rec.id], rec.embedding.reshape(1, -1))
@@ -553,25 +774,46 @@ class SyncEngine:
 
     # ── one round-trip over a transport ─────────────────────────────────────────
     def sync(self, transport, workspace_id: str, *, repo_id: Optional[str] = None,
-             dry_run: bool = False) -> dict:
+             dry_run: bool = False, push: bool = True) -> dict:
         """Push this device's snapshot, then pull and apply every *other* device's.
 
         Full-state and idempotent, so it is safe to run on any cadence (cron, a
         file-watcher, or by hand) and safe to interrupt. Returns a per-peer report."""
-        ws_row = self.store.conn.execute(
-            "SELECT name FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
-        ws_name = ws_row["name"] if ws_row else "default"
+        bundle = self.export_bundle(workspace_id, repo_id=repo_id)
+        ws_name = bundle["workspace_name"]
 
         own_name = "bundle-%s.json" % self.device_id
-        bundle = self.export_bundle(workspace_id, repo_id=repo_id)
         pushed = False
-        if not dry_run:
+        if not dry_run and push:
             transport.push(own_name, json.dumps(bundle).encode("utf-8"))
             pushed = True
 
         applied: list[dict] = []
-        totals = {"added": 0, "updated": 0, "unchanged": 0, "rejected": 0, "links_added": 0}
-        for name, data in transport.pull():
+        totals = {
+            "added": 0, "updated": 0, "unchanged": 0, "rejected": 0,
+            "links_added": 0, "links_updated": 0,
+        }
+        # Fetch each bundle inside its own try: a transport that raises while producing
+        # bundle N (a relay 404 on a bundle deleted mid-round, an oversized blob) used to
+        # propagate straight out of this loop, discarding both the remaining bundles AND
+        # the report for the peers already applied. Now the failure is recorded and the
+        # round completes with `complete: False`, so one poisoned/truncated bundle can no
+        # longer stall sync indefinitely. Nothing here weakens the trust boundary: every
+        # bundle that IS produced still goes through apply_bundle's validation, clamping,
+        # workspace authorization and confinement checks unchanged.
+        bundles = iter(transport.pull())
+        while True:
+            try:
+                name, data = next(bundles)
+            except StopIteration:
+                break
+            except Exception as exc:  # noqa: BLE001 — transport failure, not a bad bundle
+                logger.warning("sync transport pull failed (%s)", type(exc).__name__)
+                applied.append({"bundle": "?", "error": "transport failure",
+                                "error_type": type(exc).__name__})
+                # A generator that raised is closed and cannot be resumed; a list-backed
+                # transport keeps going. Either way we stop here rather than abort the run.
+                break
             if name == own_name:
                 continue
             try:
@@ -585,14 +827,21 @@ class SyncEngine:
                 rep = self.apply_bundle(remote, into_workspace=ws_name,
                                         only_repo_id=repo_id, dry_run=dry_run)
             except Exception as exc:  # one hostile bundle must never abort the whole sync
-                applied.append({"bundle": name, "error": str(exc)})
+                logger.warning("sync bundle rejected (%s)", type(exc).__name__)
+                applied.append({"bundle": name, "error": "bundle rejected",
+                                "error_type": type(exc).__name__})
                 continue
             rep["from_device"] = remote.get("device_id", "?")
             applied.append(rep)
             for k in totals:
                 totals[k] += rep.get(k, 0)
 
+        errors = [a for a in applied if "error" in a]
         return {"pushed": own_name if pushed else None, "workspace": ws_name,
                 "device_id": self.device_id, "exported_memories": len(bundle["memories"]),
-                "peers_applied": len([a for a in applied if "error" not in a]),
+                "read_only": bool(not push and not dry_run),
+                "peers_applied": len(applied) - len(errors),
+                # Explicit: the round must NOT read as a success when bundles were dropped
+                # (refused for signature/authorization, unreadable, or never delivered).
+                "complete": not errors, "errors": errors,
                 "totals": totals, "applied": applied, "dry_run": bool(dry_run)}

@@ -6,35 +6,468 @@ All notable changes to Engraphis are documented here. Format loosely follows
 ## [Unreleased]
 
 ### Added
-- **Agent Connect (Team): connect agents to a hosted instance instead of running locally.**
-  Team members mint a per-user API token from the dashboard and point their agent at the
-  instance's HTTP API to store memories in the cloud v2 store (the same DB the dashboard
-  reads). New: `POST /api/remember` (Team-gated, mirrors the local `engraphis_remember`
-  MCP tool's params), per-user bearer-token endpoints (`POST /api/auth/token`,
-  `GET /api/auth/tokens`, `DELETE /api/auth/token/{id}`), and `GET /api/auth/connect-info`
-  to verify a token + discover the API base. The dashboard auth gate now accepts a
-  per-user bearer token exactly like a cookie session (bound to the member for role +
-  personal-folder authz); disabled members' tokens are refused instantly. Tokens are
-  SHA-256 hashed at rest (raw token shown once). A free / lapsed instance returns `402`
-  on `/api/remember`, so a Team license is required to host team agents. See
-  `docs/AGENT_CONNECT.md`. (`tests/test_agent_connect.py`.)
-  *Note:* MCP-over-HTTP at `/mcp` is now mounted (see follow-up entry below), so MCP-native
-  agents point one URL at the cloud instance too. The HTTP API remains for non-MCP agents.
+
+- A search-first Analytical Galaxy Graph Explorer backed by canonical, evidence-weighted
+  scenes; deterministic hierarchical system gravity; compact edge backbones and aggregate
+  bridges; exact-ID evidence/history inspection; strongest-evidence paths; synchronized
+  accessible tables; responsive list-first mobile behavior; saved/shareable scene state; and
+  local PNG, JSON, and CSV exports.
+- Additive schema-v4 canonical identity and bi-temporal edge-support records, deterministic
+  `/api/graph/scene`, `/api/graph/suggest`, `/api/graph/entities/{canonical_id}`, and
+  `/api/graph/path` contracts with repository, memory-type, evidence-time, historical, and
+  weak-co-occurrence filtering, plus a persisted graph-index job with dry-run, progress,
+  cancellation, generation state, bounded error reporting, audit records, and tamper-evident
+  receipts.
+- Galaxy Explorer: a new Simple view (the default) renders a clean glowing galactic core with
+  soft bloom, plus an Advanced view toggle that keeps the fully decorated explorer available.
+  Default galaxy rotation is now ~10x slower for readability, and a new Freeze control
+  pauses/resumes the live rotation.
+
+### Changed
+
+- Graph rendering now uses pinned, locally bundled Sigma 3.0.3 and Graphology 0.26 assets,
+  a CSP-safe TypeScript worker, evidence-derived rest lengths, and bounded level-of-detail.
+  The legacy API and ForceGraph renderer remain available for one compatibility release via
+  `ENGRAPHIS_GRAPH_UI_V2=0`; the analytical explorer is the validated default.
+- Graph GET requests are strictly read-only. While an explicit mutating index job runs, graph
+  reads return a rebuilding conflict instead of mixing old and partially derived metrics.
+
+## [1.0.0] - 2026-07-19
+
+First commercial GA release for Pro and Team.
 
 ### Added
-- **MCP-over-HTTP at `/mcp` (agent connect, stacked on the above).** The Engraphis MCP
-  server is mounted at `/mcp` on the dashboard so an MCP-native agent (Claude Code, Cursor)
-  points one URL at the cloud instance and reuses the same v2 store the dashboard reads.
-  `mcp_server.set_service(svc)` injects the dashboard's `MemoryService` (one writer — no
-  second SQLite connection, avoiding the WAL lock contention that `mcp_server_http.py`
-  exists to prevent). The dashboard app gains a lifespan that initializes the MCP session
-  manager (a mounted sub-app's own lifespan does not run in Starlette), and `mcp.settings.transport_security`
-  DNS-rebinding protection is disabled on the mounted instance (the dashboard's `_auth_gate`
-  is the real boundary, and the default localhost-only allowlist would 421 a real domain).
-  `/mcp` is Team-gated (402) + member-authenticated (401) exactly like `/api/remember`.
-  The session manager is reset per `create_app()` so multiple apps in one process (tests)
-  each get a fresh, runnable instance. `tests/test_agent_connect_mcp.py` (4 tests: 401,
-  402, handshake+tools/list, write-shares-dashboard-store).
+
+- The Knowledge Graph can color nodes by deterministic communities, entity type, or
+  connection count. The selected mode persists and the legend follows the active scale.
+- Vendor signer rotation now has a dry-run-first bulk reissue command that requires exact
+  active-registry coverage, preserves every signed entitlement claim, keeps source keys
+  valid during dual verification, records an atomic migration audit, and enforces the
+  30-day grace period before source-key retirement.
+- Isolated `customer` and `vendor` production service modes, with an authenticated,
+  secret-free commercial readiness surface.
+- Deployment-bound Pro/Team trial claims with scanner-safe confirmation, automatic
+  server-to-server activation, replay/abuse protection, and recovery after a closed tab.
+- Atomic 72-hour Team invitations with resend, revoke, seat reservations, recipient-chosen
+  passwords, and immediate session/token invalidation for disabled users.
+- Hashed, scoped, 90-day per-user tokens for agent and sync access, including viewer
+  read-only sync.
+- Durable transactional-email outbox, verified Resend delivery events, redacted operations
+  state, bounded retries, and bounce/backlog readiness gates.
+- Canonical commercial product manifest, exact Polar product mapping, Railway customer
+  template descriptor, encrypted off-volume backup/restore tooling, and production
+  synthetics.
+
+### Changed
+
+- Paid licenses default to `https://license.engraphis.com`; the former license path is a
+  90-day compatibility surface.
+- The dashboard is auth-first when hosted, uses accessible dialogs instead of browser
+  prompts, and serves external same-origin assets under a CSP with no `unsafe-inline`.
+- The three-day no-card application trial is the only trial mechanism; Polar is paid
+  monthly/annual checkout only.
+
+### Fixed
+
+- GitHub Release publication supplies explicit repository context to `gh` in jobs without
+  a checkout. A workflow-dispatch repair path can reuse the tagged run's validated
+  distribution artifact if PyPI succeeds before release creation fails.
+
+### Security
+
+- The browser and invitation emails never receive the account-wide Team license key.
+- Trial invitation URLs are restricted to the dashboard origin bound into the initiating
+  deployment claim.
+- Production issuance rejects unknown Polar products and wrong organizations; signer
+  readiness remains fail-closed until the offline rotation ceremony is approved.
+
+## [0.9.9] - 2026-07-18
+
+Security and reliability release spanning graph isolation and performance, Team / Pro
+authentication, licensing and relay behavior, and the redesigned Knowledge Graph.
+
+### Security
+
+- `verify_lease` now rejects a non-finite `expires` (`NaN`, `Infinity`). Both `now > nan`
+  and `now > inf` are False, so such a lease previously passed the expiry check and never
+  expired — the one fail-open in lease verification. It also rejects a signed body that
+  decodes to valid-but-non-dict JSON, and a non-numeric `expires`, with `LicenseError`
+  rather than an uncaught `AttributeError`/`ValueError`. Exploiting any of these still
+  required the vendor signing key, so no issued lease is affected.
+- Code-graph search, path, impact, export, and unified-graph reads now apply the same
+  workspace/repo/session hierarchy filter as recall. Session-scoped memory content and
+  identifiers previously remained reachable through persisted code-memory links from a
+  repo-level caller. Reindexing still rebuilds those links for the owning session, but
+  every read now filters them by caller-visible scope.
+- Auth-bound dashboard users can no longer omit `workspace` to reach global recall.
+  Inspector per-user and deployment bearer tokens now bind real or synthetic identities
+  before personal receipt reads, so the deployment service account remains available for
+  shared automation without bypassing personal-folder ownership. The standalone
+  read-only graph endpoint also disables lazy write-on-read backfill.
+- Repository indexing now creates a first-time Team workspace through the same
+  privacy-aware path as remember/import/session writes, instead of silently creating a
+  shared, unowned folder for the authenticated user.
+
+### Fixed
+
+- Code-graph layer responses and filters now use the concrete persisted layer, including
+  inferred causal relations and explicitly semantic code edges. Code-memory link rebuilds
+  page through every live repo-associated memory instead of clearing the bridge and
+  stopping at 5,000, and Git impact parsing uses NUL-delimited paths without rewriting
+  valid filename characters.
+- Graph layer predicates are applied before workspace and code-edge response caps, and an
+  explicit all-off layer selection remains empty instead of reverting to every layer.
+  Layout preset and custom link-distance changes also recompute component centers while
+  preserving the existing graph data and node objects.
+  Filter reloads also tolerate transient graph-data invalidation, so restoring layers
+  redraws the canvas instead of leaving the explorer list beside an empty graph.
+- Oversized audio/video resources are rejected before transcription begins. A blank
+  `ENGRAPHIS_GRAPH_TOKEN` now correctly falls back to `ENGRAPHIS_API_TOKEN`.
+- The sync relay now has its own per-IP token bucket
+  (`ENGRAPHIS_RELAY_RATE_PER_MINUTE`, default 600) instead of sharing the
+  60-request/minute license-registration budget. A full 64-bundle sync round can complete
+  without throttling its final requests, while invalid-key floods remain bounded before
+  Ed25519 verification.
+- The relay sweeps `trial_pending` rows that lapsed over a day ago. Previously a magic
+  link that was never opened (bounced mail, a link scanner that never follows) was only
+  ever cleared when the same `machine_id` asked again, letting a caller at the
+  `/start-trial` rate-limit ceiling grow the table without bound on the volume that also
+  holds `relay.db`. The one-day retention window is deliberate: sweeping at expiry would
+  downgrade "this link has expired — request a new trial" into "this link is invalid or
+  has already been used", non-deterministically, depending on whether an unrelated device
+  happened to reserve in between.
+- A revoking Polar webhook (`order.refunded`, `subscription.revoked`) that carries neither
+  a subscription id nor an order id is no longer answered `202`. A 2xx stops Polar's
+  redelivery, so an unexpected payload shape silently dropped the revocation and left a
+  refunded customer with a working paid key. It now answers retryably on first delivery
+  and converges to `202` once a redelivery proves the payload is deterministically
+  unmappable — a permanent 5xx loop risks the endpoint being disabled, which would then
+  drop real `order.paid` fulfillments.
+
+- Opening a trial magic link no longer redeems it. `GET /license/v1/start-trial/verify`
+  now renders a confirmation page and the grant happens on the `POST` its button sends.
+  Corporate mail gateways and antivirus link-prescanners (Outlook Safe Links, Proofpoint
+  URL Defense) GET every URL in an email before the recipient sees it, which silently
+  burned the one-time grant and left a legitimate first attempt looking "already used" —
+  worst at exactly the corporate mail estates most likely to be evaluating Team. The GET
+  is read-only: it never deletes a lapsed row, so a prescanner cannot destroy what it
+  cannot redeem. The token stays in the query string, so no request body is parsed and no
+  multipart dependency is involved.
+  The confirm form posts to a query-only relative reference, so it resolves against the
+  path the page was actually served from — `ENGRAPHIS_RELAY_PUBLIC_URL` may legitimately
+  carry a path (`validate_cloud_base_url` preserves it), and a root-absolute action would
+  have rendered fine and then posted to a 404.
+- `GET /license/v1/verify/{key_id}` and both `/license/v1/start-trial/verify` handlers now
+  share the `/register` + `/team-invite` per-IP burst budget. These were the remaining
+  unauthenticated relay routes with no limit; the trial-verify pair matters most, since
+  both touch SQLite — and the POST takes `BEGIN IMMEDIATE` on the same `relay.db` that
+  carries seat claims and sync bundles — before they can tell the token is junk.
+- Every `/start-trial/verify` response (success, each error, and the 429) sends
+  `Cache-Control: no-store` and `Referrer-Policy: no-referrer`. The request URL carries
+  the one-time token, so the error pages are as Referer-leaky as the success page that
+  holds the key; they previously used separate inline header literals and had drifted.
+
+### Changed
+
+- `GET /api/auth/users` checks `admin` at the route, matching `auth.min_role()`. The
+  middleware already enforced admin, so this is defense in depth with no behaviour change;
+  the route previously said `member`, which was dead code that misrepresented the policy.
+- Successful version-tag publication now creates the matching GitHub Release and attaches
+  the same validated wheel and source distribution sent to PyPI. Manual workflow dispatch
+  remains build/check-only, and the release job is tag-gated behind successful PyPI
+  publication.
+- The Knowledge Graph defaults to compact component-aware packing and adds community,
+  radial, constellation, original, and custom layouts; selectable Cyberpunk, Galaxy,
+  Solar system, and Classic visual styles with persisted palettes; per-type node colors;
+  a synchronized keyboard-accessible explorer; collision-aware labels; and responsive
+  controls. Large graphs reuse rendered data, cap explorer DOM rows, reduce animation
+  work, and suppress expensive dense-graph effects.
+- The duplicate global Recall shortcut was removed from the dashboard header. Recall
+  remains available in the Memory Operations sidebar and from contextual page actions.
+- The README comparison matrix now includes Obsidian and clarifies the distinctions
+  between note-link graphs, agent memory, code awareness, encryption, and sleep-time
+  consolidation.
+- The README now documents Command Code CLI as an MCP-native client and includes its
+  verified stdio registration command.
+
+## [0.9.8] - 2026-07-18
+
+Hardening release focused on dependable installation, upgrades, startup, dashboard use,
+and safe hosted deployment.
+
+### Security
+
+- The relay's team-trial magic link is built from `ENGRAPHIS_RELAY_PUBLIC_URL` instead of
+  the request `Host` header, so a forged header can no longer aim a trial email at an
+  attacker's origin. **Issuer/vendor relays that offer trials must set this variable** —
+  trial signup returns 503 until they do, before any state is written. Customer-operated
+  sync relays remain clients of the managed issuer and do not set vendor secrets.
+- The vendor-admin fallback to `ENGRAPHIS_API_TOKEN` is removed. A relay that never set
+  `ENGRAPHIS_VENDOR_ADMIN_TOKEN` now fails closed on `/license/v1` administration instead
+  of accepting the per-instance service token.
+- Relay bundle storage is capped per account as well as per workspace
+  (`ENGRAPHIS_RELAY_MAX_ACCOUNT_BYTES`, default 2 GiB;
+  `ENGRAPHIS_RELAY_MAX_WORKSPACES_PER_ACCOUNT`, default 64), closing an unbounded-growth
+  path available to a single authenticated key.
+- `/license/v1/register` and `/license/v1/team-invite` share one per-IP burst budget
+  (`ENGRAPHIS_REGISTER_RATE_PER_MINUTE`, default 60) and run their Ed25519 verification in
+  a worker thread. Both routes verify caller-supplied keys, so the budget is deliberately
+  shared: alternating between them buys no extra work.
+- Every entrypoint sends baseline response headers — CSP, `X-Frame-Options: DENY`,
+  `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, and HSTS over HTTPS
+  only. Override with `ENGRAPHIS_CSP` / `ENGRAPHIS_HSTS`; set either to an empty string to
+  omit that header where a fronting proxy supplies its own.
+- A fresh deployment with no admin account, no paid license, and no API token refuses
+  remote `/api` calls with 403 while still serving loopback and safe license discovery.
+  Hosted trial creation and remote first-admin setup require the deployment API token,
+  preventing trial-consumption denial of service and an account-takeover race.
+- Loopback/bootstrap trust now rejects all common forwarding metadata, including
+  `X-Forwarded-Proto`; a same-host TLS proxy can no longer make an internet request
+  look like an unproxied local setup request.
+- Inspector first-admin setup now uses the auth store's atomic empty-database gate, so
+  concurrent different-email requests cannot both create administrators.
+
+### Added
+
+- MCP clients now receive canonical recall, session, durable-memory, and handoff guidance
+  through the server's initialization instructions.
+- The dashboard exposes a small `/api` service index, and the graph CLI documents its
+  public commands without showing the internal merge-driver command.
+- Regression coverage now exercises the sqlite-vec backend, workspace-aware entity recall,
+  installed database migration, encryption packaging, CLI startup, update paths, and release
+  artifacts.
+
+### Changed
+
+- Installed builds now keep the default database in the platform user-data directory.
+  Existing package-directory databases are copied with SQLite's backup API, validated, and
+  preserved as recovery copies; source checkouts retain their repository-local default.
+- `engraphis-update` discovers the highest stable SemVer tag, validates explicit versions,
+  fails closed on fetch errors, refuses dirty editable worktrees, and keeps pip, pipx, Git,
+  and documents the source-rebuild path for locally built Docker images.
+- Dashboard styling and navigation were reworked with five selectable themes, responsive
+  mobile behavior, semantic landmarks, improved keyboard focus, clearer confirmations, and
+  fully self-hosted browser assets.
+- Console launchers now validate arguments before optional imports, report actionable startup
+  failures, display reachable IPv4/IPv6 URLs and resolved database paths, and advertise the
+  current dashboard and API routes.
+- Optional-dependency bounds and extras were refreshed. The cross-platform `all` extra no
+  longer pulls the platform-limited SQLCipher driver, while encryption continues to fail
+  closed when no compatible driver is available.
+- The release workflow now pins actions by commit, runs the full test/evaluation and package
+  validation gates, matches release tags to package versions, and reserves publishing for
+  validated tag pushes. Bundled browser-library license notices are included in distributions.
+- Installation, hosting, sync, graph-query, MCP tool-count, and database-location guidance was
+  synchronized with the current commands and runtime behavior.
+
+### Fixed
+
+- Installed `engraphis-init` configuration is now loaded from the current directory's
+  `.env` without parent traversal, while explicit environment variables retain precedence.
+  Upgrading no longer opens a fresh platform-default database instead of the database the
+  user selected through `engraphis-init`.
+- A failed dashboard memory-detail request can no longer retain a prior memory identity or
+  leave write controls enabled, preventing a later Save from modifying the wrong memory.
+- A fresh hosted deployment now renders an actionable, non-data bootstrap screen when remote
+  API access is denied by default; it offers the safe Team-trial path or deployment-variable
+  setup without exposing account-wide license activation to a signed-out browser.
+- Dashboard, REST, Inspector, MCP, licensing, sync, billing, and provider failures now return
+  bounded user-facing messages rather than raw exceptions or upstream response bodies.
+- Trusted-proxy handling now evaluates the rightmost forwarded hop, supports exact/CIDR
+  allow-lists, and prevents untrusted forwarding headers from changing URLs or secure-cookie
+  decisions. Interactive API documentation is disabled on user-facing servers by default.
+- Dashboard handlers now read memory, workspace, member, and token identifiers from escaped
+  `data-*` attributes instead of interpolating untrusted values into inline JavaScript.
+- Repository-graph JSON output now escapes non-ASCII labels so Windows console encodings do
+  not turn successful `impact`, `prs`, or query commands into exit-code 2 failures.
+- A server-only installation now includes the multipart parser required by dashboard import
+  routes instead of depending on the unrelated MCP extra to provide it transitively.
+- `engraphis-mcp --help` works without importing the optional MCP stack; server-only and
+  explicitly offline configurations no longer emit misleading missing-dependency warnings.
+- Dashboard and legacy-server launch failures retain database recovery details instead of
+  collapsing them into generic errors, and invalid port values are rejected cleanly.
+- SQLite vector selection is now tested in both accelerated and offline-fallback modes, while
+  memory writes remain durable and audited if an index update fails.
+- The zero-configuration Compose dashboard now admits its Docker host bridge while both
+  published ports remain loopback-only; widening a port requires an API token.
+- Git-installed updates retain their recorded PEP 610 remote, and failed editable updates
+  restore the original branch without exposing a Python traceback.
+- Customer-operated sync relays are separated from the managed license/trial/invite service,
+  and the sample `.env` no longer overrides installed database defaults with a relative path.
+- MCP end-of-session guidance again represents completed work with an empty unresolved list
+  instead of persisting a fake open thread.
+
+## [0.9.7] - 2026-07-17
+
+### Security
+- Vendor-wide license administration on the shared relay (`/license/v1` revoke /
+  keys-by-email / deactivate / device listing) now authenticates with a dedicated
+  `ENGRAPHIS_VENDOR_ADMIN_TOKEN`, separated from the per-instance service token
+  `ENGRAPHIS_API_TOKEN` (which falls back with a logged warning until the operator
+  sets the new variable) — one leaked automation credential can no longer revoke
+  customers' keys. *(The fallback was removed in 0.9.8: it made this separation
+  nominal on any relay that set the common variable.)*
+- Team-mode login gained a per-source-IP failure throttle (25 failures / 15 min)
+  alongside the existing per-email lockout, closing the credential-stuffing sweep
+  that tried each address once; lockouts now surface as a typed
+  `AccountLockedError` mapped to HTTP 429 + `Retry-After` (previously 401, or a
+  429 derived by substring-matching the error message).
+
+### Fixed
+- `remember`/`remember_with_resolution` are now atomic across the neighbor-resolve →
+  insert sequence (engine-level write lock): concurrent near-duplicate writes can no
+  longer both resolve ADD and store duplicates instead of NOOP/INVALIDATE.
+- The Inspector's `/api/auth/login`/`setup` no longer run PBKDF2 (600k iterations)
+  on the asyncio event loop — password hashing moved to a worker thread, so a burst
+  of logins can't stall every other request.
+- A failed vector-index upsert on the write path is now logged and audited
+  (`index_upsert_failed`) instead of silently swallowed — previously the memory
+  stayed invisible to semantic recall with no trace.
+- URLs built from a bind host are now IPv6-safe and connectable (`engraphis.netutil`):
+  `ENGRAPHIS_HOST=::` no longer yields the malformed `http://:::8700` in the printed
+  dashboard URL, the :8710 redirector target, or `Settings.base_url`; wildcard binds
+  map to loopback.
+- The Docker image no longer bakes an IPv4-only bind: the entrypoint defaults
+  `ENGRAPHIS_HOST` to dual-stack `::` when the kernel has IPv6 (what Railway's
+  private-network healthchecks require) and `0.0.0.0` otherwise, so wiping the
+  service's env vars can't regress the 2026-07-16 healthcheck outage.
+
+### Changed
+- Consolidated four per-app bearer-token checks into one constant-time
+  `inspector.auth.bearer_ok` helper (scheme now matched case-insensitively per
+  RFC 7235 everywhere); extracted the ~230-line code-graph HTML/Markdown export
+  templates from `core/engine.py` into `core/codegraph_export.py`; documented the
+  v1/v2 split in `engraphis/routes/__init__`; entity ancestor-widening in graph
+  recall now applies to `workspace_id` symmetrically with `repo_id`; filtered
+  sqlite-vec searches cap their geometric widening with a single full scan.
+
+### Added
+- Schema v3 logical graph layers (`temporal`, `entity`, `causal`, `semantic`), privacy-safe
+  SHA-256 receipt chains, optional LLM/host retention supervision, and a persistent code↔memory
+  bridge.
+- Incremental multi-language repository indexing (Python, JS/TS, Go, Rust, Java, C#, C/C++,
+  SQL, Terraform), docstrings/comments, variables, inheritance/implementation, weighted
+  communities, hotspots, path queries, git/PR impact analysis, portable JSON/HTML/Markdown
+  exports, and a graph union merge driver.
+- Local multi-format resource ingestion for text/code/HTML/DOCX, optional PDF/image OCR and
+  faster-whisper transcription, plus live PostgreSQL schema introspection with DSN redaction.
+- Seven MCP tools for code paths/impact/export, PostgreSQL schema ingestion, and receipt
+  list/verify/export, bringing the tool surface from 20 to 27.
+- `engraphis-graph` workflow CLI and token-protected `engraphis-graph-server` read-only HTTP
+  surface.
+
+### Changed
+- Railway hosting now supports Pro solo single-admin deployments: any active Pro or Team
+  entitlement can bootstrap the first admin and activates the login wall, while member
+  seats and direct hosted agent writes remain Team-only. The hosting guide now covers both
+  Pro solo sync-relay and Team member flows.
+
+### Fixed
+- 1-hop graph recall (and the PPR large-graph fallback) now honors `graph_layers`, matching
+  the PPR arm — `Store.neighbors()` gained a `layers` filter.
+- `FolderTransport.push()` no longer follows peer-planted symlinks in the shared sync folder
+  (unpredictable temp name + `O_CREAT|O_EXCL|O_NOFOLLOW`), closing an arbitrary-file-write
+  vector that mirrored the already-hardened read side.
+- `engraphis-graph-server` treats an empty `--host`/`ENGRAPHIS_GRAPH_HOST` as non-loopback
+  (it binds all interfaces), so the bearer-token requirement can no longer be skipped.
+- Caller-supplied `metadata.retention_supervision` is stripped at the service boundary; only
+  the validated `retention_class` presets can influence importance/stability.
+- `merge_workspaces()` no longer duplicates symbols/code edges when both workspaces indexed
+  the same file in a same-named repo — the losing snapshot's rows are cleared, and its
+  memory↔code links are re-pointed at the surviving same-fqname symbols.
+- `engraphis-graph impact/prs` reject leading-dash git revisions (git option injection), and
+  graph exports refuse a symlinked output directory and are written atomically without
+  following pre-planted symlinks.
+- The unified graph endpoint bounds entity edges and code edges/links per request
+  (`limit`-derived cap) so a large workspace graph or indexed repo can't produce unbounded
+  viewer-role responses.
+- Relay sync fails closed when a workspace's settings are unreadable rather than treating a
+  possibly-personal folder as shared — in the sync CLI and in the dashboard/background
+  `_sync_all` path; resource extraction enforces its own raw-size cap.
+
+## [0.9.6] - 2026-07-16
+
+### Added
+- **Agent Connect for hosted Team instances.** Members can mint SHA-256-hashed per-user
+  bearer tokens in Settings and use the hosted v2 store through `POST /api/remember`,
+  the existing read routes, token management under `/api/auth/token*`, and
+  `GET /api/auth/connect-info`. Tokens retain the user's role and personal-folder scope;
+  viewers are read-only and disabling a user invalidates their tokens immediately.
+- **Authenticated MCP-over-HTTP at `/mcp`.** When the MCP extra is installed, the
+  dashboard mounts the same 20 tools as the standalone server and injects its existing
+  `MemoryService`, avoiding a second SQLite writer. The endpoint requires an active Team
+  entitlement and per-user bearer token, enforces viewer/member/admin roles per tool, and
+  reports actual mount availability through connect-info.
+- **One-click Railway hosting.** Added `railway.json`, the README deploy button, and
+  `docs/HOSTING_RAILWAY.md` for persistent volumes, forwarded HTTPS headers, Team
+  entitlement bootstrap, member invites, and HTTP/MCP agent connection.
+- **Two new MCP context tools.** The MCP inventory grows from 18 to 20 with
+  `engraphis_answer`, a compatibility alias for the existing grounded-recall contract,
+  and `engraphis_proactive_context`, also available at `POST /api/proactive-context`.
+  Proactive packets include bounded task/agent state, cited memories, suggested queries,
+  and the previous session handoff. Optional LLM prose is accepted only when every claim
+  carries a valid citation.
+- **Structured LLM ingestion and consolidation.** `ENGRAPHIS_EXTRACTOR=llm_structured`
+  validates typed facts, entities, relations, keywords, and confidence; that metadata is
+  preserved through storage and automatically feeds the graph. Settings now includes a
+  **Connect your LLM** card backed by `/api/llm/status` and `/api/llm/test`.
+  Consolidation adds schema-validated facts and explicit source supersession across the
+  service, REST, MCP, and CLI surfaces, with deterministic fallback on provider/schema
+  failure.
+- **Opt-in deterministic memory intelligence APIs.** Added conflict triage for duplicate,
+  refinement, contradiction, and obsolete candidates, plus a serializable `UserModel`
+  that learns interaction preferences and reranks recall results. These helpers do not
+  mutate the store or alter default recall unless a caller invokes them.
+
+### Changed
+- **Team mode is opt-out by default.** `ENGRAPHIS_TEAM_MODE=0` (or false/no/off) disables
+  Team plumbing. A fresh solo install stays open, first-admin setup requires a live Team
+  entitlement, and an existing team's authentication wall remains active if its license
+  lapses so private data never becomes public.
+- Pre-login license status and trial routes now allow a fresh instance to start a Team
+  trial before first-admin setup. Purchased keys bootstrap through
+  `ENGRAPHIS_LICENSE_KEY` or the license file; `/api/license/activate` remains admin-only.
+- Package fallback metadata and all user-facing tool inventories now agree on version
+  `0.9.6` and 20 MCP tools.
+
+### Fixed
+- **Agent Connect and dashboard lifecycle:** corrected generated endpoint URLs, retained
+  one-time token visibility, made `/mcp` bearer-only, bound MCP sessions to their initiating
+  user, rechecked tool roles on every call, retained DNS-rebinding protection, closed
+  previously injected stores, and made connect-info reflect the real optional MCP mount.
+- **License and Team enforcement:** authoritative revocations override cached entitlement
+  and persist tombstones for previously unrecorded keys; transient failures may use only
+  an unexpired lease; public license/trial bootstrap routes close after the first Team user;
+  trial rate limits trust forwarded addresses only from configured proxies; managed
+  requests use explicit client headers; retired managed relay URLs are canonicalized
+  across key issuance, license/trial, invite, and sync clients; and configured keys
+  that fall back to free after transient outages retry automatically.
+- **Billing fulfillment reliability:** Polar bodies are bounded while streaming, durable
+  reservation failures remain retryable, seat baselines and completion claims commit
+  atomically, trial seat updates cannot mint paid-period keys, and subscription replacements
+  revoke superseded keys only after the new key is registered.
+- **Python and packaging compatibility:** rate-limit buckets and audit exports use
+  timezone-aware UTC APIs, package metadata uses the SPDX license format, and the
+  deterministic fallback matches the default embedding model’s 384 dimensions.
+- **Memory and retrieval integrity:** audit writes are committed durably, recall excludes
+  non-live rows, mixed embedding dimensions no longer crash recall and have a backed-up
+  repair path, sync enforces workspace/repository boundaries in both directions, graph
+  provenance is pruned per memory instead of deleting shared edges, SQLite-vector distances
+  are converted to cosine similarity, entity expansion matches complete names, and the
+  sentence-transformers adapters support both legacy and renamed dimension APIs.
+- **Structured-data safety:** extraction metadata survives ingest unchanged, proactive and
+  consolidation inputs are bounded, structured consolidation rejects source IDs outside
+  the requested cluster, and synthesized context cannot replace deterministic output
+  without valid citations.
+- **Dashboard graph navigation:** focusing an isolated node now retains the requested node
+  through the delayed renderer retry instead of reporting a false “Entity not in view.”
+- **Dashboard typography:** replaced sub-12px text and the flat type ramp with a consistent
+  12/16/24/32px hierarchy while preserving responsive layout.
+
+### Documentation
+- Updated the README, Agent Connect, Railway, Kilo Code, bundled memory skill, benchmark
+  command, and package-version fallback to match the shipped routes, tool count, setup
+  order, and extractor/consolidation options; removed the unused shortcut icon helper.
 
 ## [0.9.5] - 2026-07-14
 

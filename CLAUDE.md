@@ -40,7 +40,10 @@ If you changed retrieval, scoring, or ranking, add or update an eval — per AGE
 
 - **Interface-first & dependency-light** (AGENTS.md §3): keep `core/` runnable on `numpy`
   alone; gate heavy imports behind the backend factories; never import a concrete backend
-  inside `core/`.
+  inside `core/` — with one deliberate exception: `core/engine.py` is the composition
+  root and may import the backend *factories* (`get_embedder`/`get_vector_index`/…),
+  whose heavy libraries stay lazily gated inside `backends/`, so `import
+  engraphis.core.engine` still needs only numpy.
 - **House style:** `ruff` line-length 100, Python 3.9-compatible syntax, pure/tested scoring
   functions, provenance and scope on every memory.
 - **Be concise and direct** in chat — explain the *why* of a change briefly, link the file,

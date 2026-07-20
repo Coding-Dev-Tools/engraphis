@@ -8,7 +8,7 @@ description: 'Give the agent durable, scoped, explainable memory across sessions
 Engraphis is a local-first memory engine exposed to agents over MCP. This skill is the
 *discipline* for using it well: what to store, how to scope it, and which tool answers which
 question. It assumes the Engraphis MCP server is connected, so tools are named `engraphis_*`
-(18 of them). If those tools are absent, see [Setup](#setup) — do not fall back to ad-hoc notes.
+(28 of them). If those tools are absent, see [Setup](#setup) — do not fall back to ad-hoc notes.
 
 Memory here is **scoped, typed, bi-temporal, and self-maintaining**: writes are deduplicated and
 contradictions supersede (never silently overwrite), and forgetting lowers priority instead of
@@ -66,6 +66,7 @@ promotion: [SCOPING.md](references/SCOPING.md).
 | "How has X changed?" | `engraphis_timeline` | Every version oldest→newest with `valid_from/valid_to`. |
 | Retire a stale memory | `engraphis_forget` | Bi-temporal close, not a delete. Prefer `correct` if you have a replacement. |
 | Fix a memory's content | `engraphis_correct` | Closes old + stores replacement that records what it fixed; keeps the *why* chain. |
+| Widen a memory's scope | `engraphis_promote` | Session→repo/workspace or repo→workspace; preserves and links narrow history. |
 | Protect from decay | `engraphis_pin` | For identity/durable facts that must never fade. |
 | Connect two memories | `engraphis_link` | A-MEM-style; e.g. bug ↔ its fix. |
 | Log a raw event | `engraphis_record_event` | Lower ceremony than remember; repeats are a promotion signal. |
@@ -73,7 +74,12 @@ promotion: [SCOPING.md](references/SCOPING.md).
 | Distill & tidy periodically | `engraphis_consolidate` | Sleep-time sweep: recurring episodes → semantic digest; decayed transients archived. Dry-run by default. |
 | Group/resume work | `engraphis_start_session` / `engraphis_end_session` | Handoff via summary + `open_threads`. |
 | Map a repo's code | `engraphis_index_repo` | Parse defs + call/import edges once per repo (safe to re-run). |
-| "What calls this?" | `engraphis_search_code` | Structural search — far cheaper than grepping/dumping files. |
+| "What calls this?" | `engraphis_search_code` | Structural search plus linked decisions/incidents/procedures. |
+| "How are these connected?" | `engraphis_code_path` | Traverse definitions, calls, imports, and code↔memory links. |
+| "What will this PR affect?" | `engraphis_code_impact` | Touched symbols, dependents, communities, memories, hotspots. |
+| Share the repo graph | `engraphis_export_code_graph` | Portable JSON + Markdown + self-contained HTML. |
+| Import a live DB schema | `engraphis_ingest_postgres_schema` | PostgreSQL tables/columns/constraints → memory + graph; DSN not stored. |
+| Privacy-safe audit | `engraphis_receipts` / `engraphis_verify_receipts` | Content-free hash chain; export with `engraphis_export_receipts`. |
 | Store health | `engraphis_stats` | Counts by type/workspace; good for onboarding checks. |
 
 Full signatures, parameters, defaults, and return shapes: [TOOLS.md](references/TOOLS.md).
@@ -107,6 +113,20 @@ engraphis_end_session(session_id=..., outcome="shipped",
                       open_threads=[])
 ```
 
+## Visual investigation
+
+For human-led graph analysis, open the dashboard's **Knowledge Graph** tab. The Analytical Galaxy
+searches the complete canonical index, then returns bounded systems, neighborhoods, and
+strongest-evidence paths. Treat labels and inspector evidence as authoritative; proximity means
+weighted connectivity, node size means evidence-weighted mass, and overview bridges are
+aggregates—not raw factual edges. Use the synchronized List view when exact keyboard or
+screen-reader access is more useful than spatial navigation. Graph reads never backfill data;
+run an explicit graph-index dry-run/job through the dashboard API when legacy memories need
+indexing. When linking directly to the graph API, keep the same investigation context on scene,
+suggestion, entity-detail, and path requests: `repo`, comma-separated `memory_types`, Unix-second
+`as_of`, `time_from`/`time_to`, and `include_weak_cooccurrence`. The UI stores shareable scene
+state in the URL hash, so filters and selected IDs are not sent to the server as opaque state.
+
 ## Setup
 
 The skill needs the Engraphis MCP server running. Install and register it once:
@@ -122,6 +142,6 @@ is needed for the memory layer. Details: the repo `README.md` "Quickstart A — 
 
 ## References
 
-- [TOOLS.md](references/TOOLS.md) — all 18 tools: parameters, defaults, returns, when to reach for each.
+- [TOOLS.md](references/TOOLS.md) — all 28 tools: parameters, defaults, returns, when to reach for each.
 - [SCOPING.md](references/SCOPING.md) — the `workspace → repo → session → memory` model, scope vs. type, and promotion.
 - [CONVENTIONS.md](references/CONVENTIONS.md) — memory types, provenance, importance, dedup/resolution, governance, and anti-patterns

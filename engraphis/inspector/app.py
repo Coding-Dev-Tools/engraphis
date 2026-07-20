@@ -19,7 +19,8 @@ Free single-user behaviour is byte-for-byte unchanged when team mode is off.
 """
 from __future__ import annotations
 
-import hmac
+import asyncio
+import hashlib
 import logging
 import time
 from typing import Optional
@@ -29,17 +30,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from engraphis import __version__, licensing
+from engraphis import __version__, http_security, licensing
 from engraphis.analytics import compute_analytics, render_analytics_html
 from engraphis.billing import router as billing_router
 from engraphis.inspector.sync_relay import router as sync_relay_router
 from engraphis.inspector.license_cloud import router as license_cloud_router
 from engraphis.config import settings
 from engraphis.inspector.auth import (
-    SESSION_TTL_SECONDS, AuthError, AuthStore, min_role as _min_role, role_at_least,
+    SESSION_TTL_SECONDS, AccountLockedError, AuthError, AuthStore,
+    SetupAlreadyCompletedError, bearer_ok, min_role as _min_role, role_at_least,
 )
 from engraphis.licensing import LicenseError
 from engraphis.logging_setup import configure_logging
+from engraphis.netutil import client_ip, is_local_request
 from engraphis.service import MemoryService, ValidationError
 
 logger = logging.getLogger("engraphis")
@@ -49,7 +52,7 @@ COOKIE_NAME = "engraphis_session"
 # Reachable without any auth in every mode: the page shell, liveness/readiness, and
 # the auth bootstrap endpoints themselves (state/login/setup must work while logged out).
 _PUBLIC = {"/", "/api/health", "/api/ready", "/api/auth/state", "/api/auth/login",
-           "/api/auth/setup", "/webhooks/polar"}
+           "/api/auth/setup", "/api/auth/invitations/accept", "/webhooks/polar"}
 
 
 # _min_role is now engraphis.inspector.auth.min_role (imported above as _min_role) —
@@ -70,6 +73,14 @@ class _GovernBody(BaseModel):
     repo: Optional[str] = Field(default=None, max_length=200)
     reason: str = Field(default="", max_length=1_000)
     pinned: bool = True
+
+
+class _PromoteBody(BaseModel):
+    memory_id: str = Field(min_length=1, max_length=200)
+    target_scope: str
+    workspace: str = Field(min_length=1, max_length=200)
+    repo: Optional[str] = Field(default=None, max_length=200)
+    reason: str = Field(default="", max_length=1_000)
 
 
 class _ConsolidateBody(BaseModel):
@@ -115,6 +126,11 @@ def _users_db_path(db_path: str) -> str:
 def create_app(service: Optional[MemoryService] = None,
                auth_store: Optional[AuthStore] = None) -> FastAPI:
     configure_logging()
+    from engraphis.commercial import service_mode
+    mode = service_mode()
+    if mode == "vendor":
+        from engraphis.vendor_app import create_app as create_vendor_app
+        return create_vendor_app()
     app = FastAPI(title="Engraphis Memory Inspector", docs_url=None, redoc_url=None)
     app.state.service = service
     app.state.auth_store = auth_store
@@ -144,25 +160,47 @@ def create_app(service: Optional[MemoryService] = None,
         return app.state.auth_store
 
     def team_active() -> bool:
-        return bool(settings.team_mode) and licensing.has_feature("team")
+        # A live Team entitlement enables first-time setup. Once any users exist, the
+        # authentication wall is permanent even if the entitlement lapses; otherwise an
+        # expired key would silently turn a private Inspector into an open API. Feature
+        # routes still enforce the current license independently.
+        return bool(settings.team_mode) and (
+            auth().count_users() > 0 or licensing.has_feature("team"))
 
     def _bearer_ok(request: Request) -> bool:
-        token = settings.api_token
-        if not token:
-            return False
-        supplied = (request.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
-        return bool(supplied) and hmac.compare_digest(supplied, token)
+        return bearer_ok(request.headers.get("Authorization"), settings.api_token)
+
+    def _bearer_token(request: Request) -> str:
+        header = request.headers.get("Authorization") or ""
+        return header[7:].strip() if header[:7].lower() == "bearer " else ""
 
     @app.middleware("http")
     async def _auth_gate(request: Request, call_next):
+        from engraphis.service import set_current_user
+
+        # Clear any identity inherited by this request context before deciding who is
+        # calling. Public, anonymous, and single-user requests must never retain the
+        # Team user bound while handling an earlier request.
+        set_current_user(None)
         path = request.url.path
         if not path.startswith("/api/") or path in _PUBLIC:
             return await call_next(request)
         if team_active():
-            user = auth().resolve_session(request.cookies.get(COOKIE_NAME, ""))
+            # Per-user API tokens authenticate headless clients exactly like browser
+            # sessions. Resolve them first, then fall back to the session cookie.
+            supplied = _bearer_token(request)
+            user = auth().resolve_api_token(supplied) if supplied else None
+            if user is not None and "agent" not in set(user.get("token_scopes") or ()):
+                return JSONResponse({"error": "token lacks agent scope"}, status_code=403)
+            if user is None:
+                user = auth().resolve_session(request.cookies.get(COOKIE_NAME, ""))
             if user is None and _bearer_ok(request):
-                # Service-account escape hatch so existing scripts keep working.
+                # Keep the deployment token as an admin service account, but bind a
+                # synthetic identity so personal-folder ownership still fails closed.
                 user = {"id": "service-token", "email": "service-token", "role": "admin"}
+                request.state.user = user
+                set_current_user(user)
+                return await call_next(request)
             if user is None:
                 return JSONResponse({"error": "authentication required", "auth": "team"},
                                     status_code=401)
@@ -171,6 +209,7 @@ def create_app(service: Optional[MemoryService] = None,
                 return JSONResponse({"error": "requires the %s role" % need},
                                     status_code=403)
             request.state.user = user
+            set_current_user(user)
             return await call_next(request)
         # Single-user modes: optional bearer token, exactly as before team mode existed.
         if settings.api_token and not _bearer_ok(request):
@@ -207,10 +246,13 @@ def create_app(service: Optional[MemoryService] = None,
         Server Error" body. The frontend's api() helper does res.json() on every
         response, so that plaintext body fails to parse and surfaces as the opaque
         "Error: bad response" -- hiding the real cause from both the user and
-        whoever's debugging it. Log the full exception server-side, return a
-        sanitized JSON message client-side (same shape every other handler here
-        uses), so at minimum the failure is visible and structured."""
-        logger.exception("unhandled exception on %s %s", request.method, request.url.path)
+        whoever's debugging it. Log the exception type server-side without copying
+        potentially sensitive exception text, and return a sanitized JSON message
+        client-side so the failure remains visible and structured."""
+        path_ref = hashlib.sha256(
+            request.url.path.encode("utf-8", "replace")).hexdigest()[:12]
+        logger.error("unhandled exception on %s path_ref=%s (%s)", request.method,
+                     path_ref, type(exc).__name__)
         return JSONResponse({"error": "internal error -- see server logs"}, status_code=500)
 
     def _actor(request: Request) -> str:
@@ -260,28 +302,49 @@ def create_app(service: Optional[MemoryService] = None,
                                       "role": user["role"]}})
         resp.set_cookie(COOKIE_NAME, user["token"], max_age=SESSION_TTL_SECONDS,
                         httponly=True, samesite="strict", path="/",
-                        secure=request.url.scheme == "https")
+                        secure=http_security.wants_https(request))
         return resp
 
     @app.post("/api/auth/setup")
     async def auth_setup(body: _SetupBody, request: Request):
+        # create_user/login run PBKDF2 (600k iterations, CPU-bound) — off the event loop
+        # via to_thread, or every concurrent request stalls for the hash duration.
         if not team_active():
             raise LicenseError("team mode is not active on this instance")
         if auth().count_users() > 0:
             return JSONResponse({"error": "setup already completed"}, status_code=409)
-        auth().create_user(body.email, body.name, body.password, "admin")
-        user = auth().login(body.email, body.password)
+        if not is_local_request(request) and not bearer_ok(
+                request.headers.get("Authorization"), settings.api_token):
+            return JSONResponse(
+                {"error": "deployment API token required for remote setup"},
+                status_code=401,
+            )
+        try:
+            await asyncio.to_thread(
+                auth().create_user, body.email, body.name, body.password, "admin",
+                require_empty=True,
+            )
+        except SetupAlreadyCompletedError:
+            return JSONResponse({"error": "setup already completed"}, status_code=409)
+        user = await asyncio.to_thread(auth().login, body.email, body.password)
         return _login_response(user, request)
 
     @app.post("/api/auth/login")
     async def auth_login(body: _LoginBody, request: Request):
         if not team_active():
             return JSONResponse({"error": "team mode is not active"}, status_code=400)
+        ip = client_ip(request)
         try:
-            user = auth().login(body.email, body.password)
+            # PBKDF2 is CPU-bound; to_thread keeps the event loop free (see auth_setup).
+            user = await asyncio.to_thread(
+                auth().login, body.email, body.password, ip=ip)
+        except AccountLockedError as exc:
+            # Report the actual remaining window; never let HTTP metadata drift from
+            # throttle configuration or elapsed time.
+            return JSONResponse({"error": str(exc)}, status_code=429,
+                                headers={"Retry-After": str(exc.retry_after)})
         except AuthError as exc:
-            status = 429 if "too many" in str(exc) else 401
-            return JSONResponse({"error": str(exc)}, status_code=status)
+            return JSONResponse({"error": str(exc)}, status_code=401)
         return _login_response(user, request)
 
     @app.post("/api/auth/logout")
@@ -375,13 +438,29 @@ def create_app(service: Optional[MemoryService] = None,
     async def audit_log(workspace: str, limit: int = 100):
         return svc().audit_log(workspace=workspace, limit=limit)
 
+    @app.get("/api/receipts")
+    async def receipts(workspace: str, limit: int = 100):
+        return svc().receipt_log(workspace=workspace, limit=limit)
+
+    @app.get("/api/receipts/verify")
+    async def receipts_verify(workspace: str):
+        return svc().verify_receipts(workspace=workspace)
+
     @app.get("/api/graph")
-    async def graph(workspace: str, limit: int = 2000):
+    async def graph(workspace: str, limit: int = 2000,
+                    layers: Optional[str] = None, include_code: bool = False,
+                    repo: Optional[str] = None):
         """Entity-relation network for the Graph tab -- same
         :meth:`MemoryService.graph` the v1-look dashboard's ``/api/graph`` calls
         (engraphis/graphdata.py), so both UIs render identical graphs and share
         the same workspace-binding isolation guard."""
-        return svc().graph(workspace=workspace, limit=limit)
+        selected = None if layers is None else [
+            x.strip() for x in layers.split(",") if x.strip()
+        ]
+        return svc().graph(
+            workspace=workspace, limit=limit, layers=selected,
+            include_code=include_code, repo=repo, backfill=False,
+        )
 
     # ── Pro: analytics & compliance export (the 402 upgrade path) ───────────
     @app.get("/api/analytics")
@@ -428,6 +507,13 @@ def create_app(service: Optional[MemoryService] = None,
         return svc().correct(body.memory_id, body.new_content, workspace=body.workspace,
                              repo=body.repo, reason=body.reason, actor=_actor(request))
 
+    @app.post("/api/promote")
+    async def promote(body: _PromoteBody, request: Request):
+        return svc().promote(
+            body.memory_id, body.target_scope, workspace=body.workspace,
+            repo=body.repo, reason=body.reason, actor=_actor(request),
+        )
+
     @app.post("/api/consolidate")
     async def consolidate(body: _ConsolidateBody):
         return svc().consolidate(workspace=body.workspace, repo=body.repo,
@@ -437,8 +523,16 @@ def create_app(service: Optional[MemoryService] = None,
     # ── Polar webhook: auto-fulfill license keys on purchase ────────────────
     # Route lives in engraphis.billing so the public server (engraphis/app.py) and
     # this Inspector serve identical fulfillment logic — no drift between the two.
-    app.include_router(billing_router)
-    app.include_router(sync_relay_router)
-    app.include_router(license_cloud_router)
+    if settings.vendor_service:
+        app.include_router(billing_router)
+        app.include_router(license_cloud_router)
+    if settings.customer_service:
+        app.include_router(sync_relay_router)
+    from engraphis.inspector.license_compat_proxy import mount_license_compat_proxy
+    mount_license_compat_proxy(app)
+
+    # Baseline security response headers — see engraphis.http_security. Registered last
+    # so it wraps the auth middleware above and also covers its 401/402 short-circuits.
+    http_security.install(app)
 
     return app

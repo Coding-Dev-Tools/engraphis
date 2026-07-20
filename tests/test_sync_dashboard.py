@@ -15,7 +15,7 @@ pytest.importorskip("httpx", reason="httpx not installed")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from engraphis import licensing as lic  # noqa: E402
-from engraphis.config import settings  # noqa: E402
+from engraphis.config import DEFAULT_RELAY_URL, settings  # noqa: E402
 from engraphis.licensing import compose_key, ed25519_public_key  # noqa: E402
 from engraphis.service import MemoryService  # noqa: E402
 
@@ -76,6 +76,13 @@ def test_sync_status_locked_without_key(monkeypatch, tmp_path):
         assert d["last"] is None
 
 
+def test_sync_status_migrates_retired_relay_url(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        settings, "relay_url", "https://engraphis-production.up.railway.app/")
+    with _client(monkeypatch, tmp_path) as c:
+        assert c.get("/api/sync/status").json()["relay_url"] == DEFAULT_RELAY_URL
+
+
 def test_sync_run_requires_license(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as c:
         assert c.post("/api/sync/run", json={}).status_code == 402
@@ -129,7 +136,7 @@ def test_sync_never_pushes_personal_folders(monkeypatch, tmp_path):
         from engraphis.routes import v2_api
         from engraphis.service import set_current_user
         svc = v2_api.service()
-        svc.create_workspace("team-shared", visibility="shared")
+        svc.create_workspace("team-shared", visibility="shared", confirmed=True)
         set_current_user({"email": "owner@x.co", "role": "admin", "id": "o1"})
         try:
             svc.create_workspace("my-personal", visibility="personal")
@@ -139,3 +146,30 @@ def test_sync_never_pushes_personal_folders(monkeypatch, tmp_path):
         assert "team-shared" in synced           # shared folders sync
         assert "demo" in synced                   # the seeded shared folder too
         assert "my-personal" not in synced        # ...personal folders never do
+
+
+def test_sync_fails_closed_on_invalid_workspace_visibility(monkeypatch, tmp_path):
+    synced = []
+
+    def fake_get_transport(kind="folder", **kw):
+        synced.append(kw.get("workspace_id"))
+        return _FakeTransport()
+
+    monkeypatch.setattr("engraphis.backends.sync_folder.get_transport", fake_get_transport)
+    with _client(monkeypatch, tmp_path, key=_key()) as c:
+        from engraphis.routes import v2_api
+        svc = v2_api.service()
+        svc.store.conn.execute(
+            "UPDATE workspaces SET settings=? WHERE name='demo'",
+            ('{"visibility":"corrupt-value"}',),
+        )
+        svc.store.conn.commit()
+
+        response = c.post("/api/sync/run", json={})
+        assert response.status_code == 200
+        summary = response.json()["summary"]
+        assert "demo" not in synced
+        assert any(
+            error["workspace"] == "demo" and "visibility is invalid" in error["error"]
+            for error in summary["errors"]
+        )

@@ -12,6 +12,7 @@ The arms are pluggable:
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -23,7 +24,7 @@ from engraphis.core.interfaces import (
     Reranker,
     SearchFilter,
 )
-from engraphis.core.store import Store, now_ts
+from engraphis.core.store import Store, memory_matches_filter, now_ts
 
 
 @dataclass
@@ -56,14 +57,20 @@ class RecallEngine:
         # ── arms ─────────────────────────────────────────────────────────────
         qvec = self.embedder.embed([query])[0]
         vec = dict(self.index.search(qvec, candidate_k, filter=flt))   # id -> cosine
-        lex = dict(self.store.fts_search(query, candidate_k))          # id -> lexical
+        lex = dict(self.store.fts_search(query, candidate_k, filter=flt))  # id -> lexical
         graph = self._graph_arm(query, flt, now)                       # id -> weight
 
-        # ── gather candidates and enforce visibility (lexical arm is unfiltered) ──
+        # ── gather candidates and enforce visibility defensively ─────────────
+        # Sorted, not raw set order: a set of ids iterates in hash order, which varies with
+        # PYTHONHASHSEED, so equal-scored results used to come back in a different order in
+        # every process. Sorting here (and on the final sort below) makes recall reproducible.
+        # One batched lookup replaces ~150 single-row get_memory() calls per recall.
+        candidate_ids = sorted(set(vec) | set(lex) | set(graph))
+        fetched = self.store.get_memories(candidate_ids)
         recs: dict[str, MemoryRecord] = {}
-        for mid in set(vec) | set(lex) | set(graph):
-            rec = self.store.get_memory(mid)
-            if rec and self._visible(rec, flt, now):
+        for mid in candidate_ids:
+            rec = fetched.get(mid)
+            if rec and memory_matches_filter(rec, flt, at=now):
                 recs[mid] = rec
         if not recs:
             return RecallResult()
@@ -87,7 +94,8 @@ class RecallEngine:
             arm = "semantic" if mid in vec else ("lexical" if mid in lex else "graph")
             scored.append(Candidate(id=mid, score=base + 0.5 * rrf.get(mid, 0.0),
                                     arm=arm, record=rec))
-        scored.sort(key=lambda c: c.score, reverse=True)
+        # Tie-break on id so equal scores get a stable, process-independent order.
+        scored.sort(key=lambda c: (-c.score, c.id))
 
         # ── rerank top-N, keep k ─────────────────────────────────────────────
         pool = scored[: max(k * 4, k)]
@@ -119,9 +127,9 @@ class RecallEngine:
         memories by walk probability. Multi-hop associations surface without
         expanding an explicit hop count; entity nodes are prefixed so names can
         never collide with memory ids."""
-        ql = query.lower()
-        all_names = [n for n in self._entities(flt) if n]
-        seeds = [n for n in all_names if n.lower() in ql]
+        entity_map = self._entity_map(flt)
+        patterns = {eid: _entity_pattern(name) for eid, name in entity_map.items() if name}
+        seeds = [eid for eid, pattern in patterns.items() if pattern.search(query)]
         if not seeds:
             return {}
 
@@ -136,13 +144,14 @@ class RecallEngine:
             connect(ent(e.src), ent(e.dst), max(float(e.weight or 1.0), 1e-6))
 
         recs = self.store.list_memories(flt, limit=500)
-        lowered = {n: n.lower() for n in all_names}
         for rec in recs:
-            hay = f"{rec.title} {rec.content}".lower()
-            for name, low in lowered.items():
-                if low in hay:
-                    connect(rec.id, ent(name), 1.0)
-        for link in self.store.links_among([r.id for r in recs]):
+            hay = f"{rec.title} {rec.content}"
+            for eid, pattern in patterns.items():
+                if pattern.search(hay):
+                    connect(rec.id, ent(eid), 1.0)
+        for link in self.store.links_among(
+            [r.id for r in recs], layers=flt.graph_layers
+        ):
             connect(link["a"], link["b"], 1.0)
 
         # Dense power iteration is O(n^2) memory: past this cap (far beyond any sane
@@ -150,68 +159,52 @@ class RecallEngine:
         if len(adj) > 4000:
             return self._graph_arm_1hop(query, flt, now)
 
-        ranked = personalized_pagerank(adj, [ent(s) for s in seeds])
+        ranked = personalized_pagerank(adj, [ent(eid) for eid in seeds])
         return {nid: score for nid, score in ranked.items()
                 if not nid.startswith("ent::") and score > 0.0}
 
     def _graph_arm_1hop(self, query: str, flt: SearchFilter, now: float) -> dict[str, float]:
-        ql = query.lower()
-        seed_names = [name for name in self._entities(flt) if name and name.lower() in ql]
-        if not seed_names:
-            return {}
-        # Resolve entity names to their node IDs so neighbors() matches the edges table.
-        seed_ids: list[str] = []
-        marks = ",".join("?" for _ in seed_names)
-        for row in self.store.conn.execute(
-            f"SELECT id FROM entities WHERE name IN ({marks})", seed_names
-        ).fetchall():
-            seed_ids.append(row["id"])
+        entity_map = self._entity_map(flt)
+        patterns = {eid: _entity_pattern(name) for eid, name in entity_map.items() if name}
+        seed_ids = [eid for eid, pattern in patterns.items() if pattern.search(query)]
         if not seed_ids:
             return {}
-        names = set(seed_names)
-        for e in self.store.neighbors(seed_ids, at=now):
-            names.add(e.src)
-            names.add(e.dst)
+        names = {entity_map[eid] for eid in seed_ids if entity_map.get(eid)}
+        for e in self.store.neighbors(seed_ids, at=now, layers=flt.graph_layers):
+            if e.src in entity_map:
+                names.add(entity_map[e.src])
+            if e.dst in entity_map:
+                names.add(entity_map[e.dst])
         out: dict[str, float] = {}
+        name_patterns = [_entity_pattern(name) for name in names if name]
         for rec in self.store.list_memories(flt, limit=500):
-            hay = f"{rec.title} {rec.content}".lower()
-            hits = sum(1 for n in names if n and n.lower() in hay)
+            hay = f"{rec.title} {rec.content}"
+            hits = sum(1 for pattern in name_patterns if pattern.search(hay))
             if hits:
                 out[rec.id] = float(hits)
         return out
 
-    def _entities(self, flt: SearchFilter) -> list[str]:
-        sql = "SELECT DISTINCT name FROM entities"
+    def _entity_map(self, flt: SearchFilter) -> dict[str, str]:
+        sql = "SELECT DISTINCT id, name FROM entities"
         clauses, params = [], []
         if flt.workspace_id:
-            clauses.append("workspace_id=?")
+            # Ancestor widening applies to workspace_id exactly as to repo_id below:
+            # entities recorded without a workspace (user-scope/global) are visible to a
+            # contextual read, matching SearchFilter.include_ancestors's contract.
+            if flt.include_ancestors:
+                clauses.append("(workspace_id=? OR workspace_id IS NULL)")
+            else:
+                clauses.append("workspace_id=?")
             params.append(flt.workspace_id)
         if flt.repo_id:
-            clauses.append("repo_id=?")
+            if flt.include_ancestors:
+                clauses.append("(repo_id=? OR repo_id IS NULL)")
+            else:
+                clauses.append("repo_id=?")
             params.append(flt.repo_id)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        return [r["name"] for r in self.store.conn.execute(sql, params).fetchall()]
-
-    @staticmethod
-    def _visible(rec: MemoryRecord, flt: SearchFilter, now: float) -> bool:
-        if flt.workspace_id and rec.workspace_id != flt.workspace_id:
-            return False
-        if flt.repo_id and rec.repo_id != flt.repo_id:
-            return False
-        if flt.session_id and rec.session_id != flt.session_id:
-            return False
-        if flt.scopes and rec.scope not in flt.scopes:
-            return False
-        if flt.mtypes and rec.mtype not in flt.mtypes:
-            return False
-        if rec.expired_at is not None:
-            return False
-        if rec.valid_from is not None and rec.valid_from > now:
-            return False
-        if rec.valid_to is not None and now >= rec.valid_to:
-            return False
-        return True
+        return {r["id"]: r["name"] for r in self.store.conn.execute(sql, params).fetchall()}
 
     def _pack(self, cands: list[Candidate]) -> str:
         parts, used = [], 0
@@ -228,5 +221,12 @@ class RecallEngine:
         return "\n\n".join(parts)
 
 
+def _entity_pattern(name: str) -> re.Pattern[str]:
+    """Match an entity as a complete token/phrase, not inside unrelated words."""
+    return re.compile(r"(?<!\w)" + re.escape(name) + r"(?!\w)", re.IGNORECASE)
+
+
 def _ranked(arm: dict[str, float], recs: dict) -> list[str]:
-    return [i for i, _ in sorted(arm.items(), key=lambda x: -x[1]) if i in recs]
+    # Tie-break on id: RRF depends on rank position, so equal arm scores must not order
+    # differently between runs (they feed the final score).
+    return [i for i, _ in sorted(arm.items(), key=lambda x: (-x[1], x[0])) if i in recs]

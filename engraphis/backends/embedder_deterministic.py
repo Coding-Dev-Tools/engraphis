@@ -18,7 +18,7 @@ import numpy as np
 
 
 class DeterministicEmbedder:
-    def __init__(self, dim: int = 256) -> None:
+    def __init__(self, dim: int = 384) -> None:
         self._dim = dim
 
     @property
@@ -29,7 +29,12 @@ class DeterministicEmbedder:
         out = np.zeros((len(texts), self._dim), dtype=np.float32)
         for i, text in enumerate(texts):
             for token in _tokenize(text, kind):
-                h = hashlib.sha1(token.encode("utf-8")).digest()
+                # SHA-1 is retained only to keep the established offline embedding
+                # mapping stable across upgrades. This is feature hashing, never a
+                # password, signature, integrity check, or other security primitive.
+                h = hashlib.sha1(
+                    token.encode("utf-8"), usedforsecurity=False
+                ).digest()
                 idx = int.from_bytes(h[:4], "big") % self._dim
                 sign = 1.0 if h[4] & 1 else -1.0
                 out[i, idx] += sign

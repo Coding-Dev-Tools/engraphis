@@ -48,13 +48,14 @@ def _graph_fixture():
     emb = DeterministicEmbedder(dim=64)
     index = NumpyVectorIndex(store)
 
+    entity_ids = {}
     for name in ("alphasvc", "betasvc", "gammasvc"):
-        store.upsert_entity(Node(id="", name=name, ntype="service",
-                                 workspace_id=wid, repo_id=rid))
-    store.upsert_edge(Edge(id="", src="alphasvc", dst="betasvc", relation="calls",
-                           workspace_id=wid, repo_id=rid))
-    store.upsert_edge(Edge(id="", src="betasvc", dst="gammasvc", relation="calls",
-                           workspace_id=wid, repo_id=rid))
+        entity_ids[name] = store.upsert_entity(Node(id="", name=name, ntype="service",
+                                                    workspace_id=wid, repo_id=rid))
+    store.upsert_edge(Edge(id="", src=entity_ids["alphasvc"], dst=entity_ids["betasvc"],
+                           relation="calls", workspace_id=wid, repo_id=rid))
+    store.upsert_edge(Edge(id="", src=entity_ids["betasvc"], dst=entity_ids["gammasvc"],
+                           relation="calls", workspace_id=wid, repo_id=rid))
 
     texts = {
         "m1": "alphasvc handles the login flow.",
@@ -93,6 +94,40 @@ def test_ppr_arm_returns_empty_without_seed_entities():
     eng = RecallEngine(store, emb, index, IdentityReranker())
     from engraphis.core.store import now_ts
     assert eng._graph_arm("nothing here matches", SearchFilter(workspace_id=wid), now_ts()) == {}
+    store.close()
+
+
+def test_1hop_arm_honors_graph_layer_filter():
+    """`graph_mode="1hop"` (also the PPR big-graph fallback) must respect
+    `SearchFilter.graph_layers` like the PPR arm does: a temporal-only intent
+    may not expand the seed through entity/causal edges (PR #19 follow-up)."""
+    from engraphis.core.interfaces import GraphLayer
+    from engraphis.core.store import now_ts
+
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    emb = DeterministicEmbedder(dim=64)
+    index = NumpyVectorIndex(store)
+    a = store.upsert_entity(Node(id="", name="alphasvc", ntype="service", workspace_id=wid))
+    b = store.upsert_entity(Node(id="", name="betasvc", ntype="service", workspace_id=wid))
+    # "calls" classifies as the ENTITY overlay.
+    store.upsert_edge(Edge(id="", src=a, dst=b, relation="calls", workspace_id=wid))
+    text = "betasvc publishes the audit events."
+    mid = store.add_memory(MemoryRecord(
+        id="", content=text, mtype=MemoryType.SEMANTIC, scope=Scope.WORKSPACE,
+        workspace_id=wid, embedding=emb.embed([text])[0],
+    ))
+    eng = RecallEngine(store, emb, index, IdentityReranker(), graph_mode="1hop")
+    now = now_ts()
+
+    unrestricted = eng._graph_arm("alphasvc status", SearchFilter(workspace_id=wid), now)
+    assert mid in unrestricted  # entity edge expands alphasvc → betasvc
+
+    temporal_only = eng._graph_arm(
+        "alphasvc status",
+        SearchFilter(workspace_id=wid, graph_layers=[GraphLayer.TEMPORAL]), now,
+    )
+    assert mid not in temporal_only  # the entity edge is outside the overlay
     store.close()
 
 

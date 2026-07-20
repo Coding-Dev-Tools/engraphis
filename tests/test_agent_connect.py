@@ -12,7 +12,7 @@ import pytest
 pytest.importorskip("fastapi", reason="full-stack extra not installed")
 pytest.importorskip("httpx", reason="httpx not installed")
 
-from fastapi.testclient import TestClient  # noqa: E402
+from tests.team_client import InvitationTestClient as TestClient  # noqa: E402
 
 from engraphis import licensing as lic  # noqa: E402
 from engraphis.config import settings  # noqa: E402
@@ -34,12 +34,20 @@ def _seed(db_path: str) -> None:
                  scope="workspace", title="DB choice")
 
 
-def _client(monkeypatch, tmp_path, *, key=None):
+def _client(monkeypatch, tmp_path, *, key=None, team_mode="1"):
     db = str(tmp_path / "agent.db")
     monkeypatch.setattr(settings, "db_path", db)
     monkeypatch.setattr(settings, "embed_model", "")
+    monkeypatch.setattr(settings, "allowed_workspaces", [])
     monkeypatch.setenv("ENGRAPHIS_EMBED_MODEL", "")
-    monkeypatch.setenv("ENGRAPHIS_TEAM_MODE", "1")
+    # The mounted relay persists opaque bundles separately from the app database. Keep
+    # it inside this test's directory so repeated/parallel runs cannot leak bundles across
+    # accounts that intentionally use the same deterministic test license.
+    monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(tmp_path / "relay.db"))
+    if team_mode is None:
+        monkeypatch.delenv("ENGRAPHIS_TEAM_MODE", raising=False)
+    else:
+        monkeypatch.setenv("ENGRAPHIS_TEAM_MODE", team_mode)
     monkeypatch.setattr(lic, "_LICENSE_FILE", tmp_path / "license.key")
     if key:
         monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
@@ -70,7 +78,7 @@ def test_token_lifecycle_and_connect_info(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path, key=_team_key()) as c:
         _setup_admin(c)
         tok = _mint(c)
-        assert len(tok["token"]) > 30 and tok["id"].startswith("tok_")
+        assert tok["token"].startswith("engr_ut_") and tok["id"].startswith("tok_")
 
         # listing never returns the raw token
         lst = c.get("/api/auth/tokens").json()["tokens"]
@@ -85,6 +93,168 @@ def test_token_lifecycle_and_connect_info(monkeypatch, tmp_path):
         # revoke, then it's gone (404 on a second revoke)
         assert c.delete(f"/api/auth/token/{tok['id']}").status_code == 200
         assert c.delete(f"/api/auth/token/{tok['id']}").status_code == 404
+
+
+def test_expired_tokens_do_not_exhaust_the_active_token_limit(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path, key=_team_key()) as c:
+        user = _setup_admin(c)
+        store = c.app.state.auth_store
+        assert c.post("/api/auth/token", json={
+            "label": "empty", "scopes": [],
+        }).status_code == 400
+        for index in range(100):
+            store.create_api_token(user["id"], label=f"expired-{index}")
+        limited = c.post("/api/auth/token", json={"label": "one-too-many"})
+        assert limited.status_code == 400 and "token limit" in limited.text
+        store.conn.execute(
+            "UPDATE api_tokens SET expires_at=0 WHERE user_id=?", (user["id"],))
+        store.conn.commit()
+
+        fresh = _mint(c, label="replacement")
+        assert fresh["token"].startswith("engr_ut_")
+
+
+def test_legacy_api_tokens_receive_the_v1_expiry_during_migration(monkeypatch, tmp_path):
+    from engraphis.inspector.auth import API_TOKEN_TTL_SECONDS
+
+    with _client(monkeypatch, tmp_path, key=_team_key()) as c:
+        user = _setup_admin(c)
+        store = c.app.state.auth_store
+        created_at = time.time() - 123
+        store.conn.execute(
+            "INSERT INTO api_tokens(id,user_id,label,token_hash,created_at,expires_at,scopes) "
+            "VALUES (?,?,?,?,?,NULL,'agent')",
+            ("tok_legacy", user["id"], "legacy", "legacy-hash", created_at),
+        )
+        store.conn.commit()
+
+        store._migrate_schema()
+        migrated = store.conn.execute(
+            "SELECT expires_at FROM api_tokens WHERE id='tok_legacy'").fetchone()[0]
+        assert migrated == pytest.approx(created_at + API_TOKEN_TTL_SECONDS)
+
+
+def test_scoped_team_sync_tokens_enforce_read_and_write(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path, key=_team_key()) as c:
+        _setup_admin(c)
+        admin_token = _mint(c, label="admin-sync")["token"]
+        c.cookies.clear()
+        admin_headers = {"Authorization": f"Bearer {admin_token}"}
+        assert c.post(
+            "/relay/v1/demo/bundles/bundle-admin.json",
+            content=b"{}",
+            headers=admin_headers,
+        ).status_code == 200
+        assert c.get("/relay/v1/demo/names", headers=admin_headers).json()["names"] == [
+            "bundle-admin.json"
+        ]
+
+        assert c.post("/api/auth/login", json={
+            "email": "admin@x.co", "password": "supersecret1",
+        }).status_code == 200
+        member = c.post("/api/auth/users", json={
+            "email": "member-sync@x.co",
+            "name": "Member",
+            "role": "member",
+            "password": "memberpass12",
+        }).json()["user"]
+        assert member["role"] == "member"
+        c.post("/api/auth/logout")
+        assert c.post("/api/auth/login", json={
+            "email": "member-sync@x.co", "password": "memberpass12",
+        }).status_code == 200
+        member_token = _mint(c, label="member-sync")["token"]
+        c.cookies.clear()
+        member_headers = {"Authorization": f"Bearer {member_token}"}
+        assert c.post(
+            "/relay/v1/demo/bundles/bundle-member.json",
+            content=b"{}",
+            headers=member_headers,
+        ).status_code == 200
+
+        # Scope alone is not durable authority: a role downgrade takes effect on the
+        # next relay request even though this older token still says sync:write.
+        assert c.post("/api/auth/login", json={
+            "email": "admin@x.co", "password": "supersecret1",
+        }).status_code == 200
+        assert c.post("/api/auth/users/update", json={
+            "user_id": member["id"], "role": "viewer",
+        }).status_code == 200
+        c.cookies.clear()
+        assert c.get("/relay/v1/demo/names", headers=member_headers).status_code == 200
+        assert c.post(
+            "/relay/v1/demo/bundles/bundle-viewer.json",
+            content=b"{}",
+            headers=member_headers,
+        ).status_code == 403
+
+
+def test_read_only_sync_policy_survives_process_environment_reset(monkeypatch, tmp_path):
+    from engraphis.backends.sync_relay import has_sync_token, sync_read_only
+
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("ENGRAPHIS_SYNC_TOKEN", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_SYNC_READ_ONLY", raising=False)
+    with _client(monkeypatch, tmp_path, key=_team_key()) as c:
+        _setup_admin(c)
+        configured = c.post("/api/sync/token", json={
+            "token": "engr_ut_" + "s" * 32, "read_only": True,
+        })
+        assert configured.status_code == 200 and configured.json()["read_only"] is True
+        assert has_sync_token() is True and sync_read_only() is True
+
+        # Simulate a fresh process with no environment override; the owner-only state
+        # files remain on the persistent volume.
+        monkeypatch.delenv("ENGRAPHIS_SYNC_READ_ONLY", raising=False)
+        status = c.get("/api/sync/status")
+        assert status.status_code == 200 and status.json()["read_only"] is True
+        assert sync_read_only() is True
+
+        removed = c.delete("/api/sync/token")
+        assert removed.status_code == 200
+        assert removed.json() == {"configured": False, "read_only": False}
+
+
+def test_concurrent_sync_token_updates_do_not_interleave(monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from engraphis.backends import sync_relay
+    from engraphis.routes import v2_api
+
+    monkeypatch.delenv("ENGRAPHIS_SYNC_TOKEN", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_SYNC_READ_ONLY", raising=False)
+    calls = []
+    calls_lock = threading.Lock()
+    start = threading.Barrier(2)
+
+    def record(kind, value):
+        with calls_lock:
+            calls.append((threading.get_ident(), kind, value))
+        time.sleep(0.01)  # encourage a context switch inside each multi-file update
+
+    monkeypatch.setattr(sync_relay, "save_sync_read_only",
+                        lambda enabled: record("policy", enabled))
+    monkeypatch.setattr(sync_relay, "save_sync_token",
+                        lambda token: record("token", token))
+
+    def configure(token, read_only):
+        start.wait()
+        return v2_api.configure_sync_token(
+            v2_api._SyncTokenReq(token=token, read_only=read_only))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(configure, "engr_ut_" + "a" * 32, True),
+            pool.submit(configure, "engr_ut_" + "b" * 32, False),
+        ]
+        assert all(future.result()["configured"] for future in futures)
+
+    # Every operation for one request is contiguous: another request cannot overwrite
+    # its policy between the restrictive sentinel and token replacement.
+    owners = [entry[0] for entry in calls]
+    transitions = sum(left != right for left, right in zip(owners, owners[1:]))
+    assert transitions == 1
 
 
 # ── agent write path ────────────────────────────────────────────────────────────
@@ -106,14 +276,41 @@ def test_remember_with_bearer_writes_to_cloud(monkeypatch, tmp_path):
                    for m in rec.json()["memories"])
 
 
-def test_remember_requires_team_license_402(monkeypatch, tmp_path):
-    # team mode ON but no Team license -> agent write is 402 ("need a team license")
-    with _client(monkeypatch, tmp_path, key=None) as c:
-        _setup_admin(c)  # bootstrap admin is exempt from the license gate
-        token = _mint(c)["token"]
+def test_team_mode_defaults_on_when_environment_is_unset(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path, key=_team_key(), team_mode=None) as c:
+        assert c.get("/api/auth/state").json()["enabled"] is True
+        assert c.post(
+            "/api/remember",
+            json={"content": "x", "workspace": "demo"}).status_code == 401
+
+
+def test_viewer_can_mint_read_only_api_token(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path, key=_team_key()) as c:
+        _setup_admin(c)
+        assert c.post("/api/auth/users", json={
+            "email": "viewer@x.co", "name": "Viewer", "role": "viewer",
+            "password": "viewerpass12",
+        }).status_code == 200
         c.cookies.clear()
+        assert c.post("/api/auth/login", json={
+            "email": "viewer@x.co", "password": "viewerpass12",
+        }).status_code == 200
+        token = _mint(c, label="viewer-agent")["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        c.cookies.clear()
+
+        assert c.get(
+            "/api/recall?q=database&workspace=demo", headers=headers).status_code == 200
+        assert c.post(
+            "/api/remember", json={"content": "x", "workspace": "demo"},
+            headers=headers).status_code == 403
+
+
+def test_remember_requires_team_license_402(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "api_token", "service-token")
+    with _client(monkeypatch, tmp_path, key=None) as c:
         r = c.post("/api/remember", json={"content": "x", "workspace": "demo"},
-                   headers={"Authorization": f"Bearer {token}"})
+                   headers={"Authorization": "Bearer service-token"})
         assert r.status_code == 402
         assert r.json()["detail"]["feature"] == "team"
 

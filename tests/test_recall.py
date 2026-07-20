@@ -67,12 +67,98 @@ def test_graph_arm_pulls_related_via_entities():
     wid = store.get_or_create_workspace("w")
     rid = store.get_or_create_repo(wid, "r")
     # Entity graph: Redis —used_by→ checkout
-    store.upsert_entity(Node(id="", name="Redis", ntype="tech", workspace_id=wid, repo_id=rid))
-    store.upsert_entity(Node(id="", name="checkout", ntype="module", workspace_id=wid, repo_id=rid))
-    store.upsert_edge(Edge(id="", src="Redis", dst="checkout", relation="used_by",
+    redis = store.upsert_entity(Node(id="", name="Redis", ntype="tech",
+                                     workspace_id=wid, repo_id=rid))
+    checkout = store.upsert_entity(Node(id="", name="checkout", ntype="module",
+                                        workspace_id=wid, repo_id=rid))
+    store.upsert_edge(Edge(id="", src=redis, dst=checkout, relation="used_by",
                            workspace_id=wid, repo_id=rid))
     _add(store, emb, wid, rid, "The checkout service had a race condition.")
     _add(store, emb, wid, rid, "Totally unrelated note about office plants.")
     # Query mentions Redis; graph arm should surface the checkout memory.
     res = eng.recall("how does Redis relate to things?", SearchFilter(workspace_id=wid), k=3)
     assert any("checkout" in c["content"].lower() for c in res.chunks)
+
+
+
+def test_lexical_recall_is_filtered_before_candidate_limit():
+    store, emb, eng = _engine()
+    target = store.get_or_create_workspace("target")
+    other = store.get_or_create_workspace("other")
+    for i in range(60):
+        _add(store, emb, other, None, f"needle belongs elsewhere {i}")
+    wanted = _add(store, emb, target, None, "needle belongs in the target workspace")
+
+    res = eng.recall("needle", SearchFilter(workspace_id=target), k=3, candidate_k=10)
+    assert [c["id"] for c in res.chunks] == [wanted]
+
+
+def test_graph_arm_does_not_match_entity_names_inside_other_words():
+    from engraphis.core.interfaces import Edge, Node
+
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    redis = store.upsert_entity(Node(
+        id="", name="Redis", ntype="tech", workspace_id=wid, repo_id=rid))
+    checkout = store.upsert_entity(Node(
+        id="", name="checkout", ntype="module", workspace_id=wid, repo_id=rid))
+    store.upsert_edge(Edge(
+        id="", src=redis, dst=checkout, relation="used_by",
+        workspace_id=wid, repo_id=rid))
+    related = _add(
+        store, emb, wid, rid, "The checkout service had a race condition.")
+
+    scores = eng._graph_arm_ppr(
+        "we rediscovered an old archive",
+        SearchFilter(workspace_id=wid, repo_id=rid),
+        now=10**12)
+
+    assert related not in scores
+
+# ── regression: batched candidate lookup + deterministic tie ordering ─────────
+
+def test_recall_resolves_candidates_in_one_batched_lookup(monkeypatch):
+    """Candidates used to be resolved with a get_memory() per unique id across the
+    vec/lex/graph arms — ~150 single-row queries per recall."""
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    for i in range(12):
+        _add(store, emb, wid, rid, "deployment note number %d about caching" % i)
+
+    single = []
+    monkeypatch.setattr(store, "get_memory", lambda mid: single.append(mid))
+    batched = []
+    real_get_memories = store.get_memories
+    monkeypatch.setattr(store, "get_memories",
+                        lambda ids: (batched.append(list(ids)), real_get_memories(ids))[1])
+
+    res = eng.recall("caching", SearchFilter(workspace_id=wid), k=5, reinforce=False)
+
+    assert res.count >= 1
+    assert single == []                       # no per-id query on the recall path
+    assert len(batched) == 1                  # exactly one batched resolve
+
+
+def test_recall_tie_order_is_deterministic():
+    """Candidates come from set(vec) | set(lex) | set(graph); set iteration order varies
+    with PYTHONHASHSEED, so equal-scored results reordered across processes."""
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    # Identical content => identical scores => ordering is decided purely by the
+    # tiebreak, which must be the id and not set/hash iteration order.
+    for _ in range(8):
+        _add(store, emb, wid, rid, "the release checklist is in the runbook")
+
+    flt = SearchFilter(workspace_id=wid)
+    runs = [[c["id"] for c in eng.recall("release checklist runbook", flt, k=8,
+                                         reinforce=False).chunks]
+            for _ in range(5)]
+
+    assert all(r == runs[0] for r in runs)
+    tied = eng.recall("release checklist runbook", flt, k=8, reinforce=False).chunks
+    top = max(c["score"] for c in tied)
+    tied_ids = [c["id"] for c in tied if c["score"] == top]
+    assert tied_ids == sorted(tied_ids)       # equal scores order by id, ascending

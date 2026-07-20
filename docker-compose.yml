@@ -2,19 +2,34 @@
 # seats, license revocation, Pro sync) — the thing teams actually deploy. The raw
 # single-user v1 API server is available under the "api" profile:
 #     docker compose --profile api up engraphis-api
+#
+# NOTE: the `env_file:` object form below (`- path: .env` + `required: false`, which makes
+# .env OPTIONAL so a fresh clone with no .env still boots) needs Docker Compose v2.24+
+# (Jan 2024). On older Compose, either upgrade, or replace each `env_file:` block with the
+# plain list form `env_file: [.env]` and run `touch .env` first — the `environment:` blocks
+# already supply every default, so .env is only ever for optional overrides.
 services:
   engraphis:
     build: .
     image: engraphis:latest
     # Team dashboard on the v2 engine. --no-open: never try to launch a browser in a
-    # container. Binds 0.0.0.0 via ENGRAPHIS_HOST (set in the image).
+    # container. Binds 0.0.0.0 via the ENGRAPHIS_HOST below (explicit here; the image
+    # itself no longer bakes a host — its entrypoint defaults to `::` dual-stack).
     command: ["engraphis-dashboard", "--no-open"]
     ports:
-      - "8700:8700"
+      # Keep the zero-token quickstart reachable only from this machine. Do not widen
+      # this bind without first setting ENGRAPHIS_API_TOKEN in .env.
+      - "127.0.0.1:8700:8700"
     env_file:
-      - .env
+      # Optional: a fresh clone has no .env (it's gitignored), and `docker compose up`
+      # must still work using the `environment:` block below plus the shell env.
+      - path: .env
+        required: false
     environment:
       ENGRAPHIS_HOST: 0.0.0.0
+      # Docker NAT presents the host browser as a private bridge peer. This exception is
+      # safe only because the published host port above is loopback-only.
+      ENGRAPHIS_LOCAL_TRUSTED_PEERS: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7
       ENGRAPHIS_DB_PATH: /data/engraphis.db
       # Persist license/trial/machine-id/lease + the revocation registry on the volume.
       ENGRAPHIS_STATE_DIR: /data/.engraphis
@@ -32,12 +47,16 @@ services:
     command: ["engraphis-server"]
     profiles: ["api"]
     ports:
-      - "8701:8700"
+      - "127.0.0.1:8701:8700"
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       ENGRAPHIS_HOST: 0.0.0.0
-      ENGRAPHIS_DB_PATH: /data/engraphis.db
+      # The v1 server uses a DIFFERENT, incompatible memory schema from the v2 dashboard,
+      # so it MUST NOT share the dashboard's engraphis.db (doing so corrupts both). Give it
+      # its own file on the shared volume.
+      ENGRAPHIS_DB_PATH: /data/engraphis_v1.db
       ENGRAPHIS_STATE_DIR: /data/.engraphis
     volumes:
       - engraphis-data:/data

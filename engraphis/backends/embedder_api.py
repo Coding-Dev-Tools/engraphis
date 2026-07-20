@@ -53,9 +53,12 @@ class ApiEmbedder:
         self._api_key = api_key or os.environ.get(_DEFAULT_API_KEY_ENV, "")
         self._dim = dim
         self._embeddings_url = f"{self._base_url}/v1/embeddings"
+        # A custom endpoint can contain embedded credentials or signed query
+        # parameters, while provider-controlled model identifiers are also untrusted
+        # log input. Do not copy either into logs.
         logger.info(
-            "ApiEmbedder(model=%s, base_url=%s, dim=%s)",
-            self.model, self._base_url, self._dim or "auto",
+            "ApiEmbedder(custom_endpoint=%s, dim=%s)",
+            bool(base_url), self._dim or "auto",
         )
 
     @property
@@ -112,7 +115,8 @@ class ApiEmbedder:
                 resp.raise_for_status()
                 data = resp.json()
         except Exception as exc:
-            logger.warning("Batch embedding failed (%s), falling back per-item", exc)
+            logger.warning("Batch embedding failed (%s), falling back per-item",
+                           type(exc).__name__)
             # Fallback: embed one at a time
             vecs = [self._embed_one(t) for t in texts]
             return np.asarray(vecs, dtype=np.float32)
@@ -130,10 +134,9 @@ class ApiEmbedder:
         for item in items:
             emb = item.get("embedding")
             if emb is None:
-                logger.warning(
-                    "Item index %s missing 'embedding' key, using zero vector",
-                    item.get("index", "?"),
-                )
+                # Never log the provider-controlled ``index`` value; a malformed
+                # response can otherwise inject PII, credentials, or new log lines.
+                logger.warning("Embedding item missing vector; using zero vector")
                 emb = [0.0] * (self._dim or 384)
             vecs.append(emb)
 
@@ -170,7 +173,7 @@ class ApiEmbedder:
                 resp.raise_for_status()
                 data = resp.json()
         except Exception as exc:
-            logger.error("Single embedding request failed: %s", exc)
+            logger.error("Single embedding request failed (%s)", type(exc).__name__)
             return [0.0] * (self._dim or 384)
 
         items = data.get("data", [])

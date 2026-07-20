@@ -19,6 +19,7 @@ from typing import Any, Optional
 from engraphis.config import settings
 from engraphis.stores import get_conn, now_ts
 from engraphis.stores import vectors as mem_store
+from engraphis.core.store import _escape_like
 
 _INTERACTION_BOOST = {
     "view": 0.05,
@@ -74,6 +75,30 @@ def apply_interaction_boost(mem_id: int, interaction_level: str) -> None:
         (new_stab, now_ts(), mem_id),
     )
     conn.commit()
+
+
+def boost_entity_memories(namespace: str, entity_name: str,
+                          interaction_level: str) -> int:
+    """Apply an interaction boost to memories that mention *entity_name*.
+
+    This is what makes a recorded interaction actually reinforce memory (interaction-aware
+    reinforcement); previously ``apply_interaction_boost`` had no caller, so interactions
+    were logged but never affected retention. Matching is a bounded name-substring lookup
+    (the entity name is a BOUND parameter — no SQL injection). Returns how many memories
+    were reinforced."""
+    name = (entity_name or "").strip()
+    if not name:
+        return 0
+    conn = get_conn()
+    like = "%" + _escape_like(name) + "%"
+    rows = conn.execute(
+        "SELECT id FROM memories WHERE namespace=? AND (title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\') "
+        "LIMIT 100",
+        (namespace, like, like),
+    ).fetchall()
+    for r in rows:
+        apply_interaction_boost(r["id"], interaction_level)
+    return len(rows)
 
 
 def decay_pass(namespace: Optional[str] = None) -> int:

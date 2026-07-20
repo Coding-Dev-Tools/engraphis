@@ -27,7 +27,10 @@ def synthesize_thoughts(
     thought_prompt: Optional[str] = None,
 ) -> dict[str, Any]:
     """Recall recent high-salience memories, synthesize a thought via LLM, optionally persist."""
-    ctx = recall_engine.recall_master(namespace=namespace or "_global", max_chunks=max_chunks)
+    # Pass the namespace through as-is: ``None`` recalls across ALL namespaces (the
+    # consciousness loop calls this with namespace=None). Coercing to a nonexistent
+    # "_global" namespace made every global synthesis silently recall nothing and no-op.
+    ctx = recall_engine.recall_master(namespace=namespace, max_chunks=max_chunks)
     chunks = ctx.get("chunks", [])
     if not chunks:
         return {"thought": None, "source_count": 0, "persisted": False, "reason": "no_memories"}
@@ -42,9 +45,18 @@ def synthesize_thoughts(
                 temperature=temperature,
                 thought_prompt=thought_prompt,
             )
-    except Exception as e:
-        logger.error("Thought synthesis failed: %s", e)
-        return {"thought": None, "source_count": len(chunks), "persisted": False, "error": str(e)}
+    except Exception as exc:
+        # Provider exceptions may embed request URLs, credentials, or excerpts. Keep
+        # both logs and the returned status content-free while retaining a useful class.
+        error_type = type(exc).__name__
+        logger.error("Thought synthesis failed (%s)", error_type)
+        return {
+            "thought": None,
+            "source_count": len(chunks),
+            "persisted": False,
+            "error": "LLM synthesis failed",
+            "error_type": error_type,
+        }
 
     persisted_id = None
     if persist and thought:

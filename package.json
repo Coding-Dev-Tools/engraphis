@@ -1,0 +1,1 @@
+{"name":"engraphis-tests","version":"1.0.0","private":true,"description":"Browser accessibility and e2e test dependencies for Engraphis","scripts":{"test:e2e":"playwright test"},"devDependencies":{"@playwright/test":"^1.52.0","@axe-core/playwright":"^4.10.0"}}

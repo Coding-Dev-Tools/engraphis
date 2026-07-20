@@ -3,7 +3,7 @@
 #
 # Runs ONLY when engraphis/static/index.html is staged, and NEVER blocks the
 # commit — it prints a summary and always exits 0. Warn-only is deliberate: the
-# autonomous _cowork_ops fleet auto-commits, and a blocking hook would break
+# automated development workflows may commit, and a blocking hook would break
 # those unattended commits. For a hard gate on your own manual commits, run
 # `bash scripts/design-lint.sh --strict` yourself before committing.
 #

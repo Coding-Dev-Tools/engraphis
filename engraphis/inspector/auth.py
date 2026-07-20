@@ -23,10 +23,15 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import math
+import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
+from functools import wraps
+from pathlib import Path
 from typing import Optional
 
 PBKDF2_ITERATIONS = 600_000
@@ -35,9 +40,21 @@ SESSION_TTL_SECONDS = 12 * 3600
 LOCKOUT_FAILS = 5           # failures within LOCKOUT_WINDOW …
 LOCKOUT_WINDOW = 900        # … lock the account for LOCKOUT_SECONDS
 LOCKOUT_SECONDS = 60
+# Per-source-IP companion to the per-email lockout above: the per-email throttle alone
+# never slows a credential-stuffing sweep that tries each address once (every attempt is
+# that email's first). Cap total failures from one source across ALL emails. 5× the
+# per-email cap so a shared office NAT with a few fat-fingered users doesn't trip it.
+IP_LOCKOUT_FAILS = 25
 RESET_TOKEN_TTL_SECONDS = 1800   # a "forgot password" link is single-use, 30 min
 RESET_REQUEST_MAX = 3            # … and throttled per-email so it can't mail-bomb
 RESET_REQUEST_WINDOW = 3600      # an inbox (independent of the login lockout above)
+MAX_THROTTLE_KEYS = 10_000       # bound unique-email memory use under credential spraying
+MAX_SESSIONS_PER_USER = 20
+MAX_ACTIVE_API_TOKENS = 100
+MAX_REVOKED_API_TOKENS = 100
+API_TOKEN_TTL_SECONDS = 90 * 86400
+INVITATION_TTL_SECONDS = 72 * 3600
+API_TOKEN_SCOPES = frozenset({"agent", "sync:read", "sync:write"})
 
 ROLES = ("viewer", "member", "admin")
 _ROLE_RANK = {r: i for i, r in enumerate(ROLES)}
@@ -78,11 +95,29 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     label        TEXT NOT NULL DEFAULT '',
     token_hash   TEXT NOT NULL UNIQUE,
     created_at   REAL NOT NULL,
+    expires_at   REAL,
+    scopes       TEXT NOT NULL DEFAULT 'agent',
     last_used_at REAL,
     revoked      INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_api_token_user ON api_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_api_token_hash ON api_tokens(token_hash);
+CREATE TABLE IF NOT EXISTS team_invitations (
+    id                  TEXT PRIMARY KEY,
+    email               TEXT NOT NULL,
+    name                TEXT NOT NULL DEFAULT '',
+    role                TEXT NOT NULL CHECK (role IN ('viewer','member','admin')),
+    token_hash          TEXT NOT NULL UNIQUE,
+    created_by          TEXT NOT NULL,
+    created_at          REAL NOT NULL,
+    expires_at          REAL NOT NULL,
+    accepted_at         REAL,
+    revoked_at          REAL,
+    delivery_state      TEXT NOT NULL DEFAULT 'pending',
+    last_delivery_error TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_team_invite_email ON team_invitations(email);
+CREATE INDEX IF NOT EXISTS idx_team_invite_expiry ON team_invitations(expires_at);
 CREATE TABLE IF NOT EXISTS audit_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts          REAL NOT NULL,
@@ -102,6 +137,32 @@ class AuthError(ValueError):
     """User-facing auth failure; message is safe to surface."""
 
 
+class SetupAlreadyCompletedError(AuthError):
+    """Atomic first-admin creation lost a race to another setup request."""
+
+
+class AccountLockedError(AuthError):
+    """Login refused because a lockout window is active (per-email or per-IP).
+
+    A distinct type so HTTP layers can map it to 429 without substring-matching the
+    human-readable message (which silently broke the mapping whenever the wording
+    changed). Subclasses :class:`AuthError` so existing broad handlers still catch it.
+    ``retry_after`` is the authoritative remaining backoff for HTTP/CLI adapters."""
+
+    def __init__(self, message: str, retry_after: float = LOCKOUT_SECONDS) -> None:
+        super().__init__(message)
+        self.retry_after = max(1, int(math.ceil(retry_after)))
+
+
+def _serialized(method):
+    """Serialize access to AuthStore's shared SQLite connection and in-memory throttles."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
 def role_at_least(role: str, minimum: str) -> bool:
     return _ROLE_RANK.get(role, -1) >= _ROLE_RANK.get(minimum, 99)
 
@@ -116,13 +177,57 @@ def min_role(method: str, path: str) -> str:
         # get more options"); anyone signed in may READ the current state (the dashboard
         # renders the toggle disabled for non-admins). GET stays viewer, writes are admin.
         return "admin" if method != "GET" else "viewer"
+    if path == "/api/sync/token":
+        # This changes the server process's device-wide relay credential.
+        return "admin"
+    if path in ("/api/ops/backup", "/api/ops/ready"):
+        return "admin"
+    if path in ("/api/llm/test", "/api/llm/extractor"):
+        # Both routes operate on the server-wide provider/extractor configuration.
+        # Testing spends the account's provider credit and the toggle also persists
+        # process settings, so neither is an ordinary member mutation.
+        return "admin"
+    if path.startswith("/api/graph/index/jobs"):
+        # Persisted rebuilds consume server-wide worker/SQLite capacity and mutating
+        # jobs temporarily gate graph reads for the whole shared workspace. Status and
+        # job polling remain ordinary reads; start/cancel are administrative controls.
+        return "viewer" if method in ("GET", "HEAD") else "admin"
+    if path.startswith("/api/license/trials"):
+        # Zero-user hosted bootstrap is explicitly exempted by dashboard_app. Once an
+        # account exists, starting or claiming a deployment license is admin-only.
+        return "admin"
+    if path == "/api/auth/token" or path.startswith("/api/auth/token/"):
+        # A signed-in user's OWN agent API tokens: mint (POST /api/auth/token) and revoke
+        # (DELETE /api/auth/token/{id}). Every operation is scoped to the caller's user id
+        # inside the route itself, so a viewer must keep it — matched for ALL methods, not
+        # just POST, so the member-by-default fall-through below cannot lock a viewer out
+        # of revoking their own credential.
+        return "viewer"
+    if path.startswith("/api/auth/invitations"):
+        return "admin"
+    if path in ("/api/intent/recall", "/api/code/path", "/api/code/impact"):
+        return "viewer"
+    if path in (
+        "/api/code/index", "/api/workspaces/import-folder", "/api/resources/postgres",
+        "/api/sync/run", "/api/workspaces/delete", "/api/workspaces/merge",
+    ):
+        # These operations read server-local files or make a caller-selected outbound
+        # connection, mutate every shared workspace through the account-wide relay, or
+        # IRREVERSIBLY destroy/combine a whole shared workspace (delete/merge). Those are
+        # not ordinary member governance actions — only an administrator may choose them.
+        return "admin"
     if path.startswith("/api/auth/users") or path.startswith("/api/auth/audit") \
             or path == "/api/auth/overview" or path in (
-            "/api/license/activate", "/api/export", "/api/consolidate"):
+            "/api/license/activate", "/api/license/trial", "/api/license/team-trial",
+            "/api/export", "/api/consolidate"):
         return "admin"
-    if method == "POST":            # pin / forget / correct — audited governance (member+)
-        return "member"
-    return "viewer"
+    # Default: reads are viewer, anything that can mutate is member+ (pin / forget /
+    # correct — audited governance). Written as "GET/HEAD are reads" rather than the old
+    # "POST is a write", because that inverted form defaulted every OTHER verb —
+    # DELETE, PUT, PATCH — to the LOWEST role. A new mutating route added under /api/
+    # would have shipped viewer-writable by omission; the default must fail toward
+    # more authority required, not less.
+    return "viewer" if method in ("GET", "HEAD") else "member"
 
 
 def _hash_password(password: str, *, iterations: int, salt: Optional[bytes] = None) -> str:
@@ -145,7 +250,25 @@ def _verify_password(password: str, encoded: str) -> bool:
 
 
 def _hash_token(token: str) -> str:
-    return hashlib.sha256(token.encode("ascii")).hexdigest()
+    # Generated tokens are ASCII, but cookies/Authorization headers are untrusted input.
+    # UTF-8 keeps malformed non-ASCII credentials on the normal "not found" path instead
+    # of raising UnicodeEncodeError and turning an auth failure into a 500.
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+
+
+def bearer_ok(authorization_header: Optional[str], expected_token: str) -> bool:
+    """Constant-time check of an ``Authorization: Bearer <token>`` header value.
+
+    The single shared implementation for every entrypoint (v1 app, inspector app,
+    dashboard app, license-cloud admin routes) — previously each had its own near-copy,
+    which is exactly how a timing-unsafe variant sneaks in. False when either side is
+    empty. The ``Bearer`` scheme is matched case-insensitively per RFC 7235 §2.1."""
+    if not expected_token:
+        return False
+    header = authorization_header or ""
+    supplied = header[7:].strip() if header[:7].lower() == "bearer " else ""
+    return bool(supplied) and hmac.compare_digest(
+        supplied.encode("utf-8"), expected_token.encode("utf-8"))
 
 
 def _validate_password(password: str) -> None:
@@ -163,13 +286,60 @@ class AuthStore:
     """Users + sessions for team mode. One instance per Inspector process."""
 
     def __init__(self, db_path: str, *, iterations: int = PBKDF2_ITERATIONS) -> None:
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._lock = threading.RLock()
+        connection_path = db_path
+        if db_path != ":memory:":
+            database = Path(db_path).expanduser()
+            database.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            # Password/session/API-token hashes and user PII must never inherit a
+            # permissive process umask. Tighten existing beta databases on upgrade too.
+            descriptor = os.open(str(database), os.O_RDWR | os.O_CREAT, 0o600)
+            os.close(descriptor)
+            try:
+                os.chmod(database, 0o600)
+            except OSError:
+                pass
+            connection_path = str(database)
+        self.conn = sqlite3.connect(connection_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA busy_timeout=5000")
+        self.conn.execute("PRAGMA foreign_keys=ON")
+        if connection_path != ":memory:":
+            try:
+                self.conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower():
+                    self.conn.close()
+                    raise
+            self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(_SCHEMA)
+        self._migrate_schema()
         self.iterations = int(iterations)
         self._failures: dict = {}   # email -> list[fail_ts] (in-memory throttle)
+        self._ip_failures: dict = {}  # ip -> list[fail_ts] (cross-email stuffing throttle)
         self._reset_requests: dict = {}   # email -> list[req_ts] (forgot-password throttle)
         self._last_prune: float = 0.0
+        self._last_throttle_prune: float = 0.0
+
+    def _migrate_schema(self) -> None:
+        """Idempotent auth migrations for databases created before v1.0."""
+        token_columns = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(api_tokens)").fetchall()
+        }
+        if "expires_at" not in token_columns:
+            self.conn.execute("ALTER TABLE api_tokens ADD COLUMN expires_at REAL")
+        if "scopes" not in token_columns:
+            self.conn.execute(
+                "ALTER TABLE api_tokens ADD COLUMN scopes TEXT NOT NULL DEFAULT 'agent'")
+        # The v1.0 token contract is a bounded 90-day credential. Databases upgraded
+        # from the beta schema otherwise retain NULL here and silently keep every old
+        # bearer token valid forever. Anchor the migration to its original creation time
+        # so upgrading cannot extend an already-old credential by another full window.
+        self.conn.execute(
+            "UPDATE api_tokens SET expires_at=created_at+? WHERE expires_at IS NULL",
+            (API_TOKEN_TTL_SECONDS,),
+        )
+        self.conn.commit()
 
     # ── users ──────────────────────────────────────────────────────────────────
     @staticmethod
@@ -179,8 +349,10 @@ class AuthStore:
             raise AuthError("invalid email address")
         return email
 
+    @_serialized
     def create_user(self, email: str, name: str, password: str, role: str,
-                    *, seat_limit: Optional[int] = None) -> dict:
+                    *, seat_limit: Optional[int] = None,
+                    require_empty: bool = False) -> dict:
         # The very first user (bootstrap admin, called from /api/auth/setup on a
         # zero-user store) is exempt from the license gate. Every user after that
         # still requires an active Team license — this only closes the chicken-and-egg
@@ -209,12 +381,16 @@ class AuthStore:
         conn = self.conn
         started = False
         try:
-            try:
+            if not conn.in_transaction:
                 conn.execute("BEGIN IMMEDIATE")
                 started = True
-            except sqlite3.OperationalError:
-                pass  # already inside a caller-managed transaction — don't nest
             if int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]) > 0:
+                # require_empty makes /api/auth/setup atomic: the first-admin bootstrap must
+                # create EXACTLY ONE user, so if any exists by the time we hold the write
+                # lock, refuse — this closes the setup TOCTOU where two concurrent requests
+                # both passed the router's count check and both created an admin.
+                if require_empty:
+                    raise SetupAlreadyCompletedError("setup already completed")
                 from engraphis.licensing import require_feature
                 require_feature("team")
             if seat_limit is not None and int(conn.execute(
@@ -241,61 +417,273 @@ class AuthStore:
             raise
         return self.get_user(uid)
 
+    @_serialized
     def get_user(self, user_id: str) -> Optional[dict]:
         row = self.conn.execute(
             "SELECT id, email, name, role, created_at, disabled FROM users WHERE id=?",
             (user_id,)).fetchone()
         return dict(row) if row else None
 
+    @_serialized
     def list_users(self) -> list:
         return [dict(r) for r in self.conn.execute(
             "SELECT id, email, name, role, created_at, disabled FROM users "
             "ORDER BY created_at")]
 
+    @_serialized
     def count_users(self) -> int:
         return int(self.conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"])
 
+    @_serialized
     def count_active_users(self) -> int:
         return int(self.conn.execute(
             "SELECT COUNT(*) AS n FROM users WHERE disabled=0").fetchone()["n"])
 
+    # -- one-time team invitations ---------------------------------------------
+
+    @staticmethod
+    def _invitation_public(row, *, token: str = "") -> dict:
+        out = dict(row)
+        out.pop("token_hash", None)
+        if token:
+            out["token"] = token
+        return out
+
+    @_serialized
+    def create_invitation(self, email: str, name: str, role: str, *, created_by: str,
+                          seat_limit: int,
+                          ttl: int = INVITATION_TTL_SECONDS) -> dict:
+        from engraphis.licensing import require_feature
+        require_feature("team")
+        email = self._clean_email(email)
+        name = (name or "").strip()[:120]
+        if role not in ROLES:
+            raise AuthError("role must be one of: %s" % ", ".join(ROLES))
+        token = secrets.token_urlsafe(32)
+        token_hash = _hash_token(token)
+        invite_id = "inv_" + secrets.token_hex(8)
+        now = time.time()
+        expires_at = now + max(300, int(ttl))
+        conn = self.conn
+        started = not conn.in_transaction
+        try:
+            if started:
+                conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE team_invitations SET revoked_at=? "
+                "WHERE accepted_at IS NULL AND revoked_at IS NULL AND expires_at<?",
+                (now, now))
+            if conn.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
+                raise AuthError("a user with that email already exists")
+            if conn.execute(
+                    "SELECT 1 FROM team_invitations WHERE email=? AND accepted_at IS NULL "
+                    "AND revoked_at IS NULL", (email,)).fetchone():
+                raise AuthError("an active invitation already exists for that email")
+            active = int(conn.execute(
+                "SELECT COUNT(*) FROM users WHERE disabled=0").fetchone()[0])
+            pending = int(conn.execute(
+                "SELECT COUNT(*) FROM team_invitations WHERE accepted_at IS NULL "
+                "AND revoked_at IS NULL AND expires_at>=?", (now,)).fetchone()[0])
+            if active + pending >= max(1, int(seat_limit)):
+                raise AuthError(
+                    "seat limit reached (%d) - revoke an invitation or upgrade Team"
+                    % seat_limit)
+            conn.execute(
+                "INSERT INTO team_invitations(id,email,name,role,token_hash,created_by,"
+                "created_at,expires_at) VALUES (?,?,?,?,?,?,?,?)",
+                (invite_id, email, name, role, token_hash, created_by, now, expires_at))
+            if started:
+                conn.commit()
+        except BaseException:
+            if started and conn.in_transaction:
+                conn.rollback()
+            raise
+        row = conn.execute("SELECT * FROM team_invitations WHERE id=?", (invite_id,)).fetchone()
+        return self._invitation_public(row, token=token)
+
+    @_serialized
+    def list_invitations(self) -> list:
+        now = time.time()
+        self.conn.execute(
+            "UPDATE team_invitations SET revoked_at=? WHERE accepted_at IS NULL "
+            "AND revoked_at IS NULL AND expires_at<?", (now, now))
+        self.conn.commit()
+        rows = self.conn.execute(
+            "SELECT * FROM team_invitations ORDER BY created_at DESC").fetchall()
+        return [self._invitation_public(row) for row in rows]
+
+    @_serialized
+    def resend_invitation(self, invite_id: str, *, ttl: int = INVITATION_TTL_SECONDS) -> dict:
+        token = secrets.token_urlsafe(32)
+        now = time.time()
+        expires_at = now + max(300, int(ttl))
+        cur = self.conn.execute(
+            "UPDATE team_invitations SET token_hash=?, expires_at=?, delivery_state='pending', "
+            "last_delivery_error='' WHERE id=? AND accepted_at IS NULL AND revoked_at IS NULL "
+            "AND expires_at>=?",
+            (_hash_token(token), expires_at, invite_id, now))
+        if cur.rowcount != 1:
+            raise AuthError("invitation is missing, expired, accepted, or revoked")
+        self.conn.commit()
+        row = self.conn.execute("SELECT * FROM team_invitations WHERE id=?", (invite_id,)).fetchone()
+        return self._invitation_public(row, token=token)
+
+    @_serialized
+    def revoke_invitation(self, invite_id: str) -> bool:
+        cur = self.conn.execute(
+            "UPDATE team_invitations SET revoked_at=? WHERE id=? AND accepted_at IS NULL "
+            "AND revoked_at IS NULL", (time.time(), invite_id))
+        self.conn.commit()
+        return cur.rowcount == 1
+
+    @_serialized
+    def set_invitation_delivery(self, invite_id: str, state: str, error: str = "") -> None:
+        state = state if state in ("pending", "sent", "failed") else "failed"
+        self.conn.execute(
+            "UPDATE team_invitations SET delivery_state=?, last_delivery_error=? WHERE id=?",
+            (state, (error or "")[:200], invite_id))
+        self.conn.commit()
+
+    @_serialized
+    def accept_invitation(self, token: str, password: str, *,
+                          seat_limit: Optional[int] = None) -> dict:
+        from engraphis import licensing
+        licensing.require_feature("team")
+        _validate_password(password)
+        token_hash = _hash_token(token)
+        # Invitation tokens carry 256 bits of entropy and are not enumerable account
+        # identifiers. Reject an invalid token before the intentionally expensive PBKDF2
+        # so an unauthenticated caller cannot turn this public endpoint into a CPU DoS.
+        candidate = self.conn.execute(
+            "SELECT 1 FROM team_invitations WHERE token_hash=? AND accepted_at IS NULL "
+            "AND revoked_at IS NULL AND expires_at>=?",
+            (token_hash, time.time()),
+        ).fetchone()
+        if candidate is None:
+            raise AuthError("invalid or expired invitation")
+        password_hash = _hash_password(password, iterations=self.iterations)
+        licensing.require_feature("team")
+        # Acceptance normally converts one already-reserved invitation into one active
+        # user, so it does not increase the store's occupied-seat count. The HTTP caller
+        # supplies the *current* entitlement to handle a license downgrade between issue
+        # and acceptance; direct/internal callers may omit it and retain the reservation
+        # semantics established by create_invitation(..., seat_limit=...).
+        current_seat_limit = None if seat_limit is None else max(1, int(seat_limit))
+        now = time.time()
+        conn = self.conn
+        started = not conn.in_transaction
+        try:
+            if started:
+                conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM team_invitations WHERE token_hash=? AND accepted_at IS NULL "
+                "AND revoked_at IS NULL AND expires_at>=?",
+                (token_hash, now)).fetchone()
+            if row is None:
+                raise AuthError("invalid or expired invitation")
+            if conn.execute("SELECT 1 FROM users WHERE email=?", (row["email"],)).fetchone():
+                raise AuthError("an account already exists for this email")
+            # Invitations reserve a seat when issued, but the license can be reduced
+            # before the recipient accepts. Re-check the *current* entitlement inside
+            # the same write transaction as user creation; pending reservations from an
+            # older, larger license must never oversubscribe the downgraded account.
+            active = int(conn.execute(
+                "SELECT COUNT(*) FROM users WHERE disabled=0").fetchone()[0])
+            if current_seat_limit is not None and active >= current_seat_limit:
+                raise AuthError(
+                    "seat limit reached (%d) — ask an admin to free a seat or upgrade Team"
+                    % current_seat_limit)
+            uid = "usr_" + secrets.token_hex(8)
+            conn.execute(
+                "INSERT INTO users(id,email,name,role,pw_hash,created_at) VALUES (?,?,?,?,?,?)",
+                (uid, row["email"], row["name"], row["role"], password_hash, now))
+            consumed = conn.execute(
+                "UPDATE team_invitations SET accepted_at=? WHERE id=? AND accepted_at IS NULL",
+                (now, row["id"]))
+            if consumed.rowcount != 1:
+                raise AuthError("invalid or expired invitation")
+            if started:
+                conn.commit()
+            return self.get_user(uid)
+        except sqlite3.IntegrityError:
+            if started and conn.in_transaction:
+                conn.rollback()
+            raise AuthError("an account already exists for this email")
+        except BaseException:
+            if started and conn.in_transaction:
+                conn.rollback()
+            raise
+
+    @_serialized
     def _count_active_admins(self) -> int:
         return int(self.conn.execute(
             "SELECT COUNT(*) AS n FROM users WHERE role='admin' AND disabled=0"
         ).fetchone()["n"])
 
+    @_serialized
     def update_user(self, user_id: str, *, role: Optional[str] = None,
                     disabled: Optional[bool] = None,
                     seat_limit: Optional[int] = None) -> dict:
-        user = self.get_user(user_id)
-        if user is None:
+        preliminary = self.get_user(user_id)
+        if preliminary is None:
             raise AuthError("no such user")
-        # Never let the last active admin lock everyone out.
-        losing_admin = (user["role"] == "admin" and not user["disabled"] and
-                        ((role is not None and role != "admin") or disabled))
-        if losing_admin and self._count_active_admins() <= 1:
-            raise AuthError("cannot demote or disable the last active admin")
-        # Re-enabling a disabled user consumes a seat, exactly like creating one, so it must
-        # honour the same licensed cap. Without this a team could exceed its paid seats via
-        # disable → add a replacement → re-enable the original — a path create_user's own
-        # seat check can't see.
-        reenabling = disabled is False and bool(user["disabled"])
-        if reenabling and seat_limit is not None and self.count_active_users() >= seat_limit:
-            raise AuthError(
-                "seat limit reached (%d) — upgrade your Team license for more seats"
-                % seat_limit)
+        if disabled is False and bool(preliminary["disabled"]):
+            from engraphis.licensing import require_feature
+            require_feature("team")
         if role is not None:
             if role not in ROLES:
                 raise AuthError("role must be one of: %s" % ", ".join(ROLES))
-            self.conn.execute("UPDATE users SET role=? WHERE id=?", (role, user_id))
-        if disabled is not None:
-            self.conn.execute("UPDATE users SET disabled=? WHERE id=?",
-                              (1 if disabled else 0, user_id))
-            if disabled:
-                self.revoke_user_sessions(user_id)
-        self.conn.commit()
+        conn = self.conn
+        started = not conn.in_transaction
+        try:
+            if started:
+                conn.execute("BEGIN IMMEDIATE")
+            user = self.get_user(user_id)
+            if user is None:
+                raise AuthError("no such user")
+            # Never let concurrent demotions/disables remove every active admin.
+            losing_admin = (
+                user["role"] == "admin" and not user["disabled"]
+                and ((role is not None and role != "admin") or disabled)
+            )
+            if losing_admin and self._count_active_admins() <= 1:
+                raise AuthError("cannot demote or disable the last active admin")
+            # Re-enabling consumes a seat. Keep the count check and update in one write
+            # transaction so concurrent admin requests cannot oversubscribe the license.
+            reenabling = disabled is False and bool(user["disabled"])
+            if reenabling and seat_limit is not None:
+                # Pending invitations already reserve seats. Counting only active users
+                # here would let an admin re-enable a disabled account after issuing an
+                # invitation, stranding its recipient or oversubscribing the license.
+                now = time.time()
+                pending = int(conn.execute(
+                    "SELECT COUNT(*) FROM team_invitations WHERE accepted_at IS NULL "
+                    "AND revoked_at IS NULL AND expires_at>=?", (now,)
+                ).fetchone()[0])
+                if self.count_active_users() + pending >= seat_limit:
+                    raise AuthError(
+                        "seat limit reached (%d) — revoke an invitation or upgrade Team"
+                        % seat_limit)
+            if role is not None:
+                conn.execute("UPDATE users SET role=? WHERE id=?", (role, user_id))
+            if disabled is not None:
+                conn.execute(
+                    "UPDATE users SET disabled=? WHERE id=?",
+                    (1 if disabled else 0, user_id),
+                )
+                if disabled:
+                    conn.execute("DELETE FROM auth_sessions WHERE user_id=?", (user_id,))
+                    conn.execute("UPDATE api_tokens SET revoked=1 WHERE user_id=?", (user_id,))
+                    self._prune_revoked_api_tokens(user_id)
+            if started:
+                conn.commit()
+        except BaseException:
+            if started and conn.in_transaction:
+                conn.rollback()
+            raise
         return self.get_user(user_id)
 
+    @_serialized
     def delete_user(self, user_id: str) -> dict:
         """Permanently remove a team member. Unlike ``disable`` (which flips a flag but
         leaves the row — and its UNIQUE ``email`` — in place), this frees both the
@@ -305,30 +693,98 @@ class AuthStore:
         codebase has no soft-delete convention, and ``audit_events`` (recorded by the
         caller with the email captured beforehand) already preserves the history.
         Returns the deleted user's row (pre-delete snapshot) for the caller's audit log."""
-        user = self.get_user(user_id)
-        if user is None:
-            raise AuthError("no such user")
-        # Same guard as update_user's demote/disable path — deletion is a strictly
-        # stronger version of disable, so it must never be able to lock everyone out.
-        if user["role"] == "admin" and not user["disabled"] and self._count_active_admins() <= 1:
-            raise AuthError("cannot delete the last active admin")
-        self.revoke_user_sessions(user_id)
-        self.conn.execute("DELETE FROM users WHERE id=?", (user_id,))
-        self.conn.commit()
-        return user
+        conn = self.conn
+        started = not conn.in_transaction
+        try:
+            if started:
+                conn.execute("BEGIN IMMEDIATE")
+            user = self.get_user(user_id)
+            if user is None:
+                raise AuthError("no such user")
+            # Same guard as update_user's demote/disable path — deletion is a strictly
+            # stronger version of disable, so it must never lock everyone out.
+            if user["role"] == "admin" and not user["disabled"] \
+                    and self._count_active_admins() <= 1:
+                raise AuthError("cannot delete the last active admin")
+            conn.execute("DELETE FROM auth_sessions WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM password_resets WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM api_tokens WHERE user_id=?", (user_id,))
+            conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+            if started:
+                conn.commit()
+            return user
+        except BaseException:
+            if started and conn.in_transaction:
+                conn.rollback()
+            raise
 
     # ── login throttle (in-memory, per-process) ────────────────────────────────
+    def _prune_throttle_maps(self, now: float) -> None:
+        periodic = now - self._last_throttle_prune >= 60
+        for bucket, window in (
+            (self._failures, LOCKOUT_WINDOW),
+            (self._ip_failures, LOCKOUT_WINDOW),
+            (self._reset_requests, RESET_REQUEST_WINDOW),
+        ):
+            if periodic:
+                for email, stamps in list(bucket.items()):
+                    live = [stamp for stamp in stamps if now - stamp < window]
+                    if live:
+                        bucket[email] = live
+                    else:
+                        bucket.pop(email, None)
+            # Dict insertion order is used as a small LRU: callers pop/reinsert a
+            # touched key. This keeps a credential-spraying request O(1) once the
+            # map reaches its cap instead of sorting ten thousand entries per hit.
+            while len(bucket) > MAX_THROTTLE_KEYS:
+                bucket.pop(next(iter(bucket)))
+        if periodic:
+            self._last_throttle_prune = now
+
+    @_serialized
     def _locked_until(self, email: str) -> float:
         now = time.time()
+        self._prune_throttle_maps(now)
         fails = [t for t in self._failures.get(email, []) if now - t < LOCKOUT_WINDOW]
-        self._failures[email] = fails
+        self._failures.pop(email, None)
+        if fails:
+            self._failures[email] = fails
         if len(fails) >= LOCKOUT_FAILS:
             return fails[-1] + LOCKOUT_SECONDS
         return 0.0
 
+    @_serialized
+    def _ip_locked_until(self, ip: Optional[str]) -> float:
+        """Per-IP analog of :meth:`_locked_until` (see :data:`IP_LOCKOUT_FAILS`)."""
+        if not ip:
+            return 0.0
+        now = time.time()
+        self._prune_throttle_maps(now)
+        fails = [t for t in self._ip_failures.get(ip, []) if now - t < LOCKOUT_WINDOW]
+        self._ip_failures.pop(ip, None)
+        if fails:
+            self._ip_failures[ip] = fails
+        if len(fails) >= IP_LOCKOUT_FAILS:
+            return fails[-1] + LOCKOUT_SECONDS
+        return 0.0
+
+    def _record_ip_failure(self, ip: Optional[str], now: float) -> None:
+        """Caller must hold ``self._lock``. Appends one failure to *ip*'s window."""
+        if not ip:
+            return
+        fails = self._ip_failures.pop(ip, [])
+        fails.append(now)
+        self._ip_failures[ip] = fails
+
     def login(self, email: str, password: str, *, ip: Optional[str] = None) -> dict:
         """Verify credentials → new session. Raises :class:`AuthError` (generic message —
         never reveals which of email/password was wrong) or the lockout notice.
+
+        NOT ``@_serialized`` as a whole: PBKDF2 password verification is CPU-bound (~100ms)
+        and must NOT hold the AuthStore lock, because the async auth middleware resolves
+        sessions/tokens under that SAME lock — holding it across the hash blocked the whole
+        event loop for the hash duration, so a burst of logins stalled every request
+        (an unauthenticated DoS). The lock is taken only for the fast DB / throttle steps.
 
         Deliberately does NOT gate on a live Team license (see ``licensing.require_feature
         ("team")``, still enforced by :meth:`create_user`). It used to — 2026-07-12 incident:
@@ -343,29 +799,78 @@ class AuthStore:
         refused — this only stops a license hiccup from locking out people who already have
         an account. Existing sessions still cap out at ``SESSION_TTL_SECONDS``."""
         email = self._clean_email(email)
-        until = self._locked_until(email)
-        if until > time.time():
-            self.record_event("login.locked", actor_email=email, ip=ip)
-            raise AuthError("too many failed attempts — try again in a minute")
-        row = self.conn.execute(
-            "SELECT id, pw_hash, disabled FROM users WHERE email=?", (email,)).fetchone()
-        # Always run one PBKDF2 even for unknown emails (no user-enumeration timing).
+        # Phase 1 (locked): throttle gates (per-email, then per-IP) + fetch the row.
+        with self._lock:
+            until = self._locked_until(email)
+            now = time.time()
+            if until > now:
+                self.record_event("login.locked", actor_email=email, ip=ip)
+                raise AccountLockedError(
+                    "too many failed attempts — try again shortly", until - now)
+            ip_until = self._ip_locked_until(ip)
+            now = time.time()
+            if ip_until > now:
+                self.record_event("login.ip_locked", actor_email=email, ip=ip)
+                raise AccountLockedError(
+                    "too many failed attempts from this network — try again shortly",
+                    ip_until - now,
+                )
+            row = self.conn.execute(
+                "SELECT id, pw_hash, disabled FROM users WHERE email=?", (email,)).fetchone()
+        # Phase 2 (UNLOCKED): the expensive PBKDF2. Always hash once, even for unknown
+        # emails, to keep timing constant (no user enumeration).
         encoded = row["pw_hash"] if row else _hash_password("x", iterations=self.iterations)
         ok = _verify_password(password or "", encoded)
-        if not ok or row is None or row["disabled"]:
-            self._failures.setdefault(email, []).append(time.time())
-            self.record_event("login.failed", actor_email=email, ip=ip,
-                              detail=("account_disabled" if row and row["disabled"]
-                                      else "bad_credentials"))
-            raise AuthError("invalid email or password")
-        self._failures.pop(email, None)
-        token = self.create_session(row["id"])
-        user = self.get_user(row["id"])
-        self.record_event("login.success", actor_id=row["id"], actor_email=email, ip=ip)
+        # Phase 3 (locked): re-read state under the lock, then record the outcome and mint
+        # the session. The phase-1 `row` is a STALE snapshot across the off-lock PBKDF2, so:
+        #   • a disable or password reset committed during the hash must not be overwritten
+        #     by a session minted from the old row — re-fetch `fresh` and reject if the
+        #     account is now disabled/deleted, or if pw_hash rotated out from under the
+        #     password we just verified (a reset the old password must no longer satisfy);
+        #   • a lockout that engaged from concurrent attempts during the hash must be
+        #     honored before we mint, so a burst can't convert a hit into a session past
+        #     the throttle (PBKDF2 runs off-lock, so N parallel attempts all clear phase 1
+        #     before any failure is recorded — the re-check bounds session-minting to the
+        #     lockout threshold).
+        with self._lock:
+            fresh = self.conn.execute(
+                "SELECT id, pw_hash, disabled FROM users WHERE email=?", (email,)).fetchone()
+            pw_rotated = row is not None and (
+                fresh is None or fresh["pw_hash"] != row["pw_hash"])
+            if not ok or fresh is None or fresh["disabled"] or pw_rotated:
+                now = time.time()
+                fails = self._failures.pop(email, [])
+                fails.append(now)
+                self._failures[email] = fails
+                self._record_ip_failure(ip, now)
+                self._prune_throttle_maps(now)
+                self.record_event("login.failed", actor_email=email, ip=ip,
+                                  detail=("account_disabled" if fresh and fresh["disabled"]
+                                          else "bad_credentials"))
+                raise AuthError("invalid email or password")
+            until = self._locked_until(email)
+            now = time.time()
+            if until > now:
+                self.record_event("login.locked", actor_email=email, ip=ip)
+                raise AccountLockedError(
+                    "too many failed attempts — try again shortly", until - now)
+            ip_until = self._ip_locked_until(ip)
+            now = time.time()
+            if ip_until > now:
+                self.record_event("login.ip_locked", actor_email=email, ip=ip)
+                raise AccountLockedError(
+                    "too many failed attempts from this network — try again shortly",
+                    ip_until - now,
+                )
+            self._failures.pop(email, None)
+            token = self.create_session(fresh["id"])
+            user = self.get_user(fresh["id"])
+            self.record_event("login.success", actor_id=fresh["id"], actor_email=email, ip=ip)
         user["token"] = token
         return user
 
     # ── password reset ("forgot password") ─────────────────────────────────────
+    @_serialized
     def request_password_reset(self, email: str) -> Optional[dict]:
         """Issue a single-use password-reset token for *email*, or return ``None``.
 
@@ -382,10 +887,13 @@ class AuthStore:
         """
         email = self._clean_email(email)
         now = time.time()
+        self._prune_throttle_maps(now)
         hits = [t for t in self._reset_requests.get(email, []) if now - t < RESET_REQUEST_WINDOW]
         throttled = len(hits) >= RESET_REQUEST_MAX
         hits.append(now)
+        self._reset_requests.pop(email, None)
         self._reset_requests[email] = hits
+        self._prune_throttle_maps(now)
         if throttled:
             self.record_event("password_reset.throttled", actor_email=email)
             return None
@@ -403,6 +911,7 @@ class AuthStore:
         self.record_event("password_reset.requested", actor_id=row["id"], actor_email=email)
         return {"token": token, "email": row["email"], "name": row["name"]}
 
+    @_serialized
     def reset_password(self, token: str, new_password: str) -> dict:
         """Consume a password-reset token and set *new_password*.
 
@@ -415,30 +924,68 @@ class AuthStore:
         caller can sign the user straight back in.
         """
         _validate_password(new_password)
-        row = self.conn.execute(
-            "SELECT user_id, expires_at, used FROM password_resets WHERE token_hash=?",
-            (_hash_token(token),)).fetchone()
-        if row is None or row["used"] or row["expires_at"] < time.time():
+        reset_hash = _hash_token(token)
+        candidate = self.conn.execute(
+            "SELECT 1 FROM password_resets r JOIN users u ON u.id=r.user_id "
+            "WHERE r.token_hash=? AND r.used=0 AND r.expires_at>=? AND u.disabled=0",
+            (reset_hash, time.time()),
+        ).fetchone()
+        if candidate is None:
             raise AuthError("invalid or expired reset link")
-        user = self.get_user(row["user_id"])
-        if user is None or user["disabled"]:
-            raise AuthError("invalid or expired reset link")
-        self.conn.execute(
-            "UPDATE users SET pw_hash=? WHERE id=?",
-            (_hash_password(new_password, iterations=self.iterations), user["id"]))
-        self.conn.execute("UPDATE password_resets SET used=1 WHERE token_hash=?",
-                          (_hash_token(token),))
-        self.conn.commit()
-        self.revoke_user_sessions(user["id"])
+        # As with invitations, only a proven high-entropy token reaches PBKDF2. Invalid
+        # public requests remain a bounded indexed lookup rather than a CPU-amplifier.
+        password_hash = _hash_password(new_password, iterations=self.iterations)
+        new_token = secrets.token_urlsafe(32)
+        new_token_hash = _hash_token(new_token)
+        now = time.time()
+        conn = self.conn
+        started = not conn.in_transaction
+        try:
+            if started:
+                conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT user_id, expires_at, used FROM password_resets WHERE token_hash=?",
+                (reset_hash,),
+            ).fetchone()
+            if row is None or row["used"] or row["expires_at"] < now:
+                raise AuthError("invalid or expired reset link")
+            user = self.get_user(row["user_id"])
+            if user is None or user["disabled"]:
+                raise AuthError("invalid or expired reset link")
+            conn.execute(
+                "UPDATE users SET pw_hash=? WHERE id=?",
+                (password_hash, user["id"]),
+            )
+            consumed = conn.execute(
+                "UPDATE password_resets SET used=1 "
+                "WHERE token_hash=? AND used=0 AND expires_at>=?",
+                (reset_hash, now),
+            )
+            if consumed.rowcount != 1:
+                raise AuthError("invalid or expired reset link")
+            conn.execute("DELETE FROM auth_sessions WHERE user_id=?", (user["id"],))
+            conn.execute("UPDATE api_tokens SET revoked=1 WHERE user_id=?", (user["id"],))
+            self._prune_revoked_api_tokens(user["id"])
+            conn.execute(
+                "INSERT INTO auth_sessions "
+                "(token_hash, user_id, created_at, expires_at) VALUES (?,?,?,?)",
+                (new_token_hash, user["id"], now, now + SESSION_TTL_SECONDS),
+            )
+            if started:
+                conn.commit()
+        except BaseException:
+            if started and conn.in_transaction:
+                conn.rollback()
+            raise
         self._failures.pop(user["email"], None)
         self.record_event("password_reset.completed", actor_id=user["id"],
                           actor_email=user["email"])
-        new_token = self.create_session(user["id"])
         result = self.get_user(user["id"])
         result["token"] = new_token
         return result
 
     # ── sessions (raw token to the client, hash in the DB) ─────────────────────
+    @_serialized
     def create_session(self, user_id: str, *, ttl: int = SESSION_TTL_SECONDS) -> str:
         token = secrets.token_urlsafe(32)
         now = time.time()
@@ -446,9 +993,16 @@ class AuthStore:
             "INSERT INTO auth_sessions (token_hash, user_id, created_at, expires_at) "
             "VALUES (?,?,?,?)", (_hash_token(token), user_id, now, now + ttl))
         self.conn.execute("DELETE FROM auth_sessions WHERE expires_at < ?", (now,))
+        self.conn.execute(
+            "DELETE FROM auth_sessions WHERE token_hash IN ("
+            "SELECT token_hash FROM auth_sessions WHERE user_id=? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?)",
+            (user_id, MAX_SESSIONS_PER_USER),
+        )
         self.conn.commit()
         return token
 
+    @_serialized
     def resolve_session(self, token: str) -> Optional[dict]:
         if not token:
             return None
@@ -467,44 +1021,71 @@ class AuthStore:
             return None
         return self.get_user(row["user_id"])
 
+    @_serialized
     def revoke_session(self, token: str) -> None:
         self.conn.execute("DELETE FROM auth_sessions WHERE token_hash=?",
                           (_hash_token(token),))
         self.conn.commit()
 
+    @_serialized
     def revoke_user_sessions(self, user_id: str) -> None:
         self.conn.execute("DELETE FROM auth_sessions WHERE user_id=?", (user_id,))
         self.conn.commit()
 
     # ── per-user API tokens (agent connect) ─────────────────────────────────────
-    def create_api_token(self, user_id: str, *, label: str = "") -> dict:
+    @_serialized
+    def create_api_token(self, user_id: str, *, label: str = "", scopes=None,
+                         ttl: int = API_TOKEN_TTL_SECONDS) -> dict:
         """Mint a long-lived per-user bearer token for an agent/automation client.
 
         The raw token is returned ONCE; only its SHA-256 hash is persisted (see
         :data:`api_tokens`), so a stolen users DB yields no usable secrets. Bound to
         ``user_id``; a disabled user's tokens are refused by :meth:`resolve_api_token`.
         """
-        tok = secrets.token_urlsafe(32)
+        # A stable non-secret prefix lets non-browser endpoints distinguish a revoked or
+        # expired user token from the temporary legacy license-key migration path. The
+        # random value remains 256 bits and only its hash is persisted.
+        tok = "engr_ut_" + secrets.token_urlsafe(32)
         tid = "tok_" + secrets.token_hex(8)
         now = time.time()
+        expires_at = now + max(300, int(ttl))
         label = (label or "")[:120]
+        requested = set(("agent", "sync:read") if scopes is None else scopes)
+        if not requested or not requested.issubset(API_TOKEN_SCOPES):
+            raise AuthError("invalid API token scopes")
+        scope_text = " ".join(sorted(requested))
+        active = int(self.conn.execute(
+            "SELECT COUNT(*) FROM api_tokens WHERE user_id=? AND revoked=0 "
+            "AND (expires_at IS NULL OR expires_at>=?)",
+            (user_id, now),
+        ).fetchone()[0])
+        if active >= MAX_ACTIVE_API_TOKENS:
+            raise AuthError(
+                "active API token limit reached (%d); revoke an old token first"
+                % MAX_ACTIVE_API_TOKENS
+            )
         self.conn.execute(
-            "INSERT INTO api_tokens (id, user_id, label, token_hash, created_at) "
-            "VALUES (?,?,?,?,?)", (tid, user_id, label, _hash_token(tok), now))
+            "INSERT INTO api_tokens (id, user_id, label, token_hash, created_at, "
+            "expires_at, scopes) VALUES (?,?,?,?,?,?,?)",
+            (tid, user_id, label, _hash_token(tok), now, expires_at, scope_text))
         self.conn.commit()
         return {"id": tid, "label": label, "created_at": now,
+                "expires_at": expires_at, "scopes": sorted(requested),
                 "last_used_at": None, "revoked": 0, "token": tok}
 
+    @_serialized
     def resolve_api_token(self, token: str) -> Optional[dict]:
         """Resolve a bearer API token to its user, or ``None``. Rejects revoked tokens
         and tokens whose owner is disabled. Best-effort stamps ``last_used_at``."""
         if not token:
             return None
         row = self.conn.execute(
-            "SELECT t.id, t.user_id, t.revoked, u.disabled FROM api_tokens t "
+            "SELECT t.id, t.user_id, t.revoked, t.expires_at, t.scopes, u.disabled "
+            "FROM api_tokens t "
             "JOIN users u ON u.id = t.user_id WHERE t.token_hash=?",
             (_hash_token(token),)).fetchone()
-        if row is None or row["revoked"] or row["disabled"]:
+        if row is None or row["revoked"] or row["disabled"] \
+                or (row["expires_at"] is not None and row["expires_at"] < time.time()):
             return None
         try:
             self.conn.execute("UPDATE api_tokens SET last_used_at=? WHERE id=?",
@@ -512,24 +1093,46 @@ class AuthStore:
             self.conn.commit()
         except sqlite3.Error:
             pass
-        return self.get_user(row["user_id"])
+        user = self.get_user(row["user_id"])
+        if user is not None:
+            user["token_id"] = row["id"]
+            user["token_scopes"] = (row["scopes"] or "agent").split()
+        return user
 
+    @_serialized
     def list_api_tokens(self, user_id: str) -> list:
         rows = self.conn.execute(
-            "SELECT id, label, created_at, last_used_at, revoked FROM api_tokens "
+            "SELECT id, label, created_at, expires_at, scopes, last_used_at, revoked "
+            "FROM api_tokens "
             "WHERE user_id=? ORDER BY created_at DESC", (user_id,)).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["scopes"] = (item.get("scopes") or "agent").split()
+            out.append(item)
+        return out
 
+    def _prune_revoked_api_tokens(self, user_id: str) -> None:
+        self.conn.execute(
+            "DELETE FROM api_tokens WHERE id IN ("
+            "SELECT id FROM api_tokens WHERE user_id=? AND revoked=1 "
+            "ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?)",
+            (user_id, MAX_REVOKED_API_TOKENS),
+        )
+
+    @_serialized
     def revoke_api_token(self, user_id: str, token_id: str) -> bool:
         """Revoke one of *user_id*'s own tokens (scoped to the caller so a member can't
         revoke another member's). Returns True if a row was affected."""
         cur = self.conn.execute(
             "UPDATE api_tokens SET revoked=1 WHERE id=? AND user_id=? AND revoked=0",
             (token_id, user_id))
+        self._prune_revoked_api_tokens(user_id)
         self.conn.commit()
         return cur.rowcount > 0
 
     # ── team audit log ─────────────────────────────────────────────────────────
+    @_serialized
     def record_event(self, action: str, *, actor_id: Optional[str] = None,
                      actor_email: Optional[str] = None, target: Optional[str] = None,
                      detail: Optional[str] = None, ip: Optional[str] = None) -> None:
@@ -540,12 +1143,16 @@ class AuthStore:
             self.conn.execute(
                 "INSERT INTO audit_events (ts, actor_id, actor_email, action, target, detail, ip) "
                 "VALUES (?,?,?,?,?,?,?)",
-                (time.time(), actor_id, actor_email, str(action)[:64],
-                 (target or None), (detail or None), (ip or None)))
+                (time.time(), str(actor_id)[:200] if actor_id else None,
+                 str(actor_email)[:320] if actor_email else None, str(action)[:64],
+                 str(target)[:320] if target else None,
+                 str(detail)[:1000] if detail else None,
+                 str(ip)[:128] if ip else None))
             self.conn.commit()
         except sqlite3.Error:
             pass
 
+    @_serialized
     def list_events(self, *, limit: int = 100, action: Optional[str] = None,
                     actor_id: Optional[str] = None, since: Optional[float] = None) -> list:
         """Most-recent-first audit events, with optional filters. ``limit`` is clamped to
@@ -569,10 +1176,12 @@ class AuthStore:
         params.append(limit)
         return [dict(r) for r in self.conn.execute(sql, params)]
 
+    @_serialized
     def count_events(self) -> int:
         return int(self.conn.execute(
             "SELECT COUNT(*) AS n FROM audit_events").fetchone()["n"])
 
+    @_serialized
     def action_counts(self, *, since: Optional[float] = None) -> dict:
         sql = "SELECT action, COUNT(*) AS n FROM audit_events"
         params: list = []
@@ -582,6 +1191,7 @@ class AuthStore:
         sql += " GROUP BY action ORDER BY n DESC"
         return {r["action"]: r["n"] for r in self.conn.execute(sql, params)}
 
+    @_serialized
     def last_active(self) -> dict:
         """Map user_id -> last successful-login timestamp (for the admin seat overview)."""
         rows = self.conn.execute(

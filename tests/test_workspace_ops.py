@@ -5,8 +5,11 @@ fresh ids into a new workspace; reorder_memories writes a per-memory sort_order.
 three are reachable from the authenticated dashboard API, so a silent regression here
 corrupts or leaks data.
 """
+import json
+
 import pytest
 
+from engraphis.core.interfaces import Edge, GraphLayer, Node
 from engraphis.service import MemoryService, ValidationError
 
 
@@ -27,11 +30,11 @@ def _mem_ids(svc, name):
 
 
 # ── create_workspace ─────────────────────────────────────────────────────────
-def test_create_makes_empty_shared_workspace():
+def test_create_makes_empty_workspace():
     svc = _svc()
     out = svc.create_workspace("team-alpha", "shared research notes")
     assert out["created"] and out["workspace"] == "team-alpha"
-    # it exists, is empty, and is listed for everyone (shared, not per-user)
+    # It exists, is empty, and remains available to the local single-user service.
     assert _wsid(svc, "team-alpha") is not None
     assert _mem_ids(svc, "team-alpha") == set()
     listed = {w["name"]: w for w in svc.list_workspaces()["workspaces"]}
@@ -40,6 +43,17 @@ def test_create_makes_empty_shared_workspace():
     # and a subsequent write lands in the pre-created folder (same id, not a new one)
     mid = svc.remember("Alpha fact.", workspace="team-alpha", scope="workspace")["id"]
     assert mid in _mem_ids(svc, "team-alpha")
+
+
+def test_workspace_counts_exclude_superseded_memories():
+    svc = _svc()
+    old = svc.remember("The deploy region is iad.", workspace="team-alpha",
+                       scope="workspace")["id"]
+    svc.store.close_validity(old)
+    svc.remember("The deploy region is fra.", workspace="team-alpha", scope="workspace")
+
+    listed = {w["name"]: w for w in svc.list_workspaces()["workspaces"]}
+    assert listed["team-alpha"]["memories"] == 1
 
 
 def test_create_rejects_duplicate_name():
@@ -63,6 +77,55 @@ def test_create_respects_workspace_binding():
 
 
 # ── merge_workspaces ────────────────────────────────────────────────────────
+def test_delete_removes_code_file_state_and_memory_bridges():
+    svc = _svc()
+    memory_id = svc.remember(
+        "The deploy helper ships releases.", workspace="a", repo="web", scope="repo"
+    )["id"]
+    c = svc.store.conn
+    repo_id = c.execute(
+        "SELECT id FROM repos WHERE workspace_id=? AND name='web'", (_wsid(svc, "a"),)
+    ).fetchone()["id"]
+    symbol_id = svc.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="deploy", fqname="deploy",
+        file="deploy.py", span="1:1-2:1", lang="python",
+    )
+    svc.store.upsert_code_file(
+        repo_id=repo_id, file="deploy.py", lang="python",
+        content_hash="file-hash", size_bytes=20, mtime_ns=20, backend="regex",
+    )
+    svc.store.link_memory_symbol(
+        repo_id=repo_id, symbol_id=symbol_id, memory_id=memory_id,
+    )
+
+    svc.delete_workspace("a")
+
+    for table in ("code_memory_links", "code_files", "symbols", "repos"):
+        assert c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+
+
+def test_delete_removes_normalized_evidence_without_orphaning_shared_edge():
+    svc = _svc()
+    removed = svc.remember("Source evidence.", workspace="a", scope="workspace")["id"]
+    retained = svc.remember("Other evidence.", workspace="b", scope="workspace")["id"]
+    svc.store.upsert_edge(Edge(
+        id="edge_global", src="x", dst="y", relation="related", workspace_id=None,
+        provenance={"memory_id": removed, "memory_ids": [removed, retained]},
+    ))
+
+    svc.delete_workspace("a")
+
+    edge = svc.store.conn.execute(
+        "SELECT valid_to, provenance FROM edges WHERE id='edge_global'"
+    ).fetchone()
+    assert edge is not None and edge["valid_to"] is None
+    assert json.loads(edge["provenance"])["memory_ids"] == [retained]
+    supports = [dict(row) for row in svc.store.conn.execute(
+        "SELECT memory_id, valid_to FROM edge_supports WHERE edge_id='edge_global'"
+    )]
+    assert supports == [{"memory_id": retained, "valid_to": None}]
+
+
 def test_merge_folds_memories_and_removes_source():
     svc = _svc()
     a1 = svc.remember("Alpha one fact.", workspace="a", scope="workspace")["id"]
@@ -95,6 +158,157 @@ def test_merge_folds_colliding_repos_without_duplicating():
     assert _wsid(svc, "a") is None
     assert svc.store.conn.execute(
         "SELECT COUNT(*) AS n FROM memories WHERE workspace_id IS NULL").fetchone()["n"] == 0
+
+
+def test_merge_remaps_code_files_and_memory_links_for_colliding_repos():
+    svc = _svc()
+    source_memory = svc.remember(
+        "Source deploy helper.", workspace="a", repo="web", scope="repo"
+    )["id"]
+    svc.remember("Target deploy helper.", workspace="b", repo="web", scope="repo")
+    c = svc.store.conn
+    src_repo = c.execute(
+        "SELECT id FROM repos WHERE workspace_id=? AND name='web'", (_wsid(svc, "a"),)
+    ).fetchone()["id"]
+    dst_repo = c.execute(
+        "SELECT id FROM repos WHERE workspace_id=? AND name='web'", (_wsid(svc, "b"),)
+    ).fetchone()["id"]
+    symbol = svc.store.upsert_symbol(
+        repo_id=src_repo, kind="function", name="deploy", fqname="deploy",
+        file="deploy.py", span="1:1-2:1", docstring="Deploy the application.",
+        lang="python", content_hash="source-symbol",
+    )
+    svc.store.upsert_code_file(
+        repo_id=src_repo, file="deploy.py", lang="python",
+        content_hash="newer-source", size_bytes=20, mtime_ns=20,
+        backend="regex",
+    )
+    svc.store.upsert_code_file(
+        repo_id=dst_repo, file="deploy.py", lang="python",
+        content_hash="older-target", size_bytes=10, mtime_ns=10,
+        backend="regex",
+    )
+    c.execute(
+        "UPDATE code_files SET indexed_at=20 WHERE repo_id=? AND file='deploy.py'",
+        (src_repo,),
+    )
+    c.execute(
+        "UPDATE code_files SET indexed_at=10 WHERE repo_id=? AND file='deploy.py'",
+        (dst_repo,),
+    )
+    svc.store.link_memory_symbol(
+        repo_id=src_repo, symbol_id=symbol, memory_id=source_memory,
+        relation="implements", confidence=0.8,
+    )
+
+    svc.merge_workspaces("a", "b")
+
+    assert c.execute("SELECT 1 FROM repos WHERE id=?", (src_repo,)).fetchone() is None
+    file_row = c.execute(
+        "SELECT content_hash FROM code_files WHERE repo_id=? AND file='deploy.py'",
+        (dst_repo,),
+    ).fetchone()
+    assert file_row["content_hash"] == "newer-source"
+    assert c.execute(
+        "SELECT COUNT(*) FROM code_files WHERE repo_id=?", (src_repo,)
+    ).fetchone()[0] == 0
+    link = c.execute(
+        "SELECT repo_id, symbol_id, memory_id, relation FROM code_memory_links "
+        "WHERE memory_id=?",
+        (source_memory,),
+    ).fetchone()
+    assert dict(link) == {
+        "repo_id": dst_repo,
+        "symbol_id": symbol,
+        "memory_id": source_memory,
+        "relation": "implements",
+    }
+    graph = svc.export_code_graph(workspace="b", repo="web")["graph"]
+    assert len(graph["files"]) == 1
+    assert len(graph["memory_links"]) == 1
+
+
+def test_merge_does_not_duplicate_symbols_for_overlapping_files():
+    """Both workspaces independently indexed the same file in a same-named repo:
+    the fold keeps exactly the winning snapshot's symbols/edges — never a
+    duplicate pair of stale + fresh rows for one file — and memory links from
+    the losing snapshot are re-pointed at the surviving same-fqname symbol
+    instead of dropped (PR #19 review follow-up)."""
+    svc = _svc()
+    a_mem = svc.remember("A web note.", workspace="a", repo="web", scope="repo")["id"]
+    b_mem = svc.remember("B web note.", workspace="b", repo="web", scope="repo")["id"]
+    c = svc.store.conn
+    src_repo = c.execute(
+        "SELECT id FROM repos WHERE workspace_id=? AND name='web'", (_wsid(svc, "a"),)
+    ).fetchone()["id"]
+    dst_repo = c.execute(
+        "SELECT id FROM repos WHERE workspace_id=? AND name='web'", (_wsid(svc, "b"),)
+    ).fetchone()["id"]
+    symbol_ids = {}
+    for repo_id, marker, indexed_at in ((src_repo, "src", 20), (dst_repo, "dst", 10)):
+        symbol_ids[marker] = svc.store.upsert_symbol(
+            repo_id=repo_id, kind="function", name="deploy", fqname="deploy",
+            file="deploy.py", span="1:1-2:1", content_hash=f"{marker}-symbol",
+        )
+        svc.store.upsert_code_file(
+            repo_id=repo_id, file="deploy.py", lang="python",
+            content_hash=f"{marker}-hash", size_bytes=10, mtime_ns=10, backend="regex",
+        )
+        c.execute("UPDATE code_files SET indexed_at=? WHERE repo_id=? AND file='deploy.py'",
+                  (indexed_at, repo_id))
+    # Each side linked its own memory to its own snapshot of the symbol.
+    svc.store.link_memory_symbol(repo_id=src_repo, symbol_id=symbol_ids["src"],
+                                 memory_id=a_mem, relation="mentions")
+    svc.store.link_memory_symbol(repo_id=dst_repo, symbol_id=symbol_ids["dst"],
+                                 memory_id=b_mem, relation="mentions")
+
+    svc.merge_workspaces("a", "b")  # src is newer → its snapshot wins
+
+    rows = c.execute(
+        "SELECT content_hash FROM symbols WHERE repo_id=? AND file='deploy.py'",
+        (dst_repo,),
+    ).fetchall()
+    assert [r["content_hash"] for r in rows] == ["src-symbol"]
+    assert c.execute(
+        "SELECT content_hash FROM code_files WHERE repo_id=? AND file='deploy.py'",
+        (dst_repo,),
+    ).fetchone()["content_hash"] == "src-hash"
+    # BOTH memories keep their code provenance, now against the surviving symbol.
+    links = {row["memory_id"]: dict(row) for row in c.execute(
+        "SELECT memory_id, symbol_id, repo_id FROM code_memory_links")}
+    assert set(links) == {a_mem, b_mem}
+    for link in links.values():
+        assert link["symbol_id"] == symbol_ids["src"]
+        assert link["repo_id"] == dst_repo
+
+    # And the mirror case: when the surviving repo's snapshot is newer, the
+    # incoming stale symbols are dropped instead of duplicated.
+    svc.remember("C web note.", workspace="c", repo="web", scope="repo")
+    stale_repo = c.execute(
+        "SELECT id FROM repos WHERE workspace_id=? AND name='web'", (_wsid(svc, "c"),)
+    ).fetchone()["id"]
+    svc.store.upsert_symbol(
+        repo_id=stale_repo, kind="function", name="deploy", fqname="deploy",
+        file="deploy.py", span="1:1-2:1", content_hash="stale-symbol",
+    )
+    svc.store.upsert_code_file(
+        repo_id=stale_repo, file="deploy.py", lang="python",
+        content_hash="stale-hash", size_bytes=10, mtime_ns=10, backend="regex",
+    )
+    c.execute("UPDATE code_files SET indexed_at=5 WHERE repo_id=? AND file='deploy.py'",
+              (stale_repo,))
+
+    svc.merge_workspaces("c", "b")
+
+    rows = c.execute(
+        "SELECT content_hash FROM symbols WHERE repo_id=? AND file='deploy.py'",
+        (dst_repo,),
+    ).fetchall()
+    assert [r["content_hash"] for r in rows] == ["src-symbol"]
+    assert c.execute(
+        "SELECT content_hash FROM code_files WHERE repo_id=? AND file='deploy.py'",
+        (dst_repo,),
+    ).fetchone()["content_hash"] == "src-hash"
 
 
 def test_merge_rejects_same_and_missing_workspaces():
@@ -133,13 +347,131 @@ def test_copy_auto_names_and_leaves_source_untouched():
     assert out2["workspace"] == "a copy 2"
 
 
+def test_copy_remaps_graph_evidence_history_and_event_references():
+    svc = _svc()
+    first = svc.remember("First source fact.", workspace="a", scope="workspace")["id"]
+    second = svc.remember("Second source fact.", workspace="a", scope="workspace")["id"]
+    c = svc.store.conn
+    c.execute(
+        "UPDATE memories SET metadata=?, provenance=? WHERE id=?",
+        (
+            json.dumps({"corrects": first, "supersedes": [first]}),
+            json.dumps({"memory_id": first, "memory_ids": [first, second]}),
+            second,
+        ),
+    )
+    svc.store.append_event(
+        kind="copy.references", content="reference test",
+        workspace_id=_wsid(svc, "a"), refs=[first, second],
+    )
+    source_workspace = _wsid(svc, "a")
+    repo_one = svc.store.get_or_create_repo(source_workspace, "one")
+    repo_two = svc.store.get_or_create_repo(source_workspace, "two")
+    entity_one = svc.store.upsert_entity(Node(
+        id="", name="Shared Entity", ntype="concept",
+        workspace_id=source_workspace, repo_id=repo_one,
+    ))
+    entity_two = svc.store.upsert_entity(Node(
+        id="", name=" shared   entity ", ntype="concept",
+        workspace_id=source_workspace, repo_id=repo_two,
+    ))
+    svc.store.upsert_edge(Edge(
+        id="edge_source", src=entity_one, dst=entity_two, relation="supports",
+        workspace_id=source_workspace,
+        provenance={"memory_id": first, "memory_ids": [first, second]},
+    ))
+
+    svc.copy_workspace("a", new_name="a2")
+
+    copied_workspace = _wsid(svc, "a2")
+    copied_memories = [dict(row) for row in c.execute(
+        "SELECT id, content, metadata, provenance FROM memories WHERE workspace_id=?",
+        (copied_workspace,),
+    )]
+    copied_by_content = {row["content"]: row for row in copied_memories}
+    copied_first = copied_by_content["First source fact."]["id"]
+    copied_second = copied_by_content["Second source fact."]["id"]
+    copied_meta = json.loads(copied_by_content["Second source fact."]["metadata"])
+    assert copied_meta == {"corrects": copied_first, "supersedes": [copied_first]}
+    copied_provenance = json.loads(
+        copied_by_content["Second source fact."]["provenance"]
+    )
+    assert copied_provenance["memory_ids"] == [copied_first, copied_second]
+
+    copied_entities = [dict(row) for row in c.execute(
+        "SELECT id, canonical_id FROM entities WHERE workspace_id=?",
+        (copied_workspace,),
+    )]
+    copied_entity_ids = {row["id"] for row in copied_entities}
+    assert copied_entity_ids
+    assert {row["canonical_id"] for row in copied_entities} <= copied_entity_ids
+    assert copied_entity_ids.isdisjoint({entity_one, entity_two})
+
+    copied_edge = c.execute(
+        "SELECT id, provenance FROM edges WHERE workspace_id=? AND relation='supports'",
+        (copied_workspace,),
+    ).fetchone()
+    edge_provenance = json.loads(copied_edge["provenance"])
+    assert edge_provenance["memory_ids"] == [copied_first, copied_second]
+    copied_supports = {row["memory_id"] for row in c.execute(
+        "SELECT memory_id FROM edge_supports WHERE edge_id=? AND valid_to IS NULL",
+        (copied_edge["id"],),
+    )}
+    assert copied_supports == {copied_first, copied_second}
+    assert copied_supports.isdisjoint({first, second})
+
+    copied_event = c.execute(
+        "SELECT refs FROM events WHERE workspace_id=? AND kind='copy.references'",
+        (copied_workspace,),
+    ).fetchone()
+    assert json.loads(copied_event["refs"]) == [copied_first, copied_second]
+
+
 def test_copy_clones_vectors_fts_links_entities_and_edges():
     svc = _svc()
     m1 = svc.remember("Postgres 16 is the primary database.", workspace="a",
                       repo="infra", scope="repo")["id"]
     m2 = svc.remember("Deploys run Fridays at noon.", workspace="a",
                       repo="infra", scope="repo")["id"]
-    svc.link(m1, m2, workspace="a", relation="related")
+    svc.link(
+        m1, m2, workspace="a", relation="related",
+        layer="causal", reason="deployment depends on the database",
+    )
+    src_repo_id = svc.store.conn.execute(
+        "SELECT id FROM repos WHERE workspace_id=?", (_wsid(svc, "a"),)
+    ).fetchone()["id"]
+    svc.store.upsert_code_file(
+        repo_id=src_repo_id, file="deploy.py", lang="python",
+        content_hash="file-hash", size_bytes=128, mtime_ns=123,
+        backend="regex",
+    )
+    src_symbol = svc.store.upsert_symbol(
+        repo_id=src_repo_id, kind="function", name="deploy", fqname="deploy",
+        file="deploy.py", span="1:1-3:1", signature="deploy()",
+        docstring="Deploy the application.", lang="python",
+        content_hash="symbol-hash",
+    )
+    svc.store.add_code_edge(
+        repo_id=src_repo_id, src=src_symbol, dst="helper",
+        relation="calls", layer=GraphLayer.CAUSAL, file="deploy.py", line=2,
+    )
+    svc.store.link_memory_symbol(
+        repo_id=src_repo_id, symbol_id=src_symbol, memory_id=m1,
+        relation="implements", confidence=0.75,
+    )
+    wid_src = _wsid(svc, "a")
+    database = svc.store.upsert_entity(Node(
+        id="", name="Postgres", ntype="database",
+        workspace_id=wid_src, repo_id=src_repo_id,
+    ))
+    deploy = svc.store.upsert_entity(Node(
+        id="", name="Deploy", ntype="process",
+        workspace_id=wid_src, repo_id=src_repo_id,
+    ))
+    svc.store.upsert_edge(Edge(
+        id="", src=deploy, dst=database, relation="depends_on",
+        layer=GraphLayer.CAUSAL, workspace_id=wid_src, repo_id=src_repo_id,
+    ))
 
     svc.copy_workspace("a", new_name="a2")
     wid_dst = _wsid(svc, "a2")
@@ -164,8 +496,6 @@ def test_copy_clones_vectors_fts_links_entities_and_edges():
     repos = [dict(r) for r in c.execute(
         "SELECT id, name FROM repos WHERE workspace_id=?", (wid_dst,))]
     assert [r["name"] for r in repos] == ["infra"]
-    src_repo_id = c.execute(
-        "SELECT id FROM repos WHERE workspace_id=?", (_wsid(svc, "a"),)).fetchone()["id"]
     assert repos[0]["id"] != src_repo_id
     # every copied memory points at the cloned repo, not the source repo
     repo_ids = {c.execute("SELECT repo_id FROM memories WHERE id=?", (r["id"],)).fetchone()["repo_id"]
@@ -176,9 +506,75 @@ def test_copy_clones_vectors_fts_links_entities_and_edges():
     id_map = {r["content"]: r["id"] for r in new_mem}
     new_a, new_b = id_map["Postgres 16 is the primary database."], id_map["Deploys run Fridays at noon."]
     linked = c.execute(
-        "SELECT 1 FROM mem_links WHERE (a=? AND b=?) OR (a=? AND b=?)",
+        "SELECT layer, reason FROM mem_links WHERE (a=? AND b=?) OR (a=? AND b=?)",
         (new_a, new_b, new_b, new_a)).fetchone()
     assert linked is not None
+    assert linked["layer"] == "causal"
+    assert linked["reason"] == "deployment depends on the database"
+
+    copied_entities = {
+        (row["name"], row["etype"]): row["id"] for row in c.execute(
+            "SELECT id, name, etype FROM entities WHERE workspace_id=?", (wid_dst,)
+        )
+    }
+    assert {("Postgres", "database"), ("Deploy", "process")} <= copied_entities.keys()
+    assert set(copied_entities.values()).isdisjoint({database, deploy})
+    copied_graph_edge = c.execute(
+        "SELECT src, dst, relation, layer FROM edges "
+        "WHERE workspace_id=? AND relation='depends_on'",
+        (wid_dst,),
+    ).fetchone()
+    assert dict(copied_graph_edge) == {
+        "src": copied_entities[("Deploy", "process")],
+        "dst": copied_entities[("Postgres", "database")],
+        "relation": "depends_on",
+        "layer": "causal",
+    }
+
+    # Incremental file state, symbol documentation, layered code edges, and the
+    # memory↔symbol bridge all point exclusively at copied ids.
+    copied_repo = repos[0]["id"]
+    code_file = c.execute(
+        "SELECT file, content_hash, size_bytes, mtime_ns, backend FROM code_files "
+        "WHERE repo_id=?",
+        (copied_repo,),
+    ).fetchone()
+    assert dict(code_file) == {
+        "file": "deploy.py",
+        "content_hash": "file-hash",
+        "size_bytes": 128,
+        "mtime_ns": 123,
+        "backend": "regex",
+    }
+    copied_symbol = c.execute(
+        "SELECT id, docstring FROM symbols WHERE repo_id=? AND fqname='deploy'",
+        (copied_repo,),
+    ).fetchone()
+    assert copied_symbol["id"] != src_symbol
+    assert copied_symbol["docstring"] == "Deploy the application."
+    copied_edge = c.execute(
+        "SELECT src, relation, layer FROM code_edges WHERE repo_id=?",
+        (copied_repo,),
+    ).fetchone()
+    assert dict(copied_edge) == {
+        "src": copied_symbol["id"],
+        "relation": "calls",
+        "layer": "causal",
+    }
+    copied_bridge = c.execute(
+        "SELECT symbol_id, memory_id, relation, confidence FROM code_memory_links "
+        "WHERE repo_id=?",
+        (copied_repo,),
+    ).fetchone()
+    assert copied_bridge["symbol_id"] == copied_symbol["id"]
+    assert copied_bridge["memory_id"] == id_map[
+        "Postgres 16 is the primary database."
+    ]
+    assert copied_bridge["relation"] == "implements"
+    assert copied_bridge["confidence"] == pytest.approx(0.75)
+    graph = svc.export_code_graph(workspace="a2", repo="infra")["graph"]
+    assert len(graph["files"]) == 1
+    assert len(graph["memory_links"]) == 1
 
 
 def test_copy_rejects_missing_source_and_colliding_new_name():
@@ -189,6 +585,28 @@ def test_copy_rejects_missing_source_and_colliding_new_name():
         svc.copy_workspace("ghost")                       # missing source
     with pytest.raises(ValidationError):
         svc.copy_workspace("a", new_name="b")              # explicit name collides
+
+
+def test_copy_rolls_back_partial_workspace_and_releases_write_lock(monkeypatch):
+    svc = _svc()
+    svc.remember("source memory", workspace="a", scope="workspace")
+    connection_type = type(svc.store.conn)
+    original_execute = connection_type.execute
+
+    def fail_during_memory_copy(connection, statement, *args, **kwargs):
+        if str(statement).startswith("INSERT INTO memories"):
+            raise RuntimeError("injected copy failure")
+        return original_execute(connection, statement, *args, **kwargs)
+
+    monkeypatch.setattr(connection_type, "execute", fail_during_memory_copy)
+
+    with pytest.raises(RuntimeError, match="injected copy failure"):
+        svc.copy_workspace("a", new_name="copy-failed")
+
+    assert svc.store.conn.in_transaction is False
+    assert svc._lookup_workspace("copy-failed") is None
+    # A subsequent write succeeds, proving the serialized connection's lock was released.
+    assert svc.create_workspace("after-failure")["created"] is True
 
 
 # ── reorder_memories ────────────────────────────────────────────────────────
@@ -225,3 +643,32 @@ def test_reorder_rejects_empty_foreign_and_oversized():
         svc.reorder_memories([str(i) for i in range(1001)], workspace="a")  # > 1000
     # the valid id alone still works (control)
     assert svc.reorder_memories([a], workspace="a")["reordered"] == 1
+
+
+# ── inspect() supersession chain — workspace isolation ─────────────────────────
+def test_inspect_chain_forward_pointer_does_not_cross_workspace():
+    """metadata is caller-supplied and reaches storage intact, so a writer in
+    workspace b can plant metadata.supersedes naming an id it doesn't own. inspect()
+    only _check_owns'd the root id; the forward LIKE scan (_successor_of) had no
+    workspace filter, so b's record rode the forged pointer into a's chain."""
+    svc = _svc()
+    a_id = svc.remember("Workspace A secret fact.", workspace="a",
+                        scope="workspace")["id"]
+    svc.remember("Forged successor claiming to supersede A's memory.", workspace="b",
+                scope="workspace", metadata={"supersedes": [a_id]})
+
+    result = svc.inspect(a_id, workspace="a")
+    assert {m["id"] for m in result["chain"]} == {a_id}
+
+
+def test_inspect_chain_backward_pointer_does_not_cross_workspace():
+    """Same boundary on the backward walk: a's own record forges a supersedes
+    pointer naming a real memory that belongs to workspace b."""
+    svc = _svc()
+    b_id = svc.remember("Workspace B fact.", workspace="b", scope="workspace")["id"]
+    forged_id = svc.remember("A's record forging a backward pointer into B.",
+                             workspace="a", scope="workspace",
+                             metadata={"supersedes": [b_id]})["id"]
+
+    result = svc.inspect(forged_id, workspace="a")
+    assert {m["id"] for m in result["chain"]} == {forged_id}

@@ -19,8 +19,11 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
+import threading
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -187,17 +190,26 @@ def upgrade_url(plan: Optional[str] = None) -> str:
             or DEFAULT_PRO_UPGRADE_URL)
 
 _KEY_PREFIX = "ENGR1"
-# Pinned **production** Ed25519 verify key (32-byte public half). Rotated 2026-07-11
-# to a fresh CSPRNG keypair, retiring BOTH the original dev keypair (see
-# _DEV_VENDOR_PUBKEY_HEX below) and the interim 2026-07-08 key d3520482…9e08, which is
-# now treated as retired out of caution. Any license signed by an older seed no longer
-# verifies. The private seed lives ONLY in the gitignored `.secrets/vendor_signing.key`
-# on the issuance machine — it never ships in this repo, never in .env, never in any agent
-# session. Anyone with only this repo CANNOT forge a valid key. Re-generate on an
-# offline/trusted machine before the first real sale.
-# ROTATE BEFORE SELLING: run `python -m scripts.license_admin keygen --force` and replace
-# this constant with the printed public key.
+# Pinned Ed25519 verifier (32-byte public half). This pre-sale key was generated on a
+# development machine and is not approved for production issuance. The private seed never
+# ships in this repo; production keeps its replacement only in the vendor secret store and
+# an encrypted recovery backup. Anyone with only this repository cannot forge a valid key.
+#
+# ROTATE BEFORE SELLING: inventory and back up the production registry, then generate into
+# a NEW file on a trusted machine:
+#   python -m scripts.license_admin keygen --key-file <secure-offline-path>/vendor_signing.key
+# Pin the printed public key through the reviewed compatibility/reissue ceremony in
+# docs/COMMERCIAL_OPERATIONS.md. Do not overwrite or discard the old seed first.
 _VENDOR_PUBKEY_HEX = "0f9ede880d65184f4615221d03e8127c38e1b7a8f8d789a050780ae50c36421d"
+# Previous production verify keys live here only during an audited rotation window.
+# New issuance always uses ``_VENDOR_PUBKEY_HEX``; remove retired entries after every
+# customer has received a replacement and the announced grace period has elapsed.
+_PREVIOUS_VENDOR_PUBKEY_HEXES = ()
+
+# Readiness intentionally fails until an operator completes the trusted-machine ceremony,
+# updates the verifier pin, validates production issuance, and flips this source-controlled
+# release gate in a separately reviewed change.
+VENDOR_SIGNER_RELEASE_READY = False
 # Frozen fingerprint of the OLD, known-compromised dev keypair. Kept as a sentinel so
 # is_default_vendor_key() / production_warnings() can flag it if anyone ever re-pins it.
 # Its private half does NOT ship in this repo (`.secrets/` is gitignored), but it was
@@ -293,26 +305,6 @@ def _trial_used_elsewhere() -> bool:
     return False
 
 
-def _write_trial_tombstones(payload: dict) -> None:
-    """Best-effort: record trial consumption in every independent location. Content is
-    informational (signed for forensics); presence is what :func:`_trial_used_elsewhere`
-    checks. A location that can't be written is skipped — the others still hold."""
-    body = json.dumps({"data": payload, "sig": _sign_trial(payload)})
-    for path in _trial_tombstone_files():
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(body, encoding="utf-8")
-            try:
-                os.chmod(path, 0o600)
-            except OSError:
-                pass
-        except OSError:
-            continue
-
-#: Monotonic wall-clock anchor. Persists the highest wall-clock time ever observed so a
-#: user cannot roll the system clock backward to resurrect an expired key/lease or stretch
-#: a trial. Advisory (the file is local and deletable) — it just closes the trivial
-#: "set the date back" bypass; real expiry enforcement is the cloud lease.
 _MONOTONIC_FILE = _STATE_DIR / ".clock_anchor"
 
 
@@ -382,15 +374,19 @@ class License:
     expires: Optional[float] = None
     features: frozenset = field(default_factory=frozenset)
     key_id: str = ""  # short fingerprint for support/display; never the key itself
-    is_trial: bool = False  # True when this License is a time-boxed local trial grant
-    #: ``"cloud"`` = this key is ONLY valid with a live server-side lease (see
-    #: :func:`_cloud_gate`); "" = classic offline verification. Part of the signed
-    #: payload, so a customer cannot strip it without breaking the signature.
+    #: Fingerprint of the Ed25519 public key that verified this license. New keys carry
+    #: the same value in their signed payload; legacy keys derive it from the verifier
+    #: that accepted them so a pre-rotation inventory can still identify their signer.
+    signing_key_id: str = ""
+    is_trial: bool = False  # True when this is a time-boxed server-issued trial key
+    #: Historical signed policy marker. Every paid/trial key now requires a live
+    #: server-side lease regardless of this value; it remains for key compatibility.
     enforce: str = ""
     #: License-server URL baked into the key at issuance — also signed/unforgeable.
     cloud_url: str = ""
     #: Optional vendor-side identifiers used only for server revocation lookups. They are
-    #: signed into auto-issued keys so refund webhooks can revoke exactly the affected key.
+    #: signed into auto-issued keys so refund webhooks can revoke exactly the affected
+    #: order/subscription without touching unrelated purchases.
     subscription_id: str = ""
     order_id: str = ""
 
@@ -472,6 +468,24 @@ def vendor_public_key() -> bytes:
     return raw
 
 
+def vendor_public_keys() -> tuple:
+    """Current plus temporarily trusted rotation keys, current first."""
+    current = vendor_public_key()
+    if _pubkey_override_allowed():
+        return (current,)
+    out = [current]
+    for hexkey in _PREVIOUS_VENDOR_PUBKEY_HEXES:
+        try:
+            raw = bytes.fromhex(hexkey)
+        except ValueError:
+            raise LicenseError("previous vendor public key is not valid hex")
+        if len(raw) != 32:
+            raise LicenseError("previous vendor public key must be 32 bytes")
+        if raw not in out:
+            out.append(raw)
+    return tuple(out)
+
+
 def compose_key(payload: dict, secret: bytes) -> str:
     """Build a signed key from a payload dict (vendor-side; see license_admin)."""
     body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -492,7 +506,9 @@ def parse_key(key: str, *, now: Optional[float] = None) -> License:
         sig = _b64u_decode(parts[2])
     except (ValueError, base64.binascii.Error):
         raise LicenseError("license key is not valid base64url")
-    if not ed25519_verify(vendor_public_key(), body, sig):
+    verified_with = next(
+        (pub for pub in vendor_public_keys() if ed25519_verify(pub, body, sig)), None)
+    if verified_with is None:
         raise LicenseError("license signature is invalid (tampered or wrong vendor key)")
     try:
         payload = json.loads(body.decode("utf-8"))
@@ -500,6 +516,10 @@ def parse_key(key: str, *, now: Optional[float] = None) -> License:
         raise LicenseError("license payload is not valid JSON")
     if not isinstance(payload, dict) or payload.get("v") != 1:
         raise LicenseError("unsupported license payload version")
+    verified_key_id = verified_with.hex()[:16]
+    signing_key_id = str(payload.get("signing_key_id", "") or "").strip().lower()
+    if signing_key_id and signing_key_id != verified_key_id:
+        raise LicenseError("license signing-key id does not match its signature")
 
     plan = str(payload.get("plan", "")).lower()
     if plan not in PLAN_FEATURES:
@@ -510,7 +530,12 @@ def parse_key(key: str, *, now: Optional[float] = None) -> License:
             expires = float(expires)
         except (TypeError, ValueError):
             raise LicenseError("invalid expiry in license")
-        if (now if now is not None else time.time()) > expires:
+        if not math.isfinite(expires):
+            raise LicenseError("invalid expiry in license")
+        current_time = time.time() if now is None else float(now)
+        if not math.isfinite(current_time):
+            raise LicenseError("invalid license validation time")
+        if current_time > expires:
             raise LicenseError("license expired on %s — renew at %s" % (
                 time.strftime("%Y-%m-%d", time.gmtime(expires)), upgrade_url()))
     extra = payload.get("features") or []
@@ -519,12 +544,13 @@ def parse_key(key: str, *, now: Optional[float] = None) -> License:
     features = frozenset(PLAN_FEATURES[plan]) | frozenset(str(f) for f in extra)
     try:
         seats = max(1, int(payload.get("seats", 1)))
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         seats = 1
     return License(
         plan=plan, email=str(payload.get("email", "")), seats=seats,
         issued=payload.get("issued"), expires=expires, features=features,
         key_id=hashlib.sha256(key.encode("ascii")).hexdigest()[:12],
+        signing_key_id=verified_key_id,
         is_trial=bool(payload.get("trial")),
         enforce=str(payload.get("enforce", "") or "").strip().lower(),
         cloud_url=str(payload.get("cloud_url", "") or "").strip().rstrip("/"),
@@ -538,11 +564,22 @@ def parse_key(key: str, *, now: Optional[float] = None) -> License:
 _cached: Optional[License] = None
 _cache_error: str = ""
 _cache_recheck_at: float = float("inf")  # wall-clock time after which the cache is stale
+# The cache globals above are read + mutated from FastAPI's threadpool AND invalidated
+# by cloud_license on denial, so all access is serialized. Reentrant so current_license
+# can be called from a context that already holds it. Without this, a concurrent
+# invalidate_cache() between the "is not None" check and the return could return None.
+_cache_lock = threading.RLock()
+#: Monotonic counter bumped on every cache invalidation or authoritative denial. A
+#: current_license() call snapshots it before its (unlocked, network) cloud gate and, when
+#: that gate comes back ALLOWED, only stores the paid result if the counter is unchanged.
+#: This closes a lost-update race: without it, an older "allowed" computed against
+#: pre-revocation state could land in the cache AFTER a newer denial / invalidate_cache()
+#: and resurrect a revoked key until the next recheck — defeating immediate fail-closed.
+_cache_generation: int = 0
 
-#: Cloud-mode cache lifetime. Bounded so a REVOKED key degrades in a long-running
-#: process within minutes of its lease lapsing instead of at the next restart. The
-#: re-check is cheap: the stored lease verifies locally, so no network round-trip
-#: happens until the lease itself needs renewing.
+#: Cloud-mode cache lifetime. Each refresh contacts the license server; an authoritative
+#: denial fails closed immediately, while a transient network failure may continue using
+#: the existing signed lease until its expiry.
 _CLOUD_RECHECK_SECONDS = 900
 
 
@@ -579,7 +616,7 @@ def _cloud_gate(lic: "License", material: str) -> tuple:
     Online-only by product policy (no offline mode): the verification server is
     ``ENGRAPHIS_CLOUD_URL`` if set, else the URL signed into the key at issuance
     (``lic.cloud_url`` — unforgeable, inside the signed payload), else the built-in
-    vendor relay (``settings.relay_url``). Unlike the previous opt-in design, a paid key
+    isolated license service. Unlike the previous opt-in design, a paid key
     is NEVER unlocked by local signature alone: it must register with the server and hold
     an unexpired lease. If no server URL resolves at all (someone blanked the relay URL),
     we DENY — there is deliberately no offline path to paid features. Revoked / expired /
@@ -587,51 +624,90 @@ def _cloud_gate(lic: "License", material: str) -> tuple:
 
     The free tier never reaches here (it has no key), so offline free-tier use is
     unaffected — only Pro/Team features require the server."""
-    from engraphis.config import settings
-    base = (os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip()
-            or lic.cloud_url
-            or (settings.relay_url or "").strip())
+    from engraphis.config import resolve_license_server_url
+    base = resolve_license_server_url(lic.cloud_url)
     if not base:
         return False, ("server-side license verification is required for paid features "
                        "but no license server is configured (ENGRAPHIS_CLOUD_URL and the "
-                       "vendor relay URL are both empty)")
+                       "license service URL and signed server URL are both empty)")
     try:
         from engraphis import cloud_license
         return cloud_license.gate(lic, material, base_url=base)
-    except Exception as exc:  # any error verifying with the server → fail closed
-        return False, "cloud verification error: %s" % exc
+    except Exception:  # any error verifying with the server -> fail closed
+        return False, ("cloud verification failed; check the license service URL and "
+                       "network connection")
+
+
+def invalidate_cache() -> None:
+    """Drop the in-memory license cache so the next :func:`current_license` re-verifies.
+
+    ``cloud_license.revalidate`` calls this the instant the server denies a key (revoked
+    /refunded/seat-limit), so a paying customer's revoked entitlement stops working
+    immediately instead of lingering until the lease TTL — without forcing the test
+    suite to reach into private module state."""
+    global _cached, _cache_recheck_at, _cache_generation
+    with _cache_lock:
+        _cached = None
+        _cache_recheck_at = float("inf")
+        _cache_generation += 1  # supersede any allow still in flight (fail closed)
 
 
 def current_license(*, refresh: bool = False) -> License:
-    """The verified license for this process, or a trial/``License.free()``. Never
-    raises — a bad key degrades (to an active trial, else the free tier) and the reason
-    is kept in :func:`license_error`. A valid paid key always takes precedence over a
-    trial; an active local trial takes precedence over free."""
-    global _cached, _cache_error, _cache_recheck_at
-    if _cached is not None and not refresh and time.time() < _cache_recheck_at:
-        return _cached
+    """The server-verified paid/trial license for this process, or ``License.free()``.
+
+    Never raises: a bad, revoked, expired, or currently unverifiable key degrades to the
+    free tier and the reason is kept in :func:`license_error`.
+    """
+    global _cached, _cache_error, _cache_recheck_at, _cache_generation
+    # Fast path under the lock: a valid, unexpired cache entry is returned atomically so a
+    # concurrent invalidate_cache() can't null it out between the check and the return.
+    with _cache_lock:
+        if _cached is not None and not refresh and time.time() < _cache_recheck_at:
+            return _cached
+        # Snapshot the generation for the staleness check below, taken while we still hold
+        # the lock so it's consistent with the cache state we're about to (re)compute from.
+        gen_at_start = _cache_generation
+    # The cloud gate does network I/O, so run it OUTSIDE the lock (two threads racing a
+    # cache miss just do redundant, idempotent work — last store wins). Online-only:
+    # entitlement comes ONLY from a signature-valid key that ALSO passes the server-side
+    # cloud gate. No key, or a server-denied key ⇒ the free tier.
     material = _read_key_material()
+    lic: Optional[License] = None
+    reason = ""
     if material:
         try:
             lic = parse_key(material)
         except LicenseError as exc:
-            _cache_error = str(exc)  # bad key → fall through to trial/free
+            lic, reason = None, str(exc)     # bad key → free
         else:
-            allowed, reason = _cloud_gate(lic, material)
-            if allowed:
-                _cached, _cache_error = lic, ""
-                _cache_recheck_at = _license_recheck_at(lic)
-                return _cached
-            _cache_error = reason    # cloud denied (revoked/unregistered) → trial/free
-    else:
-        _cache_error = ""
-    # Online-only: entitlement comes ONLY from a signature-valid key that ALSO passes the
-    # server-side cloud gate above. There is no local/offline trial grant anymore — the
-    # free trial is a real, short-lived, server-issued key (see start_trial) that flows
-    # through the exact same gate. No key, or a server-denied key ⇒ the free tier.
-    _cached = License.free()
-    _cache_recheck_at = _license_recheck_at(_cached)
-    return _cached
+            allowed, gate_reason = _cloud_gate(lic, material)
+            if not allowed:
+                lic, reason = None, gate_reason  # cloud denied (revoked/unregistered) → free
+    with _cache_lock:
+        if lic is None:
+            # A denial / free fallback is authoritative and must win over any concurrently
+            # in-flight allow: bump the generation FIRST so a slower "allowed" result
+            # computed against older (pre-revocation) state is discarded by the staleness
+            # check below instead of resurrecting a revoked key until the next recheck.
+            _cache_generation += 1
+            _cache_error = reason
+            _cached = License.free()
+            # A configured key that temporarily failed its cloud gate must retry
+            # automatically. Caching the free fallback forever forced users to restart or
+            # paste the same key again after an outage. No-key free installs stay cached.
+            _cache_recheck_at = (
+                time.time() + _CLOUD_RECHECK_SECONDS
+                if material else _license_recheck_at(_cached)
+            )
+        elif _cache_generation != gen_at_start:
+            # An invalidate_cache() or a denial landed while our cloud gate was in flight,
+            # so this "allowed" result may already be stale. Fail closed: don't overwrite
+            # the current (fail-closed) state — the next refresh re-verifies with the server.
+            return _cached if _cached is not None else License.free()
+        else:
+            _cached, _cache_error = lic, ""
+            _cache_recheck_at = _license_recheck_at(lic)
+        return _cached
 
 
 # ── one-time local free trial (grants Pro features, no key, no phone-home) ────────────
@@ -666,17 +742,6 @@ def trial_status(*, now: Optional[float] = None) -> dict:
     used = _trial_used_locally() or _trial_used_elsewhere()
     return {"active": False, "used": bool(used), "days_left": 0,
             "trial_days": TRIAL_DAYS}
-
-
-def _trial_license(status: dict) -> License:
-    """RETIRED — no longer called. The offline/local trial grant it used to synthesize was
-    a bypass (any local file could mint Pro without the server). Trials are now real
-    server-issued keys. Kept only so stray references don't break; do NOT reintroduce it
-    into :func:`current_license`."""
-    return License(plan="pro", email="trial", seats=1,
-                   issued=status.get("started"), expires=status.get("expires"),
-                   features=frozenset(PLAN_FEATURES["pro"]), key_id="trial",
-                   is_trial=True)
 
 
 def _local_material_license() -> Optional[License]:
@@ -746,8 +811,8 @@ def start_trial(*, email: str = "", now: Optional[float] = None) -> dict:
     if not email or not _TRIAL_EMAIL_RE.match(email):
         raise LicenseError("a valid email address is required to start a trial")
     from engraphis import cloud_license
-    from engraphis.config import settings
-    base = os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip() or settings.relay_url
+    from engraphis.config import resolve_license_server_url
+    base = resolve_license_server_url()
     key, reason, pending = cloud_license.request_trial_key(
         base, cloud_license.machine_id(), plan="pro", email=email)
     if pending:
@@ -759,16 +824,14 @@ def start_trial(*, email: str = "", now: Optional[float] = None) -> dict:
 
 
 def start_team_trial(*, email: str = "", now: Optional[float] = None) -> dict:
-    """Begin the one-time self-serve Team trial: unlike :func:`start_trial` (Pro,
-    fully local/offline), this requests a REAL signed ``team`` key from the vendor
-    relay exactly like a purchased key would be. The extra network round-trip is
-    required, not incidental: the resulting key is later presented to OTHER
-    server-side gates (the team-invite relay, ``/register``) that only accept a
-    genuinely vendor-signed credential, and an offline client-only claim (like the Pro
-    trial's used to be) can never satisfy those — see ``inspector.license_cloud.
-    start_team_trial`` for the full reasoning. Without this, a trialing user could
-    open Team mode locally but could never actually send a team invite, which defeats
-    the point of letting them trial Team at all.
+    """Begin the one-time self-serve Team trial by requesting a real, short-lived,
+    vendor-signed Team key from the license server. Pro and Team trials both use the
+    same server-authoritative issuance and verification path as purchased keys.
+
+    The network round-trip is required, not incidental: the resulting key is later
+    presented to other server-side gates (the team-invite relay and ``/register``)
+    that only accept a genuinely vendor-signed credential. Without it, a trialing user
+    could open Team mode locally but could never send an invite.
 
     Since 2026-07-14 *email* is required and the key is minted only once a one-time
     magic link sent to it is opened — see :func:`start_trial`'s docstring for the full
@@ -793,8 +856,8 @@ def start_team_trial(*, email: str = "", now: Optional[float] = None) -> dict:
     if not email or not _TRIAL_EMAIL_RE.match(email):
         raise LicenseError("a valid email address is required to start a trial")
     from engraphis import cloud_license
-    from engraphis.config import settings
-    base = os.environ.get("ENGRAPHIS_CLOUD_URL", "").strip() or settings.relay_url
+    from engraphis.config import resolve_license_server_url
+    base = resolve_license_server_url()
     key, reason, pending = cloud_license.request_team_trial_key(
         base, cloud_license.machine_id(), email=email)
     if pending:
@@ -815,11 +878,35 @@ def activate(key: str) -> License:
     """Verify ``key``, persist it to ``~/.engraphis/license.key``, refresh the cache."""
     parse_key(key)  # raises LicenseError if bad — nothing persisted then
     _LICENSE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _LICENSE_FILE.write_text(key.strip() + "\n", encoding="utf-8")
+    # Create a private sibling from the first byte, fsync it, then atomically replace the
+    # destination. A failed reactivation therefore leaves the last valid key intact and
+    # never writes through an existing permissive inode or symlink.
+    fd, temp_name = tempfile.mkstemp(
+        prefix=".license.key.", dir=str(_LICENSE_FILE.parent))
+    temp_path = Path(temp_name)
     try:
-        os.chmod(_LICENSE_FILE, 0o600)
-    except OSError:  # e.g. some Windows filesystems
-        pass
+        try:
+            os.chmod(temp_path, 0o600)
+        except OSError:  # e.g. some Windows filesystems
+            pass
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(key.strip() + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(str(temp_path), str(_LICENSE_FILE))
+        try:
+            os.chmod(_LICENSE_FILE, 0o600)
+        except OSError:  # e.g. some Windows filesystems
+            pass
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+        raise
     return current_license(refresh=True)
 
 
@@ -845,7 +932,8 @@ def require_feature(feature: str) -> None:
         tier = required_plan(feature)
         raise LicenseError(
             "'%s' is an Engraphis %s feature (%s). Start a %d-day free trial from the "
-            "dashboard's Settings → License panel (one click, no key), or buy at %s and "
+            "dashboard's Settings → License panel (email confirmation required), or buy "
+            "at %s and "
             "paste the key there, set ENGRAPHIS_LICENSE_KEY, or save it to "
             "~/.engraphis/license.key."
             % (feature, tier.capitalize(), desc, TRIAL_DAYS, upgrade_url(tier)),
@@ -877,13 +965,18 @@ def production_warnings() -> list:
     at startup so an operator can't accidentally ship the dev signing key or bill against
     a placeholder checkout link."""
     warns = []
+    if not VENDOR_SIGNER_RELEASE_READY:
+        warns.append(
+            "vendor signer is still marked pre-sale. Audit issued keys, rotate the seed "
+            "on a trusted machine, update the pinned public key, and set "
+            "VENDOR_SIGNER_RELEASE_READY=True in the reviewed rotation release.")
     if is_default_vendor_key():
         warns.append(
             "vendor signing key is the built-in DEV keypair, whose private half has been "
             "on dev boxes / in agent sessions and is treated as compromised. Anyone holding "
-            "that seed can forge Pro/Team keys. Rotate before selling: run "
-            "`python -m scripts.license_admin keygen --force`, then pin the printed public "
-            "key in engraphis/licensing.py (_VENDOR_PUBKEY_HEX).")
+            "that seed can forge Pro/Team keys. Generate a replacement into a new secure "
+            "path, then complete the reviewed compatibility/reissue ceremony in "
+            "docs/COMMERCIAL_OPERATIONS.md.")
     if "github.com" in upgrade_url():
         warns.append(
             "upgrade link still points at the GitHub pricing anchor, not a real checkout. "

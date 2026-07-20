@@ -15,10 +15,9 @@ files, no lost notes. Examples::
 Schedule it (cron)::      */15 * * * *  cd /path/to/repo && python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/engraphis
 Schedule it (Windows)::   schtasks /Create /SC MINUTE /MO 15 /TN EngraphisSync /TR "python -m scripts.sync --db C:\\path\\engraphis.db --workspace acme --remote C:\\Users\\me\\Dropbox\\engraphis"
 
-Cloud sync is a Pro feature. The gate lives HERE (via the same ``require_feature``
-helper the Inspector uses); the core engine in ``engraphis/core/sync.py`` never
-checks a license. Start a free 3-day trial from the dashboard's Settings → License
-panel (one click, no key) to try it.
+Shared-folder sync is a Pro feature and is checked locally. Managed-relay sync uses a
+scoped, expiring per-user token and is authorized by the customer server. The core engine
+in ``engraphis/core/sync.py`` remains transport- and license-agnostic.
 """
 from __future__ import annotations
 
@@ -39,10 +38,15 @@ def main(argv=None) -> int:
                     help="Shared folder both devices can see (Dropbox/iCloud/Syncthing/…).")
     ap.add_argument("--relay", "--relay-url", dest="relay", nargs="?", const="",
                     metavar="URL",
-                    help="Managed cloud relay root (e.g. https://sync.engraphis.app). "
+                    help="Managed cloud relay root (e.g. https://team.engraphis.com). "
                          "Bare --relay uses ENGRAPHIS_RELAY_URL. Mutually exclusive with --remote.")
-    ap.add_argument("--relay-key", default=None, metavar="KEY",
-                    help="License key for the relay (defaults to this device's configured key).")
+    ap.add_argument("--relay-token", default=None, metavar="TOKEN",
+                    help="Scoped user token for the relay (defaults to ENGRAPHIS_SYNC_TOKEN "
+                         "or the token saved by the dashboard).")
+    ap.add_argument("--relay-key", dest="legacy_relay_key", default=None, metavar="KEY",
+                    help=argparse.SUPPRESS)
+    ap.add_argument("--read-only", action="store_true",
+                    help="Pull only; required for a viewer token without sync:write.")
     ap.add_argument("--repo", default=None, help="Restrict the sync to one repo name.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Report what would change; write nothing (locally or to the remote).")
@@ -55,17 +59,29 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 2
 
-    # ── Pro gate (checked up front, before touching the DB or the folder) ──────
-    from engraphis.licensing import LicenseError, require_feature
-    try:
-        require_feature("sync")
-    except LicenseError as exc:
-        print(f"error: cloud sync is a Pro feature. {exc}", file=sys.stderr)
+    relay_token = args.relay_token or args.legacy_relay_key
+    if args.relay_token and args.legacy_relay_key:
+        print("error: use --relay-token; do not also pass deprecated --relay-key",
+              file=sys.stderr)
         return 2
+
+    # Folder sync has no remote entitlement boundary, so it retains the local Pro gate.
+    # A scoped relay token is checked server-side for owner, role, expiry, and sync
+    # scopes. Legacy license-key authorization remains a migration-only fallback.
+    from engraphis.backends.sync_relay import has_sync_token, sync_read_only
+    from engraphis.licensing import LicenseError, require_feature
+    has_user_token = bool(relay_token) or has_sync_token()
+    if not use_relay or not has_user_token:
+        try:
+            require_feature("sync")
+        except LicenseError as exc:
+            print(f"error: cloud sync requires an active entitlement. {exc}",
+                  file=sys.stderr)
+            return 2
 
     engine = MemoryEngine.create(args.db)
     wid_row = engine.store.conn.execute(
-        "SELECT id FROM workspaces WHERE name=?", (args.workspace,)).fetchone()
+        "SELECT id, settings FROM workspaces WHERE name=?", (args.workspace,)).fetchone()
     if not wid_row:
         print(f"error: no workspace named '{args.workspace}' in {args.db}", file=sys.stderr)
         return 2
@@ -84,9 +100,39 @@ def main(argv=None) -> int:
     from engraphis.backends.sync_folder import get_transport
 
     if use_relay:
+        # Fail CLOSED here, unlike the local-authorization convention
+        # (service._workspace_visibility treats malformed settings as shared): this
+        # path uploads the folder off-device, so unreadable settings must block the
+        # push rather than silently treat a possibly-personal folder as shared.
+        try:
+            workspace_settings = json.loads(wid_row["settings"] or "{}")
+        except (TypeError, ValueError):
+            workspace_settings = None
+        if not isinstance(workspace_settings, dict):
+            print(
+                "error: workspace settings are unreadable; refusing to upload to the "
+                "shared-account relay (the folder could be marked personal)",
+                file=sys.stderr,
+            )
+            return 2
+        visibility = workspace_settings.get("visibility")
+        if visibility == "personal":
+            print(
+                "error: personal workspaces are device-local and cannot be uploaded "
+                "to the shared-account relay",
+                file=sys.stderr,
+            )
+            return 2
+        if visibility not in (None, "", "shared"):
+            print(
+                "error: workspace visibility is invalid; refusing to upload to the "
+                "shared-account relay",
+                file=sys.stderr,
+            )
+            return 2
         # Namespace the relay by workspace NAME (not the per-device local id) so every
         # device on the account lands in one bucket; account isolation is enforced
-        # server-side by the license key. See engraphis/inspector/sync_relay.py.
+        # server-side by the scoped token owner. See engraphis/inspector/sync_relay.py.
         relay_url = args.relay or settings.relay_url
         if not relay_url:
             print("error: --relay needs a URL — pass --relay <url> or set ENGRAPHIS_RELAY_URL",
@@ -95,9 +141,11 @@ def main(argv=None) -> int:
         try:
             transport = get_transport("relay", base_url=relay_url,
                                       workspace_id=args.workspace,
-                                      license_key=args.relay_key)
+                                      license_key=relay_token)
         except ValueError as exc:
-            print(f"error: could not open relay '{relay_url}': {exc}", file=sys.stderr)
+            # A custom URL may contain credentials or signed query parameters. The
+            # validator's fixed reason is actionable without reflecting the endpoint.
+            print(f"error: could not open relay: {exc}", file=sys.stderr)
             return 2
     else:
         try:
@@ -109,13 +157,25 @@ def main(argv=None) -> int:
     engine_sync = SyncEngine(engine.store, embedder=engine.embedder,
                              vector_index=engine.index,
                              allowed_workspaces=settings.allowed_workspaces or None)
-    report = engine_sync.sync(transport, wid_row["id"], repo_id=rid, dry_run=args.dry_run)
+    # Honor the same durable, fail-closed device policy as dashboard auto-sync. This
+    # matters for member/admin tokens too: a device explicitly configured download-only
+    # must not silently regain upload authority merely because this CLI runs after a
+    # process restart.
+    read_only = bool(args.read_only or (use_relay and sync_read_only()))
+    report = engine_sync.sync(
+        transport,
+        wid_row["id"],
+        repo_id=rid,
+        dry_run=args.dry_run,
+        push=not read_only,
+    )
     print(json.dumps(report, indent=2))
 
     t = report["totals"]
     verb = "would sync" if args.dry_run else "synced"
     print(
-        f"{verb}: exported {report['exported_memories']} memories · "
+        f"{verb}: {'read-only · ' if report.get('read_only') else ''}"
+        f"exported {report['exported_memories']} memories · "
         f"pulled {report['peers_applied']} peer(s) · "
         f"+{t['added']} new, {t['updated']} updated, {t['unchanged']} unchanged, "
         f"+{t['links_added']} links"

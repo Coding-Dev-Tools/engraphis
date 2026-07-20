@@ -79,10 +79,10 @@ def test_graph_endpoint_serves_the_same_data_as_the_dashboard():
                  "VALUES ('e1', ?, NULL, 'Alice', 'person_or_concept', 0)", (wid,))
     conn.execute("INSERT INTO entities(id, workspace_id, repo_id, name, etype, created_at) "
                  "VALUES ('e2', ?, NULL, 'Acme Corp', 'organization', 0)", (wid,))
-    conn.execute("INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation) "
+    conn.execute("INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation, layer) "
                  # src/dst are entity ids ('e1'/'e2'), never the display name — that's
                  # what backends.graph_extractor.feed actually writes
-                 "VALUES ('g1', ?, NULL, 'e1', 'e2', 'works_at')", (wid,))
+                 "VALUES ('g1', ?, NULL, 'e1', 'e2', 'works_at', 'entity')", (wid,))
     conn.commit()
     c = TestClient(create_app(svc))
     r = c.get("/api/graph", params={"workspace": "acme"})
@@ -90,8 +90,11 @@ def test_graph_endpoint_serves_the_same_data_as_the_dashboard():
     g = r.json()
     assert {n["id"] for n in g["nodes"]} == {"e1", "e2"}
     assert {n["label"] for n in g["nodes"]} == {"Alice", "Acme Corp"}
-    assert g["edges"] == [{"from": "e1", "to": "e2", "label": "works_at"}]
+    assert g["edges"] == [
+        {"from": "e1", "to": "e2", "label": "works_at", "layer": "entity"}
+    ]
     assert g["stats"] == {"entities": 2, "edges": 1, "connected": 2, "isolated": 0}
+    assert c.get("/api/graph?workspace=acme&layers=").json()["edges"] == []
 
 
 def test_graph_endpoint_rejects_workspace_outside_the_binding():
@@ -120,6 +123,22 @@ def test_governance_endpoints_pin_and_forget(client):
     r = c.post("/api/forget", json={**body, "reason": "test"}).json()
     assert r["status"] == "forgotten"
     assert c.get("/api/stats", params={"workspace": "acme"}).json()["memories"] == 0
+
+
+def test_promote_endpoint_widens_scope(client):
+    c, out = client
+    response = c.post("/api/promote", json={
+        "memory_id": out["id"],
+        "target_scope": "workspace",
+        "workspace": "acme",
+        "repo": "backend",
+        "reason": "shared convention",
+    })
+
+    assert response.status_code == 200
+    promoted = response.json()
+    assert promoted["scope"] == "workspace"
+    assert promoted["promoted_from"] == out["id"]
 
 
 def test_validation_errors_are_400_not_500(client):
