@@ -25,6 +25,10 @@ build/
 /engraphis-[0-9]*/
 .pytest_cache/
 .ruff_cache/
+node_modules/
+.playwright/
+playwright-report/
+test-results/
 models_cache/
 .secrets/
 internal/
@@ -34,6 +38,11 @@ internal/
 
 # Runtime logs (e.g. dashboard.log from `engraphis-dashboard`) — regenerable, not content.
 *.log
+
+# One-off local dashboard measurement/smoke scripts (Playwright/d3 timing probes) that keep
+# landing at the repo root — throwaway dev tooling, never part of the package. The already-
+# tracked _smoke*.mjs / _measure_*.mjs must be removed with `git rm` (see audit handoff).
+/_*.mjs
 
 # Local machine-specific launchers (absolute user paths / PM2 deploy specifics — not portable)
 /Start-Engraphis-Dashboard.bat

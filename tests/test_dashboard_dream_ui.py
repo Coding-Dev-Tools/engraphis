@@ -6,21 +6,21 @@ the dashboard and desync from the `/api/automation` policy fields
 """
 from pathlib import Path
 
-INDEX = Path(__file__).resolve().parents[1] / "engraphis" / "static" / "index.html"
+SCRIPT = Path(__file__).resolve().parents[1] / "engraphis" / "static" / "dashboard.js"
 
 
 def test_automation_form_renders_dream_controls():
-    html = INDEX.read_text(encoding="utf-8")
+    script = SCRIPT.read_text(encoding="utf-8")
     for el in ("au-dream", "au-dream-min", "au-dream-idle", "au-infer"):
-        assert f'id="{el}"' in html, el
+        assert f'id="{el}"' in script, el
 
 
 def test_save_body_posts_dream_fields():
-    html = INDEX.read_text(encoding="utf-8")
-    assert "dream:document.getElementById('au-dream').checked" in html
-    assert "dream_min_new:Number(document.getElementById('au-dream-min').value)" in html
+    script = SCRIPT.read_text(encoding="utf-8")
+    assert "dream:document.getElementById('au-dream').checked" in script
+    assert "dream_min_new:Number(document.getElementById('au-dream-min').value)" in script
     # idle must NOT be coerced with `|| default` (0 is a valid, meaningful value). It is
     # no longer the last field (infer follows), so assert the bare expression substring.
-    assert "dream_idle_minutes:Number(document.getElementById('au-dream-idle').value)," in html
+    assert "dream_idle_minutes:Number(document.getElementById('au-dream-idle').value)," in script
     # the inference toggle is posted too, so it can't desync from the /api/automation field
-    assert "infer:document.getElementById('au-infer').checked" in html
+    assert "infer:document.getElementById('au-infer').checked" in script

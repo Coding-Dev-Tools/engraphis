@@ -1,0 +1,94 @@
+{
+  "schema": "engraphis-commercial/v2",
+  "version": "1.1.5",
+  "control_plane": "https://api.engraphis.com",
+  "account_portal": "https://api.engraphis.com/account",
+  "billing": {
+    "authority": "stripe",
+    "new_subscriptions": "stripe",
+    "legacy_providers": [],
+    "checkout_mode": "authenticated_server_session",
+    "portal_url": "https://api.engraphis.com/account#billing",
+    "provider_price_ids_public": false
+  },
+  "trial": {
+    "days": 3,
+    "card_required": false,
+    "plans": ["pro", "team"]
+  },
+  "entitlement_lifecycle": {
+    "max_grace_hours": 24,
+    "grace_mode": "workspace_write_grace",
+    "enforced_by": "private_control_plane",
+    "grace_for": "already_authorized_hosted_accounts",
+    "grace_allows": ["authenticated_existing_user_hosted_account_continuity"],
+    "live_authorization_still_required_for": [
+      "paid_or_cost_bearing_features",
+      "hosted_mcp_or_agent_writes"
+    ],
+    "grace_blocks_account_growth": true,
+    "trial_expiry_extended_by_grace": false,
+    "recovery": {
+      "mode": "recovery_read_only",
+      "enforced_by": "private_control_plane",
+      "allows": [
+        "login",
+        "password_recovery",
+        "authenticated_reads",
+        "data_export",
+        "relicensing"
+      ],
+      "blocks_normal_mutations": true
+    }
+  },
+  "plans": {
+    "free": {
+      "monthly_usd": 0,
+      "annual_usd": 0,
+      "billing_unit": "installation"
+    },
+    "pro": {
+      "monthly_usd": 10,
+      "annual_usd": 100,
+      "billing_unit": "owner",
+      "products": {
+        "monthly": {
+          "provider": "stripe",
+          "checkout_url": "https://api.engraphis.com/account?plan=pro&interval=monthly#billing"
+        },
+        "annual": {
+          "provider": "stripe",
+          "checkout_url": "https://api.engraphis.com/account?plan=pro&interval=annual#billing"
+        }
+      }
+    },
+    "team": {
+      "monthly_usd": 20,
+      "annual_usd": 200,
+      "billing_unit": "seat",
+      "products": {
+        "monthly": {
+          "provider": "stripe",
+          "checkout_url": "https://api.engraphis.com/account?plan=team&interval=monthly#billing"
+        },
+        "annual": {
+          "provider": "stripe",
+          "checkout_url": "https://api.engraphis.com/account?plan=team&interval=annual#billing"
+        }
+      }
+    }
+  },
+  "features": {
+    "offline_free_core": true,
+    "public_paid_license_gate": false,
+    "public_vendor_authority": false,
+    "hosted_authorization": true,
+    "hosted_opt_in_cloud_sync": true,
+    "hosted_multi_user_roles": true,
+    "hosted_team_audit_export": true,
+    "hosted_scoped_agent_tokens": true,
+    "end_to_end_encrypted_sync": false,
+    "sso": false,
+    "contractual_sla": false
+  }
+}

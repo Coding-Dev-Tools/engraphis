@@ -36,6 +36,7 @@ from engraphis.stores import graph as graph_store
 from engraphis.stores import ledger as ledger_store
 from engraphis.stores import vectors as mem_store
 from engraphis import licensing
+from engraphis.core.store import _escape_like
 from pydantic import BaseModel
 
 logger = logging.getLogger("engraphis.routes")
@@ -202,12 +203,15 @@ async def query_memory_context(req: QueryContextRequest):
     if req.recallOnly:
         return _ok(result)
     if req.llmQuery or req.query:
+        import asyncio
         try:
-            with LLMClient() as llm:
-                answer = llm.chat_with_context(
-                    user_prompt=req.llmQuery or req.query,
-                    context=result.get("llmContextMessage", ""),
-                )
+            def _call():
+                with LLMClient() as llm:
+                    return llm.chat_with_context(
+                        user_prompt=req.llmQuery or req.query,
+                        context=result.get("llmContextMessage", ""),
+                    )
+            answer = await asyncio.to_thread(_call)
             result["answer"] = answer
         except Exception as e:
             result["llm_error"] = str(e)
@@ -224,16 +228,21 @@ async def chat_memory_context(req: ChatRequest):
     if not user_content or not str(user_content).strip():
         raise HTTPException(400, "The latest user message must have non-empty 'content'")
     ctx = recall_engine.recall(namespace=None, prompt=user_content, num_chunks=10)
+    import asyncio
     try:
-        with LLMClient() as llm:
-            answer = llm.chat_with_context(
-                user_prompt=user_content,
-                context=ctx.get("llmContextMessage", ""),
-                temperature=req.temperature,
-                max_tokens=req.maxTokens or req.max_tokens,
-            )
-    except Exception as e:
-        logger.warning("LLM chat error: %s", e)
+        def _call():
+            with LLMClient() as llm:
+                return llm.chat_with_context(
+                    user_prompt=user_content,
+                    context=ctx.get("llmContextMessage", ""),
+                    temperature=req.temperature,
+                    max_tokens=req.maxTokens or req.max_tokens,
+                )
+        answer = await asyncio.to_thread(_call)
+    except Exception as exc:
+        # Some provider errors include a credentialed request URL. The client already
+        # receives a generic response, so keep the log equally content-free.
+        logger.warning("LLM chat error (%s)", type(exc).__name__)
         raise HTTPException(500, "LLM service unavailable")
     return _ok({"answer": answer, "context": ctx.get("chunks", []), "context_count": ctx["count"]})
 
@@ -452,8 +461,8 @@ async def entity_memories(entity_name: str, namespace: Optional[str] = None, lim
             pass
 
     # 2) broad: memories whose content mentions the entity
-    m_sql = "SELECT namespace, document_id FROM memories WHERE content LIKE ?"
-    m_params: list = [f"%{name}%"]
+    m_sql = "SELECT namespace, document_id FROM memories WHERE content LIKE ? ESCAPE '\\'"
+    m_params: list = [f"%{_escape_like(name)}%"]
     if namespace:
         m_sql += " AND namespace=?"
         m_params.append(namespace)
@@ -561,16 +570,16 @@ async def search_documents(q: str = Query(...), namespace: Optional[str] = None,
     """GET /memory/search — full-text search across document content/titles."""
     from engraphis.stores import get_conn
     conn = get_conn()
-    pattern = f"%{q}%"
+    pattern = f"%{_escape_like(q)}%"
     if namespace:
         rows = conn.execute(
-            "SELECT * FROM memories WHERE namespace=? AND (content LIKE ? OR title LIKE ?) "
+            "SELECT * FROM memories WHERE namespace=? AND (content LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\') "
             "ORDER BY updated_at DESC LIMIT ?",
             (namespace, pattern, pattern, limit),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT * FROM memories WHERE content LIKE ? OR title LIKE ? "
+            "SELECT * FROM memories WHERE content LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\' "
             "ORDER BY updated_at DESC LIMIT ?",
             (pattern, pattern, limit),
         ).fetchall()

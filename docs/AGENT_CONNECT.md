@@ -11,8 +11,8 @@ of each member running a local MCP server + syncing, one admin hosts a single in
 
 > **Pro solo?** Agent-connect (direct writes to a cloud instance via `/api/remember` or
 > `/mcp`) requires a **Team** license. If you're a Pro member hosting on Railway, your
-> agents run locally and sync to your Railway instance via cloud sync — activate the same
-> Pro key on each local instance, then set `ENGRAPHIS_RELAY_URL` to your Railway deployment URL. See
+> agents run locally and sync through your Railway instance with a scoped user token;
+> never distribute the account license key. Set `ENGRAPHIS_RELAY_URL` to your deployment URL. See
 > [HOSTING_RAILWAY.md](./HOSTING_RAILWAY.md) for the Pro solo path.
 
 ## How it works
@@ -20,10 +20,11 @@ of each member running a local MCP server + syncing, one admin hosts a single in
 1. **Admin** deploys one instance and activates Team before first-admin setup: load a
    purchased key with `ENGRAPHIS_LICENSE_KEY`, or start a Team trial and open its emailed
    confirmation link.
-2. **Admin** creates the first account, then invites members (email + password + role).
-   Each active user consumes a seat.
-3. **Member** signs in at the dashboard URL (e.g. `https://memory.example.com/`) with
-   email + password — no key and no local install. If the license later lapses, the
+2. **Admin** creates the first account, then sends a pending invitation with email and
+   role. It reserves a seat for 72 hours; the admin never chooses the recipient's password.
+3. **Member** opens the scanner-safe invitation and sets their own password. Acceptance
+   atomically creates the user. Expiry or revocation releases the reserved seat. The
+   member then signs in at the dashboard URL — no key and no local install. If the license later lapses, the
    authentication wall remains in place and existing users can still sign in.
 4. **Member** opens **Settings → Connect your agent → Create token** and copies the
    one-time bearer token.
@@ -33,7 +34,10 @@ of each member running a local MCP server + syncing, one admin hosts a single in
 
 Agents authenticate with a **per-user bearer token** (`Authorization: Bearer <token>`),
 minted from the dashboard. The token is bound to the member: their role, their personal
-folders, and their seat. Disabling the member instantly invalidates their token.
+folders, and their seat. New tokens expire after 90 days; the hosted server stores only
+their hashes, and each token carries explicit scopes. A client that saves a token for
+recurring sync must retain the raw bearer locally as an owner-only credential. Disabling
+or deleting the member instantly invalidates every session and token.
 
 Viewer tokens can call read routes, but write/governance routes return `403`;
 `/api/remember` and `/mcp` require the `member` or `admin` role.
@@ -42,7 +46,7 @@ Token management (requires a browser session):
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/auth/token` `{label}` | Mint a token (raw token returned **once**) |
+| `POST` | `/api/auth/token` `{label, scopes?}` | Mint a 90-day token (raw token returned **once**) |
 | `GET`  | `/api/auth/tokens` | List your tokens (never includes the raw token) |
 | `DELETE` | `/api/auth/token/{id}` | Revoke one of your tokens |
 | `GET`  | `/api/auth/connect-info` | Verify a token + discover the API base / snippet |
