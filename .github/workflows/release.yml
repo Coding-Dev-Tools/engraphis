@@ -131,7 +131,7 @@ jobs:
           npm install
           npx playwright install --with-deps chromium
       - name: Playwright desktop/mobile, keyboard, CSP, console, and axe checks
-        run: npm run test:e2e
+        run: npx playwright test
 
   docker-smoke:
     name: Production image release gate

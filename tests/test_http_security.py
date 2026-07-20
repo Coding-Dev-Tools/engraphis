@@ -31,9 +31,9 @@ def _client(monkeypatch, *, csp=None, hsts=None):
 
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard():
-        # The real dashboard is an inline single-file app: inline <script>/<style> and
+        # The real dashboard is fully externalized: no inline <script>/<style> or
         # on* / style="" attributes. This route stands in for it.
-        return "<!DOCTYPE html><html><body onload='boot()'>hi</body></html>"
+        return "<!DOCTYPE html><html><body>hi</body></html>"
 
     http_security.install(app)
     http_security.install(app)  # idempotent
@@ -53,15 +53,14 @@ def test_baseline_headers_apply_without_hsts_on_plain_http(monkeypatch):
     assert "Strict-Transport-Security" not in response.headers
 
 
-def test_inline_dashboard_html_gets_a_policy_that_permits_inline(monkeypatch):
-    """The single-file dashboard's inline scripts/styles/handlers must be allowed, or the
-    strict API policy renders it a blank, unstyled page. text/html only."""
+def test_dashboard_html_gets_the_strict_externalized_policy(monkeypatch):
+    """The externalized dashboard has no inline scripts/styles/handlers, so
+    text/html gets the same strict policy as the JSON API. No unsafe-inline."""
     csp = _client(monkeypatch).get("/dashboard").headers["Content-Security-Policy"]
-    assert "script-src 'self' 'unsafe-inline'" in csp
-    assert "script-src-attr 'unsafe-inline'" in csp
-    assert "style-src 'self' 'unsafe-inline'" in csp
-    assert "style-src-attr 'unsafe-inline'" in csp
-    # The high-value directives survive the relaxation.
+    assert "unsafe-inline" not in csp
+    assert "script-src-attr 'none'" in csp
+    assert "style-src-attr 'none'" in csp
+    # The high-value directives survive.
     assert "frame-ancestors 'none'" in csp
     assert "object-src 'none'" in csp
     assert "base-uri 'self'" in csp

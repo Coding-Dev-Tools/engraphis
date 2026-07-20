@@ -180,5 +180,6 @@ second issuer.
   non-bypassable.
 
 ## Supported versions
-Pre-1.0: security fixes land on `main` and latest published release. Pin a version and
-watch releases for advisories.
+1.0.x is the supported line: security fixes land on `main` and the latest published 1.0.x
+release. Pin a version and watch releases for advisories. Pre-1.0 (0.9.x) releases are no
+longer maintained.

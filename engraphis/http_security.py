@@ -18,12 +18,14 @@ Design notes
   proto, which is what Railway presents.
 * **Two policies, chosen by content type.** The JSON API and every error short-circuit
   get the strict :data:`DEFAULT_CSP` — they render no markup, so an ``unsafe-inline``
-  allowance would buy an attacker nothing there. The dashboard itself is deliberately an
-  inline single-file app (inline ``<script>``/``<style>``, ``style=""`` and ``on*``
-  handlers), so ``text/html`` responses get :data:`DASHBOARD_CSP`, which permits inline
-  while keeping the high-value directives (``frame-ancestors``/``object-src``/``base-uri``/
-  ``form-action``). DOMPurify remains the sanitization boundary for ingested memory
-  content. An explicit ``ENGRAPHIS_CSP`` override still wins wholesale, for both.
+  allowance would buy an attacker nothing there. The dashboard assets are fully
+  externalized (``dashboard.js``, ``dashboard.css``, vendored libs loaded via
+  ``<script src>`` / ``<link rel="stylesheet">``), with event handlers delegated
+  through ``data-on*`` attributes — so ``text/html`` responses get
+  :data:`DASHBOARD_CSP`, which is identical to :data:`DEFAULT_CSP` (no
+  ``unsafe-inline``). DOMPurify remains the sanitization boundary for ingested
+  memory content. An explicit ``ENGRAPHIS_CSP`` override still wins wholesale,
+  for both.
 """
 from __future__ import annotations
 
@@ -55,18 +57,18 @@ DEFAULT_CSP = "; ".join([
     "form-action 'self'",
 ])
 
-#: Content-Security-Policy for the inline single-file dashboard HTML. Identical to
-#: :data:`DEFAULT_CSP` except it permits inline scripts, styles, and event-handler /
-#: ``style=""`` attributes — which the dashboard relies on — while keeping every
-#: high-value directive (no framing, no plugins, no ``<base>`` rewrite, forms post back
-#: only to us). Applied to ``text/html`` responses only; see :func:`install`.
+#: Content-Security-Policy for the externalized dashboard HTML. Identical to
+#: :data:`DEFAULT_CSP` — the dashboard assets are now fully externalized
+#: (``dashboard.js``, ``dashboard.css``, vendored libs) with no inline scripts,
+#: styles, or event-handler attributes, so no ``unsafe-inline`` is needed.
+#: Applied to ``text/html`` responses only; see :func:`install`.
 DASHBOARD_CSP = "; ".join([
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline'",
-    "script-src-attr 'unsafe-inline'",
+    "script-src 'self'",
+    "script-src-attr 'none'",
     "worker-src 'self'",
-    "style-src 'self' 'unsafe-inline'",
-    "style-src-attr 'unsafe-inline'",
+    "style-src 'self'",
+    "style-src-attr 'none'",
     "font-src 'self'",
     "img-src 'self' data:",
     "connect-src 'self'",
@@ -110,9 +112,9 @@ def install(app) -> None:
 
     csp_override = os.environ.get("ENGRAPHIS_CSP")
     csp = DEFAULT_CSP if csp_override is None else csp_override.strip()
-    # The dashboard HTML is an inline single-file app and needs a policy that permits
-    # inline. Non-HTML responses (JSON API, error short-circuits) keep the strict policy.
-    # An explicit ENGRAPHIS_CSP override applies to both, unchanged.
+    # The dashboard HTML gets DASHBOARD_CSP (currently identical to DEFAULT_CSP since
+    # all assets are externalized). Non-HTML responses (JSON API, error short-circuits)
+    # get DEFAULT_CSP. An explicit ENGRAPHIS_CSP override applies to both, unchanged.
     html_csp = DASHBOARD_CSP if csp_override is None else csp
     hsts = os.environ.get("ENGRAPHIS_HSTS")
     hsts = DEFAULT_HSTS if hsts is None else hsts.strip()

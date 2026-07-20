@@ -77,7 +77,7 @@ jobs:
           npm install
           npx playwright install --with-deps chromium
       - name: Playwright desktop/mobile, keyboard, CSP, console, and axe checks
-        run: npm run test:e2e
+        run: npx playwright test
 
   docker-gate:
     # Keeps CI fast: the docker job always runs on push to main, but on PRs only

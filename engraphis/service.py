@@ -217,6 +217,14 @@ def _clean_keywords(value: Any) -> list[str]:
 # happen before the caller's value ever reaches the engine — see _clean_metadata below.
 _GRAPH_HINT_KEYS = ("entities", "relations", "structured_extraction")
 
+# Keys the /llm/activity audit view (routes/v2_api.py) trusts as authentic evidence that
+# a memory's content was sent to an LLM provider (``llm_extraction``) or consolidated
+# (``structured_consolidation``). Both are produced ONLY inside the engine/consolidator
+# from a real extractor's output (backends/extractor.py, core/consolidate.py), never from
+# a caller-supplied metadata dict — so, exactly like _GRAPH_HINT_KEYS above, a direct
+# remember()/ingest() caller could otherwise set them itself and forge that audit trail.
+_ACTIVITY_HINT_KEYS = ("llm_extraction", "structured_consolidation")
+
 
 def _clean_metadata(value: Any) -> dict:
     if not value:
@@ -251,6 +259,16 @@ def _clean_metadata(value: Any) -> dict:
         hints = {k: value[k] for k in _GRAPH_HINT_KEYS if k in value}
         value = {k: v for k, v in value.items() if k not in _GRAPH_HINT_KEYS}
         value = {**value, "client_supplied_graph": {**hints, "source": "client_supplied"}}
+    if any(k in value for k in _ACTIVITY_HINT_KEYS):
+        # Forged LLM-activity provenance (same class as the graph keys above): re-home the
+        # caller's values — preserved, not dropped — under an honest client-supplied label
+        # so they can never masquerade as trusted extraction/consolidation activity in
+        # /llm/activity. The genuine path is unaffected: real llm_extraction /
+        # structured_consolidation metadata is computed inside the engine/consolidator
+        # after this validation runs, never from this caller-supplied argument.
+        acts = {k: value[k] for k in _ACTIVITY_HINT_KEYS if k in value}
+        value = {k: v for k, v in value.items() if k not in _ACTIVITY_HINT_KEYS}
+        value = {**value, "client_supplied_activity": {**acts, "source": "client_supplied"}}
     return value
 
 
