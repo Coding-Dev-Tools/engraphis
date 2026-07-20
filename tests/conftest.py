@@ -1,7 +1,17 @@
+import os
+
 import pytest
 from engraphis import cloud_license, licensing
 from engraphis.config import settings
 from engraphis.inspector import license_registry
+
+# A developer's real ENGRAPHIS_LICENSE_KEY — loaded into os.environ from a gitignored .env by
+# engraphis.config's load_dotenv at the import above — must never leak a paid license into the
+# hermetic suite: an active Team key flips inspector /api/* to auth-required and 401s every
+# unauthenticated test. Strip it ONCE here at collection, before any test runs, so tests that
+# need a key still set their own via monkeypatch.setenv (function-scoped, restored per test)
+# without this clobbering them.
+os.environ.pop("ENGRAPHIS_LICENSE_KEY", None)
 
 # Opt the licensing module into honoring ENGRAPHIS_LICENSE_PUBKEY, which is otherwise
 # dead in a shipped process. Set at import time so it covers both collection and

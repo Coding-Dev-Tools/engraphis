@@ -1107,8 +1107,7 @@ def test_team_invite_relay_sends_with_valid_team_key(monkeypatch):
 def test_team_invite_relay_rejects_non_team_key():
     c = _app()
     r = c.post("/license/v1/team-invite",
-               json={"key": _key(plan="pro"), "to": "new@corp.com",
-                     "invite_url": "https://team.customer.test/#invite_token=test-secret"})
+               json={"key": _key(plan="pro"), "to": "new@corp.com"})
     assert r.status_code == 402 and "team" in r.json()["error"].lower()
 
 
@@ -1119,17 +1118,14 @@ def test_team_invite_relay_rejects_revoked_key(monkeypatch):
     key = _key(plan="team")
     reg.record_issued(key)                      # must be a known row for revoke to apply
     reg.revoke(parse_key(key).key_id)
-    r = c.post("/license/v1/team-invite",
-               json={"key": key, "to": "new@corp.com",
-                     "invite_url": "https://team.customer.test/#invite_token=test-secret"})
+    r = c.post("/license/v1/team-invite", json={"key": key, "to": "new@corp.com"})
     assert r.status_code == 402
 
 
 def test_team_invite_relay_rejects_invalid_recipient_email():
     c = _app()
     r = c.post("/license/v1/team-invite",
-               json={"key": _key(plan="team"), "to": "not-an-email",
-                     "invite_url": "https://team.customer.test/#invite_token=test-secret"})
+               json={"key": _key(plan="team"), "to": "not-an-email"})
     assert r.status_code == 400
 
 
@@ -1137,29 +1133,8 @@ def test_team_invite_relay_rejects_malformed_invited_by():
     c = _app()
     r = c.post("/license/v1/team-invite",
                json={"key": _key(plan="team"), "to": "new@corp.com",
-                     "invited_by": "garbage",
-                     "invite_url": "https://team.customer.test/#invite_token=test-secret"})
+                     "invited_by": "garbage"})
     assert r.status_code == 400
-
-
-def test_team_invite_relay_rejects_missing_invite_url(monkeypatch):
-    from engraphis.inspector import license_cloud
-    from engraphis.inspector import webhooks as WH
-    queued = []
-    monkeypatch.setattr(WH, "queue_team_invite_email", lambda *a, **k: queued.append(1))
-    monkeypatch.setattr(license_cloud, "_invite_daily_cap", lambda: 1)
-    c = _app()
-    key = _key(plan="team")
-    r = c.post("/license/v1/team-invite",
-               json={"key": key, "to": "new@corp.com", "role": "member"})
-    assert r.status_code == 400
-    assert "invite_token" in r.json()["error"]
-    assert queued == []
-    # the daily cap was not consumed by the rejected request
-    ok = c.post("/license/v1/team-invite",
-                json={"key": key, "to": "new@corp.com", "role": "member",
-                      "invite_url": "https://team.customer.test/#invite_token=ok"})
-    assert ok.status_code == 200
 
 
 @pytest.mark.parametrize("field,value", [
@@ -1176,9 +1151,7 @@ def test_team_invite_relay_rejects_missing_invite_url(monkeypatch):
     ("invite_url", "https://team.example/#invite_token=once%2Dencoded"),
 ])
 def test_team_invite_relay_rejects_hostile_fields(field, value):
-    body = {"key": _key(plan="team"), "to": "new@corp.com",
-            "invite_url": "https://team.customer.test/#invite_token=test-secret",
-            field: value}
+    body = {"key": _key(plan="team"), "to": "new@corp.com", field: value}
     assert _app().post("/license/v1/team-invite", json=body).status_code == 400
 
 
@@ -1208,19 +1181,14 @@ def test_team_invite_relay_enforces_daily_cap_per_key(monkeypatch):
     c = _app()
     key = _key(plan="team")
     for _ in range(2):
-        r = c.post("/license/v1/team-invite",
-                   json={"key": key, "to": "new@corp.com",
-                         "invite_url": "https://team.customer.test/#invite_token=cap-secret"})
+        r = c.post("/license/v1/team-invite", json={"key": key, "to": "new@corp.com"})
         assert r.status_code == 200
-    over = c.post("/license/v1/team-invite",
-                  json={"key": key, "to": "new@corp.com",
-                        "invite_url": "https://team.customer.test/#invite_token=cap-secret"})
+    over = c.post("/license/v1/team-invite", json={"key": key, "to": "new@corp.com"})
     assert over.status_code == 429 and "limit" in over.json()["error"].lower()
     # a DIFFERENT key is unaffected by another key's cap
     other = c.post("/license/v1/team-invite",
                    json={"key": _key(plan="team", email="other@corp.com"),
-                         "to": "new@corp.com",
-                         "invite_url": "https://team.customer.test/#invite_token=cap-secret"})
+                         "to": "new@corp.com"})
     assert other.status_code == 200
 
 
@@ -1236,15 +1204,13 @@ def test_team_invite_relay_surfaces_queue_failure_as_502(monkeypatch):
     c = _app()
     key = _key(plan="team")
     r = c.post("/license/v1/team-invite",
-               json={"key": key, "to": "new@corp.com",
-                     "invite_url": "https://team.customer.test/#invite_token=q-secret"})
+               json={"key": key, "to": "new@corp.com"})
     assert r.status_code == 502
     assert "RESEND_SECRET_123" not in r.text and "private" not in r.text
     # A failed durable enqueue does not consume the accepted-message cap.
     monkeypatch.setattr(WH, "queue_team_invite_email", lambda *a, **k: None)
     retry = c.post("/license/v1/team-invite",
-                   json={"key": key, "to": "new@corp.com",
-                         "invite_url": "https://team.customer.test/#invite_token=q-secret"})
+                   json={"key": key, "to": "new@corp.com"})
     assert retry.status_code == 200
 
 
@@ -1257,8 +1223,7 @@ def test_team_invite_request_retry_reuses_one_durable_outbox_operation(monkeypat
     ):
         monkeypatch.delenv(name, raising=False)
     c = _app()
-    body = {"key": _key(plan="team"), "to": "new@corp.com", "role": "member",
-            "invite_url": "https://team.customer.test/#invite_token=idem-secret"}
+    body = {"key": _key(plan="team"), "to": "new@corp.com", "role": "member"}
 
     first = c.post("/license/v1/team-invite", json=body)
     retry = c.post("/license/v1/team-invite", json=body)
@@ -1289,8 +1254,7 @@ def test_team_invite_refund_failure_keeps_provider_error_sanitized(monkeypatch):
         lambda *a: (_ for _ in ()).throw(OSError("C:/private/relay.db")))
     response = _app().post(
         "/license/v1/team-invite",
-        json={"key": _key(plan="team"), "to": "new@corp.com",
-              "invite_url": "https://team.customer.test/#invite_token=ref-secret"})
+        json={"key": _key(plan="team"), "to": "new@corp.com"})
     assert response.status_code == 502
     assert "SECRET" not in response.text and "private" not in response.text
 

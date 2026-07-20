@@ -457,7 +457,6 @@ def revoke(key_id: str, *, db_path: Optional[str] = None) -> bool:
         conn.close()
 
 
-
 def revoke_superseded(subscription_id: str, keep_key_id: str, *,
                       db_path: Optional[str] = None) -> int:
     """Revoke older active keys after a replacement key is durably registered.
