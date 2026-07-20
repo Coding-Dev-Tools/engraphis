@@ -57,26 +57,9 @@ DEFAULT_CSP = "; ".join([
     "form-action 'self'",
 ])
 
-#: Content-Security-Policy for the externalized dashboard HTML. Identical to
-#: :data:`DEFAULT_CSP` — the dashboard assets are now fully externalized
-#: (``dashboard.js``, ``dashboard.css``, vendored libs) with no inline scripts,
-#: styles, or event-handler attributes, so no ``unsafe-inline`` is needed.
-#: Applied to ``text/html`` responses only; see :func:`install`.
-DASHBOARD_CSP = "; ".join([
-    "default-src 'self'",
-    "script-src 'self'",
-    "script-src-attr 'none'",
-    "worker-src 'self'",
-    "style-src 'self'",
-    "style-src-attr 'none'",
-    "font-src 'self'",
-    "img-src 'self' data:",
-    "connect-src 'self'",
-    "frame-ancestors 'none'",
-    "object-src 'none'",
-    "base-uri 'self'",
-    "form-action 'self'",
-])
+#: Alias for backward compatibility. The dashboard is now fully externalized
+#: (no inline scripts/styles/handlers), so the same strict policy applies everywhere.
+DASHBOARD_CSP = DEFAULT_CSP
 
 #: 1 year, and explicitly NOT preload — a preload commitment is the operator's call to
 #: make for their own domain, not something a library should make on their behalf.
@@ -112,10 +95,7 @@ def install(app) -> None:
 
     csp_override = os.environ.get("ENGRAPHIS_CSP")
     csp = DEFAULT_CSP if csp_override is None else csp_override.strip()
-    # The dashboard HTML gets DASHBOARD_CSP (currently identical to DEFAULT_CSP since
-    # all assets are externalized). Non-HTML responses (JSON API, error short-circuits)
-    # get DEFAULT_CSP. An explicit ENGRAPHIS_CSP override applies to both, unchanged.
-    html_csp = DASHBOARD_CSP if csp_override is None else csp
+
     hsts = os.environ.get("ENGRAPHIS_HSTS")
     hsts = DEFAULT_HSTS if hsts is None else hsts.strip()
 
@@ -140,12 +120,7 @@ def install(app) -> None:
         headers.setdefault("Permissions-Policy",
                            "geolocation=(), microphone=(), camera=(), payment=()")
         if csp:
-            content_type = (
-                (headers.get("content-type") or "").split(";", 1)[0].strip().lower())
-            headers.setdefault(
-                "Content-Security-Policy",
-                html_csp if content_type == "text/html" else csp,
-            )
+            headers.setdefault("Content-Security-Policy", csp)
         if hsts and wants_https(request):
             headers.setdefault("Strict-Transport-Security", hsts)
         return response
