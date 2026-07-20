@@ -59,10 +59,13 @@ def create_app() -> FastAPI:
     # which is why a naive app.mount('/mcp', mcp.streamable_http_app()) raises
     # 'Task group is not initialized'). The endpoint is built at '/' inside the sub-app
     # so mounting under /mcp lines up (Starlette strips the mount prefix).
+    import importlib.util as _importlib_util
     import contextlib as _contextlib
     _mcp_asgi = None
     _mcp_mgr = None
     try:
+        if _importlib_util.find_spec("mcp") is None:
+            raise RuntimeError("mcp package is not installed")
         import engraphis.mcp_server as _mcp_mod
         from mcp.server.transport_security import TransportSecuritySettings
         # The dashboard's own _auth_gate already enforces Team-license + member-token on
@@ -100,6 +103,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title="Engraphis Dashboard", docs_url="/api/docs",
                   openapi_url="/api/openapi.json", lifespan=_lifespan)
+    app.state.mcp_over_http = _mcp_asgi is not None
     svc = MemoryService.create(
         settings.db_path, embed_model=settings.embed_model,
         embed_dim=settings.embed_dim or 256,
@@ -175,6 +179,7 @@ def create_app() -> FastAPI:
         # /api/remember. The MCP tools then reuse the dashboard's shared MemoryService.
         if path == "/mcp" or path.startswith("/mcp/"):
             from engraphis.routes.v2_team import _COOKIE
+            from engraphis.inspector.auth import role_at_least
             if not (team_enabled and auth_store is not None
                     and licensing.has_feature("team")):
                 return JSONResponse({"error": "a Team license is required to connect agents",
@@ -187,6 +192,9 @@ def create_app() -> FastAPI:
                 return JSONResponse({"error": "authentication required", "auth": "team"},
                                     status_code=401)
             request.state.user = mu
+            if not role_at_least(mu["role"], "member"):
+                return JSONResponse({"error": "role member required", "auth": "team"},
+                                    status_code=403)
             set_current_user(mu)
             return await call_next(request)
         # Service-account bearer token bypass — skips team auth entirely,

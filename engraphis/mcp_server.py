@@ -754,19 +754,17 @@ def engraphis_answer(
     Every claim is cited with [n] linking to the source memory. The deterministic path never introduces claims not in the sources.
     """
     try:
-        svc = service()
-        result = svc.grounded_recall(query=query, workspace=workspace, repo=repo, k=k,
-                                     min_support=min_support)
-        answer = result.get("answer", {})
+        result = service().grounded_recall(query=query, workspace=workspace, repo=repo, k=k,
+                                           min_support=min_support)
         return _ok({
-            "query": query,
-            "answer": answer.get("answer", ""),
-            "grounded": answer.get("grounded", False),
-            "abstained": answer.get("abstained", True),
-            "reason": answer.get("reason", ""),
-            "support": answer.get("support", 0.0),
-            "synthesized": answer.get("synthesized", False),
-            "citations": answer.get("citations", []),
+            "query": result.get("query", query),
+            "answer": result.get("answer", ""),
+            "grounded": result.get("grounded", False),
+            "abstained": result.get("abstained", True),
+            "reason": result.get("reason", ""),
+            "support": result.get("support", 0.0),
+            "synthesized": False,
+            "citations": result.get("citations", []),
         })
     except Exception as exc:  # noqa: BLE001
         return _err(exc)

@@ -10,6 +10,7 @@ These tests speak the streamable-http JSON-RPC protocol directly over the TestCl
 real socket needed). The dashboard app's lifespan must run (TestClient used as a context
 manager) so the MCP session manager's task group initializes.
 """
+import json
 import time
 
 import pytest
@@ -123,6 +124,29 @@ def test_mcp_requires_team_license_402(monkeypatch, tmp_path):
         assert r.json()["feature"] == "team"
 
 
+
+def test_mcp_rejects_viewer_token(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path, key=_team_key()) as c:
+        _setup_admin(c)
+        member = c.post("/api/auth/users", json={"email": "viewer@x.co", "name": "Viewer",
+                         "password": "viewerpass1", "role": "member"}).json()["user"]
+        c.post("/api/auth/logout")
+        assert c.post("/api/auth/login", json={"email": "viewer@x.co",
+                      "password": "viewerpass1"}).status_code == 200
+        token = _mint(c, label="viewer-agent")
+        c.post("/api/auth/logout")
+        c.post("/api/auth/login", json={"email": "admin@x.co",
+                                        "password": "supersecret1"})
+        assert c.post("/api/auth/users/update",
+                      json={"user_id": member["id"], "role": "viewer"}).status_code == 200
+        c.cookies.clear()
+        r = c.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                  "params": {"protocolVersion": _PROTO, "capabilities": {},
+                             "clientInfo": {"name": "t", "version": "1"}}},
+                   headers=_h(token))
+        assert r.status_code == 403
+
+
 def test_mcp_handshake_lists_engraphis_tools(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path, key=_team_key()) as c:
         _setup_admin(c)
@@ -151,6 +175,23 @@ def test_mcp_write_shares_the_dashboard_store(monkeypatch, tmp_path):
         assert rec.status_code == 200
         assert any("MCP" in (m.get("content") or "")
                    for m in rec.json()["memories"])
+
+
+def test_mcp_answer_returns_grounded_result(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path, key=_team_key()) as c:
+        _setup_admin(c)
+        token = _mint(c)
+        c.cookies.clear()
+        h = _init(c, token)
+        r = _rpc(c, h, "tools/call",
+                 {"name": "engraphis_answer",
+                  "arguments": {"query": "Which database does the team use?",
+                                "workspace": "demo"}}, id=11)
+        assert "Postgres" in r.text
+        event = json.loads(r.text.split("data: ", 1)[1])
+        payload = json.loads(event["result"]["content"][0]["text"])
+        assert payload["grounded"] is True
+
 
 def test_connect_info_reports_mcp_available(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path, key=_team_key()) as c:

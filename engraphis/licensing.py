@@ -389,6 +389,10 @@ class License:
     enforce: str = ""
     #: License-server URL baked into the key at issuance — also signed/unforgeable.
     cloud_url: str = ""
+    #: Optional vendor-side identifiers used only for server revocation lookups. They are
+    #: signed into auto-issued keys so refund webhooks can revoke exactly the affected key.
+    subscription_id: str = ""
+    order_id: str = ""
 
     @classmethod
     def free(cls) -> "License":
@@ -524,6 +528,8 @@ def parse_key(key: str, *, now: Optional[float] = None) -> License:
         is_trial=bool(payload.get("trial")),
         enforce=str(payload.get("enforce", "") or "").strip().lower(),
         cloud_url=str(payload.get("cloud_url", "") or "").strip().rstrip("/"),
+        subscription_id=str(payload.get("subscription_id", "") or "").strip()[:128],
+        order_id=str(payload.get("order_id", "") or "").strip()[:128],
     )
 
 

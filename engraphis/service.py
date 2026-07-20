@@ -1578,8 +1578,18 @@ class MemoryService:
                 frontier.append(nxt)
         if len(members) == 1:
             return [rec]
+
+        def depth(r, stack=None):
+            stack = stack or set()
+            if r.id in stack:
+                return 0
+            prev = [members[p] for p in predecessors(r) if p in members]
+            if not prev:
+                return 0
+            return 1 + max(depth(p, stack | {r.id}) for p in prev)
+
         return sorted(members.values(),
-                      key=lambda r: (r.valid_from or r.ingested_at or 0, r.id))
+                      key=lambda r: (depth(r), r.valid_from or r.ingested_at or 0, r.id))
 
     def _successor_of(self, memory_id: str, seen: set):
         escaped = memory_id.replace("%", "\\%").replace("_", "\\_")

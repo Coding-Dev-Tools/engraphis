@@ -128,7 +128,10 @@ class TokenReq(BaseModel):
 
 
 def _enabled() -> bool:
-    return os.environ.get("ENGRAPHIS_TEAM_MODE", "").lower() in {"1", "true", "yes", "on"}
+    raw = os.environ.get("ENGRAPHIS_TEAM_MODE")
+    if raw is not None:
+        return raw.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(settings.team_mode)
 
 
 def _users_db_path(db_path: str) -> str:
@@ -428,11 +431,7 @@ def attach(app: FastAPI, service):
         base = os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip().rstrip("/")
         if not base:
             base = str(request.base_url).rstrip("/")
-        try:  # /mcp is mounted only when the mcp extra is installed (see dashboard_app.create_app)
-            import engraphis.mcp_server  # noqa: F401
-            mcp_on = True
-        except Exception:
-            mcp_on = False
+        mcp_on = bool(getattr(request.app.state, "mcp_over_http", False))
         return {
             "user": {"id": u["id"], "email": u["email"], "name": u.get("name", ""),
                      "role": u["role"]},

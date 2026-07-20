@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS issued_licenses (
     seats      INTEGER,
     issued     REAL,
     expires    REAL,
+    subscription_id TEXT,
+    order_id   TEXT,
     status     TEXT NOT NULL DEFAULT 'active',   -- 'active' | 'revoked'
     created_at REAL NOT NULL,
     revoked_at REAL
@@ -87,6 +89,18 @@ def connect(db_path: Optional[str] = None) -> sqlite3.Connection:
         conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(_SCHEMA)
     conn.executescript(_REG_SCHEMA)
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(issued_licenses)").fetchall()}
+    if "subscription_id" not in columns:
+        conn.execute("ALTER TABLE issued_licenses ADD COLUMN subscription_id TEXT")
+    if "order_id" not in columns:
+        conn.execute("ALTER TABLE issued_licenses ADD COLUMN order_id TEXT")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_issued_subscription "
+        "ON issued_licenses(subscription_id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_issued_order "
+        "ON issued_licenses(order_id)")
     return conn
 
 
@@ -104,19 +118,22 @@ def record_issued(key: str, *, db_path: Optional[str] = None) -> str:
     """Record a freshly issued key in the registry (idempotent). Returns its key_id.
 
     Called from the fulfillment path (:func:`webhooks.issue_key`). Never raises on a
-    duplicate — re-issuing the same key just refreshes the row."""
+    duplicate, and never reactivates a revoked key.
+    """
     lic = parse_key(key)
     conn = connect(db_path)
     try:
         conn.execute(
             "INSERT INTO issued_licenses "
-            "  (key_id, email, plan, seats, issued, expires, status, created_at) "
-            "VALUES (?,?,?,?,?,?, 'active', ?) "
+            "  (key_id, email, plan, seats, issued, expires, subscription_id, order_id, "
+            "   status, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?, 'active', ?) "
             "ON CONFLICT(key_id) DO UPDATE SET "
             "  email=excluded.email, plan=excluded.plan, seats=excluded.seats, "
-            "  issued=excluded.issued, expires=excluded.expires",
+            "  issued=excluded.issued, expires=excluded.expires, "
+            "  subscription_id=excluded.subscription_id, order_id=excluded.order_id",
             (lic.key_id, lic.email, lic.plan, lic.seats, lic.issued, lic.expires,
-             time.time()),
+             lic.subscription_id or None, lic.order_id or None, time.time()),
         )
         conn.commit()
     finally:
@@ -138,6 +155,46 @@ def revoke(key_id: str, *, db_path: Optional[str] = None) -> bool:
         )
         conn.commit()
         return cur.rowcount > 0
+    finally:
+        conn.close()
+
+def revoke_by_subscription(subscription_id: str, *, db_path: Optional[str] = None) -> int:
+    """Revoke every active key issued for a subscription. Returns keys changed.
+
+    Use this for refunds or definitive subscription revocation. Do NOT call it for an
+    ordinary cancellation-at-period-end: the signed key's expiry already honors the paid
+    period the customer bought.
+    """
+    subscription_id = (subscription_id or "").strip()[:128]
+    if not subscription_id:
+        return 0
+    conn = connect(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE issued_licenses SET status='revoked', revoked_at=? "
+            "WHERE subscription_id=? AND status!='revoked'",
+            (time.time(), subscription_id),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def revoke_by_order(order_id: str, *, db_path: Optional[str] = None) -> int:
+    """Revoke every active key issued for a Polar order. Returns keys changed."""
+    order_id = (order_id or "").strip()[:128]
+    if not order_id:
+        return 0
+    conn = connect(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE issued_licenses SET status='revoked', revoked_at=? "
+            "WHERE order_id=? AND status!='revoked'",
+            (time.time(), order_id),
+        )
+        conn.commit()
+        return cur.rowcount
     finally:
         conn.close()
 
