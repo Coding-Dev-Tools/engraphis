@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from typing import Optional
 
 import numpy as np
@@ -17,11 +18,20 @@ logger = logging.getLogger("engraphis.embedder")
 
 _model = None
 _dim: Optional[int] = None
+# Guards the lazy model load. Without this, concurrent recall calls each
+# see `_model is None`, and the forked PM2 worker tries to load the
+# 80-400 MB model N times at once — the process wedges and every
+# recall atop it times out. One lock + one load for the process lifetime.
+_lock = threading.Lock()
 
 
 def _get_model():
     global _model, _dim
-    if _model is None:
+    if _model is not None:
+        return _model
+    with _lock:
+        if _model is not None:  # double-checked: another thread won the race
+            return _model
         from sentence_transformers import SentenceTransformer
 
         logger.info("Loading embedding model: %s", settings.embed_model)
@@ -32,6 +42,19 @@ def _get_model():
         _dim = get_dimension()
         logger.info("Embedding model loaded (dim=%d)", _dim)
     return _model
+
+
+def warmup():
+    """Load the model eagerly so the first recall call isn't paid under request pressure.
+
+    Safe to call from startup; returns True on success. Never raises.
+    """
+    try:
+        _get_model()
+        return True
+    except Exception as exc:  # pragma: no cover - defensive; model may be missing
+        logger.warning("Embedder warmup failed (%s): %s", type(exc).__name__, exc)
+        return False
 
 
 def embed_dim() -> int:
