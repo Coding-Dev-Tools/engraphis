@@ -10,6 +10,8 @@ permissions:
 
 jobs:
   backup:
+    # Skip silently when production secrets are not yet configured (pre-GA repos).
+    if: ${{ secrets.ENGRAPHIS_CUSTOMER_URL != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
