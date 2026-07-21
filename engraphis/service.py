@@ -40,12 +40,7 @@ from engraphis.core.graph_scene import (
 from engraphis.core.graph_layers import normalize_graph_layer
 from engraphis.core.ids import new_id as make_id
 from engraphis.core.interfaces import Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter
-from engraphis.core.store import (
-    _dumps,
-    _loads,
-    _merge_edge_provenance,
-    normalize_entity_name,
-)
+from engraphis.core.store import _loads, _merge_edge_provenance, normalize_entity_name
 from engraphis.graphdata import build_graph_payload, empty_graph
 
 # ── validation limits (memory-poisoning / resource-exhaustion guards) ──────────
@@ -2312,9 +2307,9 @@ class MemoryService:
             )
 
         # 3) Edges: relabel workspace/repo, remapping any entity ids folded in step 2.
-        #    When a remapped source edge would collide with an existing live edge
-        #    on the unique index (workspace_id, [repo_id,] src, dst, relation, layer),
-        #    merge its evidence rows into the survivor and drop the duplicate.
+        #    When a live source edge collides with an existing live target edge (same
+        #    src/dst/relation/layer/repo), merge metadata instead of violating the
+        #    partial unique index — mirrors Store._deduplicate_live_edges().
         src_edges = [dict(x) for x in c.execute(
             "SELECT id, repo_id, src, dst, relation, layer, weight, provenance, "
             "valid_from, ingested_at, valid_to, expired_at "
@@ -2324,66 +2319,79 @@ class MemoryService:
             new_dst = entity_remap.get(ed["dst"], ed["dst"])
             new_repo = _new_repo(ed["repo_id"])
             is_live = ed["valid_to"] is None and ed["expired_at"] is None
+            target = None
             if is_live:
-                if new_repo is None:
-                    collision = c.execute(
-                        "SELECT id, weight, valid_from, ingested_at, provenance FROM edges "
-                        "WHERE workspace_id=? AND repo_id IS NULL "
-                        "AND src=? AND dst=? AND relation=? AND layer=? "
+                # Check for a live target edge with the same identity.
+                if new_repo is not None:
+                    target = c.execute(
+                        "SELECT id, weight, provenance, valid_from, ingested_at "
+                        "FROM edges WHERE workspace_id=? AND repo_id=? AND src=? "
+                        "AND dst=? AND relation=? AND layer=? "
                         "AND valid_to IS NULL AND expired_at IS NULL LIMIT 1",
-                        (wid_dst, new_src, new_dst, ed["relation"], ed["layer"]),
+                        (wid_dst, new_repo, new_src, new_dst,
+                         ed["relation"], ed["layer"]),
                     ).fetchone()
                 else:
-                    collision = c.execute(
-                        "SELECT id, weight, valid_from, ingested_at, provenance FROM edges "
-                        "WHERE workspace_id=? AND repo_id=? "
+                    target = c.execute(
+                        "SELECT id, weight, provenance, valid_from, ingested_at "
+                        "FROM edges WHERE workspace_id=? AND repo_id IS NULL "
                         "AND src=? AND dst=? AND relation=? AND layer=? "
                         "AND valid_to IS NULL AND expired_at IS NULL LIMIT 1",
-                        (wid_dst, new_repo, new_src, new_dst, ed["relation"], ed["layer"]),
+                        (wid_dst, new_src, new_dst,
+                         ed["relation"], ed["layer"]),
                     ).fetchone()
-                if collision:
-                    # Fold the source relation into the surviving live target edge,
-                    # mirroring Store._deduplicate_live_edges(): keep the stronger
-                    # weight and merge provenance so a higher manual weight or unique
-                    # audit context on the source is never silently discarded.
-                    merged_provenance = _merge_edge_provenance(
-                        [_loads(collision["provenance"], {}),
-                         _loads(ed["provenance"], {})],
-                        merged_ids=[ed["id"]],
-                    )
-                    # Keep the earliest temporal anchor so the surviving relation is
-                    # never reported as newer than it truly is, mirroring
-                    # Store._deduplicate_live_edges().
-                    valid_values = [
-                        float(v) for v in (collision["valid_from"], ed["valid_from"])
-                        if v is not None
-                    ]
-                    ingested_values = [
-                        float(v) for v in (collision["ingested_at"], ed["ingested_at"])
-                        if v is not None
-                    ]
-                    c.execute(
-                        "UPDATE edges SET weight=?, valid_from=?, ingested_at=?, "
-                        "provenance=? WHERE id=?",
-                        (
-                            max(float(collision["weight"] or 0.0),
-                                float(ed["weight"] or 0.0)),
-                            min(valid_values) if valid_values else None,
-                            min(ingested_values) if ingested_values else None,
-                            _dumps(merged_provenance), collision["id"],
-                        ),
-                    )
-                    # Re-point evidence rows onto the survivor, skipping duplicates.
-                    c.execute(
-                        "UPDATE OR IGNORE edge_supports SET edge_id=? WHERE edge_id=?",
-                        (collision["id"], ed["id"]),
-                    )
-                    c.execute("DELETE FROM edge_supports WHERE edge_id=?", (ed["id"],))
-                    c.execute("DELETE FROM edges WHERE id=?", (ed["id"],))
-                    continue
-            c.execute(
-                "UPDATE edges SET workspace_id=?, repo_id=?, src=?, dst=? WHERE id=?",
-                (wid_dst, new_repo, new_src, new_dst, ed["id"]))
+            if target:
+                # Merge: keep target as survivor, retire source edge.
+                closed_at = time.time()
+                src_prov = _loads(ed["provenance"], {})
+                tgt_prov = _loads(target["provenance"], {})
+                merged_prov = _merge_edge_provenance(
+                    [tgt_prov, src_prov], merged_ids=[ed["id"]])
+                merged_weight = max(
+                    float(ed["weight"] or 0.0),
+                    float(target["weight"] or 0.0))
+                valid_vals = [v for v in (target["valid_from"], ed["valid_from"])
+                              if v is not None]
+                ingested_vals = [v for v in
+                                 (target["ingested_at"], ed["ingested_at"])
+                                 if v is not None]
+                c.execute(
+                    "UPDATE edges SET weight=?, provenance=?, "
+                    "valid_from=?, ingested_at=? WHERE id=?",
+                    (merged_weight,
+                     json.dumps(merged_prov, ensure_ascii=False),
+                     min(valid_vals) if valid_vals else None,
+                     min(ingested_vals) if ingested_vals else None,
+                     target["id"]))
+                # Move live edge_supports from source to target, skipping any that
+                # would collide with an identical live support already on the
+                # survivor (idx_edge_support_live_unique is a partial unique index
+                # on (edge_id, memory_id, source_kind) WHERE live) — a plain UPDATE
+                # would raise IntegrityError and roll back the whole merge.
+                c.execute(
+                    "UPDATE OR IGNORE edge_supports SET edge_id=? WHERE edge_id=? "
+                    "AND valid_to IS NULL AND expired_at IS NULL",
+                    (target["id"], ed["id"]))
+                # Whatever OR IGNORE left behind is still live but attached to an
+                # edge that's about to close — soft-close it too instead of leaving
+                # orphaned live evidence on a non-live edge, mirroring how
+                # Store._deduplicate_live_edges() closes retired supports.
+                c.execute(
+                    "UPDATE edge_supports SET valid_to=?, expired_at=? "
+                    "WHERE edge_id=? AND valid_to IS NULL AND expired_at IS NULL",
+                    (closed_at, closed_at, ed["id"]))
+                # Bi-temporally close the source edge.
+                src_prov["canonical_deduplicated_into"] = target["id"]
+                c.execute(
+                    "UPDATE edges SET valid_to=?, expired_at=?, "
+                    "provenance=? WHERE id=?",
+                    (closed_at, closed_at,
+                     json.dumps(src_prov, ensure_ascii=False), ed["id"]))
+            else:
+                c.execute(
+                    "UPDATE edges SET workspace_id=?, repo_id=?, src=?, dst=? "
+                    "WHERE id=?",
+                    (wid_dst, new_repo, new_src, new_dst, ed["id"]))
 
         # 4) Memories / sessions / events: relabel workspace/repo per distinct repo_id
         #    bucket (ids, content and history are untouched).
