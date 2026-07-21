@@ -680,6 +680,7 @@ def current_license(*, refresh: bool = False) -> License:
     Never raises: a bad, revoked, expired, or currently unverifiable key degrades to the
     free tier and the reason is kept in :func:`license_error`.
     """
+    _verify_no_tampering()
     global _cached, _cache_error, _cache_recheck_at, _cache_generation
     # Fast path under the lock: a valid, unexpired cache entry is returned atomically so a
     # concurrent invalidate_cache() can't null it out between the check and the return.
@@ -933,6 +934,7 @@ def activate(key: str) -> License:
 
 
 def has_feature(feature: str) -> bool:
+    _verify_no_tampering()
     return current_license().has(feature)
 
 
@@ -949,6 +951,7 @@ def require_feature(feature: str) -> None:
 
     This is THE gate helper — every paid surface (Inspector routes, report scripts)
     funnels through here, so upgrade messaging changes in exactly one place."""
+    _verify_no_tampering()
     if not has_feature(feature):
         desc = FEATURES.get(feature, feature)
         tier = required_plan(feature)
@@ -1024,7 +1027,9 @@ def _verify_module_integrity():
     to patch the source. If no compiled extension exists (pure-python install on
     a platform without wheels), the check passes.
 
-    ``ENGRAPHIS_DEV=1`` skips the check entirely for local development.
+    There is deliberately NO env-var escape hatch (Phase 2 hardening). Dev
+    installs (pip install -e .) never build .pyd/.so, so the check passes
+    naturally without any env-var bypass.
     """
     mod = sys.modules.get(__name__)
     if mod is None:
@@ -1032,12 +1037,8 @@ def _verify_module_integrity():
     f = getattr(mod, "__file__", "")
     if not f:
         return
-    if os.environ.get("ENGRAPHIS_DEV", "").strip() in ("1", "true", "yes"):
-        return
     if not f.endswith(".py"):
-        return  # running as compiled extension — all good
-    # Running as .py — check if a compiled extension exists alongside.
-    # If it does, someone replaced the extension with editable source.
+        return
     from importlib.machinery import EXTENSION_SUFFIXES
     dirname = os.path.dirname(f)
     basename = os.path.splitext(os.path.basename(f))[0]
@@ -1048,11 +1049,49 @@ def _verify_module_integrity():
                 "extension (.pyd/.so) exists but is not being loaded — the module "
                 "may have been replaced with editable source. Reinstall Engraphis "
                 "from the official distribution (pip install --force-reinstall "
-                "engraphis). For development, set ENGRAPHIS_DEV=1."
+                "engraphis)."
             )
-    # No compiled extension found — pure-python install on a platform without
-    # compiled wheels. This is less secure (the source is plaintext and patchable),
-    # but it's the expected fallback for platforms we don't pre-compile for.
+
+
+_lock_sentinel = object()
+_LOCK_SNAPSHOT = None
+
+
+def _verify_no_tampering():
+    """Verify critical gate callables haven't been monkeypatched since import.
+
+    Skipped in test mode (``_TEST_MODE_PUBKEY_OVERRIDE=True``) so the test
+    suite can mock these freely.
+    """
+    if _TEST_MODE_PUBKEY_OVERRIDE:
+        return
+    snap = _LOCK_SNAPSHOT
+    if snap is None:
+        return
+    g = globals()
+    for name, expected in snap.items():
+        current = g.get(name, _lock_sentinel)
+        if current is _lock_sentinel or current != expected:
+            raise LicenseError(
+                "Licensing integrity violation: '%s' has been tampered with at "
+                "runtime. Reinstall Engraphis from the official distribution." % name
+            )
+
+
+def _snapshot_critical_globals():
+    global _LOCK_SNAPSHOT
+    _LOCK_SNAPSHOT = {
+        "has_feature": has_feature,
+        "require_feature": require_feature,
+        "current_license": current_license,
+        "parse_key": parse_key,
+        "ed25519_verify": ed25519_verify,
+        "vendor_public_key": vendor_public_key,
+        "vendor_public_keys": vendor_public_keys,
+    }
+
+
+_snapshot_critical_globals()
 
 
 _verify_module_integrity()

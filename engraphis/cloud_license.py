@@ -582,6 +582,7 @@ def gate(lic, key_material: str, *, base_url: Optional[str] = None) -> Tuple[boo
     an authoritative denial fails closed immediately, while a transient network failure
     may use an existing unexpired lease as offline grace. Without such a lease, failure
     to register fails closed."""
+    _verify_gate_integrity()
     base = (base_url or "").strip().rstrip("/") or cloud_url()
     if not base:
         # Online-only: no server to verify against ⇒ no offline path to paid features.
@@ -660,14 +661,16 @@ def revalidate(lic, key_material: str, *, base_url: Optional[str] = None) -> str
 
 def _verify_module_integrity():
     """Detect if this module was replaced with editable source after a compiled
-    extension was already installed (same check as licensing.py)."""
+    extension was already installed.
+
+    No env-var escape hatch — dev installs never build .pyd/.so, so the check
+    passes naturally.
+    """
     mod = sys.modules.get(__name__)
     if mod is None:
         return
     f = getattr(mod, "__file__", "")
     if not f:
-        return
-    if os.environ.get("ENGRAPHIS_DEV", "").strip() in ("1", "true", "yes"):
         return
     if not f.endswith(".py"):
         return
@@ -679,8 +682,27 @@ def _verify_module_integrity():
             raise RuntimeError(
                 "Engraphis cloud_license integrity check failed: a compiled native "
                 "extension exists but is not being loaded. Reinstall from the "
-                "official distribution. For development, set ENGRAPHIS_DEV=1."
+                "official distribution."
             )
+
+
+_lock_sentinel = object()
+_GATE_SNAPSHOT = gate
+
+
+def _verify_gate_integrity():
+    """Raise if ``gate`` has been monkeypatched since import."""
+    try:
+        from engraphis.licensing import _TEST_MODE_PUBKEY_OVERRIDE
+        if _TEST_MODE_PUBKEY_OVERRIDE:
+            return
+    except ImportError:
+        pass
+    if gate != _GATE_SNAPSHOT:
+        raise RuntimeError(
+            "Engraphis cloud_license gate has been tampered with at runtime. "
+            "Reinstall from the official distribution."
+        )
 
 
 _verify_module_integrity()
