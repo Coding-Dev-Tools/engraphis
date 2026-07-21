@@ -175,20 +175,41 @@ PLAN_FEATURES: dict = {
 DEFAULT_UPGRADE_URL = "https://buy.polar.sh/polar_cl_n6CR3ERqOus2VUhRrGrsRUqOB8yjDTeEU7p1r3CRrae"
 DEFAULT_PRO_UPGRADE_URL = DEFAULT_UPGRADE_URL
 DEFAULT_TEAM_UPGRADE_URL = DEFAULT_UPGRADE_URL
+#: Informational landing page shown instead of the live checkout until the vendor side
+#: (signer rotation, Railway env, Polar/Resend wiring) is fully live. Without this gate a
+#: free 1.0.0 launch's "Buy Pro"/"Buy Team" button hits a LIVE Polar checkout and can
+#: charge a customer before a license can actually be fulfilled.
+DEFAULT_COMING_SOON_URL = "https://engraphis.com/"
+
+
+def _paid_available() -> bool:
+    """Master switch for the free-vs-paid launch split.
+
+    False (the default) routes upgrade links to the informational coming-soon page
+    instead of the live Polar checkout, so enabling real charges is an explicit,
+    reviewed step (``ENGRAPHIS_PAID_AVAILABLE=1``) rather than an accidental default."""
+    return os.environ.get("ENGRAPHIS_PAID_AVAILABLE", "").strip().lower() in (
+        "1", "true", "yes")
 
 
 def upgrade_url(plan: Optional[str] = None) -> str:
     """The URL a user should visit to buy ``plan`` (defaults to the Pro/general link).
 
     Env-configurable and never empty: ``ENGRAPHIS_TEAM_UPGRADE_URL`` for Team,
-    ``ENGRAPHIS_PRO_UPGRADE_URL`` (or the legacy ``ENGRAPHIS_UPGRADE_URL``) for Pro."""
+    ``ENGRAPHIS_PRO_UPGRADE_URL`` (or the legacy ``ENGRAPHIS_UPGRADE_URL``) for Pro. An
+    explicit override always wins; otherwise this routes to the coming-soon page unless
+    ``ENGRAPHIS_PAID_AVAILABLE=1`` (see :func:`_paid_available`)."""
     if (plan or "").lower() == "team":
-        return (os.environ.get("ENGRAPHIS_TEAM_UPGRADE_URL", "").strip()
-                or os.environ.get("ENGRAPHIS_UPGRADE_URL", "").strip()
-                or DEFAULT_TEAM_UPGRADE_URL)
-    return (os.environ.get("ENGRAPHIS_PRO_UPGRADE_URL", "").strip()
-            or os.environ.get("ENGRAPHIS_UPGRADE_URL", "").strip()
-            or DEFAULT_PRO_UPGRADE_URL)
+        override = (os.environ.get("ENGRAPHIS_TEAM_UPGRADE_URL", "").strip()
+                    or os.environ.get("ENGRAPHIS_UPGRADE_URL", "").strip())
+        if override:
+            return override
+        return DEFAULT_TEAM_UPGRADE_URL if _paid_available() else DEFAULT_COMING_SOON_URL
+    override = (os.environ.get("ENGRAPHIS_PRO_UPGRADE_URL", "").strip()
+                or os.environ.get("ENGRAPHIS_UPGRADE_URL", "").strip())
+    if override:
+        return override
+    return DEFAULT_PRO_UPGRADE_URL if _paid_available() else DEFAULT_COMING_SOON_URL
 
 _KEY_PREFIX = "ENGR1"
 # Pinned Ed25519 verifier (32-byte public half). This pre-sale key was generated on a
@@ -982,6 +1003,12 @@ def production_warnings() -> list:
         warns.append(
             "upgrade link still points at the GitHub pricing anchor, not a real checkout. "
             "Set ENGRAPHIS_UPGRADE_URL to your checkout page URL before charging.")
+    if _paid_available() and not VENDOR_SIGNER_RELEASE_READY:
+        warns.append(
+            "ENGRAPHIS_PAID_AVAILABLE is set but VENDOR_SIGNER_RELEASE_READY is still "
+            "False — customers could be charged via the live checkout before licenses "
+            "can be issued. Complete the signer rotation ceremony before enabling paid "
+            "sales.")
     return warns
 
 

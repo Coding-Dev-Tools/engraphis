@@ -252,12 +252,18 @@ def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default).strip()
 
 def _validate_service_mode(value: str) -> str:
-    """Validate service mode against allowed values, defaulting to combined on invalid input."""
+    """Validate service mode against allowed values.
+
+    An explicitly-set invalid value exits the process rather than silently falling back
+    to "combined" — a typo'd ENGRAPHIS_SERVICE_MODE silently becoming "combined" would
+    merge the vendor and customer trust domains on a misconfigured deploy. Unset (the
+    caller's own default of "combined") is always valid and never reaches this branch."""
     normalized = (value or "").strip().lower()
     if normalized not in SERVICE_MODES:
-        print(f"[engraphis] invalid ENGRAPHIS_SERVICE_MODE '{value}', using 'combined'",
-              file=sys.stderr)
-        return "combined"
+        print(f"[engraphis] invalid ENGRAPHIS_SERVICE_MODE '{value}' "
+              f"(expected one of {', '.join(SERVICE_MODES)}); refusing to start with an "
+              f"ambiguous trust boundary.", file=sys.stderr)
+        sys.exit(1)
     return normalized
 
 
