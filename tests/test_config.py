@@ -5,6 +5,8 @@ precision win on top of hybrid retrieval) can be turned on by config
 instead of only in code. The default must stay empty so the offline/numpy-only CI path is
 unchanged (empty -> None -> IdentityReranker, no torch).
 """
+import pytest
+
 from engraphis import config
 from engraphis.config import Settings
 
@@ -103,9 +105,11 @@ def test_retired_cloud_url_override_is_canonicalized(monkeypatch):
 def test_retired_relay_url_override_is_canonicalized():
     assert config.canonicalize_relay_url(RETIRED_RELAY_URL) == config.DEFAULT_RELAY_URL
 
-def test_invalid_service_mode_falls_back_to_combined(monkeypatch):
+def test_invalid_service_mode_exits_process(monkeypatch):
+    """Invalid ENGRAPHIS_SERVICE_MODE must fail-closed (sys.exit), not silently fall back."""
     monkeypatch.setenv("ENGRAPHIS_SERVICE_MODE", "bogus")
-    assert Settings().service_mode == "combined"
+    with pytest.raises(SystemExit):
+        Settings()
 
 
 def test_valid_service_modes_accepted(monkeypatch):

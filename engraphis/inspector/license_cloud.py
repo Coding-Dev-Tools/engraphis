@@ -1086,6 +1086,10 @@ CREATE INDEX IF NOT EXISTS trial_pending_expires_idx ON trial_pending(expires_at
 #: How long a magic link stays valid. Long enough to go check an inbox, short enough
 #: that an unclicked link isn't a standing liability sitting in the DB.
 _TRIAL_TOKEN_TTL_SECONDS = 1800
+# Confirmed/claimed trial_claims rows are otherwise kept forever (no natural
+# expiry sweep touches them once confirmed_at is set), so the table grows
+# unbounded under real traffic. Mirrors the trial_pending retention sweep below.
+_TRIAL_CLAIM_RETENTION_SECONDS = 30 * 24 * 3600  # 30 days past expires_at
 
 #: How long an ALREADY-EXPIRED pending row is kept before it is swept (see the sweep in
 #: :func:`_reserve_trial`). Deleting expired rows the instant they lapse would bound the
@@ -1482,6 +1486,13 @@ _TRIAL_CONFIRM_SCRIPT_HASH = base64.b64encode(
 #: links carry the secret in a URL fragment (never sent in HTTP/access logs), clear it
 #: immediately in the browser, and submit it only in a bounded JSON body. A hash-pinned
 #: inline script is the sole executable content; no caller value is interpolated here.
+_TRIAL_JSON_KEY_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, private",
+    "Pragma": "no-cache",
+    "Referrer-Policy": "no-referrer",
+}
+
+
 _TRIAL_PAGE_HEADERS = {
     "Cache-Control": "no-store, no-cache, must-revalidate, private",
     "Pragma": "no-cache",
@@ -1676,6 +1687,12 @@ def _reserve_trial_claim(machine_id: str, email: str, plan: str,
             "DELETE FROM trial_claims WHERE confirmed_at IS NULL AND expires_at<? AND "
             "(deployment_hash=? OR machine_id=? OR email=?)",
             (now, deployment_hash, machine_id, email),
+        )
+        # Global retention sweep: bound the table's growth regardless of confirmation
+        # state. Generous window past expiry so a legitimately delayed claim still works.
+        conn.execute(
+            "DELETE FROM trial_claims WHERE expires_at < ?",
+            (now - _TRIAL_CLAIM_RETENTION_SECONDS,),
         )
         existing = conn.execute(
             "SELECT * FROM trial_claims WHERE deployment_hash=? OR machine_id=? "
@@ -1944,5 +1961,7 @@ async def claim_trial_license(claim_id: str, request: Request):
         conn.commit()
     finally:
         conn.close()
-    return {"claim_id": claim_id, "status": "ready", "ready": True,
-            "key": row["license_key"]}
+    return JSONResponse(
+        {"claim_id": claim_id, "status": "ready", "ready": True,
+         "key": row["license_key"]},
+        headers=_TRIAL_JSON_KEY_HEADERS)
