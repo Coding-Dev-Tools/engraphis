@@ -55,7 +55,7 @@ def test_customer_proxy_preserves_protocol_and_strips_ambient_secrets(monkeypatc
     assert "cookie" not in captured["headers"]
     assert "x-forwarded-for" not in captured["headers"]
     assert "x-vendor-admin" not in captured["headers"]
-    assert captured["body"] == b'{"key":"ENGR1.redacted"}'
+    assert captured["body"] == b'{"key": "ENGR1.redacted"}'
 
 
 def test_customer_proxy_redacts_upstream_network_failures(monkeypatch):
