@@ -54,7 +54,7 @@ class build_py(_build_py):
             return modules
         return [
             m for m in modules
-            if (package, m[0]) not in {
+            if (package, m[1]) not in {
                 ("engraphis", "licensing"),
                 ("engraphis", "cloud_license"),
             }
