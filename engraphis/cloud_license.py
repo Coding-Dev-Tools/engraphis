@@ -210,7 +210,7 @@ def machine_id() -> str:
 
 # ── lease token (same ENGR1-style envelope, distinct prefix) ─────────────────────────
 
-def compose_lease(payload: dict, secret: bytes) -> str:
+def compose_lease(payload: object, secret: bytes) -> str:
     """Vendor-side: sign a lease payload and bind it to its signing-key id.
 
     The payload copy keeps the caller's object immutable. A supplied, mismatched key id
