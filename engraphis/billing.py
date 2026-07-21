@@ -454,29 +454,6 @@ def _finalize_webhook(delivery_id: str, fulfillment_id: str,
     finally:
         conn.close()
 
-def _polar_subscription_id(data: dict, *, object_is_subscription: bool = False) -> str:
-    """Extract a Polar subscription id from direct or nested event data."""
-    from engraphis.inspector.webhooks import _extract_subscription_id
-    sub_id = _extract_subscription_id(data, object_is_subscription=object_is_subscription)
-    if sub_id:
-        return sub_id
-    order = data.get("order") or {}
-    if isinstance(order, dict):
-        return _extract_subscription_id(order)
-    return ""
-
-
-def _polar_order_id(data: dict) -> str:
-    """Extract a Polar order id from direct or nested event data."""
-    from engraphis.inspector.webhooks import _extract_order_id
-    order_id = _extract_order_id(data)
-    if order_id:
-        return order_id
-    order = data.get("order") or {}
-    if isinstance(order, dict):
-        return _extract_order_id(order)
-    return ""
-
 
 def _release_claims(*claim_ids: str) -> None:
     """Best-effort rollback used only while returning a retryable failure."""
@@ -507,74 +484,6 @@ def _order_id(data: dict) -> str:
     if isinstance(order, dict):
         return _extract_order_id(order)
     return ""
-
-
-def _revoke_refunded_order(data: dict, webhook_id: str) -> JSONResponse:
-    """Refunds return the money, so revoke the affected key(s) immediately."""
-    subscription_id = _polar_subscription_id(data)
-    order_id = _polar_order_id(data)
-    if not subscription_id and not order_id:
-        return JSONResponse({"status": "ignored", "reason": "missing refund target",
-                             "type": "order.refunded"}, status_code=202)
-
-    delivery_claim = "dlv:" + webhook_id
-    claim_state = claim_webhook(delivery_claim)
-    if claim_state == "fulfilled":
-        logger.info("polar webhook: duplicate refund delivery %s ignored", webhook_id)
-        return JSONResponse({"status": "duplicate", "revoked": 0}, status_code=202)
-    if claim_state == "in_flight":
-        return JSONResponse({"status": "processing", "revoked": 0}, status_code=503)
-
-    try:
-        from engraphis.inspector.license_registry import (
-            revoke_by_order, revoke_by_subscription)
-        if order_id:
-            revoked = revoke_by_order(order_id)
-            target = {"order_id": order_id}
-        else:
-            revoked = revoke_by_subscription(subscription_id)
-            target = {"subscription_id": subscription_id}
-    except Exception:  # noqa: BLE001 — force Polar to retry if durable revoke failed
-        release_webhook(delivery_claim)
-        logger.exception("polar webhook: refund revocation failed")
-        return JSONResponse({"error": "revocation failed"}, status_code=503)
-
-    complete_webhook(delivery_claim)
-    logger.warning("polar webhook: refund revoked %d license key(s) for %s",
-                   revoked, target)
-    return JSONResponse({"status": "revoked", "reason": "refund",
-                         "revoked": revoked, **target}, status_code=202)
-
-
-def _revoke_subscription_event(data: dict, webhook_id: str, *,
-                               reason: str) -> JSONResponse:
-    """Definitive subscription revocation: access should end now, not at expiry."""
-    subscription_id = _polar_subscription_id(data, object_is_subscription=True)
-    if not subscription_id:
-        return JSONResponse({"status": "ignored", "reason": "missing subscription id",
-                             "type": "subscription.revoked"}, status_code=202)
-
-    delivery_claim = "dlv:" + webhook_id
-    claim_state = claim_webhook(delivery_claim)
-    if claim_state == "fulfilled":
-        logger.info("polar webhook: duplicate revocation delivery %s ignored", webhook_id)
-        return JSONResponse({"status": "duplicate", "revoked": 0}, status_code=202)
-    if claim_state == "in_flight":
-        return JSONResponse({"status": "processing", "revoked": 0}, status_code=503)
-
-    try:
-        from engraphis.inspector.license_registry import revoke_by_subscription
-        revoked = revoke_by_subscription(subscription_id)
-    except Exception:  # noqa: BLE001 — force Polar to retry if durable revoke failed
-        release_webhook(delivery_claim)
-        logger.exception("polar webhook: subscription revocation failed")
-        return JSONResponse({"error": "revocation failed"}, status_code=503)
-
-    complete_webhook(delivery_claim)
-    logger.warning("polar webhook: %s revoked %d license key(s) for subscription %s",
-                   reason, revoked, subscription_id)
-    return JSONResponse({"status": "revoked", "reason": reason, "revoked": revoked,
-                         "subscription_id": subscription_id}, status_code=202)
 
 
 def _event_modified_at(data: dict) -> Optional[float]:
@@ -866,14 +775,9 @@ async def polar_webhook(request: Request):
     #                           and unrelated updates cannot spam replacement keys.
     # A non-trial subscription.created is a no-op: its paid key comes from order.paid, so
     # a canceled trial can never keep Pro — the short trial key just expires.
-    if event_type == "order.refunded":
-        return _revoke_refunded_order(data, webhook_id)
     if event_type in ("subscription.canceled", "subscription.cancelled"):
         return JSONResponse({"status": "ignored", "reason": "paid period honored",
                              "type": event_type}, status_code=202)
-    if event_type == "subscription.revoked":
-        return _revoke_subscription_event(data, webhook_id,
-                                          reason="subscription_revoked")
     pending_seat_baseline = None  # (sub_id, seats, event_ts); persisted after key issuance
     seat_lock_claim = ""
     if event_type == "order.paid":
@@ -898,9 +802,6 @@ async def polar_webhook(request: Request):
     elif event_type == "subscription.updated":
         status = event_status
         sub_id = str(data.get("id") or "").strip()[:128]
-        if status == "revoked":
-            return _revoke_subscription_event(data, webhook_id,
-                                              reason="subscription_revoked")
         if status != "active" or not sub_id:
             return JSONResponse({"status": "ignored", "reason": "not an active "
                                  "subscription", "type": event_type}, status_code=202)

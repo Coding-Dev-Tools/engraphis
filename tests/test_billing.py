@@ -748,19 +748,6 @@ def _registry_rows():
         conn.close()
 
 
-
-def _registry_rows():
-    from engraphis.inspector import license_registry as reg
-    conn = reg.connect()
-    try:
-        rows = conn.execute(
-            "SELECT key_id, status, subscription_id, order_id FROM issued_licenses "
-            "ORDER BY created_at").fetchall()
-        return [dict(row) for row in rows]
-    finally:
-        conn.close()
-
-
 def test_trial_subscription_issues_short_lived_key(monkeypatch):
     from engraphis.inspector import webhooks as WH
     monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
