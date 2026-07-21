@@ -914,7 +914,7 @@ async def team_invite(request: Request):
     behalf of a self-hosted Team dashboard that has none configured. 402 if *key*
     doesn't verify or lacks the ``team`` feature (:func:`license_registry.
     verify_for_feature` — the same server-side gate every other licensed feature
-    uses); 400 for a malformed recipient; 409 if a paid key tries to re-aim its invites
+    uses); 400 for a malformed recipient or a missing/invalid ``invite_url``; 409 if a
     at a different ``dashboard_url`` than the one it pinned on first use; 429 for a
     per-IP burst or past the per-key daily cap. Accepted messages are durably queued and
     retried by the vendor outbox. Trial keys never choose the link (see below), and a ``viewer``

@@ -28,7 +28,7 @@ a{color:var(--accent);text-decoration:none}button{font-family:inherit;cursor:poi
 .thought{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:8px}.thought-meta{font-size:12px;color:var(--text-dim);margin-bottom:8px;display:flex;gap:6px;align-items:center}.thought-field{margin-bottom:6px}.thought-key{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--text-dim)}.thought-val{font-size:16px;line-height:1.6;margin-top:2px}
 .graph-wrap{display:flex;gap:12px;height:calc(100vh - 120px)}.graph-canvas{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);position:relative;overflow:hidden}.graph-sidebar{width:260px;flex-shrink:0;overflow-y:auto}.graph-stats{position:absolute;top:10px;right:10px;z-index:10;font-size:12px;color:var(--text-dim);background:var(--surface2);padding:5px 10px;border-radius:var(--radius-sm);border:1px solid var(--border)}
 .force-graph-container{position:relative;width:100%;height:100%}.force-graph-container canvas{display:block;width:100%;height:100%;user-select:none;outline:none;-webkit-tap-highlight-color:transparent}.force-graph-container .clickable{cursor:pointer}.force-graph-container .grabbable{cursor:grab}.force-graph-container .grabbable:active{cursor:grabbing}
-#view-graph{max-width:1500px}.graph-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,560px);gap:14px;align-items:stretch}.graph-main{min-width:0}.graph-network{position:relative;height:600px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}.graph-controls-column{min-width:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:1fr auto;gap:12px;align-items:stretch;align-self:stretch}
+#view-graph{max-width:none}.graph-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,560px);gap:14px;align-items:stretch}.graph-main{min-width:0}.graph-network{position:relative;height:600px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}.graph-controls-column{min-width:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:1fr auto;gap:12px;align-items:stretch;align-self:stretch}
 /* The rail matches the canvas height exactly. Rather than parking that slack in one card
    as dead space, the two tall cards absorb it and hand it to their own children via
    `space-between` — the sliders and the ranked list simply breathe more. Legend keeps its
@@ -256,6 +256,13 @@ body{
 .diff-ins{border-radius:var(--radius-sm);background:var(--color-success-bg);color:var(--color-success)}
 .diff-del{border-radius:var(--radius-sm);background:var(--color-danger-bg);color:var(--color-danger);text-decoration:line-through}
 .trial-banner{margin-bottom:var(--space-3);padding:var(--space-2) var(--space-3);border:var(--rule) solid var(--color-accent-strong);border-radius:var(--radius-sm);background:var(--accent-bg);color:var(--color-text);font-size:var(--text-xs)}
+.update-banner{display:flex;align-items:center;gap:var(--space-3);margin-bottom:var(--space-3);padding:var(--space-2) var(--space-3);border:var(--rule) solid var(--color-accent-strong);border-radius:var(--radius-sm);background:var(--accent-bg);color:var(--color-text);font-size:var(--text-xs)}
+.update-banner[hidden]{display:none}
+.update-banner .ub-text{flex:1;min-width:0}
+.update-banner .ub-text code{padding:1px 5px;border-radius:var(--radius-sm);background:var(--surface2);font-family:var(--font-mono,monospace)}
+.update-banner .ub-actions{display:flex;align-items:center;gap:var(--space-2);flex-shrink:0}
+.update-banner .ub-dismiss{background:none;border:none;color:var(--color-text-dim);cursor:pointer;font-size:16px;line-height:1;padding:0 var(--space-1)}
+.update-banner .ub-dismiss:hover{color:var(--color-text)}
 .empty{padding:var(--space-6) 0;color:var(--color-text-dim);line-height:1.5;text-align:left}
 .empty .btn{margin-top:var(--space-3)}
 

@@ -194,7 +194,7 @@ def test_m2_team_invite_rate_limits_invalid_key_flood(monkeypatch):
     license_cloud._REGISTER_BUCKETS.clear()
     client = _relay_client()
     body = {"key": "ENGR1.aaaa.bbbb", "to": "x@example.com", "role": "member",
-            "invite_url": "https://team.customer.test/#invite_token=flood"}
+            "invite_url": "https://team.customer.test/#invite_token=one-time-secret"}
     statuses = [client.post("/license/v1/team-invite", json=body).status_code
                 for _ in range(5)]
     assert 429 in statuses, statuses
@@ -208,7 +208,7 @@ def test_m2_invite_and_register_share_one_burst_budget(monkeypatch):
     license_cloud._REGISTER_BUCKETS.clear()
     client = _relay_client()
     invite = {"key": "ENGR1.aaaa.bbbb", "to": "x@example.com", "role": "member",
-              "invite_url": "https://team.customer.test/#invite_token=flood"}
+              "invite_url": "https://team.customer.test/#invite_token=one-time-secret"}
     register = {"key": "ENGR1.aaaa.bbbb", "machine_id": "dev-1"}
     assert client.post("/license/v1/register", json=register).status_code != 429
     assert client.post("/license/v1/team-invite", json=invite).status_code != 429

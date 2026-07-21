@@ -10,9 +10,9 @@ This manual is written for someone who wants the full technical picture: what En
 
 There are two separate questions hiding inside "connect Kilo Code to Engraphis," and they are usually where people talk past each other:
 
-1. **Transport layer — "get the pipes connected."** This is: install the Engraphis MCP server, tell Kilo Code how to launch it, confirm the tools show up. It's a plumbing task. When it's done, Kilo Code can *see* 28 `engraphis_*` tools. Success here is binary — either the tools appear or they don't.
+1. **Transport layer — "get the pipes connected."** This is: install the Engraphis MCP server, tell Kilo Code how to launch it, confirm the tools show up. It's a plumbing task. When it's done, Kilo Code can *see* 29 `engraphis_*` tools. Success here is binary — either the tools appear or they don't.
 
-2. **Orchestration layer — "use the memory well."** This is: *when* should the agent remember vs. recall, how should memories be scoped (`workspace → repo → session`), which of the 28 tools answers which question, and how to keep the store clean over time. This is where the actual value is, and it's a discipline, not a config.
+2. **Orchestration layer — "use the memory well."** This is: *when* should the agent remember vs. recall, how should memories be scoped (`workspace → repo → session`), which of the 29 tools answers which question, and how to keep the store clean over time. This is where the actual value is, and it's a discipline, not a config.
 
 You need both. A perfect config with no discipline gives you an agent that has memory tools and never uses them correctly. Good discipline with a broken config gives you an agent that wants to remember and can't. **Section 3 is the transport layer. Sections 4–6 are the orchestration layer.** Do them in order.
 
@@ -40,7 +40,7 @@ Everything runs on your machine. The whole store is a single SQLite file. Local 
 You interact with Engraphis through three surfaces, all backed by the *same* engine (`MemoryService`), so they can never drift apart:
 
 - **The dashboard WebUI** (`engraphis-dashboard`, `http://127.0.0.1:8700`) — a visual product to see, search, and curate memory.
-- **The MCP server** (`engraphis-mcp`) — the 28 tools your coding agent calls. **This is the surface Kilo Code uses.**
+- **The MCP server** (`engraphis-mcp`) — the 29 tools your coding agent calls. **This is the surface Kilo Code uses.**
 - **The Python library** (`from engraphis.service import MemoryService`) — for direct programmatic use.
 
 ### 2.1 The five ideas that make it more than a vector store
@@ -179,7 +179,7 @@ You can also click **Approve Always** on any tool at runtime to write the same r
 
 ---
 
-## 4. The 28 tools — the orchestration surface
+## 4. The 29 tools — the orchestration surface
 
 Once connected, Kilo Code sees these. Do **not** assume only `remember`/`recall` exist — the value is in the rest. This is the full surface, grouped by what question each one answers.
 
