@@ -210,7 +210,7 @@ def test_bad_env_key_degrades_to_free_with_reason(monkeypatch):
 
 
 def test_require_feature_message_is_actionable():
-    with pytest.raises(LicenseError, match="polar.sh"):
+    with pytest.raises(LicenseError, match="engraphis.com"):
         require_feature("analytics")
 
 
@@ -238,8 +238,18 @@ def test_required_plan_maps_features_to_cheapest_tier():
     assert lic.required_plan("unknown-flag") == "team"
 
 
-def test_upgrade_url_default_is_the_polar_checkout(monkeypatch):
+def test_upgrade_url_default_is_coming_soon_until_paid_available(monkeypatch):
+    """Without ENGRAPHIS_PAID_AVAILABLE=1, upgrade_url routes to the informational page."""
     monkeypatch.delenv("ENGRAPHIS_UPGRADE_URL", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_PAID_AVAILABLE", raising=False)
+    assert lic.upgrade_url() == lic.DEFAULT_COMING_SOON_URL
+    assert "engraphis.com" in lic.upgrade_url()
+
+
+def test_upgrade_url_routes_to_polar_when_paid_available(monkeypatch):
+    """With ENGRAPHIS_PAID_AVAILABLE=1, upgrade_url routes to the live checkout."""
+    monkeypatch.delenv("ENGRAPHIS_UPGRADE_URL", raising=False)
+    monkeypatch.setenv("ENGRAPHIS_PAID_AVAILABLE", "1")
     assert lic.upgrade_url() == lic.DEFAULT_UPGRADE_URL
     assert "polar.sh" in lic.upgrade_url()
 
