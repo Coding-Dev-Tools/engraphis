@@ -202,6 +202,21 @@ def _provider_state(conn: sqlite3.Connection, provider_message_id: str) -> str:
     return "sent"
 
 
+def _body_has_license_key(text_body: Optional[str]) -> bool:
+    """True when the body carries a signed license key (ENGR1.<sig>.<payload>).
+
+    Mirrors inspector/webhooks.py::_existing_license_delivery() extraction so a
+    purchase/renewal outbox row stays the recoverable source of truth until the
+    Polar fulfillment claim is finalized; only non-recoverable bodies are redacted
+    after a successful send.
+    """
+    for entry in str(text_body or "").splitlines():
+        candidate = entry.strip()
+        if candidate.startswith("ENGR1.") and candidate.count(".") == 2:
+            return True
+    return False
+
+
 def deliver_now(message_id: str,
                 deliverer: Callable[
                     [str, str, str, Optional[str], str], tuple[str, str]]) -> bool:
@@ -242,9 +257,16 @@ def deliver_now(message_id: str,
         provider_message_id = (provider_id or "")[:160]
         conn.execute("BEGIN IMMEDIATE")
         now = time.time()
+        # A purchased license key in the body is the crash-recovery source of
+        # truth for inspector/webhooks.py::_existing_license_delivery() until the
+        # Polar fulfillment claim is finalized; redacting a license row here would
+        # strand the webhook. Only clear bodies with no recoverable entitlement.
+        redact_sql = (
+            "" if _body_has_license_key(message["text_body"])
+            else ",text_body='',reply_to=NULL")
         updated = conn.execute(
             "UPDATE email_outbox SET status='sent',provider=?,provider_message_id=?,"
-            "last_error='',sent_at=?,updated_at=? "
+            "last_error='',sent_at=?,updated_at=?" + redact_sql + " "
             "WHERE id=? AND status='sending' AND attempts=?",
             (provider_name, provider_message_id, now, now,
              message_id, int(message["attempts"])))

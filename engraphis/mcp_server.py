@@ -119,6 +119,7 @@ _READ_ONLY_TOOLS = frozenset({
     "engraphis_verify_receipts",
     "engraphis_export_receipts",
     "engraphis_stats",
+    "engraphis_check_update",
 })
 _ADMIN_TOOLS = frozenset({
     "engraphis_consolidate",
@@ -316,6 +317,34 @@ def engraphis_recall_grounded(
                 llm.close()
             except Exception:
                 pass
+
+
+@mcp.tool(
+    name="engraphis_answer",
+    annotations={"title": "Grounded answer (compatibility alias)",
+                 "readOnlyHint": True, "destructiveHint": False,
+                 "idempotentHint": True, "openWorldHint": False},
+)
+def engraphis_answer(
+    query: Annotated[str, Field(description="The question to answer from memory.",
+                                min_length=1, max_length=10_000)],
+    workspace: Annotated[str, Field(description="Workspace to search.",
+                                    min_length=1, max_length=200)] = "default",
+    repo: Annotated[Optional[str], Field(description="Repository scope within the workspace.",
+                                         max_length=200)] = None,
+    k: Annotated[int, Field(description="Max memories to consider (1-50).", ge=1, le=50)] = 8,
+    min_support: Annotated[float, Field(description="Absolute support floor 0..1. Memories below this don't count as evidence.", ge=0.0, le=1.0)] = 0.25,
+    synthesize: Annotated[bool, Field(description="If true, ask configured LLM for cited prose; otherwise deterministic/extractive.")] = False,
+) -> str:
+    """Backward-compatible alias for ``engraphis_recall_grounded``.
+
+    Kept so existing agent configs that adopted the answer tool continue to work; new
+    integrations should prefer ``engraphis_recall_grounded`` for the clearer name.
+    """
+    return engraphis_recall_grounded(
+        query=query, workspace=workspace, repo=repo, session_id=None, mtypes=None, k=k,
+        min_support=min_support, synthesize=synthesize,
+    )
 
 
 @mcp.tool(
@@ -963,6 +992,33 @@ def engraphis_stats(
 
 
 @mcp.tool(
+    name="engraphis_check_update",
+    annotations={"title": "Check for an Engraphis update", "readOnlyHint": True,
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+)
+def engraphis_check_update(
+    force: Annotated[bool, Field(description="Bypass the ~24h cache and re-check the "
+                                 "release source now.")] = False,
+) -> str:
+    """Report whether a newer Engraphis release is available, so an agent can proactively
+    remind the user to upgrade.
+
+    Cached ~24h and fail-silent; honors ``ENGRAPHIS_UPDATE_CHECK=0`` (then ``enabled`` is
+    false). The default GitHub source is overridable via ``ENGRAPHIS_UPDATE_URL``.
+
+    Returns:
+        str: JSON ``{"enabled","current","latest","update_available","url","notice"}``.
+    """
+    try:
+        from engraphis import update_check
+        snap = dict(update_check.check(force=True) if force else update_check.snapshot())
+        snap["notice"] = update_check.notice_line(snap) or ""
+        return _ok(snap)
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
     name="engraphis_ingest",
     annotations={"title": "Ingest raw text (extract facts first)", "readOnlyHint": False,
                  "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
@@ -1080,32 +1136,6 @@ def engraphis_consolidate(
         return _err(exc)
 
 
-@mcp.tool(
-    name="engraphis_answer",
-    annotations={"title": "Grounded answer (compatibility alias)",
-                 "readOnlyHint": True, "destructiveHint": False,
-                 "idempotentHint": True, "openWorldHint": False},
-)
-def engraphis_answer(
-    query: Annotated[str, Field(description="The question to answer from memory.",
-                                min_length=1, max_length=10_000)],
-    workspace: Annotated[str, Field(description="Workspace to search.",
-                                    min_length=1, max_length=200)] = "default",
-    repo: Annotated[Optional[str], Field(description="Repository scope within the workspace.",
-                                         max_length=200)] = None,
-    k: Annotated[int, Field(description="Max memories to consider (1-50).", ge=1, le=50)] = 8,
-    min_support: Annotated[float, Field(description="Absolute support floor 0..1. Memories below this don't count as evidence.", ge=0.0, le=1.0)] = 0.25,
-    synthesize: Annotated[bool, Field(description="If true, ask configured LLM for cited prose; otherwise deterministic/extractive.")] = False,
-) -> str:
-    """Backward-compatible alias for ``engraphis_recall_grounded``.
-
-    Kept so existing agent configs that adopted the answer tool continue to work; new
-    integrations should prefer ``engraphis_recall_grounded`` for the clearer name.
-    """
-    return engraphis_recall_grounded(
-        query=query, workspace=workspace, repo=repo, session_id=None, mtypes=None, k=k,
-        min_support=min_support, synthesize=synthesize,
-    )
 
 
 def main() -> None:

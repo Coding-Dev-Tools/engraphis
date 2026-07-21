@@ -64,6 +64,11 @@ async def _lifespan(app: FastAPI):
         logger.info("Background consciousness loop started (interval=%ds)", settings.loop_interval)
     else:
         logger.info("Background loop disabled (ENGRAPHIS_LOOP_INTERVAL=0)")
+    try:  # one-line "update available" notice (background, fail-silent, opt-out)
+        from engraphis import update_check
+        update_check.emit_startup_notice(logger.info)
+    except Exception:  # noqa: BLE001 - never block server startup
+        pass
     try:
         yield
     finally:
