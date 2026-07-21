@@ -48,8 +48,10 @@ def test_persist_project_env_rejects_unsafe_assignments(tmp_path, values):
         persist_project_env(values, path=tmp_path / ".env")
 
 
-def test_llm_auto_extract_defaults_on_and_accepts_explicit_off(monkeypatch):
+def test_llm_auto_extract_defaults_off_and_accepts_explicit_on(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_LLM_AUTO_EXTRACT", raising=False)
+    assert Settings().llm_auto_extract is False
+    monkeypatch.setenv("ENGRAPHIS_LLM_AUTO_EXTRACT", "1")
     assert Settings().llm_auto_extract is True
     monkeypatch.setenv("ENGRAPHIS_LLM_AUTO_EXTRACT", "off")
     assert Settings().llm_auto_extract is False
