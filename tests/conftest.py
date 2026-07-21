@@ -1,9 +1,12 @@
 import os
 
-# The licensing + cloud_license integrity guards (added 2026-07) refuse to import from
-# editable .py source in production installs. The entire test suite is development mode —
-# set ENGRAPHIS_DEV=1 BEFORE any import so the guards allow the plain .py source.
-os.environ.setdefault("ENGRAPHIS_DEV", "1")
+# Opt the licensing module into honoring ENGRAPHIS_LICENSE_PUBKEY, which is otherwise
+# dead in a shipped process. Set at import time so it covers both collection and
+# execution. This is the ONLY place that flips the switch — production never imports
+# this conftest, so the vendor-key override stays non-overridable in the field.
+# TEST_MODE_PUBKEY_OVERRIDE also disables the tamper-detection checks in licensing
+# has_feature / require_feature / current_license and cloud_license gate, so existing
+# test mocking continues to work.
 
 import pytest
 from engraphis import cloud_license, licensing
