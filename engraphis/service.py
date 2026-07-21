@@ -40,7 +40,7 @@ from engraphis.core.graph_scene import (
 from engraphis.core.graph_layers import normalize_graph_layer
 from engraphis.core.ids import new_id as make_id
 from engraphis.core.interfaces import Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter
-from engraphis.core.store import normalize_entity_name
+from engraphis.core.store import normalize_entity_name, _merge_edge_provenance
 from engraphis.graphdata import build_graph_payload, empty_graph
 
 # ── validation limits (memory-poisoning / resource-exhaustion guards) ──────────
@@ -2357,6 +2357,23 @@ class MemoryService:
                              sup["confidence"], sup["valid_from"],
                              sup["ingested_at"], sup["provenance"]),
                         )
+                # Merge the source edge's provenance memory_ids into the survivor
+                # so invalidate_edges_for_memory() can find transferred memories.
+                survivor_prov_raw = c.execute(
+                    "SELECT provenance FROM edges WHERE id=?",
+                    (collision["id"],),
+                ).fetchone()
+                source_prov_raw = c.execute(
+                    "SELECT provenance FROM edges WHERE id=?",
+                    (ed["id"],),
+                ).fetchone()
+                survivor_prov = json.loads(survivor_prov_raw["provenance"] or "{}") if survivor_prov_raw else {}
+                source_prov = json.loads(source_prov_raw["provenance"] or "{}") if source_prov_raw else {}
+                merged_prov = _merge_edge_provenance([survivor_prov, source_prov])
+                c.execute(
+                    "UPDATE edges SET provenance=? WHERE id=?",
+                    (json.dumps(merged_prov, separators=(",", ":")), collision["id"]),
+                )
                 closed_at = time.time()
                 c.execute(
                     "UPDATE edges SET workspace_id=?, repo_id=?, src=?, dst=?, valid_to=? "
