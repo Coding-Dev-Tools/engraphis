@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import threading
@@ -447,6 +448,33 @@ class Store:
         )
         self.init_schema()
 
+    def _backup_before_v4_migration(self) -> None:
+        """Best-effort snapshot of the database file before running the v4
+        canonicalization/edge-support backfills below.
+
+        Uses SQLite's own online backup API via a second connection to the same file,
+        which is safe to run against a live WAL-mode database. This must never block or
+        fail startup — an upgrade that can't snapshot itself should still proceed rather
+        than refuse to start, so every failure here is swallowed silently."""
+        try:
+            if self.path in (":memory:", "") or self.path.startswith("file::memory:"):
+                return
+            backup_path = f"{self.path}.pre-migration-v4.bak"
+            if os.path.exists(backup_path):
+                return  # already have one from a prior attempt; don't overwrite it
+            src = sqlite3.connect(self.path)
+            try:
+                dst = sqlite3.connect(backup_path)
+                try:
+                    src.backup(dst)
+                    dst.execute("PRAGMA quick_check")
+                finally:
+                    dst.close()
+            finally:
+                src.close()
+        except Exception:
+            pass
+
     # ── schema ──────────────────────────────────────────────────────────────
     def init_schema(self) -> None:
         previous_version = 0
@@ -503,6 +531,9 @@ class Store:
         # v4 makes canonical identity and edge evidence explicit and indexed. Run the
         # backfills before creating representative-only uniqueness indexes so exact
         # normalized aliases can safely converge onto one deterministic canonical id.
+        # A real upgrade (not a fresh DB) gets a best-effort pre-migration snapshot first.
+        if 1 <= previous_version < 4:
+            self._backup_before_v4_migration()
         self._backfill_entity_canonicalization()
         self.conn.executescript(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_workspace_canonical "
