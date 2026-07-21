@@ -204,6 +204,17 @@ def main(argv=None) -> int:
 
     llm = None
     if args.llm or args.structured:
+        # LLM-powered consolidation (inference / structured merging) is a paid
+        # automation feature — gate here because we call engine.consolidate()
+        # directly, which has no license awareness.
+        from engraphis.licensing import require_feature, LicenseError
+        try:
+            require_feature("automation")
+        except LicenseError as exc:
+            print(f"error: LLM-powered consolidation ({exc})", file=sys.stderr)
+            print("tip: run without --llm or --structured for the free, deterministic pass",
+                  file=sys.stderr)
+            return 2
         try:
             from engraphis.llm.client import LLMClient
             llm = LLMClient()
