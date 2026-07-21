@@ -93,11 +93,12 @@ def create_app() -> FastAPI:
     # which is why a naive app.mount('/mcp', mcp.streamable_http_app()) raises
     # 'Task group is not initialized'). The endpoint is built at '/' inside the sub-app
     # so mounting under /mcp lines up (Starlette strips the mount prefix).
+    import importlib.util as _importlib_util
     import contextlib as _contextlib
     _mcp_asgi = None
     _mcp_mgr = None
     try:
-        if importlib.util.find_spec("mcp") is None:
+        if _importlib_util.find_spec("mcp") is None:
             raise ImportError("the optional mcp package is not installed")
         import engraphis.mcp_server as _mcp_mod
         # The MCP session manager's run() is once-per-instance, but create_app() may be
@@ -149,7 +150,7 @@ def create_app() -> FastAPI:
     # dashboard; the machine-readable schema remains available behind the normal gate.
     app = FastAPI(title="Engraphis Dashboard", docs_url=None, redoc_url=None,
                   openapi_url="/api/openapi.json", lifespan=_lifespan)
-    app.state.mcp_over_http = False
+    app.state.mcp_over_http = _mcp_asgi is not None
 
     # Honour the advertised allow-list on the actual GA dashboard entrypoint.  A
     # wildcard can never carry browser credentials.
@@ -322,6 +323,7 @@ def create_app() -> FastAPI:
         # and authenticated with a per-user bearer token. Each MCP tool then enforces its
         # own viewer/member/admin role while reusing the dashboard's shared MemoryService.
         if path == "/mcp" or path.startswith("/mcp/"):
+
             if not (team_enabled and auth_store is not None
                     and licensing.has_feature("team")):
                 return JSONResponse({"error": "a Team license is required to connect agents",

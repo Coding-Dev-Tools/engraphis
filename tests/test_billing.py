@@ -736,6 +736,18 @@ def _iso_in_days(n):
 def _body(obj):
     return json.dumps(obj).encode("utf-8")
 
+def _registry_rows():
+    from engraphis.inspector import license_registry as reg
+    conn = reg.connect()
+    try:
+        rows = conn.execute(
+            "SELECT key_id, status, subscription_id, order_id FROM issued_licenses "
+            "ORDER BY created_at").fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
 
 def _registry_rows():
     from engraphis.inspector import license_registry as reg
@@ -799,7 +811,6 @@ def test_route_trial_then_conversion_two_distinct_keys(monkeypatch):
     assert r1.json() == {"status": "fulfilled", "key_issued": True}
     assert r2.json() == {"status": "fulfilled", "key_issued": True}
 
-
 def test_order_paid_records_polar_ids_for_refunds(monkeypatch):
     client = _inspector_client(monkeypatch)
     order = _body({"type": "order.paid", "data": {
@@ -853,6 +864,64 @@ def test_order_refunded_without_subscription_revokes_by_order(monkeypatch):
     assert r.status_code == 202
     assert r.json()["status"] == "revoked"
     assert r.json()["order_id"] == "order_only"
+    assert reg.is_revoked(key_id) is True
+
+
+def test_subscription_canceled_honors_paid_period(monkeypatch):
+    client = _inspector_client(monkeypatch)
+    order = _body({"type": "order.paid", "data": {
+        "id": "order_cancel", "subscription_id": "sub_cancel",
+        "customer": {"email": "cancel@example.com"},
+        "product": {"name": "Engraphis Pro"}}})
+    assert _post(client, WHSEC, "evt_cancel_paid", order).json()["key_issued"] is True
+
+    cancel = _body({"type": "subscription.canceled", "data": {"id": "sub_cancel"}})
+    r = _post(client, WHSEC, "evt_cancel", cancel)
+    assert r.status_code == 202
+    assert r.json() == {"status": "ignored", "reason": "paid period honored",
+                        "type": "subscription.canceled"}
+    assert _registry_rows()[0]["status"] == "active"
+
+
+def test_subscription_revoked_ends_access_after_paid_period(monkeypatch):
+    from engraphis.inspector import license_registry as reg
+
+    client = _inspector_client(monkeypatch)
+    order = _body({"type": "order.paid", "data": {
+        "id": "order_revoke", "subscription_id": "sub_revoke_end",
+        "customer": {"email": "revoke@example.com"},
+        "product": {"name": "Engraphis Pro"}}})
+    assert _post(client, WHSEC, "evt_revoke_paid", order).json()["key_issued"] is True
+    key_id = _registry_rows()[0]["key_id"]
+
+    revoked = _body({"type": "subscription.revoked", "data": {"id": "sub_revoke_end"}})
+    r = _post(client, WHSEC, "evt_revoke", revoked)
+    assert r.status_code == 202
+    assert r.json()["status"] == "revoked"
+    assert r.json()["reason"] == "subscription_revoked"
+    assert r.json()["revoked"] == 1
+    assert reg.is_revoked(key_id) is True
+
+
+def test_subscription_updated_revoked_revokes_keys(monkeypatch):
+    from engraphis.inspector import license_registry as reg
+
+    client = _inspector_client(monkeypatch)
+    order = _body({"type": "order.paid", "data": {
+        "id": "order_update_revoke", "subscription_id": "sub_update_revoke",
+        "customer": {"email": "update-revoke@example.com"},
+        "product": {"name": "Engraphis Pro"}}})
+    assert _post(client, WHSEC, "evt_update_revoke_paid", order).json()["key_issued"] is True
+    key_id = _registry_rows()[0]["key_id"]
+
+    revoked = _body({"type": "subscription.updated", "data": {
+        "id": "sub_update_revoke", "status": "revoked", "seats": 1,
+        "customer": {"email": "update-revoke@example.com"},
+        "product": {"name": "Engraphis Pro"}}})
+    r = _post(client, WHSEC, "evt_update_revoke", revoked)
+    assert r.status_code == 202
+    assert r.json()["status"] == "revoked"
+    assert r.json()["reason"] == "subscription_revoked"
     assert reg.is_revoked(key_id) is True
 
 
@@ -912,64 +981,6 @@ def test_unmappable_revoke_event_converges_instead_of_retrying_forever(monkeypat
     # A DIFFERENT delivery still gets its own first-time retryable answer — convergence
     # is per-delivery, not a global latch that would mute a later real failure.
     assert _post(client, WHSEC, "evt_revoke_other", orphan).status_code >= 500
-
-
-def test_subscription_canceled_honors_paid_period(monkeypatch):
-    client = _inspector_client(monkeypatch)
-    order = _body({"type": "order.paid", "data": {
-        "id": "order_cancel", "subscription_id": "sub_cancel",
-        "customer": {"email": "cancel@example.com"},
-        "product": {"name": "Engraphis Pro"}}})
-    assert _post(client, WHSEC, "evt_cancel_paid", order).json()["key_issued"] is True
-
-    cancel = _body({"type": "subscription.canceled", "data": {"id": "sub_cancel"}})
-    r = _post(client, WHSEC, "evt_cancel", cancel)
-    assert r.status_code == 202
-    assert r.json() == {"status": "ignored", "reason": "paid period honored",
-                        "type": "subscription.canceled"}
-    assert _registry_rows()[0]["status"] == "active"
-
-
-def test_subscription_revoked_ends_access_after_paid_period(monkeypatch):
-    from engraphis.inspector import license_registry as reg
-
-    client = _inspector_client(monkeypatch)
-    order = _body({"type": "order.paid", "data": {
-        "id": "order_revoke", "subscription_id": "sub_revoke_end",
-        "customer": {"email": "revoke@example.com"},
-        "product": {"name": "Engraphis Pro"}}})
-    assert _post(client, WHSEC, "evt_revoke_paid", order).json()["key_issued"] is True
-    key_id = _registry_rows()[0]["key_id"]
-
-    revoked = _body({"type": "subscription.revoked", "data": {"id": "sub_revoke_end"}})
-    r = _post(client, WHSEC, "evt_revoke", revoked)
-    assert r.status_code == 202
-    assert r.json()["status"] == "revoked"
-    assert r.json()["reason"] == "subscription_revoked"
-    assert r.json()["revoked"] == 1
-    assert reg.is_revoked(key_id) is True
-
-
-def test_subscription_updated_revoked_revokes_keys(monkeypatch):
-    from engraphis.inspector import license_registry as reg
-
-    client = _inspector_client(monkeypatch)
-    order = _body({"type": "order.paid", "data": {
-        "id": "order_update_revoke", "subscription_id": "sub_update_revoke",
-        "customer": {"email": "update-revoke@example.com"},
-        "product": {"name": "Engraphis Pro"}}})
-    assert _post(client, WHSEC, "evt_update_revoke_paid", order).json()["key_issued"] is True
-    key_id = _registry_rows()[0]["key_id"]
-
-    revoked = _body({"type": "subscription.updated", "data": {
-        "id": "sub_update_revoke", "status": "revoked", "seats": 1,
-        "customer": {"email": "update-revoke@example.com"},
-        "product": {"name": "Engraphis Pro"}}})
-    r = _post(client, WHSEC, "evt_update_revoke", revoked)
-    assert r.status_code == 202
-    assert r.json()["status"] == "revoked"
-    assert r.json()["reason"] == "subscription_revoked"
-    assert reg.is_revoked(key_id) is True
 
 
 def test_vendor_revoked_subscription_update_does_not_require_product(monkeypatch):

@@ -258,7 +258,6 @@ def _extract_order_id(data: dict) -> str:
     """Normalized Polar order id from an order-shaped payload."""
     return str(data.get("id") or data.get("order_id") or "").strip()[:128]
 
-
 def _extract_product_name(data: dict) -> str:
     product = data.get("product")
     if not isinstance(product, dict):
