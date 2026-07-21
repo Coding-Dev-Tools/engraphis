@@ -605,6 +605,8 @@ async def context_preview(req: ContextPreviewReq):
 @router.get("/vaults/{namespace}/export")
 async def export_vault(namespace: str):
     """GET /memory/vaults/{namespace}/export — export all memories in a vault as JSON."""
+    from engraphis.licensing import require_feature
+    require_feature("export")
     docs = mem_store.list_documents(namespace=namespace, limit=10000)
     export_data = {
         "namespace": namespace,
