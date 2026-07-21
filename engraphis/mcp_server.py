@@ -1136,8 +1136,6 @@ def engraphis_consolidate(
         return _err(exc)
 
 
-
-
 def main() -> None:
     """Console entry point (``engraphis-mcp``). Runs over stdio."""
     mcp.run()
