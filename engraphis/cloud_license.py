@@ -658,8 +658,6 @@ def revalidate(lic, key_material: str, *, base_url: Optional[str] = None) -> str
 
 # ── compilation integrity guard — runs at import time ────────────────────────────
 
-
-
 def _verify_module_integrity():
     """Detect if this module was replaced with editable source after a compiled
     extension was already installed (same check as licensing.py)."""
