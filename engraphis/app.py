@@ -20,6 +20,7 @@ from engraphis.inspector.auth import bearer_ok
 from engraphis.inspector.cloud_mount import CLOUD_PREFIXES, mount_cloud_endpoints
 from engraphis.config import settings
 from engraphis.engines import reweight, thoughts as thoughts_engine
+from engraphis.engines.embedder import warmup as _warmup_embedder
 from engraphis.logging_setup import configure_logging
 from engraphis.netutil import client_ip
 from engraphis.routes.memory import router as memory_router
@@ -59,6 +60,10 @@ async def _lifespan(app: FastAPI):
     cancel and await the loop."""
     global _background_task
     init_db()
+    # Warm the embedding model eagerly so the first recall call isn't paid
+    # under request pressure (a cold load + concurrent call used to wedge
+    # the forked PM2 worker and time out every recall).
+    await asyncio.get_running_loop().run_in_executor(None, _warmup_embedder)
     if settings.loop_interval > 0:
         _background_task = asyncio.create_task(_consciousness_loop())
         logger.info("Background consciousness loop started (interval=%ds)", settings.loop_interval)
