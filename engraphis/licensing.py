@@ -200,7 +200,7 @@ _KEY_PREFIX = "ENGR1"
 #   python -m scripts.license_admin keygen --key-file <secure-offline-path>/vendor_signing.key
 # Pin the printed public key through the reviewed compatibility/reissue ceremony in
 # docs/COMMERCIAL_OPERATIONS.md. Do not overwrite or discard the old seed first.
-_VENDOR_PUBKEY_HEX = "0f9ede880d65184f4615221d03e8127c38e1b7a8f8d789a050780ae50c36421d"
+_VENDOR_PUBKEY_HEX = "88b998850710f24b0626bc7a82fa9b5a841720102d291259dbf12696cf623d23"
 # Previous production verify keys live here only during an audited rotation window.
 # New issuance always uses ``_VENDOR_PUBKEY_HEX``; remove retired entries after every
 # customer has received a replacement and the announced grace period has elapsed.
