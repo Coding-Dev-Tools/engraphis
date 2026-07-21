@@ -1,0 +1,69 @@
+name: Build Compiled Wheels
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-wheels:
+    name: Build wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+
+      - name: Install build tooling
+        run: python -m pip install cibuildwheel setuptools wheel cython
+
+      - name: Build wheels
+        env:
+          CIBW_BUILD: "cp312-* cp313-*"
+          CIBW_SKIP: "*musllinux*"
+          CIBW_BEFORE_BUILD: python -m pip install cython>=3.0 setuptools>=83
+          CIBW_BUILD_VERBOSITY: 1
+        run: python -m cibuildwheel --output-dir wheelhouse
+
+      - name: Store wheels
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: compiled-wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+
+  publish-compiled:
+    name: Publish compiled wheels to PyPI
+    needs: build-wheels
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Download all compiled wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: compiled-wheels-*
+          path: dist/
+          merge-multiple: true
+
+      - name: List collected artifacts
+        run: ls -la dist/
+
+      - name: Publish compiled wheels to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0

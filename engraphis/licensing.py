@@ -22,6 +22,7 @@ import json
 import math
 import os
 import re
+import sys
 import threading
 import tempfile
 import time
@@ -200,7 +201,7 @@ _KEY_PREFIX = "ENGR1"
 #   python -m scripts.license_admin keygen --key-file <secure-offline-path>/vendor_signing.key
 # Pin the printed public key through the reviewed compatibility/reissue ceremony in
 # docs/COMMERCIAL_OPERATIONS.md. Do not overwrite or discard the old seed first.
-_VENDOR_PUBKEY_HEX = "0f9ede880d65184f4615221d03e8127c38e1b7a8f8d789a050780ae50c36421d"
+_VENDOR_PUBKEY_HEX = "88b998850710f24b0626bc7a82fa9b5a841720102d291259dbf12696cf623d23"
 # Previous production verify keys live here only during an audited rotation window.
 # New issuance always uses ``_VENDOR_PUBKEY_HEX``; remove retired entries after every
 # customer has received a replacement and the announced grace period has elapsed.
@@ -982,3 +983,49 @@ def production_warnings() -> list:
             "upgrade link still points at the GitHub pricing anchor, not a real checkout. "
             "Set ENGRAPHIS_UPGRADE_URL to your checkout page URL before charging.")
     return warns
+
+
+# ── compilation integrity guard — runs at import time ────────────────────────────
+
+def _verify_module_integrity():
+    """Detect if this module was replaced with editable source after a compiled
+    extension was already installed.
+
+    If a compiled native extension (.pyd/.so) exists alongside this file, then
+    Python's default import order should have loaded that instead — the fact that
+    we're running as .py means someone removed or renamed the extension, likely
+    to patch the source. If no compiled extension exists (pure-python install on
+    a platform without wheels), the check passes.
+
+    ``ENGRAPHIS_DEV=1`` skips the check entirely for local development.
+    """
+    mod = sys.modules.get(__name__)
+    if mod is None:
+        return
+    f = getattr(mod, "__file__", "")
+    if not f:
+        return
+    if os.environ.get("ENGRAPHIS_DEV", "").strip() in ("1", "true", "yes"):
+        return
+    if not f.endswith(".py"):
+        return  # running as compiled extension — all good
+    # Running as .py — check if a compiled extension exists alongside.
+    # If it does, someone replaced the extension with editable source.
+    from importlib.machinery import EXTENSION_SUFFIXES
+    dirname = os.path.dirname(f)
+    basename = os.path.splitext(os.path.basename(f))[0]
+    for suffix in EXTENSION_SUFFIXES:
+        if os.path.exists(os.path.join(dirname, basename + suffix)):
+            raise LicenseError(
+                "Engraphis licensing integrity check failed: a compiled native "
+                "extension (.pyd/.so) exists but is not being loaded — the module "
+                "may have been replaced with editable source. Reinstall Engraphis "
+                "from the official distribution (pip install --force-reinstall "
+                "engraphis). For development, set ENGRAPHIS_DEV=1."
+            )
+    # No compiled extension found — pure-python install on a platform without
+    # compiled wheels. This is less secure (the source is plaintext and patchable),
+    # but it's the expected fallback for platforms we don't pre-compile for.
+
+
+_verify_module_integrity()
