@@ -465,7 +465,7 @@ def create_app(service: Optional[MemoryService] = None,
     # ── Pro: analytics & compliance export (the 402 upgrade path) ───────────
     @app.get("/api/analytics")
     async def analytics(workspace: str):
-        licensing.require_feature("analytics")
+        licensing.require_cloud_lease("analytics")
         wid, _ = svc()._require_scope(workspace, None)
         return compute_analytics(svc().store, wid)
 
@@ -473,7 +473,7 @@ def create_app(service: Optional[MemoryService] = None,
     async def analytics_export(workspace: str):
         """Self-contained HTML analytics report (inline CSS, no CDN) — same Pro gate
         as the analytics dashboard it renders; a shareable artifact is the point."""
-        licensing.require_feature("analytics")
+        licensing.require_cloud_lease("analytics")
         wid, _ = svc()._require_scope(workspace, None)
         page = render_analytics_html(compute_analytics(svc().store, wid),
                                      workspace=workspace, version=__version__)
@@ -484,7 +484,7 @@ def create_app(service: Optional[MemoryService] = None,
 
     @app.get("/api/export")
     async def export(workspace: str):
-        licensing.require_feature("export")
+        licensing.require_cloud_lease("export")
         data = svc().export_workspace(workspace=workspace)
         fname = "engraphis-export-%s-%s.json" % (
             workspace.replace("/", "_"), time.strftime("%Y%m%d"))

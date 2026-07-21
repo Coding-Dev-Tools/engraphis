@@ -130,8 +130,8 @@ def _write(doc: dict) -> None:
 
 def save_policy(policy: dict) -> dict:
     """Persist a maintenance policy. Pro-gated (``automation``)."""
-    from engraphis.licensing import require_feature
-    require_feature("automation")
+    from engraphis.licensing import require_cloud_lease
+    require_cloud_lease("automation")
     existing = _read()
     _write({"policy": normalize_policy(policy),
             "last_run": existing.get("last_run"),
@@ -231,8 +231,8 @@ def run_maintenance(service: Any, *, dry_run: bool = True,
     view exposes, with the policy's ``min_cluster``/``archive_below``. ``dry_run``
     previews without mutating. One failing workspace is captured per-entry and never
     aborts the sweep. Unless ``dry_run``, records ``last_run``/``last_result``."""
-    from engraphis.licensing import require_feature
-    require_feature("automation")
+    from engraphis.licensing import require_cloud_lease
+    require_cloud_lease("automation")
     now = time.time() if now is None else now
     pol = normalize_policy(policy) if policy is not None else load_policy()
     targets = pol["workspaces"]
