@@ -1,5 +1,10 @@
 import os
 
+# The licensing + cloud_license integrity guards (added 2026-07) refuse to import from
+# editable .py source in production installs. The entire test suite is development mode —
+# set ENGRAPHIS_DEV=1 BEFORE any import so the guards allow the plain .py source.
+os.environ.setdefault("ENGRAPHIS_DEV", "1")
+
 import pytest
 from engraphis import cloud_license, licensing
 from engraphis.config import settings

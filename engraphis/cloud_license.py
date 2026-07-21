@@ -29,6 +29,7 @@ import json
 import logging
 import math
 import os
+import sys
 import tempfile
 import threading
 import urllib.error
@@ -653,3 +654,36 @@ def revalidate(lic, key_material: str, *, base_url: Optional[str] = None) -> str
         return "offline"
     _write_lease(token)
     return "ok"
+
+
+# ── compilation integrity guard — runs at import time ────────────────────────────
+
+import sys as _sys
+
+
+def _verify_module_integrity():
+    """Detect if this module was replaced with editable source after a compiled
+    extension was already installed (same check as licensing.py)."""
+    mod = _sys.modules.get(__name__)
+    if mod is None:
+        return
+    f = getattr(mod, "__file__", "")
+    if not f:
+        return
+    if os.environ.get("ENGRAPHIS_DEV", "").strip() in ("1", "true", "yes"):
+        return
+    if not f.endswith(".py"):
+        return
+    from importlib.machinery import EXTENSION_SUFFIXES
+    dirname = os.path.dirname(f)
+    basename = os.path.splitext(os.path.basename(f))[0]
+    for suffix in EXTENSION_SUFFIXES:
+        if os.path.exists(os.path.join(dirname, basename + suffix)):
+            raise RuntimeError(
+                "Engraphis cloud_license integrity check failed: a compiled native "
+                "extension exists but is not being loaded. Reinstall from the "
+                "official distribution. For development, set ENGRAPHIS_DEV=1."
+            )
+
+
+_verify_module_integrity()
