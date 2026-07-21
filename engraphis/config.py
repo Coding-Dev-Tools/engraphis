@@ -275,6 +275,16 @@ def _env_float(key: str, default: float) -> float:
         return default
 
 
+_FALSY_ENV = {"0", "false", "no", "off", "disable", "disabled"}
+
+
+def _env_bool(key: str, default: bool) -> bool:
+    raw = os.environ.get(key)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in _FALSY_ENV
+
+
 def persist_project_env(values: dict[str, str], path: Optional[Path] = None) -> Path:
     """Upsert non-secret runtime settings in the project-local ``.env`` atomically.
 
@@ -412,11 +422,12 @@ class Settings:
     llm_extra_headers: dict = field(
         default_factory=lambda: _parse_headers(_env("ENGRAPHIS_LLM_EXTRA_HEADERS", ""))
     )
-    # A successful dashboard connection test enables schema-validated extraction unless
-    # the user explicitly turned it off. The separate flag is what makes an automatic
-    # default and a durable on/off control compatible.
+    # OFF by default (opt-in): a successful dashboard connection test enables
+    # schema-validated extraction ONLY while the user has turned extraction on (the
+    # Settings On/Off control, or ENGRAPHIS_LLM_AUTO_EXTRACT=1) — so a mere connection
+    # test never silently starts provider egress of ingested content.
     llm_auto_extract: bool = field(
-        default_factory=lambda: _env("ENGRAPHIS_LLM_AUTO_EXTRACT", "1").lower()
+        default_factory=lambda: _env("ENGRAPHIS_LLM_AUTO_EXTRACT", "0").lower()
         not in ("0", "false", "no", "off")
     )
 
@@ -451,6 +462,15 @@ class Settings:
     # 0 = disabled (default), matching the loopback-first posture; set both to enable.
     rate_limit: int = field(default_factory=lambda: _env_int("ENGRAPHIS_RATE_LIMIT", 0))
     rate_window: int = field(default_factory=lambda: _env_int("ENGRAPHIS_RATE_WINDOW", 60))
+
+    # Update reminder: check the newest published release and surface it in the dashboard,
+    # server startup log, and MCP. On by default; ``ENGRAPHIS_UPDATE_CHECK=0`` opts out and
+    # stops all network activity. ``ENGRAPHIS_UPDATE_URL`` overrides the default GitHub
+    # releases source (see engraphis.update_check, the runtime authority for both knobs).
+    update_check: bool = field(
+        default_factory=lambda: _env_bool("ENGRAPHIS_UPDATE_CHECK", True))
+    update_check_url: str = field(
+        default_factory=lambda: _env("ENGRAPHIS_UPDATE_URL", ""))
 
     @property
     def base_url(self) -> str:

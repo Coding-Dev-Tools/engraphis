@@ -239,7 +239,33 @@ def bootstrap():
         "stats": _run(current_service.stats, workspace=scoped_stats_workspace),
         "embedder": emb,
         "features": {"graph_ui_v2": bool(settings.graph_ui_v2)},
+        # Non-blocking best-known update snapshot; the dashboard renders an "update
+        # available" banner from this and a background refresh warms the cache.
+        "update": _update_snapshot(),
     }
+
+
+def _update_snapshot() -> dict:
+    """Best-known update snapshot for the dashboard; never raises into bootstrap."""
+    try:
+        from engraphis import update_check
+        return update_check.snapshot()
+    except Exception:  # noqa: BLE001 - a convenience feature must not break bootstrap
+        return {"enabled": False, "update_available": False}
+
+
+@router.get("/update")
+def api_update(force: bool = False):
+    """Update-availability snapshot for the dashboard banner.
+
+    Cached ~24h and fail-silent: reports the newest published release vs the installed
+    version. ``?force=1`` bypasses the cache and re-checks now.
+    """
+    try:
+        from engraphis import update_check
+        return update_check.check(force=True) if force else update_check.snapshot()
+    except Exception:  # noqa: BLE001
+        return {"enabled": False, "update_available": False}
 
 
 # ── workspaces / stats ────────────────────────────────────────────────────────
