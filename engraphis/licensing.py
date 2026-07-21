@@ -1055,19 +1055,36 @@ def _verify_module_integrity():
 
 _lock_sentinel = object()
 _LOCK_SNAPSHOT = None
+_LOCK_TAKEN = False
 
 
 def _verify_no_tampering():
     """Verify critical gate callables haven't been monkeypatched since import.
 
-    Skipped in test mode (``_TEST_MODE_PUBKEY_OVERRIDE=True``) so the test
-    suite can mock these freely.
+    The snapshot is taken lazily on the first gate call, so test-mode setup
+    (conftest sets ``_TEST_MODE_PUBKEY_OVERRIDE=True`` after import) is
+    captured correctly without false positives.
     """
-    if _TEST_MODE_PUBKEY_OVERRIDE:
-        return
+    global _LOCK_SNAPSHOT, _LOCK_TAKEN
+    if not _LOCK_TAKEN:
+        _LOCK_SNAPSHOT = {
+            "has_feature": has_feature,
+            "require_feature": require_feature,
+            "current_license": current_license,
+            "parse_key": parse_key,
+            "ed25519_verify": ed25519_verify,
+            "vendor_public_key": vendor_public_key,
+            "vendor_public_keys": vendor_public_keys,
+        }
+        _LOCK_TAKEN = True
     snap = _LOCK_SNAPSHOT
-    if snap is None:
-        return
+    if snap is None or not isinstance(snap, dict):
+        raise LicenseError(
+            "Licensing integrity violation: tamper-detection snapshot has been "
+            "corrupted. Reinstall Engraphis from the official distribution."
+        )
+    if _TEST_MODE_PUBKEY_OVERRIDE:
+        return  # test mode: skip callable checks
     g = globals()
     for name, expected in snap.items():
         current = g.get(name, _lock_sentinel)
@@ -1079,8 +1096,10 @@ def _verify_no_tampering():
 
 
 def _snapshot_critical_globals():
-    global _LOCK_SNAPSHOT
+    """Force a re-snapshot of critical globals (used by tests after mocking)."""
+    global _LOCK_SNAPSHOT, _LOCK_TAKEN
     _LOCK_SNAPSHOT = {
+        "_TEST_MODE_PUBKEY_OVERRIDE": _TEST_MODE_PUBKEY_OVERRIDE,
         "has_feature": has_feature,
         "require_feature": require_feature,
         "current_license": current_license,
@@ -1089,9 +1108,7 @@ def _snapshot_critical_globals():
         "vendor_public_key": vendor_public_key,
         "vendor_public_keys": vendor_public_keys,
     }
-
-
-_snapshot_critical_globals()
+    _LOCK_TAKEN = True
 
 
 _verify_module_integrity()
