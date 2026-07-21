@@ -327,7 +327,8 @@ def test_merge_deduplicates_colliding_live_edges():
     """When both workspaces hold the same live workspace-level relation (X related Y),
     step 2 folds the source entities onto the target IDs. Without dedup, the edge
     relabel produces two rows matching the v4 live-edge unique index and the merge
-    rolls back. The fix merges evidence into the survivor and drops the duplicate."""
+    rolls back. The fix merges evidence into the survivor and soft-closes the
+    duplicate (bi-temporal history preserved, never hard-deleted)."""
     svc = _svc()
     c = svc.store.conn
     svc.create_workspace("a")
@@ -371,8 +372,15 @@ def test_merge_deduplicates_colliding_live_edges():
         (survivor,))}
     assert supports == {"mem_a", "mem_b"}
 
-    # The duplicate edge row is gone.
-    assert c.execute("SELECT 1 FROM edges WHERE id='edge_from_a'").fetchone() is None
+    # The duplicate edge is soft-closed, not deleted: the row survives with
+    # valid_to/expired_at set and a canonical_deduplicated_into provenance marker.
+    dup = c.execute(
+        "SELECT valid_to, expired_at, provenance FROM edges WHERE id='edge_from_a'"
+    ).fetchone()
+    assert dup is not None
+    assert dup["valid_to"] is not None
+    assert dup["expired_at"] is not None
+    assert json.loads(dup["provenance"])["canonical_deduplicated_into"] == survivor
 
 
 # ── copy_workspace ───────────────────────────────────────────────────────────
