@@ -688,10 +688,19 @@ def _verify_module_integrity():
 
 _lock_sentinel = object()
 _GATE_SNAPSHOT = gate
+_GATE_LOCK_TAKEN = 0  # generation counter — prevents re-snapshot after first call
 
 
 def _verify_gate_integrity():
-    """Raise if ``gate`` has been monkeypatched since import."""
+    """Raise if ``gate`` has been monkeypatched since first call.
+
+    Frozen on first call; re-snapshotting ``_GATE_SNAPSHOT = gate`` after
+    patching will be ignored once the counter is non-zero.
+    """
+    global _GATE_SNAPSHOT, _GATE_LOCK_TAKEN
+    if _GATE_LOCK_TAKEN == 0:
+        _GATE_SNAPSHOT = gate
+        _GATE_LOCK_TAKEN = 1
     try:
         from engraphis.licensing import _TEST_MODE_PUBKEY_OVERRIDE
         if _TEST_MODE_PUBKEY_OVERRIDE:
