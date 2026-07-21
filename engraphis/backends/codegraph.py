@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -662,8 +663,21 @@ class CompositeSymbolIndexer:
         return self._primary.supports(lang) or self._fallback.supports(lang)
 
     def index_file(self, file_path: str, content: str, lang: str) -> FileIndex:
-        idx = self._primary if self._primary.supports(lang) else self._fallback
-        return idx.index_file(file_path, content, lang)
+        if self._primary.supports(lang):
+            try:
+                return self._primary.index_file(file_path, content, lang)
+            except Exception:
+                # The AST backend claimed support but failed at runtime — e.g. a
+                # tree-sitter grammar that lazily downloads its binary and can't
+                # reach the network. Fall back to the dependency-free regex indexer
+                # rather than silently producing zero symbols for this file.
+                if self._fallback.supports(lang):
+                    logging.getLogger(__name__).debug(
+                        "AST indexer failed for %s (%s); falling back to regex",
+                        file_path, lang, exc_info=True)
+                    return self._fallback.index_file(file_path, content, lang)
+                raise
+        return self._fallback.index_file(file_path, content, lang)
 
 
 def get_code_indexer(prefer: str = "auto"):
