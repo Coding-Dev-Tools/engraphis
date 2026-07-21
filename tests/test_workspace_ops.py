@@ -383,6 +383,76 @@ def test_merge_deduplicates_colliding_live_edges():
     assert json.loads(dup["provenance"])["canonical_deduplicated_into"] == survivor
 
 
+def test_merge_deduplicates_colliding_live_edges_with_colliding_support():
+    """When the two colliding live edges are ALSO supported by the same memory id
+    (same memory_id + source_kind), moving the source edge's live support onto the
+    survivor collides on idx_edge_support_live_unique(edge_id, memory_id, source_kind)
+    -- the survivor already has its own live row for that exact memory. A plain
+    UPDATE would raise IntegrityError and roll back the whole merge; the fix uses
+    UPDATE OR IGNORE for the move and then soft-closes whatever support OR IGNORE
+    left behind, so nothing is left live on a now-closed edge."""
+    svc = _svc()
+    c = svc.store.conn
+    svc.create_workspace("a")
+    svc.create_workspace("b")
+    wid_a = _wsid(svc, "a")
+    wid_b = _wsid(svc, "b")
+    svc.store.upsert_entity(Node(id="ent_a_alpha", name="Alpha", ntype="concept", workspace_id=wid_a))
+    svc.store.upsert_entity(Node(id="ent_a_beta", name="Beta", ntype="concept", workspace_id=wid_a))
+    svc.store.upsert_entity(Node(id="ent_b_alpha", name="Alpha", ntype="concept", workspace_id=wid_b))
+    svc.store.upsert_entity(Node(id="ent_b_beta", name="Beta", ntype="concept", workspace_id=wid_b))
+    # Both edges are backed by the SAME memory id, with no source/source_kind in
+    # provenance so both supports land on the default "legacy_unknown" source_kind --
+    # the target already holds a live (edge_id, memory_id, source_kind) triple
+    # identical to what moving the source's support would try to create.
+    svc.store.upsert_edge(Edge(
+        id="edge_from_a", src="ent_a_alpha", dst="ent_a_beta", relation="related",
+        workspace_id=wid_a,
+        provenance={"memory_id": "mem_shared", "memory_ids": ["mem_shared"]},
+    ))
+    svc.store.upsert_edge(Edge(
+        id="edge_from_b", src="ent_b_alpha", dst="ent_b_beta", relation="related",
+        workspace_id=wid_b,
+        provenance={"memory_id": "mem_shared", "memory_ids": ["mem_shared"]},
+    ))
+
+    # Must not raise IntegrityError on idx_edge_support_live_unique.
+    out = svc.merge_workspaces("a", "b")
+    assert out["target"] == "b"
+
+    # Exactly one live edge survives, with exactly one live support for the shared
+    # memory -- not duplicated, not dropped.
+    live = [dict(r) for r in c.execute(
+        "SELECT id FROM edges WHERE workspace_id=? AND valid_to IS NULL AND expired_at IS NULL",
+        (wid_b,))]
+    assert len(live) == 1
+    survivor = live[0]["id"]
+    live_supports = [r["memory_id"] for r in c.execute(
+        "SELECT memory_id FROM edge_supports WHERE edge_id=? "
+        "AND valid_to IS NULL AND expired_at IS NULL",
+        (survivor,))]
+    assert live_supports == ["mem_shared"]
+
+    # The retired source edge is soft-closed with the canonical marker, same as the
+    # non-colliding-support case.
+    dup = c.execute(
+        "SELECT valid_to, expired_at, provenance FROM edges WHERE id='edge_from_a'"
+    ).fetchone()
+    assert dup is not None
+    assert dup["valid_to"] is not None
+    assert dup["expired_at"] is not None
+    assert json.loads(dup["provenance"])["canonical_deduplicated_into"] == survivor
+
+    # Its own copy of the colliding support -- the one UPDATE OR IGNORE could not
+    # move -- is soft-closed too, not left live and orphaned on a closed edge.
+    dup_supports = [dict(r) for r in c.execute(
+        "SELECT valid_to, expired_at FROM edge_supports WHERE edge_id='edge_from_a'"
+    )]
+    assert len(dup_supports) == 1
+    assert dup_supports[0]["valid_to"] is not None
+    assert dup_supports[0]["expired_at"] is not None
+
+
 # ── copy_workspace ───────────────────────────────────────────────────────────
 def test_copy_auto_names_and_leaves_source_untouched():
     svc = _svc()

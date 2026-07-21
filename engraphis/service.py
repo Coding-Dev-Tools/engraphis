@@ -2363,11 +2363,23 @@ class MemoryService:
                      min(valid_vals) if valid_vals else None,
                      min(ingested_vals) if ingested_vals else None,
                      target["id"]))
-                # Move live edge_supports from source to target.
+                # Move live edge_supports from source to target, skipping any that
+                # would collide with an identical live support already on the
+                # survivor (idx_edge_support_live_unique is a partial unique index
+                # on (edge_id, memory_id, source_kind) WHERE live) — a plain UPDATE
+                # would raise IntegrityError and roll back the whole merge.
                 c.execute(
-                    "UPDATE edge_supports SET edge_id=? WHERE edge_id=? "
+                    "UPDATE OR IGNORE edge_supports SET edge_id=? WHERE edge_id=? "
                     "AND valid_to IS NULL AND expired_at IS NULL",
                     (target["id"], ed["id"]))
+                # Whatever OR IGNORE left behind is still live but attached to an
+                # edge that's about to close — soft-close it too instead of leaving
+                # orphaned live evidence on a non-live edge, mirroring how
+                # Store._deduplicate_live_edges() closes retired supports.
+                c.execute(
+                    "UPDATE edge_supports SET valid_to=?, expired_at=? "
+                    "WHERE edge_id=? AND valid_to IS NULL AND expired_at IS NULL",
+                    (closed_at, closed_at, ed["id"]))
                 # Bi-temporally close the source edge.
                 src_prov["canonical_deduplicated_into"] = target["id"]
                 c.execute(
