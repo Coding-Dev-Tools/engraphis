@@ -119,6 +119,7 @@ _READ_ONLY_TOOLS = frozenset({
     "engraphis_verify_receipts",
     "engraphis_export_receipts",
     "engraphis_stats",
+    "engraphis_check_update",
 })
 _ADMIN_TOOLS = frozenset({
     "engraphis_consolidate",
@@ -986,6 +987,33 @@ def engraphis_stats(
     """
     try:
         return _ok(service().stats(workspace=workspace))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_check_update",
+    annotations={"title": "Check for an Engraphis update", "readOnlyHint": True,
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+)
+def engraphis_check_update(
+    force: Annotated[bool, Field(description="Bypass the ~24h cache and re-check the "
+                                 "release source now.")] = False,
+) -> str:
+    """Report whether a newer Engraphis release is available, so an agent can proactively
+    remind the user to upgrade.
+
+    Cached ~24h and fail-silent; honors ``ENGRAPHIS_UPDATE_CHECK=0`` (then ``enabled`` is
+    false). The default GitHub source is overridable via ``ENGRAPHIS_UPDATE_URL``.
+
+    Returns:
+        str: JSON ``{"enabled","current","latest","update_available","url","notice"}``.
+    """
+    try:
+        from engraphis import update_check
+        snap = dict(update_check.check(force=True) if force else update_check.snapshot())
+        snap["notice"] = update_check.notice_line(snap) or ""
+        return _ok(snap)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 

@@ -322,6 +322,59 @@ def test_merge_rejects_same_and_missing_workspaces():
         svc.merge_workspaces("ghost", "a")       # missing source
 
 
+
+def test_merge_deduplicates_colliding_live_edges():
+    """When both workspaces hold the same live workspace-level relation (X related Y),
+    step 2 folds the source entities onto the target IDs. Without dedup, the edge
+    relabel produces two rows matching the v4 live-edge unique index and the merge
+    rolls back. The fix merges evidence into the survivor and drops the duplicate."""
+    svc = _svc()
+    c = svc.store.conn
+    svc.create_workspace("a")
+    svc.create_workspace("b")
+    wid_a = _wsid(svc, "a")
+    wid_b = _wsid(svc, "b")
+    # Explicit entity IDs with a stable string order (alpha < beta) so the
+    # "related" relation canonicalizes both edges to the same (src, dst) pair
+    # regardless of id-generation order — the collision is deterministic.
+    svc.store.upsert_entity(Node(id="ent_a_alpha", name="Alpha", ntype="concept", workspace_id=wid_a))
+    svc.store.upsert_entity(Node(id="ent_a_beta", name="Beta", ntype="concept", workspace_id=wid_a))
+    svc.store.upsert_entity(Node(id="ent_b_alpha", name="Alpha", ntype="concept", workspace_id=wid_b))
+    svc.store.upsert_entity(Node(id="ent_b_beta", name="Beta", ntype="concept", workspace_id=wid_b))
+    # Identical live workspace-level edges (repo_id=None) in both workspaces.
+    svc.store.upsert_edge(Edge(
+        id="edge_from_a", src="ent_a_alpha", dst="ent_a_beta", relation="related",
+        workspace_id=wid_a,
+        provenance={"memory_id": "mem_a", "memory_ids": ["mem_a"]},
+    ))
+    svc.store.upsert_edge(Edge(
+        id="edge_from_b", src="ent_b_alpha", dst="ent_b_beta", relation="related",
+        workspace_id=wid_b,
+        provenance={"memory_id": "mem_b", "memory_ids": ["mem_b"]},
+    ))
+
+    # Must not raise IntegrityError on the live-edge unique index.
+    out = svc.merge_workspaces("a", "b")
+    assert out["target"] == "b"
+
+    # Exactly one live edge survives under the target workspace.
+    live = [dict(r) for r in c.execute(
+        "SELECT id FROM edges WHERE workspace_id=? AND valid_to IS NULL AND expired_at IS NULL",
+        (wid_b,))]
+    assert len(live) == 1
+    survivor = live[0]["id"]
+
+    # Evidence from both workspaces is merged onto the survivor.
+    supports = {r["memory_id"] for r in c.execute(
+        "SELECT memory_id FROM edge_supports WHERE edge_id=? "
+        "AND valid_to IS NULL AND expired_at IS NULL",
+        (survivor,))}
+    assert supports == {"mem_a", "mem_b"}
+
+    # The duplicate edge row is gone.
+    assert c.execute("SELECT 1 FROM edges WHERE id='edge_from_a'").fetchone() is None
+
+
 # ── copy_workspace ───────────────────────────────────────────────────────────
 def test_copy_auto_names_and_leaves_source_untouched():
     svc = _svc()

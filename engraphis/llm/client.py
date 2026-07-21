@@ -260,13 +260,10 @@ class LLMClient:
         if gen_config:
             body["generationConfig"] = gen_config
 
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
         headers.update(self.extra_headers)
 
-        url = (
-            f"{self.base_url}/models/{self.model}:generateContent"
-            f"?key={self.api_key}"
-        )
+        url = f"{self.base_url}/models/{self.model}:generateContent"
         logger.debug("LLM provider request started")
         data = self._post_json(url, body, headers)
         try:
