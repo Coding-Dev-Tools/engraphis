@@ -110,8 +110,8 @@ def test_sync_run_pushes_and_records_summary(monkeypatch, tmp_path):
 
 def test_sync_never_pushes_personal_folders(monkeypatch, tmp_path):
     """A personal folder is private to its owner and must never leave the device over the
-    shared-account relay (teammates share the license key). _sync_all skips it; only shared
-    folders are namespaced onto the relay."""
+    hosted relay. _sync_all skips it; only shared folders are namespaced onto the relay with
+    scoped cloud authorization."""
     synced = []
 
     def fake_get_transport(kind="folder", **kw):

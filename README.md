@@ -428,16 +428,16 @@ recovery boundaries.
 | Write | `engraphis_record_event` | Append a lightweight episodic log entry |
 | Write | `engraphis_link` | Explicitly connect two related memories |
 | Write | `engraphis_ingest` | Apply the configured extractor (`chunk`, `llm`, or `llm_structured`); `none` stores one verbatim memory |
-| Write | `engraphis_ingest_postgres_schema` | Introspect a live PostgreSQL catalog into memory + typed graph nodes; DSN is never stored |
-| Write | `engraphis_consolidate` | Run a sleep-time sweep; optionally build entity profiles or schema-validated LLM facts |
-| Read | `engraphis_recall` | Hybrid vector + lexical + graph recall |
-| Read | `engraphis_recall_grounded` | Cited answer from retrieved memories — or abstain |
-| Read | `engraphis_answer` | Backward-compatible grounded-answer alias |
-| Read | `engraphis_recall_proactive` | "What should I know right now" — no query needed |
-| Read | `engraphis_proactive_context` | Task-aware context packet with cited memories and session handoff |
+| Write | `engraphis_ingest_postgres_schema` | Store a new PostgreSQL schema snapshot + typed graph per call; DSN is never stored |
+| Write | `engraphis_consolidate` | Pure dry-run or live sleep-time sweep; a live call can write multiple resolved facts and receipts |
+| Stateful read | `engraphis_recall` | Hybrid vector + lexical + graph recall; reinforces returned memories and records a receipt |
+| Stateful read | `engraphis_recall_grounded` | Cited answer or abstention; records a receipt and reinforces cited memories |
+| Stateful read | `engraphis_answer` | Backward-compatible grounded-answer alias with the same effects |
+| Pure read | `engraphis_recall_proactive` | "What should I know right now" — no query, reinforcement, or receipt |
+| Stateful read | `engraphis_proactive_context` | Task-aware cited context + handoff; records a receipt without reinforcement |
 | Read | `engraphis_why` | Current answer + what it superseded |
 | Read | `engraphis_timeline` | Full bi-temporal history, oldest first |
-| Code | `engraphis_index_repo` | Incrementally parse a repo into the code/memory graph |
+| Code | `engraphis_index_repo` | Incrementally parse a repo into the code/memory graph; each run records its own receipt |
 | Code | `engraphis_search_code` | Find symbols by name, callers, and linked memories |
 | Code | `engraphis_code_path` | Shortest path across definitions, calls, imports, and memories |
 | Code | `engraphis_code_impact` | Rank changed files by symbols, dependents, communities, memories, and hotspots |
@@ -445,13 +445,13 @@ recovery boundaries.
 | Audit | `engraphis_receipts` | List content-free hashed operation receipts |
 | Audit | `engraphis_verify_receipts` | Verify the receipt chain, local tail anchor, and optional externally saved head/count |
 | Audit | `engraphis_export_receipts` | Export the shareable receipt-only audit bundle |
-| Governance | `engraphis_forget` | Retire a memory — bi-temporal close, never deleted |
-| Governance | `engraphis_pin` | Exempt from future automatic decay/pruning |
+| Governance | `engraphis_forget` | Retire a memory — bi-temporal close, never deleted; every request is audited |
+| Governance | `engraphis_pin` | Exempt from future automatic decay/pruning; every request is audited |
 | Governance | `engraphis_correct` | Replace content without losing history |
 | Governance | `engraphis_promote` | Widen scope while preserving and linking narrow-scope history |
-| Session | `engraphis_start_session` / `engraphis_end_session` | Session lifecycle with cross-session handoff |
+| Session | `engraphis_start_session` / `engraphis_end_session` | Separate lifecycle operations; exact retries report `reused`, `force_new=true` creates another session, and end is idempotent |
 | Ops | `engraphis_stats` | Memory counts for health checks |
-| Ops | `engraphis_check_update` | Check the release source for a newer Engraphis version |
+| Ops | `engraphis_check_update` | Refresh the persistent release cache and report whether a newer version exists |
 
 ---
 
@@ -492,8 +492,8 @@ environment switch turns the public image into an Engraphis relay.
 
 The merge remains a state-based CRDT: every field resolves by a commutative, idempotent rule so
 `merge(A, B) == merge(B, A)`. The current format carries memories and memory-to-memory links;
-entity/code graph reconciliation is not yet part of sync. `secret` memories are excluded from
-managed uploads. Relay traffic uses HTTPS, but bundles are not yet client-side end-to-end
+entity/code graph reconciliation is not yet part of sync. `secret` memories and all
+session-scoped memories are excluded from managed uploads. Relay traffic uses HTTPS, but bundles are not yet client-side end-to-end
 encrypted or zero-knowledge.
 
 For development, backup interchange, and offline testing, the public client retains an explicit
@@ -604,9 +604,10 @@ compute and displays reviewable jobs or proposals. The scheduling, analytics, dr
 consolidation automation algorithms run in Engraphis Cloud; this repository ships no premium
 background loop, cron wrapper, or worker.
 
-Secret-class memories are excluded before a managed snapshot is serialized and are rejected
-again by the hosted service. Set `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1` only after reviewing that
-boundary. A managed proposal does not silently rewrite the local database.
+Secret-class and session-scoped memories are excluded before a managed snapshot is serialized;
+secret-class rows are rejected again by the hosted service. The encoded payload is capped at
+16 MiB. Set `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1` only after reviewing that boundary. A managed
+proposal does not silently rewrite the local database.
 
 Manual consolidation can also use schema-validated LLM output through
 `MemoryService.consolidate`, `POST /api/consolidate`, `engraphis_consolidate`, or
@@ -650,7 +651,7 @@ All via environment (or `.env`):
 | `ENGRAPHIS_CLOUD_CONTROL_URL` | hosted default | Official entitlement, organization, and credential control API |
 | `ENGRAPHIS_CLOUD_COMPUTE_URL` | hosted default | Official Analytics and managed-automation API |
 | `ENGRAPHIS_CLOUD_ORGANIZATION_ID` | — | Hosted organization bound to this customer session |
-| `ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL` | — | Rotating hosted credential; inject as a secret or prefer the owner-only cloud session file |
+| `ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL` | — | Bootstrap-only rotating hosted credential; after first use the owner-only cloud session replacement takes precedence |
 | `ENGRAPHIS_CLOUD_TOKEN_SUBJECT` | `member` | Subject fixed during hosted bootstrap (`device` or `member`); set explicitly with an environment-only refresh credential |
 | `ENGRAPHIS_CLOUD_ACCESS_TOKEN` | — | Optional short-lived access token for ephemeral jobs |
 | `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | `0` | Explicit opt-in required before uploading a bounded snapshot for hosted Analytics/Automation |

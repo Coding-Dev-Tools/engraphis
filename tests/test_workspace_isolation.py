@@ -14,7 +14,7 @@ memory written under one workspace can be probed through a differently-bound ser
 import pytest
 
 from engraphis.config import _parse_csv
-from engraphis.service import MemoryService, ValidationError
+from engraphis.service import MemoryService, ValidationError, set_current_user
 
 
 def _bound(engine, allowed):
@@ -56,6 +56,38 @@ def test_bound_instance_allows_its_own_workspace():
     bound.timeline("policy", workspace="alpha")
     bound.recall_proactive(workspace="alpha")
     assert bound.stats(workspace="alpha")["memories"] >= 1
+
+
+def test_bound_stats_counts_only_the_selected_workspace():
+    seed = MemoryService.create(":memory:")
+    seed.remember("alpha widget policy", workspace="alpha", repo="r")
+    seed.remember("beta revenue policy", workspace="beta", repo="r")
+    seed.start_session("alpha", repo="r", agent="codex", goal="alpha session")
+    seed.start_session("beta", repo="r", agent="codex", goal="beta session")
+
+    stats = _bound(seed.engine, ["alpha"]).stats(workspace="alpha")
+
+    assert stats["memories"] == 1
+    assert stats["workspaces"] == 1
+    assert stats["sessions"] == 1
+
+
+def test_authenticated_stats_counts_only_owned_sessions():
+    svc = MemoryService.create(":memory:")
+    try:
+        set_current_user({"id": "usr_alice", "email": "alice@test", "role": "member"})
+        svc.create_workspace("shared", visibility="shared", confirmed=True)
+        svc.start_session("shared", agent="codex", goal="alice")
+        set_current_user({"id": "usr_bob", "email": "bob@test", "role": "member"})
+        svc.start_session("shared", agent="codex", goal="bob")
+
+        assert svc.stats(workspace="shared")["sessions"] == 1
+        set_current_user({"id": "usr_alice", "email": "alice@test", "role": "member"})
+        assert svc.stats(workspace="shared")["sessions"] == 1
+        with pytest.raises(ValidationError):
+            svc.stats()
+    finally:
+        set_current_user(None)
 
 
 def test_bound_instance_blocks_reads_of_other_workspace():

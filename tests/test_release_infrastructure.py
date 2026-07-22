@@ -152,6 +152,8 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
     readme = _text("README.md")
     architecture = _text("docs/ARCHITECTURE_V3.md")
     skill = _text("skills/engraphis-memory/SKILL.md")
+    skill_tools = _text("skills/engraphis-memory/references/TOOLS.md")
+    skill_scoping = _text("skills/engraphis-memory/references/SCOPING.md")
     for content in (readme, architecture, skill):
         assert "28 MCP tools" not in content
         assert "28-tool" not in content
@@ -159,12 +161,16 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
     assert "29 MCP tools" in architecture
     assert "(29 of them)" in skill
     assert "`engraphis_check_update`" in readme
+    for content in (skill, skill_tools, skill_scoping):
+        assert "force_new" in content
+        assert "reused" in content
+    assert "(workspace, repo, authenticated user, agent, goal)" in skill_tools
 
     changelog = _text("CHANGELOG.md")
     assert "ForceGraph + D3 renderer" in changelog
     assert "## [1.0.0] - Unreleased" in changelog
     assert "## [1.0.0] - 2026-07-19" not in changelog
-    assert "Release candidate for the first commercial GA release" in changelog
+    assert "Release candidate for the public 1.0.0 open-core GA" in changelog
 
     public_paths = [
         ROOT / name for name in (
