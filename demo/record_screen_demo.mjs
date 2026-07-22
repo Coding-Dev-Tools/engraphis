@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 
 const demoDir = resolve(fileURLToPath(new URL(".", import.meta.url)));
+const repoRoot = resolve(demoDir, "..");
 const generatedDir = join(demoDir, "generated");
 const outputDir = join(demoDir, "output");
 const payload = join(generatedDir, "screen_demo_payload.json");
@@ -16,8 +17,8 @@ const port = 8790;
 mkdirSync(generatedDir, { recursive: true });
 mkdirSync(outputDir, { recursive: true });
 const prepared = spawnSync(process.env.PYTHON || "python", [
-  join(demoDir, "prepare_screen_demo.py"), "--output", payload,
-], { cwd: resolve(demoDir, ".."), stdio: "inherit" });
+  "-m", "demo.prepare_screen_demo", "--output", payload,
+], { cwd: repoRoot, stdio: "inherit" });
 if (prepared.status !== 0) process.exit(prepared.status || 1);
 
 const server = createServer((request, response) => {
