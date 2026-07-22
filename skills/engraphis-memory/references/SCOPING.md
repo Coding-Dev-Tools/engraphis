@@ -69,6 +69,10 @@ means a retry found the same active task. Use `force_new=true` only to branch a 
 every identity field matches; use this escape hatch deliberately because parallel duplicate task
 sessions make ownership and handoff ambiguous.
 
+An authenticated host integration must bind both a stable non-empty user `id` and an ownership
+`email`. A malformed non-`None` principal is rejected; it never collapses into an anonymous or
+legacy owner. `None` is reserved for trusted standalone/system operation with no user boundary.
+
 Use sessions for any multi-step task. `open_threads` is how the next agent avoids re-discovering
 where you stopped.
 

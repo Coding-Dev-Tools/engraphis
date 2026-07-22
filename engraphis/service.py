@@ -145,6 +145,8 @@ def _graph_entity_visibility_sql(entity_alias: str, *, at: Optional[float] = Non
 # control characters except tab/newline/carriage-return
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _NAME_RE = re.compile(r"^[A-Za-z0-9._\-/ ]{1,%d}$" % MAX_NAME_CHARS)
+_PRINCIPAL_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,%d}$" % MAX_NAME_CHARS)
+_PRINCIPAL_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+$")
 
 
 class ValidationError(ValueError):
@@ -215,15 +217,27 @@ _CURRENT_USER: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar
 def set_current_user(user: Optional[dict]) -> None:
     """Bind (or clear, with ``None``) the current dashboard user for this request context.
 
-    ``user`` is the auth-store session dict — only ``email`` and ``role`` are read here.
-    Called exactly once per request by the team auth gate; contextvars are per-context so
-    concurrent requests never see each other's user."""
-    _CURRENT_USER.set(user)
+    ``None`` is the only anonymous/single-user value. Every authenticated principal must
+    supply a stable ``id`` and ownership ``email``; malformed identity fails closed and
+    clears any inherited binding before raising. A normalized copy is stored so callers
+    cannot mutate their input dict after authentication. ``role`` defaults to member-safe.
+    Called once per request by the team auth gate; contextvars are per-context so concurrent
+    requests never see each other's user."""
+    if user is None:
+        _CURRENT_USER.set(None)
+        return
+    try:
+        principal = _validate_authenticated_principal(user)
+    except ValidationError:
+        _CURRENT_USER.set(None)
+        raise
+    _CURRENT_USER.set(principal)
 
 
 def current_user() -> Optional[dict]:
-    """The dashboard user bound to this request, or ``None`` outside team mode."""
-    return _CURRENT_USER.get()
+    """A copy of the validated dashboard principal, or ``None`` outside team mode."""
+    user = _CURRENT_USER.get()
+    return dict(user) if user is not None else None
 
 
 def _clean_text(value: Any, *, field: str, max_chars: int, required: bool = True) -> str:
@@ -247,6 +261,43 @@ def _clean_name(value: Any, *, field: str) -> str:
             f"{field} may only contain letters, digits, space and . _ - / characters"
         )
     return name
+
+
+def _validate_authenticated_principal(user: Any) -> dict[str, str]:
+    """Return a normalized, caller-independent identity or fail closed.
+
+    A non-``None`` current-user value is an authenticated boundary, never a hint. Both
+    the stable user id (session ownership) and email (workspace ownership) are mandatory;
+    silently replacing either with ``''`` collapses distinct users into one principal.
+    """
+    if not isinstance(user, dict):
+        raise ValidationError("authenticated principal must be an object")
+    raw_id = user.get("id")
+    if isinstance(raw_id, str) and _CONTROL_RE.search(raw_id):
+        raise ValidationError("authenticated principal id contains control characters")
+    user_id = _clean_text(
+        raw_id, field="authenticated principal id", max_chars=MAX_NAME_CHARS
+    )
+    if not _PRINCIPAL_ID_RE.fullmatch(user_id):
+        raise ValidationError("authenticated principal id is invalid")
+    raw_email = user.get("email")
+    if isinstance(raw_email, str) and _CONTROL_RE.search(raw_email):
+        raise ValidationError("authenticated principal email contains control characters")
+    email = _clean_text(
+        raw_email, field="authenticated principal email", max_chars=320
+    ).casefold()
+    if not _PRINCIPAL_EMAIL_RE.fullmatch(email):
+        raise ValidationError("authenticated principal email is invalid")
+    role = user.get("role")
+    if role not in {"viewer", "member", "admin"}:
+        role = "member"
+    return {"id": user_id, "email": email, "role": role}
+
+
+def _authenticated_principal() -> Optional[dict[str, str]]:
+    """Validated request principal; ``None`` alone selects trusted local-owner mode."""
+    user = current_user()
+    return _validate_authenticated_principal(user) if user is not None else None
 
 
 def _clean_string_list(value: Any, *, field: str, max_items: int, max_chars: int) -> list[str]:
@@ -662,12 +713,12 @@ class MemoryService:
 
     def _authorize_workspace_control(self, ws: str) -> None:
         """Require the original sharer or an admin for whole-workspace mutations."""
-        user = current_user()
+        user = _authenticated_principal()
         if user is None:
             return
         _visibility, owner = self._workspace_visibility(ws)
         if user.get("role") == "admin" or (
-                owner and owner == str(user.get("email") or "")):
+                owner and str(owner).casefold() == user["email"]):
             return
         raise ValidationError(
             "only the original sharer or an admin can modify the whole workspace"
@@ -681,11 +732,11 @@ class MemoryService:
         agent or import could silently create a team-visible folder. Non-team callers do
         not have an identity and retain the established single-tenant behaviour.
         """
+        user = _authenticated_principal()
         existing = self._lookup_workspace(ws)
         if existing is not None:
             return existing
-        user = current_user() or {}
-        owner = user.get("email") or ""
+        owner = user["email"] if user is not None else ""
         workspace_settings = {"visibility": "personal", "owner": owner} if owner else None
         return self.store.create_workspace(ws, settings=workspace_settings)
 
@@ -695,11 +746,12 @@ class MemoryService:
         current user owns → allowed. A personal folder owned by someone else → refused,
         with a message that neither confirms nor denies the folder's contents beyond the
         fact that it's private (the name is already known to the caller who supplied it)."""
-        user = current_user()
-        if not user:
+        user = _authenticated_principal()
+        if user is None:
             return
         vis, owner = self._workspace_visibility(ws)
-        if vis == "personal" and owner and owner != (user.get("email") or ""):
+        if (vis == "personal" and owner
+                and str(owner).casefold() != user["email"]):
             raise ValidationError(f"workspace '{ws}' is a personal folder of another user")
 
     def _clean_ws(self, workspace: Any) -> str:
@@ -752,9 +804,10 @@ class MemoryService:
         Session tools accept a bare typed id, so they cannot rely on a caller-supplied
         workspace passing through ``_clean_ws``. Resolve the owning workspace here and
         apply the same server binding/personal-folder boundary as every named operation.
-        New team sessions also carry ``user_id``; another authenticated user may neither
+        Team sessions carry a stable ``user_id``; another authenticated user may neither
         receive their handoff nor read, write, or close that user's session. Legacy rows
-        with no user id retain their established shared-workspace behavior.
+        without an owner remain available only in trusted local-owner mode, never through
+        an authenticated principal.
         """
         row = self.store.conn.execute(
             "SELECT name FROM workspaces WHERE id=?", (session["workspace_id"],)
@@ -762,10 +815,12 @@ class MemoryService:
         if row is None:
             raise ValidationError("session belongs to an unknown workspace")
         self._authorize_workspace(row["name"])
-        user = current_user()
+        user = _authenticated_principal()
         owner_id = str(session.get("user_id") or "")
-        if user is not None and owner_id != str(user.get("id") or ""):
-            if owner_id:
+        if user is not None:
+            if not owner_id:
+                raise ValidationError("session has no authenticated owner")
+            if owner_id != user["id"]:
                 raise ValidationError("session belongs to another user")
 
     def _session_for_write(self, session_id: Optional[str], wid: str,
@@ -1475,7 +1530,9 @@ class MemoryService:
 
         # A configured workspace binding or a bound dashboard user must never do a
         # workspace-less (global) recall — either case represents a tenant boundary.
-        if not workspace and (self.allowed_workspaces is not None or current_user() is not None):
+        if not workspace and (
+                self.allowed_workspaces is not None
+                or _authenticated_principal() is not None):
             raise ValidationError("workspace is required on this instance")
         wid = rid = None
         sid = None
@@ -1570,7 +1627,9 @@ class MemoryService:
             min_support = max(0.0, min(1.0, min_support))
         mts = [_enum(m, MemoryType, "mtype") for m in mtypes] if mtypes else None
 
-        if not workspace and (self.allowed_workspaces is not None or current_user() is not None):
+        if not workspace and (
+                self.allowed_workspaces is not None
+                or _authenticated_principal() is not None):
             raise ValidationError("workspace is required on this instance")
         wid = rid = None
         sid = None
@@ -1638,11 +1697,8 @@ class MemoryService:
         goal = _clean_text(goal, field="goal", max_chars=MAX_TITLE_CHARS, required=False)
         wid = self._get_or_create_workspace(ws)
         rid = self.store.get_or_create_repo(wid, rp) if rp else None
-        principal = current_user()
-        user_id = _clean_text(
-            (principal or {}).get("id") or "", field="user_id",
-            max_chars=MAX_NAME_CHARS, required=False,
-        )
+        principal = _authenticated_principal()
+        user_id = principal["id"] if principal is not None else ""
         sid, reused = self.store.get_or_start_session(
             wid, rid, agent=agent, user_id=user_id, goal=goal,
             force_new=bool(force_new),
@@ -1826,13 +1882,8 @@ class MemoryService:
         retention, plus the repo's last-session handoff if there is one."""
         wid, rid = self._require_scope(workspace, repo)
         k = max(1, min(MAX_K, int(k)))
-        principal = current_user()
-        user_id = None
-        if principal is not None:
-            user_id = _clean_text(
-                principal.get("id") or "", field="user_id",
-                max_chars=MAX_NAME_CHARS, required=False,
-            )
+        principal = _authenticated_principal()
+        user_id = principal["id"] if principal is not None else None
         out = self.engine.recall_proactive(
             workspace_id=wid, repo_id=rid, k=k, user_id=user_id,
         )
@@ -2069,8 +2120,8 @@ class MemoryService:
             "AND (m.valid_from IS NULL OR m.valid_from<=?) "
             "AND (m.valid_to IS NULL OR ?<m.valid_to) AND m.expired_at IS NULL "
             "GROUP BY w.id, w.name, w.settings ORDER BY w.name", (now, now)).fetchall()
-        user = current_user()
-        my_email = (user or {}).get("email") or ""
+        user = _authenticated_principal()
+        my_email = user["email"] if user is not None else ""
         out = []
         for r in rows:
             if self.allowed_workspaces is not None and r["name"] not in self.allowed_workspaces:
@@ -2084,8 +2135,10 @@ class MemoryService:
             _desc = _s.get("description") or ""
             _vis = "personal" if _s.get("visibility") == "personal" else "shared"
             _owner = _s.get("owner") or ""
+            _owner_normalized = str(_owner).casefold()
             # Hide other users' personal folders from the listing (team mode only).
-            if user and _vis == "personal" and _owner and _owner != my_email:
+            if (user and _vis == "personal" and _owner
+                    and _owner_normalized != my_email):
                 continue
             repos = [dict(x) for x in self.store.conn.execute(
                 "SELECT name FROM repos WHERE workspace_id=? ORDER BY name", (r["id"],))]
@@ -2093,11 +2146,11 @@ class MemoryService:
                      "visibility": _vis, "repos": [x["name"] for x in repos]}
             if user:
                 entry["can_change_access"] = bool(
-                    _owner == my_email or user.get("role") == "admin"
+                    _owner_normalized == my_email or user.get("role") == "admin"
                 )
             if _vis == "personal":
                 entry["owner"] = _owner
-                entry["mine"] = bool(my_email and _owner == my_email)
+                entry["mine"] = bool(my_email and _owner_normalized == my_email)
             out.append(entry)
         return {"workspaces": out}
 
@@ -2128,8 +2181,8 @@ class MemoryService:
             raise ValidationError("visibility must be 'personal' or 'shared'")
         if visibility == "shared" and confirmed is not True:
             raise ValidationError("sharing a folder requires explicit confirmation")
-        u = current_user() or {}
-        owner = u.get("email") or ""
+        user = _authenticated_principal()
+        owner = user["email"] if user is not None else ""
         if visibility == "personal" and not owner:
             visibility = "shared"  # no identity to own it — don't orphan the folder
         if self._lookup_workspace(ws) is not None:
@@ -2159,8 +2212,8 @@ class MemoryService:
             raise ValidationError("visibility must be 'personal' or 'shared'")
         if confirmed is not True:
             raise ValidationError("changing folder access requires explicit confirmation")
-        user = current_user() or {}
-        owner = user.get("email") or ""
+        user = _authenticated_principal()
+        owner = user["email"] if user is not None else ""
         if not owner:
             raise ValidationError("changing folder access requires a signed-in team user")
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
@@ -2177,7 +2230,8 @@ class MemoryService:
             workspace_settings = {}
         previous, previous_owner = self._workspace_visibility(ws)
         if previous == "shared" and target == "personal" \
-                and previous_owner != owner and user.get("role") != "admin":
+                and str(previous_owner).casefold() != owner \
+                and user.get("role") != "admin":
             # Making a team-visible folder private removes it from every other member.
             # The user who deliberately shared it may reverse that decision; otherwise
             # only an admin may claim a legacy/team-owned shared workspace.
@@ -3149,7 +3203,7 @@ class MemoryService:
 
         wid, _ = self._require_scope(workspace, None)
         conn = self.store.conn
-        user = current_user()
+        user = _authenticated_principal()
         if user is None:
             memory_visibility = ""
             session_visibility = ""
@@ -3158,10 +3212,10 @@ class MemoryService:
             memory_visibility = (
                 " AND (COALESCE(m.scope, 'workspace')!='session' OR EXISTS ("
                 "SELECT 1 FROM sessions visible_session WHERE visible_session.id=m.session_id "
-                "AND COALESCE(visible_session.user_id, '') IN ('', ?)))"
+                "AND visible_session.user_id=?))"
             )
-            session_visibility = " AND COALESCE(user_id, '') IN ('', ?)"
-            visibility_params = [str(user.get("id") or "")]
+            session_visibility = " AND user_id=?"
+            visibility_params = [user["id"]]
         memories = [dict(r) for r in conn.execute(
             "SELECT m.* FROM memories m WHERE m.workspace_id=?" + memory_visibility
             + " ORDER BY m.rowid", (wid, *visibility_params))]
@@ -5236,7 +5290,7 @@ class MemoryService:
         conn = self.store.conn
         params: list[Any] = []
         where = ""
-        user = current_user()
+        user = _authenticated_principal()
         # A bound instance or authenticated tenant must not report global aggregates.
         if not workspace and (self.allowed_workspaces is not None or user is not None):
             raise ValidationError("workspace is required on this instance")
@@ -5277,7 +5331,7 @@ class MemoryService:
                 sessions = conn.execute(
                     "SELECT COUNT(*) AS n FROM sessions "
                     "WHERE workspace_id=? AND user_id=?",
-                    (wid, str(user.get("id") or "")),
+                    (wid, user["id"]),
                 ).fetchone()["n"]
         return {
             "workspace": workspace, "memories": int(total), "by_type": by_type,

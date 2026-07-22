@@ -9,11 +9,85 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from engraphis.service import MemoryService, ValidationError, set_current_user
+from engraphis.service import (
+    MemoryService,
+    ValidationError,
+    current_user,
+    set_current_user,
+)
 
 
 def _svc():
     return MemoryService.create(":memory:")
+
+
+@pytest.fixture(autouse=True)
+def _clear_current_user():
+    set_current_user(None)
+    yield
+    set_current_user(None)
+
+
+@pytest.mark.parametrize(
+    ("principal", "message"),
+    [
+        ({"email": "alice@example.test", "role": "member"}, "principal id"),
+        ({"id": "usr_alice", "role": "member"}, "principal email"),
+        ({"id": "", "email": "alice@example.test"}, "principal id"),
+        ({"id": "bad id", "email": "alice@example.test"}, "principal id is invalid"),
+        ({"id": 7, "email": "alice@example.test"}, "principal id must be a string"),
+        ({"id": "usr_alice", "email": "not-an-email"}, "principal email is invalid"),
+        ({"id": "usr_alice", "email": ["alice@example.test"]},
+         "principal email must be a string"),
+        ({"id": "usr_alice\x00", "email": "alice@example.test"},
+         "principal id contains control characters"),
+        ([], "principal must be an object"),
+    ],
+)
+def test_authenticated_principal_requires_stable_id_and_ownership_email(
+        principal, message):
+    set_current_user({
+        "id": "usr_existing", "email": "existing@example.test", "role": "admin",
+    })
+
+    with pytest.raises(ValidationError, match=message):
+        set_current_user(principal)
+
+    # A failed rebind must not authorize the request as the previous principal.
+    assert current_user() is None
+
+
+def test_authenticated_principal_is_normalized_copied_and_member_safe():
+    supplied = {
+        "id": "  usr_alice  ", "email": "  Alice@Example.Test  ", "role": "owner",
+    }
+    set_current_user(supplied)
+    supplied.update({"id": "usr_mutated", "email": "mutated@test", "role": "admin"})
+
+    principal = current_user()
+    assert principal == {
+        "id": "usr_alice", "email": "alice@example.test", "role": "member",
+    }
+    principal["role"] = "admin"
+    assert current_user()["role"] == "member"
+
+
+@pytest.mark.parametrize(
+    ("principal", "message"),
+    [
+        ({"email": "alice@example.test", "role": "member"}, "principal id"),
+        ({"id": "usr_alice", "role": "member"}, "principal email"),
+    ],
+)
+def test_malformed_authenticated_principal_creates_no_workspace_or_session(
+        principal, message):
+    svc = _svc()
+
+    with pytest.raises(ValidationError, match=message):
+        set_current_user(principal)
+
+    assert svc.store.conn.execute("SELECT 1 FROM workspaces").fetchone() is None
+    assert svc.store.conn.execute("SELECT 1 FROM sessions").fetchone() is None
 
 
 def test_repeat_start_reuses_exact_active_task():
@@ -191,6 +265,55 @@ def test_team_users_get_distinct_owned_sessions_and_cannot_cross_access():
             svc.end_session(alice["session_id"], summary="hijacked")
     finally:
         set_current_user(None)
+
+
+def test_stable_id_scopes_sessions_even_when_ownership_email_matches():
+    svc = _svc()
+    svc.remember("shared workspace seed", workspace="w", repo="r")
+    shared_email = "shared-login@example.test"
+
+    set_current_user({"id": "usr_alice", "email": shared_email, "role": "member"})
+    alice = svc.start_session("w", repo="r", agent="codex", goal="same task")
+    svc.end_session(alice["session_id"], summary="Alice private handoff")
+
+    set_current_user({"id": "usr_bob", "email": shared_email, "role": "member"})
+    bob = svc.start_session("w", repo="r", agent="codex", goal="same task")
+
+    assert bob["reused"] is False
+    assert bob["session_id"] != alice["session_id"]
+    assert bob["bootstrap"] == {}
+    assert svc.stats(workspace="w")["sessions"] == 1
+    with pytest.raises(ValidationError, match="another user"):
+        svc.end_session(alice["session_id"], summary="hijacked")
+
+
+def test_authenticated_principal_cannot_claim_legacy_ownerless_session():
+    svc = _svc()
+    legacy = svc.start_session("w", repo="r", agent="codex", goal="same task")
+    svc.remember(
+        "LEGACY_OWNERLESS_PRIVATE", workspace="w", repo="r",
+        session_id=legacy["session_id"], scope="session",
+    )
+    assert svc.store.get_session(legacy["session_id"])["user_id"] == ""
+
+    set_current_user({
+        "id": "usr_alice", "email": "alice@example.test", "role": "member",
+    })
+    owned = svc.start_session("w", repo="r", agent="codex", goal="same task")
+
+    assert owned["reused"] is False
+    assert owned["session_id"] != legacy["session_id"]
+    with pytest.raises(ValidationError, match="no authenticated owner"):
+        svc.recall(
+            "LEGACY_OWNERLESS_PRIVATE", workspace="w", repo="r",
+            session_id=legacy["session_id"],
+        )
+    with pytest.raises(ValidationError, match="no authenticated owner"):
+        svc.end_session(legacy["session_id"], summary="claimed")
+    exported = repr(svc.export_workspace(workspace="w", recovery=True))
+    assert "LEGACY_OWNERLESS_PRIVATE" not in exported
+    assert legacy["session_id"] not in exported
+    assert svc.store.get_session(legacy["session_id"])["status"] == "active"
 
 
 def test_handoffs_are_user_scoped_and_start_bootstrap_is_agent_scoped():
