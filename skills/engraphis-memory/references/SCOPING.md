@@ -56,11 +56,18 @@ Over-scoping (everything `workspace`) pollutes recall in unrelated repos. Under-
 
 A session groups a task's memories and enables resume:
 
-1. `engraphis_start_session(workspace, repo, agent, goal)` → returns `session_id` and a `bootstrap`
-   carrying the previous session's `summary` + `open_threads` for this repo.
+1. `engraphis_start_session(workspace, repo, agent, goal)` → returns `session_id`, `reused`, and a
+   `bootstrap` carrying the previous same-user/agent session's `summary` + `open_threads` for this
+   repo.
 2. Pass `session_id` to `engraphis_remember` / `engraphis_record_event` during the task.
 3. `engraphis_end_session(session_id, summary, outcome, open_threads)` — `open_threads` are the
-   unresolved items; they auto-surface when the next session in this repo starts.
+   unresolved items; they auto-surface for the next same-user/agent session in this repo.
+
+Starting is idempotent per exact `(workspace, repo, authenticated user, agent, goal)` identity.
+Different users, agents, or goals automatically open separate sessions. `reused=true` therefore
+means a retry found the same active task. Use `force_new=true` only to branch a second session when
+every identity field matches; use this escape hatch deliberately because parallel duplicate task
+sessions make ownership and handoff ambiguous.
 
 Use sessions for any multi-step task. `open_threads` is how the next agent avoids re-discovering
 where you stopped.

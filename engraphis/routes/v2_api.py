@@ -165,6 +165,7 @@ def _keyword_search(ws, q, limit=20):
             return []
         sql = ("SELECT id, scope, mtype, title, content, summary, pinned, importance, "
                "valid_from, valid_to, provenance FROM memories WHERE workspace_id=? "
+               "AND COALESCE(scope, 'workspace')!='session' "
                "AND valid_to IS NULL AND expired_at IS NULL")
         args = [row["id"]]
         terms = [t for t in (q or "").split() if len(t) > 2][:6]
@@ -564,7 +565,8 @@ def llm_activity(workspace: Optional[str] = None, limit: int = 100):
         return {"workspace": ws, "count": 0, "activities": []}
     rows = service().store.conn.execute(
         "SELECT id, title, content, mtype, ingested_at, metadata FROM memories "
-        "WHERE workspace_id=? AND valid_to IS NULL AND expired_at IS NULL AND ("
+        "WHERE workspace_id=? AND COALESCE(scope, 'workspace')!='session' "
+        "AND valid_to IS NULL AND expired_at IS NULL AND ("
         "metadata LIKE '%\"llm_extraction\"%' OR "
         "metadata LIKE '%\"structured_extraction\"%' OR "
         "metadata LIKE '%\"structured_consolidation\"%' OR "
@@ -850,6 +852,7 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = None, limit: in
             return {"workspace": ws, "count": 0, "memories": []}
         sql = ("SELECT id, scope, mtype, title, content, summary, importance, pinned, "
                "valid_from, valid_to, provenance FROM memories WHERE workspace_id=? "
+               "AND COALESCE(scope, 'workspace')!='session' "
                "AND valid_to IS NULL AND expired_at IS NULL")
         args = [row["id"]]
         if q:
@@ -1174,10 +1177,7 @@ def analytics_portfolio():
 
 @router.get("/analytics")
 def analytics(workspace: Optional[str] = None):
-    """Rich per-workspace analytics (growth, retention histogram, decay forecast,
-    resolver mix, top entities) — the full engine analytics the Inspector used to own,
-    now served here. Falls back to the lightweight summary only when no workspace can be
-    resolved (e.g. a brand-new store). Pro-gated inside ``compute_analytics`` too."""
+    """Submit a consented, bounded workspace snapshot to hosted analytics."""
     from engraphis.cloud_features import run_managed_job
 
     ws = workspace or _require_ws()
@@ -1714,7 +1714,7 @@ def _sync_all(svc) -> dict:
             continue
         if w.get("visibility") == "personal":
             # Personal folders are private to their owner and must never leave this device
-            # over the shared-account relay: the relay namespace is shared by authorized
+            # over the hosted organization relay: the relay namespace is shared by authorized
             # organization members, not partitioned per local user — pushing a personal
             # folder there would let any teammate pull it. Keep them local. (Both callers are
             # covered: the "Sync now" button runs in the owner-admin's request context, where
@@ -1768,7 +1768,7 @@ def _sync_all(svc) -> dict:
             errors.append({"workspace": name, "error": str(exc), "status": 401})
             continue
         except RelayError as exc:
-            # Record the HTTP status (402 == relay rejected the key) instead of raising, so
+            # Record the HTTP status (402 == cloud authorization denied) instead of raising, so
             # one workspace can't abort the sweep; sync_run() promotes a 402 to the button.
             errors.append({"workspace": name, "error": str(exc), "status": exc.status})
             continue
@@ -1815,7 +1815,7 @@ async def sync_run():
     import asyncio
     summary = await asyncio.to_thread(_sync_all, svc)
     _SYNC_STATE["last"] = summary
-    # If the relay rejected the key for every workspace (nothing exported, a 402 seen),
+    # If cloud authorization failed for every workspace (nothing exported, a 402 seen),
     # surface it as the button's upgrade/renew prompt rather than a silent partial success.
     if summary["exported"] == 0 and any(e.get("status") == 402 for e in summary["errors"]):
         first = next(e for e in summary["errors"] if e.get("status") == 402)

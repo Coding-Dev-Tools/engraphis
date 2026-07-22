@@ -1,3 +1,7 @@
 *.pyd binary
 *.so binary
 *.dll binary
+.claude-plugin/*.json text eol=lf
+.claude-plugin/skill-assets.sha256 text eol=lf
+skills/engraphis-memory/*.md text eol=lf
+skills/engraphis-memory/references/*.md text eol=lf

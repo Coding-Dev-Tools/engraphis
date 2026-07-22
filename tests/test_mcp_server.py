@@ -1,10 +1,17 @@
 """Smoke test for the MCP binding. Skips cleanly when the optional 'mcp' package
 is not installed, so the offline CI gate is unaffected."""
 import json
+import re
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 pytest.importorskip("mcp", reason="optional 'mcp' extra not installed")
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_stdio_server_default_log_level_is_quiet():
@@ -27,6 +34,24 @@ def _module_with_memory_db(monkeypatch):
     return srv
 
 
+def _recall_side_effect_snapshot(srv):
+    """State covered by recall's reinforcement, receipt, and event side effects."""
+    conn = srv.service().store.conn
+    memories = conn.execute(
+        "SELECT id, access_count, stability, last_access FROM memories ORDER BY id"
+    ).fetchall()
+    return {
+        "memories": tuple(
+            (row["id"], row["access_count"], row["stability"], row["last_access"])
+            for row in memories
+        ),
+        "receipts": conn.execute(
+            "SELECT COUNT(*) AS n FROM operation_receipts"
+        ).fetchone()["n"],
+        "events": conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"],
+    }
+
+
 _ALL_TOOLS = {
     "engraphis_remember", "engraphis_recall", "engraphis_why", "engraphis_timeline",
     "engraphis_recall_proactive", "engraphis_forget", "engraphis_pin", "engraphis_correct",
@@ -37,6 +62,7 @@ _ALL_TOOLS = {
     "engraphis_answer", "engraphis_ingest", "engraphis_consolidate",
     "engraphis_ingest_postgres_schema",
     "engraphis_receipts", "engraphis_verify_receipts", "engraphis_export_receipts",
+    "engraphis_check_update",
 }
 
 
@@ -52,10 +78,127 @@ def test_server_identity_and_tools_registered():
     assert "engraphis_end_session" in srv.mcp.instructions
     assert "open_threads=[]" in srv.mcp.instructions
     tools = {t.name: t for t in asyncio.run(srv.mcp.list_tools())}
-    assert _ALL_TOOLS <= set(tools)
+    assert len(_ALL_TOOLS) == 29
+    assert set(tools) == _ALL_TOOLS
+    kilo = (ROOT / "docs" / "KILO_CODE_INTEGRATION.md").read_text(encoding="utf-8")
+    full_surface = kilo.split("## 4. The 29 tools", 1)[1].split("\n---", 1)[0]
+    assert set(re.findall(r"`(engraphis_[a-z_]+)`", full_surface)) == _ALL_TOOLS
     # Flat schema (not a nested "params" object) so agents can call fields directly.
     props = tools["engraphis_remember"].inputSchema.get("properties", {})
     assert "content" in props and "workspace" in props and "params" not in props
+
+
+def test_mcp_server_module_entrypoint_runs_stdio_handshake():
+    payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "entrypoint-test", "version": "1"},
+        },
+    }) + "\n"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "engraphis.mcp_server"],
+        cwd=ROOT,
+        input=payload,
+        text=True,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    response = json.loads(result.stdout)
+    assert response["id"] == 1
+    assert response["result"]["serverInfo"]["name"] == "engraphis_mcp"
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "kwargs", "memory_changes", "receipt_changes"),
+    [
+        (
+            "engraphis_recall",
+            {"query": "Which tokens authenticate the API?", "workspace": "acme", "repo": "api"},
+            True,
+            True,
+        ),
+        (
+            "engraphis_recall_grounded",
+            {
+                "query": "Which tokens authenticate the API?",
+                "workspace": "acme",
+                "repo": "api",
+                "min_support": 0.0,
+            },
+            True,
+            True,
+        ),
+        (
+            "engraphis_answer",
+            {
+                "query": "Which tokens authenticate the API?",
+                "workspace": "acme",
+                "repo": "api",
+                "min_support": 0.0,
+            },
+            True,
+            True,
+        ),
+        (
+            "engraphis_proactive_context",
+            {
+                "workspace": "acme",
+                "repo": "api",
+                "task": "Check which tokens authenticate the API",
+            },
+            False,
+            True,
+        ),
+        (
+            "engraphis_recall_proactive",
+            {"workspace": "acme", "repo": "api"},
+            False,
+            False,
+        ),
+    ],
+)
+def test_retrieval_annotations_match_observed_state_mutation(
+        monkeypatch, tool_name, kwargs, memory_changes, receipt_changes):
+    """MCP hosts must not auto-approve stateful retrieval based on false hints."""
+    import asyncio
+
+    srv = _module_with_memory_db(monkeypatch)
+    stored = json.loads(srv.engraphis_remember(
+        content="The API uses PASETO tokens for authentication.",
+        workspace="acme",
+        repo="api",
+        importance=0.9,
+    ))
+    assert stored["stored"] is True
+
+    before = _recall_side_effect_snapshot(srv)
+    result = getattr(srv, tool_name)(**kwargs)
+    assert not result.startswith("Error:"), result
+    json.loads(result)
+    after = _recall_side_effect_snapshot(srv)
+    observed_changes = {
+        key: after[key] != before[key]
+        for key in ("memories", "receipts", "events")
+    }
+    assert observed_changes == {
+        "memories": memory_changes,
+        "receipts": receipt_changes,
+        "events": False,
+    }
+    observed_mutation = any(observed_changes.values())
+
+    tools = {tool.name: tool for tool in asyncio.run(srv.mcp.list_tools())}
+    annotations = tools[tool_name].annotations
+    assert annotations.readOnlyHint is (not observed_mutation)
+    assert annotations.idempotentHint is (not observed_mutation)
 
 
 def test_remember_and_recall_tool_callables(monkeypatch):
