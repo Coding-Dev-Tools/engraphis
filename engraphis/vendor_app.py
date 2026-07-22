@@ -128,7 +128,12 @@ def create_app() -> FastAPI:
         trial_checks["email_worker"] = _email_worker_ok(app)
         trial_checks["public_url"] = bool(
             os.environ.get("ENGRAPHIS_RELAY_PUBLIC_URL", "").strip())
-        trial_checks["ready"] = all(trial_checks.values())
+        # Keep the public-rejection counter visible to monitoring, but do not make the
+        # synthetic attacker-controlled.  ``vendor_readiness`` applies the same rule:
+        # invalid lease attempts are an operator alert, not a serving dependency.
+        trial_checks["ready"] = all(
+            value for name, value in trial_checks.items()
+            if name != "rejected_leases")
         return JSONResponse(
             trial_checks, status_code=200 if trial_checks["ready"] else 503)
 
