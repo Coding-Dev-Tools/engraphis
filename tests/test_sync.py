@@ -214,6 +214,73 @@ def test_repo_scoped_export_includes_only_that_repo_metadata():
     assert drop not in bundle["repos"]
 
 
+def test_workspace_export_excludes_live_and_invalidated_session_rows_and_links():
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    records = (
+        MemoryRecord(id="mem_public_a", content="public a", workspace_id=wid,
+                     scope=Scope.WORKSPACE),
+        MemoryRecord(id="mem_public_b", content="public b", workspace_id=wid,
+                     scope=Scope.WORKSPACE),
+        MemoryRecord(id="mem_public_closed", content="public history", workspace_id=wid,
+                     scope=Scope.WORKSPACE, valid_to=1.0),
+        MemoryRecord(id="mem_session_live", content="private live", workspace_id=wid,
+                     session_id="ses_private", scope=Scope.SESSION),
+        MemoryRecord(id="mem_session_closed", content="private history", workspace_id=wid,
+                     session_id="ses_private", scope=Scope.SESSION, valid_to=1.0),
+    )
+    for record in records:
+        store.add_memory(record)
+    store.add_link("mem_public_a", "mem_public_b", "public")
+    store.add_link("mem_public_a", "mem_public_closed", "public-history")
+    store.add_link("mem_public_a", "mem_session_live", "private")
+    store.add_link("mem_session_live", "mem_session_closed", "private-history")
+
+    bundle = SyncEngine(store).export_bundle(wid)
+
+    assert {row["id"] for row in bundle["memories"]} == {
+        "mem_public_a", "mem_public_b", "mem_public_closed",
+    }
+    assert {(link["a"], link["b"], link["relation"]) for link in bundle["mem_links"]} == {
+        ("mem_public_a", "mem_public_b", "public"),
+        ("mem_public_a", "mem_public_closed", "public-history"),
+    }
+
+
+def test_repo_export_excludes_session_rows_from_the_selected_repo():
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    keep = store.get_or_create_repo(wid, "keep")
+    drop = store.get_or_create_repo(wid, "drop")
+    for record in (
+        MemoryRecord(id="mem_keep", content="keep", workspace_id=wid,
+                     repo_id=keep, scope=Scope.REPO),
+        MemoryRecord(id="mem_keep_closed", content="keep history", workspace_id=wid,
+                     repo_id=keep, scope=Scope.REPO, valid_to=1.0),
+        MemoryRecord(id="mem_keep_private", content="private", workspace_id=wid,
+                     repo_id=keep, session_id="ses_private", scope=Scope.SESSION),
+        MemoryRecord(id="mem_keep_private_closed", content="private history",
+                     workspace_id=wid, repo_id=keep, session_id="ses_private",
+                     scope=Scope.SESSION, valid_to=1.0),
+        MemoryRecord(id="mem_drop", content="drop", workspace_id=wid,
+                     repo_id=drop, scope=Scope.REPO),
+    ):
+        store.add_memory(record)
+    store.add_link("mem_keep", "mem_keep_closed", "public-history")
+    store.add_link("mem_keep", "mem_keep_private", "private")
+    store.add_link("mem_keep_private", "mem_keep_private_closed", "private-history")
+
+    bundle = SyncEngine(store).export_bundle(wid, repo_id=keep)
+
+    assert {row["id"] for row in bundle["memories"]} == {
+        "mem_keep", "mem_keep_closed",
+    }
+    assert bundle["repos"] == {keep: "keep"}
+    assert {(link["a"], link["b"], link["relation"]) for link in bundle["mem_links"]} == {
+        ("mem_keep", "mem_keep_closed", "public-history"),
+    }
+
+
 # ── two-device integration over the folder transport ──────────────────────────
 
 def _live(engine: MemoryEngine, wid: str) -> list:
@@ -547,6 +614,78 @@ def test_secret_memories_are_not_exported():
     bundle = SyncEngine(store).export_bundle(w)
     ids = {m["id"] for m in bundle["memories"]}
     assert "mem_pub" in ids and "mem_sec" not in ids
+
+
+def test_remote_session_memory_is_rejected_without_blocking_public_rows():
+    store = Store(":memory:")
+    bundle = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
+        "memories": [
+            {"id": "mem_private", "content": "private", "scope": "session",
+             "session_id": "ses_untrusted"},
+            {"id": "mem_public", "content": "public", "scope": "workspace",
+             "session_id": "ses_untrusted"},
+        ],
+        "mem_links": [],
+    }
+
+    report = SyncEngine(store).apply_bundle(bundle)
+
+    assert report["rejected"] == 1 and report["added"] == 1
+    assert store.get_memory("mem_private") is None
+    public = store.get_memory("mem_public")
+    assert public.content == "public"
+    assert public.session_id is None
+
+
+def test_remote_session_memory_dry_run_is_rejected_without_mutation():
+    store = Store(":memory:")
+    bundle = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "new-workspace", "repos": {},
+        "memories": [{"id": "mem_private", "content": "private", "scope": "session",
+                      "session_id": "ses_untrusted"}],
+        "mem_links": [],
+    }
+
+    report = SyncEngine(store).apply_bundle(bundle, dry_run=True)
+
+    assert report["rejected"] == 1
+    assert report["added"] == report["updated"] == report["unchanged"] == 0
+    assert store.get_memory("mem_private") is None
+    assert store.conn.execute(
+        "SELECT 1 FROM workspaces WHERE name='new-workspace'"
+    ).fetchone() is None
+
+
+@pytest.mark.parametrize(
+    ("local_scope", "remote_scope"),
+    [(Scope.WORKSPACE, "session"), (Scope.SESSION, "workspace")],
+)
+def test_remote_bundle_cannot_overwrite_existing_row_across_session_boundary(
+        local_scope, remote_scope):
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    store.add_memory(MemoryRecord(
+        id="mem_existing", content="local content", workspace_id=wid,
+        session_id="ses_local" if local_scope == Scope.SESSION else None,
+        scope=local_scope, last_access=1.0,
+    ))
+    bundle = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
+        "memories": [{
+            "id": "mem_existing", "content": "remote overwrite", "scope": remote_scope,
+            "session_id": "ses_untrusted" if remote_scope == "session" else None,
+            "last_access": time.time() + 86_400,
+        }],
+        "mem_links": [],
+    }
+
+    report = SyncEngine(store).apply_bundle(bundle)
+
+    assert report["rejected"] == 1 and report["updated"] == 0
+    existing = store.get_memory("mem_existing")
+    assert existing.content == "local content"
+    assert existing.scope == local_scope
 
 
 def test_remote_bundle_cannot_overwrite_or_downgrade_local_secret():

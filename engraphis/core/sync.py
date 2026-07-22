@@ -469,10 +469,12 @@ class SyncEngine:
         if self.allowed_workspaces is not None and ws_name not in self.allowed_workspaces:
             raise SyncError("workspace %r is not authorized for sync" % ws_name)
         flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id)
-        # 'secret'-flagged memories never leave the device — sync is the first feature to
-        # transmit memory content off-box, so this is the first place the label bites.
+        # Secret and session-scoped memories never leave the device. Include invalidated
+        # public rows so forget/correct still converges, but do not let closed session history
+        # become exportable. links_among() below receives only the retained ids, which also
+        # prevents a link from disclosing a filtered endpoint.
         mems = [m for m in self.store.list_memories(flt, include_invalid=True)
-                if m.sensitivity != "secret"]
+                if m.sensitivity != "secret" and m.scope != Scope.SESSION]
         if repo_id is not None:
             repo_rows = self.store.conn.execute(
                 "SELECT id, name FROM repos WHERE workspace_id=? AND id=?",
@@ -616,6 +618,13 @@ class SyncEngine:
         if rec is None:
             report["rejected"] += 1
             return
+        # Sync bundles have no authenticated session owner or session lifecycle metadata.
+        # Never create or merge private session state from an untrusted/legacy peer, even in
+        # dry-run mode or when the incoming id already exists locally.
+        if rec.scope == Scope.SESSION:
+            report["rejected"] += 1
+            return
+        rec.session_id = None
         # Re-home into local scope, and tag provenance with the origin device so a
         # synced-in memory stays auditable ("why is this known?" — AGENTS.md §3.6).
         rec.workspace_id = local_ws
@@ -648,6 +657,11 @@ class SyncEngine:
             # older sync that happened before the memory was classified secret, but it
             # must never be able to overwrite, invalidate, or downgrade the local row
             # back to an exportable sensitivity.
+            report["rejected"] += 1
+            return
+        if existing is not None and existing.scope == Scope.SESSION:
+            # A peer that learned an id before this boundary was enforced cannot relabel or
+            # overwrite the local private row with a non-session scope either.
             report["rejected"] += 1
             return
         if (existing is not None and only_repo_id is not None
