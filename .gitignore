@@ -51,6 +51,10 @@ internal/
 # venv. The portable, env-configurable equivalent is the tracked scripts/mcp_server_http.py.
 /engraphis-mcp-http.py
 
+# Generated screen-demo payload and encoded video.
+/demo/generated/
+/demo/output/
+
 # FUSE mount artifacts: orphaned unlink-while-open handles from the Cowork
 # mount layer, not real content. Safe to ignore; delete host-side once the
 # holding process releases the handle (rm from the sandbox gets EPERM).
