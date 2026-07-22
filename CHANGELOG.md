@@ -25,6 +25,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Changed
 
+- The legacy graph view now defaults to deterministic community islands, keeps sparse
+  influence bridges visually subordinate, and renders bounded direct A-MEM links even when
+  entity extraction is disabled. A reproducible repository-local screen-demo workflow exercises
+  session handoff, bi-temporal supersession, recall evidence, and history without external
+  services.
 - The public distribution is now structurally customer-only. License issuance, billing,
   fulfillment, Team identity, hosted relay, managed compute, worker execution, vendor
   administration, and commercial operations tooling moved to a private service repository;

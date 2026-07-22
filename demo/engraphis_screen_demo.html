@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Engraphis · memory continuity demo</title>
+  <style>
+    :root {
+      --ink: #eff2f6;
+      --muted: #9da8b6;
+      --faint: #687585;
+      --canvas: #090d12;
+      --panel: rgba(18, 25, 34, .93);
+      --panel-2: rgba(24, 33, 44, .9);
+      --line: rgba(170, 192, 214, .16);
+      --violet: #a78bfa;
+      --cyan: #67e8f9;
+      --green: #6ee7b7;
+      --amber: #fbbf72;
+      --red: #fb7185;
+      --shadow: 0 22px 70px rgba(0, 0, 0, .42);
+    }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; }
+    body {
+      overflow: hidden;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 78% 18%, rgba(103, 232, 249, .12), transparent 32%),
+        radial-gradient(circle at 12% 78%, rgba(167, 139, 250, .13), transparent 35%),
+        var(--canvas);
+      font: 15px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: .01em;
+    }
+    body::before {
+      position: fixed; inset: 0; content: ""; pointer-events: none; opacity: .22;
+      background-image: linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
+      background-size: 42px 42px;
+      mask-image: linear-gradient(to bottom, black, transparent 95%);
+    }
+    .frame { position: relative; width: 100vw; height: 100vh; padding: 30px 48px; }
+    .topbar { height: 42px; display: flex; justify-content: space-between; align-items: center; color: var(--muted); }
+    .brand { display: flex; align-items: center; gap: 11px; text-transform: uppercase; font-size: 12px; letter-spacing: .18em; }
+    .mark { width: 22px; height: 22px; position: relative; border: 1px solid rgba(167,139,250,.7); border-radius: 7px; transform: rotate(45deg); }
+    .mark::after { content: ""; position: absolute; inset: 5px; border: 1px solid rgba(103,232,249,.9); border-radius: 3px; }
+    .top-meta { display: flex; gap: 10px; align-items: center; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+    .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 16px var(--green); }
+    .pill { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 999px; padding: 5px 10px; color: var(--muted); background: rgba(255,255,255,.025); font-size: 11px; white-space: nowrap; }
+    .pill.violet { color: #d9ccff; border-color: rgba(167,139,250,.38); background: rgba(167,139,250,.09); }
+    .pill.cyan { color: #b9f7ff; border-color: rgba(103,232,249,.38); background: rgba(103,232,249,.08); }
+    .pill.green { color: #bbf7de; border-color: rgba(110,231,183,.38); background: rgba(110,231,183,.08); }
+    .pill.amber { color: #ffe2b2; border-color: rgba(251,191,114,.38); background: rgba(251,191,114,.08); }
+    .stage { position: absolute; top: 92px; right: 48px; bottom: 26px; left: 48px; }
+    .scene { position: absolute; inset: 0; display: flex; flex-direction: column; opacity: 0; transform: translateY(16px) scale(.985); pointer-events: none; transition: opacity .62s ease, transform .62s ease; }
+    .scene.active { opacity: 1; transform: none; pointer-events: auto; }
+    .scene.active .reveal { animation: rise .55s cubic-bezier(.2,.8,.2,1) both; }
+    .scene.active .reveal:nth-child(2) { animation-delay: .1s; }
+    .scene.active .reveal:nth-child(3) { animation-delay: .2s; }
+    .scene.active .reveal:nth-child(4) { animation-delay: .3s; }
+    .scene.active .reveal:nth-child(5) { animation-delay: .4s; }
+    @keyframes rise { from { opacity: 0; transform: translateY(13px); } to { opacity: 1; transform: none; } }
+    @keyframes blink { 0%, 100% { opacity: .3; } 50% { opacity: 1; } }
+    @keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(110,231,183,.08); } 50% { box-shadow: 0 0 0 10px rgba(110,231,183,0); } }
+    .kicker { color: var(--cyan); font-size: 11px; letter-spacing: .22em; text-transform: uppercase; }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: clamp(38px, 5vw, 70px); line-height: 1.02; letter-spacing: -.045em; font-weight: 650; }
+    h1 em { color: var(--violet); font-style: normal; }
+    h2 { font-size: 31px; line-height: 1.08; letter-spacing: -.03em; font-weight: 620; }
+    .sub { max-width: 570px; color: var(--muted); font-size: 17px; }
+    .intro { justify-content: center; padding-left: 9vw; gap: 24px; }
+    .intro h1 { max-width: 780px; }
+    .intro .sub { max-width: 555px; }
+    .intro-footer { display: flex; gap: 9px; margin-top: 10px; }
+    .scene-head { display: flex; justify-content: space-between; align-items: end; margin-bottom: 24px; }
+    .scene-head .sub { max-width: 440px; font-size: 14px; text-align: right; }
+    .split { min-height: 0; flex: 1; display: grid; grid-template-columns: .78fr 1.22fr; gap: 22px; }
+    .split.equal { grid-template-columns: 1fr 1fr; }
+    .copy { display: flex; flex-direction: column; gap: 17px; padding: 24px 8px 0 0; }
+    .copy h2 { max-width: 440px; }
+    .copy .sub { font-size: 15px; max-width: 420px; }
+    .surface { min-height: 0; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); box-shadow: var(--shadow); overflow: hidden; }
+    .terminal { display: flex; flex-direction: column; }
+    .surface-bar { height: 44px; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; border-bottom: 1px solid var(--line); background: rgba(255,255,255,.025); color: var(--faint); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; }
+    .window-dots { display: flex; gap: 6px; }
+    .window-dots i { width: 7px; height: 7px; border-radius: 50%; background: #455363; }
+    .window-dots i:first-child { background: #fb7185; }
+    .window-dots i:nth-child(2) { background: #fbbf72; }
+    .window-dots i:nth-child(3) { background: #6ee7b7; }
+    .terminal-body { padding: 23px 24px 25px; display: flex; flex-direction: column; gap: 11px; font: 13px/1.5 "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+    .prompt { color: var(--cyan); }
+    .output { color: #d4dae3; padding-left: 17px; border-left: 1px solid rgba(103,232,249,.3); }
+    .output strong { color: var(--green); font-weight: 500; }
+    .output em { color: var(--amber); font-style: normal; }
+    .handoff { margin: 4px 0 2px 17px; padding: 12px 14px; border-radius: 10px; background: rgba(167,139,250,.08); border: 1px solid rgba(167,139,250,.24); color: #d9d0f8; }
+    .handoff .label { color: var(--violet); font-size: 10px; text-transform: uppercase; letter-spacing: .12em; }
+    .result { margin-top: 3px; padding: 14px; border-radius: 10px; border: 1px solid rgba(110,231,183,.27); background: rgba(110,231,183,.06); }
+    .result-title { display: flex; justify-content: space-between; gap: 15px; color: #eafdf5; font-weight: 600; }
+    .result-copy { color: #b7c1cc; margin-top: 7px; }
+    .micro { color: var(--faint); font-size: 11px; }
+    .thread-row { display: flex; flex-wrap: wrap; gap: 7px; margin: 2px 0 0 17px; }
+    .thread { padding: 4px 8px; border: 1px solid rgba(251,191,114,.27); color: #f8d8a6; border-radius: 6px; font-size: 11px; }
+    .change-grid { display: grid; grid-template-columns: minmax(0, 1fr) 62px minmax(0, 1fr); gap: 14px; padding: 25px; }
+    .version { position: relative; padding: 18px; min-height: 190px; border: 1px solid var(--line); border-radius: 13px; background: rgba(255,255,255,.025); }
+    .version.current { border-color: rgba(110,231,183,.4); background: rgba(110,231,183,.055); }
+    .version.old { opacity: .66; }
+    .version-label { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 11px; letter-spacing: .11em; text-transform: uppercase; }
+    .version p { margin-top: 20px; font-size: 17px; line-height: 1.35; }
+    .version.old p { text-decoration: line-through; text-decoration-color: rgba(251,113,133,.66); }
+    .version .time { position: absolute; bottom: 15px; left: 18px; color: var(--faint); font-size: 11px; }
+    .arrow { align-self: center; color: var(--violet); font-size: 22px; }
+    .resolver { grid-column: 1 / -1; display: grid; grid-template-columns: 160px 1fr; align-items: center; gap: 14px; padding: 13px 15px; border-radius: 10px; border: 1px solid rgba(167,139,250,.24); background: rgba(167,139,250,.06); }
+    .resolver-label { color: var(--violet); font-size: 10px; letter-spacing: .13em; text-transform: uppercase; }
+    .resolver-copy { color: #d5dbe3; font: 12px/1.5 "SFMono-Regular", Consolas, monospace; }
+    .guard { display: flex; align-items: center; gap: 9px; color: var(--green); font-size: 12px; margin-top: auto; }
+    .guard::before { content: "✓"; display: grid; place-items: center; width: 20px; height: 20px; border: 1px solid rgba(110,231,183,.45); border-radius: 50%; animation: pulse 2s infinite; }
+    .explain-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: 1fr .94fr; gap: 22px; }
+    .explain-card { padding: 23px; display: flex; flex-direction: column; gap: 17px; }
+    .explain-title { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .explain-title h3 { margin: 0; font-size: 15px; letter-spacing: .09em; text-transform: uppercase; font-weight: 600; }
+    .query { color: var(--muted); font: 13px/1.5 "SFMono-Regular", Consolas, monospace; }
+    .why-result { padding: 15px; border: 1px solid rgba(110,231,183,.28); border-radius: 12px; background: rgba(110,231,183,.06); }
+    .why-result .title { color: #eafff6; font-weight: 650; }
+    .why-result p { color: #bbc5d0; margin-top: 7px; font-size: 14px; }
+    .evidence { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; }
+    .evidence-item { padding: 11px 12px; border: 1px solid var(--line); border-radius: 9px; background: rgba(255,255,255,.025); }
+    .evidence-item .label { color: var(--faint); display: block; text-transform: uppercase; font-size: 9px; letter-spacing: .11em; }
+    .evidence-item .value { display: block; margin-top: 4px; color: var(--ink); font: 12px/1.4 "SFMono-Regular", Consolas, monospace; }
+    .explain-note { margin-top: auto; padding-top: 13px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+    .timeline-card { padding: 23px; overflow: auto; }
+    .timeline-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 19px; }
+    .timeline-head h3 { margin: 0; font-size: 15px; letter-spacing: .09em; text-transform: uppercase; font-weight: 600; }
+    .chain { position: relative; padding-left: 24px; }
+    .chain::before { position: absolute; content: ""; top: 9px; bottom: 9px; left: 5px; width: 1px; background: linear-gradient(var(--red), var(--green)); }
+    .node { position: relative; padding: 0 0 25px 14px; }
+    .node:last-child { padding-bottom: 0; }
+    .node::before { position: absolute; content: ""; left: -24px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--red); box-shadow: 0 0 0 4px rgba(251,113,133,.11); }
+    .node.current::before { background: var(--green); box-shadow: 0 0 0 4px rgba(110,231,183,.12); }
+    .node-label { display: flex; justify-content: space-between; align-items: center; gap: 10px; color: #e7ebf0; font-size: 13px; font-weight: 600; }
+    .node-copy { margin-top: 6px; color: var(--muted); font-size: 13px; }
+    .node-meta { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 10px; color: var(--faint); font: 10px "SFMono-Regular", Consolas, monospace; }
+    .node-meta span { padding: 4px 6px; border: 1px solid var(--line); border-radius: 5px; }
+    .close { justify-content: center; align-items: center; text-align: center; gap: 21px; }
+    .close h1 { max-width: 830px; }
+    .close .sub { max-width: 600px; }
+    .close-rule { width: 92px; height: 1px; background: linear-gradient(90deg, transparent, var(--cyan), transparent); }
+    .close-badges { display: flex; gap: 9px; }
+    .progress { position: fixed; left: 48px; right: 48px; bottom: 14px; height: 2px; background: rgba(255,255,255,.1); }
+    .progress > span { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--violet), var(--cyan)); box-shadow: 0 0 10px rgba(103,232,249,.65); }
+    .timecode { min-width: 42px; text-align: right; color: var(--faint); font: 11px "SFMono-Regular", Consolas, monospace; }
+    @media (max-width: 980px) {
+      .frame { padding: 22px 24px; }
+      .stage { top: 77px; right: 24px; left: 24px; }
+      .split, .split.equal, .explain-grid { grid-template-columns: 1fr; }
+      .scene-head .sub { display: none; }
+      .copy { padding-top: 0; }
+      .surface { max-height: 60vh; }
+      .progress { left: 24px; right: 24px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <header class="topbar">
+      <div class="brand"><span class="mark"></span><span>Engraphis</span><span style="color:var(--faint)">/</span><span>Memory continuity</span></div>
+      <div class="top-meta"><span class="live-dot"></span><span>local replay</span><span class="pill violet">56 sec</span><span id="timecode" class="timecode">00:00</span></div>
+    </header>
+    <main class="stage">
+      <section class="scene intro active" data-scene="intro">
+        <div class="kicker reveal">A screen demo for coding agents</div>
+        <h1 class="reveal">Memory that survives<br><em>the next session.</em></h1>
+        <p class="sub reveal">An agent resumes repository context, updates a fact without erasing its past, then traces exactly why that context came back.</p>
+        <div class="intro-footer reveal"><span class="pill cyan">scoped</span><span class="pill violet">bi-temporal</span><span class="pill green">local-first</span></div>
+      </section>
+
+      <section class="scene" data-scene="session">
+        <div class="scene-head reveal"><div><div class="kicker">01 / start a session</div><h2>The agent resumes with context.</h2></div><p class="sub">A new session gets the last handoff before it asks the repository the first question.</p></div>
+        <div class="split">
+          <div class="copy reveal"><span class="pill violet" style="width:max-content">workspace / <b>default</b></span><span class="pill cyan" style="width:max-content">repo / <b>engraphis</b></span><p class="sub">The memory boundary is explicit. The agent does not start from an empty prompt or a flat namespace.</p><div class="guard">session scope and repository scope stay visible</div></div>
+          <div class="surface terminal reveal"><div class="surface-bar"><span class="window-dots"><i></i><i></i><i></i></span><span>agent console · demo-agent</span><span class="pill green">active</span></div><div class="terminal-body">
+            <div><span class="prompt">$</span> engraphis_start_session(<span style="color:var(--amber)">repo="engraphis"</span>)</div>
+            <div class="output"><strong>✓ new session</strong> · <span data-session-id>ses_01…</span></div>
+            <div class="handoff"><div class="label">bootstrap handoff</div><div data-bootstrap>v2 is the current scoped, bi-temporal architecture.</div></div>
+            <div class="output"><span style="color:var(--violet)">open thread</span> · <span data-open-thread>Show why the architecture context was retrieved.</span></div>
+            <div style="margin-top:5px"><span class="prompt">$</span> engraphis_recall(<span style="color:var(--amber)">"where should new capability live?"</span>)</div>
+            <div class="result"><div class="result-title"><span data-recall-title>Where to build</span><span class="pill green">recalled</span></div><div class="result-copy" data-recall-content>New capability belongs in core and backends.</div><div class="micro" style="margin-top:9px" data-recall-why>Matched by semantic retrieval · fused score 4.190 · retention 1.000</div></div>
+          </div></div>
+        </div>
+      </section>
+
+      <section class="scene" data-scene="change">
+        <div class="scene-head reveal"><div><div class="kicker">02 / change a fact</div><h2>Updates close the old truth.<br><em>They do not delete it.</em></h2></div><p class="sub">The resolver records an explicit supersession edge and leaves the prior version inspectable.</p></div>
+        <div class="surface reveal"><div class="surface-bar"><span>memory editor · Demo configuration</span><span class="pill amber">resolver activity</span></div><div class="change-grid">
+          <article class="version old"><div class="version-label"><span>past version</span><span class="pill amber">closed</span></div><p data-old-content>The screen demo records against the standard dashboard port 8700.</p><span class="time" data-old-time>valid until this update</span></article>
+          <div class="arrow">→</div>
+          <article class="version current"><div class="version-label"><span>current version</span><span class="pill green">live</span></div><p data-current-content>The screen demo records against port 8790 so it does not collide with a developer dashboard.</p><span class="time" data-current-time>valid now</span></article>
+          <div class="resolver"><div class="resolver-label">write-path decision</div><div class="resolver-copy"><span style="color:var(--green)">invalidate</span> · <span data-resolution>same subject detected; previous memory preserved in history</span></div></div>
+        </div></div>
+        <div class="guard reveal">one fact, two versions, one explainable chain</div>
+      </section>
+
+      <section class="scene" data-scene="explain">
+        <div class="scene-head reveal"><div><div class="kicker">03 / explain the answer</div><h2>Engraphis can show<br><em>why it retrieved context.</em></h2></div><p class="sub">Retrieval evidence and bi-temporal history sit beside each other, not hidden behind a black box.</p></div>
+        <div class="explain-grid">
+          <div class="surface explain-card reveal"><div class="explain-title"><h3>Why this was retrieved</h3><span class="pill cyan">recall evidence</span></div><div class="query" data-query>query: where should new Engraphis capability live?</div><div class="why-result"><div class="title" data-recall-title>Where to build</div><p data-recall-content>New capability belongs in core and backends.</p></div><div class="evidence"><div class="evidence-item"><span class="label">retrieval arm</span><span class="value" data-arm>semantic</span></div><div class="evidence-item"><span class="label">fused score</span><span class="value" data-score>4.190</span></div><div class="evidence-item"><span class="label">retention</span><span class="value" data-retention>1.000</span></div><div class="evidence-item"><span class="label">provenance</span><span class="value" data-provenance>demo-seed · trusted</span></div></div><p class="explain-note">The agent gets the answer, the score signal, and the source that produced it.</p></div>
+          <div class="surface timeline-card reveal"><div class="timeline-head"><h3>Timeline / Demo configuration</h3><span class="pill violet">history preserved</span></div><div class="chain" data-timeline><div class="node"><div class="node-label"><span>Past version</span><span class="pill amber">past</span></div><div class="node-copy">The standard dashboard port was 8700.</div><div class="node-meta"><span>valid time · closed</span><span>source · demo-seed</span></div></div><div class="node current"><div class="node-label"><span>Current version</span><span class="pill green">current</span></div><div class="node-copy">The demo uses 8790 to avoid a collision.</div><div class="node-meta"><span>valid time · current</span><span>source · demo-seed</span></div></div></div></div>
+        </div>
+      </section>
+
+      <section class="scene close" data-scene="close">
+        <div class="kicker reveal">A paper trail for agent memory</div>
+        <h1 class="reveal">Recall the context.<br><em>Keep the history.</em></h1>
+        <div class="close-rule reveal"></div>
+        <p class="sub reveal">Engraphis makes memory scoped, temporal, and explainable across sessions and repositories.</p>
+        <div class="close-badges reveal"><span class="pill violet">what the agent knows</span><span class="pill cyan">why it knows it</span><span class="pill green">how it changed</span></div>
+      </section>
+    </main>
+    <div class="progress"><span id="progress"></span></div>
+  </div>
+  <script>
+    const FALLBACK = {
+      session: { session_id: "ses_01DEMOSESSION", bootstrap: { summary: "v2 is the current scoped, bi-temporal architecture: build new capability in engraphis/core and engraphis/backends.", open_threads: ["Show why the architecture context was retrieved."] } },
+      recall: { query: "where should new Engraphis capability live?", memory: { title: "Where to build", content: "New Engraphis capability belongs in engraphis/core and engraphis/backends; engraphis/app.py is the v1 legacy reference server.", score: 4.1896, retention: 1, arm: "semantic", why_recalled: "Matched by semantic retrieval; fused score 4.190, retention 1.000.", provenance: { source: "demo-seed", trusted: true } } },
+      why: { current: { content: "The screen demo records against port 8790 so it does not collide with a developer dashboard." }, supersedes: [{ content: "The screen demo records against the standard dashboard port 8700." }] },
+      timeline: [{ content: "The screen demo records against the standard dashboard port 8700.", valid_to: 1 }, { content: "The screen demo records against port 8790 so it does not collide with a developer dashboard.", valid_to: null }],
+      inspection: { events: [{ action: "invalidate", detail: "superseded prior version" }] }
+    };
+    const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[char]));
+    const shortId = (value) => value ? value.slice(0, 18) + "…" : "ses_01…";
+    const text = (selector, value) => { const node = document.querySelector(selector); if (node) node.textContent = value ?? ""; };
+    function hydrate(data) {
+      const session = data.session || FALLBACK.session;
+      const recall = data.recall || FALLBACK.recall;
+      const memory = recall.memory || FALLBACK.recall.memory;
+      const timeline = data.timeline || FALLBACK.timeline;
+      const old = timeline[0] || FALLBACK.timeline[0];
+      const current = timeline[timeline.length - 1] || FALLBACK.timeline[1];
+      text("[data-session-id]", shortId(session.session_id));
+      text("[data-bootstrap]", session.bootstrap?.summary);
+      text("[data-open-thread]", (session.bootstrap?.open_threads || [])[0]);
+      document.querySelectorAll("[data-recall-title]").forEach((node) => node.textContent = memory.title || "Where to build");
+      document.querySelectorAll("[data-recall-content]").forEach((node) => node.textContent = memory.content || "");
+      text("[data-recall-why]", memory.why_recalled || "Matched by semantic retrieval");
+      text("[data-old-content]", old.content);
+      text("[data-current-content]", current.content);
+      const event = (data.inspection?.events || [])[0];
+      text("[data-resolution]", event?.detail || "same subject detected; previous memory preserved in history");
+      text("[data-query]", "query: " + (recall.query || FALLBACK.recall.query));
+      text("[data-arm]", memory.arm || "semantic");
+      text("[data-score]", memory.score != null ? Number(memory.score).toFixed(3) : "4.190");
+      text("[data-retention]", memory.retention != null ? Number(memory.retention).toFixed(3) : "1.000");
+      text("[data-provenance]", `${memory.provenance?.source || "demo-seed"} · ${memory.provenance?.trusted === false ? "untrusted" : "trusted"}`);
+      const chain = document.querySelector("[data-timeline]");
+      if (chain) chain.innerHTML = timeline.map((item) => { const past = item.valid_to != null || item.expired_at != null; return `<div class="node${past ? "" : " current"}"><div class="node-label"><span>${past ? "Past version" : "Current version"}</span><span class="pill ${past ? "amber" : "green"}">${past ? "past" : "current"}</span></div><div class="node-copy">${esc(item.content)}</div><div class="node-meta"><span>valid time · ${past ? "closed" : "current"}</span><span>source · ${esc(item.provenance?.source || "demo-seed")}</span></div></div>`; }).join("");
+    }
+    fetch("generated/screen_demo_payload.json").then((response) => response.ok ? response.json() : Promise.reject(new Error("payload unavailable"))).then(hydrate).catch(() => hydrate(FALLBACK));
+
+    const TOTAL = 56;
+    const scenes = [
+      ["intro", 0, 5.5], ["session", 5.5, 22], ["change", 22, 38.5], ["explain", 38.5, 53.5], ["close", 53.5, 56]
+    ];
+    let start = performance.now();
+    let lastScene = "";
+    function tick(now) {
+      const elapsed = Math.min((now - start) / 1000, TOTAL);
+      const active = scenes.find(([name, from, to]) => elapsed >= from && elapsed < to) || scenes[scenes.length - 1];
+      if (active[0] !== lastScene) {
+        document.querySelectorAll(".scene").forEach((scene) => scene.classList.toggle("active", scene.dataset.scene === active[0]));
+        lastScene = active[0];
+      }
+      document.getElementById("progress").style.width = `${(elapsed / TOTAL) * 100}%`;
+      document.getElementById("timecode").textContent = `00:${String(Math.floor(elapsed)).padStart(2, "0")}`;
+      if (elapsed >= TOTAL) { window.demoDone = true; return; }
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  </script>
+</body>
+</html>

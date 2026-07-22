@@ -5041,10 +5041,69 @@ class MemoryService:
             selected_layers = {layer.value for layer in selected_graph_layers}
         # Nodes are capped at ``limit``; edges need their own cap or a large workspace
         # graph / indexed repo lets the lowest-privilege caller pull an unbounded
-        # payload (the SQL fetches are LIMIT-ed too, so server-side work stays
-        # bounded as well — entity edges sync from peers, so they are as attacker-
-        # growable as code edges).
+        # payload. The SQL fetches are limited too, so server-side work stays bounded.
         edge_cap = max(limit * 8, 2000)
+        # A workspace can legitimately have an A-MEM graph before it has extracted
+        # entities: direct memory links are first-class relationships, not merely an
+        # implementation detail of the code overlay.  The old dashboard endpoint
+        # returned an empty graph in that case even though the complete Galaxy scene
+        # could already render the linked memories.  Surface the bounded, live subset
+        # here as a useful fallback for both Graph-tab clients.
+        memory_link_fallback: list[dict] = []
+        if not entity_rows and selected_graph_layers != []:
+            now = time.time()
+            sql = (
+                "SELECT link.a, link.b, link.relation, "
+                "COALESCE(link.layer, 'semantic') AS layer, "
+                "COALESCE(link.reason, '') AS reason, "
+                "COALESCE(NULLIF(left_memory.title, ''), "
+                "substr(left_memory.content, 1, 80)) AS a_name, "
+                "left_memory.mtype AS a_mtype, "
+                "COALESCE(NULLIF(right_memory.title, ''), "
+                "substr(right_memory.content, 1, 80)) AS b_name, "
+                "right_memory.mtype AS b_mtype "
+                "FROM mem_links link "
+                "JOIN memories left_memory ON left_memory.id=link.a "
+                "JOIN memories right_memory ON right_memory.id=link.b "
+                "WHERE left_memory.workspace_id=? AND right_memory.workspace_id=? "
+                "AND COALESCE(left_memory.scope, 'workspace')!='session' "
+                "AND COALESCE(right_memory.scope, 'workspace')!='session' "
+                "AND (left_memory.valid_from IS NULL OR left_memory.valid_from<=?) "
+                "AND (left_memory.valid_to IS NULL OR ?<left_memory.valid_to) "
+                "AND left_memory.expired_at IS NULL "
+                "AND (right_memory.valid_from IS NULL OR right_memory.valid_from<=?) "
+                "AND (right_memory.valid_to IS NULL OR ?<right_memory.valid_to) "
+                "AND right_memory.expired_at IS NULL "
+            )
+            params: list[Any] = [wid, wid, now, now, now, now]
+            if selected_graph_layers:
+                marks = ",".join("?" for _ in selected_graph_layers)
+                sql += f"AND COALESCE(link.layer, 'semantic') IN ({marks}) "
+                params.extend(layer.value for layer in selected_graph_layers)
+            sql += "ORDER BY link.created_at, link.rowid LIMIT ?"
+            params.append(edge_cap)
+
+            fallback_nodes: dict[str, dict] = {}
+            for row in conn.execute(sql, params).fetchall():
+                link = dict(row)
+                new_ids = {link["a"], link["b"]} - fallback_nodes.keys()
+                if len(fallback_nodes) + len(new_ids) > limit:
+                    continue
+                for prefix, memory_id in (("a", link["a"]), ("b", link["b"])):
+                    fallback_nodes.setdefault(memory_id, {
+                        "id": memory_id,
+                        "name": (
+                            link[f"{prefix}_name"]
+                            or memory_id
+                        ),
+                        "etype": f"memory_{link[f'{prefix}_mtype']}",
+                    })
+                memory_link_fallback.append({
+                    "a": link["a"], "b": link["b"],
+                    "relation": link["relation"], "layer": link["layer"],
+                    "reason": link["reason"],
+                })
+            entity_rows = list(fallback_nodes.values())
         visible_edge_ids = None
         if restrict_sessions:
             visible_edge_ids = {
@@ -5073,6 +5132,15 @@ class MemoryService:
                 or (edge.layer.value if edge.layer else "semantic") in selected_layers
             )
         ]
+        for link in memory_link_fallback:
+            if len(edgs) >= edge_cap:
+                break
+            edgs.append({
+                "src": link["a"], "dst": link["b"],
+                "relation": link["relation"],
+                "layer": link.get("layer") or "semantic",
+                "reason": link.get("reason") or "",
+            })
         repo_names: list[str] = []
         if include_code:
             repo_rows = []

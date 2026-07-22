@@ -443,16 +443,16 @@ function renderSync(d){const el=document.getElementById('sync-body');if(!el)retu
 async function syncNow(){const b=document.getElementById('sync-btn');const s=document.getElementById('sync-status');if(b){b.disabled=true;b.textContent='Syncing…'}if(s)s.textContent='Contacting the cloud…';try{const d=await api('/sync/run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const su=d.summary||{};toast('Synced — pushed '+(su.exported||0)+', '+(su.added||0)+' new from other devices','ok');await loadSyncStatus()}catch(e){toast('Sync failed: '+e.message,'err');if(b){b.disabled=false;b.textContent='Sync now'}if(s)s.textContent='Sync failed — try again.'}}
 
 /* ─── knowledge graph (force-graph + d3-force: compact defaults and selectable layouts) ─── */
-let GRAPH=null, FG=null, GRESIZE=false, GRESIZEFRAME=0, GADJ={}, GCOMPONENTS={}, GCOMPONENT_LAYOUT=null, GHILITE=null, GHOVERSET=null, GLABELRANK={}, GLABELBOXES=[], GDATA_CACHE=null, GACTIVE_DATA=null, GREDRAWFRAME=0, GPERF={large:false,dense:false};
+let GRAPH=null, FG=null, GRESIZE=false, GRESIZEFRAME=0, GADJ={}, GCOMM_ADJ={}, GCOMPONENTS={}, GCOMPONENT_LAYOUT=null, GHILITE=null, GHOVERSET=null, GLABELRANK={}, GLABELBOXES=[], GDATA_CACHE=null, GACTIVE_DATA=null, GREDRAWFRAME=0, GPERF={large:false,dense:false};
 const GRAPH_PRESETS={
  original:{label:'Original force',repel:120,link:30,gravity:14,font:13,size:3,linkw:1,labelDensity:40,curve:0,particles:0},
  compact:{label:'Compact clusters',repel:42,link:20,gravity:26,font:12,size:3,linkw:.7,labelDensity:30,curve:.08,particles:0},
- communities:{label:'Community islands',repel:58,link:22,gravity:26,font:13,size:3,linkw:.8,labelDensity:50,curve:.16,particles:0},
+ communities:{label:'Community islands',repel:48,link:16,gravity:48,font:12,size:3,linkw:.72,labelDensity:24,curve:.12,particles:0},
  radial:{label:'Radial orbit',repel:68,link:26,gravity:12,font:13,size:3,linkw:.75,labelDensity:55,curve:.22,particles:0},
  constellation:{label:'Constellation flow',repel:34,link:16,gravity:38,font:12,size:3,linkw:.65,labelDensity:35,curve:.32,particles:2},
  custom:{label:'Custom tuning',curve:.1,particles:0}
 };
-window.GSET=window.GSET||{mode:'compact',font:12,size:3,repel:42,link:20,gravity:26,labels:false,linkw:.7,labelDensity:30,flow:true,frozen:false};
+window.GSET=window.GSET||{mode:'communities',font:12,size:3,repel:48,link:16,gravity:48,labels:false,linkw:.72,labelDensity:24,flow:true,frozen:false};
 const ETYPE_TOKEN={person_or_concept:'--entity-concept',mention:'--entity-mention',hashtag:'--entity-hashtag',email:'--entity-email',organization:'--entity-organization',location:'--entity-location'};
 const GRAPH_PALETTES={
  theme:null,
@@ -538,7 +538,7 @@ async function loadLegacyGraph(){
  }
  const layerInputs=Array.from(document.querySelectorAll('#graph-layer-filters input')),selectedLayers=layerInputs.filter(input=>input.checked).map(input=>input.value),layerFilter=selectedLayers.length===layerInputs.length?'':'&layers='+encodeURIComponent(selectedLayers.join(',')),includeCode=document.getElementById('graph-include-code').checked,repo=(document.getElementById('graph-repo-filter').value||'').trim();
  try{
-  GRAPH=await api('/graph?workspace='+encodeURIComponent(WS||'')+layerFilter+'&include_code='+(includeCode?'true':'false')+(repo?'&repo='+encodeURIComponent(repo):''));
+   GRAPH=await api('/graph?workspace='+encodeURIComponent(WS||'')+layerFilter+'&include_code='+(includeCode?'true':'false')+(repo?'&repo='+encodeURIComponent(repo):''));
   renderGraphSide();graphRender();
  }catch(error){
   showAs(empty,true,'flex');empty.textContent='Graph failed: '+error.message;graphSetLayoutStatus('Load failed',false);
@@ -562,7 +562,19 @@ function graphData(){
  const links=GRAPH.edges.filter(edge=>names.has(edge.from)&&names.has(edge.to)).map(edge=>({source:edge.from,target:edge.to,label:edge.label,layer:edge.layer||'semantic'}));
  const data={nodes,links};GDATA_CACHE={graph:GRAPH,hideIso,data};return data;
 }
-function buildAdj(links){GADJ={};links.forEach(link=>{const source=(link.source&&link.source.id)||link.source,target=(link.target&&link.target.id)||link.target;(GADJ[source]=GADJ[source]||new Set()).add(target);(GADJ[target]=GADJ[target]||new Set()).add(source)})}
+function buildAdj(links){
+ GADJ={};GCOMM_ADJ={};
+ links.forEach(link=>{
+  const source=(link.source&&link.source.id)||link.source,target=(link.target&&link.target.id)||link.target;
+  (GADJ[source]=GADJ[source]||new Set()).add(target);(GADJ[target]=GADJ[target]||new Set()).add(source);
+  GCOMM_ADJ[source]=GCOMM_ADJ[source]||new Set();GCOMM_ADJ[target]=GCOMM_ADJ[target]||new Set();
+  // Influence links often connect otherwise distinct bodies of work. Keep them
+  // visible, but do not let a few such bridges collapse all communities into one.
+  if(link.label!=='influences'){
+   (GCOMM_ADJ[source]=GCOMM_ADJ[source]||new Set()).add(target);(GCOMM_ADJ[target]=GCOMM_ADJ[target]||new Set()).add(source);
+  }
+ });
+}
 function graphIndexComponents(nodes){
  const seen=new Set(),components=[];
  nodes.forEach(node=>{
@@ -580,10 +592,22 @@ function graphIndexComponents(nodes){
   ids.forEach(id=>{GCOMPONENTS[id]={index,size:ids.length,x,y}});
  });
 }
+function graphIndexCommunities(nodes){
+ const groups={};
+ nodes.forEach(node=>{const key=Number.isFinite(node.community)?node.community:0;(groups[key]=groups[key]||[]).push(node);});
+ const communities=Object.entries(groups).sort((a,b)=>b[1].length-a[1].length);
+ const cols=Math.max(1,Math.ceil(Math.sqrt(communities.length))),gap=Math.max(150,window.GSET.link*9);
+ GCOMPONENTS={};
+ communities.forEach(([key,members],index)=>{
+  const row=Math.floor(index/cols),col=index%cols,used=Math.min(cols,communities.length-row*cols);
+  const x=(col-(used-1)/2)*gap,y=(row-(Math.ceil(communities.length/cols)-1)/2)*gap;
+  members.forEach(node=>{GCOMPONENTS[node.id]={index,size:members.length,x,y,community:Number(key)};});
+ });
+}
 function graphRefreshComponentCenters(nodes,force=false){
  const layout=window.GSET.mode+'|'+window.GSET.link;
  if(!force&&GCOMPONENT_LAYOUT===layout)return;
- graphIndexComponents(nodes);GCOMPONENT_LAYOUT=layout;
+ if(window.GSET.mode==='communities')graphIndexCommunities(nodes);else graphIndexComponents(nodes);GCOMPONENT_LAYOUT=layout;
 }
 function graphAlpha(color,alpha){
  const hex=/^#([0-9a-f]{6})$/i.exec(color||'');
@@ -670,22 +694,18 @@ var GCOLORBY='community';try{var _cb=localStorage.getItem('engraphis-graph-color
 var GMAXDEG=1;
 function graphCommunityPalette(){return COMMUNITY_PALS[(typeof GSTYLE!=='undefined'&&COMMUNITY_PALS[GSTYLE])?GSTYLE:'classic'];}
 function graphComputeCommunities(nodes){
- var label={},ids=[];nodes.forEach(function(n,i){label[n.id]=i;ids.push(n.id);});
- for(var iter=0;iter<7;iter++){
-  var changed=false;
-  for(var a=ids.length-1;a>0;a--){var b=Math.floor(Math.random()*(a+1));var t=ids[a];ids[a]=ids[b];ids[b]=t;}
-  for(var j=0;j<ids.length;j++){
-   var id=ids[j],nb=GADJ[id];if(!nb||!nb.size)continue;
-   var counts={},best=label[id],bestC=-1;
-   nb.forEach(function(x){var l=label[x];counts[l]=(counts[l]||0)+1;if(counts[l]>bestC||(counts[l]===bestC&&l<best)){bestC=counts[l];best=l;}});
-   if(label[id]!==best){label[id]=best;changed=true;}
+ var byId={},seen=new Set(),groups=[];nodes.forEach(function(node){byId[node.id]=node;});
+ nodes.forEach(function(node){
+  if(seen.has(node.id))return;
+  var group=[],stack=[node.id];seen.add(node.id);
+  while(stack.length){
+   var id=stack.pop();group.push(id);var neighbours=GCOMM_ADJ[id]||new Set();
+   neighbours.forEach(function(next){if(byId[next]&&!seen.has(next)){seen.add(next);stack.push(next);}});
   }
-  if(!changed)break;
- }
- var groups={};nodes.forEach(function(n){var l=label[n.id];(groups[l]=groups[l]||[]).push(n);});
- var order=Object.keys(groups).sort(function(x,y){return groups[y].length-groups[x].length;});
- var remap={};order.forEach(function(l,i){remap[l]=i;});
- nodes.forEach(function(n){n.community=remap[label[n.id]];});
+  groups.push(group);
+ });
+ groups.sort(function(a,b){return b.length-a.length;});
+ groups.forEach(function(group,index){group.forEach(function(id){byId[id].community=index;});});
 }
 function graphHeatColor(node){var total=(GACTIVE_DATA&&GACTIVE_DATA.nodes.length)||1;var t=(node.rank||0)/Math.max(1,total-1);var idx=Math.min(GRAPH_HEAT.length-1,Math.floor(t*GRAPH_HEAT.length));return GRAPH_HEAT[idx];}
 function graphNodeColor(node){
@@ -821,9 +841,11 @@ function graphRender(fit=true,reheat=true){
  FG.nodePointerAreaPaint((node,color,ctx)=>{const radius=Math.max(3,node.radius)+3;ctx.beginPath();ctx.arc(node.x,node.y,radius,0,2*Math.PI);ctx.fillStyle=color;ctx.fill()});
  FG.linkColor(link=>{
   const focus=GHOVERSET&&GHOVERSET.size>1,source=(link.source&&link.source.id)||link.source,target=(link.target&&link.target.id)||link.target,active=!focus||source===GHILITE||target===GHILITE;
-  const palette=window.GCOL.links[link.layer]||window.GCOL.links.semantic;return active?(focus?palette.active:palette.base):palette.dim;
+  const palette=window.GCOL.links[link.layer]||window.GCOL.links.semantic;
+  if(link.label==='influences')return active?graphAlpha(window.GCOL.layers[link.layer]||window.GCOL.layers.semantic,focus?.34:.18):palette.dim;
+  return active?(focus?palette.active:palette.base):palette.dim;
  });
- FG.linkWidth(link=>{const width=window.GSET.linkw||1,focus=GHOVERSET&&GHOVERSET.size>1;if(!focus)return (GPERF.dense?.62:.82)*width;const source=(link.source&&link.source.id)||link.source,target=(link.target&&link.target.id)||link.target;return (source===GHILITE||target===GHILITE)?1.8*width:.25*width});
+ FG.linkWidth(link=>{const width=window.GSET.linkw||1,focus=GHOVERSET&&GHOVERSET.size>1,bridge=link.label==='influences';if(!focus)return (bridge?.45:(GPERF.dense?.62:.82))*width;const source=(link.source&&link.source.id)||link.source,target=(link.target&&link.target.id)||link.target;return (source===GHILITE||target===GHILITE)?(bridge?1.0:1.8)*width:.25*width});
  if(FG.linkLineDash)FG.linkLineDash(GPERF.dense?null:(link=>link.layer==='temporal'?[4,3]:(link.layer==='causal'?[2,2]:null)));
  if(FG.linkCurvature)FG.linkCurvature(GPERF.dense?0:mode.curve);
  FG.linkDirectionalArrowLength(GPERF.dense?0:2.5).linkDirectionalArrowRelPos(1);
@@ -892,7 +914,7 @@ function graphApplyPreset(name){
  const notes={
   original:'Original force graph · stronger repulsion and weak centering reproduce the previous, wider spacing.',
   compact:'Compact clusters · shorter links, gentler repulsion and stronger centering keep connected memories together.',
-  communities:'Community islands · connected components are packed around nearby component centers.',
+  communities:'Community islands · detected communities have their own gravity centers, while sparse bridges remain visible.',
   radial:'Radial orbit · high-degree entities settle near the center while lower-degree entities form outer rings.',
   constellation:'Constellation flow · curved directional relationships for smaller graphs.',
   custom:'Custom tuning · the appearance and physics controls below define this view.'
