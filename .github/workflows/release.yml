@@ -65,82 +65,13 @@ jobs:
           python -m eval.ablation
           python -m pip_audit --local
 
-      # Platform wheels are built by build-compiled-wheels.yml under cibuildwheel's
-      # manylinux/macOS/Windows environments. A bare Ubuntu `python -m build` would emit
-      # a non-portable linux_x86_64 wheel and duplicate the cp311 manylinux artifact.
-      - name: Build source distribution
-        run: python -m build --sdist
+      - name: Build source and universal wheel distributions
+        run: python -m build
 
       - name: Validate distributions
         run: python -m twine check dist/*
 
       - name: Store distributions
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: source-distribution
-          path: dist/
-
-  build-wheels:
-    name: Build compiled wheels (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    if: >-
-      github.event_name == 'push' ||
-      inputs.release_tag == ''
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.11"
-      - name: Install wheel tooling
-        run: python -m pip install cibuildwheel setuptools wheel cython
-      - name: Build supported platform wheels
-        env:
-          CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-*"
-          CIBW_SKIP: "*musllinux*"
-          CIBW_ARCHS_LINUX: "x86_64"
-          CIBW_ARCHS_WINDOWS: "AMD64"
-          CIBW_ARCHS_MACOS: "x86_64 arm64"
-          CIBW_BEFORE_BUILD: >-
-            python -m pip install "cython>=3.0"
-            "setuptools>=83; python_version >= '3.10'"
-            "setuptools>=77; python_version < '3.10'"
-        run: python -m cibuildwheel --output-dir wheelhouse
-      - name: Store platform wheels
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: compiled-wheels-${{ matrix.os }}
-          path: wheelhouse/*.whl
-
-  assemble:
-    name: Assemble distributions
-    needs: [build, build-wheels]
-    runs-on: ubuntu-latest
-    if: >-
-      github.event_name == 'push' ||
-      inputs.release_tag == ''
-    steps:
-      - name: Download source distribution
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: source-distribution
-          path: dist/
-      - name: Download platform wheels
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          pattern: compiled-wheels-*
-          path: dist/
-          merge-multiple: true
-      - name: Validate the complete artifact set
-        run: |
-          python -m pip install twine
-          test -n "$(find dist -maxdepth 1 -name '*.tar.gz' -print -quit)"
-          test -n "$(find dist -maxdepth 1 -name '*.whl' -print -quit)"
-          python -m twine check dist/*
-      - name: Store complete release artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: python-package-distributions
@@ -243,7 +174,7 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: [assemble, python-matrix, browser-accessibility, docker-smoke]
+    needs: [build, python-matrix, browser-accessibility, docker-smoke]
     # Manual dispatch is intentionally build/check-only. Publication requires a pushed
     # semver tag, whose value was matched to pyproject.toml in the build job above.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -374,9 +305,6 @@ jobs:
           test "$(jq '[.jobs[] | select(.name == "Publish to PyPI" and
                                         (.conclusion == "success" or
                                          .conclusion == "failure"))] | length' \
-            <<<"$jobs")" -eq 1
-          test "$(jq '[.jobs[] | select(.name == "Assemble distributions" and
-                                        .conclusion == "success")] | length' \
             <<<"$jobs")" -eq 1
           gh run download "$run_id" \
             --repo "$GH_REPO" \

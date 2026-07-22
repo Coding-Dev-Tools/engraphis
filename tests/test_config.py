@@ -64,42 +64,11 @@ def test_embed_dim_defaults_to_default_model_dimension(monkeypatch):
     assert Settings().embed_dim == 384
 
 
-def test_license_server_url_precedence(monkeypatch):
-    # Relay routing and commercial control-plane routing are intentionally independent.
-    monkeypatch.setattr(config.settings, "relay_url", "https://relay.example/")
-    monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
-    assert config.resolve_license_server_url() == config.DEFAULT_LICENSE_SERVER_URL
-    assert config.resolve_license_server_url(
-        "https://signed.example/",
-    ) == "https://signed.example"
-
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "https://override.example/")
-    assert config.resolve_license_server_url(
-        "https://signed.example/",
-    ) == "https://override.example"
-
-
-def test_license_server_url_migrates_retired_signed_host(monkeypatch):
-    monkeypatch.setattr(config.settings, "relay_url", config.DEFAULT_RELAY_URL)
-    monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
-    assert config.resolve_license_server_url(
-        "https://engraphis-production.up.railway.app/",
-    ) == config.DEFAULT_LICENSE_SERVER_URL
-
-
-def test_retired_cloud_url_override_is_canonicalized(monkeypatch):
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", RETIRED_RELAY_URL + "/")
-    assert (
-        config.resolve_license_server_url("https://signed.example")
-        == config.DEFAULT_LICENSE_SERVER_URL
-    )
-
-
 def test_retired_relay_url_override_is_canonicalized():
     assert config.canonicalize_relay_url(RETIRED_RELAY_URL) == config.DEFAULT_RELAY_URL
 
 def test_invalid_service_mode_exits_process(monkeypatch):
-    """Invalid service modes fail closed instead of selecting another role."""
+    """Invalid ENGRAPHIS_SERVICE_MODE must fail-closed (sys.exit), not silently fall back."""
     monkeypatch.setenv("ENGRAPHIS_SERVICE_MODE", "bogus")
     with pytest.raises(SystemExit):
         Settings()

@@ -9,7 +9,8 @@ v1 legacy (mounted by ``engraphis.app``, flat stores/engines namespaces):
 v2 (mounted by ``engraphis.dashboard_app``, built on ``core/`` + ``service.py``):
 
 * ``v2_api.py``  — the dashboard/REST API over MemoryService
-* ``v2_team.py`` — team-mode auth/user routes (AuthStore)
+
+Hosted Team identity and commercial feature routes are not part of this package.
 
 New capability goes on the v2 side behind ``core/interfaces.py``; the ``v2_`` filename
 prefix is the convention that marks the target side in this package.

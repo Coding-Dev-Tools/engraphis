@@ -57,10 +57,16 @@ python -m scripts.start_dashboard    # http://127.0.0.1:8700
 engraphis-init                   # or: python -m scripts.init
 engraphis-init --check
 
+# ── Customer-side hosted session ───────────────────────────────────────────
+ENGRAPHIS_CLOUD_CONTROL_URL=https://api.engraphis.com
+ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL=...  # secret; prefer the owner-only session file
+ENGRAPHIS_CLOUD_TOKEN_SUBJECT=member    # device or member, fixed at bootstrap
+# Authorization, billing, relay, compute, and worker implementations are private services.
+
 # ── Sleep-time consolidation (schedulable local job; also an MCP tool) ────────
 python -m scripts.consolidate --db engraphis.db --workspace acme --dry-run
 
-# ── Cloud sync (Pro; schedulable job over a shared folder OR the managed relay — see docs/SYNC.md) ──
+# ── Sync (local shared-folder transport or hosted Cloud Sync — see docs/SYNC.md) ──
 python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/engraphis --dry-run
 python -m scripts.sync --db engraphis.db --workspace acme --relay https://team.engraphis.com  # or bare --relay + ENGRAPHIS_RELAY_URL
 

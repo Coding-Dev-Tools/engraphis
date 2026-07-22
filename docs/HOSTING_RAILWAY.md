@@ -35,15 +35,12 @@ ENGRAPHIS_CLOUD_CONTROL_URL=https://api.engraphis.com
 ENGRAPHIS_CLOUD_COMPUTE_URL=https://compute.engraphis.com
 ENGRAPHIS_CLOUD_ORGANIZATION_ID=org_replace_me
 ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL=<secret>
+ENGRAPHIS_MANAGED_COMPUTE_CONSENT=0
 ```
 
 Prefer mounting the owner-only cloud session file rather than placing a rotating refresh
-credential directly in deployment configuration. An injected environment credential is only the
-bootstrap value; after rotation, the owner-only saved replacement takes precedence. Once
-connected, managed compute is enabled by default for an authorized customer and may upload a
-snapshot capped at 16 MiB over HTTPS without end-to-end encryption; secret-class and
-session-scoped rows are excluded client-side, and secret-class rows are rejected server-side.
-Set `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=0` to opt the deployed installation back out.
+credential directly in deployment configuration. Enabling managed-compute consent may upload a
+bounded snapshot; secret rows are excluded client-side and rejected server-side.
 
 ## Persistence and recovery
 

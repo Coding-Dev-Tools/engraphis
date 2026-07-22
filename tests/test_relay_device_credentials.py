@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import io
 import json
-import socket
 import urllib.error
 
 import pytest
@@ -13,16 +12,6 @@ from engraphis.backends.sync_relay import RelayError, RelayTransport
 
 
 TOKEN = "engr_access_" + "a" * 48
-
-
-def test_relay_url_dns_resolution_failure_fails_closed(monkeypatch):
-    def fail_resolution(*args, **kwargs):
-        raise socket.gaierror("private resolver detail")
-
-    monkeypatch.setattr(socket, "getaddrinfo", fail_resolution)
-
-    with pytest.raises(ValueError, match="could not be resolved"):
-        RelayTransport("https://unresolved.example", "workspace", access_token=TOKEN)
 
 
 def test_scoped_bearer_is_the_only_authorization_sent(monkeypatch):
@@ -86,7 +75,7 @@ def test_legacy_named_parameter_is_only_a_bearer_alias():
 
 def test_saved_bearer_is_never_forwarded_to_another_relay(monkeypatch):
     relay_backend.save_sync_token(
-        TOKEN, relay_origin="https://1.1.1.1"
+        TOKEN, relay_origin="https://relay-one.example"
     )
     monkeypatch.setattr(
         relay_backend,
@@ -95,7 +84,7 @@ def test_saved_bearer_is_never_forwarded_to_another_relay(monkeypatch):
     )
 
     with pytest.raises(RelayError, match="another relay") as caught:
-        RelayTransport("https://8.8.8.8", "workspace")
+        RelayTransport("https://relay-two.example", "workspace")
 
     assert caught.value.status == 409
 
