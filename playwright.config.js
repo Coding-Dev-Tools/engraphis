@@ -11,10 +11,11 @@ module.exports = defineConfig({
     screenshot: 'only-on-failure',
   },
   webServer: {
-    command: 'engraphis-dashboard --no-open --port 8700',
+    // Run the checked-out source, not a possibly stale globally installed console script.
+    command: 'python -m scripts.start_dashboard --no-open --port 8700',
     url: 'http://127.0.0.1:8700/api/health',
     timeout: 120_000,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: false,
     env: {
       ENGRAPHIS_EMBED_MODEL: '',
       ENGRAPHIS_LOOP_INTERVAL: '0',
@@ -29,4 +30,3 @@ module.exports = defineConfig({
     },
   ],
 });
-
