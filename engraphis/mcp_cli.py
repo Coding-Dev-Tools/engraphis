@@ -41,3 +41,7 @@ def main(argv=None) -> None:
     # when the optional dependency is absent — see engraphis/mcp_server.py.
     from engraphis.mcp_server import main as run
     run()
+
+
+if __name__ == "__main__":
+    main()

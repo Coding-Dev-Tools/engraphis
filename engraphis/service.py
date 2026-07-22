@@ -86,9 +86,67 @@ GRAPH_ENTITY_RELATION_LIMIT = 200
 GRAPH_ENTITY_EVIDENCE_LIMIT = 100
 GRAPH_ENTITY_HISTORY_LIMIT = 50
 
+
+def _graph_edge_visibility_sql(edge_alias: str, *, at: Optional[float] = None) -> str:
+    """SQL predicate: support-less legacy edge or evidence from a non-session memory."""
+    anchor = (
+        repr(float(at)) if at is not None
+        else repr(time.time())
+    )
+    return (
+        "(NOT EXISTS (SELECT 1 FROM edge_supports visibility_support "
+        f"WHERE visibility_support.edge_id={edge_alias}.id) OR EXISTS ("
+        "SELECT 1 FROM edge_supports visibility_support "
+        "JOIN memories visibility_memory "
+        "ON visibility_memory.id=visibility_support.memory_id "
+        f"WHERE visibility_support.edge_id={edge_alias}.id "
+        "AND (visibility_support.valid_from IS NULL "
+        f"OR visibility_support.valid_from<={anchor}) "
+        "AND (visibility_support.valid_to IS NULL "
+        f"OR {anchor}<visibility_support.valid_to) "
+        "AND visibility_support.expired_at IS NULL "
+        "AND (visibility_memory.valid_from IS NULL "
+        f"OR visibility_memory.valid_from<={anchor}) "
+        "AND (visibility_memory.valid_to IS NULL "
+        f"OR {anchor}<visibility_memory.valid_to) "
+        "AND visibility_memory.expired_at IS NULL "
+        "AND COALESCE(visibility_memory.scope, 'workspace')!='session'))"
+    )
+
+
+def _graph_entity_visibility_sql(entity_alias: str, *, at: Optional[float] = None) -> str:
+    """Hide entities whose entire evidence-bearing history is session-private.
+
+    Entity classification deliberately considers all historical touching edges, not only
+    the edges rendered at ``at``.  Otherwise forgetting the last session memory closes its
+    edge/support and turns the now-isolated entity into an apparently support-less public
+    label.  Truly manual/legacy entities remain visible when they have no edge history or a
+    touching edge that never had a support row.  ``at`` remains accepted for call-site
+    symmetry; edge-at-anchor visibility is applied separately when edges are rendered.
+    """
+    del at
+    touching = (
+        f"visibility_edge.workspace_id={entity_alias}.workspace_id AND "
+        f"(visibility_edge.src={entity_alias}.id OR visibility_edge.dst={entity_alias}.id)"
+    )
+    return (
+        "(NOT EXISTS (SELECT 1 FROM edges visibility_edge WHERE " + touching + ") "
+        "OR EXISTS (SELECT 1 FROM edges visibility_edge WHERE " + touching + " AND "
+        "NOT EXISTS (SELECT 1 FROM edge_supports visibility_support "
+        "WHERE visibility_support.edge_id=visibility_edge.id)) "
+        "OR EXISTS (SELECT 1 FROM edges visibility_edge "
+        "JOIN edge_supports visibility_support "
+        "ON visibility_support.edge_id=visibility_edge.id "
+        "JOIN memories visibility_memory "
+        "ON visibility_memory.id=visibility_support.memory_id WHERE " + touching + " AND "
+        "COALESCE(visibility_memory.scope, 'workspace')!='session'))"
+    )
+
 # control characters except tab/newline/carriage-return
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _NAME_RE = re.compile(r"^[A-Za-z0-9._\-/ ]{1,%d}$" % MAX_NAME_CHARS)
+_PRINCIPAL_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,%d}$" % MAX_NAME_CHARS)
+_PRINCIPAL_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+$")
 
 
 class ValidationError(ValueError):
@@ -159,15 +217,27 @@ _CURRENT_USER: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar
 def set_current_user(user: Optional[dict]) -> None:
     """Bind (or clear, with ``None``) the current dashboard user for this request context.
 
-    ``user`` is the auth-store session dict — only ``email`` and ``role`` are read here.
-    Called exactly once per request by the team auth gate; contextvars are per-context so
-    concurrent requests never see each other's user."""
-    _CURRENT_USER.set(user)
+    ``None`` is the only anonymous/single-user value. Every authenticated principal must
+    supply a stable ``id`` and ownership ``email``; malformed identity fails closed and
+    clears any inherited binding before raising. A normalized copy is stored so callers
+    cannot mutate their input dict after authentication. ``role`` defaults to member-safe.
+    Called once per request by the team auth gate; contextvars are per-context so concurrent
+    requests never see each other's user."""
+    if user is None:
+        _CURRENT_USER.set(None)
+        return
+    try:
+        principal = _validate_authenticated_principal(user)
+    except ValidationError:
+        _CURRENT_USER.set(None)
+        raise
+    _CURRENT_USER.set(principal)
 
 
 def current_user() -> Optional[dict]:
-    """The dashboard user bound to this request, or ``None`` outside team mode."""
-    return _CURRENT_USER.get()
+    """A copy of the validated dashboard principal, or ``None`` outside team mode."""
+    user = _CURRENT_USER.get()
+    return dict(user) if user is not None else None
 
 
 def _clean_text(value: Any, *, field: str, max_chars: int, required: bool = True) -> str:
@@ -191,6 +261,43 @@ def _clean_name(value: Any, *, field: str) -> str:
             f"{field} may only contain letters, digits, space and . _ - / characters"
         )
     return name
+
+
+def _validate_authenticated_principal(user: Any) -> dict[str, str]:
+    """Return a normalized, caller-independent identity or fail closed.
+
+    A non-``None`` current-user value is an authenticated boundary, never a hint. Both
+    the stable user id (session ownership) and email (workspace ownership) are mandatory;
+    silently replacing either with ``''`` collapses distinct users into one principal.
+    """
+    if not isinstance(user, dict):
+        raise ValidationError("authenticated principal must be an object")
+    raw_id = user.get("id")
+    if isinstance(raw_id, str) and _CONTROL_RE.search(raw_id):
+        raise ValidationError("authenticated principal id contains control characters")
+    user_id = _clean_text(
+        raw_id, field="authenticated principal id", max_chars=MAX_NAME_CHARS
+    )
+    if not _PRINCIPAL_ID_RE.fullmatch(user_id):
+        raise ValidationError("authenticated principal id is invalid")
+    raw_email = user.get("email")
+    if isinstance(raw_email, str) and _CONTROL_RE.search(raw_email):
+        raise ValidationError("authenticated principal email contains control characters")
+    email = _clean_text(
+        raw_email, field="authenticated principal email", max_chars=320
+    ).casefold()
+    if not _PRINCIPAL_EMAIL_RE.fullmatch(email):
+        raise ValidationError("authenticated principal email is invalid")
+    role = user.get("role")
+    if role not in {"viewer", "member", "admin"}:
+        role = "member"
+    return {"id": user_id, "email": email, "role": role}
+
+
+def _authenticated_principal() -> Optional[dict[str, str]]:
+    """Validated request principal; ``None`` alone selects trusted local-owner mode."""
+    user = current_user()
+    return _validate_authenticated_principal(user) if user is not None else None
 
 
 def _clean_string_list(value: Any, *, field: str, max_items: int, max_chars: int) -> list[str]:
@@ -604,6 +711,19 @@ class MemoryService:
         vis = s.get("visibility") or "shared"
         return (vis if vis == "personal" else "shared", s.get("owner") or "")
 
+    def _authorize_workspace_control(self, ws: str) -> None:
+        """Require the original sharer or an admin for whole-workspace mutations."""
+        user = _authenticated_principal()
+        if user is None:
+            return
+        _visibility, owner = self._workspace_visibility(ws)
+        if user.get("role") == "admin" or (
+                owner and str(owner).casefold() == user["email"]):
+            return
+        raise ValidationError(
+            "only the original sharer or an admin can modify the whole workspace"
+        )
+
     def _get_or_create_workspace(self, ws: str) -> str:
         """Get ``ws`` or create it private to the authenticated team user.
 
@@ -612,11 +732,11 @@ class MemoryService:
         agent or import could silently create a team-visible folder. Non-team callers do
         not have an identity and retain the established single-tenant behaviour.
         """
+        user = _authenticated_principal()
         existing = self._lookup_workspace(ws)
         if existing is not None:
             return existing
-        user = current_user() or {}
-        owner = user.get("email") or ""
+        owner = user["email"] if user is not None else ""
         workspace_settings = {"visibility": "personal", "owner": owner} if owner else None
         return self.store.create_workspace(ws, settings=workspace_settings)
 
@@ -626,11 +746,12 @@ class MemoryService:
         current user owns → allowed. A personal folder owned by someone else → refused,
         with a message that neither confirms nor denies the folder's contents beyond the
         fact that it's private (the name is already known to the caller who supplied it)."""
-        user = current_user()
-        if not user:
+        user = _authenticated_principal()
+        if user is None:
             return
         vis, owner = self._workspace_visibility(ws)
-        if vis == "personal" and owner and owner != (user.get("email") or ""):
+        if (vis == "personal" and owner
+                and str(owner).casefold() != user["email"]):
             raise ValidationError(f"workspace '{ws}' is a personal folder of another user")
 
     def _clean_ws(self, workspace: Any) -> str:
@@ -652,6 +773,55 @@ class MemoryService:
             raise ValidationError(f"no memory with id '{memory_id}'")
         if rec.workspace_id != wid or (rid is not None and rec.repo_id != rid):
             raise ValidationError(f"memory '{memory_id}' does not belong to that workspace/repo")
+        self._authorize_memory_session(rec)
+
+    def _authorize_memory_session(self, rec: Any) -> None:
+        """Authorize the owner of a session-private memory reached by bare id.
+
+        Workspace/repo equality is insufficient for session scope in a shared Team
+        workspace. Bare-id governance and inspector paths must resolve the associated
+        session before they may read or mutate the record.
+        """
+        if rec.scope != Scope.SESSION:
+            return
+        if not rec.session_id:
+            raise ValidationError("session-scoped memory has no owning session")
+        session = self.store.get_session(rec.session_id)
+        if session is None:
+            raise ValidationError("session-scoped memory has no owning session")
+        self._authorize_session(session)
+
+    def _memory_visible_to_caller(self, rec: Any) -> bool:
+        try:
+            self._authorize_memory_session(rec)
+        except ValidationError:
+            return False
+        return True
+
+    def _authorize_session(self, session: dict) -> None:
+        """Enforce workspace and authenticated-user ownership for a session row.
+
+        Session tools accept a bare typed id, so they cannot rely on a caller-supplied
+        workspace passing through ``_clean_ws``. Resolve the owning workspace here and
+        apply the same server binding/personal-folder boundary as every named operation.
+        Team sessions carry a stable ``user_id``; another authenticated user may neither
+        receive their handoff nor read, write, or close that user's session. Legacy rows
+        without an owner remain available only in trusted local-owner mode, never through
+        an authenticated principal.
+        """
+        row = self.store.conn.execute(
+            "SELECT name FROM workspaces WHERE id=?", (session["workspace_id"],)
+        ).fetchone()
+        if row is None:
+            raise ValidationError("session belongs to an unknown workspace")
+        self._authorize_workspace(row["name"])
+        user = _authenticated_principal()
+        owner_id = str(session.get("user_id") or "")
+        if user is not None:
+            if not owner_id:
+                raise ValidationError("session has no authenticated owner")
+            if owner_id != user["id"]:
+                raise ValidationError("session belongs to another user")
 
     def _session_for_write(self, session_id: Optional[str], wid: str,
                            rid: Optional[str]) -> Optional[dict]:
@@ -664,6 +834,9 @@ class MemoryService:
         if session["workspace_id"] != wid or (
                 rid is not None and session.get("repo_id") != rid):
             raise ValidationError("session_id does not belong to that workspace/repo")
+        self._authorize_session(session)
+        if session.get("status") != "active":
+            raise ValidationError("session_id is not active")
         return session
 
     # ── write ──────────────────────────────────────────────────────────────────
@@ -731,12 +904,21 @@ class MemoryService:
                       "trusted": bool(trusted)}
         if kind:
             provenance["kind"] = _clean_name(kind, field="kind")
-        result = self.engine.remember_with_resolution(
-            content, workspace_id=wid, repo_id=rid, session_id=session_id,
-            mtype=mt, scope=sc, title=title, importance=importance,
-            keywords=kws, metadata={**meta, "provenance": provenance},
-            resolve_conflicts=bool(resolve_conflicts),
-        )
+        try:
+            result = self.engine.remember_with_resolution(
+                content, workspace_id=wid, repo_id=rid, session_id=session_id,
+                mtype=mt, scope=sc, title=title, importance=importance,
+                keywords=kws, metadata={**meta, "provenance": provenance},
+                resolve_conflicts=bool(resolve_conflicts),
+            )
+        except ValueError as exc:
+            if session_id and str(exc) in {
+                f"no session with id '{session_id}'",
+                "session_id does not belong to that workspace/repo",
+                "session_id is not active",
+            }:
+                raise ValidationError(str(exc)) from exc
+            raise
         out = {
             "id": result["id"], "workspace": ws, "repo": rp,
             "scope": sc.value, "mtype": mt.value, "stored": True, "op": result["op"],
@@ -789,11 +971,20 @@ class MemoryService:
                       "trusted": bool(trusted)}
         if kind:
             provenance["kind"] = _clean_name(kind, field="kind")
-        out = self.engine.ingest(
-            content, workspace_id=wid, repo_id=rid, session_id=session_id, scope=sc,
-            default_mtype=mt, metadata={**meta, "provenance": provenance},
-            resolve_conflicts=bool(resolve_conflicts),
-        )
+        try:
+            out = self.engine.ingest(
+                content, workspace_id=wid, repo_id=rid, session_id=session_id, scope=sc,
+                default_mtype=mt, metadata={**meta, "provenance": provenance},
+                resolve_conflicts=bool(resolve_conflicts),
+            )
+        except ValueError as exc:
+            if session_id and str(exc) in {
+                f"no session with id '{session_id}'",
+                "session_id does not belong to that workspace/repo",
+                "session_id is not active",
+            }:
+                raise ValidationError(str(exc)) from exc
+            raise
         result = {"workspace": ws, "repo": rp, "count": out["count"],
                   "extracted": out["extracted"],
                   "facts": [{"id": r["id"], "op": r["op"],
@@ -1273,11 +1464,8 @@ class MemoryService:
         opts in — and the pass follows this call's ``dry_run`` flag (a dry-run proposes,
         a real run applies). ``dry_run=True`` reports without changing anything.
 
-        Licensing: manual consolidation (``infer=False``) is a free, in-product
-        housekeeping action; the **inference pass is a paid ``automation`` capability**
-        (the dream pass 4), so ``infer=True`` is gated here as defense in depth — every
-        caller (the ``/api/consolidate`` route, ``run_maintenance``) funnels through
-        this, so the Pro-only pass can't be reached without a server-approved license.
+        Manual deterministic consolidation remains local. Dream inference and scheduled
+        maintenance execute only in Engraphis Cloud managed compute.
 
         ``structured=True`` asks a configured LLM to emit schema-validated consolidated
         facts with graph hints; any provider/schema failure falls back to the deterministic
@@ -1286,8 +1474,7 @@ class MemoryService:
         if supersede_sources and not structured:
             raise ValidationError("supersede_sources requires structured=true")
         if infer:
-            from engraphis.licensing import require_cloud_lease
-            require_cloud_lease("automation")
+            raise ValidationError("dream inference is available through Engraphis Cloud")
         wid, rid = self._require_scope(workspace, repo)
         try:
             min_cluster = max(2, min(20, int(min_cluster)))
@@ -1311,7 +1498,7 @@ class MemoryService:
                 workspace_id=wid, repo_id=rid, dry_run=bool(dry_run),
                 min_cluster=min_cluster, archive_below=archive_below,
                 profiles=bool(profiles), min_mentions=min_mentions,
-                infer=bool(infer), structured=bool(structured),
+                infer=False, structured=bool(structured),
                 supersede_sources=bool(supersede_sources), llm=llm)
         finally:
             if llm is not None and hasattr(llm, "close"):
@@ -1343,7 +1530,9 @@ class MemoryService:
 
         # A configured workspace binding or a bound dashboard user must never do a
         # workspace-less (global) recall — either case represents a tenant boundary.
-        if not workspace and (self.allowed_workspaces is not None or current_user() is not None):
+        if not workspace and (
+                self.allowed_workspaces is not None
+                or _authenticated_principal() is not None):
             raise ValidationError("workspace is required on this instance")
         wid = rid = None
         sid = None
@@ -1370,6 +1559,7 @@ class MemoryService:
                 if session["workspace_id"] != wid or (
                         rid is not None and session.get("repo_id") != rid):
                     raise ValidationError("session_id does not belong to that workspace/repo")
+                self._authorize_session(session)
                 rid = rid or session.get("repo_id")
         elif session_id:
             raise ValidationError("session_id requires workspace")
@@ -1437,7 +1627,9 @@ class MemoryService:
             min_support = max(0.0, min(1.0, min_support))
         mts = [_enum(m, MemoryType, "mtype") for m in mtypes] if mtypes else None
 
-        if not workspace and (self.allowed_workspaces is not None or current_user() is not None):
+        if not workspace and (
+                self.allowed_workspaces is not None
+                or _authenticated_principal() is not None):
             raise ValidationError("workspace is required on this instance")
         wid = rid = None
         sid = None
@@ -1467,6 +1659,7 @@ class MemoryService:
                 if session["workspace_id"] != wid or (
                         rid is not None and session.get("repo_id") != rid):
                     raise ValidationError("session_id does not belong to that workspace/repo")
+                self._authorize_session(session)
                 rid = rid or session.get("repo_id")
         elif session_id:
             raise ValidationError("session_id requires workspace")
@@ -1493,28 +1686,32 @@ class MemoryService:
         unresolved ``open_threads`` come back as ``bootstrap`` — the concrete fix for
         "the agent forgets everything between sessions".
 
-        Idempotent by default: if a session for the same ``(workspace, repo, agent)`` is
-        already ``active``, that one is returned (``reused: true``) instead of opening a
-        second concurrent session. Two live sessions in one scope means two writers on
-        the single-writer SQLite store — the "opens up 2 instances that trample on each
-        other" failure. Pass ``force_new=True`` to deliberately branch a fresh session
-        (e.g. a genuinely separate task in the same repo)."""
+        Idempotent by default for the exact ``(workspace, repo, user, agent, goal)`` task
+        identity. A different user, agent, or goal opens a distinct session automatically;
+        ``force_new=True`` deliberately branches even when every identity field matches.
+        The lookup/create decision is one storage transaction, so concurrent retries cannot
+        both insert a session."""
         ws = self._clean_ws(workspace)
         rp = _clean_name(repo, field="repo") if repo else None
         agent = _clean_text(agent, field="agent", max_chars=MAX_NAME_CHARS, required=False)
         goal = _clean_text(goal, field="goal", max_chars=MAX_TITLE_CHARS, required=False)
         wid = self._get_or_create_workspace(ws)
         rid = self.store.get_or_create_repo(wid, rp) if rp else None
-        if not force_new:
-            existing = self.store.get_active_session(wid, rid, agent=agent)
-            if existing:
-                return {"session_id": existing["id"], "workspace": ws, "repo": rp,
-                        "goal": existing.get("goal") or goal, "status": "active",
-                        "reused": True, "bootstrap": {}}
-        sid = self.store.start_session(wid, rid, agent=agent, goal=goal)
+        principal = _authenticated_principal()
+        user_id = principal["id"] if principal is not None else ""
+        sid, reused = self.store.get_or_start_session(
+            wid, rid, agent=agent, user_id=user_id, goal=goal,
+            force_new=bool(force_new),
+        )
+        if reused:
+            return {"session_id": sid, "workspace": ws, "repo": rp,
+                    "goal": goal, "status": "active", "reused": True,
+                    "bootstrap": {}}
         bootstrap: dict = {}
         if rid:
-            last = self.store.get_last_session(wid, rid, exclude=sid)
+            last = self.store.get_last_session(
+                wid, rid, exclude=sid, user_id=user_id, agent=agent,
+            )
             if last:
                 bootstrap = {
                     "summary": last.get("summary") or "",
@@ -1531,9 +1728,17 @@ class MemoryService:
         outcome = _clean_text(outcome, field="outcome", max_chars=MAX_TITLE_CHARS, required=False)
         threads = _clean_string_list(open_threads, field="open_threads", max_items=MAX_KEYWORDS,
                                      max_chars=MAX_TITLE_CHARS)
-        if self.store.get_session(sid) is None:
+        session = self.store.get_session(sid)
+        if session is None:
             raise ValidationError(f"no session with id '{sid}'")
-        self.store.end_session(sid, summary=summary, outcome=outcome, open_threads=threads)
+        self._authorize_session(session)
+        result = self.store.end_session(
+            sid, summary=summary, outcome=outcome, open_threads=threads,
+        )
+        if result == "missing":
+            raise ValidationError(f"no session with id '{sid}'")
+        if result == "conflict":
+            raise ValidationError("session is already closed with a different handoff")
         return {"session_id": sid, "status": "summarized", "summary": summary,
                "open_threads": threads}
 
@@ -1677,7 +1882,11 @@ class MemoryService:
         retention, plus the repo's last-session handoff if there is one."""
         wid, rid = self._require_scope(workspace, repo)
         k = max(1, min(MAX_K, int(k)))
-        out = self.engine.recall_proactive(workspace_id=wid, repo_id=rid, k=k)
+        principal = _authenticated_principal()
+        user_id = principal["id"] if principal is not None else None
+        out = self.engine.recall_proactive(
+            workspace_id=wid, repo_id=rid, k=k, user_id=user_id,
+        )
         return {"memories": [_mem_to_dict(r) for r in out["memories"]],
                "last_session": out["last_session"]}
 
@@ -1737,8 +1946,22 @@ class MemoryService:
         kind = _clean_name(kind, field="kind")
         content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
         wid, rid = self._require_scope(workspace, repo)
-        eid = self.engine.record_event(kind, content, workspace_id=wid, repo_id=rid or "",
-                                       session_id=session_id or "", refs=refs)
+        session = self._session_for_write(session_id, wid, rid)
+        if rid is None and session is not None:
+            rid = session.get("repo_id")
+        try:
+            eid = self.engine.record_event(
+                kind, content, workspace_id=wid, repo_id=rid or "",
+                session_id=session_id or "", refs=refs,
+            )
+        except ValueError as exc:
+            if session_id and str(exc) in {
+                f"no session with id '{session_id}'",
+                "session_id does not belong to that workspace/repo",
+                "session_id is not active",
+            }:
+                raise ValidationError(str(exc)) from exc
+            raise
         return {"id": eid, "kind": kind}
 
     def link(self, a: str, b: str, *, workspace: str, repo: Optional[str] = None,
@@ -1893,11 +2116,12 @@ class MemoryService:
         rows = self.store.conn.execute(
             "SELECT w.id, w.name, w.settings AS settings, COUNT(m.id) AS n FROM workspaces w "
             "LEFT JOIN memories m ON m.workspace_id = w.id "
+            "AND COALESCE(m.scope, 'workspace')!='session' "
             "AND (m.valid_from IS NULL OR m.valid_from<=?) "
             "AND (m.valid_to IS NULL OR ?<m.valid_to) AND m.expired_at IS NULL "
             "GROUP BY w.id, w.name, w.settings ORDER BY w.name", (now, now)).fetchall()
-        user = current_user()
-        my_email = (user or {}).get("email") or ""
+        user = _authenticated_principal()
+        my_email = user["email"] if user is not None else ""
         out = []
         for r in rows:
             if self.allowed_workspaces is not None and r["name"] not in self.allowed_workspaces:
@@ -1911,8 +2135,10 @@ class MemoryService:
             _desc = _s.get("description") or ""
             _vis = "personal" if _s.get("visibility") == "personal" else "shared"
             _owner = _s.get("owner") or ""
+            _owner_normalized = str(_owner).casefold()
             # Hide other users' personal folders from the listing (team mode only).
-            if user and _vis == "personal" and _owner and _owner != my_email:
+            if (user and _vis == "personal" and _owner
+                    and _owner_normalized != my_email):
                 continue
             repos = [dict(x) for x in self.store.conn.execute(
                 "SELECT name FROM repos WHERE workspace_id=? ORDER BY name", (r["id"],))]
@@ -1920,11 +2146,11 @@ class MemoryService:
                      "visibility": _vis, "repos": [x["name"] for x in repos]}
             if user:
                 entry["can_change_access"] = bool(
-                    _owner == my_email or user.get("role") == "admin"
+                    _owner_normalized == my_email or user.get("role") == "admin"
                 )
             if _vis == "personal":
                 entry["owner"] = _owner
-                entry["mine"] = bool(my_email and _owner == my_email)
+                entry["mine"] = bool(my_email and _owner_normalized == my_email)
             out.append(entry)
         return {"workspaces": out}
 
@@ -1955,8 +2181,8 @@ class MemoryService:
             raise ValidationError("visibility must be 'personal' or 'shared'")
         if visibility == "shared" and confirmed is not True:
             raise ValidationError("sharing a folder requires explicit confirmation")
-        u = current_user() or {}
-        owner = u.get("email") or ""
+        user = _authenticated_principal()
+        owner = user["email"] if user is not None else ""
         if visibility == "personal" and not owner:
             visibility = "shared"  # no identity to own it — don't orphan the folder
         if self._lookup_workspace(ws) is not None:
@@ -1986,8 +2212,8 @@ class MemoryService:
             raise ValidationError("visibility must be 'personal' or 'shared'")
         if confirmed is not True:
             raise ValidationError("changing folder access requires explicit confirmation")
-        user = current_user() or {}
-        owner = user.get("email") or ""
+        user = _authenticated_principal()
+        owner = user["email"] if user is not None else ""
         if not owner:
             raise ValidationError("changing folder access requires a signed-in team user")
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS,
@@ -2004,7 +2230,8 @@ class MemoryService:
             workspace_settings = {}
         previous, previous_owner = self._workspace_visibility(ws)
         if previous == "shared" and target == "personal" \
-                and previous_owner != owner and user.get("role") != "admin":
+                and str(previous_owner).casefold() != owner \
+                and user.get("role") != "admin":
             # Making a team-visible folder private removes it from every other member.
             # The user who deliberately shared it may reverse that decision; otherwise
             # only an admin may claim a legacy/team-owned shared workspace.
@@ -2033,6 +2260,7 @@ class MemoryService:
         """Rename a workspace's label. Memories key off ``workspace_id``, so this is a pure
         relabel — all data stays attached. Same binding + uniqueness the create path enforces."""
         old = self._clean_ws(workspace)
+        self._authorize_workspace_control(old)
         new = self._authorize_workspace(_clean_name(new_name, field="new_name"))
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS, required=False) or "user"
         wid = self._lookup_workspace(old)
@@ -2049,6 +2277,7 @@ class MemoryService:
                                  *, actor: str = "user") -> dict:
         """Store a human description in the workspace's ``settings`` JSON (no schema change)."""
         ws = self._clean_ws(workspace)
+        self._authorize_workspace_control(ws)
         description = _clean_text(description, field="description",
                                   max_chars=MAX_CONTENT_CHARS, required=False)
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS, required=False) or "user"
@@ -2075,6 +2304,7 @@ class MemoryService:
         entities/edges, sessions, events, repos + their code graph). Unlike ``forget`` this is
         irreversible, so the UI gates it behind an explicit confirm. Audit rows are retained."""
         ws = self._clean_ws(workspace)
+        self._authorize_workspace_control(ws)
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS, required=False) or "user"
         wid = self._lookup_workspace(ws)
         if wid is None:
@@ -2146,6 +2376,8 @@ class MemoryService:
         Irreversible, so the UI gates it behind a confirm, same as delete."""
         src = self._clean_ws(source)
         dst = self._clean_ws(target)
+        self._authorize_workspace_control(src)
+        self._authorize_workspace_control(dst)
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS, required=False) or "user"
         if src == dst:
             raise ValidationError("source and target workspaces must be different")
@@ -2438,6 +2670,7 @@ class MemoryService:
         prompts — the name is auto-generated off ``source`` (``_next_copy_name``) so the
         copy never collides with an existing workspace."""
         src = self._clean_ws(source)
+        self._authorize_workspace_control(src)
         wid_src = self._lookup_workspace(src)
         if wid_src is None:
             raise ValidationError(f"no workspace named '{src}' yet")
@@ -2817,6 +3050,8 @@ class MemoryService:
         for link in self.store.get_links(mid):
             other_id = link["b"] if link["a"] == mid else link["a"]
             other = self.store.get_memory(other_id)
+            if other is not None and not self._memory_visible_to_caller(other):
+                continue
             links.append({"id": other_id, "relation": link["relation"],
                           "layer": link.get("layer") or "semantic",
                           "reason": link.get("reason") or "",
@@ -2871,7 +3106,8 @@ class MemoryService:
                     continue
                 seen.add(pid)
                 prev = self.store.get_memory(pid)
-                if prev is not None and prev.workspace_id == wid:
+                if (prev is not None and prev.workspace_id == wid
+                        and self._memory_visible_to_caller(prev)):
                     members[pid] = prev
                     frontier.append(prev)
             while True:
@@ -2905,7 +3141,9 @@ class MemoryService:
             except ValueError:
                 continue
             if memory_id in (meta.get("supersedes") or []) or meta.get("corrects") == memory_id:
-                return self.store.get_memory(r["id"])
+                candidate = self.store.get_memory(r["id"])
+                if candidate is not None and self._memory_visible_to_caller(candidate):
+                    return candidate
         return None
 
     def audit_log(self, *, workspace: str, limit: int = 100) -> dict:
@@ -2915,6 +3153,7 @@ class MemoryService:
         rows = self.store.conn.execute(
             "SELECT a.ts, a.actor, a.action, a.target, a.detail FROM audit a "
             "JOIN memories m ON m.id = a.target WHERE m.workspace_id=? "
+            "AND COALESCE(m.scope, 'workspace')!='session' "
             "ORDER BY a.ts DESC LIMIT ?", (wid, limit)).fetchall()
         return {"entries": [dict(r) for r in rows]}
 
@@ -2955,24 +3194,38 @@ class MemoryService:
         out["verification"] = self.verify_receipts(workspace=workspace)
         return out
 
-    def export_workspace(self, *, workspace: str) -> dict:
+    def export_workspace(self, *, workspace: str, recovery: bool = False) -> dict:
         """Full bi-temporal dump of one workspace — memories (live *and* superseded),
         sessions, and the audit trail. The compliance story in one artifact: nothing is
         ever silently deleted, and the export proves it. Scope-checked like any other
-        read; the Pro license gate lives here so every caller (Inspector, v1 dashboard,
-        v2 dashboard) passes through one check."""
-        from engraphis.licensing import require_cloud_lease
-        require_cloud_lease("export")
+        read. Raw owner data portability is part of the local core; hosted signed and
+        formatted compliance reports are separate Cloud features."""
 
         wid, _ = self._require_scope(workspace, None)
         conn = self.store.conn
+        user = _authenticated_principal()
+        if user is None:
+            memory_visibility = ""
+            session_visibility = ""
+            visibility_params: list[Any] = []
+        else:
+            memory_visibility = (
+                " AND (COALESCE(m.scope, 'workspace')!='session' OR EXISTS ("
+                "SELECT 1 FROM sessions visible_session WHERE visible_session.id=m.session_id "
+                "AND visible_session.user_id=?))"
+            )
+            session_visibility = " AND user_id=?"
+            visibility_params = [user["id"]]
         memories = [dict(r) for r in conn.execute(
-            "SELECT * FROM memories WHERE workspace_id=? ORDER BY rowid", (wid,))]
+            "SELECT m.* FROM memories m WHERE m.workspace_id=?" + memory_visibility
+            + " ORDER BY m.rowid", (wid, *visibility_params))]
         sessions = [dict(r) for r in conn.execute(
-            "SELECT * FROM sessions WHERE workspace_id=? ORDER BY rowid", (wid,))]
+            "SELECT * FROM sessions WHERE workspace_id=?" + session_visibility
+            + " ORDER BY rowid", (wid, *visibility_params))]
         audit = [dict(r) for r in conn.execute(
             "SELECT a.* FROM audit a JOIN memories m ON m.id = a.target "
-            "WHERE m.workspace_id=? ORDER BY a.ts", (wid,))]
+            "WHERE m.workspace_id=?" + memory_visibility + " ORDER BY a.ts",
+            (wid, *visibility_params))]
         receipts = self.store.list_receipts(workspace_id=wid, limit=10_000)
         import time as _time
         return {"format": "engraphis-export/1", "exported_at": _time.time(),
@@ -3190,7 +3443,8 @@ class MemoryService:
                         "too many graph index jobs are active; retry after one finishes"
                     )
                 live_where = (
-                    "workspace_id=? AND expired_at IS NULL AND valid_to IS NULL"
+                    "workspace_id=? AND COALESCE(scope, 'workspace')!='session' "
+                    "AND expired_at IS NULL AND valid_to IS NULL"
                     + (" AND repo_id=?" if rid else "")
                 )
                 params: tuple[Any, ...] = (wid, rid) if rid else (wid,)
@@ -3372,6 +3626,7 @@ class MemoryService:
                     break
                 id_sql = (
                     "SELECT id FROM memories WHERE workspace_id=? "
+                    "AND COALESCE(scope, 'workspace')!='session' "
                     "AND expired_at IS NULL AND valid_to IS NULL AND id>?"
                 )
                 id_params: list[Any] = [wid, last_memory_id]
@@ -3409,7 +3664,8 @@ class MemoryService:
                         memory_sql = (
                             "SELECT id, repo_id, title, content, metadata FROM memories "
                             "WHERE id=? AND workspace_id=? AND expired_at IS NULL "
-                            "AND valid_to IS NULL"
+                            "AND valid_to IS NULL "
+                            "AND COALESCE(scope, 'workspace')!='session'"
                         )
                         memory_params: list[Any] = [memory_id, wid]
                         if rid:
@@ -3660,10 +3916,27 @@ class MemoryService:
             repo_id = self._lookup_repo(wid, repo_name)
             if repo_id is None:
                 raise ValidationError(f"no repo named '{repo_name}' in workspace '{ws}'")
+        try:
+            t = float(as_of) if as_of is not None else time.time()
+        except (TypeError, ValueError, OverflowError):
+            raise ValidationError("as_of must be a finite timestamp")
+        if not math.isfinite(t):
+            raise ValidationError("as_of must be a finite timestamp")
+        try:
+            lower_time = float(time_from) if time_from is not None else None
+            upper_time = float(time_to) if time_to is not None else None
+        except (TypeError, ValueError, OverflowError):
+            raise ValidationError("time range values must be finite timestamps")
+        if ((lower_time is not None and not math.isfinite(lower_time))
+                or (upper_time is not None and not math.isfinite(upper_time))):
+            raise ValidationError("time range values must be finite timestamps")
+        if lower_time is not None and upper_time is not None and lower_time > upper_time:
+            raise ValidationError("time_from must be less than or equal to time_to")
         entity_sql = (
             "SELECT id, workspace_id, repo_id, name, etype, canonical_id, "
             "normalized_name, canonical_method, canonical_confidence, created_at "
-            "FROM entities WHERE workspace_id=?"
+            "FROM entities entity WHERE workspace_id=? AND "
+            + _graph_entity_visibility_sql("entity", at=t)
         )
         entity_params: list[Any] = [wid]
         if repo_id:
@@ -3690,22 +3963,6 @@ class MemoryService:
                 "graph analysis exceeds the entity candidate limit; filter by repository"
             )
 
-        try:
-            t = float(as_of) if as_of is not None else __import__("time").time()
-        except (TypeError, ValueError, OverflowError):
-            raise ValidationError("as_of must be a finite timestamp")
-        if not math.isfinite(t):
-            raise ValidationError("as_of must be a finite timestamp")
-        try:
-            lower_time = float(time_from) if time_from is not None else None
-            upper_time = float(time_to) if time_to is not None else None
-        except (TypeError, ValueError, OverflowError):
-            raise ValidationError("time range values must be finite timestamps")
-        if ((lower_time is not None and not math.isfinite(lower_time))
-                or (upper_time is not None and not math.isfinite(upper_time))):
-            raise ValidationError("time range values must be finite timestamps")
-        if lower_time is not None and upper_time is not None and lower_time > upper_time:
-            raise ValidationError("time_from must be less than or equal to time_to")
         edge_sql = (
             "SELECT id, workspace_id, repo_id, src, dst, relation, layer, weight, "
             "valid_from, valid_to, ingested_at, expired_at, provenance FROM edges "
@@ -3720,12 +3977,26 @@ class MemoryService:
         # ``build_canonical_graph``. Filtering each physical edge here would incorrectly
         # discard two independent one-support alias edges whose canonical bundle has two
         # supports and is therefore eligible for the default scene.
-        evidence_filter = bool(
+        # Session scope is invisible without an explicit session context. Support-less
+        # legacy/manual edges remain visible for compatibility; an edge that does carry
+        # evidence must have a current non-session support.
+        restrict_sessions = True
+        evidence_filter = True
+        prune_entities = bool(
+            clean_memory_types or lower_time is not None or upper_time is not None
+        )
+        allow_supportless = not (
             clean_memory_types or lower_time is not None or upper_time is not None
         )
         if evidence_filter:
+            edge_sql += " AND ("
+            if allow_supportless:
+                edge_sql += (
+                    "NOT EXISTS (SELECT 1 FROM edge_supports any_graph_support "
+                    "WHERE any_graph_support.edge_id=edges.id) OR "
+                )
             edge_sql += (
-                " AND EXISTS (SELECT 1 FROM edge_supports graph_support "
+                "EXISTS (SELECT 1 FROM edge_supports graph_support "
                 "JOIN memories graph_memory ON graph_memory.id=graph_support.memory_id "
                 "WHERE graph_support.edge_id=edges.id "
                 "AND (graph_support.valid_from IS NULL OR graph_support.valid_from<=?) "
@@ -3737,6 +4008,8 @@ class MemoryService:
                 "AND graph_memory.expired_at IS NULL"
             )
             edge_params.extend((t, t, wid, t, t))
+            if restrict_sessions:
+                edge_sql += " AND COALESCE(graph_memory.scope, 'workspace')!='session'"
             if clean_memory_types:
                 marks = ",".join("?" for _ in clean_memory_types)
                 edge_sql += f" AND graph_memory.mtype IN ({marks})"
@@ -3747,7 +4020,7 @@ class MemoryService:
             if upper_time is not None:
                 edge_sql += " AND COALESCE(graph_memory.valid_from, graph_memory.ingested_at, 0)<=?"
                 edge_params.append(upper_time)
-            edge_sql += ")"
+            edge_sql += "))"
         edge_sql += " ORDER BY id LIMIT ?"
         edge_params.append(MAX_GRAPH_ANALYSIS_EDGES + 1)
         edge_rows = [dict(row) for row in self.store.conn.execute(
@@ -3835,7 +4108,7 @@ class MemoryService:
                             "expired_at": None,
                             "provenance": json.dumps({"source": "code_index"}),
                         })
-        if evidence_filter:
+        if prune_entities:
             endpoints = {
                 str(edge.get(key) or "") for edge in edge_rows
                 for key in ("src", "dst") if edge.get(key)
@@ -3888,6 +4161,7 @@ class MemoryService:
                 "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL"
             )
             memory_params: list[Any] = [wid, *chunk, t, t]
+            memory_sql += " AND COALESCE(scope, 'workspace')!='session'"
             if clean_memory_types:
                 type_marks = ",".join("?" for _ in clean_memory_types)
                 memory_sql += f" AND mtype IN ({type_marks})"
@@ -3925,6 +4199,7 @@ class MemoryService:
                 "expired_at IS NULL",
             ]
             memory_params: list[Any] = [wid, t, t]
+            memory_where.append("COALESCE(scope, 'workspace')!='session'")
             if repo_id:
                 memory_where.append("(repo_id=? OR repo_id IS NULL)")
                 memory_params.append(repo_id)
@@ -4264,8 +4539,9 @@ class MemoryService:
         # entity or a system without maintaining a second search index.
         entity_sql = (
             "SELECT id, canonical_id, name, normalized_name, etype, repo_id "
-            "FROM entities WHERE workspace_id=? AND ("
-            "normalized_name LIKE ? ESCAPE '\\' OR canonical_id=? OR id=?)"
+            "FROM entities entity WHERE workspace_id=? AND ("
+            "normalized_name LIKE ? ESCAPE '\\' OR canonical_id=? OR id=?) AND "
+            + _graph_entity_visibility_sql("entity", at=suggestion_at)
         )
         entity_params: list[Any] = [wid, like, clean_query, clean_query]
         if repo_id:
@@ -4336,7 +4612,9 @@ class MemoryService:
             marks = ",".join("?" for _ in selected_canonical_ids)
             member_sql = (
                 "SELECT id, canonical_id, name, normalized_name, etype, repo_id "
-                f"FROM entities WHERE workspace_id=? AND canonical_id IN ({marks})"
+                f"FROM entities entity WHERE workspace_id=? "
+                f"AND canonical_id IN ({marks}) AND "
+                + _graph_entity_visibility_sql("entity", at=suggestion_at)
             )
             member_params: list[Any] = [wid, *selected_canonical_ids]
             if repo_id:
@@ -4354,6 +4632,7 @@ class MemoryService:
             member_to_canonical[str(row["id"])] = canonical_id
         support_counts: Counter = Counter()
         member_ids = sorted(member_to_canonical)
+        visible_member_ids: set[str] = set(member_ids)
         if member_ids:
             seen_supports: dict[str, set[str]] = {}
             for start in range(0, len(member_ids), 400):
@@ -4363,15 +4642,21 @@ class MemoryService:
                     "SELECT endpoint, memory_id FROM ("
                     "SELECT relation.src AS endpoint, support.memory_id FROM edges relation "
                     "JOIN edge_supports support ON support.edge_id=relation.id "
+                    "JOIN memories memory ON memory.id=support.memory_id "
                     f"WHERE relation.workspace_id=? AND relation.src IN ({marks}) "
                     "AND relation.valid_to IS NULL AND relation.expired_at IS NULL "
                     "AND support.valid_to IS NULL AND support.expired_at IS NULL "
+                    "AND memory.valid_to IS NULL AND memory.expired_at IS NULL "
+                    "AND COALESCE(memory.scope, 'workspace')!='session' "
                     "UNION ALL "
                     "SELECT relation.dst AS endpoint, support.memory_id FROM edges relation "
                     "JOIN edge_supports support ON support.edge_id=relation.id "
+                    "JOIN memories memory ON memory.id=support.memory_id "
                     f"WHERE relation.workspace_id=? AND relation.dst IN ({marks}) "
                     "AND relation.valid_to IS NULL AND relation.expired_at IS NULL "
-                    "AND support.valid_to IS NULL AND support.expired_at IS NULL)"
+                    "AND support.valid_to IS NULL AND support.expired_at IS NULL "
+                    "AND memory.valid_to IS NULL AND memory.expired_at IS NULL "
+                    "AND COALESCE(memory.scope, 'workspace')!='session')"
                 )
                 rows = self.store.conn.execute(
                     support_sql, (wid, *chunk, wid, *chunk)
@@ -4385,7 +4670,15 @@ class MemoryService:
             support_counts.update({key: len(value) for key, value in seen_supports.items()})
         entity_results = []
         for canonical_id in selected_canonical_ids:
-            rows = members_by_canonical.get(canonical_id) or matched_by_canonical[canonical_id]
+            rows = [
+                row for row in (
+                    members_by_canonical.get(canonical_id)
+                    or matched_by_canonical[canonical_id]
+                )
+                if str(row["id"]) in visible_member_ids
+            ]
+            if not rows:
+                continue
             best = min(rows, key=lambda row: (
                 0 if row["normalized_name"] == needle else
                 1 if str(row["normalized_name"]).startswith(needle) else 2,
@@ -4405,7 +4698,10 @@ class MemoryService:
         system_results = [{
             "id": item["id"], "label": f"{item['label']} System", "kind": "system",
             "anchor_id": item["id"],
-            "member_count": len(members_by_canonical.get(item["id"], [])) or 1,
+            "member_count": len([
+                row for row in members_by_canonical.get(item["id"], [])
+                if str(row["id"]) in visible_member_ids
+            ]) or 1,
             "mass": float(item["support_count"]),
         } for item in entity_results]
 
@@ -4418,6 +4714,7 @@ class MemoryService:
                 "SELECT id, title, content, mtype, repo_id FROM memories "
                 "WHERE workspace_id=? AND (valid_from IS NULL OR valid_from<=?) "
                 "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL "
+                "AND COALESCE(scope, 'workspace')!='session' "
                 "AND (lower(title) LIKE ? ESCAPE '\\' OR lower(content) LIKE ? ESCAPE '\\')"
             )
             memory_params: list[Any] = [wid, suggestion_at, suggestion_at, like, like]
@@ -4452,9 +4749,11 @@ class MemoryService:
             repositories = [{"id": row["id"], "label": row["name"], "kind": "repository"}
                             for row in repo_rows]
             relation_sql = (
-                "SELECT relation, COUNT(*) AS count FROM edges WHERE workspace_id=? "
+                "SELECT relation, COUNT(*) AS count FROM edges relation_edge "
+                "WHERE workspace_id=? "
                 "AND relation LIKE ? ESCAPE '\\' AND (valid_from IS NULL OR valid_from<=?) "
-                "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL"
+                "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL AND "
+                + _graph_edge_visibility_sql("relation_edge", at=suggestion_at)
             )
             relation_params: list[Any] = [wid, like, suggestion_at, suggestion_at]
             if repo_id:
@@ -4570,6 +4869,7 @@ class MemoryService:
                 for memory in self.store.conn.execute(
                     "SELECT id, title, content, mtype, valid_from, valid_to, ingested_at, "
                     "expired_at, provenance FROM memories WHERE workspace_id=? "
+                    "AND COALESCE(scope, 'workspace')!='session' "
                     "AND id IN (" + marks + ") "
                     "ORDER BY id", (wid, *chunk)
                 ).fetchall():
@@ -4601,7 +4901,18 @@ class MemoryService:
             "AND (src IN (SELECT id FROM entities WHERE workspace_id=? AND canonical_id=?) "
             "OR dst IN (SELECT id FROM entities WHERE workspace_id=? AND canonical_id=?))"
         )
-        history_params = (wid, wid, resolved, wid, resolved)
+        history_params: tuple[Any, ...] = (wid, wid, resolved, wid, resolved)
+        history_filter += (
+            " AND (NOT EXISTS (SELECT 1 FROM edge_supports any_history_support "
+            "WHERE any_history_support.edge_id=edges.id) OR EXISTS ("
+            "SELECT 1 FROM edge_supports history_support "
+            "JOIN memories history_memory "
+            "ON history_memory.id=history_support.memory_id "
+            "WHERE history_support.edge_id=edges.id "
+            "AND history_memory.workspace_id=? "
+            "AND COALESCE(history_memory.scope, 'workspace')!='session'))"
+        )
+        history_params = (*history_params, wid)
         history_total = int(self.store.conn.execute(
             f"SELECT COUNT(*) AS n FROM edges WHERE {history_filter}", history_params
         ).fetchone()["n"])
@@ -4699,18 +5010,26 @@ class MemoryService:
         self._assert_graph_index_ready(wid)
         limit = max(1, min(5000, int(limit)))
         conn = self.store.conn
-        ents = conn.execute(
-            "SELECT id, name, etype FROM entities WHERE workspace_id=? LIMIT ?",
-            (wid, limit)).fetchall()
+        restrict_sessions = True
+
+        def visible_entities():
+            sql = (
+                "SELECT id, name, etype FROM entities entity WHERE workspace_id=? "
+                "AND " + _graph_entity_visibility_sql("entity")
+            )
+            params: list[Any] = [wid]
+            sql += " LIMIT ?"
+            params.append(limit)
+            return conn.execute(sql, params).fetchall()
+
+        ents = visible_entities()
         # Lazy backfill: old memories can predate graph extraction or predate the
         # structured-metadata graph bridge. On first Graph-tab open in a process, feed
         # the missing graph state once; feed() de-dupes entities/edges.
         # Strictly read-only surfaces disable this write-on-first-read migration.
         if backfill and self._should_backfill_graph(wid, bool(ents)):
             self._lazy_backfill_graph(wid)
-            ents = conn.execute(
-                "SELECT id, name, etype FROM entities WHERE workspace_id=? LIMIT ?",
-                (wid, limit)).fetchall()
+            ents = visible_entities()
         entity_rows = [dict(row) for row in ents]
         node_ids = {row["id"] for row in entity_rows}
         selected_graph_layers = None
@@ -4726,6 +5045,16 @@ class MemoryService:
         # bounded as well — entity edges sync from peers, so they are as attacker-
         # growable as code edges).
         edge_cap = max(limit * 8, 2000)
+        visible_edge_ids = None
+        if restrict_sessions:
+            visible_edge_ids = {
+                row["id"] for row in conn.execute(
+                    "SELECT relation.id FROM edges relation "
+                    "WHERE relation.workspace_id=? AND "
+                    + _graph_edge_visibility_sql("relation"),
+                    (wid,),
+                ).fetchall()
+            }
         edgs = [
             {
                 "src": edge.src, "dst": edge.dst, "relation": edge.relation,
@@ -4738,6 +5067,7 @@ class MemoryService:
                 limit=edge_cap,
             )
             if edge.src in node_ids and edge.dst in node_ids
+            and (visible_edge_ids is None or edge.id in visible_edge_ids)
             and (
                 selected_layers is None
                 or (edge.layer.value if edge.layer else "semantic") in selected_layers
@@ -4895,6 +5225,7 @@ class MemoryService:
         now = _time.time()
         rows = self.store.conn.execute(
             "SELECT metadata FROM memories WHERE workspace_id=? "
+            "AND COALESCE(scope, 'workspace')!='session' "
             "AND (valid_from IS NULL OR valid_from<=?) "
             "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL "
             "AND (metadata LIKE '%entities%' OR metadata LIKE '%relations%')", (wid, now, now))
@@ -4927,7 +5258,8 @@ class MemoryService:
         now = _time.time()
         rows = self.store.conn.execute(
             "SELECT id, repo_id, title, content, metadata FROM memories "
-            "WHERE workspace_id=? AND (valid_from IS NULL OR valid_from<=?) "
+            "WHERE workspace_id=? AND COALESCE(scope, 'workspace')!='session' "
+            "AND (valid_from IS NULL OR valid_from<=?) "
             "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL",
             (wid, now, now)).fetchall()
         for r in rows:
@@ -4958,15 +5290,17 @@ class MemoryService:
         conn = self.store.conn
         params: list[Any] = []
         where = ""
-        # A bound instance must not report global (cross-tenant) aggregate counts.
-        if not workspace and self.allowed_workspaces is not None:
+        user = _authenticated_principal()
+        # A bound instance or authenticated tenant must not report global aggregates.
+        if not workspace and (self.allowed_workspaces is not None or user is not None):
             raise ValidationError("workspace is required on this instance")
+        wid: Optional[str] = None
         if workspace:
             ws = self._clean_ws(workspace)
             wid = self._lookup_workspace(ws)
             if wid is None:
                 return {"workspace": ws, "memories": 0, "note": "workspace not found"}
-            where = " WHERE workspace_id=?"
+            where = " WHERE workspace_id=? AND COALESCE(scope, 'workspace')!='session'"
             params.append(wid)
         import time as _time
         now = _time.time()
@@ -4984,8 +5318,21 @@ class MemoryService:
                 live_params
             )
         }
-        workspaces = conn.execute("SELECT COUNT(*) AS n FROM workspaces").fetchone()["n"]
-        sessions = conn.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()["n"]
+        if wid is None:
+            workspaces = conn.execute("SELECT COUNT(*) AS n FROM workspaces").fetchone()["n"]
+            sessions = conn.execute("SELECT COUNT(*) AS n FROM sessions").fetchone()["n"]
+        else:
+            workspaces = 1
+            if user is None:
+                sessions = conn.execute(
+                    "SELECT COUNT(*) AS n FROM sessions WHERE workspace_id=?", (wid,)
+                ).fetchone()["n"]
+            else:
+                sessions = conn.execute(
+                    "SELECT COUNT(*) AS n FROM sessions "
+                    "WHERE workspace_id=? AND user_id=?",
+                    (wid, user["id"]),
+                ).fetchone()["n"]
         return {
             "workspace": workspace, "memories": int(total), "by_type": by_type,
             "total_rows": int(total_rows),   # live + superseded history (never deleted)

@@ -29,23 +29,20 @@ https://discord.com/invite/Wfr2ejBmY
 > Auto Dreaming, Auto Consolidation, and Team identity/seat management run only on the
 > official hosted service; their server implementations are not distributed here.
 
-## Full Engraphis install: pip install "engraphis[all]"
+## The WebUI — one command, local-first
 
-Engraphis-Dashboard opens `http://127.0.0.1:8700` in your browser. No cloud, signup, or API key is required for
+```bash
+pip install "engraphis[server]"
+engraphis-dashboard
+```
+
+Opens `http://127.0.0.1:8700` in your browser. No cloud, signup, or API key is required for
 local memory. Memory lives in a local SQLite file on your machine. The public dashboard is
 single-user; Team accounts, invitations, roles, seats, and organization audit live in Engraphis
 Cloud.
 
-**Ledger is the primary interface** — the complete final five-area design, backed by real v2
-data rather than the design reference’s sample store. It includes Today, cited/abstaining Ask,
-the governed Library, the advanced Graph & Relations view, Provenance (beliefs, timeline, audit,
-receipts, supersessions), and Manage (workspaces, consolidation, hosted services, plans, and
-settings). It stays local and CSP-safe and includes Slate, Midnight, Paper, and Matrix themes.
-
-The complete former operator interface is preserved as **Classic**. Switch between Ledger and
-Classic from **Manage → Settings → Interface** in Ledger or **Settings → Appearance & Engine** in Classic; both
-interfaces use the same workspaces, memories, receipts, and v2 engine. Classic contains the
-full tool suite:
+**You'll see the complete local workspace plus hosted-service entry points** — a dark-themed
+(with multiple theme options in the left sidebar), sidebar-navigated dashboard with 14 tabs:
 
 **New graphical interface!** Shape the Knowledge Graph with several **Styles, Colors,
 and Presets**. Switch among Cyberpunk, Galaxy, Solar system, and Classic looks; choose
@@ -67,18 +64,6 @@ a color palette and layout preset; or change the colors used for each type of no
 | **Workspaces** | Create, rename, describe, copy, merge, and delete workspaces; import files & folders; drag-and-drop upload |
 | **Team Cloud** *(hosted Team)* | Open the hosted organization dashboard for invitations, roles, named seats, scoped credentials, and team audit history |
 | **Settings** | Hosted-plan and Cloud Sync status, LLM provider setup/test, a live structured-extraction switch and activity viewer, appearance, and local engine/store info |
-
-### Managed compute
-
-The open package can upload bounded workspace snapshots to the Engraphis Cloud service
-for managed analytics, dreaming, and consolidation. A local-only installation with no
-cloud session is **never** allowed to upload. Connecting an installation to Engraphis
-Cloud accepts the terms that cover managed compute, so a **connected installation is
-enabled by default** — there is no separate opt-in step to complete.
-`ENGRAPHIS_MANAGED_COMPUTE_CONSENT` remains as an operator override (`=0` opts a
-connected installation back out, `=1` forces it on); it is not a customer-facing
-setting. The cloud service is authoritative for all paid computation; no local setting
-turns this package into a compute worker or relay.
 
 The dashboard is powered by the v2 engine — the same `MemoryService` that backs the MCP server
 and the Python library. What you see in the UI is what your agents get.
@@ -180,12 +165,6 @@ structured-extraction entries.
 
 ---
 
-## Evidence-backed capabilities
-
-Engraphis publishes capability descriptions and reproducible benchmark protocols without narrative vendor comparisons. See [`BENCHMARKS.md`](BENCHMARKS.md) for the evidence and claim policy.
-
----
-
 ## Hosted Pro and Team
 
 Pro and Team are services, not alternate modes hidden in the public image. The official cloud
@@ -255,13 +234,9 @@ docker compose up                     # → http://127.0.0.1:8700
 
 A fresh clone needs no `.env`: the default service runs `engraphis-dashboard --no-open`,
 stores the v2 database plus license state on a named volume mounted at `/data`, and accepts
-overrides from `.env` or the shell. The legacy v1 API is opt-in, requires a strong
-`ENGRAPHIS_API_TOKEN`, and uses a separate database so its incompatible schema cannot collide
-with the dashboard:
-
-```bash
-ENGRAPHIS_API_TOKEN='generate-a-strong-unique-value' docker compose --profile api up engraphis-api
-```
+overrides from `.env` or the shell. The legacy v1 API is opt-in with
+`docker compose --profile api up engraphis-api` and uses a separate database so its
+incompatible schema cannot collide with the dashboard.
 
 Compose publishes both services on host loopback only. Set a strong `ENGRAPHIS_API_TOKEN`
 before changing either port mapping to a non-loopback host address.
@@ -387,14 +362,13 @@ to the official hosted service; it does not unlock private server code inside th
 an email-confirmed Pro or Team trial — no card required. The trial term is **exactly 3 active
 days**.
 
-Separately, the private control plane may apply `workspace_write_grace` to continuity operations
-for an already authorized hosted account for at most **24 hours** after an entitlement denial.
-This is an availability cushion, not a fourth trial day. It never extends trial or subscription expiry,
-never grants Cloud Sync, Analytics, Automation, Auto Dreaming, Auto Consolidation, Team
-access, new seats, or new credentials, and never resets an expiry clock. Hosted access may stop
-immediately. After grace, the private service can enter `recovery_read_only` so account recovery
-and export remain available while hosted mutations are blocked. These hosted states do not gate
-the Apache-licensed local dashboard, MCP tools, or local writes.
+Separately, `workspace_write_grace` may preserve ordinary writes to an already provisioned
+**local** workspace for at most **24 hours** after an authoritative entitlement denial. This is
+an availability cushion, not a fourth trial day. It never extends trial or subscription expiry,
+never grants Cloud Sync, Analytics, Automation, Auto Dreaming, Auto Consolidation, Team access,
+new seats, or new credentials, and never resets an expiry clock. Hosted access may stop
+immediately. After grace, the client preserves recovery reads and data export while blocking
+ordinary mutations until entitlement is restored.
 
 Cloud Sync is opt-in and transported over HTTPS; Engraphis does not advertise end-to-end
 encryption. Paid entitlements require current hosted authorization, while the Free core remains
@@ -416,11 +390,11 @@ recovery boundaries.
 | Memory engine + 29 MCP tools | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Manual local consolidation (dry-run by default) | ✓ | ✓ | ✓ |
-| Local workspace export (JSON: memories, sessions, audit) | ✓ | ✓ | ✓ |
 | Hosted Cloud Sync | | ✓ | ✓ |
 | Hosted Analytics | | ✓ | ✓ |
 | Hosted Auto Consolidation + retention policy | | ✓ | ✓ |
 | Hosted Auto Dreaming + managed proposals | | ✓ | ✓ |
+| Signed compliance export (checksummed bi-temporal bundle) | | ✓ | ✓ |
 | Priority support | | ✓ | ✓ |
 | Hosted multi-user dashboard: invitations, logins, roles, seat management | | | ✓ |
 | Hosted Team audit log + CSV export | | | ✓ |
@@ -522,10 +496,9 @@ The public runtime and its hosted-service clients enforce:
   bearer protects a remotely exposed customer node. Local Team accounts, invitations, roles,
   seats, password handling, and organization administration are not shipped here.
 - **Hosted authorization boundary** — Cloud Sync, Analytics, Automation, Team identity, and
-  cost-bearing work require current authorization from the private service. Any bounded
-  `workspace_write_grace` and later `recovery_read_only` state is enforced by that private
-  service for hosted account continuity; neither state grants cloud access or account growth,
-  and neither restricts the free local core.
+  cost-bearing work require current authorization from the private service. A lapsed customer
+  installation has only the bounded local `workspace_write_grace` described above, followed by
+  `recovery_read_only`; neither state permits cloud access or account growth.
 - **SQLite transaction safety** — shared v2 connections serialize complete write transactions;
   a failed statement that opened a transaction rolls it back and releases its lock. Legacy
   decay is frequency-independent, and sync preserves future bi-temporal validity horizons.
@@ -610,20 +583,16 @@ Manual consolidation is free and remains local. Use the dashboard's **Consolidat
 `MemoryService.consolidate`, `POST /api/consolidate`, `engraphis_consolidate`, or
 `python -m scripts.consolidate`. Dry-run is the default.
 
-Pro and Team add **hosted** Auto Consolidation and Auto Dreaming. On a connected workspace, the
-first Automation view automatically starts the recommended daily maintenance policy and uploads
-its bounded snapshot; there is no separate enable step. Customers can later pause or tune that
-policy. The public Automation tab displays reviewable jobs or proposals. The scheduling, analytics, dreaming, and
+Pro and Team add **hosted** Auto Consolidation and Auto Dreaming. The public Automation tab is a
+policy/status client: it submits an explicitly consented, bounded snapshot to private managed
+compute and displays reviewable jobs or proposals. The scheduling, analytics, dreaming, and
 consolidation automation algorithms run in Engraphis Cloud; this repository ships no premium
 background loop, cron wrapper, or worker.
 
 Secret-class and session-scoped memories are excluded before a managed snapshot is serialized;
 secret-class rows are rejected again by the hosted service. The encoded payload is capped at
-16 MiB and travels over HTTPS without end-to-end encryption. Managed compute is enabled by
-default once an installation is connected to Engraphis Cloud — connecting accepts the terms
-that cover it — and stays off for a local-only installation with no cloud session; cloud
-entitlement is also required. `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=0` opts a connected
-installation back out. A managed proposal never silently rewrites the local database.
+16 MiB. Set `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1` only after reviewing that boundary. A managed
+proposal does not silently rewrite the local database.
 
 Manual consolidation can also use schema-validated LLM output through
 `MemoryService.consolidate`, `POST /api/consolidate`, `engraphis_consolidate`, or
@@ -646,8 +615,6 @@ All via environment (or `.env`):
 | `ENGRAPHIS_API_TOKEN` | — | Optional bearer credential for this single-user local customer node; never reuse a hosted credential |
 | `ENGRAPHIS_CORS_ORIGINS` | loopback on `ENGRAPHIS_PORT` | Comma-separated REST CORS allow-list; defaults to `127.0.0.1` and `localhost` on the configured port |
 | `ENGRAPHIS_WORKSPACES` | — | Optional comma-separated server-side workspace allow-list |
-| `ENGRAPHIS_INDEX_ROOTS` | Working, home, and temporary directories | Optional path-separator-delimited absolute-path allow-list that replaces the default roots accepted by local code indexing |
-| `ENGRAPHIS_HTTP_INDEX_ROOT` | First `ENGRAPHIS_INDEX_ROOTS` entry, or current directory | Single root for dashboard and REST `POST /api/code/index`; submitted paths resolve beneath it. An explicit root (or fallback entry) must be absolute; an explicit HTTP root is included in the engine-approved set. MCP and CLI indexing continue to use `ENGRAPHIS_INDEX_ROOTS`. |
 | `ENGRAPHIS_DB_KEY` | — | Encrypt the database at rest (SQLCipher). Or use `ENGRAPHIS_DB_KEY_FILE` |
 | `ENGRAPHIS_EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | sentence-transformers model |
 | `ENGRAPHIS_EXTRACTOR` | `none` | `none` = verbatim; `chunk` = offline structure-aware chunks; `llm` = free-form LLM facts; `llm_structured` = schema-validated facts + graph metadata |
@@ -663,7 +630,7 @@ All via environment (or `.env`):
 | `ENGRAPHIS_LLM_MODEL` | `gpt-4o-mini` | Model name (provider-specific) |
 | `ENGRAPHIS_LLM_API_KEY` | — | API key for chat/synthesis, `llm` / `llm_structured` extraction, and structured consolidation |
 | `ENGRAPHIS_LLM_BASE_URL` | — | Base URL for openrouter / custom OpenAI-compatible endpoints |
-| `ENGRAPHIS_LLM_AUTO_EXTRACT` | `0` | Opt in to switching the running engine to `llm_structured` after a successful live connection test; the dashboard's extraction Off button persists `0`, and its On button restores `1` |
+| `ENGRAPHIS_LLM_AUTO_EXTRACT` | `1` | After a successful live connection test, automatically switch the running engine to `llm_structured`; the dashboard's extraction Off button persists `0`, and its On button restores `1` |
 | `ENGRAPHIS_FORWARDED_ALLOW_IPS` | *(none)* | Proxies trusted for forwarded client/TLS headers (`*` only when the service is reachable exclusively through that proxy) |
 | `ENGRAPHIS_LOCAL_TRUSTED_PEERS` | *(none)* | Exact peers/CIDRs treated as local without forwarding headers; intended for the shipped loopback-published Compose bridge, not public deployments |
 | `ENGRAPHIS_CLOUD_CONTROL_URL` | hosted default | Official entitlement, organization, and credential control API |
@@ -672,7 +639,7 @@ All via environment (or `.env`):
 | `ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL` | — | Bootstrap-only rotating hosted credential; after first use the owner-only cloud session replacement takes precedence |
 | `ENGRAPHIS_CLOUD_TOKEN_SUBJECT` | `member` | Subject fixed during hosted bootstrap (`device` or `member`); set explicitly with an environment-only refresh credential |
 | `ENGRAPHIS_CLOUD_ACCESS_TOKEN` | — | Optional short-lived access token for ephemeral jobs |
-| `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | *(auto)* | Operator override only; default follows whether a cloud session is configured (connected = allowed, local-only = never). `0` opts a connected installation out, `1` forces it on |
+| `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | `0` | Explicit opt-in required before uploading a bounded snapshot for hosted Analytics/Automation |
 
 See `.env.example` for the full customer-runtime and managed-service client options.
 
@@ -688,15 +655,13 @@ engraphis/
 │   ├── service.py           # validated MemoryService facade
 │   ├── mcp_server.py        # MCP server — 29 tools
 │   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
-│   ├── dashboard_assets/    # primary Ledger interface + graph engine
-│   ├── classic_assets/      # selectable full operator dashboard backup
 │   ├── read_only_api.py     # token-protected recall/repository-graph HTTP surface
 │   ├── hosted_client.py     # hosted URLs, plan labels, and endpoint validation only
 │   ├── licensing.py         # compatibility facade for hosted presentation metadata
 │   ├── cloud_session.py     # rotating hosted customer-session client
 │   ├── cloud_features.py    # consented managed-feature protocol client
 │   ├── config.py / app.py   # env settings / REST server
-│   └── static/              # compatibility dashboard asset paths
+│   └── static/              # dashboard frontend
 ├── eval/                    # offline retrieval eval harness + datasets
 ├── tests/                   # pytest suite (300+ tests, offline numpy-only core)
 ├── scripts/                 # start_dashboard, inspector, cli, init, consolidate, sync

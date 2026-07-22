@@ -3,7 +3,7 @@
 #
 # Railway (and most managed hosts) mount a persistent volume owned by root. Engraphis
 # runs as the non-root `engraphis` user (see Dockerfile), so without this the app cannot
-# create /data/engraphis.db or /data/.engraphis/relay.db on the volume and crashes at
+# create /data/engraphis.db or customer state under /data/.engraphis and crashes at
 # startup with `sqlite3.OperationalError: unable to open database file`.
 #
 # We therefore start the container as root, chown the mounted volume to `engraphis`, and
