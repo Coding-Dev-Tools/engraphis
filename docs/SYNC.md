@@ -90,6 +90,12 @@ bi-temporal history is preserved: conflicts close validity windows or create exp
 records rather than destructively overwriting facts. The public merge code is necessary so a
 customer can verify how their local database changes.
 
+Session scope is strictly device-local. Every exported workspace or repo bundle excludes both
+live and invalidated session-scoped rows, as well as `secret` rows, and includes a memory link only
+when both endpoints remain in the export. Inbound legacy or untrusted bundles cannot create,
+relabel, or overwrite session-scoped state because the sync format carries no authenticated
+session owner or lifecycle contract.
+
 Bundle input is untrusted. The client validates schema and size limits before applying records,
 rechecks workspace scope, and retains provenance/audit evidence. A relay cannot inject a record
 outside the authorized workspace merely by changing bundle fields.
