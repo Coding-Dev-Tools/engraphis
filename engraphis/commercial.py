@@ -12,6 +12,7 @@ import json
 import math
 import os
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -24,6 +25,15 @@ PRODUCT_ENV = {
     "POLAR_PRO_ANNUAL_PRODUCT_ID": ("pro", "annual"),
     "POLAR_TEAM_MONTHLY_PRODUCT_ID": ("team", "monthly"),
     "POLAR_TEAM_ANNUAL_PRODUCT_ID": ("team", "annual"),
+}
+
+_BACKUP_STATUS_LOCAL = "engraphis-backup-status/v1"
+_BACKUP_STATUS_S3 = "engraphis-backup-status/v2"
+_BACKUP_S3_ENV = {
+    "bucket": "ENGRAPHIS_BACKUP_S3_BUCKET",
+    "endpoint": "ENGRAPHIS_BACKUP_S3_ENDPOINT",
+    "access_key": "ENGRAPHIS_BACKUP_S3_ACCESS_KEY_ID",
+    "secret_key": "ENGRAPHIS_BACKUP_S3_SECRET_ACCESS_KEY",
 }
 
 
@@ -139,6 +149,107 @@ def _customer_disk_ok() -> bool:
         return False
 
 
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _backup_s3_config(*, required: bool = False) -> Optional[dict]:
+    values = {
+        name: os.environ.get(env_name, "").strip()
+        for name, env_name in _BACKUP_S3_ENV.items()
+    }
+    configured = any(values.values())
+    if not configured:
+        if required:
+            raise RuntimeError("backup object storage is not configured")
+        return None
+    missing = [env_name for name, env_name in _BACKUP_S3_ENV.items() if not values[name]]
+    if missing:
+        raise RuntimeError("backup object storage configuration is incomplete")
+    if not values["endpoint"].startswith("https://"):
+        raise RuntimeError("backup object storage endpoint must use HTTPS")
+    prefix = os.environ.get("ENGRAPHIS_BACKUP_S3_PREFIX", "engraphis").strip().strip("/")
+    if not prefix or any(part in {".", ".."} for part in prefix.split("/")):
+        raise RuntimeError("backup object storage prefix is invalid")
+    values["prefix"] = prefix
+    values["region"] = os.environ.get("ENGRAPHIS_BACKUP_S3_REGION", "auto").strip() or "auto"
+    return values
+
+
+def _backup_s3_client(config: dict):
+    try:
+        import boto3
+    except ImportError as exc:  # pragma: no cover - production dependency guard
+        raise RuntimeError("backup object storage requires boto3") from exc
+    return boto3.client(
+        "s3",
+        endpoint_url=config["endpoint"],
+        region_name=config["region"],
+        aws_access_key_id=config["access_key"],
+        aws_secret_access_key=config["secret_key"],
+    )
+
+
+def _read_s3_digest(client, bucket: str, key: str) -> tuple[int, str]:
+    response = client.get_object(Bucket=bucket, Key=key)
+    body = response["Body"]
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        while True:
+            chunk = body.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            digest.update(chunk)
+    finally:
+        close = getattr(body, "close", None)
+        if close:
+            close()
+    return size, digest.hexdigest()
+
+
+def _atomic_backup_status(marker: Path, status: dict) -> None:
+    marker = marker.expanduser()
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    if marker.is_symlink():
+        raise RuntimeError("backup status marker must not be a symlink")
+    temporary = marker.with_name(marker.name + ".tmp")
+    temporary.write_text(json.dumps(status, sort_keys=True), encoding="utf-8")
+    try:
+        os.chmod(temporary, 0o600)
+    except OSError:
+        pass
+    os.replace(temporary, marker)
+    completed_at = float(status["created_at"])
+    os.utime(marker, (completed_at, completed_at))
+
+
+def _s3_backup_fresh(status: dict, marker_path: Path, maximum: int) -> bool:
+    config = _backup_s3_config(required=True)
+    assert config is not None
+    created_at = float(status["created_at"])
+    expected_size = int(status["bytes"])
+    checksum = str(status["sha256"])
+    bucket = str(status["bucket"])
+    key = str(status["key"])
+    if bucket != config["bucket"] or not key.startswith(config["prefix"] + "/") \
+            or expected_size <= 0 or len(checksum) != 64 \
+            or any(char not in "0123456789abcdef" for char in checksum):
+        return False
+    age = time.time() - created_at
+    if not math.isfinite(created_at) or not -300 <= age <= maximum \
+            or abs(marker_path.stat().st_mtime - created_at) > 300:
+        return False
+    size, digest = _read_s3_digest(
+        _backup_s3_client(config), config["bucket"], key)
+    return size == expected_size and hmac.compare_digest(digest, checksum)
+
+
 def _backup_fresh() -> bool:
     """Validate the marker and encrypted artifact written by the backup job.
 
@@ -148,8 +259,7 @@ def _backup_fresh() -> bool:
     from holding production readiness open.
     """
     marker = os.environ.get("ENGRAPHIS_BACKUP_STATUS_FILE", "").strip()
-    output = os.environ.get("ENGRAPHIS_BACKUP_OUTPUT_DIR", "").strip()
-    if not marker or not output:
+    if not marker:
         return False
     try:
         maximum = max(60, int(os.environ.get(
@@ -160,12 +270,18 @@ def _backup_fresh() -> bool:
         marker_path = marker_source.resolve(strict=True)
         if not marker_path.is_file():
             return False
+        status = json.loads(marker_path.read_text(encoding="utf-8"))
+        if not isinstance(status, dict):
+            return False
+        if status.get("schema") == _BACKUP_STATUS_S3:
+            return _s3_backup_fresh(status, marker_path, maximum)
+        if status.get("schema") != _BACKUP_STATUS_LOCAL:
+            return False
+        output = os.environ.get("ENGRAPHIS_BACKUP_OUTPUT_DIR", "").strip()
+        if not output:
+            return False
         output_path = Path(output).expanduser().resolve(strict=True)
         if not output_path.is_dir():
-            return False
-        status = json.loads(marker_path.read_text(encoding="utf-8"))
-        if not isinstance(status, dict) \
-                or status.get("schema") != "engraphis-backup-status/v1":
             return False
         created_at = float(status["created_at"])
         artifact_source = Path(str(status["artifact"])).expanduser()
@@ -188,26 +304,82 @@ def _backup_fresh() -> bool:
                 or abs(artifact_stat.st_mtime - created_at) > 300 \
                 or artifact_stat.st_size != expected_size:
             return False
-        digest = hashlib.sha256()
-        with artifact.open("rb") as fh:
-            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return hmac.compare_digest(digest.hexdigest(), checksum)
-    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return hmac.compare_digest(_sha256_path(artifact), checksum)
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError, json.JSONDecodeError):
         return False
+
+
+def _run_s3_backup(config: dict, marker: Path, retention: int) -> bool:
+    from scripts.commercial_backup import PREFIX, backup
+
+    with tempfile.TemporaryDirectory(prefix="engraphis-s3-backup-") as temporary:
+        temporary_path = Path(temporary)
+        try:
+            artifact = backup(
+                temporary_path / "artifacts",
+                temporary_path / "local-status.json",
+                retention,
+                True,
+            )
+        except SystemExit as exc:
+            raise RuntimeError("backup configuration was rejected") from exc
+        checksum = _sha256_path(artifact)
+        expected_size = artifact.stat().st_size
+        key = "%s/%s" % (config["prefix"], artifact.name)
+        client = _backup_s3_client(config)
+        with artifact.open("rb") as fh:
+            client.put_object(
+                Bucket=config["bucket"],
+                Key=key,
+                Body=fh,
+                ContentType="application/octet-stream",
+                Metadata={"sha256": checksum},
+            )
+        remote_size, remote_digest = _read_s3_digest(client, config["bucket"], key)
+        if remote_size != expected_size or not hmac.compare_digest(remote_digest, checksum):
+            raise RuntimeError("uploaded backup verification failed")
+        completed_at = time.time()
+        _atomic_backup_status(marker, {
+            "schema": _BACKUP_STATUS_S3,
+            "bucket": config["bucket"],
+            "key": key,
+            "bytes": expected_size,
+            "created_at": completed_at,
+            "sha256": checksum,
+        })
+        cutoff = completed_at - retention * 86400
+        response = client.list_objects_v2(
+            Bucket=config["bucket"], Prefix=config["prefix"] + "/" + PREFIX)
+        stale = []
+        for item in response.get("Contents", []):
+            modified = item.get("LastModified")
+            timestamp = modified.timestamp() if hasattr(modified, "timestamp") else 0
+            candidate = str(item.get("Key", ""))
+            if candidate != key and candidate.startswith(config["prefix"] + "/") \
+                    and timestamp and timestamp < cutoff:
+                stale.append({"Key": candidate})
+        if stale:
+            client.delete_objects(Bucket=config["bucket"], Delete={"Objects": stale})
+    return _backup_fresh()
 
 
 def run_configured_backup() -> dict:
     """Create and verify one encrypted backup without exposing its path or key."""
     output = os.environ.get("ENGRAPHIS_BACKUP_OUTPUT_DIR", "").strip()
     marker = os.environ.get("ENGRAPHIS_BACKUP_STATUS_FILE", "").strip()
-    if not output or not marker:
+    if not marker:
         raise RuntimeError("off-volume backup storage is not configured")
     try:
         retention = max(1, int(os.environ.get(
             "ENGRAPHIS_BACKUP_RETENTION_DAYS", "30")))
     except ValueError as exc:
         raise RuntimeError("backup retention is invalid") from exc
+    s3_config = _backup_s3_config()
+    if s3_config is not None:
+        verified = _run_s3_backup(s3_config, Path(marker), retention)
+        return {"ok": verified, "verified": verified}
+    if not output:
+        raise RuntimeError("off-volume backup storage is not configured")
     from scripts.commercial_backup import backup
     try:
         artifact = backup(Path(output), Path(marker), retention, False)

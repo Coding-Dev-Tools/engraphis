@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import io
 import json
 import os
 import sqlite3
@@ -576,6 +577,74 @@ def test_configured_backup_returns_only_status_booleans(monkeypatch, tmp_path):
     monkeypatch.setattr(commercial_backup, "backup", lambda *_args: artifact)
     monkeypatch.setattr(commercial, "_backup_fresh", lambda: True)
     assert commercial.run_configured_backup() == {"ok": True, "verified": True}
+
+
+def test_configured_backup_uploads_and_verifies_private_s3_object(monkeypatch, tmp_path):
+    from engraphis import commercial
+    from scripts import commercial_backup
+
+    class FakeS3:
+        def __init__(self):
+            self.objects = {}
+
+        def put_object(self, *, Bucket, Key, Body, **_kwargs):
+            self.objects[(Bucket, Key)] = Body.read()
+
+        def get_object(self, *, Bucket, Key):
+            return {"Body": io.BytesIO(self.objects[(Bucket, Key)])}
+
+        def list_objects_v2(self, *, Bucket, Prefix):
+            assert Bucket == "production-backups"
+            assert Prefix == "vendor/engraphis-backup-"
+            return {"Contents": []}
+
+        def delete_objects(self, **_kwargs):
+            raise AssertionError("no object should be old enough for retention deletion")
+
+    fake_s3 = FakeS3()
+
+    def fake_backup(output, _marker, _retention, allow_same_device):
+        assert allow_same_device is True
+        output.mkdir(parents=True)
+        artifact = output / "engraphis-backup-20260722T000000Z-a1b2c3d4.egbak"
+        artifact.write_bytes(b"encrypted-and-locally-verified")
+        return artifact
+
+    marker = tmp_path / "live-volume" / "backup-status.json"
+    monkeypatch.setenv("ENGRAPHIS_BACKUP_STATUS_FILE", str(marker))
+    monkeypatch.setenv("ENGRAPHIS_BACKUP_S3_BUCKET", "production-backups")
+    monkeypatch.setenv("ENGRAPHIS_BACKUP_S3_ENDPOINT", "https://storage.example")
+    monkeypatch.setenv("ENGRAPHIS_BACKUP_S3_ACCESS_KEY_ID", "access-id")
+    monkeypatch.setenv("ENGRAPHIS_BACKUP_S3_SECRET_ACCESS_KEY", "secret-value")
+    monkeypatch.setenv("ENGRAPHIS_BACKUP_S3_PREFIX", "vendor")
+    monkeypatch.setattr(commercial, "_backup_s3_client", lambda _config: fake_s3)
+    monkeypatch.setattr(commercial_backup, "backup", fake_backup)
+
+    assert commercial.run_configured_backup() == {"ok": True, "verified": True}
+    status = json.loads(marker.read_text(encoding="utf-8"))
+    assert status["schema"] == "engraphis-backup-status/v2"
+    assert status["bucket"] == "production-backups"
+    assert status["key"].startswith("vendor/engraphis-backup-")
+    assert "access-id" not in marker.read_text(encoding="utf-8")
+    assert "secret-value" not in marker.read_text(encoding="utf-8")
+    assert commercial._backup_fresh() is True
+
+    fake_s3.objects[(status["bucket"], status["key"])] += b"tampered"
+    assert commercial._backup_fresh() is False
+
+
+def test_configured_s3_backup_fails_closed_when_credentials_are_incomplete(
+        monkeypatch, tmp_path):
+    from engraphis import commercial
+
+    monkeypatch.setenv(
+        "ENGRAPHIS_BACKUP_STATUS_FILE", str(tmp_path / "backup-status.json"))
+    monkeypatch.setenv("ENGRAPHIS_BACKUP_S3_BUCKET", "production-backups")
+    monkeypatch.delenv("ENGRAPHIS_BACKUP_S3_ENDPOINT", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_BACKUP_S3_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_BACKUP_S3_SECRET_ACCESS_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="configuration is incomplete"):
+        commercial.run_configured_backup()
 
 
 def test_backup_readiness_rejects_artifact_outside_configured_volume(monkeypatch, tmp_path):

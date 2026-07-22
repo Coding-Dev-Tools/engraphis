@@ -22,6 +22,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
   soft bloom, plus an Advanced view toggle that keeps the fully decorated explorer available.
   Default galaxy rotation is now ~10x slower for readability, and a new Freeze control
   pauses/resumes the live rotation.
+- Verified encrypted commercial backups can target private S3-compatible object storage,
+  including Railway Buckets, with read-after-write digest verification and remote retention.
 
 ### Changed
 

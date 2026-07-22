@@ -192,7 +192,13 @@ either database is absent. Do not create an empty substitute during a backup: in
 real control-plane stores during staging setup and prove they contain the expected tables.
 
 Set `ENGRAPHIS_BACKUP_OUTPUT_DIR` to the off-volume mount and
-`ENGRAPHIS_BACKUP_STATUS_FILE` to the on-volume marker on both managed services. The daily
+`ENGRAPHIS_BACKUP_STATUS_FILE` to the on-volume marker on both managed services. Railway
+deployments may instead use a private S3-compatible Bucket by setting
+`ENGRAPHIS_BACKUP_S3_BUCKET`, `ENGRAPHIS_BACKUP_S3_ENDPOINT`,
+`ENGRAPHIS_BACKUP_S3_ACCESS_KEY_ID`, `ENGRAPHIS_BACKUP_S3_SECRET_ACCESS_KEY`, and optionally
+`ENGRAPHIS_BACKUP_S3_REGION` / `ENGRAPHIS_BACKUP_S3_PREFIX`. The service creates and locally
+verifies the encrypted archive, uploads it, reads the object back to verify its exact digest,
+and stores only a credential-free remote-object marker on the live volume. The daily
 `commercial encrypted backups` workflow calls the protected customer and control-plane
 backup endpoints; neither response exposes the artifact path or encryption key.
 Set a separate strong `ENGRAPHIS_API_TOKEN` on the managed customer service and copy it to
