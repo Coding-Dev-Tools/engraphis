@@ -492,8 +492,10 @@ environment switch turns the public image into an Engraphis relay.
 
 The merge remains a state-based CRDT: every field resolves by a commutative, idempotent rule so
 `merge(A, B) == merge(B, A)`. The current format carries memories and memory-to-memory links;
-entity/code graph reconciliation is not yet part of sync. `secret` memories and all
-session-scoped memories are excluded from managed uploads. Relay traffic uses HTTPS, but bundles are not yet client-side end-to-end
+entity/code graph reconciliation is not yet part of sync. `secret` memories and all live or
+invalidated session-scoped memories are device-local and excluded from every exported sync
+bundle; links are exported only when both endpoints remain. Inbound bundles cannot create or
+overwrite session state. Relay traffic uses HTTPS, but bundles are not yet client-side end-to-end
 encrypted or zero-knowledge.
 
 For development, backup interchange, and offline testing, the public client retains an explicit
