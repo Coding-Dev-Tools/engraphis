@@ -379,6 +379,41 @@ def test_vendor_readiness_proves_matching_signer_but_honors_release_gate(
     assert operational["manual_fulfillment"] is True
 
 
+def test_trial_synthetic_reports_rejected_lease_alert_without_gating(monkeypatch):
+    from engraphis import vendor_app
+    from engraphis.config import settings
+
+    monkeypatch.setattr(settings, "service_mode", "vendor")
+    monkeypatch.setattr(vendor_app, "_admin_ok", lambda _request: True)
+    monkeypatch.setattr(vendor_app, "_email_worker_ok", lambda _app: True)
+    monkeypatch.setenv(
+        "ENGRAPHIS_RELAY_PUBLIC_URL", "https://license.engraphis.test")
+    checks = {
+        "signer": True,
+        "signer_release_ready": True,
+        "registry": True,
+        "email": True,
+        "email_webhook": True,
+        "email_outbox": True,
+        "polar_backlog": True,
+        "rejected_leases": False,
+        "disk": True,
+        "backup": True,
+        "ready": True,
+    }
+    monkeypatch.setattr(vendor_app, "vendor_readiness", lambda: checks.copy())
+    monkeypatch.setattr(
+        email_outbox, "process_due",
+        lambda *_args, **_kwargs: {"processed": 0, "sent": 0, "failed": 0})
+
+    with TestClient(vendor_app.create_app()) as client:
+        response = client.get("/ops/synthetic/trial")
+
+    assert response.status_code == 200
+    assert response.json()["rejected_leases"] is False
+    assert response.json()["ready"] is True
+
+
 def test_manual_fulfillment_fallback_is_an_authenticated_ops_alert(monkeypatch, tmp_path):
     from engraphis.inspector import webhooks
 
