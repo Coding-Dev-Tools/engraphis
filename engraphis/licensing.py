@@ -212,26 +212,21 @@ def upgrade_url(plan: Optional[str] = None) -> str:
     return DEFAULT_PRO_UPGRADE_URL if _paid_available() else DEFAULT_COMING_SOON_URL
 
 _KEY_PREFIX = "ENGR1"
-# Pinned Ed25519 verifier (32-byte public half). This pre-sale key was generated on a
-# development machine and is not approved for production issuance. The private seed never
-# ships in this repo; production keeps its replacement only in the vendor secret store and
-# an encrypted recovery backup. Anyone with only this repository cannot forge a valid key.
-#
-# ROTATE BEFORE SELLING: inventory and back up the production registry, then generate into
-# a NEW file on a trusted machine:
-#   python -m scripts.license_admin keygen --key-file <secure-offline-path>/vendor_signing.key
-# Pin the printed public key through the reviewed compatibility/reissue ceremony in
-# docs/COMMERCIAL_OPERATIONS.md. Do not overwrite or discard the old seed first.
-_VENDOR_PUBKEY_HEX = "88b998850710f24b0626bc7a82fa9b5a841720102d291259dbf12696cf623d23"
+# Pinned Ed25519 verifier (32-byte public half) derived from the production Railway signing
+# seed during the 2026-07-22 release ceremony. The production registry inventory contained
+# no issued keys, so this was a clean rotation with no compatibility verifier or reissue.
+# The private seed never ships in this repo; production keeps it only in the vendor secret
+# store and an encrypted recovery backup. Anyone with only this repository cannot forge a
+# valid key. Future rotations follow the audited ceremony in docs/COMMERCIAL_OPERATIONS.md.
+_VENDOR_PUBKEY_HEX = "77d0f9e4637bc322e494c0073b03266009a6140c7e1b99d0f47b827d4ece6d83"
 # Previous production verify keys live here only during an audited rotation window.
 # New issuance always uses ``_VENDOR_PUBKEY_HEX``; remove retired entries after every
 # customer has received a replacement and the announced grace period has elapsed.
 _PREVIOUS_VENDOR_PUBKEY_HEXES = ()
 
-# Readiness intentionally fails until an operator completes the trusted-machine ceremony,
-# updates the verifier pin, validates production issuance, and flips this source-controlled
-# release gate in a separately reviewed change.
-VENDOR_SIGNER_RELEASE_READY = False
+# Source-controlled proof that the trusted-machine ceremony, inventory, and verifier pin
+# were independently reviewed before production issuance was enabled.
+VENDOR_SIGNER_RELEASE_READY = True
 # Frozen fingerprint of the OLD, known-compromised dev keypair. Kept as a sentinel so
 # is_default_vendor_key() / production_warnings() can flag it if anyone ever re-pins it.
 # Its private half does NOT ship in this repo (`.secrets/` is gitignored), but it was

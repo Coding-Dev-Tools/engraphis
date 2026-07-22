@@ -32,6 +32,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Graph GET requests are strictly read-only. While an explicit mutating index job runs, graph
   reads return a rebuilding conflict instead of mixing old and partially derived metrics.
 
+### Security
+
+- Pin the public key derived from the production vendor signing seed and enable issuance only
+  after the production registry inventory confirmed that no legacy licenses required reissue.
+
 ## [1.0.0] - 2026-07-19
 
 First commercial GA release for Pro and Team.
