@@ -32,6 +32,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Graph GET requests are strictly read-only. While an explicit mutating index job runs, graph
   reads return a rebuilding conflict instead of mixing old and partially derived metrics.
 
+### Security
+
+
 ## [1.0.0] - 2026-07-19
 
 First commercial GA release for Pro and Team.
