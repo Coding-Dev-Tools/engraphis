@@ -241,7 +241,7 @@ def test_login_throttle_locks_after_repeated_failures(make_client):
 
 def test_lapsed_team_license_keeps_existing_inspector_users_behind_auth(
         make_client, monkeypatch):
-    app, admin, _ = make_client(key=_key("team"), team_mode=True)
+    app, admin, mem_id = make_client(key=_key("team"), team_mode=True)
     _setup_admin(admin)
     admin.post("/api/auth/logout")
 
@@ -252,7 +252,39 @@ def test_lapsed_team_license_keeps_existing_inspector_users_behind_auth(
         "/api/recall", params={"q": "rate", "workspace": "acme"}).status_code == 401
     state = anonymous.get("/api/auth/state").json()
     assert state["mode"] == "team" and state["team_locked"] is True
+    assert state["entitlement_state"] == "workspace_write_grace"
+    assert state["workspace_writes_allowed"] is True
     # Entitlement lapse limits paid features, not account recovery/authentication.
+    assert anonymous.post("/api/auth/login", json={
+        "email": "admin@x.co", "password": PW,
+    }).status_code == 200
+    # Ordinary local governance remains available during the bounded grace.
+    assert anonymous.post("/api/pin", json={
+        "memory_id": mem_id, "workspace": "acme", "repo": "api",
+    }).status_code == 200
+    growth = anonymous.post("/api/auth/users", json={
+        "email": "new@x.co", "name": "New", "password": PW, "role": "member",
+    })
+    assert growth.status_code == 402
+    assert growth.json()["entitlement_state"] == "workspace_write_grace"
+
+    app.state.auth_store.conn.execute(
+        "UPDATE entitlement_state SET grace_until=0 WHERE singleton=1")
+    app.state.auth_store.conn.commit()
+    recovery = anonymous.get("/api/auth/state").json()
+    assert recovery["entitlement_state"] == "recovery_read_only"
+    assert recovery["recovery_read_only"] is True
+    assert anonymous.get(
+        "/api/recall", params={"q": "rate", "workspace": "acme"}
+    ).status_code == 200
+    # Export is a recovery escape hatch even though ordinary paid export is gated.
+    assert anonymous.get("/api/export", params={"workspace": "acme"}).status_code == 200
+    blocked = anonymous.post("/api/pin", json={
+        "memory_id": mem_id, "workspace": "acme", "repo": "api",
+    })
+    assert blocked.status_code == 402
+    assert blocked.json()["entitlement_state"] == "recovery_read_only"
+    assert anonymous.post("/api/auth/logout").status_code == 200
     assert anonymous.post("/api/auth/login", json={
         "email": "admin@x.co", "password": PW,
     }).status_code == 200

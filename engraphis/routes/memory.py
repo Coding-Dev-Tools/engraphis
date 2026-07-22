@@ -648,7 +648,7 @@ async def get_config():
         "llm_provider": settings.llm_provider,
         "llm_model": settings.llm_model,
         "llm_api_key_set": bool(settings.llm_api_key),
-        "llm_base_url": settings.llm_base_url or "(provider default)",
+        "llm_custom_base_url_set": bool(settings.llm_base_url),
         "embed_model": settings.embed_model,
         "loop_interval": settings.loop_interval,
         "decay_halflife_days": settings.decay_halflife_days,

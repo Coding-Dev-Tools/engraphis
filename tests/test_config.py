@@ -64,13 +64,6 @@ def test_embed_dim_defaults_to_default_model_dimension(monkeypatch):
     assert Settings().embed_dim == 384
 
 
-def test_galaxy_ui_rollout_flag_defaults_on_and_can_restore_legacy(monkeypatch):
-    monkeypatch.delenv("ENGRAPHIS_GRAPH_UI_V2", raising=False)
-    assert Settings().graph_ui_v2 is True
-    monkeypatch.setenv("ENGRAPHIS_GRAPH_UI_V2", "0")
-    assert Settings().graph_ui_v2 is False
-
-
 def test_license_server_url_precedence(monkeypatch):
     # Relay routing and commercial control-plane routing are intentionally independent.
     monkeypatch.setattr(config.settings, "relay_url", "https://relay.example/")

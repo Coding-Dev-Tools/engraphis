@@ -2955,14 +2955,16 @@ class MemoryService:
         out["verification"] = self.verify_receipts(workspace=workspace)
         return out
 
-    def export_workspace(self, *, workspace: str) -> dict:
+    def export_workspace(self, *, workspace: str, recovery: bool = False) -> dict:
         """Full bi-temporal dump of one workspace — memories (live *and* superseded),
         sessions, and the audit trail. The compliance story in one artifact: nothing is
         ever silently deleted, and the export proves it. Scope-checked like any other
-        read; the Pro license gate lives here so every caller (Inspector, v1 dashboard,
-        v2 dashboard) passes through one check."""
-        from engraphis.licensing import require_cloud_lease
-        require_cloud_lease("export")
+        read. The Pro license gate lives here so every ordinary caller passes through one
+        check; authenticated HTTP recovery paths may set ``recovery=True`` only after the
+        durable entitlement state has entered grace/read-only recovery."""
+        if not recovery:
+            from engraphis.licensing import require_cloud_lease
+            require_cloud_lease("export")
 
         wid, _ = self._require_scope(workspace, None)
         conn = self.store.conn

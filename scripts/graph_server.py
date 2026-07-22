@@ -5,6 +5,19 @@ import argparse
 import ipaddress
 import os
 
+
+def _port(value: str) -> int:
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            "port must be an integer from 1 to 65535"
+        ) from None
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be from 1 to 65535")
+    return port
+
+
 def _loopback(host: str) -> bool:
     # An empty host string makes the socket layer bind ALL interfaces, so it is
     # emphatically not loopback; any unparseable hostname is treated as
@@ -22,7 +35,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="engraphis-graph-server")
     parser.add_argument("--host", default=os.environ.get("ENGRAPHIS_GRAPH_HOST", "127.0.0.1"))
     parser.add_argument(
-        "--port", type=int, default=int(os.environ.get("ENGRAPHIS_GRAPH_PORT", "8720"))
+        "--port", type=_port, default=os.environ.get("ENGRAPHIS_GRAPH_PORT", "8720")
     )
     args = parser.parse_args(argv)
     token = (

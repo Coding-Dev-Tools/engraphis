@@ -236,7 +236,7 @@ def test_concurrent_sync_token_updates_do_not_interleave(monkeypatch):
     monkeypatch.setattr(sync_relay, "save_sync_read_only",
                         lambda enabled: record("policy", enabled))
     monkeypatch.setattr(sync_relay, "save_sync_token",
-                        lambda token: record("token", token))
+                        lambda token, **_kwargs: record("token", token))
 
     def configure(token, read_only):
         start.wait()

@@ -6,9 +6,11 @@ already in requirements. All providers are reached via their REST API.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 from typing import Any, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -22,6 +24,48 @@ _PROVIDER_BASE_URLS = {
     "anthropic": "https://api.anthropic.com/v1",
     "google": "https://generativelanguage.googleapis.com/v1beta",
 }
+
+
+def validate_llm_base_url(value: str) -> str:
+    """Validate and normalize an LLM API base URL without resolving or logging it.
+
+    Custom OpenAI-compatible endpoints may include a path (for example ``/v1``), but
+    credentials, query strings, fragments, control characters, and ambiguous hosts are
+    rejected.  The raw value can contain customer-specific routing or credentials, so
+    callers must never reflect it in HTTP responses or logs.
+    """
+    raw = str(value or "")
+    if raw != raw.strip() or any(
+        char.isspace() or ord(char) == 127 for char in raw
+    ):
+        raise ValueError("LLM base URL contains whitespace or control characters")
+    try:
+        parts = urlsplit(raw)
+        hostname = parts.hostname
+        port = parts.port
+    except ValueError:
+        raise ValueError("LLM base URL is invalid") from None
+    scheme = parts.scheme.lower()
+    if scheme not in {"http", "https"} or not hostname:
+        raise ValueError("LLM base URL must be an absolute http(s) URL")
+    loopback = hostname.lower() == "localhost" or hostname.lower().endswith(".localhost")
+    if not loopback:
+        try:
+            loopback = ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            loopback = False
+    if scheme != "https" and not loopback:
+        raise ValueError("LLM base URL must use HTTPS unless it targets loopback")
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("LLM base URL has an invalid port")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("LLM base URL must not contain embedded credentials")
+    if "\\" in parts.netloc or any(char.isspace() for char in parts.netloc):
+        raise ValueError("LLM base URL contains an invalid host")
+    if parts.query or parts.fragment:
+        raise ValueError("LLM base URL must not contain a query string or fragment")
+    path = parts.path.rstrip("/")
+    return urlunsplit((scheme, parts.netloc, path, "", ""))
 
 _THOUGHT_SYSTEM_PROMPT = (
     "You are a memory consolidation engine. You receive recalled memory context "
@@ -69,9 +113,10 @@ class LLMClient:
         self.provider = (provider or settings.llm_provider).lower()
         self.model = model or settings.llm_model
         self.api_key = api_key or settings.llm_api_key
-        self.base_url = base_url or settings.llm_base_url or _PROVIDER_BASE_URLS.get(
-            self.provider, ""
+        configured_base_url = (
+            base_url or settings.llm_base_url or _PROVIDER_BASE_URLS.get(self.provider, "")
         )
+        self.base_url = validate_llm_base_url(configured_base_url)
         self.extra_headers = extra_headers or settings.llm_extra_headers
         self._http = httpx.Client(
             timeout=120,
