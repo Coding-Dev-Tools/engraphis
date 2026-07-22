@@ -18,7 +18,8 @@ def render_report(payload: dict) -> str:
     lines = [
         "# Engraphis Code Graph Report",
         "",
-        f"- Generated: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(payload['generated_at']))}",
+        f"- Generated: "
+        f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(payload['generated_at']))}",
         f"- Files indexed: {len(payload['files'])}",
         f"- Symbols: {len(payload['nodes'])}",
         f"- Relationships: {len(payload['edges'])}",

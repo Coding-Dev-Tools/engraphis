@@ -29,7 +29,10 @@ class CrossEncoderReranker:
     def rerank(self, query: str, candidates: list[Candidate], k: int) -> list[Candidate]:
         if not candidates:
             return []
-        pairs = [(query, (c.record.summary or c.record.content) if c.record else "") for c in candidates]
+        pairs = [
+            (query, (c.record.summary or c.record.content) if c.record else "")
+            for c in candidates
+        ]
         scores = self.model.predict(pairs)
         for c, s in zip(candidates, scores):
             c.score = float(s)
