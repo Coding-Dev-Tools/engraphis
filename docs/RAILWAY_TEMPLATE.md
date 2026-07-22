@@ -1,10 +1,8 @@
-# Railway template publication runbook
+# Railway customer-node publication runbook
 
-[`deploy/railway-template.json`](../deploy/railway-template.json) is a reviewable composer
-worksheet and the source of truth for the public Railway template. It is not a
-Railway-importable JSON schema: enter or verify these settings in Railway's template
-composer (or generate a template from the matching staging project). `railway.json`
-configures a service after creation; it is not itself a marketplace template.
+Any Railway template published from this repository must be described as a **free single-user
+customer node**. It must not claim to deploy Engraphis Cloud, Pro/Team server features, a license
+issuer, relay, managed compute, Auto Dreaming, Auto Consolidation, or Team identity.
 
 ## Required template shape
 
@@ -12,24 +10,20 @@ configures a service after creation; it is not itself a marketplace template.
 - Service mode: `customer`.
 - Persistent volume: `/data`.
 - Health check: `/api/ready`.
-- Public domain references:
-  `ENGRAPHIS_DASHBOARD_URL=https://${{RAILWAY_PUBLIC_DOMAIN}}` and the same value for
-  `ENGRAPHIS_RELAY_URL`.
-- Managed license service: `ENGRAPHIS_CLOUD_URL=https://license.engraphis.com`.
-- Generated ownership secret: `ENGRAPHIS_DEPLOYMENT_TOKEN=${{ secret(48) }}`. Copy it
-  into the hosted onboarding wizard, then seal it after the first admin is created.
+- Generated local API bearer supplied as `ENGRAPHIS_API_TOKEN`.
+- No vendor signer, billing, mail, Team-admin, relay-storage, or worker secrets.
 
-Vendor signer, Polar, vendor-admin, and Engraphis-operated email secrets must not appear in
-the template.
+Hosted customer endpoint variables may be exposed as optional inputs, but a refresh credential
+must be injected as a secret or mounted owner-only state file. Managed compute consent defaults
+off.
 
 ## Publish gate
 
-1. Run `python scripts/check_commercial_manifest.py` and the complete repository CI gate.
-2. Create the Railway template from a staging project matching the descriptor exactly.
-3. Deploy it from a logged-out Railway account and complete the acceptance checklist in
-   [`HOSTING_RAILWAY.md`](HOSTING_RAILWAY.md).
-4. Record the assigned `https://railway.com/deploy/<code>` URL.
-5. Add that exact URL to the README only after the logged-out test succeeds.
+1. Run the complete public repository CI gate.
+2. Deploy from a logged-out Railway account.
+3. Confirm the template copy says “free customer node” and links to official hosted plans.
+4. Verify authentication, persistent storage, CSP, and recovery behavior.
+5. Add the assigned Railway template URL to the README only after that acceptance test succeeds.
 
-Do not substitute `railway.app/new?template=<raw railway.json>`; Railway ignores that shape
-and opens a generic project chooser.
+Do not substitute `railway.app/new?template=<raw railway.json>`; `railway.json` is per-service
+build configuration, not a marketplace template descriptor.

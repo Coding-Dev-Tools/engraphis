@@ -1,157 +1,66 @@
-# Agent Connect — point your agent at a hosted Engraphis instance
+# Agent Connect
 
-Team members can connect their coding agents (Claude Code, Cursor, any HTTP-capable
-agent) **directly to a hosted Engraphis dashboard** and store memories in the cloud
-instance instead of running Engraphis locally. A Team license (the instance's) is
-required to write — a free / lapsed instance refuses agent writes with `402`.
+The public Engraphis dashboard is a single-user local application. It does not mount Team
+accounts, invitations, roles, seats, organization audit, or per-member token administration.
+Those capabilities live in **Engraphis Team Cloud**.
 
-This is the team counterpart to the local-first model in [SYNC.md](./SYNC.md): instead
-of each member running a local MCP server + syncing, one admin hosts a single instance
-(e.g. on Railway) and everyone else just connects.
+## Local agents remain free
 
-> **Pro solo?** Agent-connect (direct writes to a cloud instance via `/api/remember` or
-> `/mcp`) requires a **Team** license. If you're a Pro member hosting on Railway, your
-> agents run locally and sync through your Railway instance with a scoped user token;
-> never distribute the account license key. Set `ENGRAPHIS_RELAY_URL` to your deployment URL. See
-> [HOSTING_RAILWAY.md](./HOSTING_RAILWAY.md) for the Pro solo path.
-
-## How it works
-
-1. **Admin** deploys one instance and activates Team before first-admin setup: load a
-   purchased key with `ENGRAPHIS_LICENSE_KEY`, or start a Team trial and open its emailed
-   confirmation link.
-2. **Admin** creates the first account, then sends a pending invitation with email and
-   role. It reserves a seat for 72 hours; the admin never chooses the recipient's password.
-3. **Member** opens the scanner-safe invitation and sets their own password. Acceptance
-   atomically creates the user. Expiry or revocation releases the reserved seat. The
-   member then signs in at the dashboard URL — no key and no local install. If the license later lapses, the
-   authentication wall remains in place and existing users can still sign in.
-4. **Member** opens **Settings → Connect your agent → Create token** and copies the
-   one-time bearer token.
-5. **Member** configures their agent to call the instance with that token.
-
-## Agent authentication
-
-Agents authenticate with a **per-user bearer token** (`Authorization: Bearer <token>`),
-minted from the dashboard. The token is bound to the member: their role, their personal
-folders, and their seat. New tokens expire after 90 days; the hosted server stores only
-their hashes, and each token carries explicit scopes. A client that saves a token for
-recurring sync must retain the raw bearer locally as an owner-only credential. Disabling
-or deleting the member instantly invalidates every session and token.
-
-Viewer tokens can call read routes, but write/governance routes return `403`;
-`/api/remember` and `/mcp` require the `member` or `admin` role.
-
-Token management (requires a browser session):
-
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/api/auth/token` `{label, scopes?}` | Mint a 90-day token (raw token returned **once**) |
-| `GET`  | `/api/auth/tokens` | List your tokens (never includes the raw token) |
-| `DELETE` | `/api/auth/token/{id}` | Revoke one of your tokens |
-| `GET`  | `/api/auth/connect-info` | Verify a token + discover the API base / snippet |
-
-`GET /api/auth/connect-info` works with either a cookie or a bearer, so an agent can hit
-it first to confirm its token is valid and learn the base URL:
+For one person on one machine, run the local MCP server. No hosted account is required:
 
 ```bash
-curl -H "Authorization: Bearer <token>" https://memory.example.com/api/auth/connect-info
+pip install "engraphis[mcp]"
+engraphis-init
+claude mcp add engraphis -- engraphis-mcp
 ```
 
-## The agent write/read API
+The local server exposes the same memory semantics while keeping the database on your machine.
+Use `ENGRAPHIS_API_TOKEN` only when protecting a local HTTP surface; it is not a Team identity or
+seat credential.
 
-| Method | Path | Notes |
-|---|---|---|
-| `POST` | `/api/remember` | **Team-gated and member-only** (`402` without Team, `403` for viewers). Same params as local `engraphis_remember`. |
-| `GET`  | `/api/recall?q=…&workspace=…` | Read (not gated). |
-| `GET`  | `/api/memory/{id}?workspace=…` | One memory. |
-| `GET`  | `/api/why?q=…&workspace=…` / `/api/timeline?…` | Provenance / history. |
+## Connect through Team Cloud
 
-`POST /api/remember` body (all optional except `content`):
+Use the official hosted dashboard when several people or remote agents need one managed
+organization:
 
-```json
-{
-  "content": "We use pnpm for all frontend repos.",
-  "workspace": "default",
-  "repo": null,
-  "mtype": "semantic",
-  "scope": "repo",
-  "title": "",
-  "importance": 0.0,
-  "keywords": null,
-  "metadata": null,
-  "source": "agent",
-  "trusted": true,
-  "dedupe": true
-}
-```
+1. The organization owner starts Team or purchases a subscription in Engraphis Cloud.
+2. The owner invites named members and assigns roles in the hosted dashboard.
+3. A member accepts the invitation and creates a scoped agent/device credential.
+4. The member configures their agent with the hosted URL and the one-time credential.
+5. The hosted service rechecks organization membership, role, scopes, entitlement version, and
+   workspace binding on every request.
 
-Example:
+Members consume named seats; devices do not. Disabling a member or releasing their seat revokes
+their hosted access without distributing an account-wide license key.
 
-```bash
-curl -X POST https://memory.example.com/api/remember \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{"content":"Redis caches the gateway.","workspace":"default"}'
+The hosted onboarding flow provides the exact endpoint and client snippet for the member's
+organization. Do not substitute the URL of a public self-hosted image: that image intentionally
+has no Team identity backend.
 
-curl "https://memory.example.com/api/recall?q=Redis&workspace=default" \
-  -H "Authorization: Bearer <token>"
-```
+## Credential lifecycle
 
-Writes go to the **same v2 store the dashboard reads** — there is no separate agent DB,
-so memories written by an agent immediately appear in the UI and in every other member's
-recall (subject to workspace / personal-folder scoping).
+Hosted access uses short-lived access tokens plus rotating refresh credentials. A refresh family
+has an absolute lifetime and rotation never extends it. Only credential hashes are stored by the
+service; the raw replacement is returned once and must be kept in an owner-only local state file
+or secrets manager.
 
-## "They need a Team license to connect"
+Customer-side environment variables are documented in [`.env.example`](../.env.example). Prefer
+the onboarding-created `~/.engraphis/cloud_session.json` over long-lived environment secrets.
 
-The Team license is the **instance's**: a purchased key is loaded before first-admin
-setup, or the admin starts with a confirmed Team trial and can replace the key later.
-Members never present a license to log in or connect — they present a **seat** (an account)
-and a **token**. `POST /api/remember` returns `402` only when the instance has no active
-Team entitlement (or it has lapsed/revoked), which is exactly “a Team license is required
-to host team agents.”
+## Trial and grace
+
+The no-card Team trial starts after email confirmation and lasts **exactly 3 active days**.
+`workspace_write_grace` is a distinct local availability state, capped at **24 hours**. It never
+extends the trial, hosted agent access, Team membership, seats, Cloud Sync, or managed compute.
 
 ## Security notes
 
-- Tokens are stored **SHA-256 hashed** (like session cookies); a leaked users DB contains
-  no usable bearer secrets. The raw token is shown **once** at creation.
-- Disable a member → their tokens are permanently revoked immediately; re-enabling the
-  account requires minting fresh agent tokens.
-- Expose the instance over **HTTPS** only (the session/token cookies and bearer tokens
-  must not transit cleartext). Behind Railway/a proxy, set
-  `ENGRAPHIS_FORWARDED_ALLOW_IPS=*` so the `Secure` flag is applied.
-- The agent endpoints are rate-limit candidates for high-write deployments (the trial
-  endpoint already rate-limits; mirror that pattern if you expose this publicly).
+- Use only the HTTPS endpoint shown by the official hosted dashboard.
+- Never put refresh credentials, access tokens, or account keys in a repository or support log.
+- Bind every hosted credential to the intended organization and workspace.
+- Give automation the minimum scopes it needs and revoke unused devices.
+- Keep local and hosted responsibilities clear: the public client transports authorized
+  requests; the private control plane owns identity, seats, policy, and revocation.
 
-## MCP-over-HTTP (`/mcp`)
-
-A streamable-HTTP MCP endpoint is mounted at `/mcp` on the dashboard, so an **MCP-native
-agent** (Claude Code, Cursor, ...) points one URL at the cloud instance and reuses the same
-v2 store the dashboard reads (the MCP tools share the dashboard's single `MemoryService` —
-no second SQLite writer). It is Team-gated and requires a per-user bearer token; browser
-session cookies are deliberately not accepted. Responses are `402` without Team, `401`
-without a bearer token, and `403` when the token's role is below the requested tool's minimum.
-
-Agent config (streamable-http transport) — add to your MCP client:
-
-```json
-{
-  "engraphis": {
-    "url": "https://memory.example.com/mcp",
-    "headers": { "Authorization": "Bearer <your-token>" }
-  }
-}
-```
-
-The tools are the same as the local `engraphis-mcp` server (`engraphis_remember`,
-`engraphis_recall`, `engraphis_start_session`, ...) — an agent gets identical semantics
-whether it writes locally or to the cloud.
-
-**Security note:** MCP's built-in DNS-rebinding protection remains enabled. Loopback hosts
-remain allowed by default; a hosted deployment must set `ENGRAPHIS_DASHBOARD_URL` to its
-canonical public URL (for example, `https://memory.example.com`) so that exact Host and
-Origin are added to the transport allowlist. Requests with any other Host are rejected.
-The per-user bearer token is checked on every request, and dashboard roles carry through to
-tools: viewers may use read tools, members may use mutating tools, and consolidation,
-repository indexing, and PostgreSQL schema ingestion require admin. The standalone
-`engraphis-mcp-http` launcher keeps its own SDK defaults.
+See [Licensing](LICENSING.md) for the source/service boundary and [Cloud Sync](SYNC.md) for the
+relay client contract.

@@ -1273,11 +1273,8 @@ class MemoryService:
         opts in — and the pass follows this call's ``dry_run`` flag (a dry-run proposes,
         a real run applies). ``dry_run=True`` reports without changing anything.
 
-        Licensing: manual consolidation (``infer=False``) is a free, in-product
-        housekeeping action; the **inference pass is a paid ``automation`` capability**
-        (the dream pass 4), so ``infer=True`` is gated here as defense in depth — every
-        caller (the ``/api/consolidate`` route, ``run_maintenance``) funnels through
-        this, so the Pro-only pass can't be reached without a server-approved license.
+        Manual deterministic consolidation remains local. Dream inference and scheduled
+        maintenance execute only in Engraphis Cloud managed compute.
 
         ``structured=True`` asks a configured LLM to emit schema-validated consolidated
         facts with graph hints; any provider/schema failure falls back to the deterministic
@@ -1286,8 +1283,7 @@ class MemoryService:
         if supersede_sources and not structured:
             raise ValidationError("supersede_sources requires structured=true")
         if infer:
-            from engraphis.licensing import require_cloud_lease
-            require_cloud_lease("automation")
+            raise ValidationError("dream inference is available through Engraphis Cloud")
         wid, rid = self._require_scope(workspace, repo)
         try:
             min_cluster = max(2, min(20, int(min_cluster)))
@@ -1311,7 +1307,7 @@ class MemoryService:
                 workspace_id=wid, repo_id=rid, dry_run=bool(dry_run),
                 min_cluster=min_cluster, archive_below=archive_below,
                 profiles=bool(profiles), min_mentions=min_mentions,
-                infer=bool(infer), structured=bool(structured),
+                infer=False, structured=bool(structured),
                 supersede_sources=bool(supersede_sources), llm=llm)
         finally:
             if llm is not None and hasattr(llm, "close"):
@@ -2959,12 +2955,8 @@ class MemoryService:
         """Full bi-temporal dump of one workspace — memories (live *and* superseded),
         sessions, and the audit trail. The compliance story in one artifact: nothing is
         ever silently deleted, and the export proves it. Scope-checked like any other
-        read. The Pro license gate lives here so every ordinary caller passes through one
-        check; authenticated HTTP recovery paths may set ``recovery=True`` only after the
-        durable entitlement state has entered grace/read-only recovery."""
-        if not recovery:
-            from engraphis.licensing import require_cloud_lease
-            require_cloud_lease("export")
+        read. Raw owner data portability is part of the local core; hosted signed and
+        formatted compliance reports are separate Cloud features."""
 
         wid, _ = self._require_scope(workspace, None)
         conn = self.store.conn

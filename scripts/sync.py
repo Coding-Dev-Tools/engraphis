@@ -15,9 +15,8 @@ files, no lost notes. Examples::
 Schedule it (cron)::      */15 * * * *  cd /path/to/repo && python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/engraphis
 Schedule it (Windows)::   schtasks /Create /SC MINUTE /MO 15 /TN EngraphisSync /TR "python -m scripts.sync --db C:\\path\\engraphis.db --workspace acme --remote C:\\Users\\me\\Dropbox\\engraphis"
 
-Shared-folder sync is a Pro feature and is checked locally. Managed-relay sync uses a
-scoped, expiring per-user token and is authorized by the customer server. The core engine
-in ``engraphis/core/sync.py`` remains transport- and license-agnostic.
+Shared-folder sync is a local transport. Managed-relay sync uses a scoped, expiring token;
+the private cloud service is the sole authority for hosted entitlement and access.
 """
 from __future__ import annotations
 
@@ -43,8 +42,6 @@ def main(argv=None) -> int:
     ap.add_argument("--relay-token", default=None, metavar="TOKEN",
                     help="Scoped user token for the relay (defaults to ENGRAPHIS_SYNC_TOKEN "
                          "or the token saved by the dashboard).")
-    ap.add_argument("--relay-key", dest="legacy_relay_key", default=None, metavar="KEY",
-                    help=argparse.SUPPRESS)
     ap.add_argument("--read-only", action="store_true",
                     help="Pull only; required for a viewer token without sync:write.")
     ap.add_argument("--repo", default=None, help="Restrict the sync to one repo name.")
@@ -59,25 +56,11 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 2
 
-    relay_token = args.relay_token or args.legacy_relay_key
-    if args.relay_token and args.legacy_relay_key:
-        print("error: use --relay-token; do not also pass deprecated --relay-key",
-              file=sys.stderr)
-        return 2
+    relay_token = args.relay_token
 
-    # Folder sync has no remote entitlement boundary, so it retains the local Pro gate.
-    # A scoped relay token is checked server-side for owner, role, expiry, and sync
-    # scopes. A supplied Pro key is exchange-only and never becomes bundle authorization.
+    # Local folder sync needs no commercial authority. The managed relay checks its scoped
+    # cloud token server-side for organization, workspace, expiry, scopes, and entitlement.
     from engraphis.backends.sync_relay import RelayError, has_sync_token, sync_read_only
-    from engraphis.licensing import LicenseError, require_feature
-    has_user_token = bool(relay_token) or has_sync_token()
-    if not use_relay or not has_user_token:
-        try:
-            require_feature("sync")
-        except LicenseError as exc:
-            print(f"error: cloud sync requires an active entitlement. {exc}",
-                  file=sys.stderr)
-            return 2
 
     engine = MemoryEngine.create(args.db)
     wid_row = engine.store.conn.execute(
@@ -130,18 +113,29 @@ def main(argv=None) -> int:
                 file=sys.stderr,
             )
             return 2
+        if not relay_token and not has_sync_token():
+            from engraphis.cloud_session import CloudSessionError, access_for_workspace
+            try:
+                relay_token, _, _ = access_for_workspace(
+                    args.workspace, require_compute=False)
+            except CloudSessionError as exc:
+                print(f"error: cloud sync is not connected. {exc}", file=sys.stderr)
+                return 2
         # Namespace the relay by workspace NAME (not the per-device local id) so every
         # device on the account lands in one bucket; account isolation is enforced
-        # server-side by the scoped token owner. See engraphis/inspector/sync_relay.py.
+        # server-side by the scoped token owner through the hosted relay protocol.
         relay_url = args.relay or settings.relay_url
         if not relay_url:
             print("error: --relay needs a URL — pass --relay <url> or set ENGRAPHIS_RELAY_URL",
                   file=sys.stderr)
             return 2
         try:
-            transport = get_transport("relay", base_url=relay_url,
-                                      workspace_id=args.workspace,
-                                      license_key=relay_token)
+            transport = get_transport(
+                "relay",
+                base_url=relay_url,
+                workspace_id=args.workspace,
+                access_token=relay_token,
+            )
         except (RelayError, ValueError) as exc:
             # A custom URL may contain credentials or signed query parameters. The
             # validator's fixed reason is actionable without reflecting the endpoint.

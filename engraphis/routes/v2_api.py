@@ -1,9 +1,9 @@
 """v1-dashboard API adapter over the v2 MemoryService (engraphis/service.py).
 
 Serves the restored v1 dashboard on the *v2* engine — same look, real (v2) data.
-Every route is under /api and returns plain JSON the dashboard's JS consumes. Paid
-surfaces (analytics, export) gate through engraphis.licensing. Team auth lives in
-engraphis/routes/v2_team.py and is included by the dashboard app.
+Every route is under /api and returns plain JSON the dashboard's JS consumes. The open
+runtime is single-user and local; hosted Team and managed feature authority live in
+Engraphis Cloud.
 """
 from __future__ import annotations
 
@@ -16,12 +16,11 @@ import time
 import weakref
 from typing import Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
 from engraphis import licensing
 from engraphis.config import DEFAULT_RELAY_URL, canonicalize_relay_url, settings
-from engraphis.netutil import is_local_request
 from engraphis.service import (
     GraphIndexRebuilding,
     GraphSceneCapacityExceeded,
@@ -63,16 +62,6 @@ def set_service(svc: MemoryService) -> None:
     _service = svc
 
 
-def _paid(feature: str) -> None:
-    try:
-        licensing.require_feature(feature)
-    except licensing.LicenseError as exc:
-        raise HTTPException(status_code=402, detail={
-            "error": str(exc), "feature": exc.feature or feature,
-            "tier_required": licensing.required_plan(feature),
-            "upgrade_url": licensing.upgrade_url()})
-
-
 def _run(fn, *a, **k):
     """Call a service method, mapping validation errors to 400 and the rest to 500."""
     try:
@@ -107,6 +96,19 @@ def _run(fn, *a, **k):
                 "embedder": True})
         logger.error("dashboard operation failed (%s)", type(exc).__name__)
         raise HTTPException(status_code=500, detail={"error": "internal server error"})
+
+
+def _managed_call(fn, *args, **kwargs):
+    """Map the public cloud-client protocol onto structured dashboard errors."""
+    from engraphis.cloud_features import CloudFeatureError
+
+    try:
+        return fn(*args, **kwargs)
+    except CloudFeatureError as exc:
+        raise HTTPException(
+            status_code=exc.status or 503,
+            detail={"error": str(exc), "managed_cloud": True, "transient": exc.transient},
+        )
 
 
 def _default_ws() -> Optional[str]:
@@ -209,8 +211,7 @@ def health():
 
 @router.get("/bootstrap")
 def bootstrap():
-    lic = licensing.current_license(refresh=True).to_public_dict()
-    lic["error"] = licensing.license_error()
+    lic = get_license()
     current_service = service()
     wss = _run(current_service.list_workspaces).get("workspaces") or []
     # A workspace-bound server rejects global aggregate statistics. Bootstrap must
@@ -1046,14 +1047,8 @@ def merge(req: _MergeReq):
 
 
 # ── agent connect (Team) ───────────────────────────────────────────────────────
-# The remote agent write path. An agent authenticates with a per-user bearer token
-# (POST /api/auth/token) and stores memories on THIS cloud instance's v2 store — the
-# same DB the dashboard reads — instead of running Engraphis locally. Gated by the
-# instance's Team license (``_paid('team')``) so a free / lapsed instance can't host
-# team agents: 402 without it. Workspace scoping + personal-folder ownership come from
-# the auth gate's ``set_current_user`` (see dashboard_app._auth_gate). Parameters mirror
-# the local MCP ``engraphis_remember`` tool so an agent gets identical semantics whether
-# it writes locally or to the cloud.
+# This is the single-user local agent write path. The optional deployment token is
+# enforced by dashboard_app; hosted members, roles, seats, and remote agents live in Cloud.
 class _RememberReq(BaseModel):
     content: str
     workspace: str = "default"
@@ -1073,7 +1068,6 @@ class _RememberReq(BaseModel):
 
 @router.post("/remember")
 def remember(req: _RememberReq):
-    _paid("team")
     return _run(service().remember, req.content, workspace=req.workspace,
                 repo=req.repo, mtype=req.mtype, scope=req.scope, title=req.title,
                 importance=req.importance, keywords=req.keywords, metadata=req.metadata,
@@ -1097,9 +1091,8 @@ class _IntentRememberReq(BaseModel):
 
 @router.post("/intent/remember")
 def intent_remember(req: _IntentRememberReq):
-    # Team-gated exactly like /api/remember: this is the intent-native agent WRITE path
-    # onto this cloud instance's store, so a free/lapsed instance must not host it (402).
-    _paid("team")
+    # The local open core accepts its own writes. Hosted remote-agent authorization is a
+    # separate server-side Team boundary and is not implemented in this package.
     return _run(
         service().intent_remember, req.text, workspace=req.workspace, repo=req.repo,
         title=req.title, mtype=req.mtype, scope=req.scope, importance=req.importance,
@@ -1120,8 +1113,7 @@ class _IntentLinkReq(BaseModel):
 
 @router.post("/intent/link")
 def intent_link(req: _IntentLinkReq):
-    # Team-gated like /api/remember and /api/intent/remember — same cloud write surface.
-    _paid("team")
+    # Local link creation has no client-side commercial gate.
     return _run(
         service().intent_link, req.source_id, req.target_id, workspace=req.workspace,
         repo=req.repo, relation=req.relation, layer=req.layer, reason=req.reason,
@@ -1159,7 +1151,12 @@ class _ConsolidateReq(BaseModel):
 @router.post("/consolidate")
 def consolidate(req: _ConsolidateReq):
     if req.infer:
-        _paid("automation")
+        raise HTTPException(status_code=501, detail={
+            "error": "Dream inference is available through Engraphis Cloud managed compute.",
+            "cloud_only": True,
+            "feature": "automation",
+            "upgrade_url": licensing.upgrade_url(),
+        })
     ws = req.workspace or _default_ws()
     return _run(service().consolidate, workspace=ws, dry_run=req.dry_run, infer=req.infer,
                 structured=req.structured, supersede_sources=req.supersede_sources)
@@ -1168,15 +1165,11 @@ def consolidate(req: _ConsolidateReq):
 # ── analytics (Pro) ───────────────────────────────────────────────────────────
 @router.get("/analytics/portfolio")
 def analytics_portfolio():
-    """Cross-workspace rollup. Same gate as /analytics; the workspace set comes
-    from list_workspaces(), so team-auth boundaries (allowed_workspaces) hold."""
-    _paid("analytics")
-    from engraphis.analytics import compute_portfolio
-    svc = service()
-    wss = _run(svc.list_workspaces).get("workspaces") or []
-    pairs = [(wid, w["name"]) for w in wss
-             if (wid := svc._lookup_workspace(w["name"]))]
-    return _run(compute_portfolio, svc.store, pairs)
+    """Portfolio computation moved to the hosted analytics surface."""
+    raise HTTPException(status_code=501, detail={
+        "error": "Portfolio analytics are available in the Engraphis Cloud dashboard.",
+        "managed_cloud": True,
+    })
 
 
 @router.get("/analytics")
@@ -1185,37 +1178,21 @@ def analytics(workspace: Optional[str] = None):
     resolver mix, top entities) — the full engine analytics the Inspector used to own,
     now served here. Falls back to the lightweight summary only when no workspace can be
     resolved (e.g. a brand-new store). Pro-gated inside ``compute_analytics`` too."""
-    _paid("analytics")
-    svc = service()
-    ws = workspace or _default_ws()
-    if ws:
-        ws = _run(svc._clean_ws, ws)
-    wid = svc._lookup_workspace(ws) if ws else None
-    if not wid:
-        return _analytics_summary(workspace)
-    from engraphis.analytics import compute_analytics
-    return _run(compute_analytics, svc.store, wid)
+    from engraphis.cloud_features import run_managed_job
+
+    ws = workspace or _require_ws()
+    envelope = _managed_call(run_managed_job, service(), ws, "analytics")
+    return envelope.get("result", envelope)
 
 
 @router.get("/analytics/export")
 def analytics_export(workspace: Optional[str] = None):
     """Self-contained HTML analytics report (inline CSS, zero CDN) — a shareable,
     archivable artifact. Same Pro gate as the analytics view it renders."""
-    _paid("analytics")
-    from engraphis import __version__
-    from engraphis.analytics import compute_analytics, render_analytics_html
-    from fastapi.responses import HTMLResponse
-    svc = service()
-    ws = _run(svc._clean_ws, workspace or _require_ws())
-    wid = svc._lookup_workspace(ws)
-    if not wid:
-        raise HTTPException(status_code=400, detail={"error": "Unknown workspace '%s'." % ws})
-    page = render_analytics_html(_run(compute_analytics, svc.store, wid),
-                                 workspace=ws, version=__version__)
-    fname = "engraphis-analytics-%s-%s.html" % (
-        ws.replace("/", "_"), __import__("time").strftime("%Y%m%d"))
-    return HTMLResponse(page, headers={
-        "Content-Disposition": 'attachment; filename="%s"' % fname})
+    raise HTTPException(status_code=501, detail={
+        "error": "Download analytics reports from the Engraphis Cloud dashboard.",
+        "managed_cloud": True,
+    })
 
 
 @router.get("/ready")
@@ -1237,74 +1214,22 @@ def ready():
                         status_code=200 if is_ready else 503)
 
 
-def _analytics_summary(workspace: Optional[str]) -> dict:
-    """Lightweight analytics summary (by-type + per-namespace distribution). The
-    Pro gate lives HERE, at the top of the computation, so the payload can never
-    be assembled on the free tier even if the route's ``_paid`` wrapper is deleted
-    (defense in depth; mirrors engraphis.analytics.compute_analytics)."""
-    licensing.require_cloud_lease("analytics")
-    st = _run(service().stats, workspace=workspace)
-    wss = _run(service().list_workspaces).get("workspaces") or []
-    by_type = [{"bucket": t, "count": c} for t, c in (st.get("by_type") or {}).items()]
-    ws_dist = [{"namespace": w["name"], "count": w.get("memories", 0)} for w in wss]
-    return {"by_type": by_type, "namespace_distribution": ws_dist,
-            "total_memories": st.get("memories", 0), "sessions": st.get("sessions", 0),
-            "workspaces": st.get("workspaces", 0)}
-
-
 # ── compliance export (Pro) ───────────────────────────────────────────────────
-def _sign_export(data: dict, workspace: str) -> dict:
-    """Wrap a raw workspace dump in a tamper-evident compliance manifest.
-
-    The manifest records the engine version, generation time, per-table record
-    counts, the active license fingerprint, and a SHA-256 over the canonical JSON of
-    the payload — so an archived export can be verified byte-for-byte years later
-    without any Engraphis install. This is what turns a ``SELECT *`` dump into an
-    audit-grade artifact."""
-    import hashlib
-    import json as _json
-    import time as _time
-    from engraphis import __version__
-    canonical = _json.dumps(data, sort_keys=True, separators=(",", ":"),
-                            default=str).encode("utf-8")
-    lic = licensing.current_license()
-
-    def _count(v):
-        return len(v) if isinstance(v, (list, dict)) else None
-    counts = {k: _count(v) for k, v in data.items() if _count(v) is not None}
-    return {
-        "manifest": {
-            "format": "engraphis-compliance-export/v1",
-            "engraphis_version": __version__,
-            "workspace": workspace,
-            "generated_at": int(_time.time()),
-            "record_counts": counts,
-            "sha256": hashlib.sha256(canonical).hexdigest(),
-            "licensed_to": lic.email or None,
-            "license_plan": lic.plan,
-            "license_key_id": lic.key_id or None,
-        },
-        "data": data,
-    }
-
-
 @router.get("/export")
-def export(request: Request, workspace: Optional[str] = None, signed: bool = False):
+def export(workspace: Optional[str] = None, signed: bool = False):
     """Full bi-temporal workspace dump (memories + sessions + audit). Pro-gated.
 
     ``signed=true`` wraps the dump in a SHA-256 compliance manifest (see
     :func:`_sign_export`) — a tamper-evident, self-verifying audit bundle."""
-    recovery_export = False
-    auth_store = getattr(request.app.state, "auth_store", None)
-    if auth_store is not None and auth_store.count_users() > 0:
-        from engraphis.inspector.auth import ENTITLEMENT_ACTIVE
-        access = auth_store.entitlement_access(licensing.current_license())
-        recovery_export = access["state"] != ENTITLEMENT_ACTIVE
-    if not recovery_export:
-        _paid("export")
+    if signed:
+        raise HTTPException(status_code=501, detail={
+            "error": "Signed compliance exports are available in Engraphis Cloud.",
+            "cloud_only": True,
+            "feature": "export",
+            "upgrade_url": licensing.upgrade_url(),
+        })
     ws = workspace or _default_ws()
-    data = _run(service().export_workspace, workspace=ws, recovery=recovery_export)
-    return _sign_export(data, ws or "") if signed else data
+    return _run(service().export_workspace, workspace=ws, recovery=True)
 
 
 # ── automated maintenance (Pro) ───────────────────────────────────────────────
@@ -1316,6 +1241,7 @@ class _AutomationReq(BaseModel):
     archive_below: Optional[float] = None
     workspaces: Optional[list] = None
     dream: Optional[bool] = None
+    dream_enabled: Optional[bool] = None
     dream_min_new: Optional[int] = None
     dream_idle_minutes: Optional[int] = None
     infer: Optional[bool] = None
@@ -1323,23 +1249,87 @@ class _AutomationReq(BaseModel):
 
 @router.get("/automation")
 def automation_get():
-    """Current maintenance policy + last-run telemetry. Pro-gated (``automation``)."""
-    _paid("automation")
-    from engraphis import automation
-    return automation.load_policy()
+    """Read the cloud-authoritative managed-maintenance policy."""
+    from engraphis.cloud_features import CloudFeatureClient
+
+    ws = _require_ws()
+    workspace_id = service()._lookup_workspace(ws)
+    if not workspace_id:
+        raise HTTPException(status_code=404, detail={
+            "error": "The selected workspace does not exist.",
+            "managed_cloud": True,
+        })
+    cloud = _managed_call(CloudFeatureClient.from_environment, workspace_id)
+    policy = _managed_call(cloud.get_policy, workspace_id)
+    recent = _managed_call(cloud.list_jobs, workspace_id, limit=10)
+    recent_jobs = recent.get("jobs") if isinstance(recent, dict) else []
+    if not isinstance(recent_jobs, list):
+        recent_jobs = []
+    last_job = recent_jobs[0] if recent_jobs and isinstance(recent_jobs[0], dict) else {}
+    return {
+        "enabled": bool(policy.get("enabled")),
+        "cadence_hours": max(1, int(policy.get("cadence_minutes") or 1440) // 60),
+        "consolidate": True,
+        "min_cluster": 3,
+        "archive_below": 0.05,
+        "workspaces": [ws],
+        "dream": bool(policy.get("dream_enabled", True)),
+        "dream_min_new": int(policy.get("dream_min_new") or 25),
+        "dream_idle_minutes": int(policy.get("dream_idle_minutes") or 15),
+        "infer": bool(policy.get("infer")),
+        "last_run": last_job.get("updated_at") or last_job.get("created_at"),
+        "recent_jobs": recent_jobs,
+        "next_run_at": policy.get("next_run_at"),
+        "version": policy.get("version", 0),
+    }
 
 
 @router.post("/automation")
 def automation_set(req: _AutomationReq):
-    """Persist the maintenance policy. Pro-gated (``automation``)."""
-    _paid("automation")
-    from engraphis import automation
-    current = automation.load_policy()
-    merged = {k: (getattr(req, k) if getattr(req, k) is not None else current.get(k))
-              for k in ("enabled", "cadence_hours", "consolidate", "min_cluster",
-                        "archive_below", "workspaces",
-                        "dream", "dream_min_new", "dream_idle_minutes", "infer")}
-    return _run(automation.save_policy, merged)
+    """Persist scheduling only in the private cloud data store."""
+    from engraphis.cloud_features import CloudFeatureClient, build_managed_snapshot
+
+    ws = _require_ws()
+    workspace_id = service()._lookup_workspace(ws)
+    if not workspace_id:
+        raise HTTPException(status_code=404, detail={
+            "error": "The selected workspace does not exist.",
+            "managed_cloud": True,
+        })
+    cloud = _managed_call(CloudFeatureClient.from_environment, workspace_id)
+    current = _managed_call(cloud.get_policy, workspace_id)
+    current_hours = max(1, int(current.get("cadence_minutes") or 1440) // 60)
+    cadence_hours = req.cadence_hours if req.cadence_hours is not None else current_hours
+    enabled = req.enabled if req.enabled is not None else bool(current.get("enabled"))
+    policy = {
+        "enabled": enabled,
+        "cadence_minutes": max(15, int(cadence_hours) * 60),
+        "dream_enabled": (
+            req.dream_enabled
+            if req.dream_enabled is not None
+            else req.dream
+            if req.dream is not None
+            else bool(current.get("dream_enabled", True))
+        ),
+        "dream_min_new": req.dream_min_new if req.dream_min_new is not None
+        else int(current.get("dream_min_new") or 25),
+        "dream_idle_minutes": req.dream_idle_minutes if req.dream_idle_minutes is not None
+        else int(current.get("dream_idle_minutes") or 15),
+        "infer": req.infer if req.infer is not None else bool(current.get("infer")),
+    }
+    if enabled:
+        # Upload only when managed processing is actually enabled. Merely viewing or
+        # disabling a cloud policy must never transfer memory content.
+        workspace_id, snapshot = _managed_call(build_managed_snapshot, service(), ws)
+        _managed_call(cloud.upload_snapshot, workspace_id, snapshot)
+    saved = _managed_call(cloud.save_policy, workspace_id, policy)
+    return {
+        **policy,
+        **saved,
+        "cadence_hours": policy["cadence_minutes"] // 60,
+        "dream": policy["dream_enabled"],
+        "consolidate": True,
+    }
 
 
 class _MaintenanceReq(BaseModel):
@@ -1348,10 +1338,19 @@ class _MaintenanceReq(BaseModel):
 
 @router.post("/maintenance/run")
 def maintenance_run(req: _MaintenanceReq):
-    """Run the maintenance sweep now (dry-run by default). Pro-gated (``automation``)."""
-    _paid("automation")
-    from engraphis import automation
-    return _run(automation.run_maintenance, service(), dry_run=req.dry_run)
+    """Submit consolidation to managed compute; results remain generation-bound."""
+    from engraphis.cloud_features import run_managed_job
+
+    ws = _require_ws()
+    envelope = _managed_call(run_managed_job, service(), ws, "consolidate")
+    result = envelope.get("result", envelope)
+    return {
+        "dry_run": True,
+        "cloud_managed": True,
+        "requested_apply": not req.dry_run,
+        "workspaces": [ws],
+        "runs": [{"workspace": ws, "consolidate": result}],
+    }
 
 
 # ── knowledge graph (entities + relations, scoped to a workspace) ──────────────
@@ -1587,220 +1586,65 @@ def code_export(workspace: str, repo: str):
 
 
 # ── license ───────────────────────────────────────────────────────────────────
-class _KeyReq(BaseModel):
-    key: str = Field(..., min_length=1, max_length=8192)
-
-
-class _TrialReq(BaseModel):
-    email: str = Field(default="", max_length=320)
-
-
-class _TrialClaimReq(BaseModel):
-    email: str = Field(..., min_length=3, max_length=320)
-    plan: str = Field(..., min_length=3, max_length=16)
-    # Optional: a remote caller must still send the configured ownership token (enforced
-    # in the handler), but a trusted loopback caller may omit it — the local UI does.
-    deployment_token: str = Field(default="", max_length=8192)
-
-
 @router.get("/license")
 def get_license():
-    lic = licensing.current_license(refresh=True).to_public_dict()
-    lic["error"] = licensing.license_error()
-    return lic
+    """The local core has no Pro/Team authority; hosted entitlements live in Cloud."""
+    return {
+        "plan": "local",
+        "features": [],
+        "cloud_managed": True,
+        "trial_seconds": 259_200,
+        "grace_seconds": 86_400,
+        "grace_scope": "existing authenticated local workspace writes only",
+        "upgrade_url": licensing.upgrade_url(),
+    }
+
+
+def _hosted_license_detail() -> dict:
+    return {
+        "error": "Start or manage Pro and Team in the Engraphis Cloud account portal.",
+        "cloud_only": True,
+        "trial_seconds": 259_200,
+        "grace_seconds": 86_400,
+        "grace_extends_cloud_access": False,
+        "upgrade_url": licensing.upgrade_url(),
+    }
 
 
 @router.post("/license/activate")
-def activate_license(req: _KeyReq):
-    """Verify + persist a key. A signature-valid key can still land on the free tier
-    if the server-side cloud gate denies it (revoked, seat-capped, or this process
-    can't reach the license server) — ``licensing.activate`` degrades silently in
-    that case rather than raising, so it looked exactly like a successful
-    activation of the free tier. Surface the real reason the same way
-    :func:`get_license` does, so the caller can tell "activated Team" from
-    "accepted the key but the cloud check failed" instead of both reading as a
-    plain 200 with ``plan: free``."""
-    try:
-        lic = licensing.activate(req.key)
-    except licensing.LicenseError as exc:
-        raise HTTPException(status_code=400, detail={"error": str(exc)})
-    data = lic.to_public_dict()
-    data["error"] = licensing.license_error()
-    return data
-
-
 @router.post("/license/trial")
-def start_trial(req: _TrialReq, request: Request):
-    """Deprecated v1.0 wrapper for a deployment-bound Pro claim."""
-    token, fallback = _trial_binding(request)
-    result = _start_bound_trial(req.email, "pro", token, dashboard_url_fallback=fallback)
-    result["deprecated"] = True
-    result["replacement"] = "/api/license/trials"
-    return result
-
-
 @router.post("/license/team-trial")
-def start_team_trial(req: _TrialReq, request: Request):
-    """Deprecated v1.0 wrapper for a deployment-bound Team claim."""
-    token, fallback = _trial_binding(request)
-    result = _start_bound_trial(req.email, "team", token, dashboard_url_fallback=fallback)
-    result["deprecated"] = True
-    result["replacement"] = "/api/license/trials"
-    return result
-
-
-def _configured_deployment_token() -> str:
-    return os.environ.get("ENGRAPHIS_DEPLOYMENT_TOKEN", "").strip()
-
-
-def _local_deployment_token() -> str:
-    """A stable, machine-bound trial token for a trusted loopback caller.
-
-    Loopback requests are already fully trusted by the dashboard auth gate (they reach
-    every ``/api`` route without a bearer, and first-admin setup accepts them the same
-    way), so the deployment-token ownership proof adds no security on localhost — it only
-    stops the local operator from starting a trial with a secret that, on a self-hosted
-    box, nobody ever configured. Derive a deterministic value from the machine id so the
-    create -> email-confirm -> poll round-trip binds to a single ``deployment_hash`` even
-    across a process restart, without asking the operator to invent one.
-    """
-    import hashlib
-
-    from engraphis import cloud_license
-    digest = hashlib.sha256(
-        ("engraphis-local-trial:" + cloud_license.machine_id()).encode("utf-8")).hexdigest()
-    return "local-" + digest
-
-
-def _effective_deployment_token(request: Request) -> str:
-    """The configured ownership token, or a machine-bound one for trusted loopback."""
-    configured = _configured_deployment_token()
-    if configured:
-        return configured
-    return _local_deployment_token() if is_local_request(request) else ""
-
-
-def _trial_binding(request: Request) -> "tuple[str, str]":
-    """``(deployment_token, dashboard_url_fallback)`` for a trial from *request*.
-
-    On loopback with nothing configured, the fallback dashboard URL is the request's own
-    origin, so a purely local instance needs neither ``ENGRAPHIS_DEPLOYMENT_TOKEN`` nor
-    ``ENGRAPHIS_DASHBOARD_URL`` set to start a trial. A proxied internet request never
-    looks local (any ``X-Forwarded-*`` header disqualifies it), so this changes nothing
-    for a hosted deployment.
-    """
-    local = is_local_request(request)
-    token = _configured_deployment_token() or (_local_deployment_token() if local else "")
-    fallback = str(request.base_url).rstrip("/") if local else ""
-    return token, fallback
-
-
-def _start_bound_trial(email: str, plan: str, deployment_token: str,
-                       *, dashboard_url_fallback: str = "") -> dict:
-    email = email.strip().lower()
-    if not email or "@" not in email or len(email) > 320:
-        raise HTTPException(status_code=400, detail={
-            "error": "a valid email address is required to start a trial"})
-    if not deployment_token:
-        raise HTTPException(status_code=503, detail={
-            "error": "ENGRAPHIS_DEPLOYMENT_TOKEN is not configured"})
-    dashboard_url = (os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
-                     or (dashboard_url_fallback or "").strip())
-    if not dashboard_url:
-        raise HTTPException(status_code=503, detail={
-            "error": "ENGRAPHIS_DASHBOARD_URL is required for hosted trials"})
-    from engraphis import cloud_license
-    from engraphis.config import resolve_license_server_url
-    try:
-        result = cloud_license.create_trial_claim(
-            resolve_license_server_url(), deployment_token, cloud_license.machine_id(),
-            email, plan, dashboard_url=dashboard_url)
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail={"error": str(exc)})
-    result.pop("key", None)
-    return result
-
-
 @router.post("/license/trials")
-def create_deployment_trial(req: _TrialClaimReq, request: Request):
-    """Start a claim after proving ownership of this deployment.
-
-    A remote caller must present the configured ``ENGRAPHIS_DEPLOYMENT_TOKEN`` as an
-    ownership proof. A loopback caller is already trusted (see
-    :func:`_local_deployment_token`), so on localhost the token and dashboard URL are
-    derived automatically and a self-hosted instance can trial with nothing configured.
-    """
-    local = is_local_request(request)
-    configured = _configured_deployment_token()
-    if not configured and not local:
-        raise HTTPException(status_code=503, detail={
-            "error": "ENGRAPHIS_DEPLOYMENT_TOKEN is not configured"})
-    if configured and not local and not hmac.compare_digest(
-            configured, req.deployment_token or ""):
-        raise HTTPException(status_code=401, detail={"error": "invalid deployment token"})
-    plan = req.plan.strip().lower()
-    if plan not in ("pro", "team"):
-        raise HTTPException(status_code=400, detail={"error": "plan must be pro or team"})
-    token = configured or _local_deployment_token()
-    fallback = str(request.base_url).rstrip("/") if local else ""
-    return _start_bound_trial(req.email, plan, token, dashboard_url_fallback=fallback)
+def hosted_license_only():
+    raise HTTPException(status_code=501, detail=_hosted_license_detail())
 
 
 @router.get("/license/trials/{claim_id}")
-def get_deployment_trial(claim_id: str, request: Request):
-    """Poll, retrieve, persist, and activate a confirmed claim without exposing its key."""
-    token = _effective_deployment_token(request)
-    if not token:
-        raise HTTPException(status_code=503, detail={"error": "deployment token unavailable"})
-    from engraphis import cloud_license
-    from engraphis.config import resolve_license_server_url
-    try:
-        result = cloud_license.claim_trial(
-            resolve_license_server_url(), claim_id, token, cloud_license.machine_id())
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=502, detail={"error": str(exc)})
-    key = result.pop("key", None)
-    if key:
-        try:
-            license_public = licensing.activate(key).to_public_dict()
-        except licensing.LicenseError as exc:
-            raise HTTPException(status_code=502, detail={"error": str(exc)})
-        result["license"] = license_public
-        result["active"] = license_public.get("plan") in ("pro", "team")
-    return result
+def hosted_trial_status(claim_id: str):
+    del claim_id
+    raise HTTPException(status_code=501, detail=_hosted_license_detail())
 
 
 @router.post("/ops/backup")
 def run_customer_backup():
-    """Run the configured off-volume backup; authentication is enforced by middleware."""
-    try:
-        from engraphis.commercial import run_configured_backup
-        result = run_configured_backup()
-    except Exception as exc:  # noqa: BLE001 - never expose storage paths or key detail
-        import logging
-        logging.getLogger("engraphis.backup").error(
-            "customer backup failed (%s)", type(exc).__name__)
-        raise HTTPException(status_code=503, detail={
-            "ok": False, "verified": False})
-    if not result["verified"]:
-        raise HTTPException(status_code=503, detail=result)
-    return result
+    """Commercial backup orchestration is hosted and no longer shipped here."""
+    raise HTTPException(status_code=501, detail={
+        "error": "Managed backups are operated by Engraphis Cloud.",
+        "managed_cloud": True,
+    })
 
 
 @router.get("/ops/ready")
 def customer_operations_ready():
-    """Authenticated, boolean-only storage readiness for the managed customer service."""
-    from engraphis.commercial import customer_operations_readiness
-    from fastapi.responses import JSONResponse
-    checks = customer_operations_readiness()
-    return JSONResponse(checks, status_code=200 if checks["ready"] else 503)
+    """The open local service has no commercial cloud-operations role."""
+    return {"ready": True, "local_core": True, "managed_cloud": False}
 
 
 # ── Cloud sync (Pro) — the dashboard's one-click "Sync now" button ────────────────────
 # The heavy lifting is in core/sync.py + the RelayTransport client; these two routes just
 # expose it to the dashboard so a user never touches a terminal. Sync is namespaced by
-# workspace NAME (every device on the account shares a namespace); identity is the license
-# key, verified server-side by the relay. See docs/SYNC.md.
+# workspace NAME (every device on the account shares a namespace); identity comes from a
+# short-lived, workspace-scoped cloud bearer verified by the relay. See docs/SYNC.md.
 
 #: Last-sync summary, per process, so the button can show "last synced …" without a store.
 _SYNC_STATE: dict = {}
@@ -1816,21 +1660,24 @@ def _relay_url() -> str:
 def sync_status():
     """Whether one-click cloud sync is ready, plus the last-sync summary for the button."""
     from engraphis.backends.sync_relay import has_sync_token, sync_read_only
+    from engraphis.cloud_session import CloudSessionError, configured
+
     has_token = has_sync_token()
-    has_key = bool(licensing._read_key_material())
-    lic = licensing.current_license(refresh=False)
+    try:
+        has_cloud_session = configured(require_compute=False)
+    except CloudSessionError:
+        has_cloud_session = False
     return {
-        # Ready only when the plan includes sync AND a key is configured. Purchased and
-        # trial entitlements are both real server-issued keys.
-        "available": bool(has_token or (licensing.has_feature("sync") and has_key)),
-        "has_key": has_key,
+        "available": bool(has_token or has_cloud_session),
+        "has_key": False,
+        "has_cloud_session": has_cloud_session,
         "has_user_token": has_token,
         "read_only": sync_read_only(),
         "token_managed_by_environment": bool(
             os.environ.get("ENGRAPHIS_SYNC_TOKEN", "").strip()),
         "read_only_managed_by_environment": bool(
             os.environ.get("ENGRAPHIS_SYNC_READ_ONLY", "").strip()),
-        "plan": lic.plan,
+        "plan": "cloud" if has_cloud_session else "local",
         "relay_url": _relay_url(),
         "tier_required": licensing.required_plan("sync"),
         "upgrade_url": licensing.upgrade_url(),
@@ -1840,14 +1687,14 @@ def sync_status():
 
 def _sync_all(svc) -> dict:
     """Push every workspace's memories to the relay and pull every peer's — the shared
-    core behind both the dashboard 'Sync now' button and the background auto-sync loop.
+    core behind the dashboard's explicit 'Sync now' action.
 
     Never raises: a relay/transport failure on one workspace is captured in ``errors``
     (with the HTTP ``status`` when known) so a single bad workspace never aborts the rest,
-    and the background loop can keep ticking. Returns the last-sync summary; the caller
-    decides whether to surface an error to a human (the button) or just log it (auto)."""
+    Returns the last-sync summary so the caller can surface a bounded error to a human."""
     from engraphis.backends.sync_folder import get_transport
-    from engraphis.backends.sync_relay import RelayError
+    from engraphis.backends.sync_relay import RelayError, has_sync_token
+    from engraphis.cloud_session import CloudSessionError, access_for_workspace
     from engraphis.core.sync import SyncEngine
 
     wss = svc.list_workspaces().get("workspaces") or []
@@ -1860,14 +1707,15 @@ def _sync_all(svc) -> dict:
     # device by its workspace count. Counting unique device ids gives the true peer total.
     peer_devices: set = set()
     exported, errors = 0, []
+    legacy_token_configured = has_sync_token()
     for w in wss:
         name = w.get("name")
         if not name:
             continue
         if w.get("visibility") == "personal":
             # Personal folders are private to their owner and must never leave this device
-            # over the shared-account relay: a team shares one license key, so the relay is
-            # namespaced per workspace but not partitioned per user — pushing a personal
+            # over the shared-account relay: the relay namespace is shared by authorized
+            # organization members, not partitioned per local user — pushing a personal
             # folder there would let any teammate pull it. Keep them local. (Both callers are
             # covered: the "Sync now" button runs in the owner-admin's request context, where
             # list_workspaces already hides *other* users' personal folders but still returns
@@ -1904,10 +1752,21 @@ def _sync_all(svc) -> dict:
             })
             continue
         try:
-            transport = get_transport("relay", base_url=_relay_url(), workspace_id=name)
+            cloud_access = None
+            if not legacy_token_configured:
+                cloud_access, _, _ = access_for_workspace(name, require_compute=False)
+            transport = get_transport(
+                "relay",
+                base_url=_relay_url(),
+                workspace_id=name,
+                access_token=cloud_access,
+            )
             from engraphis.backends.sync_relay import sync_read_only
             read_only = sync_read_only()
             rep = syncer.sync(transport, row["id"], push=not read_only)
+        except CloudSessionError as exc:
+            errors.append({"workspace": name, "error": str(exc), "status": 401})
+            continue
         except RelayError as exc:
             # Record the HTTP status (402 == relay rejected the key) instead of raising, so
             # one workspace can't abort the sweep; sync_run() promotes a 402 to the button.
@@ -1934,14 +1793,18 @@ def _sync_all(svc) -> dict:
 @router.post("/sync/run")
 async def sync_run():
     """Push this device's memories to the relay and pull every other device's — for every
-    workspace. Backs the dashboard 'Sync now' button. Pro/Team; needs a license key."""
+    workspace. Backs the dashboard 'Sync now' button and requires a scoped cloud session."""
     from engraphis.backends.sync_relay import has_sync_token
+    from engraphis.cloud_session import CloudSessionError, configured
+
     has_token = has_sync_token()
-    if not has_token:
-        _paid("sync")   # legacy paid-key migration path
-    if not has_token and not licensing._read_key_material():
+    try:
+        has_cloud_session = configured(require_compute=False)
+    except CloudSessionError:
+        has_cloud_session = False
+    if not has_token and not has_cloud_session:
         raise HTTPException(status_code=402, detail={
-            "error": "Cloud sync needs your license key. Sign in with it above, then Sync.",
+            "error": "Connect this installation to Engraphis Cloud before syncing.",
             "upgrade_url": licensing.upgrade_url()})
 
     svc = service()
@@ -2009,35 +1872,3 @@ def remove_sync_token():
     # An explicit deployment environment token cannot be removed by a dashboard file
     # operation. Report the effective state instead of claiming it disappeared.
     return {"configured": has_sync_token(), "read_only": sync_read_only()}
-
-
-class _AutoSyncReq(BaseModel):
-    enabled: Optional[bool] = None            # cadence (timer) sync
-    cadence_minutes: Optional[int] = None
-
-
-@router.get("/sync/auto")
-def sync_auto_get():
-    """The background auto-sync policy for the dashboard toggle (cadence + last run).
-    License-ungated read (it only reports a local preference and defaults to off); in team
-    mode the dashboard's role gate still limits it to signed-in users, and only admins can
-    POST changes (the toggle renders read-only for members/viewers)."""
-    from engraphis import autosync
-    return autosync.load_policy()
-
-
-@router.post("/sync/auto")
-def sync_auto_set(req: _AutoSyncReq):
-    """Enable/disable background cadence auto-sync and set its interval (minutes, floored at
-    5). Pro/Team — the same ``sync`` feature the button needs. In team mode this route is
-    **admin-only** (``inspector/auth.min_role``): auto-sync is an account-wide control.
-    The loop itself is licensed-gated too, so a stale toggle can never reach the relay
-    after a plan lapses."""
-    from engraphis.backends.sync_relay import has_sync_token
-    if not has_sync_token():
-        _paid("sync")
-    from engraphis import autosync
-    cur = autosync.load_policy()
-    merged = {k: (getattr(req, k) if getattr(req, k) is not None else cur.get(k))
-              for k in ("enabled", "cadence_minutes")}
-    return autosync.save_policy(merged)

@@ -25,6 +25,20 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Changed
 
+- The public distribution is now structurally customer-only. License issuance, billing,
+  fulfillment, Team identity, hosted relay, managed compute, worker execution, vendor
+  administration, and commercial operations tooling moved to a private service repository;
+  the Apache package retains local core functionality and customer-side protocols.
+- Analytics, Cloud Sync service operation, Auto Dreaming, Auto Consolidation, automation
+  scheduling, and Team administration are now hosted-service capabilities. The public dashboard
+  keeps status, consent, and launch surfaces plus the free manual consolidation action; it no
+  longer ships local premium algorithms, schedulers, Team accounts, invitations, roles, or seats.
+- The hosted no-card trial remains **exactly 3 active days** after email confirmation. A distinct
+  `workspace_write_grace` may preserve ordinary writes to an already provisioned local workspace
+  for at most 24 hours; it never extends the trial or any cloud/paid access.
+- Documentation now states the legal boundary directly: Apache-2.0 rights in already published
+  releases and forks cannot be clawed back. Future proprietary value is protected through the
+  private hosted implementation and service authorization boundary.
 - Recall graph seeding now matches all entity names with one boundary-aware compiled pattern
   instead of rescanning every memory once per entity, and the streamable-HTTP launcher warms
   the singleton service before accepting clients.

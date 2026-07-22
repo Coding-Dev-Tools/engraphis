@@ -8,7 +8,7 @@ https://engraphis.com/
 
 https://discord.com/invite/Wfr2ejBmY
 
-**Give your AI agents a memory. See it, search it, and watch it self-maintain — all in a beautiful WebUI on your own machine.**
+**Give your AI agents a memory. See it, search it, and maintain it — all in a beautiful WebUI on your own machine.**
 
 <br>
 
@@ -24,11 +24,10 @@ https://discord.com/invite/Wfr2ejBmY
 
 > Open-source users: update regularly for the latest fixes and improvements.
 >
-> **Version 1.0 release candidate:** the core engine, dashboard, MCP server, Pro features,
-> and Team layer are implemented on `main`, but 1.0 is not generally available until the
-> matching PyPI package and GitHub Release are published and the production readiness gates
-> pass. Team includes multi-user authentication, roles, seat management, invitation and
-> password-reset flows, audit history, and scoped cloud-sync tokens.
+> **Open-core boundary:** this repository contains the free local engine, single-user
+> dashboard, MCP server, and customer-side clients. Cloud Sync, Analytics, Automation,
+> Auto Dreaming, Auto Consolidation, and Team identity/seat management run only on the
+> official hosted service; their server implementations are not distributed here.
 
 ## The WebUI — one command, local-first
 
@@ -37,11 +36,13 @@ pip install "engraphis[server]"
 engraphis-dashboard
 ```
 
-Opens `http://127.0.0.1:8700` in your browser. No cloud, no signup, no API key for memory.
-Memory lives in a local SQLite file on your machine. When hosted user accounts are enabled,
-their credentials and sessions live in a companion `<database>.users.db`; back up both files.
+Opens `http://127.0.0.1:8700` in your browser. No cloud, signup, or API key is required for
+local memory. Memory lives in a local SQLite file on your machine. The public dashboard is
+single-user; Team accounts, invitations, roles, seats, and organization audit live in Engraphis
+Cloud.
 
-**You'll see the full product** — a dark-themed (with multiple theme options in left sidebar), sidebar-navigated dashboard with 14 tabs:
+**You'll see the complete local workspace plus hosted-service entry points** — a dark-themed
+(with multiple theme options in the left sidebar), sidebar-navigated dashboard with 14 tabs:
 
 **New graphical interface!** Shape the Knowledge Graph with several **Styles, Colors,
 and Presets**. Switch among Cyberpunk, Galaxy, Solar system, and Classic looks; choose
@@ -50,7 +51,7 @@ a color palette and layout preset; or change the colors used for each type of no
 | Tab | What you see |
 |-----|-------------|
 | **Overview** | Live memory counts, memory-type mix, and a health summary at a glance |
-| **Analytics** *(Pro)* | Growth, retention distribution, decay forecast, resolver mix, and top entities — plus a one-click shareable HTML report and a cross-workspace portfolio view |
+| **Analytics** *(hosted Pro/Team)* | A cloud-backed status and launch surface for growth, retention, decay, and entity insights computed by the private managed service |
 | **Recall** | Hybrid search across the memory bank — each result shows its score breakdown (retention, semantic, lexical, graph, importance, recency) |
 | **Memories** | Browse and curate every memory by workspace — click into a full reader with type and retention pills, drag-to-reorder, inline title/type edits |
 | **Proactive** | "What should I know right now" — importance × recency × retention, plus the last session handoff |
@@ -58,11 +59,11 @@ a color palette and layout preset; or change the colors used for each type of no
 | **Timeline** | Bi-temporal history of a topic — what was believed, and when |
 | **Audit** | Full governance ledger — who did what, when, and why |
 | **Knowledge Graph** | Interactive force-directed graph of entities and their relationships — click any node to see every linked memory |
-| **Consolidate** | Run a consolidation sweep on demand — see what got distilled and what got pruned |
-| **Automation** *(Pro)* | Scheduled consolidation + retention policies on autopilot — plus **auto-dreaming**: a background consolidation + cross-cluster inference loop that fires when the store has accumulated enough new memories *and* gone idle. Configurable from the dashboard (cadence, dream trigger, idle threshold, inference toggle) or the `GET/POST /api/automation` API, and via `scripts/auto_maintain` for cron / Task Scheduler |
+| **Consolidate** | Run the free local consolidation tool manually; dry-run remains the default and no scheduler is bundled |
+| **Automation** *(hosted Pro/Team)* | Configure hosted Auto Consolidation and Auto Dreaming policies, inspect job status, and review managed proposals before applying them locally |
 | **Workspaces** | Create, rename, describe, copy, merge, and delete workspaces; import files & folders; drag-and-drop upload |
-| **Team** *(Team plan)* | Multi-user access with PBKDF2 logins, password reset, admin / member / viewer roles, seat management, scoped agent/sync tokens, and team audit history |
-| **Settings** | License activation (Pro/Team), cloud sync, LLM provider setup/test, a live structured-extraction switch and activity viewer, Agent Connect token management, appearance, and engine/store info |
+| **Team Cloud** *(hosted Team)* | Open the hosted organization dashboard for invitations, roles, named seats, scoped credentials, and team audit history |
+| **Settings** | Hosted-plan and Cloud Sync status, LLM provider setup/test, a live structured-extraction switch and activity viewer, appearance, and local engine/store info |
 
 The dashboard is powered by the v2 engine — the same `MemoryService` that backs the MCP server
 and the Python library. What you see in the UI is what your agents get.
@@ -117,12 +118,14 @@ or structured consolidation.
 - **Privacy-safe receipts** — remember, link, recall, and indexing operations can be verified through a content-free SHA-256 receipt chain without exporting memory or query text.
 - **Code-aware** — incremental multi-language symbol/call/import graph, code↔memory links,
   path queries, communities/hotspots, git/PR impact analysis, and portable graph exports.
-- **Sleep-time consolidation** — scheduled job distills recurring episodes, reports its compaction.
+- **Manual consolidation** — the local tool distills recurring episodes on demand and reports
+  compaction; hosted plans add Auto Consolidation and Auto Dreaming.
 - **Scoped** — `workspace → repo → session` hierarchy.
 - **Encryption at rest** — optional SQLCipher (AES-256) encryption for the main memory
-  database via `ENGRAPHIS_DB_KEY`. No plaintext fallback when a key is set; separate
-  auth/relay/vendor state requires an encrypted volume (see `SECURITY.md`).
-- **Cloud sync** — cross-device and cross-team memory sync with deterministic CRDT merge (folder transport for self-hosting, managed relay for zero-setup). One-click "Sync now" or automatic cadence in the dashboard.
+  database via `ENGRAPHIS_DB_KEY`. No plaintext fallback when a key is set; protect hosted
+  customer credentials and backups separately (see `SECURITY.md`).
+- **Cloud-ready client** — the public client can connect an authorized installation to the
+  private hosted Cloud Sync relay; relay storage, authorization, and automation remain server-side.
 - **Import & ingest** — local documents/code/DOCX plus optional PDF text extraction, image OCR,
   audio/video transcription, and live PostgreSQL schema introspection.
 
@@ -172,57 +175,29 @@ structured-extraction entries.
 | Bi-temporal graph | ✗ (note-link graph; no fact validity) | partial | ✓ | **✓** |
 | Native multi-repo model | ✗ (separate vaults; no repo/session hierarchy) | ✗ | ✗ | **✓ (unique)** |
 | Code-aware (AST/symbol graph) | ✗ | ✗ | ✗ | **✓ (unique)** |
-| Cloud sync (CRDT merge) | ✗ (file merge or optional conflict copies) | ✗ | ✗ | **✓ (deterministic, no conflict copies)** |
+| Hosted Cloud Sync (CRDT merge) | ✗ (file merge or optional conflict copies) | ✗ | ✗ | **✓ (deterministic, no conflict copies)** |
 | Encryption at rest | partial | ✗ | ✗ | **✓ (local SQLCipher database)** |
 | MCP-native for coding agents | partial (not core) | ✓ | ✗ | **✓ (first-party memory and code tools)** |
-| Sleep-time consolidation | ✗ | ✗ | ✗ | **✓** |
+| Manual local / automatic hosted consolidation | ✗ | ✗ | ✗ | **✓** |
 
 ---
 
-## Host on Railway (Pro solo or Team)
+## Hosted Pro and Team
 
-The official template runs the shared image in `customer` mode, mounts `/data`, checks
-`/api/ready`, and generates a 48-character deployment token. Deploy one instance and use the
-hosted wizard: verify deployment ownership → choose Pro or Team → confirm email → automatic
-activation → create the first admin. The signed key never appears in the browser and the
-service does not redeploy during activation.
+Pro and Team are services, not alternate modes hidden in the public image. The official cloud
+runs separate control, relay, compute, and worker roles. That boundary keeps entitlement
+authority, Cloud Sync storage, Analytics, Auto Dreaming, Auto Consolidation, and Team identity
+outside code that a fork controls.
 
-- **Pro solo** — a Pro member deploys a single-admin cloud instance: browser dashboard
-  (analytics, automation, export) + a self-hosted sync relay. Activate the same Pro key
-  on each local instance, set `ENGRAPHIS_RELAY_URL` on both the hosted service and local
-  instances to **your Railway deployment URL**, then connect with an expiring scoped sync
-  token and enable auto-sync (or run **Sync now**). Keep
-  `ENGRAPHIS_CLOUD_URL=https://license.engraphis.com` for trials and license leases. One
-  admin, no member seats.
-- **Team admin** — a Team administrator deploys one instance and invites members (email +
-  role). The recipient chooses their own password from a 72-hour invitation. Members sign
-  in at your URL and create scoped agent/sync tokens; member invitations never contain the
-  purchaser's account-wide Team license key.
+- **Pro** connects one owner and their local installations to hosted sync and managed compute.
+- **Team** adds hosted organizations, invitations, named seats, roles, scoped credentials, and
+  organization audit. Devices do not consume seats.
 
-See [`docs/HOSTING_RAILWAY.md`](docs/HOSTING_RAILWAY.md) for the 5-minute guide covering
-both paths (volume, custom domain, activate Pro/Team, create the first admin, invite
-members, and connect agents).
-
-**→ [Deploy on Railway (5-minute guide)](docs/HOSTING_RAILWAY.md)**
-
-> Until the public Railway template code is published, deploy from this repository and
-> apply [`deploy/railway-template.json`](deploy/railway-template.json) exactly: persistent
-> `/data`, customer service mode, generated public-domain references, and a unique
-> `ENGRAPHIS_DEPLOYMENT_TOKEN`. `railway.json` supplies the build and `/api/ready` check.
->
-> *(A one-click "Deploy on Railway" button previously sat here pointing at
-> `railway.app/new?template=<raw railway.json URL>`. Railway ignores that parameter —
-> `railway.json` is per-service build config, not a publishable template — so the button
-> only ever landed people on a generic project chooser. It remains removed until the
-> source descriptor is published through Railway and passes the logged-out acceptance
-> suite. `docs/RAILWAY_TEMPLATE.md` is the publication runbook.)*
-
-Hosted **Agent Connect** tokens are per-user and shown only once; the server stores only
-SHA-256 digests. A local sync device necessarily retains its raw bearer in an owner-only
-credential file so it can authenticate future rounds. Roles are rechecked on every HTTP/MCP
-call; disabling a member or resetting their password permanently revokes existing agent tokens.
-The hosted `/mcp` endpoint exposes the same
-29-tool service as local `engraphis-mcp`. See [the Agent Connect guide](docs/AGENT_CONNECT.md).
+The no-card trial starts only after email confirmation and lasts **exactly 3 active days**.
+See [Licensing](docs/LICENSING.md), [Cloud Sync](docs/SYNC.md), and
+[Agent Connect](docs/AGENT_CONNECT.md). The public image can still be deployed as a free local
+customer node; it does not become a Pro/Team backend through an environment switch. See
+[Railway hosting](docs/HOSTING_RAILWAY.md) for that limited deployment shape.
 
 ## Install
 
@@ -283,9 +258,9 @@ incompatible schema cannot collide with the dashboard.
 Compose publishes both services on host loopback only. Set a strong `ENGRAPHIS_API_TOKEN`
 before changing either port mapping to a non-loopback host address.
 
-Set `ENGRAPHIS_API_TOKEN` to require API authentication, `ENGRAPHIS_DB_KEY` to encrypt
-the database at rest, and `ENGRAPHIS_LICENSE_KEY` to unlock Pro/Team features. See
-`docker-compose.yml` for all options.
+Set `ENGRAPHIS_API_TOKEN` to require API authentication and `ENGRAPHIS_DB_KEY` to encrypt
+the local database at rest. Hosted-plan credentials configure customer clients; they do not
+install premium server implementations into this image. See `docker-compose.yml` for options.
 
 ---
 
@@ -397,36 +372,32 @@ pinned. The full multi-predecessor chain remains visible through inspection, Why
 
 ## Free forever vs. Pro vs. Team
 
-The core engine, single-user dashboard, standalone MCP server, and governance tools are
-free and Apache-2.0, permanently. Paid Pro/Team keys are **server-authoritative**: the
-vendor signature is checked locally, then the key must hold a current machine-bound lease
-from the configured license service. Revoked, expired, or seat-exceeded keys fail closed.
+The core engine, single-user dashboard, standalone MCP server, manual consolidation, and
+governance tools are free and Apache-2.0, permanently. A paid subscription authorizes access
+to the official hosted service; it does not unlock private server code inside this package.
 **Pro is $10/mo ($100/yr), Team is $20/seat/mo ($200/seat/yr)**, and the dashboard offers
-a server-issued Pro or Team trial after email confirmation — no card required. The trial
-term is **exactly 3 active days**.
+an email-confirmed Pro or Team trial — no card required. The trial term is **exactly 3 active
+days**.
 
-Separately, `workspace_write_grace` can preserve an already activated installation for up
-to 24 hours. It starts at the first authoritative denial, or at signed key expiry when that
-expiry has already passed; unused cached-lease time is not subtracted. Existing authenticated
-users may continue ordinary local-core workspace writes, but paid/cost-bearing features and
-MCP/agent writes still require a live lease and may stop immediately. Grace never extends trial expiry,
-enables a new activation, adds users or seats, or resets an expiry. After grace,
-`recovery_read_only` preserves the login wall plus authenticated reads, data export, password
-recovery, and relicensing while blocking normal mutations and Team administration.
+Separately, `workspace_write_grace` may preserve ordinary writes to an already provisioned
+**local** workspace for at most **24 hours** after an authoritative entitlement denial. This is
+an availability cushion, not a fourth trial day. It never extends trial or subscription expiry,
+never grants Cloud Sync, Analytics, Automation, Auto Dreaming, Auto Consolidation, Team access,
+new seats, or new credentials, and never resets an expiry clock. Hosted access may stop
+immediately. After grace, the client preserves recovery reads and data export while blocking
+ordinary mutations until entitlement is restored.
 
-Pro and Team are release candidates for v1.0.0; they become GA only when matching tagged
-artifacts are published on PyPI and GitHub and the vendor service passes its production
-readiness gate. Cloud sync is opt-in and transported over HTTPS; Engraphis does not advertise
-end-to-end encryption. Paid entitlements require online lease renewal, while the Free core
-remains fully local and offline-capable.
+Cloud Sync is opt-in and transported over HTTPS; Engraphis does not advertise end-to-end
+encryption. Paid entitlements require current hosted authorization, while the Free core remains
+fully local and offline-capable.
 
 The published repository and clients are Apache-2.0; a paid subscription purchases access
 to the official hosted control plane and managed service, not extra rights over public code.
-See [`docs/LICENSING.md`](docs/LICENSING.md) for the source-license, service, grace, and
-recovery boundaries.
-
-The published repository and clients are Apache-2.0; a paid subscription purchases access
-to the official hosted control plane and managed service, not extra rights over public code.
+Already published Apache-2.0 releases and forks **cannot be clawed back or relicensed
+retroactively**. The sustainable boundary applies to future proprietary service code and
+official service access.
+The license issuer, billing fulfillment, Team identity, hosted relay, managed compute, and
+worker implementations live in a private repository and are not part of this package.
 See [`docs/LICENSING.md`](docs/LICENSING.md) for the source-license, service, grace, and
 recovery boundaries.
 
@@ -435,15 +406,15 @@ recovery boundaries.
 | Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
 | Memory engine + 29 MCP tools | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
-| Cloud sync (folder + managed relay) | | ✓ | ✓ |
-| Auto-sync (hands-off cadence) | | ✓ | ✓ |
-| Analytics: growth, retention, decay forecast + entities | | ✓ | ✓ |
-| Analytics HTML report (self-contained, shareable) | | ✓ | ✓ |
-| Automated maintenance: scheduled consolidation + retention policies + **auto-dreaming** | | ✓ | ✓ |
+| Manual local consolidation (dry-run by default) | ✓ | ✓ | ✓ |
+| Hosted Cloud Sync | | ✓ | ✓ |
+| Hosted Analytics | | ✓ | ✓ |
+| Hosted Auto Consolidation + retention policy | | ✓ | ✓ |
+| Hosted Auto Dreaming + managed proposals | | ✓ | ✓ |
 | Signed compliance export (checksummed bi-temporal bundle) | | ✓ | ✓ |
 | Priority support | | ✓ | ✓ |
-| Multi-user dashboard: invitations, logins, roles, seat management | | | ✓ |
-| Team audit log + CSV export | | | ✓ |
+| Hosted multi-user dashboard: invitations, logins, roles, seat management | | | ✓ |
+| Hosted Team audit log + CSV export | | | ✓ |
 | 72-hour pending invitations (resend/revoke) | | | ✓ |
 | Scoped, expiring per-user agent and sync tokens | | | ✓ |
 
@@ -513,47 +484,43 @@ See [the v3 architecture document](docs/ARCHITECTURE_V3.md) for the data flow an
 
 ## Cloud sync
 
-Cloud sync keeps your memory store consistent across all your machines — and, on the Team
-tier, across a group — without giving up local-first ownership. It ships two transports:
+**Cloud Sync is a hosted Pro/Team service.** The private service owns relay storage,
+organization authorization, credential rotation, scheduling, isolation, and operations. This
+Apache package contains only the customer protocol, deterministic merge implementation, and
+one-shot client needed to participate after the hosted service authorizes an installation. No
+environment switch turns the public image into an Engraphis relay.
 
-- **Folder transport** — any shared directory (Dropbox, iCloud, Syncthing, a git repo, a
-  mounted drive). Zero infrastructure.
-- **Managed relay** — HTTPS against a dedicated, isolated relay data plane, authenticated by an
-  expiring, revocable per-user token issued by the separate license control plane. One-click in
-  the dashboard or
-  `python -m scripts.sync --relay --relay-token <token>`; viewers use `--read-only`.
+The merge remains a state-based CRDT: every field resolves by a commutative, idempotent rule so
+`merge(A, B) == merge(B, A)`. The current format carries memories and memory-to-memory links;
+entity/code graph reconciliation is not yet part of sync. `secret` memories are excluded from
+managed uploads. Relay traffic uses HTTPS, but bundles are not yet client-side end-to-end
+encrypted or zero-knowledge.
 
-Sync is a **state-based CRDT**: deterministic merge, no conflict copies, no data loss.
-Every field resolves by a commutative, idempotent rule so `merge(A, B) == merge(B, A)`.
-The current sync format carries memories and their memory-to-memory links; entity/code graph
-reconciliation is not yet part of sync. `secret` memories are never exported, and Team personal
-folders are never uploaded to a shared-account relay. Managed-relay traffic uses HTTPS, but
-bundles are not yet client-side end-to-end encrypted or zero-knowledge.
-See [`docs/SYNC.md`](docs/SYNC.md) for architecture, security model, and CLI usage.
+For development, backup interchange, and offline testing, the public client retains an explicit
+one-shot folder exchange. That manual primitive is not the official Cloud Sync product and has
+no hosted identity, seat, managed-storage, availability, or support guarantees. See
+[`docs/SYNC.md`](docs/SYNC.md) for the exact boundary, security model, and client usage.
 
 ---
 
 ## Security, reliability, and trust boundaries
 
-The current shared and commercial surfaces enforce:
+The public runtime and its hosted-service clients enforce:
 
-- **Team authentication and RBAC** — first-admin setup is atomic; login PBKDF2 verification
-  runs outside the shared store lock; sessions and agent-token history are bounded;
-  disable/reset events revoke long-lived tokens. Viewers read and members perform ordinary
-  writes. Only admins can change account-wide sync policy, import/index server-side
-  resources, or delete/merge workspaces.
-- **License and billing lifecycle** — paid features require a current machine-bound lease;
-  process cache and device-id creation are serialized. A lapsed, already provisioned Team
-  installation has only the bounded `workspace_write_grace` described above, followed by
-  authenticated `recovery_read_only`; neither state permits entitlement or account growth.
-  Billing webhook fulfillment is bounded, durable, retry-safe, and idempotent.
+- **Single-user local access** — loopback is the default; an optional constant-time-checked
+  bearer protects a remotely exposed customer node. Local Team accounts, invitations, roles,
+  seats, password handling, and organization administration are not shipped here.
+- **Hosted authorization boundary** — Cloud Sync, Analytics, Automation, Team identity, and
+  cost-bearing work require current authorization from the private service. A lapsed customer
+  installation has only the bounded local `workspace_write_grace` described above, followed by
+  `recovery_read_only`; neither state permits cloud access or account growth.
 - **SQLite transaction safety** — shared v2 connections serialize complete write transactions;
   a failed statement that opened a transaction rolls it back and releases its lock. Legacy
   decay is frequency-independent, and sync preserves future bi-temporal validity horizons.
-- **Relay isolation** — workspace allow-lists are enforced while applying fetched data,
-  personal Team folders cannot enter the shared-account relay, and device-local `secret`
-  memories cannot be remotely overwritten, invalidated, or downgraded. Bundle size, count,
-  and per-workspace storage are bounded.
+- **Customer-client isolation** — workspace allow-lists are enforced while applying fetched
+  data, and device-local `secret` memories cannot be uploaded or remotely overwritten,
+  invalidated, or downgraded. Bundle size and record counts are bounded before application;
+  hosted tenant and storage enforcement remains private service responsibility.
 - **Hostile-input handling** — sync-folder peers, graph merge inputs, repository walks,
   resource files, and PostgreSQL selectors are treated as untrusted; traversal,
   symlink/replace races, oversized/deep payloads, malformed rows, and non-finite JSON are
@@ -578,9 +545,8 @@ pip install "engraphis[encryption]"
 ```
 
 The entire main memory database file is transparently encrypted with AES-256 via SQLCipher —
-full-text search, the graph, and every query keep working unchanged. Separate users/sessions,
-relay, and vendor registry/email-outbox databases remain ordinary SQLite; run those services
-on encrypted, access-restricted volumes. When a key is set for the main database, Engraphis
+full-text search, the graph, and every query keep working unchanged. Customer authentication
+and managed-service state use their respective deployment protections. When a key is set for the main database, Engraphis
 **fails loud** rather than silently falling back to plaintext. Generate a strong key:
 
 ```bash
@@ -594,7 +560,7 @@ python -c "import secrets; print(secrets.token_hex(32))"
 
 ## Import files & folders
 
-Drag-and-drop or server-side import, role-gated and bounded:
+Drag-and-drop or server-side import, access-controlled and bounded:
 
 - **Dashboard upload** — accepts text, Markdown, code, JSON/CSV/HTML, DOCX, and exported
   Google Workspace documents directly; optional adapters add PDF text extraction, image OCR,
@@ -626,32 +592,21 @@ default; MCP ingest remains an authenticated agent write.
 
 ---
 
-## Consolidation and automated maintenance
+## Manual consolidation and hosted automation
 
-<p align="center">
-  <img src="docs/images/automation.png" alt="Engraphis Automated maintenance policy and scheduling dashboard" width="100%">
-</p>
+Manual consolidation is free and remains local. Use the dashboard's **Consolidate** tab,
+`MemoryService.consolidate`, `POST /api/consolidate`, `engraphis_consolidate`, or
+`python -m scripts.consolidate`. Dry-run is the default.
 
-Manual consolidation is free. The Pro **Automation** tab (and the
-`GET/POST /api/automation` plus `POST /api/maintenance/run` API) can keep the store
-clean without you clicking anything,
-using a maintenance **policy** with two modes that compose:
+Pro and Team add **hosted** Auto Consolidation and Auto Dreaming. The public Automation tab is a
+policy/status client: it submits an explicitly consented, bounded snapshot to private managed
+compute and displays reviewable jobs or proposals. The scheduling, analytics, dreaming, and
+consolidation automation algorithms run in Engraphis Cloud; this repository ships no premium
+background loop, cron wrapper, or worker.
 
-- **Scheduled maintenance** — a consolidation + retention sweep on a fixed cadence
-  (`cadence_hours`). Recurring episodic memories are distilled into semantic digests,
-  and memories fading below `archive_below` retention are archived bi-temporally (pinned
-  memories are always protected).
-- **Auto-dreaming** — a *background* consolidation + **cross-cluster inference** loop
-  (no cron needed — it runs inside the dashboard process) that fires when **both** hold:
-  the store has accumulated ≥ `dream_min_new` new episodic memories since the last sweep,
-  *and* the store has been idle for `dream_idle_minutes`. Dreaming emits low-salience
-  `dream_inference` memories (cross-cluster/entity profiles, marked untrusted and linked
-  back to their sources) so inferred knowledge is auditable and never silently promoted.
-
-Knobs (dashboard Automation tab ↔ `/api/automation` API): `enabled`, `cadence_hours`,
-`consolidate`, `min_cluster`, `archive_below`, `dream`, `dream_min_new`,
-`dream_idle_minutes`, `infer`. Headless / no-dashboard-open: `python -m scripts.auto_maintain --apply`
-(via Task Scheduler or cron).
+Secret-class memories are excluded before a managed snapshot is serialized and are rejected
+again by the hosted service. Set `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1` only after reviewing that
+boundary. A managed proposal does not silently rewrite the local database.
 
 Manual consolidation can also use schema-validated LLM output through
 `MemoryService.consolidate`, `POST /api/consolidate`, `engraphis_consolidate`, or
@@ -670,9 +625,8 @@ All via environment (or `.env`):
 | `ENGRAPHIS_DB_PATH` | Source: `<repo>/engraphis.db`; installed: platform user-data directory | SQLite database file. Installed defaults are `%LOCALAPPDATA%\engraphis\engraphis.db` (Windows), `~/Library/Application Support/engraphis/engraphis.db` (macOS), and `$XDG_DATA_HOME/engraphis/engraphis.db` or `~/.local/share/engraphis/engraphis.db` (Linux). The environment variable overrides every default. |
 | `ENGRAPHIS_HOST` | `127.0.0.1` | Server bind address |
 | `ENGRAPHIS_PORT` | `8700` | Dashboard port |
-| `ENGRAPHIS_SERVICE_MODE` | `customer` | `customer` is the fail-safe normal-install default; use `vendor` for the isolated official control plane, `relay` for the isolated managed-sync data plane, and `combined` only for development/test compatibility |
-| `ENGRAPHIS_API_TOKEN` | — | Optional service-wide REST bearer credential; per-user tokens are preferred for hosted agent access |
-| `ENGRAPHIS_DEPLOYMENT_TOKEN` | — | Secret ownership proof required by hosted trial activation and remote first-admin setup |
+| `ENGRAPHIS_SERVICE_MODE` | `customer` | The public package supports only `customer`; hosted vendor, relay, compute, and worker roles are not distributed here |
+| `ENGRAPHIS_API_TOKEN` | — | Optional bearer credential for this single-user local customer node; never reuse a hosted credential |
 | `ENGRAPHIS_CORS_ORIGINS` | loopback on `ENGRAPHIS_PORT` | Comma-separated REST CORS allow-list; defaults to `127.0.0.1` and `localhost` on the configured port |
 | `ENGRAPHIS_WORKSPACES` | — | Optional comma-separated server-side workspace allow-list |
 | `ENGRAPHIS_DB_KEY` | — | Encrypt the database at rest (SQLCipher). Or use `ENGRAPHIS_DB_KEY_FILE` |
@@ -691,19 +645,17 @@ All via environment (or `.env`):
 | `ENGRAPHIS_LLM_API_KEY` | — | API key for chat/synthesis, `llm` / `llm_structured` extraction, and structured consolidation |
 | `ENGRAPHIS_LLM_BASE_URL` | — | Base URL for openrouter / custom OpenAI-compatible endpoints |
 | `ENGRAPHIS_LLM_AUTO_EXTRACT` | `1` | After a successful live connection test, automatically switch the running engine to `llm_structured`; the dashboard's extraction Off button persists `0`, and its On button restores `1` |
-| `ENGRAPHIS_LICENSE_KEY` | — | Pro/Team key (or `~/.engraphis/license.key`) |
-| `ENGRAPHIS_TEAM_MODE` | `1` | Mount hosted auth/team plumbing; any active Pro/Team license activates the login wall and first-admin setup, and existing users keep the wall active after lapse. Set `0` to disable hosted user auth for single-user mode |
-| `ENGRAPHIS_DASHBOARD_URL` | — | Canonical public dashboard URL used in invites, reset links, redirects, and the hosted MCP Host/Origin allow-list |
-| `ENGRAPHIS_LOOP_INTERVAL` | `60` | Background consolidation loop interval in seconds (0 = disabled) |
-| `ENGRAPHIS_DECAY_HALFLIFE_DAYS` | `7` | Ebbinghaus decay half-life (higher = memories persist longer) |
 | `ENGRAPHIS_FORWARDED_ALLOW_IPS` | *(none)* | Proxies trusted for forwarded client/TLS headers (`*` only when the service is reachable exclusively through that proxy) |
 | `ENGRAPHIS_LOCAL_TRUSTED_PEERS` | *(none)* | Exact peers/CIDRs treated as local without forwarding headers; intended for the shipped loopback-published Compose bridge, not public deployments |
-| `ENGRAPHIS_RELAY_URL` | `https://team.engraphis.com` | Sync relay target (Pro/Team); set to a customer deployment for self-hosted sync |
-| `ENGRAPHIS_CLOUD_URL` | `https://license.engraphis.com` | License/trial/invite control plane; keep separate from a customer-operated `ENGRAPHIS_RELAY_URL` |
-| `ENGRAPHIS_AUTOSYNC_LOOP` | `1` | Kill switch for the in-process auto-sync loop (0 = off) |
+| `ENGRAPHIS_CLOUD_CONTROL_URL` | hosted default | Official entitlement, organization, and credential control API |
+| `ENGRAPHIS_CLOUD_COMPUTE_URL` | hosted default | Official Analytics and managed-automation API |
+| `ENGRAPHIS_CLOUD_ORGANIZATION_ID` | — | Hosted organization bound to this customer session |
+| `ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL` | — | Rotating hosted credential; inject as a secret or prefer the owner-only cloud session file |
+| `ENGRAPHIS_CLOUD_TOKEN_SUBJECT` | `member` | Subject fixed during hosted bootstrap (`device` or `member`); set explicitly with an environment-only refresh credential |
+| `ENGRAPHIS_CLOUD_ACCESS_TOKEN` | — | Optional short-lived access token for ephemeral jobs |
+| `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | `0` | Explicit opt-in required before uploading a bounded snapshot for hosted Analytics/Automation |
 
-See `.env.example` for the full list including commercial/vendor, email delivery, and
-cloud-license enforcement options.
+See `.env.example` for the full customer-runtime and managed-service client options.
 
 ---
 
@@ -718,11 +670,10 @@ engraphis/
 │   ├── mcp_server.py        # MCP server — 29 tools
 │   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
 │   ├── read_only_api.py     # token-protected recall/repository-graph HTTP surface
-│   ├── autosync.py          # background auto-sync loop (Pro/Team)
-│   ├── licensing.py         # signed-key + live machine-bound lease verification
-│   ├── analytics.py         # Pro analytics engine
-│   ├── automation.py        # scheduled maintenance policies (Pro)
-│   ├── billing.py           # Polar webhook fulfillment
+│   ├── hosted_client.py     # hosted URLs, plan labels, and endpoint validation only
+│   ├── licensing.py         # compatibility facade for hosted presentation metadata
+│   ├── cloud_session.py     # rotating hosted customer-session client
+│   ├── cloud_features.py    # consented managed-feature protocol client
 │   ├── config.py / app.py   # env settings / REST server
 │   └── static/              # dashboard frontend
 ├── eval/                    # offline retrieval eval harness + datasets

@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from engraphis import cloud_license, licensing
 from engraphis.backends import sync_relay
 from engraphis.private_state import (
     UnsafeStateFile,
@@ -28,53 +27,7 @@ def _adversarial_link(target, link):
         return "hardlink"
 
 
-def test_machine_id_rejects_link_malformed_and_oversize_state(monkeypatch, tmp_path):
-    victim = tmp_path / "victim.txt"
-    victim.write_text("a" * 32, encoding="utf-8")
-    linked = tmp_path / "machine_id"
-    _adversarial_link(victim, linked)
-    monkeypatch.setattr(cloud_license, "_MACHINE_ID_FILE", linked)
-    cloud_license._machine_id_cache.clear()
-
-    with pytest.raises(RuntimeError, match="unsafe"):
-        cloud_license.machine_id()
-    assert victim.read_text(encoding="utf-8") == "a" * 32
-
-    linked.unlink()
-    linked.write_text("not-a-generated-machine-id", encoding="utf-8")
-    with pytest.raises(RuntimeError, match="malformed"):
-        cloud_license.machine_id()
-    linked.write_bytes(b"a" * 129)
-    with pytest.raises(RuntimeError, match="unsafe"):
-        cloud_license.machine_id()
-
-
-def test_lease_state_never_follows_links_or_fixed_temp_traps(monkeypatch, tmp_path):
-    victim = tmp_path / "victim.txt"
-    victim.write_text("do-not-overwrite", encoding="utf-8")
-    lease = tmp_path / "lease.sig"
-    _adversarial_link(victim, lease)
-    monkeypatch.setattr(cloud_license, "_LEASE_FILE", lease)
-
-    assert cloud_license._read_lease() == ""
-    cloud_license._write_lease("ENGRLS1." + "a" * 40 + "." + "b" * 40)
-    assert victim.read_text(encoding="utf-8") == "do-not-overwrite"
-    assert lease.exists()
-
-    lease.unlink()
-    fixed_temp = tmp_path / "lease.sig.tmp"
-    _adversarial_link(victim, fixed_temp)
-    token = "ENGRLS1." + "c" * 40 + "." + "d" * 40
-    cloud_license._write_lease(token)
-    assert cloud_license._read_lease() == token
-    assert victim.read_text(encoding="utf-8") == "do-not-overwrite"
-    assert fixed_temp.exists()
-
-    lease.write_bytes(b"x" * (cloud_license._MAX_LEASE_BYTES + 1))
-    assert cloud_license._read_lease() == ""
-
-
-def test_sync_token_link_and_malformed_state_fail_without_license_fallback(
+def test_sync_token_link_and_malformed_state_fail_closed(
         monkeypatch, tmp_path):
     monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path))
     monkeypatch.delenv("ENGRAPHIS_SYNC_TOKEN", raising=False)
@@ -82,13 +35,9 @@ def test_sync_token_link_and_malformed_state_fail_without_license_fallback(
     victim.write_text("engr_ut_" + "s" * 40, encoding="utf-8")
     token_path = tmp_path / "sync.token"
     _adversarial_link(victim, token_path)
-    monkeypatch.setattr(
-        licensing, "_read_key_material",
-        lambda: (_ for _ in ()).throw(AssertionError("must not widen to license key")))
-
     assert sync_relay.has_sync_token() is False
     with pytest.raises(sync_relay.RelayError, match="unsafe|unreadable"):
-        sync_relay._current_key("https://relay.example")
+        sync_relay._current_bearer("https://relay.example")
     with pytest.raises(UnsafeStateFile):
         sync_relay.save_sync_token("engr_ut_" + "n" * 40)
     assert victim.read_text(encoding="utf-8") == "engr_ut_" + "s" * 40
@@ -97,11 +46,11 @@ def test_sync_token_link_and_malformed_state_fail_without_license_fallback(
     token_path.write_text("short\nsecond-line\n", encoding="utf-8")
     assert sync_relay.has_sync_token() is False
     with pytest.raises(sync_relay.RelayError, match="malformed"):
-        sync_relay._current_key("https://relay.example")
+        sync_relay._current_bearer("https://relay.example")
     token_path.write_bytes(b"x" * (sync_relay.MAX_SYNC_TOKEN_BYTES + 3))
     assert sync_relay.has_sync_token() is False
     with pytest.raises(sync_relay.RelayError, match="unsafe|unreadable"):
-        sync_relay._current_key("https://relay.example")
+        sync_relay._current_bearer("https://relay.example")
 
 
 def test_sync_policy_link_and_malformed_state_are_read_only(monkeypatch, tmp_path):

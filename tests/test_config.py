@@ -64,37 +64,6 @@ def test_embed_dim_defaults_to_default_model_dimension(monkeypatch):
     assert Settings().embed_dim == 384
 
 
-def test_license_server_url_precedence(monkeypatch):
-    # Relay routing and commercial control-plane routing are intentionally independent.
-    monkeypatch.setattr(config.settings, "relay_url", "https://relay.example/")
-    monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
-    assert config.resolve_license_server_url() == config.DEFAULT_LICENSE_SERVER_URL
-    assert config.resolve_license_server_url(
-        "https://signed.example/",
-    ) == "https://signed.example"
-
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", "https://override.example/")
-    assert config.resolve_license_server_url(
-        "https://signed.example/",
-    ) == "https://override.example"
-
-
-def test_license_server_url_migrates_retired_signed_host(monkeypatch):
-    monkeypatch.setattr(config.settings, "relay_url", config.DEFAULT_RELAY_URL)
-    monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
-    assert config.resolve_license_server_url(
-        "https://engraphis-production.up.railway.app/",
-    ) == config.DEFAULT_LICENSE_SERVER_URL
-
-
-def test_retired_cloud_url_override_is_canonicalized(monkeypatch):
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_URL", RETIRED_RELAY_URL + "/")
-    assert (
-        config.resolve_license_server_url("https://signed.example")
-        == config.DEFAULT_LICENSE_SERVER_URL
-    )
-
-
 def test_retired_relay_url_override_is_canonicalized():
     assert config.canonicalize_relay_url(RETIRED_RELAY_URL) == config.DEFAULT_RELAY_URL
 
@@ -111,14 +80,10 @@ def test_service_mode_defaults_to_customer_trust_domain(monkeypatch):
 
     assert configured.service_mode == "customer"
     assert configured.customer_service is True
-    assert configured.relay_service is False
-    assert configured.vendor_service is False
 
 
-def test_valid_service_modes_accepted(monkeypatch):
-    # Relay, vendor, and combined modes remain available only when selected explicitly.
-    for mode in ("customer", "relay", "vendor", "combined"):
+def test_private_service_modes_are_not_available_in_the_public_package(monkeypatch):
+    for mode in ("relay", "vendor", "combined"):
         monkeypatch.setenv("ENGRAPHIS_SERVICE_MODE", mode)
-        configured = Settings()
-        assert configured.service_mode == mode
-        assert configured.relay_service is (mode == "relay")
+        with pytest.raises(SystemExit):
+            Settings()

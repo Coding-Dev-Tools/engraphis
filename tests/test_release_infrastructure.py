@@ -24,30 +24,16 @@ def test_published_image_and_railway_template_fail_safe_to_customer_mode():
     assert template["variables"]["ENGRAPHIS_SERVICE_MODE"]["value"] == "customer"
     assert template["service"]["healthcheck"] == "/api/ready"
     assert template["service"]["volume"]["mount_path"] == "/data"
-    deployment = template["variables"]["ENGRAPHIS_DEPLOYMENT_TOKEN"]
-    assert deployment["value"] == "${{ secret(48) }}"
-    assert deployment["secret"] is True
-    assert deployment["required"] is True
-
-
-def test_recurring_customer_operations_never_use_deployment_token():
-    for workflow in (
-            ".github/workflows/commercial-backup.yml",
-            ".github/workflows/production-synthetics.yml"):
-        content = _text(workflow)
-        assert "secrets.ENGRAPHIS_CUSTOMER_OPS_TOKEN" in content
-        assert "secrets.ENGRAPHIS_CUSTOMER_DEPLOYMENT_TOKEN" not in content
-
-
-def test_backup_workflow_verifies_authenticated_backup_readiness():
-    content = _text(".github/workflows/commercial-backup.yml")
-    readiness = content.split("- name: Require fresh readiness after backup", 1)[1]
-
-    assert '"$CUSTOMER_TOKEN"' in readiness
-    assert '"${CUSTOMER_URL%/}/api/ops/ready"' in readiness
-    assert '"${CUSTOMER_URL%/}/api/ready"' not in readiness
-    assert '"$VENDOR_TOKEN"' in readiness
-    assert '"${LICENSE_URL%/}/ops/ready"' in readiness
+    local_api = template["variables"]["ENGRAPHIS_API_TOKEN"]
+    assert local_api["value"] == "${{ secret(48) }}"
+    assert local_api["secret"] is True
+    assert local_api["required"] is True
+    for removed in (
+        "ENGRAPHIS_DEPLOYMENT_TOKEN",
+        "ENGRAPHIS_LICENSE_KEY",
+        "ENGRAPHIS_TEAM_MODE",
+    ):
+        assert removed not in template["variables"]
 
 
 def test_ci_and_release_audit_production_image_dependencies():
@@ -71,29 +57,21 @@ def test_ci_and_release_audit_production_image_dependencies():
         assert version in release
 
 
-def test_compiled_wheels_cover_declared_python_and_mainstream_platforms():
-    wheel_workflow = _text(".github/workflows/build-compiled-wheels.yml")
+def test_release_builds_one_portable_open_core_wheel():
     release = _text(".github/workflows/release.yml")
     pyproject = _text("pyproject.toml")
 
     assert 'requires-python = ">=3.9"' in pyproject
     for version in ("3.9", "3.10", "3.11", "3.12"):
         assert f'"Programming Language :: Python :: {version}"' in pyproject
-    assert 'os: [ubuntu-latest, windows-latest, macos-latest]' in wheel_workflow
-    assert 'CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-*"' in wheel_workflow
-    assert 'CIBW_ARCHS_LINUX: "x86_64"' in wheel_workflow
-    assert 'CIBW_ARCHS_WINDOWS: "AMD64"' in wheel_workflow
-    assert 'CIBW_ARCHS_MACOS: "x86_64 arm64"' in wheel_workflow
-    assert '"setuptools>=77; python_version < \'3.10\'"' in wheel_workflow
-    assert '"setuptools>=83; python_version >= \'3.10\'"' in wheel_workflow
-    assert "python -m build --sdist" in release
-    assert "run: python -m build\n" not in release
-    assert "Build compiled wheels (${{ matrix.os }})" in release
-    assert "name: Assemble distributions" in release
-    assert "needs: [assemble, python-matrix, browser-accessibility, docker-smoke]" in release
+    assert not (ROOT / ".github/workflows/build-compiled-wheels.yml").exists()
+    assert "cython" not in pyproject.lower()
+    assert "cibuildwheel" not in release
+    assert "run: python -m build\n" in release
+    assert "Build compiled wheels" not in release
+    assert "name: Assemble distributions" not in release
+    assert "needs: [build, python-matrix, browser-accessibility, docker-smoke]" in release
     assert "name: python-package-distributions" in release
-    assert "Publish compiled wheels to PyPI" not in wheel_workflow
-    assert "push:\n    tags:" not in wheel_workflow
 
 
 def test_all_workflow_actions_are_pinned_to_full_commit_shas():
@@ -136,7 +114,7 @@ def test_release_repair_requires_tag_sha_successful_build_publish_and_pypi_ident
     assert '.event == "push"' in repair
     assert '.name == "Build distributions"' in repair
     assert '.name == "Publish to PyPI"' in repair
-    assert '.name == "Assemble distributions"' in repair
+    assert '.name == "Assemble distributions"' not in repair
     assert repair.count('.conclusion == "success"') >= 2
     assert 'gh run download "$run_id"' in repair
     assert '--repo "$GH_REPO"' in repair
@@ -208,24 +186,17 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
     security = _text("SECURITY.md")
     normalized_security = re.sub(r"\s+", " ", security)
     normalized_readme = re.sub(r"\s+", " ", readme)
-    assert "Vendor license control plane (license.engraphis.com)" in security
+    assert "Private hosted service boundary" in security
     assert "latest published stable release is the supported line" in security
     assert "0.9.x) releases are no longer maintained" not in security
-    assert "vendor registry/transactional-email outbox DB are ordinary SQLite" in (
-        normalized_security
-    )
+    assert "signing keys" in normalized_security
     assert "whole-database encryption" not in readme
     assert "Pro and Team are GA in v1.0.0" not in readme
-    assert "Pro and Team are release candidates for v1.0.0" in readme
+    assert "Pro and Team are services" in readme
     assert "img.shields.io/badge/version-1.0.0" not in readme
     assert "img.shields.io/pypi/v/engraphis.svg" in readme
-    assert "Version 1.0 release candidate" in readme
+    assert "official hosted service" in readme
     assert "are generally available" not in readme
-    assert "vendor registry/email-outbox databases remain ordinary SQLite" in (
-        normalized_readme
-    )
-
-    operations = _text("docs/COMMERCIAL_OPERATIONS.md")
-    assert "message_id=eml_..." in operations
-    assert "permanent two-requeue cap" in operations
-    assert "can temporarily contain" in operations
+    assert "private repository" in normalized_readme
+    assert not (ROOT / "docs" / "COMMERCIAL_OPERATIONS.md").exists()
+    assert not (ROOT / ".github" / "workflows" / "commercial-backup.yml").exists()
