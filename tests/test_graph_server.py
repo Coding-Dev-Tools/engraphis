@@ -11,7 +11,39 @@ import types
 
 import pytest
 
-from scripts.graph_server import _loopback, main
+from scripts.graph_server import _loopback, _port, main
+
+
+@pytest.mark.parametrize("value", ["0", "65536", "70000", "abc", ""])
+def test_invalid_port_is_rejected_before_server_or_model_imports(value, monkeypatch, capsys):
+    monkeypatch.delitem(sys.modules, "engraphis.read_only_api", raising=False)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--port", value])
+
+    assert exc.value.code == 2
+    assert "engraphis.read_only_api" not in sys.modules
+    stderr = capsys.readouterr().err
+    assert "port must be" in stderr
+    assert "Traceback" not in stderr
+    assert "Loading weights" not in stderr
+
+
+def test_invalid_port_from_environment_is_a_clean_argparse_error(monkeypatch, capsys):
+    monkeypatch.setenv("ENGRAPHIS_GRAPH_PORT", "70000")
+    monkeypatch.delitem(sys.modules, "engraphis.read_only_api", raising=False)
+
+    with pytest.raises(SystemExit) as exc:
+        main([])
+
+    assert exc.value.code == 2
+    assert "engraphis.read_only_api" not in sys.modules
+    assert "port must be from 1 to 65535" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["1", "8720", "65535"])
+def test_valid_port_range(value):
+    assert _port(value) == int(value)
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "::1", "localhost", "127.1.2.3"])
 def test_loopback_hosts_are_recognized(host):

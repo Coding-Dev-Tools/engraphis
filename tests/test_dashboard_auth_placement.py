@@ -1,4 +1,4 @@
-"""Static UI contract for clear account sign-in versus license activation."""
+"""Static UI contract for the single-user local client and hosted commercial boundary."""
 import re
 from pathlib import Path
 
@@ -7,19 +7,19 @@ INDEX = Path(__file__).resolve().parents[1] / "engraphis" / "static" / "index.ht
 SCRIPT = Path(__file__).resolve().parents[1] / "engraphis" / "static" / "dashboard.js"
 
 
-def test_dashboard_sign_in_is_in_topbar_and_license_key_activates():
+def test_dashboard_has_no_local_team_auth_or_license_activation_ui():
     html = INDEX.read_text(encoding="utf-8")
-
-    # Assert containment, not merely source order: a later control would satisfy
-    # ``topbar < session_action`` while still rendering outside the topbar.
-    topbar = html.index('<header class="topbar">')
-    topbar_end = html.index("</header>", topbar)
-    session_action = html.index('id="session-action"')
-    assert topbar < session_action < topbar_end
     script = SCRIPT.read_text(encoding="utf-8")
-    assert "async function activateLicense()" in script
-    assert "async function activateSyncLicense()" in script
-    assert "function signInSync()" not in script
+
+    for removed in ('id="session-action"', 'id="auth-overlay"', 'id="lic-key"'):
+        assert removed not in html
+    assert "activateLicense" not in script
+    assert "'/license/activate'" not in script
+    assert "Start hosted Pro trial" in script
+    assert "Start hosted Team trial" in script
+    # ``plan: local`` is the free customer runtime, not a paid local plan.
+    assert "raw==='pro'||raw==='team'" in script
+    assert "d.plan&&d.plan!=='free'" not in script
 
 
 def test_failed_memory_open_cannot_save_against_a_stale_memory():
@@ -42,36 +42,47 @@ def test_failed_memory_open_cannot_save_against_a_stale_memory():
         assert f'id="{control}"' in html
 
 
-def test_hosted_first_boot_has_an_actionable_non_data_setup_screen():
+def test_first_boot_is_local_and_commercial_actions_open_hosted_cloud():
     script = SCRIPT.read_text(encoding="utf-8")
-    hosted = script[script.index("function renderHostedBootstrap"):
-                    script.index("async function showHostedBootstrap")]
-
-    assert "Hosted onboarding" in hosted
-    assert "ENGRAPHIS_DEPLOYMENT_TOKEN" in hosted
+    assert "renderHostedBootstrap" not in script
+    assert "showHostedBootstrap" not in script
+    assert "ENGRAPHIS_DEPLOYMENT_TOKEN" not in script
     assert "startTrialPlan" in script
-    assert "activateLicense()" not in hosted
-    assert "else if(e.status===403){await showHostedBootstrap(e.message);resumeTrialClaim()}" \
-        in script
+    assert "Hosted signup URL is not configured" in script
+    assert "Local API token required" in script
+    assert "'/auth/state'" in script
 
 
-def test_invitation_link_opens_recipient_password_setup():
+def test_hosted_views_delegate_entitlement_to_cloud_proxy_responses():
     script = SCRIPT.read_text(encoding="utf-8")
-    assert "getInvitationToken" in script
-    assert "showInvitationForm" in script
-    assert "Accept team invitation" in script
-    assert "Confirm password" in script
-    assert "'/auth/invitations/accept'" in script
-    assert "url.searchParams.delete('invite_token')" in script
-    assert "new URLSearchParams(raw).get(name)" in script
-    assert "new URLSearchParams(location.search).get(name)" not in script
-    assert "params.delete('invite_token')" in script
-    assert "params.delete('reset_token')" in script
-    startup = script[script.index("(async function(){resumeTrialClaim()"):
-                     script.index("setInterval(checkHealth")]
-    assert startup.index("scrubAuthLinkTokens()") < startup.index("if(INVITE_TOKEN)")
-    assert "if(AUTH_MODE==='invitation'){cancelInvitation();return}" in script
-    assert "document.getElementById('topbar-title')" in script
+    analytics_view = script[script.index("function loadAnalyticsView()"):
+                            script.index("function loadAutomationView()")]
+    automation_view = script[script.index("function loadAutomationView()"):
+                             script.index("function workspaceRequired")]
+    assert "return loadAnalytics()" in analytics_view
+    assert "return loadAutomation()" in automation_view
+    assert "LIC.features" not in analytics_view + automation_view
+
+    analytics = script[script.index("async function loadAnalytics()"):
+                       script.index("/* ── hosted automation policy")]
+    automation = script[script.index("async function loadAutomation()"):
+                        script.index("async function saveAutomation()")]
+    for body in (analytics, automation):
+        assert "e.status===401||e.status===402||e.status===501" in body
+        assert "unlockHtml" in body
+
+
+def test_team_invitations_and_password_setup_are_not_in_local_client():
+    html = INDEX.read_text(encoding="utf-8")
+    script = SCRIPT.read_text(encoding="utf-8")
+    for removed in (
+        "getInvitationToken", "showInvitationForm", "Accept team invitation",
+        "Confirm password", "'/auth/invitations/accept'", "invite_token", "reset_token",
+    ):
+        assert removed not in script
+    assert 'id="auth-overlay"' not in html
+    assert "Organizations, invitations, roles, named seats" in script
+    assert "private hosted service" in script
 
 
 def test_untrusted_values_are_not_spliced_into_inline_javascript_literals():

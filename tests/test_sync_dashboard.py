@@ -5,8 +5,6 @@ fresh DB per test, mirroring tests/test_dashboard_v2.py. The relay is stubbed wi
 transport so no network is touched; the real client↔server round-trip is covered by
 tests/test_sync_relay.py.
 """
-import time
-
 import pytest
 
 pytest.importorskip("fastapi", reason="full-stack extra not installed")
@@ -14,33 +12,22 @@ pytest.importorskip("httpx", reason="httpx not installed")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from engraphis import licensing as lic  # noqa: E402
 from engraphis.config import DEFAULT_RELAY_URL, settings  # noqa: E402
-from engraphis.licensing import compose_key, ed25519_public_key  # noqa: E402
 from engraphis.service import MemoryService  # noqa: E402
 
-_SECRET = bytes(range(32))
 
-
-def _key(plan="team", seats=5):
-    return compose_key({"v": 1, "plan": plan, "email": "w@x.co", "seats": seats,
-                        "issued": int(time.time()),
-                        "expires": int(time.time() + 365 * 86400)}, _SECRET)
-
-
-def _client(monkeypatch, tmp_path, *, key=None):
+def _client(monkeypatch, tmp_path, *, cloud=False):
     db = str(tmp_path / "dash.db")
     monkeypatch.setattr(settings, "db_path", db)
     monkeypatch.setattr(settings, "embed_model", "")
     monkeypatch.setenv("ENGRAPHIS_EMBED_MODEL", "")
-    monkeypatch.setenv("ENGRAPHIS_TEAM_MODE", "0")
-    monkeypatch.setattr(lic, "_LICENSE_FILE", tmp_path / "license.key")
-    if key:
-        monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
-        monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(_SECRET).hex())
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path / "state"))
+    if cloud:
+        monkeypatch.setenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", "cloud-access-token-" + "x" * 32)
+        monkeypatch.setenv("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "org_test")
     else:
-        monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY", raising=False)
-    lic.current_license(refresh=True)
+        monkeypatch.delenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", raising=False)
+        monkeypatch.delenv("ENGRAPHIS_CLOUD_ORGANIZATION_ID", raising=False)
     svc = MemoryService.create(db)
     svc.remember("Postgres 16 is the main database.", workspace="demo",
                  scope="workspace", title="DB choice")
@@ -88,11 +75,12 @@ def test_sync_run_requires_license(monkeypatch, tmp_path):
         assert c.post("/api/sync/run", json={}).status_code == 402
 
 
-def test_sync_status_ready_with_key(monkeypatch, tmp_path):
-    with _client(monkeypatch, tmp_path, key=_key()) as c:
+def test_sync_status_ready_with_cloud_session(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path, cloud=True) as c:
         d = c.get("/api/sync/status").json()
         assert d["available"] is True
-        assert d["has_key"] is True
+        assert d["has_key"] is False
+        assert d["has_cloud_session"] is True
 
 
 def test_sync_run_pushes_and_records_summary(monkeypatch, tmp_path):
@@ -104,7 +92,7 @@ def test_sync_run_pushes_and_records_summary(monkeypatch, tmp_path):
         return _FakeTransport()
 
     monkeypatch.setattr("engraphis.backends.sync_folder.get_transport", fake_get_transport)
-    with _client(monkeypatch, tmp_path, key=_key()) as c:
+    with _client(monkeypatch, tmp_path, cloud=True) as c:
         r = c.post("/api/sync/run", json={})
         assert r.status_code == 200, r.text
         su = r.json()["summary"]
@@ -122,8 +110,8 @@ def test_sync_run_pushes_and_records_summary(monkeypatch, tmp_path):
 
 def test_sync_never_pushes_personal_folders(monkeypatch, tmp_path):
     """A personal folder is private to its owner and must never leave the device over the
-    shared-account relay (teammates share the license key). _sync_all skips it; only shared
-    folders are namespaced onto the relay."""
+    hosted relay. _sync_all skips it; only shared folders are namespaced onto the relay with
+    scoped cloud authorization."""
     synced = []
 
     def fake_get_transport(kind="folder", **kw):
@@ -131,7 +119,7 @@ def test_sync_never_pushes_personal_folders(monkeypatch, tmp_path):
         return _FakeTransport()
 
     monkeypatch.setattr("engraphis.backends.sync_folder.get_transport", fake_get_transport)
-    with _client(monkeypatch, tmp_path, key=_key()) as c:
+    with _client(monkeypatch, tmp_path, cloud=True) as c:
         # seed a shared and a personal folder directly on the service the app uses
         from engraphis.routes import v2_api
         from engraphis.service import set_current_user
@@ -156,7 +144,7 @@ def test_sync_fails_closed_on_invalid_workspace_visibility(monkeypatch, tmp_path
         return _FakeTransport()
 
     monkeypatch.setattr("engraphis.backends.sync_folder.get_transport", fake_get_transport)
-    with _client(monkeypatch, tmp_path, key=_key()) as c:
+    with _client(monkeypatch, tmp_path, cloud=True) as c:
         from engraphis.routes import v2_api
         svc = v2_api.service()
         svc.store.conn.execute(

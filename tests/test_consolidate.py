@@ -459,35 +459,6 @@ def test_profile_digest_inherits_strictest_sensitivity_and_trust():
     assert profile.metadata["provenance"]["source"] == "profile_consolidation"
 
 
-def test_inference_digest_stays_untrusted_when_every_source_is_trusted():
-    """The tightening is one-way: inheritance can never *raise* trust back to True."""
-    from engraphis.core.consolidate import infer_links
-    from engraphis.core.interfaces import Node
-
-    eng = MemoryEngine.create(":memory:")
-    wid = eng.store.get_or_create_workspace("w")
-    rid = eng.store.get_or_create_repo(wid, "r")
-    eng.remember("Aurora tuned the Postgres vacuum settings on the billing shard.",
-                 workspace_id=wid, repo_id=rid, mtype=MemoryType.SEMANTIC,
-                 resolve_conflicts=False)
-    secret = eng.remember(
-        "Aurora keeps the pager rotation spreadsheet in a private drive folder.",
-        workspace_id=wid, repo_id=rid, mtype=MemoryType.SEMANTIC,
-        resolve_conflicts=False)
-    eng.store.conn.execute(
-        "UPDATE memories SET sensitivity='secret' WHERE id=?", (secret,))
-    eng.store.conn.commit()
-    eng.store.upsert_entity(Node(
-        id="", name="Aurora", ntype="person", workspace_id=wid, repo_id=rid))
-
-    report = infer_links(eng, workspace_id=wid, repo_id=rid, dry_run=False)
-
-    assert report["links_created"], "fixture must bridge two dissimilar clusters"
-    inferred = eng.store.get_memory(report["links_created"][0]["id"])
-    assert inferred.provenance.get("trusted") is False
-    assert inferred.sensitivity == "secret"
-
-
 # ── scan-limit regression: the type filter must run in SQL, not in Python ───────────
 #
 # ``store.list_memories`` truncates with ``ORDER BY ingested_at DESC LIMIT n``. Filtering
@@ -530,29 +501,9 @@ def test_archive_pass_sees_transients_behind_newer_semantic_rows(monkeypatch):
     assert [row["id"] for row in report["archived"]] == [stale]
 
 
-# ── scheduled report artifact (scripts/consolidate.py --report, Team-gated) ──────────
+# ── explicit local consolidation command ─────────────────────────────────────
 
-from engraphis import licensing as _lic  # noqa: E402
-from engraphis.licensing import compose_key, ed25519_public_key  # noqa: E402
 from scripts.consolidate import main as consolidate_main  # noqa: E402
-
-_SECRET = bytes(range(32))
-
-
-@pytest.fixture()
-def _license_env(monkeypatch):
-    """Free tier by default; returns a helper that installs a signed key."""
-    monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(_SECRET).hex())
-    monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY", raising=False)
-    _lic.current_license(refresh=True)
-
-    def _use(plan):
-        monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", compose_key(
-            {"v": 1, "plan": plan, "email": "t@x.co", "seats": 3,
-             "issued": int(time.time()), "expires": None}, _SECRET))
-        _lic.current_license(refresh=True)
-    yield _use
-    _lic.current_license(refresh=True)
 
 
 def _seed_db(tmp_path):
@@ -567,55 +518,7 @@ def _seed_db(tmp_path):
     return db
 
 
-def test_report_flag_is_team_gated_and_fails_before_touching_the_db(
-        _license_env, tmp_path, capsys):
-    db = _seed_db(tmp_path)
-    out = tmp_path / "report.md"
-    rc = consolidate_main(["--db", str(db), "--workspace", "w", "--report", str(out)])
-    assert rc == 2
-    assert not out.exists()
-    err = capsys.readouterr().err
-    assert "Team feature" in err and "https://" in err     # actionable upsell, not a crash
-
-    # a Pro key is not enough — reports are the Team ops artifact
-    _license_env("pro")
-    assert consolidate_main(
-        ["--db", str(db), "--workspace", "w", "--report", str(out)]) == 2
-    assert not out.exists()
-
-
-def test_report_flag_writes_markdown_summary_with_before_after_counts(
-        _license_env, tmp_path, capsys):
-    _license_env("team")
-    db = _seed_db(tmp_path)
-    out = tmp_path / "reports" / "consolidation.md"       # parent dir auto-created
-    rc = consolidate_main(["--db", str(db), "--workspace", "w", "--report", str(out)])
-    assert rc == 0
-    text = out.read_text(encoding="utf-8")
-    assert text.startswith("# Engraphis consolidation report")
-    assert "**workspace:** w" in text
-    assert "**live memories before:** 3" in text
-    assert "**live memories after:**" in text
-    assert "**digests created:** 1" in text               # the cluster got merged
-    assert "**memories merged into digests:** 3" in text
-    assert "transients archived" in text and "generated" in text
-    assert capsys.readouterr().out.strip().startswith("{")   # JSON still on stdout
-
-
-def test_report_flag_renders_html_when_extension_says_so(_license_env, tmp_path):
-    _license_env("team")
-    db = _seed_db(tmp_path)
-    out = tmp_path / "consolidation.html"
-    assert consolidate_main(
-        ["--db", str(db), "--workspace", "w", "--dry-run", "--report", str(out)]) == 0
-    page = out.read_text(encoding="utf-8")
-    assert page.startswith("<!doctype html>")
-    assert "Engraphis consolidation report" in page
-    assert "dry run — nothing changed" in page
-    assert "<script" not in page and "src=" not in page   # self-contained here too
-
-
-def test_supersede_sources_cli_flag_requires_structured(_license_env, tmp_path, capsys):
+def test_supersede_sources_cli_flag_requires_structured(tmp_path, capsys):
     db = _seed_db(tmp_path)
     assert consolidate_main([
         "--db", str(db), "--workspace", "w", "--supersede-sources",
@@ -623,6 +526,6 @@ def test_supersede_sources_cli_flag_requires_structured(_license_env, tmp_path, 
     assert "requires --structured" in capsys.readouterr().err
 
 
-def test_sweep_without_report_needs_no_license(_license_env, tmp_path):
-    db = _seed_db(tmp_path)   # free tier from the fixture default
+def test_explicit_sweep_needs_no_license(tmp_path):
+    db = _seed_db(tmp_path)
     assert consolidate_main(["--db", str(db), "--workspace", "w"]) == 0

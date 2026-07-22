@@ -19,10 +19,11 @@ write/session tools at two levels:
     default (this is the *exact* thing that broke: a missing default), and
   * behavioral level — omitting ``workspace`` succeeds and lands the write in 'default'.
 
-NOTE: ``engraphis_recall`` is deliberately excluded. It is a READ tool whose ``workspace``
-defaults to ``None`` (search-broadly semantics), so omitting it returns an empty/again
-result set rather than crashing with "workspace Field required". Do not "helpfully" add
-recall here — its None default is intentional and different from the write-path contract.
+NOTE: ``engraphis_recall`` is deliberately excluded. It is a stateful retrieval tool whose
+``workspace`` defaults to ``None`` (search-broadly semantics), so omitting it returns an
+empty/again result set rather than crashing with "workspace Field required". Its
+reinforcement/receipt side effects do not make it one of the auto-fired write/session tools
+whose default contract this test pins; its None default is intentional.
 """
 import inspect
 import json
