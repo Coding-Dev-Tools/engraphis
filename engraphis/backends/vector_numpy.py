@@ -1,7 +1,8 @@
 """NumPy brute-force vector index — the Phase-0 reference ``VectorIndex``.
 
 This is intentionally simple and correct, not fast: it scans the (scope-filtered)
-vectors for each query — the exact O(n) behaviour that is the #1 scale gap. It exists so the rest of the system is runnable and testable *today*.
+vectors for each query — the exact O(n) behaviour that is the #1 scale gap.
+It exists so the rest of the system is runnable and testable *today*.
 Phase 1 swaps in an ANN index (sqlite-vec / LanceDB / Qdrant) behind this same
 interface; nothing above the ``VectorIndex`` boundary changes.
 """

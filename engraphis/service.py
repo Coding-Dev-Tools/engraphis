@@ -1286,8 +1286,8 @@ class MemoryService:
         if supersede_sources and not structured:
             raise ValidationError("supersede_sources requires structured=true")
         if infer:
-            from engraphis.licensing import require_feature
-            require_feature("automation")
+            from engraphis.licensing import require_cloud_lease
+            require_cloud_lease("automation")
         wid, rid = self._require_scope(workspace, repo)
         try:
             min_cluster = max(2, min(20, int(min_cluster)))
@@ -2961,8 +2961,8 @@ class MemoryService:
         ever silently deleted, and the export proves it. Scope-checked like any other
         read; the Pro license gate lives here so every caller (Inspector, v1 dashboard,
         v2 dashboard) passes through one check."""
-        from engraphis.licensing import require_feature
-        require_feature("export")
+        from engraphis.licensing import require_cloud_lease
+        require_cloud_lease("export")
 
         wid, _ = self._require_scope(workspace, None)
         conn = self.store.conn
