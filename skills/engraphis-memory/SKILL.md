@@ -18,7 +18,10 @@ hard-deleting. You get those guarantees for free *if* you use the right tool wit
 
 1. **Starting a task in a repo** → `engraphis_recall_proactive` to load high-signal context with
    no query, and (for multi-step work) `engraphis_start_session` — its `bootstrap` returns the
-   last session's summary and unresolved `open_threads`, so you resume instead of starting cold.
+   last same-user/agent session's summary and unresolved `open_threads`, so you resume instead
+   of starting cold or inheriting somebody else's handoff.
+   `reused=true` means the exact same user/agent/goal task is already active. Use
+   `force_new=true` only to branch a second session for that same task identity.
 2. **Before you answer or act** and prior context would help → `engraphis_recall`. Do this
    *before* asking the user something they may have already told you.
 3. **The moment you learn something durable** → `engraphis_remember` (a convention, a decision and
@@ -61,7 +64,7 @@ promotion: [SCOPING.md](references/SCOPING.md).
 |---|---|---|
 | Store a fact | `engraphis_remember` | Returns `op`: `add` / `noop` (reinforced a near-dup) / `invalidate` (superseded old). |
 | Recall by query | `engraphis_recall` | Hybrid vector+lexical+graph; returns packed `context` + scored memories. |
-| Load context, no query | `engraphis_recall_proactive` | Start-of-task; also returns last-session handoff when `repo` is given. |
+| Load context, no query | `engraphis_recall_proactive` | Start-of-task; authenticated callers receive only their own last-session handoff. |
 | "Why is it like this?" | `engraphis_why` | Live answer **plus** what it superseded (bi-temporal). |
 | "How has X changed?" | `engraphis_timeline` | Every version oldest→newest with `valid_from/valid_to`. |
 | Retire a stale memory | `engraphis_forget` | Bi-temporal close, not a delete. Prefer `correct` if you have a replacement. |
