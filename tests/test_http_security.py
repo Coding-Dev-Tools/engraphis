@@ -98,3 +98,38 @@ def test_empty_environment_overrides_disable_csp_and_hsts(monkeypatch):
     )
     assert "Content-Security-Policy" not in response.headers
     assert "Strict-Transport-Security" not in response.headers
+
+
+def test_configured_public_host_redirects_first_plain_http_visit(monkeypatch):
+    monkeypatch.setenv(
+        "ENGRAPHIS_DASHBOARD_URL", "https://team.engraphis.test")
+    client = _client(monkeypatch)
+    response = client.get(
+        "/login?next=%2Fgraph",
+        headers={"Host": "team.engraphis.test"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 308
+    assert response.headers["location"] == (
+        "https://team.engraphis.test/login?next=%2Fgraph")
+    assert response.headers["x-frame-options"] == "DENY"
+
+
+def test_https_redirect_never_uses_spoofed_or_credential_bearing_host(
+        monkeypatch):
+    marker = "private-credential-marker"
+    monkeypatch.setenv(
+        "ENGRAPHIS_DASHBOARD_URL",
+        "https://user:%s@team.engraphis.test" % marker)
+    client = _client(monkeypatch)
+    response = client.get(
+        "/", headers={"Host": "team.engraphis.test"}, follow_redirects=False)
+    assert response.status_code == 200
+    assert marker not in response.text
+
+    monkeypatch.setenv(
+        "ENGRAPHIS_DASHBOARD_URL", "https://team.engraphis.test")
+    other = _client(monkeypatch).get(
+        "/", headers={"Host": "attacker.example"}, follow_redirects=False)
+    assert other.status_code == 200
+    assert "location" not in other.headers
