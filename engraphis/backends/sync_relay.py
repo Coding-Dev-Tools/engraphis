@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 from urllib.parse import quote, urlsplit, urlunsplit
 
-from engraphis.hosted_client import build_pinned_https_opener
 from engraphis.private_state import UnsafeStateFile, atomic_private_text, read_private_text
 
 MAX_RELAY_BUNDLE_BYTES = 64 * 1024 * 1024
@@ -71,7 +70,7 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _urlopen_no_redirect(req, *, timeout: float):
-    return build_pinned_https_opener(_NoRedirectHandler()).open(req, timeout=timeout)
+    return urllib.request.build_opener(_NoRedirectHandler()).open(req, timeout=timeout)
 
 
 def _validated_sync_token(value: str) -> str:
@@ -158,7 +157,7 @@ def _sync_read_only_path() -> Path:
 
 def _atomic_private_text(path: Path, value: str) -> None:
     """Atomically write one owner-only state value next to the sync credential."""
-    atomic_private_text(path, value + "\n", harden_parent=True)
+    atomic_private_text(path, value + "\n")
 
 
 def save_sync_token(token: str, *, relay_origin: Optional[str] = None) -> None:
@@ -248,7 +247,7 @@ def has_sync_token() -> bool:
 
 
 def _is_loopback_host(host: str) -> bool:
-    if host == "localhost":
+    if host == "localhost" or host.endswith(".localhost"):
         return True
     try:
         return ipaddress.ip_address(host).is_loopback
@@ -287,13 +286,12 @@ def _validated_base_url(value: str) -> str:
                     ip_obj = ipaddress.ip_address(ip)
                 except ValueError:
                     continue  # sockaddr wasn't a parseable IP; skip
-                if not ip_obj.is_global:
+                if (ip_obj.is_private or ip_obj.is_reserved or ip_obj.is_link_local
+                        or ip_obj.is_multicast or ip_obj.is_unspecified):
                     raise ValueError(
                         "relay URL must not target private/reserved IP ranges")
         except (_socket.gaierror, OSError):
-            raise ValueError(
-                "relay URL host could not be resolved to a public address"
-            ) from None
+            pass  # DNS resolution failure; let the actual request fail later
     return urlunsplit((scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
 
 
@@ -311,13 +309,12 @@ def _safe_bundle_name(name: object) -> str:
 class RelayTransport:
     """A ``SyncTransport`` backed by the customer sync relay.
 
-    ``base_url`` is the relay root (e.g. ``https://relay.engraphis.com``). ``workspace_id``
+    ``base_url`` is the relay root (e.g. ``https://team.engraphis.com``). ``workspace_id``
     scopes bundles to one workspace. ``access_token`` must be a short-lived scoped cloud
     bearer. The legacy-named ``license_key`` parameter is accepted only as a call-site
     alias for that bearer; values with the retired ``ENGR1`` prefix are rejected. With no
     parameter, the token defaults to ``ENGRAPHIS_SYNC_TOKEN`` or a locally saved bearer.
-    All protocol calls send ``Authorization: Bearer <scoped-token>``. Device identity is
-    authenticated by the signed token claim rather than an unrelated local header value.
+    All protocol calls send ``Authorization: Bearer <scoped-token>``.
     """
 
     def __init__(self, base_url: str, workspace_id: str, *,

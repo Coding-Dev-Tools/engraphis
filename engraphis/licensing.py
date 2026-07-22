@@ -9,12 +9,10 @@ working while callers migrate.
 from __future__ import annotations
 
 from engraphis.hosted_client import (
-    MAX_HOSTED_ACCOUNT_GRACE_SECONDS,
     MAX_LOCAL_WRITE_GRACE_SECONDS,
     TRIAL_DAYS,
     TRIAL_SECONDS,
     HostedFeatureError,
-    account_url,
     required_plan,
     upgrade_url,
 )
@@ -31,8 +29,6 @@ def production_warnings() -> list:
 
 __all__ = [
     "LicenseError",
-    "account_url",
-    "MAX_HOSTED_ACCOUNT_GRACE_SECONDS",
     "MAX_LOCAL_WRITE_GRACE_SECONDS",
     "TRIAL_DAYS",
     "TRIAL_SECONDS",

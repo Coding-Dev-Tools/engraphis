@@ -1,7 +1,7 @@
 {
   "format": "engraphis-railway-template-composer-source/v1",
-  "name": "Engraphis Pro or Team",
-  "description": "Customer-mode Engraphis dashboard with persistent memory, secure hosted trial activation, and scoped Team sync tokens.",
+  "name": "Engraphis Free Customer Node",
+  "description": "Free single-user Engraphis memory node with optional clients for official hosted Pro and Team services.",
   "source": {
     "repository": "https://github.com/Coding-Dev-Tools/engraphis",
     "branch": "main",
@@ -27,8 +27,10 @@
       "value": "/data/.engraphis",
       "required": true
     },
-    "ENGRAPHIS_TEAM_MODE": {
-      "value": "1",
+    "ENGRAPHIS_API_TOKEN": {
+      "value": "${{ secret(48) }}",
+      "secret": true,
+      "prompt": "Railway generates this bearer for the single-user customer node. Keep it private.",
       "required": true
     },
     "ENGRAPHIS_JSON_LOGS": {
@@ -39,22 +41,16 @@
       "value": "*",
       "required": true
     },
-    "ENGRAPHIS_CLOUD_URL": {
-      "value": "https://license.engraphis.com",
-      "required": true
+    "ENGRAPHIS_CLOUD_CONTROL_URL": {
+      "value": "https://api.engraphis.com",
+      "required": false
     },
-    "ENGRAPHIS_DASHBOARD_URL": {
-      "value": "https://${{RAILWAY_PUBLIC_DOMAIN}}",
-      "required": true
+    "ENGRAPHIS_CLOUD_COMPUTE_URL": {
+      "value": "https://compute.engraphis.com",
+      "required": false
     },
-    "ENGRAPHIS_RELAY_URL": {
-      "value": "https://${{RAILWAY_PUBLIC_DOMAIN}}",
-      "required": true
-    },
-    "ENGRAPHIS_DEPLOYMENT_TOKEN": {
-      "value": "${{ secret(48) }}",
-      "secret": true,
-      "prompt": "Railway generates this unique ownership secret. Copy it into the hosted onboarding wizard, then seal it after the first admin is created.",
+    "ENGRAPHIS_MANAGED_COMPUTE_CONSENT": {
+      "value": "0",
       "required": true
     }
   }

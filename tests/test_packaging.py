@@ -4,45 +4,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_compiled_wheel_staging_excludes_python_licensing_sources(
-        monkeypatch, tmp_path):
-    """Exercise the real build_py hook against a wheel-like staging tree.
+def test_distribution_has_no_compiled_local_license_gate():
+    setup = (ROOT / "setup.py").read_text(encoding="utf-8")
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
-    setuptools returns ``(package, module, source)`` tuples. A prior predicate compared
-    the package to tuple element zero twice, silently shipping both source modules next
-    to the compiled extensions.
-    """
-    import runpy
-
-    import setuptools
-    from setuptools import Distribution
-
-    monkeypatch.setenv("ENGRAPHIS_SKIP_CYTHON", "1")
-    monkeypatch.setattr(setuptools, "setup", lambda **_kwargs: None)
-    setup_globals = runpy.run_path(str(ROOT / "setup.py"))
-    setup_globals["EXT_MODULES"].append(object())
-
-    source_root = tmp_path / "src"
-    package = source_root / "engraphis"
-    package.mkdir(parents=True)
-    for name in ("__init__.py", "licensing.py", "cloud_license.py", "feature.py"):
-        (package / name).write_text(f"# {name}\n", encoding="utf-8")
-
-    distribution = Distribution({
-        "packages": ["engraphis"],
-        "package_dir": {"": str(source_root)},
-    })
-    distribution.script_name = str(ROOT / "setup.py")
-    command = setup_globals["build_py"](distribution)
-    command.build_lib = str(tmp_path / "wheel-tree")
-    command.ensure_finalized()
-    command.run()
-
-    staged = Path(command.build_lib) / "engraphis"
-    assert (staged / "__init__.py").is_file()
-    assert (staged / "feature.py").is_file()
-    assert not (staged / "licensing.py").exists()
-    assert not (staged / "cloud_license.py").exists()
+    assert "Cython" not in setup + pyproject
+    assert "cython" not in setup + pyproject
+    assert "Extension(" not in setup
+    assert not (ROOT / "engraphis" / "cloud_license.py").exists()
 
 
 def test_distribution_configuration_excludes_runtime_bytecode():
@@ -161,11 +130,14 @@ def test_example_config_preserves_platform_database_default():
     assert "platform user-data directory" in example
 
 
-def test_customer_sync_relay_docs_keep_vendor_license_service_separate():
+def test_customer_hosting_docs_do_not_claim_private_cloud_authority():
     hosting = (ROOT / "docs" / "HOSTING_RAILWAY.md").read_text(encoding="utf-8")
     template = (ROOT / "docs" / "RAILWAY_TEMPLATE.md").read_text(encoding="utf-8")
-    for document in (hosting, template):
-        assert "ENGRAPHIS_RELAY_URL" in document
-        assert "ENGRAPHIS_CLOUD_URL" in document
-        assert "https://license.engraphis.com" in document
-        assert "ENGRAPHIS_RELAY_URL=https://license.engraphis.com" not in document
+    combined = hosting + template
+    normalized = " ".join(combined.replace("**", "").split())
+
+    assert "free single-user" in combined
+    assert "does not" in normalized
+    assert "license issuer" in combined
+    assert "ENGRAPHIS_CLOUD_CONTROL_URL" in hosting
+    assert "ENGRAPHIS_CLOUD_COMPUTE_URL" in hosting

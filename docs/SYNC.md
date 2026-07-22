@@ -30,12 +30,11 @@ infrastructure.
 The no-card Pro or Team trial begins after email confirmation and lasts **exactly 3 active
 days**.
 
-`workspace_write_grace` is separate and private-service enforced. It may preserve bounded
-hosted-account continuity operations for at most **24 hours** following an authoritative
-entitlement denial. It never extends the trial or subscription, and it never grants Cloud Sync,
-Analytics, Automation, Auto Dreaming, Auto Consolidation, Team access, seats, or credentials.
-Cloud access may stop immediately. The free local sync-folder primitive and local core are not
-gated by this hosted lifecycle state.
+`workspace_write_grace` is separate. It may preserve ordinary writes to an already provisioned
+local workspace for at most **24 hours** following an authoritative entitlement denial. It never
+extends the trial or subscription, and it never grants Cloud Sync, Analytics, Automation, Auto
+Dreaming, Auto Consolidation, Team access, seats, or credentials. Cloud access may stop
+immediately even while local write grace remains.
 
 ## Configure a customer installation
 
@@ -49,11 +48,9 @@ ENGRAPHIS_CLOUD_ORGANIZATION_ID=org_replace_me
 ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL=<secret>
 ```
 
-The refresh credential rotates. Refresh is serialized across threads and cooperating processes,
-and the client stores only the replacement needed for the next session in an owner-only file.
-After the first rotation, that saved replacement takes precedence over a still-present bootstrap
-environment credential. Do not place either value in source, documentation, container images,
-shell history, or support logs.
+The refresh credential rotates. The client stores only the replacement needed for the next
+session and writes it atomically to an owner-only file. Do not place it in source, documentation,
+container images, shell history, or support logs.
 
 The one-shot customer client remains available for explicit sync operations:
 
@@ -61,15 +58,12 @@ The one-shot customer client remains available for explicit sync operations:
 python -m scripts.sync \
   --db engraphis.db \
   --workspace acme \
-  --relay https://relay.engraphis.com
+  --relay https://team.engraphis.com
 ```
 
 The dashboard's **Sync now** action invokes the same customer protocol. The public package does
 not run a local auto-sync loop or ship a cron/Task Scheduler wrapper. Hosted automation belongs
-to the private service. If the relay denies every attempted shared workspace because the session
-is expired, revoked, or no longer entitled, the dashboard returns to the hosted Pro/Team recovery
-CTA instead of reporting a successful empty sync. A successful empty or read-only workspace keeps
-the result partial so another workspace's denial is not misreported as a total authorization loss.
+to the private service.
 
 ### Local folder transport
 
@@ -93,12 +87,6 @@ Sync exchanges bounded workspace snapshots and merges them deterministically. Ex
 bi-temporal history is preserved: conflicts close validity windows or create explicit successor
 records rather than destructively overwriting facts. The public merge code is necessary so a
 customer can verify how their local database changes.
-
-Session scope is strictly device-local. Every exported workspace or repo bundle excludes both
-live and invalidated session-scoped rows, as well as `secret` rows, and includes a memory link only
-when both endpoints remain in the export. Inbound legacy or untrusted bundles cannot create,
-relabel, or overwrite session-scoped state because the sync format carries no authenticated
-session owner or lifecycle contract.
 
 Bundle input is untrusted. The client validates schema and size limits before applying records,
 rechecks workspace scope, and retains provenance/audit evidence. A relay cannot inject a record
