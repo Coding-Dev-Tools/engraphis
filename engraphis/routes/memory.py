@@ -718,7 +718,7 @@ def _compute_memory_analytics() -> dict:
     the computation, so the data can never be assembled on the free tier even if
     the route's ``_require_paid`` wrapper is deleted (defense in depth; mirrors
     engraphis.analytics.compute_analytics)."""
-    licensing.require_feature("analytics")
+    licensing.require_cloud_lease("analytics")
     from collections import defaultdict
     from engraphis.stores import get_conn
     from engraphis.engines.reweight import retention_score
@@ -867,7 +867,7 @@ def _compute_compliance_export(namespace: Optional[str]) -> dict:
     """Full workspace dump. The Pro gate lives HERE so the export can never be
     built on the free tier even if the route's ``_require_paid`` wrapper is
     deleted (defense in depth; mirrors service.export_workspace)."""
-    licensing.require_feature("export")
+    licensing.require_cloud_lease("export")
     docs = mem_store.list_documents(namespace=namespace, limit=100000)
     return {"exported_at": time.time(), "namespace": namespace,
             "count": len(docs), "memories": docs}

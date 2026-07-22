@@ -568,7 +568,10 @@ class MemoryEngine:
         return final_importance, final_stability, signal
 
     def _has_structured_graph_metadata(self, metadata: dict) -> bool:
-        if isinstance(metadata.get("entities"), list) or isinstance(metadata.get("relations"), list):
+        if (
+            isinstance(metadata.get("entities"), list)
+            or isinstance(metadata.get("relations"), list)
+        ):
             return True
         structured = metadata.get("structured_extraction")
         return isinstance(structured, dict) and (
@@ -1808,7 +1811,14 @@ class MemoryEngine:
             + len(memory_mentions) * 2
             + len(communities_affected) * 5,
         )
-        level = "low" if score < 25 else "medium" if score < 55 else "high" if score < 80 else "critical"
+        if score < 25:
+            level = "low"
+        elif score < 55:
+            level = "medium"
+        elif score < 80:
+            level = "high"
+        else:
+            level = "critical"
         hotspot_names = {item["node"] for item in analysis["hotspots"][:10]}
         conflict_zones = sorted(touched_names & hotspot_names)
         return {

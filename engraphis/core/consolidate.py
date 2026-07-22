@@ -266,7 +266,9 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
 
 # ── internals ─────────────────────────────────────────────────────────────────
 
-def _cluster_by_subject(memories: list[MemoryRecord], *, threshold: float) -> list[list[MemoryRecord]]:
+def _cluster_by_subject(
+    memories: list[MemoryRecord], *, threshold: float
+) -> list[list[MemoryRecord]]:
     """Greedy single-link clustering on token Jaccard — deterministic, order-stable
     (memories arrive newest-first from the store; clusters keep that order)."""
     token_sets = [tokenize(f"{m.title} {m.content}") for m in memories]
@@ -845,7 +847,9 @@ def infer_links(engine, *, workspace_id: str, repo_id: Optional[str] = None,
     return report
 
 
-def _cluster_reps(mentions: list[MemoryRecord], cluster_of: dict, cis: list[int]) -> list[MemoryRecord]:
+def _cluster_reps(
+    mentions: list[MemoryRecord], cluster_of: dict, cis: list[int]
+) -> list[MemoryRecord]:
     """One representative memory per bridged cluster (first mention seen in each)."""
     reps: list[MemoryRecord] = []
     seen: set[int] = set()

@@ -1207,7 +1207,7 @@ def _analytics_summary(workspace: Optional[str]) -> dict:
     Pro gate lives HERE, at the top of the computation, so the payload can never
     be assembled on the free tier even if the route's ``_paid`` wrapper is deleted
     (defense in depth; mirrors engraphis.analytics.compute_analytics)."""
-    licensing.require_feature("analytics")
+    licensing.require_cloud_lease("analytics")
     st = _run(service().stats, workspace=workspace)
     wss = _run(service().list_workspaces).get("workspaces") or []
     by_type = [{"bucket": t, "count": c} for t, c in (st.get("by_type") or {}).items()]
