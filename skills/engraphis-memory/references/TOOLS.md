@@ -259,6 +259,10 @@ If a previous same-user/agent session in this repo ended with a summary/open thr
 carries them so you resume without crossing an identity boundary. Pass `session_id` to `remember`
 and `end_session`.
 
+Authenticated host adapters must provide a stable non-empty user `id` and ownership `email` when
+binding request context. Malformed non-`None` principals fail closed; only `None` selects trusted
+standalone/system mode. Ownerless legacy sessions are not exposed to authenticated callers.
+
 ### `engraphis_end_session`
 Close a session with a summary/outcome so the next one picks up the thread.
 
