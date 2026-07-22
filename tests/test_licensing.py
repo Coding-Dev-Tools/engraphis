@@ -288,8 +288,15 @@ def test_rotated_vendor_key_clears_the_dev_key_warning(monkeypatch):
     assert lic.production_warnings() == []
 
 
-def test_pre_sale_signer_blocks_production_readiness():
-    assert any("pre-sale" in warning for warning in lic.production_warnings())
+def test_production_signer_release_ceremony_is_pinned():
+    # The 2026-07-22 Railway inventory was empty, so the reviewed release pins the
+    # production seed's derived public key without a legacy compatibility verifier.
+    assert lic._VENDOR_PUBKEY_HEX == (
+        "77d0f9e4637bc322e494c0073b03266009a6140c7e1b99d0f47b827d4ece6d83"
+    )
+    assert lic._PREVIOUS_VENDOR_PUBKEY_HEXES == ()
+    assert lic.VENDOR_SIGNER_RELEASE_READY is True
+    assert not any("pre-sale" in warning for warning in lic.production_warnings())
 
 
 def test_production_warnings_flag_placeholder_checkout(monkeypatch):
