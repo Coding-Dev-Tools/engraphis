@@ -25,6 +25,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Changed
 
+- The legacy graph view now defaults to deterministic community islands, keeps sparse
+  influence bridges visually subordinate, and renders bounded direct A-MEM links even when
+  entity extraction is disabled. A reproducible repository-local screen-demo workflow exercises
+  session handoff, bi-temporal supersession, recall evidence, and history without external
+  services.
 - The public package contains the local engine and customer-side protocols; hosted service implementation is maintained separately.
 - Analytics, Cloud Sync service operation, Auto Dreaming, Auto Consolidation, automation
   scheduling, and Team administration are now hosted-service capabilities. The public dashboard

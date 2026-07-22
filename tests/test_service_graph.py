@@ -311,6 +311,102 @@ def test_graph_lazy_backfills_preexisting_memories():
     assert "Alice Johnson" in labels and "Acme Corp" in labels
 
 
+def test_graph_falls_back_to_direct_memory_links_without_entities():
+    """A-MEM links form a useful graph even when entity extraction is disabled."""
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    first = svc.remember("Synthetic alpha", workspace="acme", scope="workspace")
+    second = svc.remember("Synthetic beta", workspace="acme", scope="workspace")
+    svc.link(first["id"], second["id"], workspace="acme", relation="causes")
+
+    graph = svc.graph(workspace="acme")
+    assert {node["id"] for node in graph["nodes"]} == {first["id"], second["id"]}
+    assert {row["etype"] for row in graph["types"]} == {"memory_semantic"}
+    assert {
+        "from": first["id"], "to": second["id"],
+        "label": "causes", "layer": "causal",
+    } in graph["edges"]
+
+
+def test_graph_memory_link_fallback_excludes_session_scope():
+    """The workspace graph must never surface private session memories."""
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    session = svc.start_session("acme", repo="r", agent="codex", goal="private")
+    private_a = svc.remember(
+        "Private alpha", workspace="acme", repo="r",
+        session_id=session["session_id"], scope="session",
+    )
+    private_b = svc.remember(
+        "Private beta", workspace="acme", repo="r",
+        session_id=session["session_id"], scope="session",
+    )
+    svc.link(private_a["id"], private_b["id"], workspace="acme", relation="causes")
+
+    assert svc.graph(workspace="acme")["nodes"] == []
+
+
+def test_graph_memory_link_fallback_respects_empty_layer_filter():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    first = svc.remember("Synthetic alpha", workspace="acme", scope="workspace")
+    second = svc.remember("Synthetic beta", workspace="acme", scope="workspace")
+    svc.link(first["id"], second["id"], workspace="acme", relation="causes")
+
+    graph = svc.graph(workspace="acme", layers=[])
+    assert graph["nodes"] == []
+    assert graph["edges"] == []
+
+
+def test_graph_memory_link_fallback_samples_links_before_unrelated_memories():
+    """A small graph limit must still select connected memories."""
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    svc.engine.auto_evolve = False
+    for index in range(5):
+        svc.remember(
+            f"Unlinked memory {index}", workspace="acme", scope="workspace"
+        )
+    first = svc.remember(
+        "Orchid deployment requires manual approval.",
+        workspace="acme", scope="workspace",
+    )
+    second = svc.remember(
+        "Jupiter telemetry is retained for thirty days.",
+        workspace="acme", scope="workspace",
+    )
+    svc.link(first["id"], second["id"], workspace="acme", relation="causes")
+
+    graph = svc.graph(workspace="acme", limit=2)
+
+    assert {node["id"] for node in graph["nodes"]} == {first["id"], second["id"]}
+    assert graph["edges"] == [{
+        "from": first["id"], "to": second["id"],
+        "label": "causes", "layer": "causal",
+    }]
+
+
+def test_graph_memory_link_fallback_projects_bounded_content_excerpts():
+    """Fallback SQL must not materialize full memory bodies just to label nodes."""
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    svc.engine.auto_evolve = False
+    first = svc.remember("A" * 100_000, workspace="acme", scope="workspace")
+    second = svc.remember("B" * 100_000, workspace="acme", scope="workspace")
+    svc.link(first["id"], second["id"], workspace="acme", relation="causes")
+    statements = []
+    svc.store.conn.set_trace_callback(statements.append)
+
+    try:
+        graph = svc.graph(workspace="acme", limit=2)
+    finally:
+        svc.store.conn.set_trace_callback(None)
+
+    assert {node["label"] for node in graph["nodes"]} == {"A" * 80, "B" * 80}
+    fallback_queries = [sql for sql in statements if "FROM mem_links link" in sql]
+    assert len(fallback_queries) == 1
+    projection = fallback_queries[0].lower()
+    assert "substr(left_memory.content, 1, 80)" in projection
+    assert "substr(right_memory.content, 1, 80)" in projection
+    assert "left_memory.content as" not in projection
+    assert "right_memory.content as" not in projection
+
+
 def test_graph_lazy_backfill_is_idempotent():
     """Re-opening the Graph tab must not duplicate entities."""
     svc = MemoryService.create(":memory:", graph_extractor="regex")
