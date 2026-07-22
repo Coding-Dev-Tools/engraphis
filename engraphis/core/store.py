@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import threading
 import time
 import unicodedata
@@ -319,6 +320,16 @@ class _SerializedConnection:
     def _pinned(self) -> bool:
         return getattr(self._pin, "held", False)
 
+    def transaction_owned_by_current_thread(self) -> bool:
+        """Whether this thread owns the connection's currently pinned transaction.
+
+        ``sqlite3.Connection.in_transaction`` is connection-global: it is also true when
+        a *different* thread owns the transaction and this thread is waiting on ``_lock``.
+        Multi-statement Store operations use this thread-local view to decide whether they
+        must open and settle their own transaction after that waiter is released.
+        """
+        return self._pinned()
+
     def _acquire(self) -> None:
         if not self._lock.acquire(timeout=self._ACQUIRE_TIMEOUT):
             raise sqlite3.OperationalError(
@@ -425,20 +436,14 @@ class Store:
                  allowed_workspaces: Optional[set] = None,
                  connect: Optional[Callable[[str], Any]] = None) -> None:
         self.path = path
+        self._connect = connect
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        if connect is not None:
-            # Injected connection factory (e.g. the SQLCipher encrypted backend). It owns
-            # opening + keying + row_factory; the core never imports the concrete driver.
-            raw_conn = connect(path)
-        else:
-            raw_conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
-            raw_conn.row_factory = sqlite3.Row
+        raw_conn = self._open_connection(path)
         # Serialize the shared connection so concurrent threadpool handlers can't interleave
         # transactions on it (see _SerializedConnection). All Store/service/backend access
         # goes through self.conn, so wrapping here covers every writer.
         self.conn = _SerializedConnection(raw_conn)
-        self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.has_fts5 = False
@@ -446,49 +451,268 @@ class Store:
         self.allowed_workspaces: Optional[frozenset] = (
             frozenset(allowed_workspaces) if allowed_workspaces else None
         )
-        self.init_schema()
-
-    def _backup_before_v4_migration(self) -> None:
-        """Best-effort snapshot of the database file before running the v4
-        canonicalization/edge-support backfills below.
-
-        Uses SQLite's own online backup API via a second connection to the same file,
-        which is safe to run against a live WAL-mode database. This must never block or
-        fail startup — an upgrade that can't snapshot itself should still proceed rather
-        than refuse to start, so every failure here is swallowed silently."""
         try:
-            if self.path in (":memory:", "") or self.path.startswith("file::memory:"):
-                return
-            backup_path = f"{self.path}.pre-migration-v4.bak"
-            if os.path.exists(backup_path):
-                return  # already have one from a prior attempt; don't overwrite it
-            src = sqlite3.connect(self.path)
+            self.init_schema()
+            # journal_mode is persistent state, so set it only after a required backup
+            # and the transactional migration have completed successfully.
+            self.conn.execute("PRAGMA journal_mode=WAL")
+        except BaseException:
             try:
-                dst = sqlite3.connect(backup_path)
-                try:
-                    src.backup(dst)
-                    dst.execute("PRAGMA quick_check")
-                finally:
-                    dst.close()
+                if self.conn.in_transaction:
+                    self.conn.rollback()
             finally:
-                src.close()
-        except Exception:
-            pass
+                self.conn.close()
+            raise
+
+    def _open_connection(self, path: str):
+        """Open *path* with the primary database's connection semantics."""
+        if self._connect is not None:
+            # Injected factories own opening, keying, row_factory, and exception
+            # translation (notably the SQLCipher backend).
+            return self._connect(path)
+        conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    @staticmethod
+    def _raw_connection(conn):
+        """Unwrap core/backend adapters for sqlite3's type-checked backup API."""
+        seen: set[int] = set()
+        while hasattr(conn, "_raw") and id(conn) not in seen:
+            seen.add(id(conn))
+            conn = getattr(conn, "_raw")
+        return conn
+
+    @staticmethod
+    def _quick_check(conn) -> bool:
+        rows = conn.execute("PRAGMA quick_check").fetchall()
+        return len(rows) == 1 and str(rows[0][0]).casefold() == "ok"
+
+    @staticmethod
+    def _same_file(left, right) -> bool:
+        return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+    @staticmethod
+    def _checked_backup_file(path: str, *, allow_missing: bool = False):
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            if allow_missing:
+                return None
+            raise
+        attributes = getattr(info, "st_file_attributes", 0)
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
+                or (reparse and attributes & reparse)
+                or getattr(info, "st_nlink", 1) != 1):
+            raise RuntimeError("schema backup path is not a private regular file")
+        return info
+
+    @staticmethod
+    def _fsync_backup_parent(path: str) -> None:
+        if os.name == "nt":
+            return
+        descriptor = os.open(
+            str(Path(path).parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _logical_digest(conn) -> str:
+        digest = hashlib.sha256()
+        for statement in conn.iterdump():
+            digest.update(statement.encode("utf-8"))
+            digest.update(b"\n")
+        return digest.hexdigest()
+
+    def _cleanup_v4_backup_temps(self, backup_path: str) -> None:
+        stable = Path(backup_path)
+        pattern = re.compile(
+            r"^%s\.tmp-[0-9]+-[0-9]+-[0-9]+$" % re.escape(stable.name))
+        try:
+            entries = tuple(stable.parent.iterdir())
+        except OSError:
+            return
+        changed = False
+        for entry in entries:
+            if not pattern.fullmatch(entry.name):
+                continue
+            try:
+                info = os.lstat(str(entry))
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                if getattr(info, "st_nlink", 1) == 1:
+                    entry.unlink()
+                    changed = True
+                    continue
+                try:
+                    published = os.lstat(str(stable))
+                except FileNotFoundError:
+                    continue
+                if self._same_file(info, published):
+                    entry.unlink()
+                    changed = True
+            except OSError:
+                pass
+        if changed:
+            self._fsync_backup_parent(backup_path)
+
+    def _backup_before_v4_migration(self) -> str:
+        """Create and verify the mandatory pre-v4 backup without mutating source data.
+
+        Source and destination both use the injected connector, so SQLCipher databases
+        remain keyed throughout. The caller holds ``BEGIN IMMEDIATE`` on the primary
+        connection, preventing another writer from changing the source between this
+        snapshot and the migration commit. Only a quick-checked temporary backup may
+        atomically replace the stable backup path; every failure aborts the migration.
+        """
+        if self.path in (":memory:", "") or self.path.startswith("file::memory:"):
+            raise RuntimeError("schema v4 migration requires a durable pre-migration backup")
+        backup_path = f"{self.path}.pre-migration-v4.bak"
+        self._cleanup_v4_backup_temps(backup_path)
+        temp_path = (
+            f"{backup_path}.tmp-{os.getpid()}-{threading.get_ident()}-{time.time_ns()}"
+        )
+        source = destination = None
+        try:
+            flags = (
+                os.O_RDWR | os.O_CREAT | os.O_EXCL
+                | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            )
+            descriptor = os.open(temp_path, flags, 0o600)
+            created = os.fstat(descriptor)
+            os.close(descriptor)
+            source = self._open_connection(self.path)
+            destination = self._open_connection(temp_path)
+            current = self._checked_backup_file(temp_path)
+            if not self._same_file(created, current):
+                raise RuntimeError("schema backup path changed while opening")
+            self._raw_connection(source).backup(self._raw_connection(destination))
+            destination.commit()
+            if not self._quick_check(destination):
+                raise RuntimeError("backup quick_check did not return ok")
+            source_digest = self._logical_digest(source)
+            backup_digest = self._logical_digest(destination)
+            if source_digest != backup_digest:
+                raise RuntimeError("backup logical digest did not match source")
+            destination.close()
+            destination = None
+            source.close()
+            source = None
+            current = self._checked_backup_file(temp_path)
+            if not self._same_file(created, current):
+                raise RuntimeError("schema backup path changed while writing")
+            descriptor = os.open(
+                temp_path, os.O_RDWR | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                opened = os.fstat(descriptor)
+                if not self._same_file(current, opened):
+                    raise RuntimeError("schema backup path changed before flush")
+                fchmod = getattr(os, "fchmod", None)
+                if fchmod is not None:
+                    fchmod(descriptor, 0o600)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            try:
+                os.link(temp_path, backup_path)
+            except FileExistsError:
+                stable_info = self._checked_backup_file(backup_path)
+                stable = self._open_connection(backup_path)
+                try:
+                    if not self._quick_check(stable):
+                        raise RuntimeError("existing schema backup failed quick_check")
+                    if self._logical_digest(stable) != backup_digest:
+                        raise RuntimeError("existing schema backup does not match source")
+                finally:
+                    stable.close()
+                if not self._same_file(
+                        stable_info, self._checked_backup_file(backup_path)):
+                    raise RuntimeError("existing schema backup changed while validating")
+                os.unlink(temp_path)
+                self._fsync_backup_parent(backup_path)
+                return backup_path
+            published = os.lstat(backup_path)
+            if not self._same_file(current, published):
+                raise RuntimeError("schema backup publication changed")
+            os.unlink(temp_path)
+            stable_info = self._checked_backup_file(backup_path)
+            if not self._same_file(current, stable_info):
+                raise RuntimeError("schema backup publication was replaced")
+            self._fsync_backup_parent(backup_path)
+            return backup_path
+        except BaseException as exc:
+            for conn in (destination, source):
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            try:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+            except OSError:
+                pass
+            raise RuntimeError(
+                "schema v4 migration aborted: could not create and verify the "
+                "pre-migration backup"
+            ) from exc
+
+    def _execute_script_transactional(self, script: str) -> None:
+        """Execute a SQLite script without ``executescript``'s implicit COMMIT."""
+        statement = ""
+        # Some callers compose adjacent string literals with no newline between their
+        # semicolon-terminated statements, so split at complete semicolon boundaries
+        # rather than assuming one statement per source line. ``complete_statement``
+        # correctly keeps trigger ``BEGIN ...; ...; END;`` bodies together.
+        for character in script:
+            statement += character
+            if character == ";" and sqlite3.complete_statement(statement):
+                sql = statement.strip()
+                if sql:
+                    self.conn.execute(sql)
+                statement = ""
+        if statement.strip():
+            raise sqlite3.OperationalError("incomplete schema statement")
 
     # ── schema ──────────────────────────────────────────────────────────────
     def init_schema(self) -> None:
+        objects = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table','view','index','trigger') "
+            "AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        object_names = {str(row[0]) for row in objects}
         previous_version = 0
-        try:
+        if "schema_migrations" in object_names:
             row = self.conn.execute(
                 "SELECT MAX(version) AS v FROM schema_migrations"
             ).fetchone()
-            previous_version = int(row["v"]) if row and row["v"] is not None else 0
-        except Exception:
-            # A new database has no migration table yet. Injected SQLite-compatible
-            # drivers may use their own exception types, so treat any probe failure as
-            # "no prior schema" and let the canonical schema create it below.
-            previous_version = 0
-        self.conn.executescript(SCHEMA_SQL)
+            value = row[0] if row is not None else None
+            previous_version = int(value) if value is not None else 0
+        if previous_version > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"database schema {previous_version} is newer than supported "
+                f"schema {SCHEMA_VERSION}"
+            )
+        needs_backup = bool(object_names) and previous_version < SCHEMA_VERSION
+        try:
+            # Reserve the writer before the snapshot. This is read/locking state only;
+            # every schema/data transform remains inside the transaction below.
+            self.conn.execute("BEGIN IMMEDIATE")
+            if needs_backup:
+                self._backup_before_v4_migration()
+            self._apply_schema(previous_version)
+            self.conn.commit()
+        except BaseException:
+            if self.conn.in_transaction:
+                self.conn.rollback()
+            raise
+
+    def _apply_schema(self, previous_version: int) -> None:
+        self._execute_script_transactional(SCHEMA_SQL)
         self.has_fts5 = _fts5_available(self.conn)
         self.conn.execute(FTS_SQL_FTS5 if self.has_fts5 else FTS_SQL_FALLBACK)
         # Additive columns for DBs created before they existed — CREATE TABLE IF NOT
@@ -531,11 +755,8 @@ class Store:
         # v4 makes canonical identity and edge evidence explicit and indexed. Run the
         # backfills before creating representative-only uniqueness indexes so exact
         # normalized aliases can safely converge onto one deterministic canonical id.
-        # A real upgrade (not a fresh DB) gets a best-effort pre-migration snapshot first.
-        if 1 <= previous_version < 4:
-            self._backup_before_v4_migration()
         self._backfill_entity_canonicalization()
-        self.conn.executescript(
+        self._execute_script_transactional(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_workspace_canonical "
             "ON entities(workspace_id, normalized_name, etype) "
             "WHERE repo_id IS NULL AND canonical_id=id AND normalized_name<>'';"
@@ -549,7 +770,7 @@ class Store:
         )
         self._backfill_edge_supports()
         self._deduplicate_live_edges()
-        self.conn.executescript(
+        self._execute_script_transactional(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_workspace_live_unique "
             "ON edges(workspace_id, src, dst, relation, layer) "
             "WHERE workspace_id IS NOT NULL AND repo_id IS NULL "
@@ -593,7 +814,6 @@ class Store:
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?,?)",
             (SCHEMA_VERSION, now_ts()),
         )
-        self.conn.commit()
 
     def _backfill_entity_canonicalization(self) -> None:
         rows = [dict(row) for row in self.conn.execute(
@@ -878,24 +1098,63 @@ class Store:
 
     # ── sessions ──────────────────────────────────────────────────────────────
     def start_session(self, workspace_id: str, repo_id: Optional[str] = None,
-                      *, agent: str = "", user_id: str = "", goal: str = "") -> str:
+                      *, agent: str = "", user_id: str = "", goal: str = "",
+                      commit: bool = True) -> str:
         sid = ids.new_id("session")
         self.conn.execute(
             "INSERT INTO sessions(id, workspace_id, repo_id, agent, user_id, goal, status, "
             "started_at) VALUES (?,?,?,?,?,?,?,?)",
             (sid, workspace_id, repo_id, agent, user_id, goal, "active", now_ts()),
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return sid
 
     def end_session(self, session_id: str, *, summary: str = "",
-                    open_threads: Optional[list] = None, outcome: str = "") -> None:
-        self.conn.execute(
-            "UPDATE sessions SET status='summarized', ended_at=?, summary=?, open_threads=?, "
-            "outcome=? WHERE id=?",
-            (now_ts(), summary, _dumps(open_threads or []), outcome, session_id),
-        )
-        self.conn.commit()
+                    open_threads: Optional[list] = None, outcome: str = "") -> str:
+        """Close one active session exactly once.
+
+        An identical retry is a no-op, while a conflicting retry cannot overwrite the
+        durable handoff left by the first caller. ``BEGIN IMMEDIATE`` makes the state
+        check and transition atomic across threads, processes, and Store instances.
+
+        Returns ``"ended"``, ``"unchanged"``, ``"conflict"``, or ``"missing"``.
+        """
+        threads = list(open_threads or [])
+        encoded_threads = _dumps(threads)
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        try:
+            if owns_transaction:
+                self.conn.execute("BEGIN IMMEDIATE")
+            row = self.conn.execute(
+                "SELECT status, summary, open_threads, outcome FROM sessions WHERE id=?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                result = "missing"
+            elif row["status"] == "active":
+                self.conn.execute(
+                    "UPDATE sessions SET status='summarized', ended_at=?, summary=?, "
+                    "open_threads=?, outcome=? WHERE id=? AND status='active'",
+                    (now_ts(), summary, encoded_threads, outcome, session_id),
+                )
+                result = "ended"
+            elif (
+                row["status"] == "summarized"
+                and (row["summary"] or "") == summary
+                and _loads(row["open_threads"], []) == threads
+                and (row["outcome"] or "") == outcome
+            ):
+                result = "unchanged"
+            else:
+                result = "conflict"
+            if owns_transaction:
+                self.conn.commit()
+            return result
+        except BaseException:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+                self.conn.rollback()
+            raise
 
     def get_session(self, session_id: str) -> Optional[dict]:
         row = self.conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
@@ -905,18 +1164,54 @@ class Store:
         d["open_threads"] = _loads(d.get("open_threads"), [])
         return d
 
+    def begin_session_write(self, session_id: str, *, workspace_id: str,
+                            repo_id: Optional[str] = None) -> bool:
+        """Reserve an active session for one write transaction.
+
+        The service performs an early ownership/status check for useful public errors, but
+        that check cannot serialize with a concurrent ``end_session``.  Re-reading under
+        ``BEGIN IMMEDIATE`` makes the write and close operations linearizable: whichever
+        transaction wins first either commits the write before closure or observes the
+        closed session and rejects it.
+
+        Return whether this call opened the transaction so the caller can roll it back if
+        a later step fails.  A caller already inside a transaction retains ownership.
+        """
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        try:
+            if owns_transaction:
+                self.conn.execute("BEGIN IMMEDIATE")
+            row = self.conn.execute(
+                "SELECT workspace_id, repo_id, status FROM sessions WHERE id=?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"no session with id '{session_id}'")
+            if row["workspace_id"] != workspace_id or (
+                    repo_id is not None and row["repo_id"] != repo_id):
+                raise ValueError("session_id does not belong to that workspace/repo")
+            if row["status"] != "active":
+                raise ValueError("session_id is not active")
+            return owns_transaction
+        except BaseException:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+                self.conn.rollback()
+            raise
+
     def get_active_session(self, workspace_id: str, repo_id: Optional[str],
-                           *, agent: str = "") -> Optional[dict]:
-        """Most recent still-``active`` session for this exact scope (and ``agent`` when
-        given). Powers idempotent ``start_session``: a repeat start in the same scope
-        reuses this session instead of opening a second concurrent one, which would put
-        two writers on the single-writer SQLite store (the "trampling" symptom)."""
+                           *, agent: str = "", user_id: str = "",
+                           goal: str = "") -> Optional[dict]:
+        """Return the active session for one exact task identity.
+
+        Empty values are values, not wildcards. This prevents an unnamed client, a
+        different authenticated user, or a new goal from inheriting unrelated work.
+        ``COALESCE`` keeps legacy rows with NULL identity fields compatible with the
+        empty-string values written by current clients.
+        """
         sql = ("SELECT * FROM sessions WHERE workspace_id=? AND repo_id IS ? "
-               "AND status='active'")
-        params: list[Any] = [workspace_id, repo_id]
-        if agent:
-            sql += " AND agent=?"
-            params.append(agent)
+               "AND status='active' AND COALESCE(agent, '')=? "
+               "AND COALESCE(user_id, '')=? AND COALESCE(goal, '')=?")
+        params: list[Any] = [workspace_id, repo_id, agent, user_id, goal]
         sql += " ORDER BY started_at DESC LIMIT 1"
         row = self.conn.execute(sql, params).fetchone()
         if not row:
@@ -925,17 +1220,61 @@ class Store:
         d["open_threads"] = _loads(d.get("open_threads"), [])
         return d
 
+    def get_or_start_session(self, workspace_id: str, repo_id: Optional[str] = None,
+                             *, agent: str = "", user_id: str = "", goal: str = "",
+                             force_new: bool = False) -> tuple[str, bool]:
+        """Atomically reuse an exact active task or create a new session.
+
+        The write reservation precedes the lookup, so two concurrent callers cannot both
+        observe "no session" and insert duplicates. ``force_new`` deliberately skips the
+        lookup while retaining the same transaction boundary.
+        """
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        try:
+            if owns_transaction:
+                self.conn.execute("BEGIN IMMEDIATE")
+            if not force_new:
+                existing = self.get_active_session(
+                    workspace_id, repo_id, agent=agent, user_id=user_id, goal=goal,
+                )
+                if existing is not None:
+                    if owns_transaction:
+                        self.conn.commit()
+                    return existing["id"], True
+            sid = self.start_session(
+                workspace_id, repo_id, agent=agent, user_id=user_id, goal=goal,
+                commit=False,
+            )
+            if owns_transaction:
+                self.conn.commit()
+            return sid, False
+        except BaseException:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+                self.conn.rollback()
+            raise
+
     def get_last_session(self, workspace_id: str, repo_id: Optional[str],
-                         *, exclude: Optional[str] = None) -> Optional[dict]:
-        """Most recently *ended* session in this repo — the cross-session handoff
-        source: the next session bootstraps from its
-        ``summary``/``open_threads`` instead of starting from nothing."""
+                         *, exclude: Optional[str] = None,
+                         user_id: Optional[str] = None,
+                         agent: Optional[str] = None) -> Optional[dict]:
+        """Return the most recent ended session matching the requested identity.
+
+        ``None`` leaves an identity dimension unfiltered for legacy/core callers. Passing
+        an empty string is an exact match for legacy unowned/unnamed sessions; it is never
+        a wildcard.
+        """
         sql = ("SELECT * FROM sessions WHERE workspace_id=? AND repo_id IS ? "
                "AND ended_at IS NOT NULL")
         params: list[Any] = [workspace_id, repo_id]
         if exclude:
             sql += " AND id != ?"
             params.append(exclude)
+        if user_id is not None:
+            sql += " AND COALESCE(user_id, '') = ?"
+            params.append(user_id)
+        if agent is not None:
+            sql += " AND COALESCE(agent, '') = ?"
+            params.append(agent)
         sql += " ORDER BY ended_at DESC LIMIT 1"
         row = self.conn.execute(sql, params).fetchone()
         if not row:
@@ -2035,14 +2374,25 @@ class Store:
                      repo_id: str = "", session_id: str = "", refs: Optional[list] = None,
                      interaction_level: str = "") -> str:
         eid = ids.new_id("event")
-        self.conn.execute(
-            "INSERT INTO events(id, workspace_id, repo_id, session_id, kind, content, refs, "
-            "interaction_level, ts) VALUES (?,?,?,?,?,?,?,?,?)",
-            (eid, workspace_id, repo_id, session_id, kind, content, _dumps(refs or []),
-             interaction_level, now_ts()),
-        )
-        self.conn.commit()
-        return eid
+        owns_session_transaction = False
+        try:
+            if session_id:
+                owns_session_transaction = self.begin_session_write(
+                    session_id, workspace_id=workspace_id, repo_id=repo_id or None
+                )
+            self.conn.execute(
+                "INSERT INTO events(id, workspace_id, repo_id, session_id, kind, content, refs, "
+                "interaction_level, ts) VALUES (?,?,?,?,?,?,?,?,?)",
+                (eid, workspace_id, repo_id, session_id, kind, content, _dumps(refs or []),
+                 interaction_level, now_ts()),
+            )
+            self.conn.commit()
+            return eid
+        except BaseException:
+            if (owns_session_transaction
+                    and self.conn.transaction_owned_by_current_thread()):
+                self.conn.rollback()
+            raise
 
     def audit(self, actor: str, action: str, target: str, detail: str = "",
               *, commit: bool = True) -> None:

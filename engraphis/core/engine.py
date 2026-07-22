@@ -362,13 +362,24 @@ class MemoryEngine:
         # sequence. Same single-process posture as the rest of the engine (the store is
         # one shared connection); multi-process writers are out of scope by design.
         with self._write_lock:
-            return self._resolve_and_store(
-                content, text=text, vec=vec, workspace_id=workspace_id, repo_id=repo_id,
-                session_id=session_id, mtype=mtype, scope=scope, title=title,
-                importance=importance, keywords=keywords, metadata=metadata,
-                valid_from=valid_from, resolve_conflicts=resolve_conflicts,
-                candidate_k=candidate_k, trusted_graph_keys=_trusted_graph_keys,
-            )
+            owns_session_transaction = False
+            try:
+                if session_id:
+                    owns_session_transaction = self.store.begin_session_write(
+                        session_id, workspace_id=workspace_id, repo_id=repo_id
+                    )
+                return self._resolve_and_store(
+                    content, text=text, vec=vec, workspace_id=workspace_id, repo_id=repo_id,
+                    session_id=session_id, mtype=mtype, scope=scope, title=title,
+                    importance=importance, keywords=keywords, metadata=metadata,
+                    valid_from=valid_from, resolve_conflicts=resolve_conflicts,
+                    candidate_k=candidate_k, trusted_graph_keys=_trusted_graph_keys,
+                )
+            except BaseException:
+                if (owns_session_transaction
+                        and self.store.conn.transaction_owned_by_current_thread()):
+                    self.store.conn.rollback()
+                raise
 
     def _resolve_and_store(self, content: str, *, text: str, vec: np.ndarray,
                            workspace_id: str, repo_id: Optional[str],
@@ -449,7 +460,7 @@ class MemoryEngine:
                     "failure_type=%s" % type(exc).__name__)
             except Exception:  # noqa: BLE001
                 pass
-        if repo_id:
+        if repo_id and scope != Scope.SESSION:
             self._link_memory_to_code(mid, content=f"{title}\n{content}", repo_id=repo_id)
 
         # Optional graph population (backends.graph_extractor). Structured fact metadata
@@ -459,7 +470,7 @@ class MemoryEngine:
         # ``meta`` was demoted above, so any hint still under a GRAPH_HINT_KEYS name here
         # was vouched for by ingest() — the "structured_extractor" label below is earned,
         # not merely asserted by whoever built the metadata dict.
-        if self._has_structured_graph_metadata(meta):
+        if scope != Scope.SESSION and self._has_structured_graph_metadata(meta):
             try:
                 from engraphis.backends.graph_extractor import (
                     StructuredMetadataGraphExtractor, feed as _graph_feed,
@@ -470,7 +481,7 @@ class MemoryEngine:
                             provenance={"source": "structured_extractor", "memory_id": mid})
             except Exception:
                 pass
-        if self.graph_extractor is not None:
+        if scope != Scope.SESSION and self.graph_extractor is not None:
             try:
                 from engraphis.backends.graph_extractor import feed as _graph_feed
                 _graph_feed(self.store, content, workspace_id=workspace_id,
@@ -842,7 +853,8 @@ class MemoryEngine:
         return out
 
     def recall_proactive(self, *, workspace_id: str, repo_id: Optional[str] = None,
-                         k: int = 10) -> dict:
+                         k: int = 10, user_id: Optional[str] = None,
+                         agent: Optional[str] = None) -> dict:
         """"What should I know right now" with no explicit query — conscious/proactive
         recall: importance + recency + retention, no semantic arm,
         plus the repo's last-session handoff (open threads / summary) if there is one.
@@ -863,7 +875,9 @@ class MemoryEngine:
 
         last_session: dict = {}
         if repo_id:
-            last = self.store.get_last_session(workspace_id, repo_id)
+            last = self.store.get_last_session(
+                workspace_id, repo_id, user_id=user_id, agent=agent,
+            )
             if last:
                 last_session = {
                     "session_id": last["id"], "summary": last.get("summary") or "",

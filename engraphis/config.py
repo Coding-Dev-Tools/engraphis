@@ -2,15 +2,24 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import sqlite3
+import stat
 import sys
 from contextlib import contextmanager
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Optional
+
+from engraphis.private_state import (
+    UnsafeStateFile,
+    atomic_private_text,
+    private_file_stat,
+    read_private_text,
+)
 
 try:
     from dotenv import load_dotenv
@@ -72,9 +81,23 @@ def _backup_sqlite(src: Path, dst: Path) -> None:
     SQLite's backup API includes committed WAL content; copying only the main file can
     silently drop recent writes. The source remains untouched for rollback/recovery.
     """
+    source_info = private_file_stat(src)
+    if private_file_stat(dst, allow_missing=True) is not None:
+        raise FileExistsError("database migration stage already exists")
+    flags = (
+        os.O_RDWR | os.O_CREAT | os.O_EXCL
+        | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(str(dst), flags, 0o600)
+    created_info = os.fstat(descriptor)
+    os.close(descriptor)
     source = sqlite3.connect(str(src), timeout=30)
     target = sqlite3.connect(str(dst), timeout=30)
     try:
+        if not _same_identity(source_info, private_file_stat(src)):
+            raise UnsafeStateFile("database migration source changed while opening")
+        if not _same_identity(created_info, private_file_stat(dst)):
+            raise UnsafeStateFile("database migration stage changed while opening")
         source.execute("PRAGMA query_only=ON")
         source.backup(target)
         check = target.execute("PRAGMA quick_check").fetchone()
@@ -84,14 +107,153 @@ def _backup_sqlite(src: Path, dst: Path) -> None:
     finally:
         target.close()
         source.close()
+    final_info = private_file_stat(dst)
+    if not _same_identity(created_info, final_info):
+        raise UnsafeStateFile("database migration stage changed while writing")
+    descriptor = os.open(
+        str(dst), os.O_RDWR | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(descriptor)
+        if not _same_identity(final_info, opened):
+            raise UnsafeStateFile("database migration stage changed before flush")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _same_identity(left, right) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _fsync_parent(path: Path) -> None:
+    """Persist directory-entry ordering on platforms that expose directory fsync."""
+    if os.name == "nt":
+        return
+    descriptor = os.open(
+        str(path.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _unlink_if_identity(path: Path, identity) -> bool:
+    try:
+        current = os.lstat(str(path))
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(current.st_mode) or not _same_identity(current, identity):
+        return False
+    path.unlink()
+    return True
+
+
+def _publish_no_replace(source: Path, destination: Path):
+    """Atomically publish one same-filesystem stage without replacing a collision."""
+    source_info = private_file_stat(source)
+    linked = False
+    try:
+        os.link(str(source), str(destination))
+        linked = True
+        published = os.lstat(str(destination))
+        if not stat.S_ISREG(published.st_mode) or not _same_identity(
+                source_info, published):
+            raise UnsafeStateFile("database migration publication changed")
+        source.unlink()
+        durable = os.lstat(str(destination))
+        if not _same_identity(source_info, durable):
+            raise UnsafeStateFile("database migration publication was replaced")
+        _fsync_parent(destination)
+        return durable
+    except BaseException:
+        if linked:
+            try:
+                if _unlink_if_identity(destination, source_info):
+                    _fsync_parent(destination)
+            except OSError:
+                pass
+        raise
+
+
+def _sqlite_logical_digest(path: Path) -> str:
+    """Hash a validated SQLite database's logical dump without logging its contents."""
+    private_file_stat(path)
+    connection = sqlite3.connect(str(path), timeout=30)
+    digest = hashlib.sha256()
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        check = connection.execute("PRAGMA quick_check").fetchone()
+        if not check or check[0] != "ok":
+            raise sqlite3.DatabaseError("database integrity check failed")
+        for statement in connection.iterdump():
+            digest.update(statement.encode("utf-8"))
+            digest.update(b"\n")
+    finally:
+        connection.close()
+    return digest.hexdigest()
+
+
+def _cleanup_stale_migration_stages(target: Path) -> None:
+    """Remove only this migration's randomized, hard-crash staging artifacts."""
+    pattern = re.compile(
+        r"^\.%s\.migrating-[0-9a-f]{32}$" % re.escape(target.name))
+    try:
+        entries = tuple(target.parent.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if pattern.fullmatch(entry.name):
+            try:
+                info = os.lstat(str(entry))
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                if getattr(info, "st_nlink", 1) == 1:
+                    entry.unlink()
+                    continue
+                try:
+                    published = os.lstat(str(target))
+                except FileNotFoundError:
+                    continue
+                if _same_identity(info, published):
+                    entry.unlink()
+            except OSError:
+                pass
 
 
 @contextmanager
 def _migration_lock(target: Path):
     """Serialize first-run migration across processes without a third-party lock."""
-    target.parent.mkdir(parents=True, exist_ok=True)
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(target.parent, 0o700)
+    except OSError:
+        pass
     lock_path = target.with_name(".%s.migration.lock" % target.name)
-    handle = open(lock_path, "a+b")  # noqa: SIM115 - held through the context yield
+    expected = private_file_stat(lock_path, allow_missing=True)
+    flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    if expected is None:
+        try:
+            descriptor = os.open(str(lock_path), flags | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            expected = private_file_stat(lock_path)
+            descriptor = os.open(str(lock_path), flags)
+    else:
+        descriptor = os.open(str(lock_path), flags)
+    try:
+        opened = os.fstat(descriptor)
+        current = private_file_stat(lock_path)
+        changed = (
+            (expected is not None and not _same_identity(expected, opened))
+            or not _same_identity(opened, current)
+        )
+    except BaseException:
+        os.close(descriptor)
+        raise
+    if changed:
+        os.close(descriptor)
+        raise UnsafeStateFile("migration lock changed while it was opened")
+    handle = os.fdopen(descriptor, "r+b")  # held through the context yield
     locked = False
     try:
         if os.name == "nt":
@@ -132,7 +294,26 @@ def _prepare_installed_db_default_unlocked(root: Path, target: Path) -> Path:
     legacy = root / "engraphis.db"
     if not legacy.is_file():
         return target
-    if target.exists():
+    legacy_users = Path(str(legacy) + ".users.db")
+    target_users = Path(str(target) + ".users.db")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # A power loss can bypass Python cleanup after a complete SQLite backup but before
+    # either destination is published. Remove only this migration's random, redundant
+    # stages before retrying; the preserved legacy databases remain authoritative.
+    _cleanup_stale_migration_stages(target)
+    _cleanup_stale_migration_stages(target_users)
+    try:
+        target_info = private_file_stat(target, allow_missing=True)
+        target_users_info = private_file_stat(target_users, allow_missing=True)
+    except UnsafeStateFile as exc:
+        raise RuntimeError(
+            "cannot migrate the pre-1.0 database through a linked or unsafe destination"
+        ) from exc
+    if target_info is not None:
+        if legacy_users.is_file() and target_users_info is None:
+            raise RuntimeError(
+                "the current database exists without its expected auth companion; set "
+                "ENGRAPHIS_DB_PATH explicitly and reconcile the files")
         _db_notice(
             "default-db-collision:%s" % target,
             "both the current database (%s) and preserved pre-1.0 database (%s) exist; "
@@ -142,22 +323,39 @@ def _prepare_installed_db_default_unlocked(root: Path, target: Path) -> Path:
         return target
 
     pairs = []
-    legacy_users = Path(str(legacy) + ".users.db")
-    target_users = Path(str(target) + ".users.db")
-    if legacy_users.is_file():
+    if target_users_info is not None:
+        # A hard process/host death after the auth publish but before the primary publish
+        # leaves exactly this state.  Resume only when the companion is a byte-independent
+        # logical match for the still-preserved legacy source; any other collision remains
+        # a release-blocking ambiguity.
+        if not legacy_users.is_file():
+            raise RuntimeError(
+                "cannot resume the pre-1.0 migration because an unexpected auth "
+                "companion already exists")
+        try:
+            matches = _sqlite_logical_digest(legacy_users) == \
+                _sqlite_logical_digest(target_users)
+        except (OSError, sqlite3.Error, UnsafeStateFile) as exc:
+            raise RuntimeError(
+                "cannot validate the interrupted auth-database migration (%s)" %
+                type(exc).__name__) from None
+        if not matches:
+            raise RuntimeError(
+                "cannot resume the pre-1.0 migration because the destination auth "
+                "companion does not match the preserved source")
+    elif legacy_users.is_file():
         pairs.append((legacy_users, target_users))
     # Publish the primary memory DB last: it is the migration's commit marker. If the
     # process or host dies between the two os.replace calls, the next start will either
     # see both files (complete) or only the auth companion and refuse to continue. The
     # reverse order could expose a primary DB without its users after a hard crash.
     pairs.append((legacy, target))
-    if any(dst.exists() for _, dst in pairs):
+    if any(private_file_stat(dst, allow_missing=True) is not None for _, dst in pairs):
         raise RuntimeError(
             "cannot migrate the pre-1.0 database because a destination companion "
             "already exists; set ENGRAPHIS_DB_PATH explicitly and reconcile the files"
         )
 
-    target.parent.mkdir(parents=True, exist_ok=True)
     staged = []
     installed = []
     try:
@@ -166,15 +364,16 @@ def _prepare_installed_db_default_unlocked(root: Path, target: Path) -> Path:
             staged.append((tmp, dst))
             _backup_sqlite(src, tmp)
         for tmp, dst in staged:
-            os.replace(str(tmp), str(dst))
-            installed.append(dst)
+            identity = _publish_no_replace(tmp, dst)
+            installed.append((dst, identity))
     except Exception as exc:
         # Publishing two databases cannot be one filesystem transaction. If the users DB
         # publish fails after memory succeeds, remove the newly-published copy so the next
         # run retries both from the preserved legacy sources instead of opening half a pair.
-        for dst in reversed(installed):
+        for dst, identity in reversed(installed):
             try:
-                dst.unlink()
+                if _unlink_if_identity(dst, identity):
+                    _fsync_parent(dst)
             except OSError:
                 pass
         for tmp, _ in staged:
@@ -226,12 +425,10 @@ def _configured_db_path(root: Path = _PROJECT_ROOT) -> str:
 #: their own dashboard URL; local Pro clients retain the managed default.
 DEFAULT_RELAY_URL = "https://team.engraphis.com"
 
-#: Isolated commercial control plane for paid-license leases, trials, fulfillment, and
-#: transactional mail. Keeping this distinct from the dashboard removes the signing seed
-#: and billing webhook secret from the customer-facing memory service.
-DEFAULT_LICENSE_SERVER_URL = "https://license.engraphis.com"
-
-SERVICE_MODES = ("customer", "vendor", "combined")
+SERVICE_MODES = ("customer",)
+# The public package is a customer data plane and contains no vendor authority or hosted
+# relay implementation. Private services are built and deployed from a separate repository.
+DEFAULT_SERVICE_MODE = "customer"
 
 # Keys issued before the custom domain migration carry this URL inside their signed
 # payload. Preserve the signature, but route that one retired vendor host to the current
@@ -240,24 +437,14 @@ RETIRED_RELAY_URLS = frozenset({
     "https://engraphis-production.up.railway.app",
 })
 
-# Existing signed keys point at the old combined host. License verification may migrate
-# that exact vendor URL without altering arbitrary customer-signed endpoints.
-RETIRED_LICENSE_SERVER_URLS = frozenset({
-    "https://team.engraphis.com",
-    "https://engraphis-production.up.railway.app",
-})
-
-
 def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default).strip()
 
 def _validate_service_mode(value: str) -> str:
     """Validate service mode against allowed values.
 
-    An explicitly-set invalid value exits the process rather than silently falling back
-    to "combined" — a typo'd ENGRAPHIS_SERVICE_MODE silently becoming "combined" would
-    merge the vendor and customer trust domains on a misconfigured deploy. Unset (the
-    caller's own default of "combined") is always valid and never reaches this branch."""
+    The public package accepts only ``customer``. Hosted vendor, relay, and worker roles
+    live in a private service repository and cannot be enabled through configuration."""
     normalized = (value or "").strip().lower()
     if normalized not in SERVICE_MODES:
         print(f"[engraphis] invalid ENGRAPHIS_SERVICE_MODE '{value}' "
@@ -309,15 +496,13 @@ def persist_project_env(values: dict[str, str], path: Optional[Path] = None) -> 
             raise ValueError("environment setting values must be single-line")
         clean[name] = text
 
-    existed = target.exists()
-    existing = target.read_text(encoding="utf-8") if existed else ""
+    source_stat = private_file_stat(target, allow_missing=True)
+    existed = source_stat is not None
+    existing = (read_private_text(target, max_bytes=1024 * 1024) or "") if existed else ""
     # Replacing an existing .env through a fresh default-mode file can silently widen
     # permissions from 0600 to 0644 while the preserved lines still contain API keys.
     # Carry the original mode forward; new files start private regardless of umask.
-    try:
-        mode = target.stat().st_mode & 0o777 if existed else 0o600
-    except OSError:
-        mode = 0o600
+    mode = source_stat.st_mode & 0o777 if source_stat is not None else 0o600
     lines = existing.splitlines()
     found: set[str] = set()
     rendered: list[str] = []
@@ -336,25 +521,9 @@ def persist_project_env(values: dict[str, str], path: Optional[Path] = None) -> 
         if key not in found:
             rendered.append(f"{key}={value}")
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(
-        f".{target.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
-    )
-    try:
-        with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write("\n".join(rendered).rstrip() + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            os.chmod(temporary, mode)
-        except OSError:
-            pass
-        os.replace(temporary, target)
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
+    atomic_private_text(
+        target, "\n".join(rendered).rstrip() + "\n", mode=mode,
+        expected_stat=source_stat)
     return target
 
 
@@ -378,24 +547,15 @@ class Settings:
     allowed_workspaces: list = field(
         default_factory=lambda: _parse_csv(_env("ENGRAPHIS_WORKSPACES", ""))
     )
-    # Team auth is ON by default (opt-out); set ENGRAPHIS_TEAM_MODE=0/false/no/off to
-    # disable it. A Team license gates paid capabilities and additional seats, while an
-    # existing user store keeps its login wall even if entitlement later lapses.
-    team_mode: bool = field(
-        default_factory=lambda: _env("ENGRAPHIS_TEAM_MODE", "").lower()
-        not in ("0", "false", "no", "off")
-    )
-
-    # Production roles are isolated. ``combined`` preserves local development and legacy
-    # self-host behavior; the official Railway template sets ``customer`` and the vendor
-    # control plane sets ``vendor``.
+    # The public package is always the customer runtime. Hosted service roles are private.
     service_mode: str = field(
-        default_factory=lambda: _validate_service_mode(_env("ENGRAPHIS_SERVICE_MODE", "combined"))
+        default_factory=lambda: _validate_service_mode(
+            _env("ENGRAPHIS_SERVICE_MODE", DEFAULT_SERVICE_MODE)
+        )
     )
 
-    # Managed relay base URL. Client sync uses it when `--relay-url` is omitted, and paid
-    # license flows fall back to it when a signed key or explicit cloud override supplies
-    # no URL. Set an empty ENGRAPHIS_RELAY_URL to require an explicit target.
+    # Managed relay base URL. Client sync uses it when `--relay-url` is omitted. Set an
+    # empty ENGRAPHIS_RELAY_URL to require an explicit target.
     relay_url: str = field(default_factory=lambda: _env(
         "ENGRAPHIS_RELAY_URL", DEFAULT_RELAY_URL))
 
@@ -450,12 +610,6 @@ class Settings:
             "ENGRAPHIS_GRAPH_EXTRACTOR", "regex"
         ).lower()
     )
-    # Analytical Galaxy v2 is the validated default; setting the rollout flag to 0
-    # restores the legacy ForceGraph surface for one compatibility release.
-    graph_ui_v2: bool = field(
-        default_factory=lambda: _env("ENGRAPHIS_GRAPH_UI_V2", "1").lower()
-        not in ("0", "false", "no", "off")
-    )
 
     # Optional host-LLM importance/retention classification. "none" keeps the fully
     # deterministic local write path; "llm" asks the configured provider for a bounded
@@ -493,11 +647,7 @@ class Settings:
 
     @property
     def customer_service(self) -> bool:
-        return self.service_mode in ("customer", "combined")
-
-    @property
-    def vendor_service(self) -> bool:
-        return self.service_mode in ("vendor", "combined")
+        return self.service_mode == "customer"
 
 
 def _parse_headers(raw: str) -> dict:
@@ -531,17 +681,3 @@ def canonicalize_relay_url(url: str) -> str:
     """Normalize a relay URL and migrate known retired vendor hosts."""
     normalized = (url or "").strip().rstrip("/")
     return DEFAULT_RELAY_URL if normalized in RETIRED_RELAY_URLS else normalized
-
-
-def canonicalize_license_server_url(url: str) -> str:
-    """Normalize a license-server URL and migrate the retired combined host."""
-    normalized = (url or "").strip().rstrip("/")
-    return (DEFAULT_LICENSE_SERVER_URL
-            if normalized in RETIRED_LICENSE_SERVER_URLS else normalized)
-
-
-def resolve_license_server_url(signed_url: str = "") -> str:
-    """Resolve the license server, including known vendor-host migrations."""
-    override = canonicalize_license_server_url(_env("ENGRAPHIS_CLOUD_URL", ""))
-    signed = canonicalize_license_server_url(signed_url)
-    return override or signed or DEFAULT_LICENSE_SERVER_URL

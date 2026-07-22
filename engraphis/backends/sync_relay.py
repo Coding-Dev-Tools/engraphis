@@ -1,10 +1,9 @@
-"""Relay transport — the managed cloud-sync client.
+"""Relay transport — the managed Cloud Sync client.
 
 Implements the ``SyncTransport`` protocol (``core/interfaces.py``) over HTTPS against the
-customer-hosted relay (``engraphis.inspector.sync_relay``). It carries an expiring,
-revocable, per-user token as a bearer credential; the server verifies its owner, role,
-scope, and the account entitlement before accepting or returning bundles. A license-key
-fallback exists only for the documented customer migration window. It plugs into
+hosted relay API. It carries an expiring, revocable, scoped token as a bearer credential;
+the server verifies its owner, role, scope, and account entitlement before accepting or
+returning bundles. Long-lived paid keys are intentionally unsupported. The transport plugs into
 ``SyncEngine.sync`` exactly like ``FolderTransport``; the sync engine is unchanged and
 still treats every pulled bundle as untrusted.
 
@@ -14,17 +13,19 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import ipaddress
 import json
 import math
 import os
 import re
-import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 from urllib.parse import quote, urlsplit, urlunsplit
+
+from engraphis.private_state import UnsafeStateFile, atomic_private_text, read_private_text
 
 MAX_RELAY_BUNDLE_BYTES = 64 * 1024 * 1024
 MAX_RELAY_NAMES_BYTES = 1024 * 1024
@@ -39,12 +40,14 @@ MAX_PULL_BUNDLE_FAILURES = 8
 MAX_PULL_FAILURE_CHARS = 200
 # Refusals that apply to the whole round, not to one bundle: retrying the remaining
 # bundles would only mask the refusal and hammer the relay. 401/403 authentication and
-# authorization, 402 unusable license, 429 backpressure.
+# authorization, 402 inactive hosted entitlement, 429 backpressure.
 FATAL_PULL_STATUSES = frozenset({401, 402, 403, 429})
+MAX_SYNC_TOKEN_BYTES = 8192
+MAX_SYNC_POLICY_BYTES = 64
 
 
 class RelayError(RuntimeError):
-    """A relay call failed. ``status`` is the HTTP code (402 == license rejected)."""
+    """A relay call failed. ``status`` is the HTTP response code when available."""
 
     def __init__(self, message: str, *, status: Optional[int] = None):
         super().__init__(message)
@@ -70,20 +73,76 @@ def _urlopen_no_redirect(req, *, timeout: float):
     return urllib.request.build_opener(_NoRedirectHandler()).open(req, timeout=timeout)
 
 
-def _current_key() -> str:
-    """A scoped user sync token, falling back to a legacy license during migration."""
-    configured = os.environ.get("ENGRAPHIS_SYNC_TOKEN", "").strip()
-    if configured:
+def _validated_sync_token(value: str) -> str:
+    value = str(value or "")
+    if (len(value) < 24 or len(value) > MAX_SYNC_TOKEN_BYTES
+            or any(ord(char) < 33 or ord(char) > 126 for char in value)):
+        raise ValueError("sync token must be a bounded single-line ASCII bearer token")
+    return value
+
+
+def _sync_token_meta_path() -> Path:
+    return _sync_token_path().with_name("sync.token.meta")
+
+
+def _saved_sync_token(relay_origin: str) -> str:
+    """Return a relay-bound saved bearer, never a token for another origin."""
+    configured = os.environ.get("ENGRAPHIS_SYNC_TOKEN")
+    if configured is not None and configured != "":
+        try:
+            configured = _validated_sync_token(configured)
+        except ValueError:
+            raise RelayError(
+                "configured relay credential is malformed; replace or unset it",
+                status=409,
+            ) from None
         return configured
-    path = _sync_token_path()
     try:
-        stored = path.read_text(encoding="utf-8").strip()
-        if stored:
-            return stored
-    except OSError:
-        pass
-    from engraphis import licensing
-    return licensing._read_key_material()
+        raw = read_private_text(
+            _sync_token_path(), max_bytes=MAX_SYNC_TOKEN_BYTES + 2,
+            allow_missing=True,
+        )
+    except (OSError, UnsafeStateFile):
+        raise RelayError(
+            "saved sync credential is unsafe or unreadable; reconfigure it",
+            status=409,
+        ) from None
+    if raw is None:
+        return ""
+    if raw.endswith("\r\n"):
+        raw = raw[:-2]
+    elif raw.endswith("\n"):
+        raw = raw[:-1]
+    try:
+        stored = _validated_sync_token(raw)
+    except ValueError:
+        raise RelayError(
+            "saved sync credential is malformed; reconfigure it", status=409,
+        ) from None
+    try:
+        metadata = read_private_text(
+            _sync_token_meta_path(), max_bytes=16 * 1024, allow_missing=False)
+        binding = json.loads(metadata or "")
+    except (OSError, UnsafeStateFile, ValueError, RecursionError):
+        raise RelayError(
+            "saved sync credential has no valid relay binding; reconfigure it",
+            status=409,
+        ) from None
+    expected_hash = hashlib.sha256(stored.encode("utf-8")).hexdigest()
+    if (not isinstance(binding, dict) or binding.get("v") != 1
+            or binding.get("relay_origin") != relay_origin
+            or binding.get("token_sha256") != expected_hash):
+        raise RelayError(
+            "saved sync credential belongs to another relay; reconfigure it",
+            status=409,
+        )
+    return stored
+
+
+def _current_bearer(relay_origin: str) -> str:
+    """Return only an explicitly configured or previously saved scoped bearer."""
+
+    return _saved_sync_token(relay_origin)
 
 
 def _sync_token_path() -> Path:
@@ -98,41 +157,24 @@ def _sync_read_only_path() -> Path:
 
 def _atomic_private_text(path: Path, value: str) -> None:
     """Atomically write one owner-only state value next to the sync credential."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix=".%s." % path.name, dir=str(path.parent))
-    temp_path = Path(temp_name)
-    try:
-        try:
-            os.chmod(temp_path, 0o600)
-        except OSError:
-            pass
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            fd = -1
-            handle.write(value + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(str(temp_path), str(path))
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-    except BaseException:
-        if fd >= 0:
-            os.close(fd)
-        try:
-            temp_path.unlink()
-        except OSError:
-            pass
-        raise
+    atomic_private_text(path, value + "\n")
 
 
-def save_sync_token(token: str) -> None:
-    """Atomically persist a per-user bearer token with owner-only permissions."""
-    value = str(token or "").strip()
-    if (len(value) < 24 or len(value) > 8192
-            or any(ord(char) < 32 or ord(char) == 127 for char in value)):
-        raise ValueError("sync token must be a bounded single-line bearer token")
+def save_sync_token(token: str, *, relay_origin: Optional[str] = None) -> None:
+    """Persist a bearer plus a non-secret relay-origin binding beside it."""
+    value = _validated_sync_token(str(token or ""))
+    if relay_origin is None:
+        from engraphis.config import settings
+        relay_origin = settings.relay_url
+    origin = _validated_base_url(str(relay_origin or ""))
+    binding = {
+        "v": 1,
+        "relay_origin": origin,
+        "token_sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
+    }
     _atomic_private_text(_sync_token_path(), value)
+    _atomic_private_text(
+        _sync_token_meta_path(), json.dumps(binding, separators=(",", ":"), sort_keys=True))
 
 
 def save_sync_read_only(enabled: bool) -> None:
@@ -155,12 +197,13 @@ def sync_read_only() -> bool:
         if raw in ("0", "false", "no", "off"):
             return False
         return True
-    path = _sync_read_only_path()
     try:
-        raw = path.read_text(encoding="utf-8").strip().lower()
-    except FileNotFoundError:
-        raw = ""
-    except OSError:
+        value = read_private_text(
+            _sync_read_only_path(), max_bytes=MAX_SYNC_POLICY_BYTES,
+            allow_missing=True,
+        )
+        raw = "" if value is None else value.strip().lower()
+    except (OSError, UnsafeStateFile):
         return True
     if raw in ("1", "true", "yes", "on"):
         return True
@@ -170,31 +213,37 @@ def sync_read_only() -> bool:
     return True
 
 
-def clear_sync_token() -> None:
-    for path in (_sync_token_path(), _sync_read_only_path()):
+def clear_cached_sync_credential() -> None:
+    """Best-effort removal of the cached bearer while preserving device policy."""
+    for path in (_sync_token_path(), _sync_token_meta_path()):
         try:
             path.unlink()
-        except FileNotFoundError:
+        except OSError:
             pass
 
 
-def has_sync_token() -> bool:
-    if os.environ.get("ENGRAPHIS_SYNC_TOKEN", "").strip():
-        return True
+def clear_sync_token() -> None:
+    clear_cached_sync_credential()
     try:
-        return bool(_sync_token_path().read_text(encoding="utf-8").strip())
+        _sync_read_only_path().unlink()
     except OSError:
-        return False
+        pass
 
 
-def _current_machine_id() -> str:
-    """This device's stable id, best-effort. Sent to the relay so Team seat enforcement
-    can bind the caller to a seat; harmless for Pro (the relay ignores it there)."""
+def has_sync_token() -> bool:
+    configured = os.environ.get("ENGRAPHIS_SYNC_TOKEN")
+    if configured is not None and configured != "":
+        try:
+            _validated_sync_token(configured)
+            return True
+        except ValueError:
+            return False
     try:
-        from engraphis import cloud_license
-        return cloud_license.machine_id()
-    except Exception:
-        return ""
+        from engraphis.config import settings
+        origin = _validated_base_url(settings.relay_url)
+        return bool(_saved_sync_token(origin))
+    except (OSError, RelayError, ValueError):
+        return False
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -261,13 +310,18 @@ class RelayTransport:
     """A ``SyncTransport`` backed by the customer sync relay.
 
     ``base_url`` is the relay root (e.g. ``https://team.engraphis.com``). ``workspace_id``
-    scopes bundles to one workspace. The compatibility parameter ``license_key`` accepts
-    the scoped token and defaults to ``ENGRAPHIS_SYNC_TOKEN`` or the locally saved token.
-    All protocol calls send ``Authorization: Bearer <token>``.
+    scopes bundles to one workspace. ``access_token`` must be a short-lived scoped cloud
+    bearer. The legacy-named ``license_key`` parameter is accepted only as a call-site
+    alias for that bearer; values with the retired ``ENGR1`` prefix are rejected. With no
+    parameter, the token defaults to ``ENGRAPHIS_SYNC_TOKEN`` or a locally saved bearer.
+    All protocol calls send ``Authorization: Bearer <scoped-token>``. Device identity is
+    authenticated by the signed token claim rather than an unrelated local header value.
     """
 
     def __init__(self, base_url: str, workspace_id: str, *,
-                 license_key: Optional[str] = None, timeout: float = 30.0) -> None:
+                 access_token: Optional[str] = None,
+                 license_key: Optional[str] = None,
+                 timeout: float = 30.0) -> None:
         self.base = _validated_base_url(base_url)
         workspace = str(workspace_id or "").strip()
         if (
@@ -279,20 +333,27 @@ class RelayTransport:
         ):
             raise ValueError("relay workspace_id must be a non-empty bounded string")
         self.workspace_id = workspace
-        key = str(
-            (license_key if license_key is not None else _current_key()) or ""
-        ).strip()
+        if access_token is not None and license_key is not None:
+            raise ValueError("pass access_token only")
+        supplied = access_token if access_token is not None else license_key
+        key = str((supplied if supplied is not None else _current_bearer(self.base)) or "")
+        key = key.strip()
         if (
             len(key) > 8192
             or any(ord(char) < 32 or ord(char) == 127 for char in key)
         ):
             raise ValueError("relay bearer token must be a bounded single-line value")
+        if key.startswith("ENGR1."):
+            raise RelayError(
+                "legacy license keys are not relay credentials; connect Engraphis Cloud",
+                status=401,
+            )
+        if not key:
+            raise RelayError(
+                "a scoped cloud bearer is required; connect Engraphis Cloud",
+                status=401,
+            )
         self.key = key
-        machine_id = str(_current_machine_id() or "").strip()
-        self.machine_id = machine_id if (
-            len(machine_id) <= 200
-            and not any(ord(char) < 32 or ord(char) == 127 for char in machine_id)
-        ) else ""
         try:
             timeout_value = float(timeout)
         except (TypeError, ValueError):
@@ -306,10 +367,8 @@ class RelayTransport:
         return "%s/relay/v1/%s/%s" % (self.base, quote(self.workspace_id, safe=""), suffix)
 
     def _request(self, url: str, *, method: str, data: Optional[bytes] = None,
-                 max_response_bytes: int = MAX_RELAY_BUNDLE_BYTES) -> bytes:
+                  max_response_bytes: int = MAX_RELAY_BUNDLE_BYTES) -> bytes:
         headers = {"Authorization": "Bearer %s" % self.key}
-        if self.machine_id:
-            headers["X-Engraphis-Machine-Id"] = self.machine_id
         if data is not None:
             headers["Content-Type"] = "application/octet-stream"
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
@@ -326,7 +385,8 @@ class RelayTransport:
             # credentials and these errors are surfaced by sync APIs and CLIs.
             if exc.code == 402:
                 raise RelayError(
-                    "relay rejected the license (upgrade/renew required)", status=402
+                    "Cloud Sync entitlement is inactive (upgrade or renew required)",
+                    status=402,
                 ) from None
             raise RelayError("relay request failed (HTTP %s)" % exc.code,
                              status=exc.code) from None

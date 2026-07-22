@@ -22,71 +22,83 @@ All notable changes to Engraphis are documented here. Format loosely follows
   soft bloom, plus an Advanced view toggle that keeps the fully decorated explorer available.
   Default galaxy rotation is now ~10x slower for readability, and a new Freeze control
   pauses/resumes the live rotation.
-- Verified encrypted commercial backups can target private S3-compatible object storage,
-  including Railway Buckets, with read-after-write digest verification and remote retention.
 
 ### Changed
 
-- Graph rendering now uses pinned, locally bundled Sigma 3.0.3 and Graphology 0.26 assets,
-  a CSP-safe TypeScript worker, evidence-derived rest lengths, and bounded level-of-detail.
-  The legacy API and ForceGraph renderer remain available for one compatibility release via
-  `ENGRAPHIS_GRAPH_UI_V2=0`; the analytical explorer is the validated default.
+- The public distribution is now structurally customer-only. License issuance, billing,
+  fulfillment, Team identity, hosted relay, managed compute, worker execution, vendor
+  administration, and commercial operations tooling moved to a private service repository;
+  the Apache package retains local core functionality and customer-side protocols.
+- Analytics, Cloud Sync service operation, Auto Dreaming, Auto Consolidation, automation
+  scheduling, and Team administration are now hosted-service capabilities. The public dashboard
+  keeps status, consent, and launch surfaces plus the free manual consolidation action; it no
+  longer ships local premium algorithms, schedulers, Team accounts, invitations, roles, or seats.
+- The hosted no-card trial remains **exactly 3 active days** after email confirmation. A distinct
+  `workspace_write_grace` may preserve ordinary writes to an already provisioned local workspace
+  for at most 24 hours; it never extends the trial or any cloud/paid access.
+- Documentation now states the legal boundary directly: Apache-2.0 rights in already published
+  releases and forks cannot be clawed back. Future proprietary value is protected through the
+  private hosted implementation and service authorization boundary.
+- Recall graph seeding now matches all entity names with one boundary-aware compiled pattern
+  instead of rescanning every memory once per entity, and the streamable-HTTP launcher warms
+  the singleton service before accepting clients.
+
+- The graph explorer uses its locally bundled ForceGraph + D3 renderer under the strict
+  same-origin CSP. The new scene APIs and synchronized accessible entity/relation tables are
+  additive to that shipped UI.
 - Graph GET requests are strictly read-only. While an explicit mutating index job runs, graph
   reads return a rebuilding conflict instead of mixing old and partially derived metrics.
 
-### Security
+## [1.0.0] - Unreleased
 
-- Pin the public key derived from the production vendor signing seed and enable issuance only
-  after the production registry inventory confirmed that no legacy licenses required reissue.
-
-## [1.0.0] - 2026-07-19
-
-First commercial GA release for Pro and Team.
+Release candidate for the public 1.0.0 open-core GA. Replace `Unreleased` with the actual
+publication date only in the final authorized release commit.
 
 ### Added
 
-- The Knowledge Graph can color nodes by deterministic communities, entity type, or
-  connection count. The selected mode persists and the legend follows the active scale.
-- Vendor signer rotation now has a dry-run-first bulk reissue command that requires exact
-  active-registry coverage, preserves every signed entitlement claim, keeps source keys
-  valid during dual verification, records an atomic migration audit, and enforces the
-  30-day grace period before source-key retirement.
-- Isolated `customer` and `vendor` production service modes, with an authenticated,
-  secret-free commercial readiness surface.
-- Deployment-bound Pro/Team trial claims with scanner-safe confirmation, automatic
-  server-to-server activation, replay/abuse protection, and recovery after a closed tab.
-- Atomic 72-hour Team invitations with resend, revoke, seat reservations, recipient-chosen
-  passwords, and immediate session/token invalidation for disabled users.
-- Hashed, scoped, 90-day per-user tokens for agent and sync access, including viewer
-  read-only sync.
-- Durable transactional-email outbox, verified Resend delivery events, redacted operations
-  state, bounded retries, and bounce/backlog readiness gates.
-- Canonical commercial product manifest, exact Polar product mapping, Railway customer
-  template descriptor, encrypted off-volume backup/restore tooling, and production
-  synthetics.
+- The Galaxy Knowledge Graph explorer with deterministic communities, entity/relation search,
+  temporal scenes, evidence and history inspection, accessible tables, and a locally bundled
+  ForceGraph + D3 renderer.
+- A 29-tool MCP surface with explicit behavior annotations, operation receipts, exact session
+  retry semantics, portable plugin manifests, and checksummed skill assets.
+- Customer-side hosted protocols for scoped Cloud Sync, rotating cloud sessions, Analytics,
+  and managed Automation requests, plus explicit manual folder exchange for local workflows.
 
 ### Changed
 
-- Paid licenses default to `https://license.engraphis.com`; the former license path is a
-  90-day compatibility surface.
-- The dashboard is auth-first when hosted, uses accessible dialogs instead of browser
-  prompts, and serves external same-origin assets under a CSP with no `unsafe-inline`.
-- The three-day no-card application trial is the only trial mechanism; Polar is paid
-  monthly/annual checkout only.
+- The public distribution is a universal Python open-core package that runs only as a customer
+  node. Hosted authorization, billing, relay storage, managed compute, Team identity, workers,
+  and vendor operations remain private services.
+- Commercial compatibility modules now expose presentation and customer-protocol metadata only;
+  no environment variable turns the public package into a hosted Engraphis service.
+- Session identity is exact across workspace, repo, authenticated user, agent, and goal; callers
+  can request a distinct run with `force_new=true` and observe retry reuse explicitly.
 
 ### Fixed
 
-- GitHub Release publication supplies explicit repository context to `gh` in jobs without
-  a checkout. A workflow-dispatch repair path can reuse the tagged run's validated
-  distribution artifact if PyPI succeeds before release creation fails.
+- Session start/end and session-scoped writes are atomic under concurrency; exact retries reuse
+  one session while intentionally separate runs remain distinct.
+- Rotating refresh credentials serialize across threads and processes, persist replacements in
+  owner-only state, close failed HTTP responses, and never regress to a stale bootstrap value.
+- Managed snapshots reserve a monotonic generation in the same local write transaction as the
+  capture, use one operation ID per run and retry, redact provider errors, reject unknown
+  sensitivity, exclude session and secret data, and enforce exact record/byte limits.
+- Graph reads, suggestions, evidence, history, indexing, exports, audit views, fallback search,
+  and workspace statistics consistently enforce workspace and session boundaries, including
+  forgotten session-only graph evidence.
+- Windows private-state validation uses safe file metadata checks without weakening symlink,
+  ownership, size, or atomic-publication protections.
 
 ### Security
 
-- The browser and invitation emails never receive the account-wide Team license key.
-- Trial invitation URLs are restricted to the dashboard origin bound into the initiating
-  deployment claim.
-- Production issuance rejects unknown Polar products and wrong organizations; signer
-  readiness remains fail-closed until the offline rotation ceremony is approved.
+- Removed hosted signer, vendor, billing, relay-storage, S3, worker, and Team administration
+  implementations from the public source and package artifacts.
+- Bare memory IDs, shared-workspace controls, graph entities, statistics, snapshots, exports,
+  audit rows, and keyword fallbacks cannot cross authenticated session or workspace boundaries.
+- Managed uploads require explicit consent, are capped at 16 MiB and 100,000 rows, omit all
+  session-scoped and secret-class memories, and surface only fixed client-safe provider errors.
+- Customer credentials remain owner-only, redirect-safe, serialized during rotation, and are
+  never substituted with an unproven local machine identifier.
 
 ## [0.9.9] - 2026-07-18
 

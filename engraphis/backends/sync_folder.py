@@ -177,11 +177,12 @@ def get_transport(kind: str = "folder", **kw):
     name so swapping the folder backend for the managed relay is a config change.
 
     - ``folder`` (default): shared-directory sync. Requires ``root=<shared directory>``.
-    - ``relay``: the managed Pro relay transport (``RelayTransport``). Requires
+    - ``relay``: the managed Cloud Sync transport (``RelayTransport``). Requires
       ``base_url=<relay root>`` and ``workspace_id=<namespace>`` (use the workspace
       *name*, so every authorized device on the account shares one namespace);
-      ``license_key`` is a compatibility parameter for a scoped bearer token and
-      ``timeout`` is optional. The token defaults to the saved per-user sync token.
+      ``access_token`` is a scoped bearer and ``timeout`` is optional. ``license_key``
+      remains a temporary call-site alias for a bearer, never a paid key. The token
+      defaults to the saved per-user sync token.
 
     Both implement the ``SyncTransport`` protocol (``core/interfaces.py``) and plug into
     ``SyncEngine.sync`` unchanged. ``relay`` is imported lazily so a folder-only install
@@ -199,7 +200,13 @@ def get_transport(kind: str = "folder", **kw):
         if not workspace_id:
             raise ValueError("relay transport requires workspace_id=<namespace>")
         from engraphis.backends.sync_relay import RelayTransport
-        return RelayTransport(base_url, workspace_id,
-                              license_key=kw.get("license_key"),
-                              timeout=kw.get("timeout", 30.0))
+        access_token = kw.get("access_token")
+        if access_token is None:
+            access_token = kw.get("license_key")
+        return RelayTransport(
+            base_url,
+            workspace_id,
+            access_token=access_token,
+            timeout=kw.get("timeout", 30.0),
+        )
     raise ValueError("unknown sync transport %r (have: folder, relay)" % kind)

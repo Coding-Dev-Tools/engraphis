@@ -57,17 +57,16 @@ python -m scripts.start_dashboard    # http://127.0.0.1:8700
 engraphis-init                   # or: python -m scripts.init
 engraphis-init --check
 
-# ── Commercial layer (shared dashboard/auth/license modules; never core/) ──
-python -m scripts.license_admin keygen                 # vendor keypair → .secrets/ (gitignored)
-python -m scripts.license_admin issue --email a@b.co --plan team --seats 5 --days 365
-ENGRAPHIS_LICENSE_KEY=ENGR1...   # or ~/.engraphis/license.key; free tier = no key
-# Team mode is ON by default (multi-user dashboard). Set ENGRAPHIS_TEAM_MODE=0 to disable.
-# A 'team' license is required to add seats beyond the first admin.
+# ── Customer-side hosted session ───────────────────────────────────────────
+ENGRAPHIS_CLOUD_CONTROL_URL=https://api.engraphis.com
+ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL=...  # secret; prefer the owner-only session file
+ENGRAPHIS_CLOUD_TOKEN_SUBJECT=member    # device or member, fixed at bootstrap
+# Authorization, billing, relay, compute, and worker implementations are private services.
 
 # ── Sleep-time consolidation (schedulable local job; also an MCP tool) ────────
 python -m scripts.consolidate --db engraphis.db --workspace acme --dry-run
 
-# ── Cloud sync (Pro; schedulable job over a shared folder OR the managed relay — see docs/SYNC.md) ──
+# ── Sync (local shared-folder transport or hosted Cloud Sync — see docs/SYNC.md) ──
 python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/engraphis --dry-run
 python -m scripts.sync --db engraphis.db --workspace acme --relay https://team.engraphis.com  # or bare --relay + ENGRAPHIS_RELAY_URL
 

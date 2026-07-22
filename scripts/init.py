@@ -23,7 +23,6 @@ import secrets
 import sqlite3
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 
@@ -80,21 +79,15 @@ def cmd_check() -> int:
         _fail("database writable", f"{db}: {exc}")
         failures += 1
 
+    _ok("local core", "single-user features available without a hosted subscription")
     try:
-        from engraphis import licensing
-        lic = licensing.current_license(refresh=True)
-        err = licensing.license_error()
-        if err:
-            _miss("license", f"key rejected: {err}")
-        elif not lic.is_paid:
-            _ok("license", "free tier - all core features available")
+        from engraphis.cloud_session import configured
+        if configured(require_compute=False):
+            _ok("Engraphis Cloud", "installation connected")
         else:
-            expiry = ("expires " + time.strftime("%Y-%m-%d", time.gmtime(lic.expires))
-                      if lic.expires else "perpetual")
-            _ok("license", f"{lic.plan} tier "
-                           f"({', '.join(sorted(lic.features))}) - {expiry}")
-    except Exception as exc:  # never let licensing break the doctor
-        _miss("license", str(exc))
+            _miss("Engraphis Cloud", "not connected (optional for the local core)")
+    except Exception:
+        _miss("Engraphis Cloud", "saved session unavailable; reconnect if needed")
 
     print("all good" if failures == 0 else f"{failures} problem(s) found")
     return 0 if failures == 0 else 1
@@ -111,10 +104,10 @@ def _env_content(db_path: Path, token: str) -> str:
             f"ENGRAPHIS_API_TOKEN={token}",
         ]
     lines += [
-        "# Unlock Pro/Team (analytics, export, multi-user). A key can live here OR in",
-        "# ~/.engraphis/license.key (the Inspector's license dialog writes that file).",
-        "# Team mode is ON by default; set ENGRAPHIS_TEAM_MODE=0 to disable.",
-        "# ENGRAPHIS_LICENSE_KEY=ENGR1.xxxxx.yyyyy",
+        "# Pro and Team are hosted. Connect through the Engraphis Cloud account portal;",
+        "# never paste access or refresh credentials into a repository .env file.",
+        "# ENGRAPHIS_CLOUD_CONTROL_URL=https://control.example.com",
+        "# ENGRAPHIS_CLOUD_COMPUTE_URL=https://compute.example.com",
     ]
     return "\n".join(lines) + "\n"
 

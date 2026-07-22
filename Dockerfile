@@ -17,9 +17,8 @@ ENV PYTHONUNBUFFERED=1 \
     # ONCE, not on every cold container. A fresh in-container download blocks startup and
     # can lose the healthcheck race; caching on the volume makes subsequent boots instant.
     HF_HOME=/data/.cache/huggingface \
-    # License / trial / machine-id / lease / relay-registry state. Kept on the /data
-    # volume (not the container's ephemeral home) so activated keys, the one-time trial,
-    # device binding, and — critically — the revocation registry survive redeploys.
+    # Customer license / trial / machine-id / lease state. Kept on the /data volume
+    # (not the container's ephemeral home) so activation and device binding survive.
     ENGRAPHIS_STATE_DIR=/data/.engraphis
 
 WORKDIR /app
@@ -62,8 +61,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --retries=3 \
 # running the CMD (or any Railway/compose start-command override, which becomes its args).
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
-# Default: the v2 team dashboard (multi-user auth, roles, seats, cloud-license
-# revocation, Pro sync) — this is what docker-compose.yml already defaults to, and what
+# Default: the v2 team dashboard (multi-user auth, roles, seats, cloud-license clients,
+# Pro sync clients) — this is what docker-compose.yml already defaults to, and what
 # every hosted deployment (e.g. Railway) needs, since it's the only entrypoint that
 # serves /api/auth/*, /api/license/*, and /api/bootstrap. `--no-open`: never try to launch
 # a browser in a container.

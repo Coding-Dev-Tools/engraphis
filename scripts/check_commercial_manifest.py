@@ -78,8 +78,14 @@ def _check_repository(manifest: dict, errors: list[str]) -> None:
         _fail(errors, "pyproject version does not match the commercial manifest")
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    if "version-%s-" % manifest["version"] not in readme:
-        _fail(errors, "README version badge does not match the commercial manifest")
+    live_badge = (
+        "[![PyPI version](https://img.shields.io/pypi/v/engraphis.svg)]"
+        "(https://pypi.org/project/engraphis/)"
+    )
+    if live_badge not in readme:
+        _fail(errors, "README must use the live PyPI version badge")
+    if re.search(r"img\.shields\.io/badge/version-[^\s)]+", readme):
+        _fail(errors, "README must not advertise an unpublished hard-coded version badge")
 
     template = json.loads((ROOT / "deploy" / "railway-template.json").read_text(
         encoding="utf-8"))
@@ -91,16 +97,15 @@ def _check_repository(manifest: dict, errors: list[str]) -> None:
         _fail(errors, "Railway template must mount a persistent /data volume")
     required_values = {
         "ENGRAPHIS_SERVICE_MODE": "customer",
-        "ENGRAPHIS_CLOUD_URL": manifest["license_server"],
-        "ENGRAPHIS_DASHBOARD_URL": "https://${{RAILWAY_PUBLIC_DOMAIN}}",
+        "ENGRAPHIS_CLOUD_CONTROL_URL": manifest["control_plane"],
     }
     for name, expected in required_values.items():
         if variables.get(name, {}).get("value") != expected:
             _fail(errors, "Railway variable %s does not match manifest" % name)
-    deployment = variables.get("ENGRAPHIS_DEPLOYMENT_TOKEN", {})
-    if not deployment.get("required") or not deployment.get("secret") \
-            or deployment.get("value") != "${{ secret(48) }}":
-        _fail(errors, "Railway template must generate a secret deployment token")
+    local_api = variables.get("ENGRAPHIS_API_TOKEN", {})
+    if not local_api.get("required") or not local_api.get("secret") \
+            or local_api.get("value") != "${{ secret(48) }}":
+        _fail(errors, "Railway template must generate a secret local API token")
 
     from engraphis.commercial import PRODUCT_ENV, expected_product_ids
     expected = expected_product_ids()

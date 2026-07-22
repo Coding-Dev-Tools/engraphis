@@ -17,8 +17,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from engraphis import __version__
-from engraphis.inspector.auth import bearer_ok
-from engraphis.inspector.cloud_mount import CLOUD_PREFIXES, mount_cloud_endpoints
+from engraphis.local_auth import bearer_ok
 from engraphis.config import settings
 from engraphis.engines import reweight, thoughts as thoughts_engine
 from engraphis.engines.embedder import warmup as _warmup_embedder
@@ -95,17 +94,6 @@ def create_app() -> FastAPI:
     from engraphis.observability import configure_structured_logging
     configure_structured_logging()
 
-    # The legacy reference entrypoint is still packaged and callable, so it must honor
-    # the same commercial role boundary as the primary dashboard entrypoint. Without
-    # this dispatch a customer-mode process mounted the Polar webhook, signer-backed
-    # issuance routes, and vendor-admin revocation surface merely because an operator
-    # launched ``engraphis-server`` instead of ``engraphis-dashboard``.
-    from engraphis.commercial import service_mode
-    mode = service_mode()
-    if mode == "vendor":
-        from engraphis.vendor_app import create_app as create_vendor_app
-        return create_vendor_app()
-
     app = FastAPI(
         title="Engraphis",
         description="Self-hosted AI memory engine for agents — Ebbinghaus decay, "
@@ -130,19 +118,14 @@ def create_app() -> FastAPI:
 
     # Optional bearer-token auth. Active only when ENGRAPHIS_API_TOKEN is set.
     # Health-type probes (liveness + readiness) stay unauthenticated by convention.
-    # /webhooks/polar is server-to-server (Polar signs it with POLAR_WEBHOOK_SECRET,
-    # verified in engraphis.billing) — it can't carry a bearer token, so it must be
-    # exempt from ENGRAPHIS_API_TOKEN auth and from rate limiting.
     _PUBLIC_PREFIXES = ("/memory/health", "/api/health", "/api/ready",
-                        "/openapi.json", "/static",
-                        "/webhooks/polar")
+                        "/openapi.json", "/static")
 
     @app.middleware("http")
     async def _require_token(request: Request, call_next):
         token = settings.api_token
         if token and request.method != "OPTIONS" and request.url.path != "/" \
-                and not request.url.path.startswith(_PUBLIC_PREFIXES) \
-                and not request.url.path.startswith(CLOUD_PREFIXES):
+                and not request.url.path.startswith(_PUBLIC_PREFIXES):
             if not bearer_ok(request.headers.get("authorization"), token):
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
         return await call_next(request)
@@ -208,21 +191,6 @@ def create_app() -> FastAPI:
     # DB init + background loop lifecycle live in _lifespan (above); see FastAPI(lifespan=…).
     app.include_router(memory_router)
     app.include_router(vault_router)
-    # Purchase fulfillment (Polar order.paid → signed key → email). Shared with the
-    # Inspector so it works regardless of which entrypoint is deployed.
-    if settings.vendor_service:
-        from engraphis.billing import router as billing_router
-        app.include_router(billing_router)
-    # Cloud license (register/verify/REVOKE) + gated Pro sync relay. Previously
-    # mounted only on the retired Inspector, which made revocation inoperable in
-    # production; now served by every shipped entrypoint. See inspector.cloud_mount.
-    mount_cloud_endpoints(
-        app, include_license=settings.vendor_service,
-        include_sync=settings.customer_service)
-    # Customer mode preserves the pre-split URL only as a bounded compatibility proxy;
-    # it never mounts the local signer/control-plane implementation.
-    from engraphis.inspector.license_compat_proxy import mount_license_compat_proxy
-    mount_license_compat_proxy(app)
 
     # ── probes (unauthenticated; see _PUBLIC_PREFIXES) ──────────────────────────
     @app.get("/api/health")

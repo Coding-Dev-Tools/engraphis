@@ -47,19 +47,6 @@ def _ok(data: Any) -> dict[str, Any]:
     return {"data": data}
 
 
-def _require_paid(feature: str) -> None:
-    """Raise a structured HTTP 402 if ``feature`` is not licensed (free tier default)."""
-    try:
-        licensing.require_feature(feature)
-    except licensing.LicenseError as exc:
-        raise HTTPException(status_code=402, detail={
-            "error": str(exc),
-            "feature": exc.feature or feature,
-            "tier_required": licensing.required_plan(feature),
-            "upgrade_url": licensing.upgrade_url(),
-        })
-
-
 def _norm_doc_id(item: DocumentItem) -> str:
     return item.document_id or item.documentId or f"doc-{int(time.time()*1000)}"
 
@@ -648,7 +635,7 @@ async def get_config():
         "llm_provider": settings.llm_provider,
         "llm_model": settings.llm_model,
         "llm_api_key_set": bool(settings.llm_api_key),
-        "llm_base_url": settings.llm_base_url or "(provider default)",
+        "llm_custom_base_url_set": bool(settings.llm_base_url),
         "embed_model": settings.embed_model,
         "loop_interval": settings.loop_interval,
         "decay_halflife_days": settings.decay_halflife_days,
@@ -709,137 +696,26 @@ async def list_interactions(namespace: Optional[str] = None, limit: int = 100):
 @router.get("/analytics")
 async def memory_analytics():
     """GET /memory/analytics — time-series and distribution data for charts."""
-    _require_paid("analytics")
-    return _ok(_compute_memory_analytics())
+    raise HTTPException(
+        status_code=501,
+        detail="Analytics are available through the Engraphis Cloud dashboard.",
+    )
 
 
-def _compute_memory_analytics() -> dict:
-    """Build the analytics charts payload. The Pro gate lives HERE, at the top of
-    the computation, so the data can never be assembled on the free tier even if
-    the route's ``_require_paid`` wrapper is deleted (defense in depth; mirrors
-    engraphis.analytics.compute_analytics)."""
-    licensing.require_cloud_lease("analytics")
-    from collections import defaultdict
-    from engraphis.stores import get_conn
-    from engraphis.engines.reweight import retention_score
-    conn = get_conn()
-    now = time.time()
-
-    # ── Memory creation timeline (grouped by day, last 30 days) ──────────────
-    rows = conn.execute(
-        "SELECT created_at FROM memories WHERE created_at > ? ORDER BY created_at",
-        (now - 30 * 86400,),
-    ).fetchall()
-    timeline = defaultdict(int)
-    for r in rows:
-        day = int(r["created_at"] // 86400)
-        timeline[day] += 1
-    timeline_data = [
-        {"day": day, "count": timeline.get(day, 0),
-         "ts": day * 86400,
-         "label": time.strftime("%m/%d", time.gmtime(day * 86400))}
-        for day in range(int((now - 30 * 86400) // 86400), int(now // 86400) + 1)
-    ]
-
-    # ── Retention distribution histogram (10 buckets) ────────────────────────
-    all_mems = mem_store.list_documents(limit=10000)
-    retentions = [retention_score(m) for m in all_mems]
-    buckets = [0] * 10
-    for r in retentions:
-        idx = min(int(r * 10), 9)
-        buckets[idx] += 1
-    retention_hist = [
-        {"bucket": f"{i*10}-{(i+1)*10}%", "count": buckets[i], "range": [i*10, (i+1)*10]}
-        for i in range(10)
-    ]
-
-    # ── Namespace distribution with avg retention ────────────────────────────
-    ns_rows = conn.execute(
-        "SELECT namespace, COUNT(*) as count, AVG(stability) as avg_stability, "
-        "AVG(access_count) as avg_access FROM memories GROUP BY namespace ORDER BY count DESC"
-    ).fetchall()
-    ns_dist = []
-    for r in ns_rows:
-        ns_mems = [m for m in all_mems if m["namespace"] == r["namespace"]]
-        ns_ret = sum(retention_score(m) for m in ns_mems) / len(ns_mems) if ns_mems else 0
-        ns_dist.append({
-            "namespace": r["namespace"],
-            "count": r["count"],
-            "avg_retention": round(ns_ret, 4),
-            "avg_stability": round(r["avg_stability"] or 0, 2),
-            "avg_access": round(r["avg_access"] or 0, 1),
-        })
-
-    # ── Top entities by connection degree ────────────────────────────────────
-    entity_rows = conn.execute(
-        """SELECT e.name, e.namespace, e.entity_type,
-                  (SELECT COUNT(*) FROM edges ed WHERE ed.namespace=e.namespace
-                   AND (ed.source_entity=e.name OR ed.target_entity=e.name)) as degree
-           FROM entities e ORDER BY degree DESC LIMIT 20"""
-    ).fetchall()
-    top_entities = [dict(r) for r in entity_rows if r["degree"] > 0]
-
-    # ── Interaction activity timeline (last 30 days) ─────────────────────────
-    int_rows = conn.execute(
-        "SELECT timestamp, interaction_level FROM interactions WHERE timestamp > ?",
-        (now - 30 * 86400,),
-    ).fetchall()
-    int_timeline = defaultdict(lambda: defaultdict(int))
-    for r in int_rows:
-        day = int(r["timestamp"] // 86400)
-        level = r["interaction_level"] or "unknown"
-        int_timeline[day][level] += 1
-    int_data = [
-        {"day": day, "ts": day * 86400,
-         "label": time.strftime("%m/%d", time.gmtime(day * 86400)),
-         "levels": dict(int_timeline.get(day, {}))}
-        for day in range(int((now - 30 * 86400) // 86400), int(now // 86400) + 1)
-    ]
-
-    # ── Access frequency distribution ────────────────────────────────────────
-    access_rows = conn.execute(
-        "SELECT access_count, COUNT(*) as cnt FROM memories GROUP BY access_count ORDER BY access_count"
-    ).fetchall()
-    access_dist = [{"access_count": r["access_count"], "count": r["cnt"]} for r in access_rows]
-
-    # ── Thought generation timeline ──────────────────────────────────────────
-    thought_rows = conn.execute(
-        "SELECT created_at, namespace FROM thoughts WHERE created_at > ? ORDER BY created_at",
-        (now - 30 * 86400,),
-    ).fetchall()
-    thought_timeline = defaultdict(int)
-    for r in thought_rows:
-        day = int(r["created_at"] // 86400)
-        thought_timeline[day] += 1
-    thought_data = [
-        {"day": day, "count": thought_timeline.get(day, 0),
-         "ts": day * 86400,
-         "label": time.strftime("%m/%d", time.gmtime(day * 86400))}
-        for day in range(int((now - 30 * 86400) // 86400), int(now // 86400) + 1)
-    ]
-
-    return {
-        "timeline": timeline_data,
-        "retention_histogram": retention_hist,
-        "namespace_distribution": ns_dist,
-        "top_entities": top_entities,
-        "interaction_timeline": int_data,
-        "access_distribution": access_dist,
-        "thought_timeline": thought_data,
-        "total_memories": len(all_mems),
-        "avg_retention": round(sum(retentions) / len(retentions), 4) if retentions else 0,
-    }
-
-
-# ═══ LICENSING (open-core paid tier — see engraphis/licensing.py) ═══════════
+# ═══ HOSTED PLAN METADATA (the local core has no commercial authority) ══════
 
 @router.get("/license")
 async def get_license():
-    """GET /memory/license — current license state; free tier is the default."""
-    lic = licensing.current_license(refresh=True)
-    data = lic.to_public_dict()
-    data["error"] = licensing.license_error()
-    return _ok(data)
+    """GET /memory/license — local core metadata; hosted plans live in Cloud."""
+    return _ok({
+        "plan": "local",
+        "features": [],
+        "cloud_managed": True,
+        "trial_seconds": 259_200,
+        "grace_seconds": 86_400,
+        "grace_extends_cloud_access": False,
+        "upgrade_url": licensing.upgrade_url(),
+    })
 
 
 class _LicenseActivateReq(BaseModel):
@@ -848,26 +724,23 @@ class _LicenseActivateReq(BaseModel):
 
 @router.post("/license/activate")
 async def activate_license(req: _LicenseActivateReq):
-    """POST /memory/license/activate — verify + persist a key, return new state."""
-    try:
-        lic = licensing.activate(req.key)
-    except licensing.LicenseError as exc:
-        raise HTTPException(status_code=400, detail={"error": str(exc)})
-    return _ok(lic.to_public_dict())
+    """Legacy activation moved to the hosted account portal."""
+    del req
+    raise HTTPException(status_code=501, detail={
+        "error": "Manage Pro and Team in Engraphis Cloud.",
+        "cloud_only": True,
+        "upgrade_url": licensing.upgrade_url(),
+    })
 
 
 @router.get("/export")
 async def compliance_export(namespace: Optional[str] = None):
-    """GET /memory/export — full workspace dump (Pro: compliance export)."""
-    _require_paid("export")
+    """GET /memory/export — raw owner data export for the legacy local store."""
     return _ok(_compute_compliance_export(namespace))
 
 
 def _compute_compliance_export(namespace: Optional[str]) -> dict:
-    """Full workspace dump. The Pro gate lives HERE so the export can never be
-    built on the free tier even if the route's ``_require_paid`` wrapper is
-    deleted (defense in depth; mirrors service.export_workspace)."""
-    licensing.require_cloud_lease("export")
+    """Full raw workspace dump; hosted signed reports remain a Cloud feature."""
     docs = mem_store.list_documents(namespace=namespace, limit=100000)
     return {"exported_at": time.time(), "namespace": namespace,
             "count": len(docs), "memories": docs}

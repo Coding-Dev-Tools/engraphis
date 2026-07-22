@@ -1,12 +1,35 @@
 {
   "schema": "engraphis-commercial/v1",
   "version": "1.0.0",
-  "license_server": "https://license.engraphis.com",
+  "control_plane": "https://api.engraphis.com",
   "managed_dashboard": "https://team.engraphis.com",
   "trial": {
     "days": 3,
     "card_required": false,
     "plans": ["pro", "team"]
+  },
+  "entitlement_lifecycle": {
+    "max_grace_hours": 24,
+    "grace_mode": "workspace_write_grace",
+    "grace_for": "already_activated_or_provisioned_installations",
+    "grace_allows": ["authenticated_existing_user_local_core_workspace_writes"],
+    "live_authorization_still_required_for": [
+      "paid_or_cost_bearing_features",
+      "mcp_or_agent_writes"
+    ],
+    "grace_blocks_account_growth": true,
+    "trial_expiry_extended_by_grace": false,
+    "recovery": {
+      "mode": "recovery_read_only",
+      "allows": [
+        "login",
+        "password_recovery",
+        "authenticated_reads",
+        "data_export",
+        "relicensing"
+      ],
+      "blocks_normal_mutations": true
+    }
   },
   "plans": {
     "free": {
@@ -51,11 +74,13 @@
   },
   "features": {
     "offline_free_core": true,
-    "online_paid_license_verification": true,
-    "opt_in_cloud_sync": true,
-    "multi_user_roles": true,
-    "team_audit_export": true,
-    "per_user_agent_tokens": true,
+    "public_paid_license_gate": false,
+    "public_vendor_authority": false,
+    "hosted_authorization": true,
+    "hosted_opt_in_cloud_sync": true,
+    "hosted_multi_user_roles": true,
+    "hosted_team_audit_export": true,
+    "hosted_scoped_agent_tokens": true,
     "end_to_end_encrypted_sync": false,
     "sso": false,
     "contractual_sla": false
