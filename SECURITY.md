@@ -59,18 +59,9 @@ DOMPurify at all render sites. Verified against payloads with `onerror` handlers
 ### 5. Code indexing
 `engraphis_index_repo` parses source files under a path you give it — same trust boundary as
 any other local tool the agent has. Path is attacker-controlled if agent's instructions are.
-Canonical roots are restricted to the working, home, or temporary directories by default.
-Set `ENGRAPHIS_INDEX_ROOTS` to a path-separator-delimited absolute-path operator allow-list to
-replace those defaults for nonstandard mounts or a narrower deployment boundary.
-Dashboard and REST `POST /api/code/index` use the stricter single-root boundary
-`ENGRAPHIS_HTTP_INDEX_ROOT`: submitted paths resolve beneath that root. It defaults to the first
-`ENGRAPHIS_INDEX_ROOTS` entry, or the current directory. An explicit HTTP root (or fallback
-entry) must be absolute; an explicit HTTP root is included in the engine-approved set. MCP and
-CLI indexing retain the `ENGRAPHIS_INDEX_ROOTS` allow-list semantics.
-`max_files`/`max_file_bytes` bound resource use, not access within an allowed root. Traversal
-does not follow file symlinks outside the root, prunes dependency/build directories during the
-walk, and honors the root `.engraphisignore` without allowing negation rules to re-expose
-hardcoded excludes.
+`max_files`/`max_file_bytes` bound resource use, not access scope. Traversal does not follow
+file symlinks outside the root, prunes dependency/build directories during the walk, and honors
+the root `.engraphisignore` without allowing negation rules to re-expose hardcoded excludes.
 Anyone who can reach an authenticated local mutation route has the authority of that local
 installation, so do not share its bearer token.
 
@@ -114,22 +105,14 @@ them back as `expected_head` / `expected_count` when independent evidence is req
   no paid-key parser, signer, issuer, local feature gate, or long-lived-key relay exchange.
 - **Server authority:** every hosted and cost-bearing operation is authorized by the private
   control plane; local plan labels and upgrade URLs are presentation metadata only.
-- **Managed-compute consent:** Analytics, Auto Dreaming, and Auto Consolidation upload a
-  bounded snapshot. Consent travels with the cloud account: connecting an installation to
-  Engraphis Cloud accepts the terms covering managed compute, so a connected installation is
-  allowed and an installation with no cloud session is never allowed. Operators may override
-  with `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` (`0` opts a connected installation back out).
-  The snapshot carries normal and sensitive memory content, excludes secret-class and
-  session-scoped rows, is capped at 16 MiB, and travels over HTTPS without end-to-end
-  encryption. Secret-class memories are excluded before serialization and rejected again by
-  the hosted service.
+- **Managed-compute consent:** Analytics, Auto Dreaming, and Auto Consolidation upload a bounded
+  snapshot only after `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1`. Secret-class memories are excluded
+  before serialization and rejected again by the hosted service.
 - **Trial and grace are separate:** an email-confirmed trial lasts exactly 3 active days. A
   separately bounded, maximum-24-hour local workspace-write grace never extends the trial,
   subscription, Cloud Sync, managed compute, Team access, seats, or credentials.
 - **Remote URL validation:** hosted endpoints require HTTPS except explicit loopback use,
-  reject embedded credentials and redirects, require globally routable resolved addresses,
-  and pin credential-bearing TLS connections to a vetted address while verifying the
-  original hostname.
+  reject embedded credentials and redirects, and block private/reserved literal targets.
 - **Bounded I/O:** credential-bearing JSON responses are read through strict byte limits;
   malformed, oversized, or authoritative denial responses fail closed.
 - **HTTP response headers:** every entrypoint sends `X-Content-Type-Options: nosniff`,

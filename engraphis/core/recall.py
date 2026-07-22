@@ -128,8 +128,17 @@ class RecallEngine:
         expanding an explicit hop count; entity nodes are prefixed so names can
         never collide with memory ids."""
         entity_map = self._entity_map(flt)
-        patterns = {eid: _entity_pattern(name) for eid, name in entity_map.items() if name}
-        seeds = [eid for eid, pattern in patterns.items() if pattern.search(query)]
+        patterns = {
+            eid: (name.casefold(), _entity_pattern(name))
+            for eid, name in entity_map.items()
+            if name
+        }
+        query_folded = query.casefold()
+        seeds = [
+            eid
+            for eid, (needle, pattern) in patterns.items()
+            if needle in query_folded and pattern.search(query)
+        ]
         if not seeds:
             return {}
 
@@ -143,21 +152,27 @@ class RecallEngine:
         for e in self.store.edges_in_scope(flt, at=now):
             connect(ent(e.src), ent(e.dst), max(float(e.weight or 1.0), 1e-6))
 
+        # Past this cap, PPR would be rejected below anyway. Fall back before
+        # scanning every memory against every entity and then repeating that
+        # work in the 1-hop arm.
+        if len(adj) > 4000:
+            return self._graph_arm_1hop(query, flt, now)
+
         recs = self.store.list_memories(flt, limit=500)
         for rec in recs:
             hay = f"{rec.title} {rec.content}"
-            for eid, pattern in patterns.items():
-                if pattern.search(hay):
+            hay_folded = hay.casefold()
+            for eid, (needle, pattern) in patterns.items():
+                # Most entity names are absent. The C-level substring guard avoids
+                # millions of comparatively expensive regex searches while the
+                # regex retains exact token-boundary semantics for actual matches.
+                if needle in hay_folded and pattern.search(hay):
                     connect(rec.id, ent(eid), 1.0)
         for link in self.store.links_among(
             [r.id for r in recs], layers=flt.graph_layers
         ):
             connect(link["a"], link["b"], 1.0)
 
-        # Dense power iteration is O(n^2) memory: past this cap (far beyond any sane
-        # local scope) degrade gracefully to the 1-hop arm instead of allocating big.
-        if len(adj) > 4000:
-            return self._graph_arm_1hop(query, flt, now)
 
         ranked = personalized_pagerank(adj, [ent(eid) for eid in seeds])
         return {nid: score for nid, score in ranked.items()
@@ -165,8 +180,17 @@ class RecallEngine:
 
     def _graph_arm_1hop(self, query: str, flt: SearchFilter, now: float) -> dict[str, float]:
         entity_map = self._entity_map(flt)
-        patterns = {eid: _entity_pattern(name) for eid, name in entity_map.items() if name}
-        seed_ids = [eid for eid, pattern in patterns.items() if pattern.search(query)]
+        patterns = {
+            eid: (name.casefold(), _entity_pattern(name))
+            for eid, name in entity_map.items()
+            if name
+        }
+        query_folded = query.casefold()
+        seed_ids = [
+            eid
+            for eid, (needle, pattern) in patterns.items()
+            if needle in query_folded and pattern.search(query)
+        ]
         if not seed_ids:
             return {}
         names = {entity_map[eid] for eid in seed_ids if entity_map.get(eid)}
@@ -176,10 +200,19 @@ class RecallEngine:
             if e.dst in entity_map:
                 names.add(entity_map[e.dst])
         out: dict[str, float] = {}
-        name_patterns = [_entity_pattern(name) for name in names if name]
+        name_patterns = [
+            (name.casefold(), _entity_pattern(name))
+            for name in names
+            if name
+        ]
         for rec in self.store.list_memories(flt, limit=500):
             hay = f"{rec.title} {rec.content}"
-            hits = sum(1 for pattern in name_patterns if pattern.search(hay))
+            hay_folded = hay.casefold()
+            hits = sum(
+                1
+                for needle, pattern in name_patterns
+                if needle in hay_folded and pattern.search(hay)
+            )
             if hits:
                 out[rec.id] = float(hits)
         return out

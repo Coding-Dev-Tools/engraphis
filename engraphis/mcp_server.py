@@ -216,8 +216,9 @@ def engraphis_remember(
 
 @mcp.tool(
     name="engraphis_recall",
-    annotations={"title": "Recall relevant memories", "readOnlyHint": True,
-                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    annotations={"title": "Recall relevant memories", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": False,
+                 "openWorldHint": False},
 )
 def engraphis_recall(
     query: Annotated[str, Field(description="What you want to remember, in natural language "
@@ -238,6 +239,8 @@ def engraphis_recall(
 
     Call this before answering or acting when prior context would help — to avoid re-asking
     the user, to recover decisions/conventions, or to resume earlier work.
+    Successful calls reinforce returned memories and append a privacy-safe recall receipt,
+    so this retrieval surface is intentionally neither read-only nor idempotent.
 
     Returns:
         str: JSON with ``{"query","count","context","memories":[{"id","title","content",
@@ -255,8 +258,9 @@ def engraphis_recall(
 
 @mcp.tool(
     name="engraphis_recall_grounded",
-    annotations={"title": "Grounded recall (cited answer, or abstain)", "readOnlyHint": True,
-                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    annotations={"title": "Grounded recall (cited answer, or abstain)",
+                 "readOnlyHint": False, "destructiveHint": False,
+                 "idempotentHint": False, "openWorldHint": False},
 )
 def engraphis_recall_grounded(
     query: Annotated[str, Field(description="The question to answer from memory, in natural "
@@ -289,6 +293,8 @@ def engraphis_recall_grounded(
     non-hallucinated answer and would rather get "insufficient evidence" than a guess.
     The deterministic default never introduces a claim that is not in a cited memory.
     With ``synthesize=True``, configured LLM prose is accepted only when citations hold.
+    Every resolved call appends a privacy-safe receipt (including abstentions), and a
+    grounded answer reinforces cited memories.
 
     Returns:
         str: JSON ``{"query","grounded","abstained","answer","support","reason",
@@ -322,8 +328,8 @@ def engraphis_recall_grounded(
 @mcp.tool(
     name="engraphis_answer",
     annotations={"title": "Grounded answer (compatibility alias)",
-                 "readOnlyHint": True, "destructiveHint": False,
-                 "idempotentHint": True, "openWorldHint": False},
+                 "readOnlyHint": False, "destructiveHint": False,
+                 "idempotentHint": False, "openWorldHint": False},
 )
 def engraphis_answer(
     query: Annotated[str, Field(description="The question to answer from memory.",
@@ -428,7 +434,11 @@ def engraphis_recall_proactive(
     no query needed — call this at the start of a task to load context before you've
     figured out what to ask for. When ``repo`` is given, also returns the most recent
     *ended* session's summary and unresolved ``open_threads`` for that repo, so you can
-    pick up exactly where the last session left off.
+    pick up exactly where the last session left off. Authenticated callers only receive
+    handoffs owned by their own user identity.
+
+    Unlike query-based recall, this queryless ranking does not reinforce memories or append
+    an operation receipt, so repeated calls are read-only and idempotent.
 
     Returns:
         str: JSON ``{"memories":[...], "last_session":{"summary","open_threads","outcome"}
@@ -442,8 +452,9 @@ def engraphis_recall_proactive(
 
 @mcp.tool(
     name="engraphis_proactive_context",
-    annotations={"title": "Agent-ready proactive context", "readOnlyHint": True,
-                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    annotations={"title": "Agent-ready proactive context", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": False,
+                 "openWorldHint": False},
 )
 def engraphis_proactive_context(
     workspace: Annotated[str, Field(description="Workspace to surface context from.",
@@ -462,6 +473,9 @@ def engraphis_proactive_context(
     Combines proactive recall, optional task-specific recall, and last-session handoff
     into a cited ``context_summary`` plus ``suggested_queries``. Deterministic by
     default; LLM synthesis is opt-in and accepted only when it cites source memories.
+    When ``task`` or ``agent_state`` is supplied, the task-specific recall appends a
+    privacy-safe receipt (without reinforcing memories), so the tool is conservatively
+    annotated as mutating and non-idempotent.
     """
     try:
         return _ok(service().proactive_context(
@@ -475,7 +489,7 @@ def engraphis_proactive_context(
 @mcp.tool(
     name="engraphis_forget",
     annotations={"title": "Forget a memory", "readOnlyHint": False,
-                 "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+                 "destructiveHint": True, "idempotentHint": False, "openWorldHint": False},
 )
 def engraphis_forget(
     memory_id: Annotated[str, Field(description="The memory id to forget (from a prior "
@@ -494,6 +508,8 @@ def engraphis_forget(
     """Retire a memory: it stops appearing in recall, but history is preserved, not
     deleted (bi-temporal close, never a hard delete) — use ``engraphis_correct`` instead
     if you have replacement content, since that keeps the "why" chain intact.
+    Every request appends an audit record, including an identical retry, so the MCP call
+    is deliberately annotated as non-idempotent.
 
     Returns:
         str: JSON ``{"id","status":"forgotten","reason"}`` or an actionable error if the
@@ -508,7 +524,8 @@ def engraphis_forget(
 @mcp.tool(
     name="engraphis_pin",
     annotations={"title": "Pin or unpin a memory", "readOnlyHint": False,
-                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+                 "destructiveHint": False, "idempotentHint": False,
+                 "openWorldHint": False},
 )
 def engraphis_pin(
     memory_id: Annotated[str, Field(description="The memory id to pin/unpin.", min_length=1,
@@ -524,6 +541,8 @@ def engraphis_pin(
 ) -> str:
     """Mark a memory as important enough to exempt from automatic decay/pruning — use for
     durable conventions or identity facts that must never silently fade.
+    Every pin/unpin request is audited, including an identical retry, so the MCP call is
+    deliberately annotated as non-idempotent even when the boolean value is unchanged.
 
     Returns:
         str: JSON ``{"id","pinned"}`` or an actionable error if the id is unknown or doesn't
@@ -687,7 +706,8 @@ def engraphis_record_event(
 @mcp.tool(
     name="engraphis_index_repo",
     annotations={"title": "Index a repository's code graph", "readOnlyHint": False,
-                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+                 "destructiveHint": False, "idempotentHint": False,
+                 "openWorldHint": False},
 )
 def engraphis_index_repo(
     workspace: Annotated[str, Field(description="Workspace the repo belongs to.",
@@ -719,6 +739,8 @@ def engraphis_index_repo(
     engraphis_remember). Re-indexing is safe to call again; each file's symbols are
     replaced, not duplicated. Reads files from ``root_path`` on the local filesystem —
     the same trust boundary as any other local tool you have, nothing is sent anywhere.
+    Each completed scan appends a fresh operation receipt, so the MCP call is
+    non-idempotent even when the code graph itself is unchanged.
 
     Returns:
         str: JSON ``{"files_indexed","symbols","edges","backend"}``.
@@ -836,7 +858,8 @@ def engraphis_export_code_graph(
 @mcp.tool(
     name="engraphis_start_session",
     annotations={"title": "Start a memory session", "readOnlyHint": False,
-                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+                 "destructiveHint": False, "idempotentHint": False,
+                 "openWorldHint": False},
 )
 def engraphis_start_session(
     workspace: Annotated[str, Field(description="Workspace the session belongs to. "
@@ -850,21 +873,23 @@ def engraphis_start_session(
     goal: Annotated[str, Field(description="What this session is trying to accomplish.",
                                max_length=1_000)] = "",
     force_new: Annotated[bool, Field(description="Force a brand-new session even if one is "
-                         "already active for this workspace/repo/agent. Default false: a "
-                         "repeat call in the same scope returns the existing active session "
-                         "(reused=true) rather than opening a second one. Set true only for "
-                         "a genuinely separate task in the same repo.")] = False,
+                         "already active for this exact workspace/repo/user/agent/goal "
+                         "identity. Default false: an exact retry returns the existing "
+                         "active session (reused=true). Set true only to branch a second "
+                         "session for the same task identity.")] = False,
 ) -> str:
     """Open a session to group this work's memories and enable cross-session resume.
 
     Call this at the start of a task in a repo you've worked in before — if a previous
-    session in that repo was ended with a summary or open threads, they come back in
-    ``bootstrap`` so you can pick up where it left off instead of starting cold.
+    session for the same authenticated user and agent was ended with a summary or open
+    threads, they come back in ``bootstrap`` so you can resume without crossing another
+    user or agent's handoff boundary.
 
-    Idempotent: calling it again in the same ``(workspace, repo, agent)`` scope returns
-    the session already in progress (``reused: true``) instead of forking a second
-    concurrent session — two live sessions on one scope means two writers contending on
-    the store. Use ``force_new=true`` when you really do want a separate session.
+    Exact retries are reused by default for the same ``(workspace, repo, authenticated
+    user, agent, goal)`` identity. Different users, agents, or goals start distinct
+    sessions automatically, and ``force_new=true`` always branches another session.
+    Because that valid option creates a new row on every call, the tool as a whole is
+    conservatively annotated as non-idempotent.
 
     Returns:
         str: JSON ``{"session_id","workspace","repo","goal","status":"active","reused",
@@ -891,11 +916,12 @@ def engraphis_end_session(
     outcome: Annotated[str, Field(description="Short outcome label (e.g. 'shipped', "
                                   "'blocked').", max_length=1_000)] = "",
     open_threads: Annotated[Optional[List[str]], Field(description="Unresolved items to "
-                            "carry into the next session in this repo (e.g. 'tests 3-5 "
-                            "still failing'). Surfaced automatically when that next "
-                            "session starts.")] = None,
+                            "carry into the next session for the same user and agent in "
+                            "this repo (e.g. 'tests 3-5 still failing').")] = None,
 ) -> str:
     """Close a session with a summary/outcome so the next session can pick up the thread.
+    An identical retry is an atomic no-op; a retry with a conflicting handoff is rejected,
+    so this tool remains idempotent.
 
     Returns:
         str: JSON ``{"session_id","status":"summarized","summary","open_threads"}`` or
@@ -993,8 +1019,9 @@ def engraphis_stats(
 
 @mcp.tool(
     name="engraphis_check_update",
-    annotations={"title": "Check for an Engraphis update", "readOnlyHint": True,
-                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+    annotations={"title": "Check for an Engraphis update", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": False,
+                 "openWorldHint": True},
 )
 def engraphis_check_update(
     force: Annotated[bool, Field(description="Bypass the ~24h cache and re-check the "
@@ -1004,7 +1031,9 @@ def engraphis_check_update(
     remind the user to upgrade.
 
     Cached ~24h and fail-silent; honors ``ENGRAPHIS_UPDATE_CHECK=0`` (then ``enabled`` is
-    false). The default GitHub source is overridable via ``ENGRAPHIS_UPDATE_URL``.
+    false). The default GitHub source is overridable via ``ENGRAPHIS_UPDATE_URL``. A stale
+    lookup refreshes the persistent cache, and ``force=true`` rewrites it on every call,
+    so this open-world tool is neither read-only nor idempotent.
 
     Returns:
         str: JSON ``{"enabled","current","latest","update_available","url","notice"}``.
@@ -1066,7 +1095,8 @@ def engraphis_ingest(
 @mcp.tool(
     name="engraphis_ingest_postgres_schema",
     annotations={"title": "Ingest a live PostgreSQL schema", "readOnlyHint": False,
-                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": True},
+                 "destructiveHint": False, "idempotentHint": False,
+                 "openWorldHint": True},
 )
 def engraphis_ingest_postgres_schema(
     dsn: Annotated[str, Field(
@@ -1082,7 +1112,9 @@ def engraphis_ingest_postgres_schema(
     )] = None,
 ) -> str:
     """Convert tables, columns, constraints, and foreign keys into a schema memory and
-    entity graph. Requires the optional psycopg backend."""
+    entity graph. Requires the optional psycopg backend. Each invocation stores a new
+    point-in-time schema snapshot and appends audit/receipt records, so it is not
+    idempotent."""
     try:
         return _ok(service().import_postgres_schema(
             dsn, workspace=workspace, repo=repo, schemas=schemas, actor="agent",
@@ -1094,7 +1126,8 @@ def engraphis_ingest_postgres_schema(
 @mcp.tool(
     name="engraphis_consolidate",
     annotations={"title": "Consolidate memories (sleep-time sweep)", "readOnlyHint": False,
-                 "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+                 "destructiveHint": True, "idempotentHint": False,
+                 "openWorldHint": False},
 )
 def engraphis_consolidate(
     workspace: Annotated[str, Field(description="Workspace to consolidate.", min_length=1,
@@ -1116,11 +1149,13 @@ def engraphis_consolidate(
     """Run one sleep-time consolidation sweep: recurring episodic memories on the same
     subject are distilled into one durable semantic digest (linked to its sources), and
     fully-decayed transient memories are archived (bi-temporally closed — never deleted,
-    always audited, pinned memories exempt). Idempotent: already-consolidated clusters
-    are skipped. With ``profiles=True`` each entity's memories are also rolled into one
-    durable profile digest. With ``structured=True`` a configured LLM may produce
-    schema-validated facts/entities/relations; provider/schema failure falls back to the
-    deterministic digest. Good moments to call it: session end, or on a schedule.
+    always audited, pinned memories exempt). Already-consolidated sources are skipped on
+    retries. With ``profiles=True`` each entity's memories are also rolled into one durable
+    profile digest. With ``structured=True`` a configured LLM may produce schema-validated
+    facts/entities/relations; provider/schema failure falls back to the deterministic
+    digest. A structured result may cite only part of a large cluster, allowing an
+    identical later call to process the remainder, so the overall tool is conservatively
+    non-idempotent. Good moments to call it: session end, or on a schedule.
 
     Returns:
         str: JSON report ``{"clusters_found","digests_created","archived",
@@ -1139,3 +1174,7 @@ def engraphis_consolidate(
 def main() -> None:
     """Console entry point (``engraphis-mcp``). Runs over stdio."""
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()

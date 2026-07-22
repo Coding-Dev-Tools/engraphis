@@ -65,7 +65,7 @@ jobs:
           python -m eval.ablation
           python -m pip_audit --local
 
-      - name: Build sdist and wheel
+      - name: Build source and universal wheel distributions
         run: python -m build
 
       - name: Validate distributions
@@ -184,14 +184,29 @@ jobs:
       contents: read
 
     steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Download distributions
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: python-package-distributions
           path: dist/
 
+      - name: Verify any previously published subset
+        shell: bash
+        run: >-
+          python scripts/verify_release_artifacts.py --dist dist
+          --version "${GITHUB_REF_NAME#v}" --allow-subset
+
       - name: Publish distributions to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          skip-existing: true
+
+      - name: Require the exact complete PyPI file set
+        shell: bash
+        run: >-
+          python scripts/verify_release_artifacts.py --dist dist
+          --version "${GITHUB_REF_NAME#v}" --retries 18 --delay 10
 
   github-release:
     name: Publish GitHub Release
@@ -214,10 +229,16 @@ jobs:
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "GitHub Release $GITHUB_REF_NAME already exists; nothing to publish."
+          if gh release view "$GITHUB_REF_NAME" --repo "$GH_REPO" >/dev/null 2>&1; then
+            # A previous partial attempt may have created the release before every
+            # canonical package asset uploaded. Reconcile same-named assets from the
+            # exact aggregate that passed the publish gate.
+            gh release upload "$GITHUB_REF_NAME" dist/* \
+              --repo "$GH_REPO" \
+              --clobber
           else
             gh release create "$GITHUB_REF_NAME" dist/* \
+              --repo "$GH_REPO" \
               --verify-tag \
               --generate-notes \
               --title "Engraphis ${GITHUB_REF_NAME#v}" \
@@ -226,13 +247,18 @@ jobs:
 
   github-release-repair:
     name: Repair GitHub Release
-    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.release_tag != ''
     runs-on: ubuntu-latest
     permissions:
       actions: read
       contents: write
+      id-token: write
 
     steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       - name: Download published distributions
         env:
           GH_TOKEN: ${{ github.token }}
@@ -240,17 +266,71 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         shell: bash
         run: |
-          run_id="$(gh run list \
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag_ref="$(gh api "repos/${GH_REPO}/git/ref/tags/${RELEASE_TAG}")"
+          object_type="$(jq -r '.object.type' <<<"$tag_ref")"
+          tag_sha="$(jq -r '.object.sha' <<<"$tag_ref")"
+          # Annotated tags point at tag objects rather than commits. Peel a bounded
+          # chain explicitly so a same-named branch can never supply the repair SHA.
+          for _ in {1..8}; do
+            if [ "$object_type" = "commit" ]; then
+              break
+            fi
+            test "$object_type" = "tag"
+            tag_object="$(gh api "repos/${GH_REPO}/git/tags/${tag_sha}")"
+            object_type="$(jq -r '.object.type' <<<"$tag_object")"
+            tag_sha="$(jq -r '.object.sha' <<<"$tag_object")"
+          done
+          test "$object_type" = "commit"
+          runs="$(gh run list \
+            --repo "$GH_REPO" \
             --workflow release.yml \
             --branch "$RELEASE_TAG" \
             --event push \
-            --limit 1 \
-            --json databaseId \
-            --jq '.[0].databaseId')"
+            --limit 20 \
+            --json databaseId,headBranch,headSha,event)"
+          run_id="$(jq -r \
+            --arg tag "$RELEASE_TAG" \
+            --arg sha "$tag_sha" \
+            'map(select(.headBranch == $tag and
+                        .headSha == $sha and
+                        .event == "push"))[0].databaseId // empty' \
+            <<<"$runs")"
           test -n "$run_id"
+          jobs="$(gh run view "$run_id" --repo "$GH_REPO" --json jobs)"
+          test "$(jq '[.jobs[] | select(.name == "Build distributions" and
+                                        .conclusion == "success")] | length' \
+            <<<"$jobs")" -eq 1
+          test "$(jq '[.jobs[] | select(.name == "Publish to PyPI" and
+                                        (.conclusion == "success" or
+                                         .conclusion == "failure"))] | length' \
+            <<<"$jobs")" -eq 1
           gh run download "$run_id" \
+            --repo "$GH_REPO" \
             --name python-package-distributions \
             --dir dist
+
+      - name: Verify any previously published subset
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: >-
+          python scripts/verify_release_artifacts.py --dist dist
+          --version "${RELEASE_TAG#v}" --allow-subset
+
+      - name: Publish only missing verified distributions
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          skip-existing: true
+
+      - name: Require the exact complete PyPI file set
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: >-
+          python scripts/verify_release_artifacts.py --dist dist
+          --version "${RELEASE_TAG#v}" --retries 18 --delay 10
 
       - name: Repair GitHub Release
         env:
@@ -259,10 +339,13 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         shell: bash
         run: |
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "GitHub Release $RELEASE_TAG already exists; nothing to repair."
+          if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" dist/* \
+              --repo "$GH_REPO" \
+              --clobber
           else
             gh release create "$RELEASE_TAG" dist/* \
+              --repo "$GH_REPO" \
               --verify-tag \
               --generate-notes \
               --title "Engraphis ${RELEASE_TAG#v}" \

@@ -15,7 +15,7 @@
 <div class="brand">
 <svg class="brand-mark" viewBox="0 0 24 24" fill="none"><path d="M12 2L3 7v10l9 5 9-5V7l-9-5z" stroke="var(--accent)" stroke-width="1.5" stroke-linejoin="round"/><path d="M12 12L3 7m9 5l9-5m-9 5v10" stroke="var(--accent-dim)" stroke-width="1.2" stroke-linejoin="round"/><circle cx="12" cy="12" r="2" fill="var(--accent)"/></svg>
 <div data-csp-style="s1"><div class="brand-name">Engraphis</div><div class="brand-sub">Memory Engine</div></div>
-<button type="button" id="lic-badge" class="pill pill-muted" data-onclick="h1" title="License — open settings to manage" aria-label="Open license settings" data-csp-style="s2">•••</button>
+<button type="button" id="lic-badge" class="pill pill-muted" data-onclick="h1" title="Hosted plans — open settings" aria-label="Open hosted plan settings" data-csp-style="s2">•••</button>
 <div class="theme-wrap" data-csp-style="s3"><button type="button" id="theme-btn" class="theme-btn" data-onclick="h2" title="Change theme" aria-label="Change theme" aria-controls="theme-menu" aria-expanded="false" data-csp-style="s4">◑</button><div id="theme-menu" class="theme-menu" aria-label="Theme choices"></div></div>
 </div>
 <button type="button" class="vault-switcher" id="vault-switcher" data-onclick="h3" aria-label="Choose active workspace">
@@ -40,7 +40,7 @@
 <div class="nav-section">Engine</div>
 <button type="button" class="nav-item" data-view="consolidate"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M2 5h12M4 8h8M6 11h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Consolidate</button>
 <button type="button" class="nav-item" data-view="automation"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="3" stroke="currentColor" stroke-width="1.3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6L13 13M13 3l-1.4 1.4M4.4 11.6L3 13" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>Automation<span class="nav-badge" id="nav-automation-lock"></span></button>
-<button type="button" class="nav-item" data-view="team"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="6" cy="6" r="2.3" stroke="currentColor" stroke-width="1.3"/><path d="M2 13c0-2.2 1.8-3.5 4-3.5s4 1.3 4 3.5" stroke="currentColor" stroke-width="1.3"/><path d="M11 5.5a2 2 0 010 4M12 13c0-1.6-.7-2.7-1.8-3.2" stroke="currentColor" stroke-width="1.2"/></svg>Team<span class="nav-badge" id="nav-team-lock"></span></button>
+<button type="button" class="nav-item" data-view="team"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="6" cy="6" r="2.3" stroke="currentColor" stroke-width="1.3"/><path d="M2 13c0-2.2 1.8-3.5 4-3.5s4 1.3 4 3.5" stroke="currentColor" stroke-width="1.3"/><path d="M11 5.5a2 2 0 010 4M12 13c0-1.6-.7-2.7-1.8-3.2" stroke="currentColor" stroke-width="1.2"/></svg>Team Cloud<span class="nav-badge" id="nav-team-lock"></span></button>
 <button type="button" class="nav-item" data-view="settings"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Settings</button>
 </nav>
 <div class="sidebar-footer" role="status" aria-live="polite"><div data-csp-style="s6"><span class="pulse-dot" id="health-dot" aria-hidden="true"></span><span id="health-text">Connecting…</span></div><span data-csp-style="s7" id="engine-badge">v2</span></div>
@@ -55,11 +55,9 @@
 <div class="topbar-heading"><h1 class="topbar-title" id="topbar-title">Overview</h1><span id="an-lock" class="pill pill-muted topbar-lock"></span><span id="au-lock" class="pill pill-muted topbar-lock"></span><div class="topbar-sub" id="topbar-sub" role="status" aria-live="polite"></div></div>
 </div>
 <div class="topbar-spacer"></div>
-<button id="session-action" class="btn btn-ghost btn-sm" data-csp-style="s8" data-onclick="h6" aria-label="Sign in to the dashboard">Sign in</button>
 </header>
 <div class="content">
 <div id="sem-banner" class="status-region system-banner" role="status" aria-live="polite" data-csp-style="s8"></div>
-<div id="auth-banner" class="status-region system-banner" role="status" aria-live="polite" data-csp-style="s8"></div>
 <div id="update-banner" class="update-banner" role="status" aria-live="polite" hidden></div>
 
 <div class="view active" id="view-overview">
@@ -213,10 +211,8 @@
 <div class="view" id="view-analytics">
 <div id="an-actions" class="workbench-command" data-csp-style="s8">
 <button class="btn btn-ghost btn-sm" data-onclick="h58">Refresh</button>
-<button class="btn btn-ghost btn-sm" id="an-portfolio-btn" data-onclick="h59">Portfolio · all workspaces</button>
-<button class="btn btn-primary btn-sm" data-onclick="h60">Download HTML report</button>
 </div>
-<div id="analytics-body" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Loading workspace analytics…</div></div>
+<div id="analytics-body" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Connecting to hosted Analytics…</div></div>
 </div>
 
 <div class="view" id="view-consolidate">
@@ -225,7 +221,7 @@
 </div>
 
 <div class="view" id="view-automation">
-<div id="automation-body" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Loading maintenance policy…</div></div>
+<div id="automation-body" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Loading hosted Auto Consolidation and Auto Dreaming policy…</div></div>
 </div>
 
 <div class="view" id="view-workspaces">
@@ -266,7 +262,7 @@
 </div>
 
 <div class="view" id="view-team">
-<div id="team-body" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Loading team access…</div></div>
+<div id="team-body" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Loading hosted Team options…</div></div>
 </div>
 
 <div class="view" id="view-settings">
@@ -287,7 +283,7 @@
 </div>
 </div>
 <div class="card"><div class="card-head">Cloud sync</div><div id="sync-body" class="lic-body">Loading…</div></div>
-<div class="card"><div class="card-head">Connect an agent</div><div id="tokens-body" class="lic-body">Loading…</div></div>
+<div class="card"><div class="card-head">Hosted Team &amp; agent access</div><div id="tokens-body" class="lic-body">Loading…</div></div>
 </div>
 <div class="settings-column">
 <div class="card"><div class="card-head">Connect an LLM</div><div id="llm-body" class="lic-body">Loading…</div></div>
@@ -305,33 +301,6 @@
 <div class="mm-meta" id="mm-meta"></div>
 <div class="mm-body md-reader status-region" id="mm-body" role="status" aria-live="polite"></div>
 <div class="mm-actions" id="mm-actions"></div>
-</div>
-</div>
-
-<!-- AUTH OVERLAY (team mode) -->
-<div class="mm-overlay" id="auth-overlay" data-onclick="h77" aria-hidden="true">
-<div class="mm-box" role="dialog" aria-modal="true" aria-labelledby="auth-title">
-<div class="mm-head"><div class="mm-title" id="auth-title">Sign in</div><button class="btn btn-ghost btn-sm" data-onclick="h78" aria-label="Close">&#10005;</button></div>
-<div class="mm-body" id="auth-body"></div>
-</div>
-</div>
-
-<!-- NEW FOLDER DIALOG (team mode requires an explicit access choice) -->
-<div class="mm-overlay" id="folder-overlay" data-onclick="h79" aria-hidden="true">
-<div class="mm-box" role="dialog" aria-modal="true" aria-labelledby="folder-dialog-title" aria-describedby="folder-access-help">
-<div class="mm-head"><div class="mm-title" id="folder-dialog-title">New folder</div><button class="btn btn-ghost btn-sm" data-onclick="h80" aria-label="Close">&#10005;</button></div>
-<div class="mm-body">
-<div class="field"><label class="field-lbl" for="folder-name">Folder name</label><input class="input" id="folder-name" autocomplete="off" placeholder="e.g. Product research"></div>
-<div class="field"><label class="field-lbl" for="folder-description">Description <span class="optional-label">(optional)</span></label><input class="input" id="folder-description" autocomplete="off" placeholder="What belongs here"></div>
-<fieldset class="folder-access-fieldset"><legend class="field-lbl">Who can access this folder?</legend>
-<div class="folder-access-grid" id="folder-access-help">
-<label class="folder-access-option"><input type="radio" name="folder-visibility" value="personal" checked data-onchange="h81"><span><strong>Personal and private</strong><span>Only you can see and use this folder.</span></span></label>
-<label class="folder-access-option"><input type="radio" name="folder-visibility" value="shared" data-onchange="h81"><span><strong>Shared with team</strong><span>Every team member can see and use this folder.</span></span></label>
-</div>
-</fieldset>
-<div class="field-hint" id="folder-create-status" role="status" aria-live="polite">Personal and private is selected by default. Sharing requires confirmation.</div>
-</div>
-<div class="mm-actions"><button class="btn btn-ghost" data-onclick="h80">Cancel</button><button class="btn btn-primary" id="folder-create-submit" data-onclick="h82" disabled>Create folder</button></div>
 </div>
 </div>
 

@@ -7,7 +7,7 @@ retention-supervision, and privacy-receipt additions introduced with schema vers
 flowchart LR
     Agent["Agent / host LLM"] --> Intent["remember · link · recall"]
     CLI["engraphis-graph CLI"] --> Service["MemoryService"]
-    MCP["28 MCP tools"] --> Service
+    MCP["29 MCP tools"] --> Service
     HTTP["Dashboard + read-only graph HTTP"] --> Service
     Import["Local resources / PostgreSQL catalog"] --> Extractors["Optional local extractors"]
     Extractors --> Service
@@ -60,9 +60,9 @@ flowchart LR
    memory/query text, workspace names, IDs, and actor identities are excluded from the exported
    payload. A previously exported head/count can be supplied during verification to anchor the
    chain outside the database.
-10. **Team-safe exposure.** The full dashboard retains its existing auth/role controls. The
-    optional `engraphis-graph-server` exposes only read operations and refuses a non-loopback bind
-    without a bearer token.
+10. **Local-safe exposure.** The public dashboard is single-user and supports an optional local
+    bearer token. The optional `engraphis-graph-server` exposes only read operations and refuses a
+    non-loopback bind without a bearer token. Team identity, roles, and seats are hosted services.
 
 ## Schema additions
 

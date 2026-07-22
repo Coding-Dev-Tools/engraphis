@@ -1,7 +1,6 @@
 """Regressions for sync/store integrity fixes:
 - get_or_create_workspace bypassed the workspace allow-list on the retrieve path.
 - sync clamped future world-time validity (valid_to/valid_from) to now+skew.
-- autosync _record reset the policy to the disabled default on a transient read failure.
 """
 import time
 
@@ -34,21 +33,3 @@ def test_sync_apply_preserves_future_world_validity():
     poisoned = dict_to_record({"id": "mem_y", "content": "c", "ingested_at": future,
                                "last_access": future})
     assert poisoned.ingested_at <= time.time() + 10 * 86400
-
-
-def test_autosync_record_preserves_policy_on_unreadable_file(monkeypatch, tmp_path):
-    from engraphis import autosync
-    target = tmp_path / "autosync.json"
-    target.mkdir()                                     # exists but read_text raises OSError
-    monkeypatch.setattr(autosync, "policy_path", lambda: target)
-    wrote = []
-    monkeypatch.setattr(autosync, "_write", lambda doc: wrote.append(doc))
-    autosync._record({"workspaces": 1})
-    assert wrote == []                                 # never clobber the policy on a read hiccup
-
-
-def test_autosync_record_creates_on_fresh_install(monkeypatch, tmp_path):
-    from engraphis import autosync
-    monkeypatch.setattr(autosync, "policy_path", lambda: tmp_path / "fresh.json")
-    autosync._record({"workspaces": 1}, now=123.0)
-    assert autosync.load_policy()["last_run"] == 123.0

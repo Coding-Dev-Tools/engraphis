@@ -10,7 +10,12 @@ import json
 from pathlib import Path
 
 
-BILLING_AUTHORITY = "stripe"
+PRODUCT_ENV = {
+    "POLAR_PRO_MONTHLY_PRODUCT_ID": ("pro", "monthly"),
+    "POLAR_PRO_ANNUAL_PRODUCT_ID": ("pro", "annual"),
+    "POLAR_TEAM_MONTHLY_PRODUCT_ID": ("team", "monthly"),
+    "POLAR_TEAM_ANNUAL_PRODUCT_ID": ("team", "annual"),
+}
 
 
 def manifest() -> dict:
@@ -19,19 +24,13 @@ def manifest() -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def expected_checkout_targets() -> dict:
-    """Return public onboarding targets without exposing provider-side price identifiers."""
-    # Read defensively: the release check calls this *after* collecting its own structural
-    # errors, so a missing plan/products block must not raise a KeyError here and abort
-    # before those errors are printed. Missing entries simply do not appear.
-    plans = manifest().get("plans", {})
+def expected_product_ids() -> dict:
+    """Return the manifest's public product identifiers keyed by environment name."""
     expected = {}
     for plan_name in ("pro", "team"):
-        products = plans.get(plan_name, {}).get("products", {})
-        for interval, product in products.items():
-            expected[(plan_name, interval)] = {
-                "provider": product.get("provider"),
-                "checkout_url": product.get("checkout_url"),
+        for interval, product in manifest()["plans"][plan_name]["products"].items():
+            expected[product["env"]] = {
+                "id": product["id"],
                 "plan": plan_name,
                 "interval": interval,
             }

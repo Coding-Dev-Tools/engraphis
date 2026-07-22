@@ -9,7 +9,6 @@ shipped entry point could drive it. These tests lock the wiring in place.
 from __future__ import annotations
 
 import json
-import socket
 
 import pytest
 
@@ -22,14 +21,7 @@ from scripts.sync import main as sync_main
 
 # ── factory: relay is now a first-class transport ───────────────────────────────────
 
-def test_get_transport_relay_builds_relay_transport(monkeypatch):
-    monkeypatch.setattr(
-        socket,
-        "getaddrinfo",
-        lambda *args, **kwargs: [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))
-        ],
-    )
+def test_get_transport_relay_builds_relay_transport():
     t = get_transport("relay", base_url="https://sync.test/", workspace_id="acme",
                       access_token="engr_ut_" + "x" * 32)
     assert isinstance(t, RelayTransport)

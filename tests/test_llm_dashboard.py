@@ -89,12 +89,14 @@ def test_successful_connection_auto_enables_extractor_and_activity_is_explainabl
     tested = client.post("/api/llm/test")
     assert tested.status_code == 200
     assert tested.json()["ok"] is True
+    assert "reply" not in tested.json()
     assert tested.json()["extractor_enabled"] is True
     assert tested.json()["auto_enabled"] is True
     assert svc.engine.extractor is not None
     status = client.get("/api/llm/status").json()
     assert status["working"] is True
     assert status["extractor"] == "llm_structured"
+    assert "base_url" not in status
 
     persisted = (tmp_path / ".env").read_text(encoding="utf-8")
     assert "ENGRAPHIS_EXTRACTOR=llm_structured" in persisted
@@ -186,3 +188,65 @@ def test_dashboard_warns_when_auto_enabled_extractor_cannot_persist():
     assert "could not be saved for restart" in dashboard
     assert "ENGRAPHIS_EXTRACTOR=llm_structured" in dashboard
     assert "ENGRAPHIS_LLM_AUTO_EXTRACT=1" in dashboard
+    assert "d.reply" not in dashboard
+    assert "replied:" not in dashboard
+
+
+def test_llm_http_status_and_test_allowlist_hide_endpoint_and_provider_payload(
+        monkeypatch, tmp_path):
+    client, _svc = _client(monkeypatch, tmp_path)
+    marker = "private-provider-route-and-reply-secret"
+    monkeypatch.setattr(
+        settings, "llm_base_url", "https://provider.example/%s" % marker
+    )
+    monkeypatch.setattr(settings, "llm_auto_extract", False)
+
+    from engraphis.llm import client as llm_client
+
+    class _HostilePing(_WorkingLLM):
+        def ping(self):
+            return {
+                "ok": True,
+                "reply": marker,
+                "base_url": "https://user:%s@provider.example" % marker,
+                "unexpected": marker,
+                "provider": marker,
+                "model": marker,
+            }
+
+    monkeypatch.setattr(llm_client, "LLMClient", _HostilePing)
+    tested = client.post("/api/llm/test")
+    status = client.get("/api/llm/status")
+
+    assert tested.status_code == 200
+    assert set(tested.json()) == {
+        "ok", "provider", "model", "extractor", "extractor_enabled",
+        "auto_extract", "auto_enabled",
+    }
+    assert tested.json()["provider"] == _WorkingLLM.provider
+    assert tested.json()["model"] == _WorkingLLM.model
+    assert status.json()["custom_base_url_configured"] is True
+    assert "base_url" not in status.json()
+    assert marker not in tested.text
+    assert marker not in status.text
+
+    class _HostileFailure(_WorkingLLM):
+        def ping(self):
+            return {
+                "ok": False,
+                "error": marker,
+                "reply": marker,
+                "base_url": marker,
+                "provider": marker,
+                "model": marker,
+            }
+
+    monkeypatch.setattr(llm_client, "LLMClient", _HostileFailure)
+    failed = client.post("/api/llm/test")
+    assert failed.status_code == 200
+    assert set(failed.json()) == {
+        "ok", "provider", "model", "extractor", "extractor_enabled",
+        "auto_extract", "auto_enabled", "error",
+    }
+    assert failed.json()["error"].startswith("The provider test failed")
+    assert marker not in failed.text

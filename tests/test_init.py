@@ -99,36 +99,20 @@ def _fresh_settings(monkeypatch, tmp_path):
     monkeypatch.setattr(cfg, "settings", cfg.Settings())
 
 
-def test_doctor_reports_free_tier_reassuringly(tmp_path, monkeypatch, capsys):
-    from engraphis import licensing
+def test_doctor_reports_local_core_reassuringly(tmp_path, monkeypatch, capsys):
     _fresh_settings(monkeypatch, tmp_path)
-    monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY", raising=False)
-    monkeypatch.setattr(licensing, "_LICENSE_FILE", tmp_path / "no-such-key")
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path / "state"))
     assert main(["--check"]) == 0
     output = capsys.readouterr().out
-    assert "free tier - all core features available" in output
+    assert "local core - single-user features available without a hosted subscription" in output
+    assert "Engraphis Cloud - not connected" in output
     output.encode("ascii")
-    licensing.current_license(refresh=True)
 
 
-def test_doctor_reports_tier_and_expiry_for_a_licensed_install(
-        tmp_path, monkeypatch, capsys):
-    import time as _time
-    from engraphis import licensing
-    from engraphis.licensing import compose_key, ed25519_public_key
+def test_doctor_reports_connected_cloud_install(tmp_path, monkeypatch, capsys):
     _fresh_settings(monkeypatch, tmp_path)
-    secret = bytes(range(32))
-    expires = int(_time.time() + 30 * 86400)
-    monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(secret).hex())
-    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", compose_key(
-        {"v": 1, "plan": "pro", "email": "t@x.co", "seats": 1,
-         "issued": int(_time.time()), "expires": expires}, secret))
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", "cloud-token-" + "x" * 32)
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "org_test")
     assert main(["--check"]) == 0
     out = capsys.readouterr().out
-    assert "pro tier (analytics, automation, export, sync)" in out
-    assert "expires " + _time.strftime("%Y-%m-%d", _time.gmtime(expires)) in out
-    # leave the process-wide license cache the way we found it
-    monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY")
-    monkeypatch.delenv("ENGRAPHIS_LICENSE_PUBKEY")
-    monkeypatch.setattr(licensing, "_LICENSE_FILE", tmp_path / "no-such-key")
-    licensing.current_license(refresh=True)
+    assert "Engraphis Cloud - installation connected" in out

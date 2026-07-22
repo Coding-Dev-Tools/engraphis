@@ -1,73 +1,91 @@
 const { test, expect } = require('@playwright/test');
 const AxeBuilder = require('@axe-core/playwright').default;
 
-const admin = { id: 'usr_admin', email: 'admin@example.com', name: 'Admin', role: 'admin' };
-const teamLicense = {
-  plan: 'team', is_trial: true, seats: 5, features: ['team', 'cloud_sync', 'analytics'],
-  trial: { active: true, days_left: 3, trial_days: 3 }, known_features: {},
-  pro_upgrade_url: 'https://engraphis.com/product.html#pricing',
-  team_upgrade_url: 'https://engraphis.com/product.html#pricing',
+const hostedLicense = {
+  plan: 'local',
+  features: [],
+  cloud_managed: true,
+  trial_seconds: 259_200,
+  grace_seconds: 86_400,
+  grace_scope: 'existing authenticated local workspace writes only',
+  pro_upgrade_url: 'https://cloud.engraphis.test/pro',
+  team_upgrade_url: 'https://cloud.engraphis.test/team',
+  upgrade_url: 'https://cloud.engraphis.test/pricing',
+  trial: { used: false, trial_days: 3 },
 };
 
-async function mockApi(page, mode) {
-  let setupDone = false;
+async function mockLocalClient(page, cloudStatus = 402) {
+  const calls = [];
+
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname.replace(/^\/api/, '');
+    calls.push({ path, method: request.method(), query: url.search });
+
     let status = 200;
     let body = {};
 
-    if (path === '/health') body = { status: 'ok' };
-    else if (mode === 'setup' && path === '/auth/state') {
-      body = setupDone
-        ? { enabled: true, needs_setup: false, licensed: true, user: admin }
-        : { enabled: true, needs_setup: true, licensed: true, user: null };
-    } else if (mode === 'setup' && path === '/auth/setup' && request.method() === 'POST') {
-      setupDone = true;
-      body = { user: admin };
-    } else if (mode === 'setup' && path === '/bootstrap') {
-      body = { license: teamLicense, workspaces: [], embedder: { semantic: true } };
-    } else if (mode === 'setup' && path === '/license') body = teamLicense;
-    else if (mode === 'invitation' && path === '/auth/invitations/accept') {
-      body = { user: { ...admin, email: 'member@example.com', role: 'member' } };
-    } else if (mode === 'invitation' && path === '/auth/state') {
-      body = { enabled: true, needs_setup: false, licensed: true, user: null };
-    } else if (mode === 'invitation' && path === '/bootstrap') {
-      body = { license: teamLicense, workspaces: [], embedder: { semantic: true } };
+    if (path === '/bootstrap') {
+      body = {
+        license: hostedLicense,
+        workspaces: [],
+        embedder: { semantic: true },
+      };
+    } else if (path === '/health') {
+      body = { status: 'ok' };
+    } else if (path === '/stats') {
+      body = {
+        memories: 0,
+        total_rows: 0,
+        workspaces: 0,
+        sessions: 0,
+        by_type: {},
+      };
+    } else if (path === '/license') {
+      body = hostedLicense;
+    } else if (path === '/auth/state') {
+      body = {
+        enabled: false,
+        mode: 'open',
+        user: null,
+        hosted_team: true,
+        cloud_url: 'https://cloud.engraphis.test/team',
+      };
+    } else if (path === '/sync/status') {
+      body = { available: false };
+    } else if (path === '/llm/status') {
+      body = {
+        configured: false,
+        key_set: false,
+        provider: 'openai',
+        model: 'gpt-4o-mini',
+        extractor: 'passthrough',
+        extractor_enabled: false,
+        default_models: { openai: 'gpt-4o-mini' },
+        env_snippet: '',
+      };
+    } else if (path === '/analytics' || path === '/automation') {
+      status = cloudStatus;
+      body = {
+        detail: {
+          error: cloudStatus === 401
+            ? 'Connect this installation to Engraphis Cloud.'
+            : cloudStatus === 402
+              ? 'A hosted Pro or Team entitlement is required.'
+              : 'This capability is available through Engraphis Cloud.',
+        },
+      };
     }
-    else if (mode === 'onboarding' && path === '/auth/state') {
-      body = { enabled: false, needs_setup: false, user: null };
-    } else if (mode === 'onboarding' && path === '/bootstrap') {
-      body = { license: { plan: 'free', features: [] }, workspaces: [],
-               embedder: { semantic: true } };
-    } else if (mode === 'onboarding' && path === '/license') {
-      body = { plan: 'free', features: [], trial: { used: false, trial_days: 3 } };
-    } else if (mode === 'onboarding' && path === '/license/trials'
-               && request.method() === 'POST') {
-      body = { claim_id: 'claim_e2e', status: 'pending' };
-    } else if (mode === 'onboarding' && path === '/license/trials/claim_e2e') {
-      body = { claim_id: 'claim_e2e', status: 'pending', active: false };
-    } else if (mode === 'team' && path === '/auth/state') {
-      body = { enabled: true, needs_setup: false, licensed: true, user: admin };
-    } else if (mode === 'team' && path === '/bootstrap') {
-      body = { license: teamLicense, workspaces: [{ name: 'default', memories: 0 }],
-               embedder: { semantic: true } };
-    } else if (mode === 'team' && path === '/license') body = teamLicense;
-    else if (mode === 'team' && path === '/auth/users') body = { users: [admin] };
-    else if (mode === 'team' && path === '/auth/overview') {
-      body = { active_users: 1, pending_invitations: 1, seats_used: 2, seats_total: 5 };
-    } else if (mode === 'team' && path === '/auth/invitations') {
-      body = { invitations: [{ id: 'inv_1', email: 'member@example.com', name: 'Member',
-        role: 'member', expires_at: Date.now() / 1000 + 3600, delivery_state: 'failed' }] };
-    } else if (mode === 'team' && path.startsWith('/auth/audit')) body = { events: [], total: 0 };
-    else if (mode === 'team' && path === '/folders') body = { folders: [] };
-    else if (mode === 'team' && path === '/overview') body = {};
-    else if (mode === 'team' && path === '/analytics') body = {};
-    else if (mode === 'team' && path === '/workspaces') body = { workspaces: [] };
 
-    await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+    await route.fulfill({
+      status,
+      contentType: 'application/json',
+      body: JSON.stringify(body),
+    });
   });
+
+  return calls;
 }
 
 function recordBrowserErrors(page) {
@@ -75,61 +93,72 @@ function recordBrowserErrors(page) {
   page.on('console', message => {
     if (message.type() === 'error') {
       const location = message.location();
-      errors.push(message.text() + (location.url ? ` @ ${location.url}:${location.lineNumber}` : ''));
+      const expectedCloudDenial = /\/api\/(analytics|automation)/.test(location.url || '')
+        && /status of (401|402|501)/.test(message.text());
+      if (expectedCloudDenial) return;
+      errors.push(message.text() + (location.url
+        ? ` @ ${location.url}:${location.lineNumber}`
+        : ''));
     }
   });
   page.on('pageerror', error => errors.push(error.message));
   return errors;
 }
 
-test('hosted Team onboarding is scanner-safe, keyboard operable, mobile, and strict-CSP', async ({ page }) => {
+async function openView(page, name) {
+  await page.locator(`.nav-item[data-view="${name}"]`).click();
+  await expect(page.locator(`#view-${name}`)).toHaveClass(/\bactive\b/);
+}
+
+test('local dashboard exposes hosted Pro and Team CTAs without local commercial controls', async ({ page }) => {
   const errors = recordBrowserErrors(page);
-  await mockApi(page, 'onboarding');
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const calls = await mockLocalClient(page);
   const response = await page.goto('/');
+
   const csp = response.headers()['content-security-policy'];
   expect(csp).toBeTruthy();
   expect(csp).not.toContain("'unsafe-inline'");
+  await expect(page.getByLabel('Open hosted plan settings')).toHaveText('LOCAL');
 
-  // Wait for boot() to complete before calling showHostedBootstrap
-  await page.waitForFunction(() => typeof LIC !== 'undefined' && LIC !== null, { timeout: 10000 });
-  await page.evaluate(() => showHostedBootstrap('Complete hosted onboarding to continue.'));
-  // Wait for the button to be visible before clicking
-  const startTrialBtn = page.getByRole('button', { name: 'Start Team trial' });
-  await expect(startTrialBtn).toBeVisible({ timeout: 10000 });
-  await startTrialBtn.click();
+  await openView(page, 'settings');
+  const licensePanel = page.locator('.settings-license-panel');
+  await expect(licensePanel.getByText('LOCAL CORE', { exact: true })).toBeVisible();
+  await expect(licensePanel.getByRole('button', { name: 'Start hosted Pro trial' })).toBeVisible();
+  await expect(licensePanel.getByRole('button', { name: 'Start hosted Team trial' })).toBeVisible();
+  await expect(licensePanel).toContainText(
+    'The email-confirmed, no-card trial lasts exactly 3 active days; '
+      + 'local-only write grace is separate, capped at 24 hours, and never extends cloud access.',
+  );
 
-  const dialog = page.getByRole('dialog', { name: 'Start Team trial' });
-  await expect(dialog).toBeVisible();
-  await expect(dialog.getByLabel('Email address')).toBeVisible();
-  await expect(dialog.getByLabel('Deployment token')).toBeVisible();
-  await dialog.getByLabel('Email address').fill('owner@example.com');
-  await dialog.getByLabel('Deployment token').fill('playwright-only-deployment-token-1234567890');
+  await openView(page, 'team');
+  const team = page.locator('#team-body');
+  await expect(team.getByText('Engraphis Team Cloud', { exact: false })).toBeVisible();
+  await expect(team.getByRole('link', { name: 'Start hosted Team trial' }))
+    .toHaveAttribute('href', 'https://cloud.engraphis.test/team?trial=team');
+  await expect(team.getByRole('link', { name: 'Open Team Cloud' }))
+    .toHaveAttribute('href', 'https://cloud.engraphis.test/team');
+  await expect(team).toContainText('exactly 3 active days');
+  await expect(team).toContainText(
+    'A separate local-only write grace is capped at 24 hours and never extends Team or other cloud access.',
+  );
 
-  const requestPromise = page.waitForRequest(request =>
-    request.url().endsWith('/api/license/trials') && request.method() === 'POST');
-  await page.getByRole('button', { name: 'Send confirmation' }).click();
-  const trialRequest = await requestPromise;
-  expect(trialRequest.postDataJSON()).toMatchObject({ plan: 'team', email: 'owner@example.com' });
-
-  await page.getByRole('button', { name: 'Start Team trial' }).click();
-  await expect(dialog).toBeVisible();
-  await page.keyboard.press('Escape');
-  await expect(dialog).toBeHidden();
-  expect(errors).toEqual([]);
-});
-
-test('Team administration exposes pending delivery recovery with accessible semantics', async ({ page }) => {
-  const errors = recordBrowserErrors(page);
-  await mockApi(page, 'team');
-  await page.goto('/');
-  const teamNavigation = page.getByRole('button', { name: /^Team/ });
-  await teamNavigation.focus();
-  await page.keyboard.press('Enter');
-  await expect(page.getByText('Pending invitations (1)')).toBeVisible();
-  await expect(page.getByText('member@example.com')).toBeVisible();
-  await expect(page.getByRole('button', { name: /Resend/ })).toBeVisible();
+  for (const selector of ['#auth-overlay', '#session-action', '#lic-key']) {
+    await expect(page.locator(selector)).toHaveCount(0);
+  }
+  for (const removedLabel of [
+    'Create admin account',
+    'Sign in',
+    'Accept team invitation',
+    'Activate license',
+  ]) {
+    await expect(page.getByText(removedLabel, { exact: true })).toHaveCount(0);
+  }
+  expect(calls.some(call => [
+    '/auth/setup',
+    '/auth/login',
+    '/auth/invitations/accept',
+    '/license/activate',
+  ].includes(call.path))).toBe(false);
 
   const scan = await new AxeBuilder({ page })
     .include('#view-team')
@@ -139,89 +168,51 @@ test('Team administration exposes pending delivery recovery with accessible sema
   expect(errors).toEqual([]);
 });
 
-test('desktop first-admin setup, login, and purchase paths are labelled and operable', async ({ page }) => {
-  const errors = recordBrowserErrors(page);
-  await mockApi(page, 'setup');
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.goto('/');
+for (const cloudStatus of [401, 402, 501]) {
+  test(`Analytics and Automation defer to cloud proxy status ${cloudStatus}`, async ({ page }) => {
+    const errors = recordBrowserErrors(page);
+    const calls = await mockLocalClient(page, cloudStatus);
+    await page.goto('/');
+    await expect(page.getByLabel('Open hosted plan settings')).toHaveText('LOCAL');
 
-  const setup = page.getByRole('dialog', { name: 'Create admin account' });
-  await expect(setup).toBeVisible();
-  await setup.getByLabel('Email').fill('owner@example.com');
-  await setup.getByLabel('Name').fill('Owner');
-  await setup.getByLabel('Password').fill('recipient-chosen-1');
-  await setup.getByLabel(/Deployment token/).fill('d'.repeat(32));
-  const setupRequest = page.waitForRequest(request =>
-    request.url().endsWith('/api/auth/setup') && request.method() === 'POST');
-  await setup.getByRole('button', { name: 'Create admin' }).click();
-  const request = await setupRequest;
-  expect(request.headers().authorization).toBe(`Bearer ${'d'.repeat(32)}`);
-  expect(request.postDataJSON()).toMatchObject({ email: 'owner@example.com', name: 'Owner' });
-  await expect(setup).toBeHidden();
+    const analyticsBefore = calls.filter(call => call.path === '/analytics').length;
+    await openView(page, 'analytics');
+    await expect.poll(
+      () => calls.filter(call => call.path === '/analytics').length,
+    ).toBeGreaterThan(analyticsBefore);
+    const analytics = page.locator('#analytics-body');
+    await expect(analytics).toContainText('Analytics runs in Engraphis Pro Cloud');
+    await expect(analytics).toContainText('exactly 3 active days');
+    await expect(analytics).toContainText(
+      'Local-only write grace is separate, capped at 24 hours, and never extends cloud access.',
+    );
+    await expect(analytics.getByRole('link', { name: 'Start hosted Pro trial' }))
+      .toHaveAttribute('href', 'https://cloud.engraphis.test/pro?trial=pro');
+    await expect(analytics.getByRole('link', { name: 'View Pro plans' }))
+      .toHaveAttribute('href', 'https://cloud.engraphis.test/pro');
+    await expect(page.locator('#an-lock')).toHaveText('PRO');
 
-  await page.evaluate(() => showAuth({ enabled: true, needs_setup: false, user: null }));
-  const login = page.getByRole('dialog', { name: 'Sign in' });
-  await expect(login.getByLabel('Email')).toBeVisible();
-  await expect(login.getByLabel('Password')).toBeVisible();
-  const authScan = await new AxeBuilder({ page })
-    .include('#auth-overlay')
-    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
-    .analyze();
-  expect(authScan.violations).toEqual([]);
-  await page.keyboard.press('Escape');
+    const automationBefore = calls.filter(call => call.path === '/automation').length;
+    await openView(page, 'automation');
+    await expect.poll(
+      () => calls.filter(call => call.path === '/automation').length,
+    ).toBeGreaterThan(automationBefore);
+    const automation = page.locator('#automation-body');
+    await expect(automation).toContainText(
+      'Automation, Auto Consolidation, and Auto Dreaming runs in Engraphis Pro Cloud',
+    );
+    await expect(automation).toContainText('exactly 3 active days');
+    await expect(automation).toContainText(
+      'Local-only write grace is separate, capped at 24 hours, and never extends cloud access.',
+    );
+    await expect(automation.getByRole('link', { name: 'Start hosted Pro trial' }))
+      .toHaveAttribute('href', 'https://cloud.engraphis.test/pro?trial=pro');
+    await expect(automation.getByRole('link', { name: 'View Pro plans' }))
+      .toHaveAttribute('href', 'https://cloud.engraphis.test/pro');
+    await expect(page.locator('#au-lock')).toHaveText('PRO');
 
-  await page.evaluate(license => { selectView('settings'); renderLicense(license); }, teamLicense);
-  await expect(page.getByRole('link', { name: /Buy Pro/ })).toHaveAttribute('href', /pricing/);
-  await expect(page.getByRole('link', { name: /^Team/ })).toHaveAttribute('href', /pricing/);
-  expect(errors).toEqual([]);
-});
-
-test('invitation acceptance is screen-reader labelled and posts the one-time token', async ({ page }) => {
-  const errors = recordBrowserErrors(page);
-  await mockApi(page, 'invitation');
-  await page.goto('/#invite_token=invite-once-1234567890');
-
-  const dialog = page.getByRole('dialog', { name: 'Accept team invitation' });
-  await expect(dialog).toBeVisible();
-  expect(await page.evaluate(() => location.search + location.hash)).not.toContain('invite_token');
-  await dialog.getByLabel('Password', { exact: true }).fill('recipient-chosen-1');
-  await dialog.getByLabel('Confirm password').fill('recipient-chosen-1');
-  const acceptanceRequest = page.waitForRequest(request =>
-    request.url().endsWith('/api/auth/invitations/accept') && request.method() === 'POST');
-  await dialog.getByRole('button', { name: 'Create account and sign in' }).click();
-  const request = await acceptanceRequest;
-  expect(request.postDataJSON()).toEqual({
-    token: 'invite-once-1234567890', password: 'recipient-chosen-1',
+    expect(calls.some(call => call.path === '/analytics' && call.method === 'GET')).toBe(true);
+    expect(calls.some(call => call.path === '/automation' && call.method === 'GET')).toBe(true);
+    expect(errors).toEqual([]);
   });
-  await expect(dialog).toBeHidden();
-  expect(errors).toEqual([]);
-});
-
-test('query invitation and reset credentials are ignored and scrubbed', async ({ page }) => {
-  await mockApi(page, 'invitation');
-  await page.goto('/?invite_token=query-invite-secret&reset_token=query-reset-secret');
-
-  await expect(page.getByRole('dialog', { name: 'Sign in' })).toBeVisible();
-  await expect(page.getByRole('dialog', { name: 'Accept team invitation' })).toBeHidden();
-  await expect(page.getByRole('dialog', { name: 'Set a new password' })).toBeHidden();
-  const locationValue = await page.evaluate(() => location.search + location.hash);
-  expect(locationValue).not.toContain('invite_token');
-  expect(locationValue).not.toContain('reset_token');
-});
-
-test('password reset fragment is scrubbed and posts its one-time token', async ({ page }) => {
-  await mockApi(page, 'invitation');
-  await page.goto('/#reset_token=reset-once-1234567890');
-
-  const dialog = page.getByRole('dialog', { name: 'Set a new password' });
-  await expect(dialog).toBeVisible();
-  expect(await page.evaluate(() => location.search + location.hash)).not.toContain('reset_token');
-  await dialog.getByLabel('New password').fill('replacement-pass-1');
-  const resetRequest = page.waitForRequest(request =>
-    request.url().endsWith('/api/auth/reset') && request.method() === 'POST');
-  await dialog.getByRole('button', { name: 'Set new password' }).click();
-  const request = await resetRequest;
-  expect(request.postDataJSON()).toEqual({
-    token: 'reset-once-1234567890', password: 'replacement-pass-1',
-  });
-});
+}

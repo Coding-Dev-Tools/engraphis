@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from engraphis.config import settings
-from engraphis.inspector.auth import bearer_ok
+from engraphis.local_auth import bearer_ok
 from engraphis.service import MemoryService, ValidationError
 
 
