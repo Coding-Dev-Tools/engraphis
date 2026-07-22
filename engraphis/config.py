@@ -425,12 +425,9 @@ def _configured_db_path(root: Path = _PROJECT_ROOT) -> str:
 #: their own dashboard URL; local Pro clients retain the managed default.
 DEFAULT_RELAY_URL = "https://team.engraphis.com"
 
-#: Isolated commercial control plane for paid-license leases, trials, fulfillment, and
-#: transactional mail. Keeping this distinct from the dashboard removes the signing seed
-#: and billing webhook secret from the customer-facing memory service.
-DEFAULT_LICENSE_SERVER_URL = "https://license.engraphis.com"
-
 SERVICE_MODES = ("customer",)
+# The public package is a customer data plane and contains no vendor authority or hosted
+# relay implementation. Private services are built and deployed from a separate repository.
 DEFAULT_SERVICE_MODE = "customer"
 
 # Keys issued before the custom domain migration carry this URL inside their signed
@@ -440,26 +437,19 @@ RETIRED_RELAY_URLS = frozenset({
     "https://engraphis-production.up.railway.app",
 })
 
-# Existing signed keys point at the old combined host. License verification may migrate
-# that exact vendor URL without altering arbitrary customer-signed endpoints.
-RETIRED_LICENSE_SERVER_URLS = frozenset({
-    "https://team.engraphis.com",
-    "https://engraphis-production.up.railway.app",
-})
-
-
 def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default).strip()
 
 def _validate_service_mode(value: str) -> str:
-    """Validate the public package customer-only service mode."""
+    """Validate service mode against allowed values.
+
+    The public package accepts only ``customer``. Hosted vendor, relay, and worker roles
+    live in a private service repository and cannot be enabled through configuration."""
     normalized = (value or "").strip().lower()
     if normalized not in SERVICE_MODES:
-        print(
-            f"[engraphis] invalid ENGRAPHIS_SERVICE_MODE '{value}' "
-            f"(expected one of {', '.join(SERVICE_MODES)}); refusing to start.",
-            file=sys.stderr,
-        )
+        print(f"[engraphis] invalid ENGRAPHIS_SERVICE_MODE '{value}' "
+              f"(expected one of {', '.join(SERVICE_MODES)}); refusing to start with an "
+              f"ambiguous trust boundary.", file=sys.stderr)
         sys.exit(1)
     return normalized
 
@@ -557,24 +547,15 @@ class Settings:
     allowed_workspaces: list = field(
         default_factory=lambda: _parse_csv(_env("ENGRAPHIS_WORKSPACES", ""))
     )
-    # Team auth is ON by default (opt-out); set ENGRAPHIS_TEAM_MODE=0/false/no/off to
-    # disable it. A Team license gates paid capabilities and additional seats, while an
-    # existing user store keeps its login wall even if entitlement later lapses.
-    team_mode: bool = field(
-        default_factory=lambda: _env("ENGRAPHIS_TEAM_MODE", "").lower()
-        not in ("0", "false", "no", "off")
-    )
-
-    # The public package is always the customer runtime.
+    # The public package is always the customer runtime. Hosted service roles are private.
     service_mode: str = field(
         default_factory=lambda: _validate_service_mode(
             _env("ENGRAPHIS_SERVICE_MODE", DEFAULT_SERVICE_MODE)
         )
     )
 
-    # Managed relay base URL. Client sync uses it when `--relay-url` is omitted, and paid
-    # license flows fall back to it when a signed key or explicit cloud override supplies
-    # no URL. Set an empty ENGRAPHIS_RELAY_URL to require an explicit target.
+    # Managed relay base URL. Client sync uses it when `--relay-url` is omitted. Set an
+    # empty ENGRAPHIS_RELAY_URL to require an explicit target.
     relay_url: str = field(default_factory=lambda: _env(
         "ENGRAPHIS_RELAY_URL", DEFAULT_RELAY_URL))
 
@@ -668,6 +649,7 @@ class Settings:
     def customer_service(self) -> bool:
         return self.service_mode == "customer"
 
+
 def _parse_headers(raw: str) -> dict:
     if not raw:
         return {}
@@ -699,17 +681,3 @@ def canonicalize_relay_url(url: str) -> str:
     """Normalize a relay URL and migrate known retired vendor hosts."""
     normalized = (url or "").strip().rstrip("/")
     return DEFAULT_RELAY_URL if normalized in RETIRED_RELAY_URLS else normalized
-
-
-def canonicalize_license_server_url(url: str) -> str:
-    """Normalize a license-server URL and normalize a recognized retired hosted endpoint."""
-    normalized = (url or "").strip().rstrip("/")
-    return (DEFAULT_LICENSE_SERVER_URL
-            if normalized in RETIRED_LICENSE_SERVER_URLS else normalized)
-
-
-def resolve_license_server_url(signed_url: str = "") -> str:
-    """Resolve the license server, including recognized hosted-endpoint migrations."""
-    override = canonicalize_license_server_url(_env("ENGRAPHIS_CLOUD_URL", ""))
-    signed = canonicalize_license_server_url(signed_url)
-    return override or signed or DEFAULT_LICENSE_SERVER_URL
