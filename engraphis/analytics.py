@@ -233,8 +233,8 @@ def compute_analytics(store: Any, workspace_id: str, *, now: Optional[float] = N
     Gate lives here so every caller (Inspector, v1 dashboard, v2 dashboard)
     passes through a single, auditable check inside the computation module
     rather than at every HTTP endpoint."""
-    from engraphis.licensing import require_feature
-    require_feature("analytics")
+    from engraphis.licensing import require_cloud_lease
+    require_cloud_lease("analytics")
 
     conn = store.conn
     mem_rows = [dict(r) for r in conn.execute(
@@ -359,8 +359,8 @@ def compute_portfolio(store: Any, workspaces: Iterable, *,
     single-workspace dashboard, checked in the computation module per house rule.
     A shared ``now`` keeps every workspace's weekly buckets aligned for the sum.
     """
-    from engraphis.licensing import require_feature
-    require_feature("analytics")
+    from engraphis.licensing import require_cloud_lease
+    require_cloud_lease("analytics")
 
     now = time.time() if now is None else now
     return portfolio_rollup({

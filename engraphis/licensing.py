@@ -938,6 +938,32 @@ def has_feature(feature: str) -> bool:
     return current_license().has(feature)
 
 
+def require_cloud_lease(feature: str) -> None:
+    """Require a live, server-verified cloud lease for a paid feature.
+
+    Unlike :func:`has_feature` / :func:`require_feature` (which can be patched
+    in a forked client), this gate forces a **fresh** server round-trip via
+    ``current_license(refresh=True)``. The server must return a valid Ed25519-
+    signed lease — which a patched client cannot forge without the vendor's
+    private key. This ties local-only features (analytics, export, automation)
+    to the same server-side enforcement that protects sync and team.
+
+    Raises :class:`LicenseError` if no active license or the cloud lease is
+    absent/denied/expired.
+    """
+    _verify_no_tampering()
+    lic = current_license(refresh=True)
+    if not lic.has(feature):
+        raise LicenseError(
+            "'%s' is an Engraphis %s feature (%s). Start a %d-day free trial from the "
+            "dashboard's Settings → License panel, or buy at %s and paste the key."
+            % (feature, required_plan(feature).capitalize(),
+               FEATURES.get(feature, feature), TRIAL_DAYS, upgrade_url(required_plan(feature))),
+            feature=feature)
+    # The cloud gate was already checked in current_license(refresh=True) above.
+    # No separate lease check needed — if the gate denied it, lic would be free().
+
+
 def required_plan(feature: str) -> str:
     """The cheapest plan that unlocks ``feature`` ('team' for anything unknown)."""
     for plan in ("pro", "team"):

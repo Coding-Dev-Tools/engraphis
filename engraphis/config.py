@@ -421,7 +421,9 @@ class Settings:
     # facts via the configured LLM before storing).
     extractor: str = field(default_factory=lambda: _env("ENGRAPHIS_EXTRACTOR", "none").lower())
 
-    llm_provider: str = field(default_factory=lambda: _env("ENGRAPHIS_LLM_PROVIDER", "openai").lower())
+    llm_provider: str = field(
+        default_factory=lambda: _env("ENGRAPHIS_LLM_PROVIDER", "openai").lower()
+    )
     llm_model: str = field(default_factory=lambda: _env("ENGRAPHIS_LLM_MODEL", "gpt-4o-mini"))
     llm_api_key: str = field(default_factory=lambda: _env("ENGRAPHIS_LLM_API_KEY", ""))
     llm_base_url: str = field(default_factory=lambda: _env("ENGRAPHIS_LLM_BASE_URL", ""))
@@ -443,7 +445,11 @@ class Settings:
     # Graph extractor for the knowledge-graph tab: "regex" (default) = dependency-free
     # heuristic NER, no API key, populated on every ingest; "none" disables graph
     # population. Defaults on so the Graph tab works out of the box for every install.
-    graph_extractor: str = field(default_factory=lambda: _env("ENGRAPHIS_GRAPH_EXTRACTOR", "regex").lower())
+    graph_extractor: str = field(
+        default_factory=lambda: _env(
+            "ENGRAPHIS_GRAPH_EXTRACTOR", "regex"
+        ).lower()
+    )
     # Analytical Galaxy v2 is the validated default; setting the rollout flag to 0
     # restores the legacy ForceGraph surface for one compatibility release.
     graph_ui_v2: bool = field(

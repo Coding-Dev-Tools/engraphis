@@ -1,4 +1,5 @@
-"""FastAPI app assembly — mounts all routes, serves dashboard, initializes DB, starts background loop."""
+"""FastAPI app assembly — mounts all routes, serves dashboard, initializes DB,
+starts background loop."""
 from __future__ import annotations
 
 import asyncio
