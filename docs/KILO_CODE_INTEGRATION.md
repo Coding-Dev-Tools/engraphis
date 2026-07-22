@@ -157,15 +157,13 @@ Reload Kilo Code (or toggle the server off/on in **Settings → MCP**). You shou
 
 A JSON response with memory counts means the transport layer is fully working. If it errors, jump to Section 7 (Troubleshooting).
 
-### 3.4 (Optional) Auto-approve the read tools
+### 3.4 (Optional) Auto-approve the truly read-only tools
 
-Kilo Code gates each MCP tool call behind an approval prompt. The permission key is the namespaced name `{server}_{tool}`. For a smooth loop, auto-approve the read-only tools (they can't damage anything) while keeping writes/governance manual until you trust the flow. In `kilo.jsonc`:
+Kilo Code gates each MCP tool call behind an approval prompt. The permission key is the namespaced name `{server}_{tool}`. For a smooth loop, auto-approve tools whose MCP annotations are genuinely read-only and idempotent while keeping stateful retrieval, writes, and governance manual until you trust the flow. In `kilo.jsonc`:
 
 ```jsonc
 {
   "permission": {
-    "engraphis_recall": "allow",
-    "engraphis_recall_grounded": "allow",
     "engraphis_recall_proactive": "allow",
     "engraphis_why": "allow",
     "engraphis_timeline": "allow",
@@ -174,6 +172,12 @@ Kilo Code gates each MCP tool call behind an approval prompt. The permission key
   }
 }
 ```
+
+Query-based `engraphis_recall`, `engraphis_recall_grounded`, and `engraphis_answer`
+are deliberately absent: they update reinforcement metadata and/or append a privacy-safe
+operation receipt. `engraphis_proactive_context` is also conservatively stateful because a
+non-empty task or agent state runs receipt-recording recall. The queryless
+`engraphis_recall_proactive` path does neither, so it remains safe to auto-approve.
 
 You can also click **Approve Always** on any tool at runtime to write the same rule. A blanket `"engraphis_*": "allow"` works too, but auto-approving *writes* means the agent can reshape your memory without you seeing it — approve those consciously at first.
 
@@ -189,15 +193,15 @@ Once connected, Kilo Code sees these. Do **not** assume only `remember`/`recall`
 | Write | `engraphis_record_event` | Append a lightweight episodic log entry — lower ceremony than remember; repeats are a promotion signal. |
 | Write | `engraphis_link` | Explicitly connect two related memories (e.g. a bug ↔ its fix). |
 | Write | `engraphis_ingest` | Store raw/undistilled text; extracts discrete facts first when an LLM extractor is configured. |
-| Write | `engraphis_ingest_postgres_schema` | Convert a live PostgreSQL catalog into schema memories + graph nodes; the DSN is never stored. |
-| **Read** | `engraphis_recall` | Hybrid vector + lexical + graph recall; returns packed context + scored memories. |
-| Read | `engraphis_recall_grounded` | Cited answer assembled *only* from retrieved memories — or abstains if nothing supports it. |
-| Read | `engraphis_answer` | Backward-compatible grounded-answer alias; prefer `engraphis_recall_grounded` for new configs. |
-| Read | `engraphis_recall_proactive` | "What should I know right now" — no query; high-importance/recent/reinforced memories + last-session handoff. |
-| Read | `engraphis_proactive_context` | Build a task-aware, cited context packet from proactive recall, current agent state, and the last-session handoff. |
+| Write | `engraphis_ingest_postgres_schema` | Store a new point-in-time PostgreSQL schema + graph per call; the DSN is never stored. |
+| **Stateful recall** | `engraphis_recall` | Hybrid vector + lexical + graph recall; reinforces matches and appends a privacy-safe receipt. |
+| Stateful recall | `engraphis_recall_grounded` | Cited answer assembled *only* from retrieved memories — or abstains; records a receipt and reinforces cited memories. |
+| Stateful recall | `engraphis_answer` | Backward-compatible grounded-answer alias with the same state effects; prefer `engraphis_recall_grounded` for new configs. |
+| **Read** | `engraphis_recall_proactive` | "What should I know right now" — pure queryless ranking + last-session handoff, with no reinforcement or receipt. |
+| Stateful recall | `engraphis_proactive_context` | Build a task-aware, cited context packet; task/agent-state recall records a receipt without reinforcement. |
 | Read | `engraphis_why` | The current answer to a question **plus** what it superseded (bi-temporal). |
 | Read | `engraphis_timeline` | Every version of a fact, oldest → newest, with `valid_from`/`valid_to`. |
-| **Code** | `engraphis_index_repo` | Incrementally parse a multi-language repo and link symbols to relevant memories. |
+| **Code** | `engraphis_index_repo` | Incrementally parse a multi-language repo; every completed run appends a receipt. |
 | Code | `engraphis_search_code` | Find symbols, callers, docstrings, and linked decisions/incidents/procedures. |
 | Code | `engraphis_code_path` | Explain a path across files, definitions, calls, imports, and memories. |
 | Code | `engraphis_code_impact` | Rank commit/PR impact by dependents, communities, memories, and hotspots. |
@@ -205,14 +209,15 @@ Once connected, Kilo Code sees these. Do **not** assume only `remember`/`recall`
 | **Audit** | `engraphis_receipts` | List content-free hashed operation receipts. |
 | Audit | `engraphis_verify_receipts` | Verify the tamper-evident receipt chain. |
 | Audit | `engraphis_export_receipts` | Export a privacy-safe receipt-only audit bundle. |
-| **Governance** | `engraphis_forget` | Retire a memory — bi-temporal close, never a hard delete. |
-| Governance | `engraphis_pin` | Exempt a memory from automatic decay/pruning (identity/durable facts). |
+| **Governance** | `engraphis_forget` | Retire a memory — bi-temporal close, never a hard delete; every request is audited. |
+| Governance | `engraphis_pin` | Exempt a memory from decay/pruning; every pin/unpin request is audited. |
 | Governance | `engraphis_correct` | Replace a memory's content without losing history — keeps the "why" chain. |
 | Governance | `engraphis_promote` | Widen scope while preserving and linking the narrow-scope history. |
-| **Session** | `engraphis_start_session` | Open a session; its `bootstrap` returns the last session's summary + open threads for resume. |
-| Session | `engraphis_end_session` | Close a session with a summary + `open_threads` for next time. |
+| **Session** | `engraphis_start_session` | Exact retries reuse by default; `force_new=true` creates another session every call. |
+| Session | `engraphis_end_session` | Close with a summary + `open_threads`; an identical retry is a no-op. |
 | **Ops** | `engraphis_stats` | Memory counts by type/workspace — health/onboarding checks. |
-| Maintenance | `engraphis_consolidate` | Sleep-time sweep: recurring episodes → semantic digest; decayed transients archived. Dry-run by default. |
+| Ops | `engraphis_check_update` | Check the release source and refresh the persistent update cache. |
+| Maintenance | `engraphis_consolidate` | Pure dry-run or live sweep; structured calls may process a large cluster across retries. |
 
 ---
 
@@ -224,7 +229,7 @@ This is how to make the connection actually pay off. The discipline fits on a ca
 
 ### 5.1 The core loop for a coding task
 
-1. **Starting work in a repo** → `engraphis_recall_proactive` (loads high-signal context with no query) and, for multi-step work, `engraphis_start_session` (its `bootstrap` hands back the last session's summary and unresolved `open_threads`, so the agent resumes instead of starting cold).
+1. **Starting work in a repo** → `engraphis_recall_proactive` (loads high-signal context with no query) and, for multi-step work, `engraphis_start_session` (its `bootstrap` hands back the last same-user/agent summary and unresolved `open_threads`, so the agent resumes without crossing an identity boundary).
 2. **Before answering or acting**, when prior context would help → `engraphis_recall`. Do this *before* asking you something you may have already said.
 3. **The moment it learns something durable** → `engraphis_remember` (a convention, a decision *with its rationale*, a bug's cause→fix, a preference, a reusable procedure).
 4. **Finishing the task** → `engraphis_end_session` with a `summary` and `open_threads` for the next session in that repo.

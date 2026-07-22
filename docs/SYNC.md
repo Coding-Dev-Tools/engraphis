@@ -48,9 +48,11 @@ ENGRAPHIS_CLOUD_ORGANIZATION_ID=org_replace_me
 ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL=<secret>
 ```
 
-The refresh credential rotates. The client stores only the replacement needed for the next
-session and writes it atomically to an owner-only file. Do not place it in source, documentation,
-container images, shell history, or support logs.
+The refresh credential rotates. Refresh is serialized across threads and cooperating processes,
+and the client stores only the replacement needed for the next session in an owner-only file.
+After the first rotation, that saved replacement takes precedence over a still-present bootstrap
+environment credential. Do not place either value in source, documentation, container images,
+shell history, or support logs.
 
 The one-shot customer client remains available for explicit sync operations:
 

@@ -320,6 +320,16 @@ class _SerializedConnection:
     def _pinned(self) -> bool:
         return getattr(self._pin, "held", False)
 
+    def transaction_owned_by_current_thread(self) -> bool:
+        """Whether this thread owns the connection's currently pinned transaction.
+
+        ``sqlite3.Connection.in_transaction`` is connection-global: it is also true when
+        a *different* thread owns the transaction and this thread is waiting on ``_lock``.
+        Multi-statement Store operations use this thread-local view to decide whether they
+        must open and settle their own transaction after that waiter is released.
+        """
+        return self._pinned()
+
     def _acquire(self) -> None:
         if not self._lock.acquire(timeout=self._ACQUIRE_TIMEOUT):
             raise sqlite3.OperationalError(
@@ -1088,24 +1098,63 @@ class Store:
 
     # ── sessions ──────────────────────────────────────────────────────────────
     def start_session(self, workspace_id: str, repo_id: Optional[str] = None,
-                      *, agent: str = "", user_id: str = "", goal: str = "") -> str:
+                      *, agent: str = "", user_id: str = "", goal: str = "",
+                      commit: bool = True) -> str:
         sid = ids.new_id("session")
         self.conn.execute(
             "INSERT INTO sessions(id, workspace_id, repo_id, agent, user_id, goal, status, "
             "started_at) VALUES (?,?,?,?,?,?,?,?)",
             (sid, workspace_id, repo_id, agent, user_id, goal, "active", now_ts()),
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return sid
 
     def end_session(self, session_id: str, *, summary: str = "",
-                    open_threads: Optional[list] = None, outcome: str = "") -> None:
-        self.conn.execute(
-            "UPDATE sessions SET status='summarized', ended_at=?, summary=?, open_threads=?, "
-            "outcome=? WHERE id=?",
-            (now_ts(), summary, _dumps(open_threads or []), outcome, session_id),
-        )
-        self.conn.commit()
+                    open_threads: Optional[list] = None, outcome: str = "") -> str:
+        """Close one active session exactly once.
+
+        An identical retry is a no-op, while a conflicting retry cannot overwrite the
+        durable handoff left by the first caller. ``BEGIN IMMEDIATE`` makes the state
+        check and transition atomic across threads, processes, and Store instances.
+
+        Returns ``"ended"``, ``"unchanged"``, ``"conflict"``, or ``"missing"``.
+        """
+        threads = list(open_threads or [])
+        encoded_threads = _dumps(threads)
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        try:
+            if owns_transaction:
+                self.conn.execute("BEGIN IMMEDIATE")
+            row = self.conn.execute(
+                "SELECT status, summary, open_threads, outcome FROM sessions WHERE id=?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                result = "missing"
+            elif row["status"] == "active":
+                self.conn.execute(
+                    "UPDATE sessions SET status='summarized', ended_at=?, summary=?, "
+                    "open_threads=?, outcome=? WHERE id=? AND status='active'",
+                    (now_ts(), summary, encoded_threads, outcome, session_id),
+                )
+                result = "ended"
+            elif (
+                row["status"] == "summarized"
+                and (row["summary"] or "") == summary
+                and _loads(row["open_threads"], []) == threads
+                and (row["outcome"] or "") == outcome
+            ):
+                result = "unchanged"
+            else:
+                result = "conflict"
+            if owns_transaction:
+                self.conn.commit()
+            return result
+        except BaseException:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+                self.conn.rollback()
+            raise
 
     def get_session(self, session_id: str) -> Optional[dict]:
         row = self.conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
@@ -1115,18 +1164,54 @@ class Store:
         d["open_threads"] = _loads(d.get("open_threads"), [])
         return d
 
+    def begin_session_write(self, session_id: str, *, workspace_id: str,
+                            repo_id: Optional[str] = None) -> bool:
+        """Reserve an active session for one write transaction.
+
+        The service performs an early ownership/status check for useful public errors, but
+        that check cannot serialize with a concurrent ``end_session``.  Re-reading under
+        ``BEGIN IMMEDIATE`` makes the write and close operations linearizable: whichever
+        transaction wins first either commits the write before closure or observes the
+        closed session and rejects it.
+
+        Return whether this call opened the transaction so the caller can roll it back if
+        a later step fails.  A caller already inside a transaction retains ownership.
+        """
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        try:
+            if owns_transaction:
+                self.conn.execute("BEGIN IMMEDIATE")
+            row = self.conn.execute(
+                "SELECT workspace_id, repo_id, status FROM sessions WHERE id=?",
+                (session_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"no session with id '{session_id}'")
+            if row["workspace_id"] != workspace_id or (
+                    repo_id is not None and row["repo_id"] != repo_id):
+                raise ValueError("session_id does not belong to that workspace/repo")
+            if row["status"] != "active":
+                raise ValueError("session_id is not active")
+            return owns_transaction
+        except BaseException:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+                self.conn.rollback()
+            raise
+
     def get_active_session(self, workspace_id: str, repo_id: Optional[str],
-                           *, agent: str = "") -> Optional[dict]:
-        """Most recent still-``active`` session for this exact scope (and ``agent`` when
-        given). Powers idempotent ``start_session``: a repeat start in the same scope
-        reuses this session instead of opening a second concurrent one, which would put
-        two writers on the single-writer SQLite store (the "trampling" symptom)."""
+                           *, agent: str = "", user_id: str = "",
+                           goal: str = "") -> Optional[dict]:
+        """Return the active session for one exact task identity.
+
+        Empty values are values, not wildcards. This prevents an unnamed client, a
+        different authenticated user, or a new goal from inheriting unrelated work.
+        ``COALESCE`` keeps legacy rows with NULL identity fields compatible with the
+        empty-string values written by current clients.
+        """
         sql = ("SELECT * FROM sessions WHERE workspace_id=? AND repo_id IS ? "
-               "AND status='active'")
-        params: list[Any] = [workspace_id, repo_id]
-        if agent:
-            sql += " AND agent=?"
-            params.append(agent)
+               "AND status='active' AND COALESCE(agent, '')=? "
+               "AND COALESCE(user_id, '')=? AND COALESCE(goal, '')=?")
+        params: list[Any] = [workspace_id, repo_id, agent, user_id, goal]
         sql += " ORDER BY started_at DESC LIMIT 1"
         row = self.conn.execute(sql, params).fetchone()
         if not row:
@@ -1135,17 +1220,61 @@ class Store:
         d["open_threads"] = _loads(d.get("open_threads"), [])
         return d
 
+    def get_or_start_session(self, workspace_id: str, repo_id: Optional[str] = None,
+                             *, agent: str = "", user_id: str = "", goal: str = "",
+                             force_new: bool = False) -> tuple[str, bool]:
+        """Atomically reuse an exact active task or create a new session.
+
+        The write reservation precedes the lookup, so two concurrent callers cannot both
+        observe "no session" and insert duplicates. ``force_new`` deliberately skips the
+        lookup while retaining the same transaction boundary.
+        """
+        owns_transaction = not self.conn.transaction_owned_by_current_thread()
+        try:
+            if owns_transaction:
+                self.conn.execute("BEGIN IMMEDIATE")
+            if not force_new:
+                existing = self.get_active_session(
+                    workspace_id, repo_id, agent=agent, user_id=user_id, goal=goal,
+                )
+                if existing is not None:
+                    if owns_transaction:
+                        self.conn.commit()
+                    return existing["id"], True
+            sid = self.start_session(
+                workspace_id, repo_id, agent=agent, user_id=user_id, goal=goal,
+                commit=False,
+            )
+            if owns_transaction:
+                self.conn.commit()
+            return sid, False
+        except BaseException:
+            if owns_transaction and self.conn.transaction_owned_by_current_thread():
+                self.conn.rollback()
+            raise
+
     def get_last_session(self, workspace_id: str, repo_id: Optional[str],
-                         *, exclude: Optional[str] = None) -> Optional[dict]:
-        """Most recently *ended* session in this repo — the cross-session handoff
-        source: the next session bootstraps from its
-        ``summary``/``open_threads`` instead of starting from nothing."""
+                         *, exclude: Optional[str] = None,
+                         user_id: Optional[str] = None,
+                         agent: Optional[str] = None) -> Optional[dict]:
+        """Return the most recent ended session matching the requested identity.
+
+        ``None`` leaves an identity dimension unfiltered for legacy/core callers. Passing
+        an empty string is an exact match for legacy unowned/unnamed sessions; it is never
+        a wildcard.
+        """
         sql = ("SELECT * FROM sessions WHERE workspace_id=? AND repo_id IS ? "
                "AND ended_at IS NOT NULL")
         params: list[Any] = [workspace_id, repo_id]
         if exclude:
             sql += " AND id != ?"
             params.append(exclude)
+        if user_id is not None:
+            sql += " AND COALESCE(user_id, '') = ?"
+            params.append(user_id)
+        if agent is not None:
+            sql += " AND COALESCE(agent, '') = ?"
+            params.append(agent)
         sql += " ORDER BY ended_at DESC LIMIT 1"
         row = self.conn.execute(sql, params).fetchone()
         if not row:
@@ -2245,14 +2374,25 @@ class Store:
                      repo_id: str = "", session_id: str = "", refs: Optional[list] = None,
                      interaction_level: str = "") -> str:
         eid = ids.new_id("event")
-        self.conn.execute(
-            "INSERT INTO events(id, workspace_id, repo_id, session_id, kind, content, refs, "
-            "interaction_level, ts) VALUES (?,?,?,?,?,?,?,?,?)",
-            (eid, workspace_id, repo_id, session_id, kind, content, _dumps(refs or []),
-             interaction_level, now_ts()),
-        )
-        self.conn.commit()
-        return eid
+        owns_session_transaction = False
+        try:
+            if session_id:
+                owns_session_transaction = self.begin_session_write(
+                    session_id, workspace_id=workspace_id, repo_id=repo_id or None
+                )
+            self.conn.execute(
+                "INSERT INTO events(id, workspace_id, repo_id, session_id, kind, content, refs, "
+                "interaction_level, ts) VALUES (?,?,?,?,?,?,?,?,?)",
+                (eid, workspace_id, repo_id, session_id, kind, content, _dumps(refs or []),
+                 interaction_level, now_ts()),
+            )
+            self.conn.commit()
+            return eid
+        except BaseException:
+            if (owns_session_transaction
+                    and self.conn.transaction_owned_by_current_thread()):
+                self.conn.rollback()
+            raise
 
     def audit(self, actor: str, action: str, target: str, detail: str = "",
               *, commit: bool = True) -> None:

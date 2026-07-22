@@ -314,7 +314,8 @@ class RelayTransport:
     bearer. The legacy-named ``license_key`` parameter is accepted only as a call-site
     alias for that bearer; values with the retired ``ENGR1`` prefix are rejected. With no
     parameter, the token defaults to ``ENGRAPHIS_SYNC_TOKEN`` or a locally saved bearer.
-    All protocol calls send ``Authorization: Bearer <scoped-token>``.
+    All protocol calls send ``Authorization: Bearer <scoped-token>``. Device identity is
+    authenticated by the signed token claim rather than an unrelated local header value.
     """
 
     def __init__(self, base_url: str, workspace_id: str, *,

@@ -8,13 +8,19 @@ main point of this file — lock in that graph() enforces the same
 workspace-binding isolation boundary as every other read (service.py's
 _clean_ws), which the dashboard-only implementation it replaced did not.
 """
+import time
+
 import pytest
 
 from engraphis.backends.extractor import StructuredLLMExtractor
-from engraphis.backends.graph_extractor import get_graph_extractor
+from engraphis.backends.graph_extractor import (
+    RegexGraphExtractor,
+    feed as graph_feed,
+    get_graph_extractor,
+)
 from engraphis.core.graph_layers import infer_graph_layer
 from engraphis.core.interfaces import Edge, MemoryRecord, MemoryType, Scope, SearchFilter
-from engraphis.service import MemoryService, ValidationError
+from engraphis.service import MemoryService, ValidationError, set_current_user
 
 
 class _StructuredGraphLLM:
@@ -117,6 +123,136 @@ def test_remember_populates_graph_when_extractor_wired():
     # node identity is the entity id (ent_<ulid>), not the extracted name —
     # regression guard for the 2026-07-11 id/name mixup bug
     assert all(n["id"] != n["label"] for n in nodes)
+
+
+def test_team_graph_reads_hide_legacy_session_supported_entities():
+    svc = MemoryService.create(":memory:", graph_extractor="regex")
+    try:
+        set_current_user({"id": "usr_alice", "email": "alice@test", "role": "member"})
+        svc.create_workspace("acme", visibility="shared", confirmed=True)
+        session = svc.start_session("acme", repo="r", agent="codex", goal="private")
+        private = svc.remember(
+            "Alice Johnson works at Secret Corporation.", workspace="acme", repo="r",
+            session_id=session["session_id"], scope="session",
+        )
+        # Simulate a database written before session graph extraction was disabled.
+        memory = svc.store.get_memory(private["id"])
+        graph_feed(
+            svc.store, memory.content, workspace_id=memory.workspace_id,
+            repo_id=memory.repo_id, extractor=RegexGraphExtractor(),
+            provenance={"source": "legacy", "memory_id": memory.id},
+        )
+
+        set_current_user({"id": "usr_bob", "email": "bob@test", "role": "member"})
+        assert "Secret Corporation" not in repr(svc.graph(workspace="acme", backfill=False))
+        assert "Secret Corporation" not in repr(svc.graph_scene(workspace="acme"))
+        assert svc.graph_suggest("Secret", workspace="acme")["groups"]["entities"] == []
+        assert svc.graph_suggest("works", workspace="acme")["groups"]["relations"] == []
+
+        # Ordinary local graph reads also have no session context; authentication being
+        # disabled must not widen the hierarchy.
+        set_current_user(None)
+        assert "Secret Corporation" not in repr(svc.graph(workspace="acme", backfill=False))
+        assert "Secret Corporation" not in repr(svc.graph_scene(workspace="acme"))
+    finally:
+        set_current_user(None)
+
+
+def test_team_graph_reads_keep_forgotten_session_entities_private():
+    svc = MemoryService.create(":memory:", graph_extractor="regex")
+    try:
+        set_current_user({"id": "usr_alice", "email": "alice@test", "role": "member"})
+        svc.create_workspace("acme", visibility="shared", confirmed=True)
+        session = svc.start_session("acme", repo="r", agent="codex", goal="private")
+        private = svc.remember(
+            "Alice Johnson works at Secret Corporation.", workspace="acme", repo="r",
+            session_id=session["session_id"], scope="session",
+        )
+        memory = svc.store.get_memory(private["id"])
+        graph_feed(
+            svc.store, memory.content, workspace_id=memory.workspace_id,
+            repo_id=memory.repo_id, extractor=RegexGraphExtractor(),
+            provenance={"source": "legacy", "memory_id": memory.id},
+        )
+
+        svc.forget(private["id"], workspace="acme")
+
+        set_current_user({"id": "usr_bob", "email": "bob@test", "role": "member"})
+        assert "Alice Johnson" not in repr(svc.graph(workspace="acme", backfill=False))
+        assert "Secret Corporation" not in repr(svc.graph(workspace="acme", backfill=False))
+        assert "Secret Corporation" not in repr(svc.graph_scene(workspace="acme"))
+        assert svc.graph_suggest("Secret", workspace="acme")["groups"]["entities"] == []
+        assert svc.graph_suggest("works", workspace="acme")["groups"]["relations"] == []
+
+        set_current_user(None)
+        assert "Secret Corporation" not in repr(svc.graph(workspace="acme", backfill=False))
+        assert "Secret Corporation" not in repr(svc.graph_scene(workspace="acme"))
+        assert svc.graph_suggest("Secret", workspace="acme")["groups"]["entities"] == []
+    finally:
+        set_current_user(None)
+
+
+def test_team_graph_entity_with_mixed_session_and_workspace_history_is_visible():
+    svc = MemoryService.create(":memory:", graph_extractor="regex")
+    try:
+        set_current_user({"id": "usr_alice", "email": "alice@test", "role": "member"})
+        svc.create_workspace("acme", visibility="shared", confirmed=True)
+        session = svc.start_session("acme", repo="r", agent="codex", goal="private")
+        private = svc.remember(
+            "Alice Johnson works at Shared Corporation.", workspace="acme", repo="r",
+            session_id=session["session_id"], scope="session",
+        )
+        public = svc.remember(
+            "Alice Johnson works at Shared Corporation.", workspace="acme", repo="r",
+            scope="repo",
+        )
+        for memory_id in (private["id"], public["id"]):
+            memory = svc.store.get_memory(memory_id)
+            graph_feed(
+                svc.store, memory.content, workspace_id=memory.workspace_id,
+                repo_id=memory.repo_id, extractor=RegexGraphExtractor(),
+                provenance={"source": "legacy", "memory_id": memory.id},
+            )
+
+        set_current_user({"id": "usr_bob", "email": "bob@test", "role": "member"})
+        graph = repr(svc.graph(workspace="acme", backfill=False))
+        assert "Alice Johnson" in graph
+        assert "Shared Corporation" in graph
+        assert svc.graph_suggest("Shared", workspace="acme")["groups"]["entities"]
+    finally:
+        set_current_user(None)
+
+
+def test_graph_index_excludes_session_scoped_memories():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    try:
+        set_current_user({"id": "usr_alice", "email": "alice@test", "role": "member"})
+        svc.create_workspace("acme", visibility="shared", confirmed=True)
+        session = svc.start_session("acme", repo="r", agent="codex", goal="private")
+        svc.remember(
+            "Private Falcon works at Hidden Corporation.", workspace="acme", repo="r",
+            session_id=session["session_id"], scope="session",
+        )
+        svc.remember(
+            "Public Robin works at Visible Corporation.", workspace="acme", repo="r",
+            scope="repo",
+        )
+
+        set_current_user({"id": "usr_bob", "email": "bob@test", "role": "member"})
+        job = svc.start_graph_index_job(workspace="acme", dry_run=False)
+        deadline = time.time() + 5
+        while job["state"] in {"queued", "running"} and time.time() < deadline:
+            time.sleep(0.01)
+            job = svc.graph_index_job(job["id"], workspace="acme")
+
+        assert job["state"] == "completed"
+        assert job["total_items"] == 1
+        assert job["counts"]["memories_scanned"] == 1
+        graph = repr(svc.graph(workspace="acme", backfill=False))
+        assert "Hidden Corporation" not in graph
+        assert "Visible Corporation" in graph
+    finally:
+        set_current_user(None)
 
 
 def test_structured_extractor_metadata_populates_graph_without_regex_extractor():

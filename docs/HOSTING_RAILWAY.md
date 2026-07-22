@@ -39,8 +39,10 @@ ENGRAPHIS_MANAGED_COMPUTE_CONSENT=0
 ```
 
 Prefer mounting the owner-only cloud session file rather than placing a rotating refresh
-credential directly in deployment configuration. Enabling managed-compute consent may upload a
-bounded snapshot; secret rows are excluded client-side and rejected server-side.
+credential directly in deployment configuration. An injected environment credential is only the
+bootstrap value; after rotation, the owner-only saved replacement takes precedence. Enabling
+managed-compute consent may upload a snapshot capped at 16 MiB; secret-class and session-scoped
+rows are excluded client-side, and secret-class rows are rejected server-side.
 
 ## Persistence and recovery
 

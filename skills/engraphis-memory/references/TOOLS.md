@@ -6,7 +6,7 @@ Governance tools (`forget`/`pin`/`correct`/`link`) verify the memory actually be
 `workspace`/`repo` you pass **before** changing anything, so you can't touch memories outside a
 scope you were already given.
 
-Group index: [Write](#write) · [Read](#read) · [History](#history-bi-temporal) · [Governance](#governance) ·
+Group index: [Write](#write) · [Recall and read](#recall-and-read) · [History](#history-bi-temporal) · [Governance](#governance) ·
 [Code](#code) · [Sessions](#sessions) · [Ops](#ops).
 
 ---
@@ -53,7 +53,7 @@ Returns `{id, kind}`. Three similar events about the same thing is a signal to p
 
 ---
 
-## Read
+## Recall and read
 
 ### `engraphis_recall`
 Retrieve the memories most relevant to a query (hybrid vector + lexical + graph, fused + reranked).
@@ -70,6 +70,8 @@ Call it before answering or acting when prior context would help.
 Returns `{query, count, context, memories:[{id, title, content, scope, mtype, repo_id, score,
 arm, retention, provenance}]}`. `context` is a token-budgeted pack ready to drop into your prompt.
 `count:0` with a `note` means that workspace/repo isn't known yet — not an error.
+Successful calls reinforce returned memories and append a privacy-safe operation receipt. The MCP
+tool is therefore stateful and non-idempotent even though its primary purpose is retrieval.
 
 ### `engraphis_recall_grounded`
 Answer a question **strictly from** stored memories, with `[n]` citations — or **abstain** when
@@ -87,10 +89,13 @@ extractive; optional LLM synthesis is accepted only when its claims remain cited
 Returns `{query, grounded, abstained, answer, support, reason, synthesized, citations:[{n, id,
 title, content, score, support, provenance}]}`. When `grounded` is false, `answer` is empty and
 `reason` says why (insufficient evidence, or unknown workspace/repo).
+Resolved calls append a privacy-safe receipt, including abstentions, and cited memories are
+reinforced. This surface is stateful and non-idempotent.
 
 ### `engraphis_answer`
-Backward-compatible grounded-answer alias. Prefer `engraphis_recall_grounded` for new configs;
-keep using this only if an existing agent already references it.
+Backward-compatible grounded-answer alias with the same state effects. Prefer
+`engraphis_recall_grounded` for new configs; keep using this only if an existing agent already
+references it.
 
 ### `engraphis_recall_proactive`
 Conscious recall with **no query**: high-importance, recent, well-reinforced memories. Use at the
@@ -99,7 +104,8 @@ start of a task to load context before you know what to ask.
 - `workspace (str)`, `repo (str, None)`, `k (int, 10)`.
 
 Returns `{memories:[…], last_session:{summary, open_threads, outcome}}`. When `repo` is given,
-`last_session` is the most recent *ended* session for that repo (or `{}` if none) — the handoff.
+`last_session` is the authenticated caller's most recent *ended* session for that repo (or `{}`
+if none); standalone trusted callers retain the unfiltered local handoff behavior.
 
 ### `engraphis_proactive_context`
 Build a task-aware context packet from proactive recall, optional current agent state, and the
@@ -111,6 +117,8 @@ than the raw queryless memory list.
 
 Returns `{context_summary, suggested_memories, citations, suggested_queries, last_session,
 grounded, synthesized, reason}`.
+When `task` or `agent_state` is non-empty, its task-specific recall appends a privacy-safe receipt
+without reinforcing memories, so the MCP tool is conservatively stateful and non-idempotent.
 
 
 ---
@@ -240,17 +248,22 @@ Return portable `graph.json` data plus a human-readable Markdown report and self
 Open a session to group this work's memories and enable cross-session resume.
 
 - `workspace (str)`, `repo (str, None)`, `agent (str, "")` (e.g. `"claude-code"`),
-  `goal (str, "")`.
+  `goal (str, "")`, `force_new (bool, false)`.
 
-Returns `{session_id, workspace, repo, goal, status:"active", bootstrap:{summary, open_threads,
-outcome}}`. If a previous session in this repo was ended with a summary/open threads, `bootstrap`
-carries them so you resume. Pass `session_id` to `remember` and `end_session`.
+By default this is idempotent per exact `(workspace, repo, authenticated user, agent, goal)` task
+identity. Different users, agents, or goals automatically open distinct sessions. An exact retry
+returns the same active session with `reused:true`. Use `force_new=true` only to branch a second
+session when every identity field matches. A new session returns `reused:false` plus
+`{session_id, workspace, repo, goal, status:"active", bootstrap:{summary, open_threads, outcome}}`.
+If a previous same-user/agent session in this repo ended with a summary/open threads, `bootstrap`
+carries them so you resume without crossing an identity boundary. Pass `session_id` to `remember`
+and `end_session`.
 
 ### `engraphis_end_session`
 Close a session with a summary/outcome so the next one picks up the thread.
 
 - `session_id (str)`, `summary (str, "")`, `outcome (str, "")` (e.g. `shipped`, `blocked`),
-  `open_threads (list[str], None)` — surfaced automatically when the next session in this repo starts.
+  `open_threads (list[str], None)` — surfaced for the next same-user/agent session in this repo.
 
 Returns `{session_id, status:"summarized", summary, open_threads}`.
 
@@ -279,14 +292,19 @@ constraint graph nodes. The DSN is used for the connection only and is never sto
 One sleep-time consolidation sweep: recurring episodic memories on the same subject become a
 single durable semantic digest (linked to sources via `consolidates` links), and fully-decayed
 transient memories are archived (bi-temporal close — audited, recoverable, pinned exempt).
-Idempotent. `dry_run=true` is the default; call it at session end or on a schedule
-(`python -m scripts.consolidate` is the cron-able equivalent).
+`dry_run=true` is the pure default. Live deterministic retries skip already-consolidated
+sources, but structured results may cite only part of a large cluster and let an identical later
+call process the remainder, so the public tool is conservatively non-idempotent. Call it at
+session end or on a schedule (`python -m scripts.consolidate` is the cron-able equivalent).
 
 With `profiles=true` it also rolls every live memory mentioning an entity into one durable
 semantic *profile* digest (linked via `profiles`) — a per-subject knowledge profile that grows
 with use.
 
-- `workspace (str, required)`; `repo (str, None)`; `dry_run (bool, true)`; `profiles (bool, false)`.
+- `workspace (str, required)`; `repo (str, None)`; `dry_run (bool, true)`;
+  `profiles (bool, false)`; `structured (bool, false)`; `supersede_sources (bool, false)`.
+  `supersede_sources=true` requires `structured=true` and bi-temporally closes only the source
+  episodes cited by validated structured facts.
 
 Returns `{clusters_found, digests_created, archived, skipped_already_consolidated, compaction, dry_run}`
 — `compaction` is the context tokens the sweep saved (before → after). With `profiles=true` a

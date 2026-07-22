@@ -15,6 +15,17 @@ from typing import Optional
 
 _UNSET = object()
 
+# On Windows, Python 3.12 can report different ``st_ctime_ns`` values for ``lstat``
+# and ``fstat`` of the same unchanged file. Windows historically exposes creation time
+# through this field (and deprecated that meaning in 3.12), so it is not a reliable
+# cross-handle version signal there. Identity, size, and nanosecond mtime remain stable;
+# POSIX keeps ctime as the additional metadata/change detector.
+_VERSION_FIELDS = (
+    ("st_size", "st_mtime_ns")
+    if os.name == "nt"
+    else ("st_size", "st_mtime_ns", "st_ctime_ns")
+)
+
 
 class UnsafeStateFile(OSError):
     """A private-state path is not a stable, single-link regular file."""
@@ -57,7 +68,7 @@ def _same_version(left, right) -> bool:
     """Identity plus metadata that changes on an in-place rewrite."""
     return _same_file(left, right) and all(
         getattr(left, name, None) == getattr(right, name, None)
-        for name in ("st_size", "st_mtime_ns", "st_ctime_ns")
+        for name in _VERSION_FIELDS
     )
 
 

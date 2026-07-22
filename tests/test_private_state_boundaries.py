@@ -13,6 +13,7 @@ from engraphis.private_state import (
     atomic_private_text,
     private_file_stat,
     publish_private_text_if_absent,
+    read_private_text,
 )
 
 
@@ -114,6 +115,19 @@ def test_atomic_write_rejects_same_inode_edit_after_read(tmp_path):
         atomic_private_text(path, "OUR_UPDATE=1\n", expected_stat=expected)
 
     assert path.read_text(encoding="utf-8") == "CONCURRENT=longer\n"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows stat compatibility regression")
+def test_repeated_private_replacement_remains_readable_on_windows(tmp_path):
+    """Python 3.12 may disagree on unchanged-file ctime across lstat/fstat handles."""
+    path = tmp_path / "state"
+    path.write_text("initial", encoding="utf-8")
+
+    for index in range(20):
+        expected = private_file_stat(path)
+        value = "value-%02d" % index
+        atomic_private_text(path, value, expected_stat=expected)
+        assert read_private_text(path, max_bytes=100) == value
 
 
 @pytest.mark.parametrize("publisher", [

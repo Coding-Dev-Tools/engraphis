@@ -48,55 +48,52 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [1.0.0] - Unreleased
 
-Release candidate for the first commercial GA release for Pro and Team. Replace
-`Unreleased` with the actual publication date only in the final authorized release commit.
+Release candidate for the public 1.0.0 open-core GA. Replace `Unreleased` with the actual
+publication date only in the final authorized release commit.
 
 ### Added
 
-- The Knowledge Graph can color nodes by deterministic communities, entity type, or
-  connection count. The selected mode persists and the legend follows the active scale.
-- Deployment-bound Pro/Team trial claims with scanner-safe confirmation, automatic
-  server-to-server activation, replay/abuse protection, and recovery after a closed tab.
-- Hashed, scoped, 90-day per-user tokens for agent and sync access, including viewer
-  read-only sync.
+- The Galaxy Knowledge Graph explorer with deterministic communities, entity/relation search,
+  temporal scenes, evidence and history inspection, accessible tables, and a locally bundled
+  ForceGraph + D3 renderer.
+- A 29-tool MCP surface with explicit behavior annotations, operation receipts, exact session
+  retry semantics, portable plugin manifests, and checksummed skill assets.
+- Customer-side hosted protocols for scoped Cloud Sync, rotating cloud sessions, Analytics,
+  and managed Automation requests, plus explicit manual folder exchange for local workflows.
+
 ### Changed
 
-- Paid licenses default to `https://license.engraphis.com`; the former license path is a
-  90-day compatibility surface.
-- The dashboard is auth-first when hosted, uses accessible dialogs instead of browser
-  prompts, and serves external same-origin assets under a CSP with no `unsafe-inline`.
+- The public distribution is a universal Python open-core package that runs only as a customer
+  node. Hosted authorization, billing, relay storage, managed compute, Team identity, workers,
+  and vendor operations remain private services.
+- Commercial compatibility modules now expose presentation and customer-protocol metadata only;
+  no environment variable turns the public package into a hosted Engraphis service.
+- Session identity is exact across workspace, repo, authenticated user, agent, and goal; callers
+  can request a distinct run with `force_new=true` and observe retry reuse explicitly.
 
 ### Fixed
 
-- GitHub Release publication supplies explicit repository context to `gh` in jobs without
-  a checkout. A main-only workflow-dispatch repair path is pinned to the exact tag commit,
-  verifies any immutable PyPI subset by filename and SHA-256, publishes only missing files,
-  requires the exact complete set, and reconciles an existing partial GitHub Release. Source
-  and platform-wheel publication is aggregated into one gated artifact and one publisher.
-- Private-workspace analytics and HTML export now pass through the same ownership check as
-  recall and memory reads.
-- Schema-v4 upgrades take and integrity-check a pre-mutation recovery copy, then apply every
-  schema/backfill change transactionally; injected encrypted connectors use the same
-  backup path and an interrupted upgrade is restart-safe.
-- Deployment-bound trial use survives claim-row retention sweeps; paid-license email bodies
-  are redacted after durable fulfillment while provider-deferred delivery remains
-  recoverable; operator requeues are explicit and permanently bounded.
-- First-run database and `.env` migrations, machine/lease state, and sync credentials reject
-  linked, aliased, oversized, or malformed leaves and use race-checked atomic publication.
-- The graph launcher rejects invalid ports before optional model loading, and a configured
-  public HTTPS dashboard origin redirects its matching plain-HTTP host before serving a
-  login page.
+- Session start/end and session-scoped writes are atomic under concurrency; exact retries reuse
+  one session while intentionally separate runs remain distinct.
+- Rotating refresh credentials serialize across threads and processes, persist replacements in
+  owner-only state, close failed HTTP responses, and never regress to a stale bootstrap value.
+- Managed snapshots reserve a monotonic generation in the same local write transaction as the
+  capture, use one operation ID per run and retry, redact provider errors, reject unknown
+  sensitivity, exclude session and secret data, and enforce exact record/byte limits.
+- Graph reads, suggestions, evidence, history, indexing, exports, audit views, fallback search,
+  and workspace statistics consistently enforce workspace and session boundaries, including
+  forgotten session-only graph evidence.
+- Windows private-state validation uses safe file metadata checks without weakening symlink,
+  ownership, size, or atomic-publication protections.
 
 ### Security
 
-- The browser and invitation emails never receive the account-wide Team license key.
-- Trial invitation URLs are restricted to the dashboard origin bound into the initiating
-  deployment claim.
-- The retired customer-host license path is an explicit client-protocol allowlist, not a
-  catch-all vendor proxy, and never forwards the dashboard Authorization header.
-- LLM connection status exposes neither custom/internal endpoints nor provider replies;
-  custom remote endpoints require HTTPS, and provider results are reduced to a fixed
-  response allowlist.
+- Bare memory IDs, shared-workspace controls, graph entities, statistics, snapshots, exports,
+  audit rows, and keyword fallbacks cannot cross authenticated session or workspace boundaries.
+- Managed uploads require explicit consent, are capped at 16 MiB and 100,000 rows, omit all
+  session-scoped and secret-class memories, and surface only fixed client-safe provider errors.
+- Customer credentials remain owner-only, redirect-safe, serialized during rotation, and are
+  never substituted with an unproven local machine identifier.
 
 ## [0.9.9] - 2026-07-18
 
