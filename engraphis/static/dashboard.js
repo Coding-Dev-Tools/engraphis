@@ -589,7 +589,7 @@ function onLlmProvChange(){const p=document.getElementById('llm-prov').value;con
 function updateLlmSnippet(){const p=(document.getElementById('llm-prov')||{}).value||'openai';const m=(document.getElementById('llm-model')||{}).value||'';const ta=document.getElementById('llm-snippet');if(!ta)return;ta.value='ENGRAPHIS_LLM_PROVIDER='+p+'\nENGRAPHIS_LLM_MODEL='+m+'\nENGRAPHIS_LLM_API_KEY=<your-key>\nENGRAPHIS_EXTRACTOR=llm_structured\n'}
 function copyLlmSnippet(){const ta=document.getElementById('llm-snippet');if(!ta)return;ta.select();try{navigator.clipboard.writeText(ta.value);toast('Copied .env snippet','ok')}catch(e){toast('Copy failed — select and Ctrl+C','err')}}
 async function setLlmExtractor(on){try{const d=await api('/llm/extractor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:!!on})});const ok=!!d.extractor_enabled;toast(ok?'LLM extraction turned on — new memories will be sent to your provider':'LLM extraction turned off — memories stay on this machine'+(d.persisted===false?' (could not save for restart)':''),ok?'ok':'muted');loadLlmStatus()}catch(e){toast(e.message,'err')}}
-async function testLlm(){const r=document.getElementById('llm-test-result');if(r){r.textContent='Testing…';setTone(r,'muted')}try{const d=await api('/llm/test',{method:'POST'});if(r){if(d.ok){const transient=d.auto_enabled&&d.persisted===false;r.textContent=(transient?'⚠ ':'✓ ')+'Connected — '+esc(d.provider)+'/'+esc(d.model)+' replied: '+esc(d.reply||'(empty)')+(transient?' Extraction is active for this process, but the setting could not be saved for restart. Set ENGRAPHIS_EXTRACTOR=llm_structured and ENGRAPHIS_LLM_AUTO_EXTRACT=1 in the deployment environment.':'');setTone(r,transient?'red':'green')}else{r.textContent='✗ '+(d.error||'failed');setTone(r,'red')}}}catch(e){if(r){r.textContent='✗ '+esc(e.message);setTone(r,'red')}}}
+async function testLlm(){const r=document.getElementById('llm-test-result');if(r){r.textContent='Testing…';setTone(r,'muted')}try{const d=await api('/llm/test',{method:'POST'});if(r){if(d.ok){const transient=d.auto_enabled&&d.persisted===false;r.textContent=(transient?'⚠ ':'✓ ')+'Connected — '+esc(d.provider)+'/'+esc(d.model)+(transient?' Extraction is active for this process, but the setting could not be saved for restart. Set ENGRAPHIS_EXTRACTOR=llm_structured and ENGRAPHIS_LLM_AUTO_EXTRACT=1 in the deployment environment.':'');setTone(r,transient?'red':'green')}else{r.textContent='✗ '+(d.error||'failed');setTone(r,'red')}}}catch(e){if(r){r.textContent='✗ '+esc(e.message);setTone(r,'red')}}}
 
 async function renderTokList(){try{const toks=(await api('/auth/tokens')).tokens||[];const el=document.getElementById('tok-list');if(!el)return;el.innerHTML=toks.length?toks.map(t=>`<div class="audit-row"><span data-csp-style="s1">${esc(t.label||'(unlabelled)')} <span data-csp-style="s145">· ${t.revoked?'revoked':fmtRel(t.created_at)}${t.last_used_at?' · used '+fmtRel(t.last_used_at):''}</span></span>${t.revoked?'':`<button class="btn btn-ghost btn-sm" data-token-id="${esc(t.id)}" data-onclick="h132">Revoke</button>`}</div>`).join(''):'<div class="empty" data-csp-style="s85">No tokens yet.</div>'}catch(e){}}
 async function loadApiTokens(){const el=document.getElementById('tokens-body');if(!el)return;try{const st=await api('/auth/state');if(!st.enabled){el.innerHTML='<div class="empty" data-csp-style="s10">Team mode is off — activate a Team license to connect agents to this instance.</div>';return}if(!st.user){el.innerHTML='<div class="empty" data-csp-style="s10">Sign in to create and manage agent tokens.</div>';return}let ci={};try{ci=await api('/auth/connect-info')}catch(e){}const base=ci.api_base||(API||'');el.innerHTML=`<div class="cfg-row" data-csp-style="s169">Point an agent at this instance with a per-user bearer token (the server stores only its hash; the raw value is shown once). <code data-csp-style="s159">POST ${esc(base)}/remember</code> · <code data-csp-style="s159">GET ${esc(base)}/recall</code></div><div data-csp-style="s167"><input class="input" id="tok-label" placeholder="token label (e.g. claude-code)" data-csp-style="s1"><button class="btn btn-primary btn-sm" data-onclick="h133">Create token</button></div><div id="tok-created" data-csp-style="s170"></div><div data-csp-style="s171">Your tokens</div><div id="tok-list"></div>`;renderTokList()}catch(e){el.innerHTML='<div class="empty" data-csp-style="s10">'+esc(e.message)+'</div>'}}
@@ -605,7 +605,6 @@ async function syncNow(){const b=document.getElementById('sync-btn');const s=doc
 
 /* ─── knowledge graph (force-graph + d3-force: compact defaults and selectable layouts) ─── */
 let GRAPH=null, FG=null, GRESIZE=false, GRESIZEFRAME=0, GADJ={}, GCOMPONENTS={}, GCOMPONENT_LAYOUT=null, GHILITE=null, GHOVERSET=null, GLABELRANK={}, GLABELBOXES=[], GDATA_CACHE=null, GACTIVE_DATA=null, GREDRAWFRAME=0, GPERF={large:false,dense:false};
-const GRAPH_UI_V2=false;
 const GRAPH_PRESETS={
  original:{label:'Original force',repel:120,link:30,gravity:14,font:13,size:3,linkw:1,labelDensity:40,curve:0,particles:0},
  compact:{label:'Compact clusters',repel:42,link:20,gravity:26,font:12,size:3,linkw:.7,labelDensity:30,curve:.08,particles:0},
@@ -678,7 +677,7 @@ function graphSetSimulationStatus(text,busy){
  graphSetLayoutStatus(text,busy)
 }
 function graphUpdateHud(data){
- const mode=document.getElementById(GRAPH_UI_V2?'galaxy-hud-mode':'graph-hud-mode'),count=document.getElementById(GRAPH_UI_V2?'galaxy-hud-count':'graph-hud-count'),badge=document.getElementById('graph-performance-badge');
+ const mode=document.getElementById('graph-hud-mode'),count=document.getElementById('graph-hud-count'),badge=document.getElementById('graph-performance-badge');
  const preset=GRAPH_PRESETS[window.GSET.mode]||GRAPH_PRESETS.compact;
  if(mode)mode.textContent=preset.label||'Custom graph';
  if(count&&data)count.textContent=data.nodes.length.toLocaleString()+' entities · '+data.links.length.toLocaleString()+' relations';
@@ -925,7 +924,7 @@ function loadForceGraph(){
  return FORCE_GRAPH_LOADING;
 }
 function graphRender(fit=true,reheat=true){
- const empty=document.getElementById(GRAPH_UI_V2?'galaxy-empty':'graph-empty');
+ const empty=document.getElementById('graph-empty');
  if(typeof ForceGraph==='undefined'){
   showAs(empty,true,'flex');empty.textContent='Loading graph engine…';
   graphSetLayoutStatus('Loading engine',true);
@@ -935,7 +934,7 @@ function graphRender(fit=true,reheat=true){
   });
   return;
  }
- const element=document.getElementById(GRAPH_UI_V2?'galaxy-net':'graph-net'),settings=window.GSET,mode=GRAPH_PRESETS[settings.mode]||GRAPH_PRESETS.compact,data=graphData(),dataChanged=GACTIVE_DATA!==data;
+ const element=document.getElementById('graph-net'),settings=window.GSET,mode=GRAPH_PRESETS[settings.mode]||GRAPH_PRESETS.compact,data=graphData(),dataChanged=GACTIVE_DATA!==data;
  GPERF={large:data.nodes.length>600||data.links.length>2400,dense:data.links.length>1500};
  graphSyncReadouts();graphUpdateEditedBadge();
  if(dataChanged){
@@ -1165,8 +1164,7 @@ function renderGraphExplorer(query,reset=false){
  if(edgePage.length<shownEdges.length)edgesBox.insertAdjacentHTML('beforeend',`<button type="button" class="graph-explorer-more" data-onclick="h144">Show ${Math.min(GRAPH_EXPLORER_PAGE.edges,shownEdges.length-edgePage.length)} more relations</button>`);
  syncGraphExplorerSelection(GHILITE);
 }
-/* World-Class Galaxy Explorer. The legacy ForceGraph implementation above stays available as
-   a no-WebGL/module fallback for one compatibility release. */
+/* Search and accessible-table extensions for the shipped ForceGraph + D3 explorer. */
 function loadAnalyticsView(){
  if(LIC&&(LIC.features||[]).includes('analytics'))return loadAnalytics();
  const el=document.getElementById('analytics-body'),lock=document.getElementById('an-lock'),acts=document.getElementById('an-actions');

@@ -167,7 +167,7 @@ def test_dashboard_serves_and_bootstraps(monkeypatch, tmp_path):
         b = c.get("/api/bootstrap").json()
         assert b["stats"]["memories"] >= 2
         assert any(w["name"] == "demo" for w in b["workspaces"])
-        assert b["features"]["graph_ui_v2"] is True
+        assert "features" not in b
         assert b["license"]["plan"] == "free"
 
 
@@ -1190,6 +1190,87 @@ def test_team_license_routes_are_public_only_during_zero_user_bootstrap(monkeypa
         ).status_code == 403
 
 
+def test_lapsed_team_workspace_grace_then_authenticated_read_only_recovery(
+        monkeypatch, tmp_path):
+    """A lapse gets one bounded local-write window, then only reads/export/relicense."""
+    key = _team_key()
+    with _client(monkeypatch, tmp_path, team=True, key=key) as admin:
+        assert admin.post("/api/auth/setup", json={
+            "email": "w@x.co", "name": "W", "password": "supersecret1",
+        }).status_code == 200
+        member = admin.post("/api/auth/users", json={
+            "email": "member@x.co", "name": "Member",
+            "password": "anotherpass1", "role": "member",
+        }).json()["user"]
+        active = admin.get("/api/auth/state").json()
+        assert active["entitlement_state"] == "active"
+        assert active["grace_until"] is None
+
+        monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY", raising=False)
+        assert lic.current_license(refresh=True).plan == "free"
+
+        grace = admin.get("/api/auth/state").json()
+        assert grace["entitlement_state"] == "workspace_write_grace"
+        assert grace["workspace_writes_allowed"] is True
+        assert grace["recovery_read_only"] is False
+        assert grace["grace_until"] > time.time()
+
+        # Ordinary authenticated/local workspace writes continue. Paid agent writes and
+        # every form of account growth still require a live entitlement immediately.
+        assert admin.post("/api/workspaces/create", json={
+            "workspace": "during-grace",
+        }).status_code == 200
+        assert admin.post("/api/remember", json={
+            "content": "agent write", "workspace": "demo",
+        }).status_code == 402
+        token_denied = admin.post("/api/auth/token", json={"label": "new agent"})
+        assert token_denied.status_code == 402
+        token_body = token_denied.json()
+        assert token_body.get("entitlement_state") == "workspace_write_grace", token_body
+        invite_denied = admin.post("/api/auth/invitations", json={
+            "email": "new@x.co", "name": "New", "role": "member",
+        })
+        assert invite_denied.status_code == 402
+        promote_denied = admin.post("/api/auth/users/update", json={
+            "user_id": member["id"], "role": "admin",
+        })
+        assert promote_denied.status_code == 402
+
+        # Advance the durable state without sleeping; the request gate reads this same
+        # persisted deadline on every restart/request.
+        store = admin.app.state.auth_store
+        store.conn.execute(
+            "UPDATE entitlement_state SET grace_until=0 WHERE singleton=1")
+        store.conn.commit()
+
+        recovery = admin.get("/api/auth/state").json()
+        assert recovery["entitlement_state"] == "recovery_read_only"
+        assert recovery["workspace_writes_allowed"] is False
+        assert recovery["recovery_read_only"] is True
+        assert admin.post("/api/auth/forgot", json={
+            "email": "w@x.co",
+        }).status_code == 200
+        # Invalid reset tokens still reach the reset route (400), not the recovery gate (402).
+        assert admin.post("/api/auth/reset", json={
+            "token": "not-a-valid-reset-token", "password": "renewedpass1",
+        }).status_code == 400
+        assert admin.get(
+            "/api/recall", params={"q": "Postgres", "workspace": "demo"}
+        ).status_code == 200
+        assert admin.get("/api/export", params={"workspace": "demo"}).status_code == 200
+
+        blocked = admin.post("/api/workspaces/create", json={
+            "workspace": "after-grace",
+        })
+        assert blocked.status_code == 402
+        assert blocked.json()["entitlement_state"] == "recovery_read_only"
+
+        # Relicensing is deliberately available in recovery and clears the state.
+        renewed = admin.post("/api/license/activate", json={"key": key})
+        assert renewed.status_code == 200
+        assert admin.get("/api/auth/state").json()["entitlement_state"] == "active"
+
+
 def test_license_activate_still_requires_admin_session(monkeypatch, tmp_path):
     """Pasting an arbitrary key changes the whole team's plan, so activation is always
     behind the normal session + min_role('admin') gate."""
@@ -1453,6 +1534,13 @@ def test_personal_folders_are_isolated_per_user(monkeypatch, tmp_path):
         assert c.get("/api/memories?workspace=alice-secret",
                      headers=hdr(bob)).status_code == 400
         assert c.get("/api/recall?q=x&workspace=alice-secret",
+                     headers=hdr(bob)).status_code == 400
+        # Analytics used to bypass MemoryService._clean_ws and look up the raw
+        # workspace name directly, exposing another user's private folder and a
+        # content-derived HTML report despite the ordinary memory route refusing it.
+        assert c.get("/api/analytics?workspace=alice-secret",
+                     headers=hdr(bob)).status_code == 400
+        assert c.get("/api/analytics/export?workspace=alice-secret",
                      headers=hdr(bob)).status_code == 400
         # bob makes his own personal folder; alice (an admin) can't see it either
         assert c.post("/api/workspaces/create",
