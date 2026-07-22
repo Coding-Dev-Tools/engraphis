@@ -25,16 +25,20 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Changed
 
-- Graph rendering now uses pinned, locally bundled Sigma 3.0.3 and Graphology 0.26 assets,
-  a CSP-safe TypeScript worker, evidence-derived rest lengths, and bounded level-of-detail.
-  The legacy API and ForceGraph renderer remain available for one compatibility release via
-  `ENGRAPHIS_GRAPH_UI_V2=0`; the analytical explorer is the validated default.
+- Recall graph seeding now matches all entity names with one boundary-aware compiled pattern
+  instead of rescanning every memory once per entity, and the streamable-HTTP launcher warms
+  the singleton service before accepting clients.
+
+- The graph explorer uses its locally bundled ForceGraph + D3 renderer under the strict
+  same-origin CSP. The new scene APIs and synchronized accessible entity/relation tables are
+  additive to that shipped UI.
 - Graph GET requests are strictly read-only. While an explicit mutating index job runs, graph
   reads return a rebuilding conflict instead of mixing old and partially derived metrics.
 
-## [1.0.0] - 2026-07-19
+## [1.0.0] - Unreleased
 
-First commercial GA release for Pro and Team.
+Release candidate for the first commercial GA release for Pro and Team. Replace
+`Unreleased` with the actual publication date only in the final authorized release commit.
 
 ### Added
 
@@ -70,8 +74,26 @@ First commercial GA release for Pro and Team.
 ### Fixed
 
 - GitHub Release publication supplies explicit repository context to `gh` in jobs without
-  a checkout. A workflow-dispatch repair path can reuse the tagged run's validated
-  distribution artifact if PyPI succeeds before release creation fails.
+  a checkout. A main-only workflow-dispatch repair path is pinned to the exact tag commit,
+  verifies any immutable PyPI subset by filename and SHA-256, publishes only missing files,
+  requires the exact complete set, and reconciles an existing partial GitHub Release. Source
+  and platform-wheel publication is aggregated into one gated artifact and one publisher.
+- Private-workspace analytics and HTML export now pass through the same ownership check as
+  recall and memory reads.
+- Schema-v4 upgrades take and integrity-check a pre-mutation recovery copy, then apply every
+  schema/backfill change transactionally; injected encrypted connectors use the same
+  backup path and an interrupted upgrade is restart-safe.
+- Deployment-bound trial use survives claim-row retention sweeps; paid-license email bodies
+  are redacted after durable fulfillment while provider-deferred delivery remains
+  recoverable; operator requeues are explicit and permanently bounded.
+- Public vendor readiness stays red when an authenticated operational gate such as backup,
+  webhook intake, outbox health, or manual fulfillment is not ready; detailed state remains
+  confined to the vendor-admin endpoint.
+- First-run database and `.env` migrations, machine/lease state, and sync credentials reject
+  linked, aliased, oversized, or malformed leaves and use race-checked atomic publication.
+- The graph launcher rejects invalid ports before optional model loading, and a configured
+  public HTTPS dashboard origin redirects its matching plain-HTTP host before serving a
+  login page.
 
 ### Security
 
@@ -80,6 +102,14 @@ First commercial GA release for Pro and Team.
   deployment claim.
 - Production issuance rejects unknown Polar products and wrong organizations; signer
   readiness remains fail-closed until the offline rotation ceremony is approved.
+- The retired customer-host license path is an explicit client-protocol allowlist, not a
+  catch-all vendor proxy, and never forwards the dashboard Authorization header.
+- LLM connection status exposes neither custom/internal endpoints nor provider replies;
+  custom remote endpoints require HTTPS, and provider results are reduced to a fixed
+  response allowlist.
+- Polar webhook responses no longer reflect provider event fields or order/subscription
+  identifiers, and sync/machine state cannot turn an arbitrary linked local file into an
+  outbound credential or device identifier.
 
 ## [0.9.9] - 2026-07-18
 

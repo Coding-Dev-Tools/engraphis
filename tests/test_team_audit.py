@@ -33,8 +33,12 @@ def _client(monkeypatch, tmp_path, *, seats=3):
     monkeypatch.setenv("ENGRAPHIS_TEAM_MODE", "1")
     monkeypatch.setenv("ENGRAPHIS_TEAM_INVITES", "0")
     monkeypatch.setattr(lic, "_LICENSE_FILE", tmp_path / "license.key")
-    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", _team_key(seats))
+    key = _team_key(seats)
+    monkeypatch.setenv("ENGRAPHIS_LICENSE_KEY", key)
     monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(_SECRET).hex())
+    monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(tmp_path / "vendor-relay.db"))
+    from engraphis.inspector import license_registry
+    license_registry.record_issued(key)
     lic.current_license(refresh=True)
     svc = MemoryService.create(str(tmp_path / "dash.db"))
     from engraphis.routes import v2_api
@@ -352,7 +356,7 @@ def test_viewer_invite_through_vendor_relay_reports_delivery(monkeypatch, tmp_pa
             queued.append({"to": to, "role": role, "invited_by": invited_by,
                            "invite_url": invite_url, **kwargs}) or "eml_invite",
     )
-    wire_vendor_relay(monkeypatch)
+    wire_vendor_relay(monkeypatch, tmp_path)
 
     c = _client(monkeypatch, tmp_path)
     monkeypatch.setenv("ENGRAPHIS_TEAM_INVITES", "1")

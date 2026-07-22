@@ -87,6 +87,9 @@ def create_app() -> FastAPI:
     if mode == "vendor":
         from engraphis.vendor_app import create_app as create_vendor_app
         return create_vendor_app()
+    if mode == "relay":
+        from engraphis.relay_app import create_app as create_relay_app
+        return create_relay_app()
     # MCP-over-HTTP agent connect: build the streamable-http ASGI app up front so we can
     # give the dashboard a lifespan that initializes its session manager (a mounted
     # sub-app's own lifespan does NOT run in Starlette - only the root app's does -
@@ -164,15 +167,34 @@ def create_app() -> FastAPI:
     )
 
     @app.exception_handler(licensing.LicenseError)
-    async def _license_error(_request: Request, exc: licensing.LicenseError):
+    async def _license_error(request: Request, exc: licensing.LicenseError):
+        if request.url.path.startswith(("/license/v1/", "/relay/v1/")):
+            try:
+                from engraphis.inspector import license_registry
+                license_registry.record_control_plane_event("lease_rejected")
+            except Exception:  # noqa: BLE001 - preserve the original safe 402 response
+                pass
         feature = exc.feature or "team"
         body = {
             "error": str(exc),
+            "upgrade": True,
             "feature": feature,
             "tier_required": licensing.required_plan(feature),
             "upgrade_url": licensing.upgrade_url(),
+            "purchase_url": licensing.upgrade_url(),
         }
+        access = getattr(exc, "entitlement_access", None)
+        if isinstance(access, dict):
+            from engraphis.inspector.auth import entitlement_denial
+            body.update(entitlement_denial(access, growth=True))
+            body["feature"] = feature
+            body["tier_required"] = licensing.required_plan(feature)
+            body["upgrade_url"] = licensing.upgrade_url("team")
+            body["purchase_url"] = licensing.upgrade_url("team")
         return JSONResponse({**body, "detail": body}, status_code=402)
+    # cloud_mount installs the same handler only when one is absent. Mark this richer
+    # dashboard handler as authoritative so mounting relay routes cannot replace it.
+    app.state._license_handler_installed = True
     svc = MemoryService.create(
         settings.db_path, embed_model=settings.embed_model,
         embed_dim=settings.embed_dim or 384,
@@ -267,6 +289,31 @@ def create_app() -> FastAPI:
     def _bearer_token(request: Request) -> str:
         header = request.headers.get("Authorization") or ""
         return header[7:].strip() if header[:7].lower() == "bearer " else ""
+
+    def _provisioned_entitlement_access() -> dict | None:
+        if not (team_enabled and auth_store is not None and auth_store.count_users() > 0):
+            return None
+        return auth_store.entitlement_access(licensing.current_license())
+
+    def _lapse_denial(request: Request, access: dict | None):
+        """Return a 402 for a disallowed recovery mutation, else ``None``.
+
+        The grace covers ordinary authenticated/local workspace writes only. Paid routes
+        keep their own live-license gates; after grace every mutation is refused except the
+        explicit relicensing paths classified by the shared auth policy.
+        """
+        if not access or not access.get("recovery"):
+            return None
+        from engraphis.inspector.auth import entitlement_denial, recovery_request_allowed
+        if recovery_request_allowed(request.method, request.url.path):
+            return None
+        body = entitlement_denial(access)
+        body.update({
+            "feature": "team",
+            "tier_required": licensing.required_plan("team"),
+            "upgrade_url": licensing.upgrade_url("team"),
+        })
+        return JSONResponse(body, status_code=402)
 
     from engraphis.netutil import is_local_request
 
@@ -382,6 +429,9 @@ def create_app() -> FastAPI:
         # allowing CI/CD scripts and automation to use the same ENGRAPHIS_API_TOKEN
         # regardless of whether team mode is enabled.
         if settings.api_token and _api_bearer_ok(request):
+            denied = _lapse_denial(request, _provisioned_entitlement_access())
+            if denied is not None:
+                return denied
             return await call_next(request)
         # A new, unlicensed instance with no users remains open for solo use. Once a paid
         # license (Pro or Team) activates the wall—or any users have been provisioned—the
@@ -412,6 +462,9 @@ def create_app() -> FastAPI:
             if not role_at_least(user["role"], need):
                 return JSONResponse({"error": "requires the %s role" % need},
                                     status_code=403)
+            denied = _lapse_denial(request, _provisioned_entitlement_access())
+            if denied is not None:
+                return denied
             request.state.user = user
             # Bind the identity the service reads to enforce personal-folder ownership on
             # every workspace-scoped read/write (see MemoryService._authorize_workspace).

@@ -30,6 +30,7 @@ from typing import Optional
 
 from engraphis.licensing import (
     PLAN_FEATURES,
+    TRIAL_DAYS,
     compose_key,
     ed25519_public_key,
     _DEV_VENDOR_PUBKEY_HEX,
@@ -328,26 +329,23 @@ def _parse_ts(value) -> Optional[float]:
 
 
 def _trial_days(period_end, *, now: Optional[float] = None) -> int:
-    """How long a trial key stays valid: through the trial's ``current_period_end``,
-    rounded UP to whole days (so it always covers the full trial, never expiring a
-    legit trial user early) but with NO extra grace — a canceled trial should lapse
-    right at trial end so no one keeps Pro without paying. Falls back to
-    ENGRAPHIS_TRIAL_DAYS (default 4, matching a 3-day trial) if the end is missing."""
-    now = now if now is not None else time.time()
-    end = _parse_ts(period_end)
-    if end and end > now:
-        return max(1, math.ceil((end - now) / 86400))
-    try:
-        return max(1, int(os.environ.get("ENGRAPHIS_TRIAL_DAYS", "4")))
-    except ValueError:
-        return 4
+    """Return the single product-wide trial term.
+
+    Provider period timestamps are deliberately not rounded into license days: a value
+    fractionally beyond three days previously rounded up to four. Trial revocation still
+    follows provider lifecycle events, while every newly issued trial key starts with the
+    same exact three-day entitlement.
+    """
+    del period_end, now
+    return TRIAL_DAYS
+
 
 
 def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
               days: Optional[int] = None, metadata: Optional[dict] = None,
               *, trial: bool = False, record: bool = True,
               subscription_id: str = "", order_id: str = "",
-              product_id: str = "") -> str:
+              product_id: str = "", retention_claim: str = "") -> str:
     """Generate a signed ``ENGR1.xxx.yyy`` key for *email_addr*.
 
     Uses the pinned vendor signing key (``.secrets/vendor_signing.key`` or
@@ -411,10 +409,13 @@ def issue_key(email_addr: str, product_name: str = "pro", seats: int = 1,
     if record:
         try:
             from engraphis.inspector.license_registry import (
-                record_issued, revoke_superseded)
-            key_id = record_issued(key)
-            if subscription_id:
-                revoke_superseded(subscription_id, key_id)
+                record_fulfillment_key, record_issued, revoke_superseded)
+            if retention_claim:
+                key = record_fulfillment_key(retention_claim, key)
+            else:
+                key_id = record_issued(key)
+                if subscription_id:
+                    revoke_superseded(subscription_id, key_id)
         except Exception as exc:
             from engraphis.commercial import service_mode
             if service_mode() == "vendor":
@@ -586,7 +587,7 @@ def _deliver_text_email(to: str, subject: str, text_body: str,
 
 def _send_text_email(to: str, subject: str, text_body: str, *,
                      reply_to: Optional[str] = None, kind: str = "transactional",
-                     idempotency_key: str = "") -> str:
+                     idempotency_key: str = "", retention_claim: str = "") -> str:
     """Persist and immediately attempt a plain-text transactional email.
 
     Prefers the Resend HTTPS API (``ENGRAPHIS_RESEND_API_KEY`` or the Resend key
@@ -602,13 +603,14 @@ def _send_text_email(to: str, subject: str, text_body: str, *,
     from engraphis import email_outbox
     message_id = email_outbox.enqueue(
         kind, to, subject, text_body, reply_to=reply_to,
-        idempotency_key=idempotency_key)
+        idempotency_key=idempotency_key, retention_claim=retention_claim)
     email_outbox.deliver_now(message_id, _deliver_text_email)
     return message_id
 
 
 def send_license_email(to: str, key: str, product_name: str = "Pro",
-                       is_trial: bool = False, *, idempotency_key: str = "") -> None:
+                       is_trial: bool = False, *, idempotency_key: str = "",
+                       retention_claim: str = "") -> None:
     """Deliver a license key to *to*.
 
     Raises RuntimeError if nothing is configured, and raises on delivery
@@ -620,7 +622,8 @@ def send_license_email(to: str, key: str, product_name: str = "Pro",
     text_body = _license_email_text(key, product_name, is_trial=is_trial)
     _send_text_email(to, subject, text_body,
                      kind="trial_license" if is_trial else "purchase_license",
-                     idempotency_key=idempotency_key)
+                     idempotency_key=idempotency_key,
+                     retention_claim=retention_claim)
 
 
 def _password_reset_email_text(name: str, reset_url: str) -> str:
@@ -932,11 +935,24 @@ def _issue_and_email(email_addr: str, product_name: str, seats: int,
     the only raw key in the encrypted-backup-covered 0600 operator fallback instead.
     """
     email_idempotency_key = ""
+    retention_claim = ""
+    if fulfillment_id:
+        from engraphis.email_outbox import fulfillment_retention_claim
+        retention_claim = fulfillment_retention_claim(fulfillment_id)
     if order_id:
         # A renewal has a fresh order id. Reusing this stable key makes a retry converge
         # on the original durable outbox message rather than enqueueing a second email.
         email_idempotency_key = "purchase-license:" + order_id
-        existing_key = _existing_license_delivery(email_idempotency_key)
+        try:
+            existing_key = _existing_license_delivery(email_idempotency_key)
+        except RuntimeError:
+            # A terminal row may already have been minimized after the registry-side
+            # crash journal was written. Recover only from that journal; without it,
+            # fail closed rather than minting a key the existing message never carried.
+            from engraphis.inspector.license_registry import fulfillment_key
+            existing_key = fulfillment_key(retention_claim) if retention_claim else None
+            if not existing_key:
+                raise
         if existing_key:
             return existing_key
     elif fulfillment_id:
@@ -946,7 +962,13 @@ def _issue_and_email(email_addr: str, product_name: str, seats: int,
         # of minting a second entitlement on retry.
         digest = hashlib.sha256(fulfillment_id.encode("utf-8")).hexdigest()
         email_idempotency_key = "license-fulfillment:" + digest
-        existing_key = _existing_license_delivery(email_idempotency_key)
+        try:
+            existing_key = _existing_license_delivery(email_idempotency_key)
+        except RuntimeError:
+            from engraphis.inspector.license_registry import fulfillment_key
+            existing_key = fulfillment_key(retention_claim) if retention_claim else None
+            if not existing_key:
+                raise
         if existing_key:
             return existing_key
 
@@ -956,11 +978,12 @@ def _issue_and_email(email_addr: str, product_name: str, seats: int,
     key = issue_key(
         email_addr, product_name=product_name, seats=seats, days=days,
         trial=is_trial, subscription_id=subscription_id, order_id=order_id,
-        product_id=product_id)
+        product_id=product_id, retention_claim=retention_claim)
     try:
         send_license_email(
             email_addr, key, product_name=label, is_trial=is_trial,
-            idempotency_key=email_idempotency_key)
+            idempotency_key=email_idempotency_key,
+            retention_claim=retention_claim)
     except Exception as exc:  # noqa: BLE001 — a delivery failure must not lose a key
         fp = hashlib.sha256(key.encode("ascii")).hexdigest()[:12]
         # A provider outage happens *after* enqueue; the durable outbox already contains

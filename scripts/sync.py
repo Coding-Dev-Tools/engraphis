@@ -67,8 +67,8 @@ def main(argv=None) -> int:
 
     # Folder sync has no remote entitlement boundary, so it retains the local Pro gate.
     # A scoped relay token is checked server-side for owner, role, expiry, and sync
-    # scopes. Legacy license-key authorization remains a migration-only fallback.
-    from engraphis.backends.sync_relay import has_sync_token, sync_read_only
+    # scopes. A supplied Pro key is exchange-only and never becomes bundle authorization.
+    from engraphis.backends.sync_relay import RelayError, has_sync_token, sync_read_only
     from engraphis.licensing import LicenseError, require_feature
     has_user_token = bool(relay_token) or has_sync_token()
     if not use_relay or not has_user_token:
@@ -142,7 +142,7 @@ def main(argv=None) -> int:
             transport = get_transport("relay", base_url=relay_url,
                                       workspace_id=args.workspace,
                                       license_key=relay_token)
-        except ValueError as exc:
+        except (RelayError, ValueError) as exc:
             # A custom URL may contain credentials or signed query parameters. The
             # validator's fixed reason is actionable without reflecting the endpoint.
             print(f"error: could not open relay: {exc}", file=sys.stderr)
@@ -162,13 +162,17 @@ def main(argv=None) -> int:
     # must not silently regain upload authority merely because this CLI runs after a
     # process restart.
     read_only = bool(args.read_only or (use_relay and sync_read_only()))
-    report = engine_sync.sync(
-        transport,
-        wid_row["id"],
-        repo_id=rid,
-        dry_run=args.dry_run,
-        push=not read_only,
-    )
+    try:
+        report = engine_sync.sync(
+            transport,
+            wid_row["id"],
+            repo_id=rid,
+            dry_run=args.dry_run,
+            push=not read_only,
+        )
+    except RelayError as exc:
+        print(f"error: relay sync failed: {exc}", file=sys.stderr)
+        return 2
     print(json.dumps(report, indent=2))
 
     t = report["totals"]

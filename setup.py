@@ -48,17 +48,13 @@ class build_py(_build_py):
     """Exclude licensing.py and cloud_license.py from the package when compiled
     extensions exist — ship the .pyd/.so instead so the compiled version wins."""
 
-    def find_package_modules(self, package, package_dir):
-        modules = super().find_package_modules(package, package_dir)
-        if not EXT_MODULES:
-            return modules
-        return [
-            m for m in modules
-            if (package, m[0]) not in {
-                ("engraphis", "licensing"),
-                ("engraphis", "cloud_license"),
-            }
-        ]
+    def build_module(self, module, module_file, package):
+        if EXT_MODULES and (package, module) in {
+            ("engraphis", "licensing"),
+            ("engraphis", "cloud_license"),
+        }:
+            return None
+        return super().build_module(module, module_file, package)
 
 
 setup(

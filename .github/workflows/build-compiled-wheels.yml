@@ -1,9 +1,8 @@
 name: Build Compiled Wheels
 
+# Manual build-only diagnostics. The tag-gated release workflow owns aggregation and
+# publication so an sdist and platform wheels can never race through separate publishers.
 on:
-  push:
-    tags:
-      - "v*.*.*"
   workflow_dispatch:
 
 permissions:
@@ -33,9 +32,17 @@ jobs:
 
       - name: Build wheels
         env:
-          CIBW_BUILD: "cp312-* cp313-*"
+          # Match requires-python/classifiers exactly: every supported interpreter gets
+          # an installable wheel on Linux, Windows, and both mainstream macOS arches.
+          CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-*"
           CIBW_SKIP: "*musllinux*"
-          CIBW_BEFORE_BUILD: python -m pip install cython>=3.0 setuptools>=83
+          CIBW_ARCHS_LINUX: "x86_64"
+          CIBW_ARCHS_WINDOWS: "AMD64"
+          CIBW_ARCHS_MACOS: "x86_64 arm64"
+          CIBW_BEFORE_BUILD: >-
+            python -m pip install "cython>=3.0"
+            "setuptools>=83; python_version >= '3.10'"
+            "setuptools>=77; python_version < '3.10'"
           CIBW_BUILD_VERBOSITY: 1
         run: python -m cibuildwheel --output-dir wheelhouse
 
@@ -44,26 +51,3 @@ jobs:
         with:
           name: compiled-wheels-${{ matrix.os }}
           path: wheelhouse/*.whl
-
-  publish-compiled:
-    name: Publish compiled wheels to PyPI
-    needs: build-wheels
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-
-    steps:
-      - name: Download all compiled wheels
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          pattern: compiled-wheels-*
-          path: dist/
-          merge-multiple: true
-
-      - name: List collected artifacts
-        run: ls -la dist/
-
-      - name: Publish compiled wheels to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0

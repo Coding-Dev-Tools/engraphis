@@ -34,6 +34,11 @@ def _cloud_env(monkeypatch, tmp_path):
     monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", SECRET.hex())  # server signs leases
     monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(tmp_path / "relay.db"))
     monkeypatch.setenv("ENGRAPHIS_RELAY_PUBLIC_URL", "https://relay.example.test")
+    # This long-standing compatibility suite mints keys directly rather than exercising
+    # fulfillment. Opt it into the explicit bounded pre-registry migration path; the
+    # authoritative-registry suite separately proves the shipped default fails closed.
+    monkeypatch.setenv(
+        "ENGRAPHIS_LEGACY_LICENSE_MIGRATION_UNTIL", str(time.time() + 3600))
     monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
     monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY", raising=False)
     monkeypatch.delenv("ENGRAPHIS_FORWARDED_ALLOW_IPS", raising=False)
@@ -512,11 +517,11 @@ def test_register_raises_revoked_on_server_denial(monkeypatch):
     class _HTTPError(urllib.error.HTTPError):
         def __init__(self, code): super().__init__("http://x", code, "denied", None, io.BytesIO(b""))
     def _urlopen(req, timeout=None): raise _HTTPError(402)
-    monkeypatch.setattr(cloud_license.urllib.request, "urlopen", _urlopen)
+    monkeypatch.setattr(cloud_license, "_urlopen_no_redirect", _urlopen)
     with pytest.raises(cloud_license.Revoked):
         cloud_license.register("http://127.0.0.1", _key(), "m-1")
     def _urlopen_5xx(req, timeout=None): raise _HTTPError(503)
-    monkeypatch.setattr(cloud_license.urllib.request, "urlopen", _urlopen_5xx)
+    monkeypatch.setattr(cloud_license, "_urlopen_no_redirect", _urlopen_5xx)
     assert cloud_license.register("http://127.0.0.1", _key(), "m-1") is None
 
 
@@ -524,7 +529,7 @@ def test_license_client_sets_cloudflare_safe_headers(monkeypatch):
     captured = {}
 
     class _Resp:
-        def read(self): return b'{"lease": null}'
+        def read(self, limit=-1): return b'{"lease": null}'[:limit]
         def __enter__(self): return self
         def __exit__(self, *args): return False
 
@@ -533,12 +538,52 @@ def test_license_client_sets_cloudflare_safe_headers(monkeypatch):
         captured["accept"] = req.get_header("Accept")
         return _Resp()
 
-    monkeypatch.setattr(cloud_license.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(cloud_license, "_urlopen_no_redirect", fake_urlopen)
     assert cloud_license.register("http://127.0.0.1", _key(), "m-1") is None
     assert captured == {
         "user_agent": "Engraphis/1.0 (+https://engraphis.com)",
         "accept": "application/json",
     }
+
+
+def test_credential_bearing_cloud_posts_bound_response_reads(monkeypatch):
+    observed_limits = []
+
+    class _OversizedResponse:
+        def read(self, limit=-1):
+            observed_limits.append(limit)
+            return b"x" * limit
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        cloud_license, "_urlopen_no_redirect",
+        lambda *_args, **_kwargs: _OversizedResponse(),
+    )
+    base = "http://127.0.0.1"
+
+    assert cloud_license.register(base, _key(), "machine") is None
+    assert cloud_license.send_team_invite(
+        base, _key(plan="team"), "new@corp.com", "New", "member", "owner@corp.com",
+    )[0] is False
+    assert cloud_license.send_password_reset(
+        base, _key(plan="team"), "owner@corp.com", "Owner",
+        "https://dashboard.example/#reset_token=secret",
+    )[0] is False
+    assert cloud_license.request_trial_key(
+        base, "machine", plan="pro", email="owner@corp.com",
+    )[0] is None
+    with pytest.raises(RuntimeError, match="invalid response"):
+        cloud_license.create_trial_claim(
+            base, "deployment-token", "machine", "owner@corp.com", "pro")
+    with pytest.raises(RuntimeError, match="invalid response"):
+        cloud_license.claim_trial(base, "claim", "deployment-token", "machine")
+
+    assert observed_limits == [cloud_license._CLOUD_POST_MAX_RESPONSE_BYTES + 1] * 6
 
 
 @pytest.mark.parametrize("headers, expected", [
@@ -557,7 +602,7 @@ def test_team_invite_429_distinguishes_burst_gate_from_daily_cap(monkeypatch, he
         raise cloud_license.urllib.error.HTTPError(
             req.full_url, 429, "Too Many Requests", headers, None)
 
-    monkeypatch.setattr(cloud_license.urllib.request, "urlopen", raise_429)
+    monkeypatch.setattr(cloud_license, "_urlopen_no_redirect", raise_429)
     sent, reason = cloud_license.send_team_invite(
         "https://relay.example", _key(plan="team"), "new@corp.com",
         "Mo", "member", "admin@corp.com",
@@ -570,7 +615,7 @@ def test_license_clients_refuse_plain_http_off_loopback(monkeypatch):
     def unexpected_network(*args, **kwargs):
         raise AssertionError("insecure URL must be rejected before opening a connection")
 
-    monkeypatch.setattr(cloud_license.urllib.request, "urlopen", unexpected_network)
+    monkeypatch.setattr(cloud_license, "_urlopen_no_redirect", unexpected_network)
     assert cloud_license.register("http://relay.example", _key(), "m-1") is None
     sent, reason = cloud_license.send_team_invite(
         "http://relay.example", _key(plan="team"), "new@corp.com",
@@ -1402,7 +1447,7 @@ def _wire_urlopen_to(client, monkeypatch):
     accepts, not just what a mock expects."""
     class _Resp:
         def __init__(self, data): self._d = data
-        def read(self): return self._d
+        def read(self, limit=-1): return self._d if limit < 0 else self._d[:limit]
         def __enter__(self): return self
         def __exit__(self, *a): return False
 
@@ -1414,7 +1459,7 @@ def _wire_urlopen_to(client, monkeypatch):
                                          None, io.BytesIO(resp.content))
         return _Resp(resp.content)
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(cloud_license, "_urlopen_no_redirect", fake_urlopen)
 
 
 def test_send_team_invite_client_roundtrip(monkeypatch):
@@ -1446,7 +1491,7 @@ def test_send_team_invite_client_fails_closed_on_network_error(monkeypatch):
     def boom(req, timeout=None):
         raise urllib.error.URLError("no route to host")
 
-    monkeypatch.setattr("urllib.request.urlopen", boom)
+    monkeypatch.setattr(cloud_license, "_urlopen_no_redirect", boom)
     sent, reason = cloud_license.send_team_invite(
         "http://127.0.0.1", _key(plan="team"), "new@corp.com", "Mo", "member", "a@b.com")
     assert sent is False and "unreachable" in reason.lower()

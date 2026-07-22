@@ -133,10 +133,12 @@ Team mode (`ENGRAPHIS_TEAM_MODE`, ON by default unless set to `0` + a `team` lic
   setup remains zero-configuration. This prevents an internet caller consuming the trial
   or racing the operator for ownership.
 
-### 11. Vendor relay (team.engraphis.com) — operator notes
+### 11. Vendor license control plane (license.engraphis.com) — operator notes
 
-Only relevant if you *run* the relay; a self-hosted Engraphis is a client of it, never a
-second issuer.
+Only relevant if you *run* the vendor control plane; a self-hosted Engraphis is a client of it,
+never a second issuer. New integrations use `license.engraphis.com`. The legacy
+`team.engraphis.com` relay URL remains a compatibility surface for existing clients and is not
+the canonical hostname for license or trial operations.
 
 - `ENGRAPHIS_RELAY_PUBLIC_URL` is **required** to offer self-serve trials. The emailed
   magic-link is built from it and from nothing else — deriving it from the request would
@@ -165,8 +167,12 @@ second issuer.
 ## Known limitations
 - Rate limiting: in-process limiter ships (`ENGRAPHIS_RATE_LIMIT`, off by default);
   use reverse proxy for multi-process/distributed
-- Encryption at rest is opt-in (SQLCipher via `ENGRAPHIS_DB_KEY`); separate users/sessions
-  DB and relay DB not yet SQLCipher-encrypted
+- Encryption at rest is opt-in for the main memory DB (SQLCipher via
+  `ENGRAPHIS_DB_KEY`). The separate users/sessions DB, relay DB, and vendor
+  registry/transactional-email outbox DB are ordinary SQLite and are not SQLCipher-encrypted.
+  The outbox may temporarily retain recipient PII and an undelivered signed license body for
+  recovery; successful finalized deliveries are redacted. Use an encrypted, access-restricted
+  volume and encrypted off-volume commercial backups.
 - Managed relay bundles are HTTPS-protected in transit but remain plaintext at rest until
   client-side end-to-end encryption ships. Team personal folders and `secret` memories are never
   uploaded to the shared-account relay.
@@ -180,6 +186,7 @@ second issuer.
   non-bypassable.
 
 ## Supported versions
-1.0.x is the supported line: security fixes land on `main` and the latest published 1.0.x
-release. Pin a version and watch releases for advisories. Pre-1.0 (0.9.x) releases are no
-longer maintained.
+The latest published stable release is the supported line. Release-candidate documentation on
+`main` does not retire the previously published line: support moves only when matching artifacts
+are available from both PyPI and GitHub Releases. Pin a version and watch releases for
+advisories.

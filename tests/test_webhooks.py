@@ -64,7 +64,12 @@ class TestPolarWebhook:
             },
         )
         assert r.status_code == 202
-        assert r.json()["type"] == "subscription.updated"
+        assert r.json() == {
+            "status": "ignored",
+            "reason": "not an active subscription",
+        }
+        # Provider-controlled event names are deliberately not reflected to callers.
+        assert "type" not in r.json()
 
     def test_fulfillment_fails_when_no_signing_key(self, monkeypatch):
         import base64

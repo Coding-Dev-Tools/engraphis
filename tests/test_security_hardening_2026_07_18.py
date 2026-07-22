@@ -29,6 +29,11 @@ SECRET = bytes(range(32))  # deterministic test vendor keypair
 def _relay_env(monkeypatch, tmp_path):
     monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(SECRET).hex())
     monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(tmp_path / "relay.db"))
+    # H2 quota tests predate the issuance registry and mint their own keys. Keep that
+    # compatibility explicit and time-bounded; authoritative default-denial has its own
+    # focused regression suite.
+    monkeypatch.setenv(
+        "ENGRAPHIS_LEGACY_LICENSE_MIGRATION_UNTIL", str(time.time() + 3600))
     monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY", raising=False)
     monkeypatch.delenv("ENGRAPHIS_RELAY_PUBLIC_URL", raising=False)
     monkeypatch.delenv("ENGRAPHIS_FORWARDED_ALLOW_IPS", raising=False)

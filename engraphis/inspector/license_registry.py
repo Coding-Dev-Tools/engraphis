@@ -5,12 +5,14 @@ point of server-side gating: a client can patch its local ``licensing.has_featur
 return ``True``, but it cannot make *this* code (running on the relay server) accept an
 invalid, expired, or revoked key.
 
-The check has three independent parts, each of which a client cannot fake:
+The check has four independent parts, each of which a client cannot fake:
   1. Signature — :func:`licensing.parse_key` verifies the ``ENGR1`` key against the
      pinned vendor public key. Only the holder of the vendor *private* seed (the server)
-     can mint a key that verifies, so a valid signature is proof we issued it.
-  2. Plan / expiry — the payload must grant the requested feature and not be expired.
-  3. Revocation — a key we have explicitly revoked (refund, leak, abuse) is rejected
+     can mint a key that verifies; a signature alone is not treated as issuance.
+  2. Issuance — an active registry row must exist and its stored entitlement claims must
+     match the signed payload exactly. A leaked signer cannot silently enroll new keys.
+  3. Plan / expiry — the payload must grant the requested feature and not be expired.
+  4. Revocation — a key we have explicitly revoked (refund, leak, abuse) is rejected
      even though its signature is still valid. This is what a signature alone can't do.
 
 Storage is a single SQLite file (``ENGRAPHIS_RELAY_DB``, default ``~/.engraphis/relay.db``)
@@ -18,15 +20,44 @@ shared with the sync-relay bundle store.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
+import ipaddress
+import json
 import math
 import os
+import secrets
 import sqlite3
 import time
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
-from engraphis.licensing import License, LicenseError, parse_key
+from engraphis.licensing import (
+    License,
+    LicenseError,
+    ed25519_public_key,
+    ed25519_sign,
+    ed25519_verify,
+    parse_key,
+)
+
+
+# A migration deadline is deliberately bounded. An accidentally distant timestamp must
+# not turn the one-time compatibility path into a permanent alternate issuance channel.
+LEGACY_MIGRATION_MAX_WINDOW_SECONDS = 30 * 86400
+
+# Relay device tokens use their own domain and keypair. They are intentionally not lease
+# tokens: a relay bearer and a local paid-feature lease have different audiences and
+# revocation paths, so accepting one where the other belongs would be a confused-deputy
+# bug. See :func:`verify_relay_device_token`.
+RELAY_DEVICE_TOKEN_PREFIX = "ENGRDT1"
+RELAY_DEVICE_TOKEN_TTL_DEFAULT = 3600
+RELAY_DEVICE_TOKEN_TTL_MIN = 300
+RELAY_DEVICE_TOKEN_TTL_MAX = 3600
+RELAY_DEVICE_TOKEN_SCOPES = frozenset({"sync:read", "sync:write"})
+RELAY_TOKEN_AUDIENCE_ENV = "ENGRAPHIS_RELAY_TOKEN_AUDIENCE"
+RELAY_TOKEN_PREVIOUS_KEYS_ENV = "ENGRAPHIS_RELAY_TOKEN_PREVIOUS_KEYS"
 
 def _state_dir() -> Path:
     base = os.environ.get("ENGRAPHIS_STATE_DIR", "").strip()
@@ -51,6 +82,7 @@ CREATE TABLE IF NOT EXISTS registrations (
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS issued_licenses (
     key_id     TEXT PRIMARY KEY,   -- licensing key_id (sha256(key)[:12]); never the key
+    organization_id TEXT,          -- opaque relay tenant id; never derived from email
     email      TEXT,
     plan       TEXT,
     seats      INTEGER,
@@ -78,12 +110,146 @@ CREATE TABLE IF NOT EXISTS control_plane_events (
 );
 CREATE INDEX IF NOT EXISTS idx_control_plane_events_kind_time
     ON control_plane_events(kind, occurred_at);
+CREATE TABLE IF NOT EXISTS license_fulfillment_keys (
+    retention_claim TEXT PRIMARY KEY,
+    license_key TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 
 """
 
 
 def _db_path(db_path: Optional[str] = None) -> str:
     return db_path or os.environ.get("ENGRAPHIS_RELAY_DB", "").strip() or _DEFAULT_DB
+
+
+def _migration_organization_id(row: sqlite3.Row) -> str:
+    """Deterministic, PII-free tenant id for a registry row from an older schema.
+
+    Rows from one subscription (or, for one-off purchases, one order) retain a shared
+    namespace. Rows with neither identifier are isolated by key fingerprint. New
+    issuance uses randomness; determinism is confined to this one-time migration so it
+    remains safe to retry after a partial rollout.
+    """
+    subscription_id = str(row["subscription_id"] or "").strip()
+    order_id = str(row["order_id"] or "").strip()
+    if subscription_id:
+        basis = "subscription\0" + subscription_id
+    elif order_id:
+        basis = "order\0" + order_id
+    else:
+        basis = "key\0" + str(row["key_id"] or "")
+    digest = hashlib.sha256(
+        ("engraphis-organization-migration-v1\0" + basis).encode("utf-8")
+    ).hexdigest()[:32]
+    return "org_" + digest
+
+
+def _legacy_account_id(row: sqlite3.Row) -> str:
+    """Reproduce the retired email/key namespace only for one-time bundle migration."""
+    email = str(row["email"] or "").strip().lower()
+    basis = email or ("key:" + str(row["key_id"] or ""))
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+
+
+def _valid_organization_id(value: object) -> bool:
+    text = str(value or "")
+    return len(text) == 36 and text.startswith("org_") and all(
+        char in "0123456789abcdef" for char in text[4:]
+    )
+
+
+def _backfill_organization_ids(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        "SELECT key_id, email, subscription_id, order_id FROM issued_licenses "
+        "WHERE organization_id IS NULL OR organization_id='' ORDER BY key_id"
+    ).fetchall()
+    if not rows:
+        return
+
+    assignments = {row["key_id"]: _migration_organization_id(row) for row in rows}
+    legacy_accounts = {row["key_id"]: _legacy_account_id(row) for row in rows}
+
+    # Build connected components across both durable purchase identity and the retired
+    # account id. If A/B shared a subscription while B/C had already collided by email,
+    # all three must move together; resolving only one grouping would strand or leak part
+    # of that component.
+    parents = {row["key_id"]: row["key_id"] for row in rows}
+
+    def _find(key_id: str) -> str:
+        while parents[key_id] != key_id:
+            parents[key_id] = parents[parents[key_id]]
+            key_id = parents[key_id]
+        return key_id
+
+    def _union(left: str, right: str) -> None:
+        left_root, right_root = _find(left), _find(right)
+        if left_root != right_root:
+            parents[max(left_root, right_root)] = min(left_root, right_root)
+
+    seen_identity = {}
+    for row in rows:
+        key_id = row["key_id"]
+        for identity in (
+                ("candidate", assignments[key_id]),
+                ("legacy", legacy_accounts[key_id])):
+            previous = seen_identity.setdefault(identity, key_id)
+            _union(previous, key_id)
+
+    components = {}
+    for row in rows:
+        components.setdefault(_find(row["key_id"]), []).append(row["key_id"])
+    for member_ids in components.values():
+        candidate_ids = {assignments[key_id] for key_id in member_ids}
+        if len(candidate_ids) <= 1:
+            continue
+        component_basis = "\0".join(sorted(
+            candidate_ids | {legacy_accounts[key_id] for key_id in member_ids}
+        ))
+        common = "org_" + hashlib.sha256(
+            ("engraphis-legacy-account-v1\0" + component_basis).encode("ascii")
+        ).hexdigest()[:32]
+        for key_id in member_ids:
+            assignments[key_id] = common
+
+    for row in rows:
+        conn.execute(
+            "UPDATE issued_licenses SET organization_id=? WHERE key_id=? "
+            "AND (organization_id IS NULL OR organization_id='')",
+            (assignments[row["key_id"]], row["key_id"]),
+        )
+
+    # The relay shares this database. Move existing bundle rows in the same transaction
+    # so an upgrade cannot make customer data disappear behind the retired 16-char id.
+    has_bundles = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sync_bundles'"
+    ).fetchone()
+    if has_bundles is None:
+        return
+    migrated_accounts = {}
+    for row in rows:
+        old_account_id = _legacy_account_id(row)
+        new_account_id = assignments[row["key_id"]]
+        previous = migrated_accounts.setdefault(old_account_id, new_account_id)
+        if previous != new_account_id:
+            raise sqlite3.IntegrityError(
+                "legacy relay account maps to multiple organizations")
+    for old_account_id, new_account_id in migrated_accounts.items():
+        # Keep BLOBs inside SQLite. Fetching rows into Python here materialized an
+        # account's entire (potentially multi-GB) sync history during startup. The
+        # SELECT's final ``WHERE true`` also disambiguates SQLite's UPSERT parser.
+        conn.execute(
+            "INSERT INTO sync_bundles"
+            "(account_id,workspace_id,name,data,updated_at) "
+            "SELECT ?,workspace_id,name,data,updated_at FROM sync_bundles "
+            "WHERE account_id=? AND true "
+            "ON CONFLICT(account_id,workspace_id,name) DO UPDATE SET "
+            "data=excluded.data,updated_at=excluded.updated_at "
+            "WHERE excluded.updated_at>sync_bundles.updated_at",
+            (new_account_id, old_account_id),
+        )
+        conn.execute(
+            "DELETE FROM sync_bundles WHERE account_id=?", (old_account_id,))
 
 
 def connect(db_path: Optional[str] = None) -> sqlite3.Connection:
@@ -137,6 +303,9 @@ def connect(db_path: Optional[str] = None) -> sqlite3.Connection:
         # registry deliberately stores no raw license material. They remain NULL and are
         # reported as ``unknown`` by inventory(), which forces a conservative reissue.
         conn.execute("ALTER TABLE issued_licenses ADD COLUMN signing_key_id TEXT")
+    if "organization_id" not in columns:
+        conn.execute("ALTER TABLE issued_licenses ADD COLUMN organization_id TEXT")
+    _backfill_organization_ids(conn)
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_issued_subscription "
         "ON issued_licenses(subscription_id)")
@@ -146,6 +315,13 @@ def connect(db_path: Optional[str] = None) -> sqlite3.Connection:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_issued_signer "
         "ON issued_licenses(signing_key_id)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_issued_organization "
+        "ON issued_licenses(organization_id)")
+    # The Python backfill above is DML, unlike the schema ALTERs. Commit it here so a
+    # caller that opens the registry only to read cannot accidentally roll migration
+    # state back when it closes the connection.
+    conn.commit()
     return conn
 
 
@@ -195,32 +371,149 @@ def inventory(db_path: Optional[str] = None) -> dict:
     }
 
 
-def account_id_for(lic: License) -> str:
-    """Stable, non-PII namespace for a customer's bundles.
+def _optional_number(value: object, *, label: str) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise LicenseError("license contains an invalid %s claim" % label) from None
+    if not math.isfinite(number):
+        raise LicenseError("license contains an invalid %s claim" % label)
+    return number
 
-    Derived from the license email (all of a buyer's devices share one email, so they
-    sync together); hashed so the sync store never holds a raw address. Falls back to
-    the key fingerprint if a key somehow carries no email."""
-    basis = (lic.email or "").strip().lower() or ("key:" + lic.key_id)
-    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+
+def _license_claims(lic: License) -> dict:
+    return {
+        "email": str(lic.email or ""),
+        "plan": str(lic.plan or ""),
+        "seats": max(1, int(lic.seats or 1)),
+        "issued": _optional_number(lic.issued, label="issued-at"),
+        "expires": _optional_number(lic.expires, label="expiry"),
+        "subscription_id": str(lic.subscription_id or ""),
+        "order_id": str(lic.order_id or ""),
+        "signing_key_id": str(lic.signing_key_id or ""),
+    }
 
 
-def _record_issued_on_connection(conn: sqlite3.Connection, lic: License) -> None:
-    """Insert or refresh one verified license without changing a revocation tombstone."""
-    conn.execute(
-        "INSERT INTO issued_licenses "
-        "  (key_id, email, plan, seats, issued, expires, subscription_id, order_id, "
-        "   signing_key_id, status, created_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?, 'active', ?) "
-        "ON CONFLICT(key_id) DO UPDATE SET "
-        "  email=excluded.email, plan=excluded.plan, seats=excluded.seats, "
-        "  issued=excluded.issued, expires=excluded.expires, "
-        "  subscription_id=excluded.subscription_id, order_id=excluded.order_id, "
-        "  signing_key_id=excluded.signing_key_id",
-        (lic.key_id, lic.email, lic.plan, lic.seats, lic.issued, lic.expires,
-         lic.subscription_id or None, lic.order_id or None,
-         lic.signing_key_id or None, time.time()),
-    )
+def _claim_value(column: str, value: object) -> object:
+    if column in ("issued", "expires"):
+        return _optional_number(value, label=column)
+    if column == "seats":
+        try:
+            return max(1, int(value or 1))
+        except (OverflowError, TypeError, ValueError):
+            return 1
+    return str(value or "")
+
+
+def _claims_match(row: sqlite3.Row, lic: License, *, allow_missing: bool = False) -> bool:
+    expected = _license_claims(lic)
+    for column, signed_value in expected.items():
+        stored = row[column]
+        if allow_missing and stored is None:
+            continue
+        if _claim_value(column, stored) != signed_value:
+            return False
+    return True
+
+
+def _organization_id_for_issue(
+        conn: sqlite3.Connection, lic: License, preferred: Optional[str] = None) -> str:
+    if preferred is not None:
+        if not _valid_organization_id(preferred):
+            raise ValueError("invalid organization id")
+        return preferred
+
+    # A renewal or signer-rotation replacement for the same vendor subscription/order
+    # stays in the same tenant without trusting mutable contact email as identity.
+    for column, value in (
+            ("subscription_id", str(lic.subscription_id or "").strip()),
+            ("order_id", str(lic.order_id or "").strip())):
+        if not value:
+            continue
+        rows = conn.execute(
+            "SELECT DISTINCT organization_id FROM issued_licenses "
+            f"WHERE {column}=?",
+            (value,),
+        ).fetchall()
+        if not rows:
+            continue
+        organizations = {str(row["organization_id"] or "") for row in rows}
+        if len(organizations) != 1 or not all(
+                _valid_organization_id(item) for item in organizations):
+            raise LicenseError("license registry purchase identity is ambiguous")
+        return next(iter(organizations))
+    return "org_" + secrets.token_hex(16)
+
+
+def _record_issued_on_connection(
+        conn: sqlite3.Connection, lic: License, *,
+        organization_id: Optional[str] = None) -> None:
+    """Insert one verified issuance without weakening an existing registry record.
+
+    Idempotent replays may fill columns absent from a pre-schema tombstone, but can never
+    overwrite a non-null claim or reactivate a revoked row.
+    """
+    claims = _license_claims(lic)
+    existing = conn.execute(
+        "SELECT * FROM issued_licenses WHERE key_id=?", (lic.key_id,)
+    ).fetchone()
+    if existing is None:
+        opaque_id = _organization_id_for_issue(conn, lic, organization_id)
+        conn.execute(
+            "INSERT INTO issued_licenses "
+            "  (key_id, organization_id, email, plan, seats, issued, expires, "
+            "   subscription_id, order_id, signing_key_id, status, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?, 'active', ?)",
+            (lic.key_id, opaque_id, claims["email"], claims["plan"], claims["seats"],
+             claims["issued"], claims["expires"], claims["subscription_id"],
+             claims["order_id"], claims["signing_key_id"], time.time()),
+        )
+        return
+
+    if not _claims_match(existing, lic, allow_missing=True):
+        raise LicenseError("license registry claims do not match the signed license")
+    stored_org = existing["organization_id"]
+    if organization_id is not None and stored_org != organization_id:
+        raise LicenseError("license registry organization does not match")
+    if not _valid_organization_id(stored_org):
+        raise LicenseError("license registry organization is invalid")
+
+    missing = [column for column in claims if existing[column] is None]
+    if missing:
+        assignments = ", ".join(column + "=?" for column in missing)
+        conn.execute(
+            "UPDATE issued_licenses SET " + assignments + " WHERE key_id=?",
+            tuple(claims[column] for column in missing) + (lic.key_id,),
+        )
+
+
+def _authoritative_row(conn: sqlite3.Connection, lic: License) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM issued_licenses WHERE key_id=?", (lic.key_id,)
+    ).fetchone()
+
+
+def account_id_for(lic: License, *, db_path: Optional[str] = None) -> str:
+    """Return the durable opaque tenant id from authoritative issuance state.
+
+    Contact email is intentionally absent from the derivation. A missing, revoked, or
+    claim-mismatched row fails closed instead of silently creating a new namespace.
+    """
+    conn = connect(db_path)
+    try:
+        row = _authoritative_row(conn, lic)
+    finally:
+        conn.close()
+    if row is None or row["status"] != "active":
+        raise LicenseError("license is not active in the issuance registry")
+    if not _claims_match(row, lic):
+        raise LicenseError("license registry claims do not match the signed license")
+    account_id = str(row["organization_id"] or "")
+    if not _valid_organization_id(account_id):
+        raise LicenseError("license registry organization is invalid")
+    return account_id
 
 
 def record_issued(key: str, *, db_path: Optional[str] = None) -> str:
@@ -237,6 +530,113 @@ def record_issued(key: str, *, db_path: Optional[str] = None) -> str:
     finally:
         conn.close()
     return lic.key_id
+
+
+def _clean_retention_claim(value: str) -> str:
+    claim = str(value or "").strip()
+    if (not claim or len(claim) > 256
+            or any(ord(char) < 32 or ord(char) == 127 for char in claim)):
+        raise ValueError("fulfillment retention claim is invalid")
+    return claim
+
+
+def record_fulfillment_key(retention_claim: str, key: str, *,
+                           db_path: Optional[str] = None) -> str:
+    """Atomically retain a recoverable key and make it usable in the registry.
+
+    The outbox and registry share this SQLite database, but webhook claims live in a
+    separate ledger. This journal closes the host-death window between registry insert
+    and outbox enqueue: a retry gets the exact original key instead of minting another
+    entitlement. The row is deleted only after the fulfillment claim is durable.
+    """
+    claim = _clean_retention_claim(retention_claim)
+    candidate = parse_key(key)
+    conn = connect(db_path)
+    try:
+        with conn:
+            # Serialize the read-before-insert decision. A deferred transaction lets
+            # two workers both observe "no journal row" and makes the loser fail its
+            # unique insert after doing avoidable registry work. IMMEDIATE ensures the
+            # waiter instead reads and returns the exact winner key.
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT license_key FROM license_fulfillment_keys "
+                "WHERE retention_claim=?", (claim,)).fetchone()
+            if existing is not None:
+                # Validate stored recovery material before allowing it to cross the
+                # provider boundary. Corruption fails closed instead of minting anew.
+                recovered = str(existing["license_key"] or "")
+                recovered_license = parse_key(recovered)
+                _record_issued_on_connection(conn, recovered_license)
+                if recovered_license.subscription_id:
+                    conn.execute(
+                        "UPDATE issued_licenses SET status='revoked', revoked_at=? "
+                        "WHERE subscription_id=? AND key_id!=? AND status!='revoked'",
+                        (time.time(), recovered_license.subscription_id,
+                         recovered_license.key_id))
+                return recovered
+            _record_issued_on_connection(conn, candidate)
+            if candidate.subscription_id:
+                conn.execute(
+                    "UPDATE issued_licenses SET status='revoked', revoked_at=? "
+                    "WHERE subscription_id=? AND key_id!=? AND status!='revoked'",
+                    (time.time(), candidate.subscription_id, candidate.key_id))
+            conn.execute(
+                "INSERT INTO license_fulfillment_keys("
+                "retention_claim,license_key,created_at) VALUES (?,?,?)",
+                (claim, key, time.time()))
+        return key
+    finally:
+        conn.close()
+
+
+def fulfillment_key(retention_claim: str, *, db_path: Optional[str] = None
+                    ) -> Optional[str]:
+    """Return crash-recovery key material for one unfinalized fulfillment."""
+    claim = _clean_retention_claim(retention_claim)
+    conn = connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT license_key FROM license_fulfillment_keys WHERE retention_claim=?",
+            (claim,)).fetchone()
+        if row is None:
+            return None
+        value = str(row["license_key"] or "")
+        parse_key(value)
+        return value
+    finally:
+        conn.close()
+
+
+def fulfillment_retention_claims(*, db_path: Optional[str] = None,
+                                 after: str = "", limit: int = 1000) -> list[str]:
+    """Page recovery claims for cross-database retention reconciliation."""
+    page_size = max(1, min(1000, int(limit)))
+    conn = connect(db_path)
+    try:
+        return [
+            str(row["retention_claim"])
+            for row in conn.execute(
+                "SELECT retention_claim FROM license_fulfillment_keys "
+                "WHERE retention_claim>? ORDER BY retention_claim LIMIT ?",
+                (str(after or ""), page_size)).fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def redact_fulfillment_key(retention_claim: str, *,
+                           db_path: Optional[str] = None) -> int:
+    """Delete raw recovery material after its durable fulfillment commit."""
+    claim = _clean_retention_claim(retention_claim)
+    conn = connect(db_path)
+    try:
+        changed = conn.execute(
+            "DELETE FROM license_fulfillment_keys WHERE retention_claim=?", (claim,))
+        conn.commit()
+        return int(changed.rowcount)
+    finally:
+        conn.close()
 
 
 def signer_rotation_state(replacement_signing_key_id: str, *,
@@ -332,8 +732,9 @@ def record_signer_rotation(
                 continue
 
             source = conn.execute(
-                "SELECT status, signing_key_id, email, plan, seats, issued, expires, "
-                "subscription_id, order_id FROM issued_licenses WHERE key_id=?",
+                "SELECT status, signing_key_id, organization_id, email, plan, seats, "
+                "issued, expires, subscription_id, order_id "
+                "FROM issued_licenses WHERE key_id=?",
                 (source_id,),
             ).fetchone()
             if source is None or source["status"] != "active":
@@ -354,7 +755,8 @@ def record_signer_rotation(
             if source_entitlement != replacement_entitlement:
                 raise ValueError("replacement key changes the source entitlement")
 
-            _record_issued_on_connection(conn, replacement)
+            _record_issued_on_connection(
+                conn, replacement, organization_id=source["organization_id"])
             replacement_row = conn.execute(
                 "SELECT status FROM issued_licenses WHERE key_id=?",
                 (replacement.key_id,),
@@ -444,12 +846,13 @@ def revoke(key_id: str, *, db_path: Optional[str] = None) -> bool:
     conn = connect(db_path)
     try:
         cur = conn.execute(
-            "INSERT INTO issued_licenses(key_id, status, created_at, revoked_at) "
-            "VALUES (?, 'revoked', ?, ?) "
+            "INSERT INTO issued_licenses"
+            "(key_id, organization_id, status, created_at, revoked_at) "
+            "VALUES (?, ?, 'revoked', ?, ?) "
             "ON CONFLICT(key_id) DO UPDATE SET "
             "status='revoked', revoked_at=excluded.revoked_at "
             "WHERE issued_licenses.status!='revoked'",
-            (key_id, now, now),
+            (key_id, "org_" + secrets.token_hex(16), now, now),
         )
         conn.commit()
         return cur.rowcount > 0
@@ -535,9 +938,8 @@ def revoke_by_order(order_id: str, *,
 def is_revoked(key_id: str, *, db_path: Optional[str] = None) -> bool:
     """True only if the key is present AND explicitly revoked.
 
-    A key absent from the registry is NOT treated as revoked: only the vendor can mint a
-    validly-signed key, so a good signature already proves issuance (keys sold before the
-    registry existed, or trials, simply have no row). Revocation is an explicit overlay."""
+    This remains a narrow status helper for admin/inventory call sites. Authorization
+    uses :func:`verify_issued_license`, where an absent row fails closed."""
     conn = connect(db_path)
     try:
         row = conn.execute(
@@ -548,22 +950,435 @@ def is_revoked(key_id: str, *, db_path: Optional[str] = None) -> bool:
     return row is not None and row["status"] == "revoked"
 
 
+def legacy_license_migration_active(*, now: Optional[float] = None) -> bool:
+    """Whether the explicit, bounded pre-registry enrollment window is active.
+
+    ``ENGRAPHIS_LEGACY_LICENSE_MIGRATION_UNTIL`` is an absolute Unix timestamp. It is
+    disabled when absent, malformed, expired, or more than 30 days in the future. The
+    last rule prevents a typo (or an effectively permanent date) from silently restoring
+    signature-only issuance in a vendor deployment.
+    """
+    raw = os.environ.get("ENGRAPHIS_LEGACY_LICENSE_MIGRATION_UNTIL", "").strip()
+    if not raw:
+        return False
+    try:
+        deadline = float(raw)
+        current = time.time() if now is None else float(now)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(deadline) or not math.isfinite(current):
+        return False
+    remaining = deadline - current
+    return 0 < remaining <= LEGACY_MIGRATION_MAX_WINDOW_SECONDS
+
+
+def _migrate_legacy_issuance(
+        conn: sqlite3.Connection, lic: License, *, now: float) -> sqlite3.Row:
+    """Atomically enroll/fill one signature-valid legacy key during the migration window."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        row = _authoritative_row(conn, lic)
+        if row is not None and row["status"] != "active":
+            raise LicenseError("this license has been revoked")
+        if row is not None and not _claims_match(row, lic, allow_missing=True):
+            raise LicenseError("license registry claims do not match the signed license")
+        _record_issued_on_connection(conn, lic)
+        conn.execute(
+            "INSERT INTO control_plane_events(kind,occurred_at) VALUES (?,?)",
+            ("legacy_license_migrated", now),
+        )
+        migrated = _authoritative_row(conn, lic)
+        conn.execute("COMMIT")
+        if migrated is None:
+            raise LicenseError("license migration did not create an issuance record")
+        return migrated
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+
+
+def verify_issued_license(
+        key: str, *, db_path: Optional[str] = None,
+        now: Optional[float] = None) -> License:
+    """Verify signed claims against one active authoritative issuance record.
+
+    Signature validity is necessary but no longer sufficient: a leaked signing seed
+    cannot mint a usable license unless the vendor registry also contains the exact
+    signed entitlement. Legacy signature-only keys can be enrolled only while the
+    explicit bounded migration deadline is active.
+    """
+    key = (key or "").strip()
+    if not key:
+        raise LicenseError("a license key is required")
+    current = time.time() if now is None else float(now)
+    lic = parse_key(key, now=current)
+    conn = connect(db_path)
+    try:
+        row = _authoritative_row(conn, lic)
+        complete_match = row is not None and _claims_match(row, lic)
+        if (row is None or not complete_match) and legacy_license_migration_active(now=current):
+            row = _migrate_legacy_issuance(conn, lic, now=current)
+        if row is None:
+            raise LicenseError("license was not issued by this service")
+        if row["status"] != "active":
+            raise LicenseError("this license has been revoked")
+        if not _claims_match(row, lic):
+            raise LicenseError("license registry claims do not match the signed license")
+        organization_id = str(row["organization_id"] or "")
+        if not _valid_organization_id(organization_id):
+            raise LicenseError("license registry organization is invalid")
+        return lic
+    finally:
+        conn.close()
+
+
 def verify_for_feature(key: str, feature: str, *, db_path: Optional[str] = None,
                        now: Optional[float] = None) -> License:
     """THE server-side gate. Return the verified :class:`License` or raise LicenseError.
 
-    Order: signature + expiry (:func:`parse_key`) → plan grants ``feature`` → not revoked.
-    The raised LicenseError carries ``feature`` so the HTTP layer renders a 402."""
+    Order: signature and expiry, matching active issuance row, then feature grant.
+    The raised LicenseError carries ``feature`` for the HTTP 402 layer."""
     key = (key or "").strip()
     if not key:
         raise LicenseError("a license key is required for this feature", feature=feature)
-    lic = parse_key(key, now=now)                      # signature + expiry + known plan
+    try:
+        lic = verify_issued_license(key, db_path=db_path, now=now)
+    except LicenseError as exc:
+        raise LicenseError(str(exc), feature=feature) from None
     if not lic.has(feature):
         raise LicenseError(
             "this license's plan does not include '%s'" % feature, feature=feature)
-    if is_revoked(lic.key_id, db_path=db_path):
-        raise LicenseError("this license has been revoked", feature=feature)
     return lic
+
+
+def canonical_relay_audience(value: object) -> str:
+    """Return one canonical relay origin suitable for an exact token audience check."""
+    raw = str(value or "").strip()
+    if not raw or len(raw) > 2048:
+        raise LicenseError("relay token audience is not configured")
+    try:
+        parts = urlsplit(raw)
+        port = parts.port
+    except ValueError:
+        raise LicenseError("relay token audience is invalid") from None
+    scheme = parts.scheme.lower()
+    hostname = (parts.hostname or "").strip().lower()
+    if scheme not in ("http", "https") or not hostname:
+        raise LicenseError("relay token audience must be an absolute HTTP(S) origin")
+    if parts.username is not None or parts.password is not None \
+            or parts.query or parts.fragment or parts.path not in ("", "/"):
+        raise LicenseError("relay token audience must contain only an origin")
+    if port is not None and port <= 0:
+        raise LicenseError("relay token audience has an invalid port")
+    if "\\" in parts.netloc or any(
+            ord(char) < 33 or ord(char) == 127 for char in parts.netloc
+    ) \
+            or hostname.endswith(".") or "%" in hostname:
+        raise LicenseError("relay token audience has an invalid host")
+    try:
+        canonical_host = hostname.encode("idna").decode("ascii")
+    except UnicodeError:
+        raise LicenseError("relay token audience has an invalid host") from None
+    try:
+        ip = ipaddress.ip_address(canonical_host)
+    except ValueError:
+        ip = None
+    loopback = canonical_host == "localhost" or canonical_host.endswith(".localhost") \
+        or (ip is not None and ip.is_loopback)
+    if scheme != "https" and not loopback:
+        raise LicenseError("relay token audience must use HTTPS unless it is loopback")
+    if ip is not None and ip.version == 6:
+        canonical_host = "[" + canonical_host + "]"
+    default_port = 443 if scheme == "https" else 80
+    port_suffix = "" if port is None or port == default_port else ":%d" % port
+    return "%s://%s%s" % (scheme, canonical_host, port_suffix)
+
+
+def relay_token_audience(value: Optional[str] = None) -> str:
+    """Resolve the configured relay-token audience, failing closed when absent/invalid."""
+    configured = os.environ.get(RELAY_TOKEN_AUDIENCE_ENV, "") if value is None else value
+    return canonical_relay_audience(configured)
+
+
+def relay_device_token_ttl_seconds() -> int:
+    """Configured relay-bearer TTL, constrained to five minutes through one hour."""
+    try:
+        configured = int(os.environ.get(
+            "ENGRAPHIS_RELAY_DEVICE_TOKEN_TTL_SECONDS",
+            str(RELAY_DEVICE_TOKEN_TTL_DEFAULT),
+        ))
+    except (TypeError, ValueError):
+        configured = RELAY_DEVICE_TOKEN_TTL_DEFAULT
+    return min(RELAY_DEVICE_TOKEN_TTL_MAX, max(RELAY_DEVICE_TOKEN_TTL_MIN, configured))
+
+
+def _relay_public_key(value: object) -> bytes:
+    text = str(value or "").strip().lower()
+    try:
+        raw = bytes.fromhex(text)
+    except ValueError:
+        raise LicenseError("relay device-token public key is invalid") from None
+    if len(raw) != 32:
+        raise LicenseError("relay device-token public key must be 32 bytes")
+    return raw
+
+
+def relay_token_verifiers(*, now: Optional[float] = None) -> tuple[dict, ...]:
+    """Return current and time-bounded previous relay-token verifier metadata.
+
+    ``ENGRAPHIS_RELAY_TOKEN_PREVIOUS_KEYS`` is strict JSON:
+    ``[{"public_key":"<64 hex>","issued_before":<epoch>,"not_after":<epoch>}]``.
+    A previous key accepts only tokens issued strictly before its cutoff and expires
+    entirely no later than one token TTL afterward. Expired metadata must be removed;
+    the retired unbounded public-key list is rejected if present.
+    """
+    current_time = time.time() if now is None else float(now)
+    if not math.isfinite(current_time):
+        raise LicenseError("relay-token key metadata check time is invalid")
+    current = _relay_public_key(os.environ.get("ENGRAPHIS_RELAY_TOKEN_PUBKEY", ""))
+    if os.environ.get("ENGRAPHIS_RELAY_TOKEN_PREVIOUS_PUBKEYS", "").strip():
+        raise LicenseError(
+            "unbounded previous relay keys are unsupported; configure cutoff metadata")
+    raw_previous = os.environ.get(RELAY_TOKEN_PREVIOUS_KEYS_ENV, "").strip()
+    if len(raw_previous) > 16384:
+        raise LicenseError("previous relay-token key metadata is too large")
+    if not raw_previous:
+        parsed = []
+    else:
+        try:
+            parsed = json.loads(
+                raw_previous,
+                parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+            )
+        except (ValueError, TypeError, RecursionError):
+            raise LicenseError("previous relay-token key metadata is invalid JSON") from None
+        if not isinstance(parsed, list):
+            raise LicenseError("previous relay-token key metadata must be a JSON list")
+    if len(parsed) > 3:
+        raise LicenseError("too many previous relay-token keys are configured")
+
+    verifiers = [{
+        "public_key": current,
+        "signing_key_id": current.hex()[:16],
+        "issued_before": None,
+        "not_after": None,
+    }]
+    seen = {current}
+    required_fields = {"public_key", "issued_before", "not_after"}
+    for item in parsed:
+        if not isinstance(item, dict) or set(item) != required_fields:
+            raise LicenseError("previous relay-token key metadata has invalid fields")
+        public_key = _relay_public_key(item["public_key"])
+        issued_before = item["issued_before"]
+        not_after = item["not_after"]
+        if isinstance(issued_before, bool) or not isinstance(issued_before, int) \
+                or isinstance(not_after, bool) or not isinstance(not_after, int):
+            raise LicenseError("previous relay-token key cutoffs must be integer epochs")
+        if issued_before <= 0 or issued_before > current_time + 300 \
+                or not_after <= issued_before \
+                or not_after - issued_before > RELAY_DEVICE_TOKEN_TTL_MAX:
+            raise LicenseError("previous relay-token key cutoff window is invalid")
+        if not_after <= current_time:
+            raise LicenseError(
+                "previous relay-token key metadata has expired; remove the retired key")
+        if public_key in seen:
+            raise LicenseError("relay device-token public keys must be unique")
+        seen.add(public_key)
+        verifiers.append({
+            "public_key": public_key,
+            "signing_key_id": public_key.hex()[:16],
+            "issued_before": issued_before,
+            "not_after": not_after,
+        })
+    return tuple(verifiers)
+
+
+def relay_token_public_keys() -> tuple[bytes, ...]:
+    """Compatibility view of :func:`relay_token_verifiers`, current key first."""
+    return tuple(item["public_key"] for item in relay_token_verifiers())
+
+
+def _token_b64encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _token_b64decode(text: str) -> bytes:
+    if not text or any(char not in (
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+    ) for char in text):
+        raise ValueError("invalid base64url")
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def compose_relay_device_token(
+        lic: License, account_id: str, device_id: str, secret: bytes, *,
+        scopes: Optional[list[str]] = None, now: Optional[float] = None,
+        ttl_seconds: Optional[int] = None,
+        audience: Optional[str] = None) -> tuple[str, dict]:
+    """Sign a short-lived, scoped relay bearer with the dedicated token keypair."""
+    if len(secret) != 32:
+        raise ValueError("relay device-token signing key must be 32 bytes")
+    if lic.plan != "pro":
+        raise ValueError("relay device tokens are available only for Pro licenses")
+    canonical_audience = relay_token_audience(audience)
+    if not _valid_organization_id(account_id):
+        raise ValueError("invalid relay account id")
+    device_id = str(device_id or "").strip()
+    if not device_id or len(device_id) > 200 or any(
+            ord(char) < 32 or ord(char) == 127 for char in device_id):
+        raise ValueError("invalid relay device id")
+    requested = set(RELAY_DEVICE_TOKEN_SCOPES if scopes is None else scopes)
+    if not requested or not requested.issubset(RELAY_DEVICE_TOKEN_SCOPES):
+        raise ValueError("invalid relay device-token scopes")
+    issued = time.time() if now is None else float(now)
+    if not math.isfinite(issued):
+        raise ValueError("invalid relay device-token issue time")
+    ttl = relay_device_token_ttl_seconds() if ttl_seconds is None else int(ttl_seconds)
+    ttl = min(RELAY_DEVICE_TOKEN_TTL_MAX, max(RELAY_DEVICE_TOKEN_TTL_MIN, ttl))
+    signing_key_id = ed25519_public_key(secret).hex()[:16]
+    expires = issued + ttl
+    if lic.expires is not None:
+        expires = min(expires, _optional_number(lic.expires, label="expiry") or expires)
+    if expires <= issued:
+        raise ValueError("cannot mint a relay token for an expired license")
+    issued_epoch, expires_epoch = int(issued), int(expires)
+    if expires_epoch <= issued_epoch:
+        raise ValueError("license expires too soon to mint a relay device token")
+    payload = {
+        "v": 1,
+        "typ": "relay_device",
+        "aud": canonical_audience,
+        "account_id": account_id,
+        "key_id": lic.key_id,
+        "device_id": device_id,
+        "scopes": sorted(requested),
+        "issued": issued_epoch,
+        "expires": expires_epoch,
+        "jti": secrets.token_urlsafe(18),
+        "signing_key_id": signing_key_id,
+    }
+    body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    signature = ed25519_sign(secret, body)
+    token = "%s.%s.%s" % (
+        RELAY_DEVICE_TOKEN_PREFIX,
+        _token_b64encode(body),
+        _token_b64encode(signature),
+    )
+    return token, payload
+
+
+def verify_relay_device_token(
+        token: str, required_scope: Optional[str] = None, *,
+        db_path: Optional[str] = None, now: Optional[float] = None,
+        check_registry: bool = True,
+        expected_audience: Optional[str] = None) -> dict:
+    """Verify a scoped relay bearer and its current registry entitlement.
+
+    The token contains neither contact email nor raw license material. Vendor-control-
+    plane callers keep ``check_registry=True`` for immediate revocation. The isolated
+    managed-relay data plane must pass ``check_registry=False`` explicitly; signature,
+    audience, one-hour maximum TTL, license-capped expiry, and scope still fail closed,
+    while revocation converges when that short token expires.
+    """
+    raw_token = str(token or "").strip()
+    if len(raw_token) > 8192:
+        raise LicenseError("relay device token is too large")
+    parts = raw_token.split(".")
+    if len(parts) != 3 or parts[0] != RELAY_DEVICE_TOKEN_PREFIX:
+        raise LicenseError("not an Engraphis relay device token")
+    try:
+        body = _token_b64decode(parts[1])
+        signature = _token_b64decode(parts[2])
+    except (ValueError, base64.binascii.Error):
+        raise LicenseError("relay device token is not valid base64url") from None
+    current = time.time() if now is None else float(now)
+    if not math.isfinite(current):
+        raise LicenseError("relay device token has invalid timing claims")
+    verifier = next(
+        (item for item in relay_token_verifiers(now=current)
+         if ed25519_verify(item["public_key"], body, signature)),
+        None,
+    )
+    if verifier is None:
+        raise LicenseError("relay device-token signature is invalid")
+    try:
+        payload = json.loads(
+            body.decode("utf-8"),
+            parse_constant=lambda _value: (_ for _ in ()).throw(ValueError()),
+        )
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise LicenseError("relay device-token payload is invalid") from None
+    if not isinstance(payload, dict) or payload.get("v") != 1 \
+            or payload.get("typ") != "relay_device":
+        raise LicenseError("unsupported relay device-token payload")
+    expected = relay_token_audience(expected_audience)
+    signed_audience = payload.get("aud")
+    if not isinstance(signed_audience, str):
+        raise LicenseError("relay device token has no audience")
+    canonical_signed_audience = canonical_relay_audience(signed_audience)
+    if signed_audience != canonical_signed_audience \
+            or canonical_signed_audience != expected:
+        raise LicenseError("relay device token has the wrong audience")
+
+    issued = _optional_number(payload.get("issued"), label="token issue time")
+    expires = _optional_number(payload.get("expires"), label="token expiry")
+    if issued is None or expires is None:
+        raise LicenseError("relay device token has invalid timing claims")
+    if current >= expires:
+        raise LicenseError("relay device token has expired")
+    if issued > current + 300 or expires <= issued \
+            or expires - issued > RELAY_DEVICE_TOKEN_TTL_MAX:
+        raise LicenseError("relay device token has invalid timing claims")
+    if verifier["issued_before"] is not None:
+        if issued >= verifier["issued_before"] or expires > verifier["not_after"] \
+                or current >= verifier["not_after"]:
+            raise LicenseError("relay device token was signed outside its rotation window")
+
+    signing_key_id = str(payload.get("signing_key_id") or "").strip().lower()
+    if signing_key_id != verifier["signing_key_id"]:
+        raise LicenseError("relay device-token signer id does not match")
+    account_id = str(payload.get("account_id") or "")
+    key_id = str(payload.get("key_id") or "")
+    device_id = str(payload.get("device_id") or "")
+    jti = str(payload.get("jti") or "")
+    if not _valid_organization_id(account_id):
+        raise LicenseError("relay device token has an invalid account id")
+    if len(key_id) != 12 or any(char not in "0123456789abcdef" for char in key_id):
+        raise LicenseError("relay device token has an invalid key id")
+    if not device_id or len(device_id) > 200 or any(
+            ord(char) < 32 or ord(char) == 127 for char in device_id):
+        raise LicenseError("relay device token has an invalid device id")
+    if not jti or len(jti) > 128 or any(ord(char) < 33 or ord(char) == 127 for char in jti):
+        raise LicenseError("relay device token has an invalid token id")
+    scopes = payload.get("scopes")
+    if not isinstance(scopes, list) or any(not isinstance(scope, str) for scope in scopes):
+        raise LicenseError("relay device token has invalid scopes")
+    scope_set = set(scopes)
+    if len(scopes) != len(scope_set) or not scope_set \
+            or not scope_set.issubset(RELAY_DEVICE_TOKEN_SCOPES):
+        raise LicenseError("relay device token has invalid scopes")
+    if required_scope is not None and required_scope not in scope_set:
+        raise LicenseError("relay device token lacks the required scope")
+
+    if check_registry:
+        conn = connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT status, organization_id, plan, expires FROM issued_licenses "
+                "WHERE key_id=?",
+                (key_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None or row["status"] != "active":
+            raise LicenseError("relay device token is no longer entitled")
+        if row["organization_id"] != account_id or row["plan"] != "pro":
+            raise LicenseError("relay device token does not match its entitlement")
+        registry_expiry = _optional_number(row["expires"], label="registry expiry")
+        if registry_expiry is not None and current > registry_expiry:
+            raise LicenseError("relay device token entitlement has expired")
+    return payload
 
 
 def record_control_plane_event(kind: str, *, db_path: Optional[str] = None,

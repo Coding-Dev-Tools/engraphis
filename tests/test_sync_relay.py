@@ -5,6 +5,7 @@ end-to-end against the real endpoints via a TestClient shim.
 Runs on the numpy-only gate: stdlib + fastapi TestClient, no network.
 """
 import base64
+import hashlib
 import io
 import json
 import time
@@ -34,13 +35,24 @@ from engraphis.core.store import Store
 from engraphis.core.sync import SYNC_FORMAT, SyncEngine
 
 SECRET = bytes(range(32))  # deterministic test vendor keypair
+RELAY_SECRET = bytes(reversed(range(32)))
 
 
 @pytest.fixture(autouse=True)
 def _relay_env(monkeypatch, tmp_path):
     # verify against the test keypair (conftest already sets _TEST_MODE_PUBKEY_OVERRIDE)
     monkeypatch.setenv("ENGRAPHIS_LICENSE_PUBKEY", ed25519_public_key(SECRET).hex())
+    monkeypatch.setenv(
+        "ENGRAPHIS_RELAY_TOKEN_PUBKEY", ed25519_public_key(RELAY_SECRET).hex())
+    monkeypatch.setenv(
+        "ENGRAPHIS_RELAY_TOKEN_AUDIENCE", "https://relay.example.test")
     monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(tmp_path / "relay.db"))
+    # Most tests in this module exercise the explicit combined-mode compatibility path.
+    # Production customer mode rejects raw ENGR1 at relay routes; a dedicated test below
+    # locks that boundary, while authoritative-registry tests cover migration-disabled
+    # denial. Keep this local migration window short and absolute, like production.
+    monkeypatch.setenv(
+        "ENGRAPHIS_LEGACY_LICENSE_MIGRATION_UNTIL", str(time.time() + 3600))
     monkeypatch.delenv("ENGRAPHIS_LICENSE_KEY", raising=False)
     # _authorize uses the relay's OWN per-IP burst budget (_relay_rate_ok), separate from
     # /license/v1/register's. Every TestClient request in this file arrives from the same
@@ -184,7 +196,7 @@ def test_scoped_user_token_cannot_address_personal_or_unknown_workspace(
     # Seed a legacy private bundle directly to model data uploaded by an older client.
     # The HTTP boundary must make it unreachable even to the folder's owner because this
     # database is account-wide rather than partitioned per user.
-    account_id = reg.account_id_for(active_license)
+    account_id = auth_store.organization_id()
     assert sync_relay._store_bundle(
         account_id, "member-private", "legacy-private.json", b"private",
     ) == (None, 200)
@@ -211,6 +223,105 @@ def test_scoped_user_token_cannot_address_personal_or_unknown_workspace(
     malformed = c.get("/relay/v1/invalid-visibility/names", headers=headers)
     assert malformed.status_code == 403
     assert "existing shared workspaces only" in malformed.text
+
+
+def test_customer_user_token_migrates_legacy_bundle_namespace(monkeypatch, tmp_path):
+    """Existing relay data survives the email-hash to opaque organization-id upgrade."""
+    active_license = licensing.parse_key(_key(plan="team"))
+    monkeypatch.setattr(licensing, "current_license", lambda *a, **k: active_license)
+
+    auth_store = AuthStore(str(tmp_path / "users.db"), iterations=1_000)
+    user = auth_store.create_user(
+        "member@example.com", "Member", "correct-horse-1", "member", seat_limit=1)
+    token = auth_store.create_api_token(
+        user["id"], scopes=["sync:read"], ttl=600)["token"]
+    opaque = auth_store.organization_id()
+    legacy = hashlib.sha256(
+        active_license.email.strip().lower().encode("utf-8")
+    ).hexdigest()[:16]
+    assert sync_relay._store_bundle(
+        legacy, "team-shared", "legacy.json", b"legacy-data",
+    ) == (None, 200)
+
+    workspace_store = Store(str(tmp_path / "memories.db"))
+    workspace_store.create_workspace("team-shared", settings={"visibility": "shared"})
+    client = _app(service=SimpleNamespace(store=workspace_store))
+    client.app.state.auth_store = auth_store
+
+    response = client.get(
+        "/relay/v1/team-shared/names", headers=_auth(token))
+    assert response.status_code == 200
+    assert response.json()["names"] == ["legacy.json"]
+    conn = sync_relay._conn()
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sync_bundles WHERE account_id=?", (legacy,)
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sync_bundles WHERE account_id=?", (opaque,)
+        ).fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_provisioned_customer_relay_rejects_vendor_device_token(monkeypatch, tmp_path):
+    """A deployment cannot split one workspace across local and vendor tenant ids."""
+    from engraphis.config import settings
+
+    monkeypatch.setattr(settings, "service_mode", "customer")
+    key = _key(plan="pro")
+    lic = licensing.parse_key(key)
+    reg.record_issued(key)
+    token, _payload = reg.compose_relay_device_token(
+        lic, reg.account_id_for(lic), "device-1", RELAY_SECRET)
+
+    auth_store = AuthStore(str(tmp_path / "users.db"), iterations=1_000)
+    auth_store.create_user(
+        "owner@example.com", "Owner", "correct-horse-1", "admin", seat_limit=1)
+    client = _app()
+    client.app.state.auth_store = auth_store
+
+    response = client.get(
+        "/relay/v1/ws1/names", headers=_dev(token, "device-1"))
+    assert response.status_code == 401
+    assert "per-user sync token" in response.json()["detail"]["error"]
+
+
+def test_unprovisioned_customer_relay_still_rejects_vendor_device_token(monkeypatch):
+    """Only explicit relay mode may consume the public data-plane credential."""
+    from engraphis.config import settings
+
+    monkeypatch.setattr(settings, "service_mode", "customer")
+    key = _key(plan="pro")
+    lic = licensing.parse_key(key)
+    reg.record_issued(key)
+    token, _payload = reg.compose_relay_device_token(
+        lic, reg.account_id_for(lic), "device-1", RELAY_SECRET)
+
+    response = _app().get(
+        "/relay/v1/ws1/names", headers=_dev(token, "device-1"))
+
+    assert response.status_code == 401
+    assert "managed relay data plane" in response.json()["detail"]["error"]
+
+
+def test_relay_device_token_for_another_audience_is_rejected():
+    key = _key(plan="pro")
+    lic = licensing.parse_key(key)
+    reg.record_issued(key)
+    token, _payload = reg.compose_relay_device_token(
+        lic,
+        reg.account_id_for(lic),
+        "device-1",
+        RELAY_SECRET,
+        audience="https://other-relay.example.test",
+    )
+
+    response = _app().get(
+        "/relay/v1/ws1/names", headers=_dev(token, "device-1"))
+
+    assert response.status_code == 402
+    assert "wrong audience" in response.json()["error"]
 
 
 def test_expired_prefixed_user_token_never_falls_back_to_license_verification(
@@ -437,6 +548,16 @@ def test_wrong_plan_feature_is_rejected():
         reg.verify_for_feature(_key(plan="pro"), "team")
 
 
+def test_customer_mode_never_accepts_raw_license(monkeypatch):
+    from engraphis.config import settings
+
+    monkeypatch.setattr(settings, "service_mode", "customer")
+    response = _app().get("/relay/v1/ws1/names", headers=_auth(_key()))
+
+    assert response.status_code == 402
+    assert "license-key sync is disabled" in response.json()["error"]
+
+
 # ── registry unit behavior ─────────────────────────────────────────────────────────────
 
 def test_registry_record_then_revoke():
@@ -523,7 +644,13 @@ def _wire_transport_to(client, monkeypatch):
 def test_relay_transport_roundtrip(monkeypatch):
     c = _app()
     _wire_transport_to(c, monkeypatch)
-    t = RelayTransport("http://127.0.0.1", "ws1", license_key=_key())
+    key = _key()
+    lic = licensing.parse_key(key)
+    reg.record_issued(key)
+    token, _payload = reg.compose_relay_device_token(
+        lic, reg.account_id_for(lic), "devA", RELAY_SECRET)
+    monkeypatch.setattr("engraphis.cloud_license.machine_id", lambda: "devA")
+    t = RelayTransport("http://127.0.0.1", "ws1", license_key=token)
     t.push("bundle-devA.json", b'{"m":1}')
     assert t.list_names() == ["bundle-devA.json"]
     assert list(t.pull()) == [("bundle-devA.json", b'{"m":1}')]
@@ -532,10 +659,9 @@ def test_relay_transport_roundtrip(monkeypatch):
 def test_relay_transport_surfaces_license_rejection(monkeypatch):
     c = _app()
     _wire_transport_to(c, monkeypatch)
-    t = RelayTransport("http://127.0.0.1", "ws1", license_key="")  # no license
     with pytest.raises(RelayError) as ei:
-        list(t.pull())
-    assert ei.value.status == 402
+        RelayTransport("http://127.0.0.1", "ws1", license_key="")
+    assert ei.value.status == 401
 
 
 def test_relay_transport_requires_https_off_loopback():

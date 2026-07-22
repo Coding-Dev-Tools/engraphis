@@ -33,7 +33,7 @@ from engraphis import cloud_license, netutil
 from engraphis.inspector import license_registry as reg
 from engraphis.inspector.auth import _EMAIL_RE, _hash_token, bearer_ok
 from engraphis.inspector.webhooks import _load_signing_secret
-from engraphis.licensing import LicenseError, PLAN_FEATURES, parse_key
+from engraphis.licensing import LicenseError, PLAN_FEATURES
 
 logger = logging.getLogger("engraphis.license_cloud")
 
@@ -125,9 +125,9 @@ def _single_line(value: object, *, max_chars: int, required: bool = True) -> Opt
 #: Per-IP burst cap on the unauthenticated, CPU-bound relay endpoints (``/register``,
 #: ``/team-invite``, and ``/password-reset``, which share one budget).
 #: Ed25519 verification here is the pure-Python RFC-8032 reference implementation at
-#: ~3 ms a call, and ``/register`` performs two (parse_key + record_issued) — roughly
-#: 165 registrations/second/core. Without a cap, a few hundred requests per second of
-#: well-formed-but-invalid keys saturates the worker and starves ``/api/health``, which
+#: ~3 ms a call, plus one indexed authoritative-registry lookup. Without a cap, a few
+#: hundred requests per second of well-formed-but-invalid keys saturates the worker and
+#: starves ``/api/health``, which
 #: the platform reads as a failed healthcheck and restarts (Railway:
 #: ``restartPolicyMaxRetries: 10``) — i.e. an unauthenticated remote DoS.
 #:
@@ -224,6 +224,27 @@ def _lease_ttl_seconds() -> int:
 router = APIRouter(prefix="/license/v1", tags=["license-cloud"])
 
 
+def _load_relay_token_signing_secret() -> bytes:
+    """Load the dedicated relay-device-token seed and verify its public half.
+
+    There is intentionally no fallback to the license/lease signing seed: independent
+    keys keep relay bearer authority separate from paid-feature entitlements. During
+    rotation, a retiring public key needs an issuance cutoff and absolute not-after in
+    ``ENGRAPHIS_RELAY_TOKEN_PREVIOUS_KEYS``; unbounded previous keys are rejected.
+    """
+    raw = os.environ.get("ENGRAPHIS_RELAY_TOKEN_SIGNING_KEY", "").strip()
+    try:
+        secret = bytes.fromhex(raw)
+    except ValueError:
+        raise RuntimeError("ENGRAPHIS_RELAY_TOKEN_SIGNING_KEY must be hex") from None
+    if len(secret) != 32:
+        raise RuntimeError("ENGRAPHIS_RELAY_TOKEN_SIGNING_KEY must be a 32-byte seed")
+    from engraphis.licensing import ed25519_public_key
+    if ed25519_public_key(secret) != reg.relay_token_public_keys()[0]:
+        raise RuntimeError("relay device-token signing and verification keys do not match")
+    return secret
+
+
 @router.post("/register")
 async def register(request: Request):
     """Register a device for a key and return a signed lease. 402 if the key is bad/
@@ -257,12 +278,11 @@ async def register(request: Request):
             {"error": "too many registration attempts — try again shortly"},
             status_code=429, headers={"Retry-After": "60"})
 
-    # parse_key is pure-Python Ed25519 (~3 ms) and record_issued parses again. Run both
-    # in a worker thread: on the single-worker deployments we ship, doing this inline
-    # blocks the event loop for every other request including /api/health.
-    lic = await asyncio.to_thread(parse_key, key)     # signature + expiry + plan → 402
-    if await asyncio.to_thread(reg.is_revoked, lic.key_id):
-        raise LicenseError("this license has been revoked")
+    # Ed25519 verification and the authoritative registry lookup run off-loop. A valid
+    # signature is not issuance: the active row must already exist and its stored claims
+    # must exactly match the signed entitlement. The only exception is the explicit,
+    # bounded pre-registry migration window inside verify_issued_license.
+    lic = await asyncio.to_thread(reg.verify_issued_license, key)
 
     now = time.time()
     # Team is the only device-capped tier (it is seat-priced). Pro is intentionally NOT
@@ -287,11 +307,6 @@ async def register(request: Request):
         # propagates out of to_thread unchanged, so the 402 mapping is unaffected.
         await asyncio.to_thread(_claim)
 
-    try:                                              # ensure it's in the issued registry
-        await asyncio.to_thread(reg.record_issued, key)   # re-parses the key — off-loop
-    except Exception:
-        pass
-
     ttl = reg.lease_ttl_seconds()
     payload = {"v": 1, "key_id": lic.key_id, "plan": lic.plan,
                "features": sorted(lic.features), "machine_id": machine_id,
@@ -299,6 +314,75 @@ async def register(request: Request):
     signing_secret = await asyncio.to_thread(_load_signing_secret)
     lease = await asyncio.to_thread(cloud_license.compose_lease, payload, signing_secret)
     return {"lease": lease, "expires": payload["expires"], "plan": lic.plan}
+
+
+@router.post("/device-token")
+async def issue_device_token(request: Request):
+    """Exchange one active issued license for a short-lived scoped relay bearer.
+
+    The raw license is used only to authenticate this exchange. It is never returned or
+    stored, and the resulting token contains only opaque ids and sync scopes.
+    """
+    try:
+        body = await _bounded_json_object(request)
+    except _JsonBodyError as exc:
+        return _json_error(exc)
+    raw_key, raw_machine = body.get("key"), body.get("machine_id")
+    if not isinstance(raw_key, str) or not isinstance(raw_machine, str):
+        return JSONResponse(
+            {"error": "key and machine_id must be strings"}, status_code=400)
+    key = _single_line(raw_key, max_chars=8192, required=False)
+    machine_id = _single_line(raw_machine, max_chars=200)
+    if key is None:
+        return JSONResponse(
+            {"error": "license key must be a bounded single-line value"},
+            status_code=400,
+        )
+    if machine_id is None:
+        return JSONResponse(
+            {"error": "machine_id must be a bounded single-line value"},
+            status_code=400,
+        )
+    if not _register_rate_ok(_register_rate_key(request)):
+        return JSONResponse(
+            {"error": "too many token exchange attempts — try again shortly"},
+            status_code=429,
+            headers={"Retry-After": "60"},
+        )
+
+    lic = await asyncio.to_thread(reg.verify_for_feature, key, "sync")
+    if lic.plan != "pro":
+        raise LicenseError(
+            "Team sync requires a named-user scoped token from the customer deployment",
+            feature="sync",
+        )
+    now = time.time()
+    account_id = await asyncio.to_thread(reg.account_id_for, lic)
+    try:
+        signing_secret = await asyncio.to_thread(_load_relay_token_signing_secret)
+        token, payload = await asyncio.to_thread(
+            reg.compose_relay_device_token,
+            lic,
+            account_id,
+            machine_id,
+            signing_secret,
+            now=now,
+        )
+    except (LicenseError, RuntimeError, ValueError) as exc:
+        logger.error("relay device-token issuer unavailable: %s", type(exc).__name__)
+        return JSONResponse(
+            {"error": "relay device-token issuer is not configured"},
+            status_code=503,
+        )
+    return JSONResponse(
+        {
+            "device_token": token,
+            "token_type": "Bearer",
+            "expires": payload["expires"],
+            "scopes": payload["scopes"],
+        },
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )
 
 
 @router.get("/verify/{key_id}")
@@ -1064,6 +1148,7 @@ CREATE TABLE IF NOT EXISTS trial_grants (
     machine_id TEXT PRIMARY KEY,
     email      TEXT,
     plan       TEXT,
+    deployment_hash TEXT NOT NULL DEFAULT '',
     issued_at  REAL NOT NULL
 );
 """
@@ -1148,14 +1233,31 @@ def _ensure_trial_claim_columns(conn) -> None:
 
 
 def _ensure_trial_plan_column(conn) -> None:
-    """Add trial_grants.plan to a pre-existing DB (older schema had none). Idempotent."""
-    try:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(trial_grants)").fetchall()}
-        if "plan" not in cols:
-            conn.execute("ALTER TABLE trial_grants ADD COLUMN plan TEXT")
-            conn.commit()
-    except Exception:
-        pass
+    """Idempotently extend permanent trial tombstones without dropping history."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(trial_grants)").fetchall()}
+    if "plan" not in cols:
+        conn.execute("ALTER TABLE trial_grants ADD COLUMN plan TEXT")
+    if "deployment_hash" not in cols:
+        conn.execute(
+            "ALTER TABLE trial_grants ADD COLUMN "
+            "deployment_hash TEXT NOT NULL DEFAULT ''")
+    claim_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='trial_claims'"
+    ).fetchone()
+    if claim_table:
+        # Before the bounded claim-retention sweep removes old rows, promote every
+        # confirmed deployment binding into the permanent grant tombstone.
+        conn.execute(
+            "UPDATE trial_grants SET deployment_hash=COALESCE(("
+            " SELECT c.deployment_hash FROM trial_claims c"
+            " WHERE c.confirmed_at IS NOT NULL AND"
+            " (c.machine_id=trial_grants.machine_id OR lower(c.email)=lower(trial_grants.email))"
+            " ORDER BY c.confirmed_at DESC LIMIT 1"
+            "), '') WHERE deployment_hash=''")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS trial_grants_deployment_idx "
+        "ON trial_grants(deployment_hash) WHERE deployment_hash<>''")
+    conn.commit()
 
 
 def _trial_rate_limit_per_hour() -> int:
@@ -1234,9 +1336,10 @@ def _relay_public_base() -> str:
     and no entrypoint installs ``TrustedHostMiddleware``. That let an attacker POST
     ``/start-trial`` with ``Host: attacker.tld`` and a victim's address, so the victim
     received a genuine vendor email whose confirm link pointed at the attacker; replaying
-    the captured token yielded a real signed key carrying the VICTIM's email — and since
-    ``license_registry.account_id_for()`` namespaces the relay on ``sha256(email)``, that
-    key landed inside the victim's sync-bundle tenant.
+    the captured token yielded a real signed key carrying the VICTIM's email. Older
+    releases also derived the relay tenant from that email, compounding the impact. The
+    current registry requires an authoritative issuance row and uses opaque random
+    organization ids, but neither defense makes a Host-derived confirmation URL safe.
 
     The parameter is gone rather than merely unused so the Host header cannot be
     reintroduced here by a later well-meaning edit. Callers MUST treat ``""`` as "trial
@@ -1671,6 +1774,7 @@ def _reserve_trial_claim(machine_id: str, email: str, plan: str,
     _ensure_trial_plan_column(conn)
     conn.executescript(_TRIAL_CLAIM_SCHEMA)
     _ensure_trial_claim_columns(conn)
+    _ensure_trial_plan_column(conn)
     now = time.time()
     deployment_hash = _deployment_hash(deployment_token)
     confirmation = secrets.token_urlsafe(32)
@@ -1713,8 +1817,9 @@ def _reserve_trial_claim(machine_id: str, email: str, plan: str,
                 return str(existing["claim_id"]), None, "pending"
             claim_id = str(existing["claim_id"])
         prior_grant = conn.execute(
-            "SELECT 1 FROM trial_grants WHERE machine_id=? OR lower(email)=? LIMIT 1",
-            (machine_id, email)).fetchone()
+            "SELECT 1 FROM trial_grants WHERE deployment_hash=? OR machine_id=? "
+            "OR lower(email)=? LIMIT 1",
+            (deployment_hash, machine_id, email)).fetchone()
         if prior_grant:
             conn.execute("COMMIT")
             return "", None, "used"
@@ -1850,7 +1955,11 @@ async def verify_trial_claim(request: Request):
 
 def _verify_trial_claim_token(token: str):
     conn = reg.connect()
+    conn.executescript(_TRIAL_SCHEMA)
+    _ensure_trial_plan_column(conn)
     conn.executescript(_TRIAL_CLAIM_SCHEMA)
+    _ensure_trial_claim_columns(conn)
+    _ensure_trial_plan_column(conn)
     previous = conn.isolation_level
     conn.isolation_level = None
     try:
@@ -1882,8 +1991,10 @@ def _verify_trial_claim_token(token: str):
             "UPDATE trial_claims SET confirmed_at=?,license_key=?,delivery_state='confirmed' "
             "WHERE claim_id=? AND confirmed_at IS NULL", (now, key, row["claim_id"]))
         conn.execute(
-            "INSERT OR IGNORE INTO trial_grants(machine_id,email,plan,issued_at) "
-            "VALUES (?,?,?,?)", (row["machine_id"], row["email"], row["plan"], now))
+            "INSERT OR IGNORE INTO trial_grants("
+            "machine_id,email,plan,deployment_hash,issued_at) VALUES (?,?,?,?,?)",
+            (row["machine_id"], row["email"], row["plan"],
+             row["deployment_hash"], now))
         conn.execute("COMMIT")
         return HTMLResponse(_claim_success_html(row["plan"]),
                             headers=_TRIAL_PAGE_HEADERS)

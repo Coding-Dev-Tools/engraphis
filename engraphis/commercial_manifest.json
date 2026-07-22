@@ -8,6 +8,29 @@
     "card_required": false,
     "plans": ["pro", "team"]
   },
+  "entitlement_lifecycle": {
+    "max_grace_hours": 24,
+    "grace_mode": "workspace_write_grace",
+    "grace_for": "already_activated_or_provisioned_installations",
+    "grace_allows": ["authenticated_existing_user_local_core_workspace_writes"],
+    "live_lease_still_required_for": [
+      "paid_or_cost_bearing_features",
+      "mcp_or_agent_writes"
+    ],
+    "grace_blocks_account_growth": true,
+    "trial_expiry_extended_by_grace": false,
+    "recovery": {
+      "mode": "recovery_read_only",
+      "allows": [
+        "login",
+        "password_recovery",
+        "authenticated_reads",
+        "data_export",
+        "relicensing"
+      ],
+      "blocks_normal_mutations": true
+    }
+  },
   "plans": {
     "free": {
       "monthly_usd": 0,

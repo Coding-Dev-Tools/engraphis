@@ -37,8 +37,9 @@ from engraphis.inspector.sync_relay import router as sync_relay_router
 from engraphis.inspector.license_cloud import router as license_cloud_router
 from engraphis.config import settings
 from engraphis.inspector.auth import (
-    SESSION_TTL_SECONDS, AccountLockedError, AuthError, AuthStore,
-    SetupAlreadyCompletedError, bearer_ok, min_role as _min_role, role_at_least,
+    ENTITLEMENT_ACTIVE, SESSION_TTL_SECONDS, AccountLockedError, AuthError, AuthStore,
+    SetupAlreadyCompletedError, bearer_ok, entitlement_denial,
+    min_role as _min_role, recovery_request_allowed, role_at_least,
 )
 from engraphis.licensing import LicenseError
 from engraphis.logging_setup import configure_logging
@@ -52,7 +53,8 @@ COOKIE_NAME = "engraphis_session"
 # Reachable without any auth in every mode: the page shell, liveness/readiness, and
 # the auth bootstrap endpoints themselves (state/login/setup must work while logged out).
 _PUBLIC = {"/", "/api/health", "/api/ready", "/api/auth/state", "/api/auth/login",
-           "/api/auth/setup", "/api/auth/invitations/accept", "/webhooks/polar"}
+           "/api/auth/logout", "/api/auth/setup", "/api/auth/invitations/accept",
+           "/webhooks/polar"}
 
 
 # _min_role is now engraphis.inspector.auth.min_role (imported above as _min_role) —
@@ -131,6 +133,9 @@ def create_app(service: Optional[MemoryService] = None,
     if mode == "vendor":
         from engraphis.vendor_app import create_app as create_vendor_app
         return create_vendor_app()
+    if mode == "relay":
+        from engraphis.relay_app import create_app as create_relay_app
+        return create_relay_app()
     app = FastAPI(title="Engraphis Memory Inspector", docs_url=None, redoc_url=None)
     app.state.service = service
     app.state.auth_store = auth_store
@@ -167,6 +172,36 @@ def create_app(service: Optional[MemoryService] = None,
         return bool(settings.team_mode) and (
             auth().count_users() > 0 or licensing.has_feature("team"))
 
+    def entitlement_access() -> dict:
+        return auth().entitlement_access(licensing.current_license())
+
+    def _lapse_denial(request: Request):
+        if auth().count_users() == 0:
+            return None
+        access = entitlement_access()
+        if not access.get("recovery") or recovery_request_allowed(
+                request.method, request.url.path):
+            return None
+        body = entitlement_denial(access)
+        body.update({
+            "feature": "team",
+            "tier_required": licensing.required_plan("team"),
+            "upgrade_url": licensing.upgrade_url("team"),
+        })
+        return JSONResponse(body, status_code=402)
+
+    def _growth_denial():
+        access = entitlement_access()
+        if access["state"] == ENTITLEMENT_ACTIVE:
+            return None
+        body = entitlement_denial(access, growth=True)
+        body.update({
+            "feature": "team",
+            "tier_required": licensing.required_plan("team"),
+            "upgrade_url": licensing.upgrade_url("team"),
+        })
+        return JSONResponse(body, status_code=402)
+
     def _bearer_ok(request: Request) -> bool:
         return bearer_ok(request.headers.get("Authorization"), settings.api_token)
 
@@ -198,6 +233,9 @@ def create_app(service: Optional[MemoryService] = None,
                 # Keep the deployment token as an admin service account, but bind a
                 # synthetic identity so personal-folder ownership still fails closed.
                 user = {"id": "service-token", "email": "service-token", "role": "admin"}
+                denied = _lapse_denial(request)
+                if denied is not None:
+                    return denied
                 request.state.user = user
                 set_current_user(user)
                 return await call_next(request)
@@ -208,6 +246,9 @@ def create_app(service: Optional[MemoryService] = None,
             if not role_at_least(user["role"], need):
                 return JSONResponse({"error": "requires the %s role" % need},
                                     status_code=403)
+            denied = _lapse_denial(request)
+            if denied is not None:
+                return denied
             request.state.user = user
             set_current_user(user)
             return await call_next(request)
@@ -281,6 +322,10 @@ def create_app(service: Optional[MemoryService] = None,
                 user = {"email": user["email"], "name": user["name"],
                         "role": user["role"]}
         lic = licensing.current_license()
+        access = auth().entitlement_access(lic) if team else {
+            "state": "free", "grace_until": None, "grace_remaining_seconds": None,
+            "workspace_writes_allowed": True, "recovery": False,
+        }
         body = {
             "mode": mode,
             "setup_required": bool(team and auth().count_users() == 0),
@@ -289,6 +334,11 @@ def create_app(service: Optional[MemoryService] = None,
             "license_error": licensing.license_error(),
             # env asked for team mode but the license lacks it → UI shows the unlock path
             "team_locked": bool(settings.team_mode) and not licensing.has_feature("team"),
+            "entitlement_state": access["state"],
+            "grace_until": access["grace_until"],
+            "grace_remaining_seconds": access["grace_remaining_seconds"],
+            "workspace_writes_allowed": access["workspace_writes_allowed"],
+            "recovery_read_only": access["recovery"],
         }
         # Never let a browser cache the boot-state probe — a stale "mode:team"
         # here would make the fixed UI re-render the old login overlay.
@@ -364,15 +414,30 @@ def create_app(service: Optional[MemoryService] = None,
 
     @app.post("/api/auth/users")
     async def users_create(body: _UserCreateBody):
+        denied = _growth_denial()
+        if denied is not None:
+            return denied
         user = auth().create_user(body.email, body.name, body.password, body.role,
                                   seat_limit=licensing.current_license().seats)
         return {"user": user}
 
     @app.post("/api/auth/users/update")
     async def users_update(body: _UserUpdateBody):
+        before = auth().get_user(body.user_id)
+        promoting = bool(
+            body.role is not None and before is not None
+            and not role_at_least(before["role"], body.role)
+        )
+        reenabling = bool(
+            body.disabled is False and before is not None and before.get("disabled")
+        )
+        if promoting or reenabling:
+            denied = _growth_denial()
+            if denied is not None:
+                return denied
         return {"user": auth().update_user(body.user_id, role=body.role,
-                                           disabled=body.disabled,
-                                           seat_limit=licensing.current_license().seats)}
+                                            disabled=body.disabled,
+                                            seat_limit=licensing.current_license().seats)}
 
     @app.get("/api/license")
     async def license_state():
@@ -484,8 +549,11 @@ def create_app(service: Optional[MemoryService] = None,
 
     @app.get("/api/export")
     async def export(workspace: str):
-        licensing.require_cloud_lease("export")
-        data = svc().export_workspace(workspace=workspace)
+        access = entitlement_access() if auth().count_users() > 0 else None
+        recovery_export = bool(access and access["state"] != ENTITLEMENT_ACTIVE)
+        if not recovery_export:
+            licensing.require_cloud_lease("export")
+        data = svc().export_workspace(workspace=workspace, recovery=recovery_export)
         fname = "engraphis-export-%s-%s.json" % (
             workspace.replace("/", "_"), time.strftime("%Y%m%d"))
         return JSONResponse(data, headers={

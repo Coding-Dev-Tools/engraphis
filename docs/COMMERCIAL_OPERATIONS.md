@@ -2,27 +2,50 @@
 
 ## Production topology
 
-`team.engraphis.com` runs `ENGRAPHIS_SERVICE_MODE=customer`: dashboard, memory API,
-authentication, invitations, and customer sync only. `license.engraphis.com` runs
-`ENGRAPHIS_SERVICE_MODE=vendor`: issuance, leases, deployment trials, Polar webhooks,
-transactional email, and authenticated operations checks. New signed keys use
-`https://license.engraphis.com`; the old `team.engraphis.com/license/v1/*` proxy is retained
-for the 90-day compatibility window, with `Deprecation`, `Sunset`, and successor `Link`
-headers. It is removed in v1.1; the customer proxy strips cookies, forwarding headers, and
-all vendor secrets.
+Production has three distinct trust roles. Do not collapse them into `combined` mode:
+
+1. `license.engraphis.com` runs `ENGRAPHIS_SERVICE_MODE=vendor`. It owns license issuance,
+   leases, deployment trials, Polar webhooks, transactional email, the authoritative license
+   registry, and the private relay-token signing seed. It does not mount bundle routes.
+2. The Engraphis-managed relay data plane runs `ENGRAPHIS_SERVICE_MODE=relay` as a
+   dedicated deployment and volume. It receives only the relay-token public verifier, never
+   either private signing seed, billing credentials, customer license keys, or a copy of the
+   vendor registry. Its ingress must expose only the relay and health/readiness surfaces (plus
+   the explicitly bounded compatibility routes until sunset), not the general dashboard or
+   memory API.
+3. Each ordinary Pro/Team customer deployment also runs `customer` mode, but authenticates
+   sync with locally issued named-user tokens. It does not need the vendor relay-token keypair.
+
+New signed keys use `https://license.engraphis.com`. The retired
+`team.engraphis.com/license/v1/*` proxy exists only through **17 October 2026 00:00 UTC**.
+Before that instant it forwards an explicit legacy route/method allowlist and strips
+Authorization, cookies, customer credentials, forwarding headers, and vendor secrets; at and
+after the deadline it returns HTTP 410 without contacting the control plane. Remove the proxy
+routes in the next release after the deadline.
+The pre-sunset allowlist is limited to `POST register`, `GET/HEAD verify/{key_id}`, `POST
+team-invite`, `POST password-reset`, `POST start-trial`, and `GET/HEAD/POST
+start-trial/verify`. It never proxies administrative, device-token, trial-claim, or arbitrary
+future license routes.
 
 Never place the Ed25519 signing seed, Polar webhook secret, vendor admin token, or
 Engraphis Resend key on a customer service.
 
 ## Release readiness
 
-`GET /api/ready` is the public serving gate used by the orchestrator. On the customer
+`GET /api/ready` is the public serving gate used by the orchestrator. On an ordinary customer
 service it checks the database/embedder path. On the vendor service it checks service mode,
-the approved signer, writable registry, exact Polar webhook/organization/products and
-idempotency store, mail configuration and worker liveness, and disk capacity. It deliberately
-does not include backup age, admin-monitoring configuration, delivery backlogs, or externally
-triggerable alert counters: those conditions require operator action, and restarting or
-draining an otherwise healthy first deployment cannot repair them.
+the approved license signer, the separate relay-token issuer keypair and TTL, writable registry,
+exact Polar webhook/organization/products and idempotency store, mail configuration and worker
+liveness, and disk capacity. It deliberately does not include backup age, admin-monitoring
+configuration, delivery backlogs, or externally triggerable alert counters: those conditions
+require operator action, and restarting or draining an otherwise healthy first deployment
+cannot repair them.
+
+The dedicated managed relay has a separate, secret-free
+`commercial.managed_relay_verifier_readiness()` contract. Its deployment probe must require
+`service_mode`, `relay_token_verifier`, `relay_db`, and `disk` to be true. This is intentionally
+not folded into ordinary customer readiness: provisioned customer dashboards use their own
+named-user tokens and must not be forced to install a vendor verifier merely to stay healthy.
 
 The full operational gates remain authenticated. `GET /api/ops/ready` on the customer
 service requires an admin or operations bearer and returns boolean-only service-mode,
@@ -128,6 +151,73 @@ Only then remove the old public key from `_PREVIOUS_VENDOR_PUBKEY_HEXES`, deploy
 readiness plus production synthetics. The retirement command never edits the verifier pin or
 destroys either seed.
 
+## Relay-token issuer, audience, and rotation
+
+Relay-device credentials use a dedicated Ed25519 keypair; never reuse the license/lease
+signer. Configure the control plane with all of:
+
+- `ENGRAPHIS_RELAY_TOKEN_SIGNING_KEY`: the 32-byte private seed as 64 hex characters;
+- `ENGRAPHIS_RELAY_TOKEN_PUBKEY`: its matching 32-byte public key as 64 hex characters;
+- `ENGRAPHIS_RELAY_TOKEN_AUDIENCE`: the exact canonical HTTPS origin of the managed relay;
+  and
+- optional `ENGRAPHIS_RELAY_DEVICE_TOKEN_TTL_SECONDS`, from 300 through 3600 (default and
+  hard maximum 3600).
+
+Configure the separate managed-relay data plane with the same audience and current public
+key, but **not** the signing seed. The audience is an origin only: no credentials, path, query,
+or fragment. Default ports and host casing are canonicalized, then issuance and verification
+must match exactly. This prevents a bearer minted for one relay from being replayed at another.
+`vendor_serving_readiness()` fails until the issuer seed, public half, audience, previous-key
+metadata, and TTL are valid. The managed relay must independently require
+`managed_relay_verifier_readiness()["ready"]` before receiving traffic.
+
+Rotation uses strict JSON in `ENGRAPHIS_RELAY_TOKEN_PREVIOUS_KEYS`:
+
+```json
+[
+  {
+    "public_key": "<retiring-64-hex-public-key>",
+    "issued_before": 1785000000,
+    "not_after": 1785003600
+  }
+]
+```
+
+Both timestamps are integer Unix epochs. `issued_before` is the cutover instant at which the
+old issuer must already have stopped; old-key tokens issued at or after that instant are
+rejected. `not_after` must be later and no more than 3600 seconds after the cutover. At most
+three previous keys are accepted. Once verifier time reaches `not_after`, leaving that stale
+entry configured is an error and readiness/verification fails closed. The retired unbounded
+`ENGRAPHIS_RELAY_TOKEN_PREVIOUS_PUBKEYS` setting is rejected, not treated as a fallback.
+
+Use this order so no valid token is stranded and no retired key can mint fresh credentials:
+
+1. Generate the replacement seed offline and derive its public key. Choose cutover `T` no
+   more than five minutes ahead and `N = T + 3600` (or the shorter active token TTL).
+2. First deploy the managed relay with the replacement as the current public key and the old
+   public key in `PREVIOUS_KEYS` with `issued_before=T` and `not_after=N`. Keep the audience
+   unchanged. Require verifier readiness.
+3. At `T`, atomically update the control plane's signing seed and current public key to the
+   replacement. Give it the same bounded previous-key metadata and require issuer readiness
+   before restoring traffic.
+4. At `N`, atomically remove the previous-key entry from both deployments before restoring
+   traffic, then rerun readiness. Never retain expired metadata “just in case”; stale metadata
+   deliberately fails closed, and possession of a retired private seed must not remain useful.
+
+The two services may share the public verifier and audience, but never a database or private
+seed. HTTPS remains mandatory. Relay bundles are not end-to-end encrypted and the relay
+operator can read their plaintext contents.
+
+## Authoritative-registry migration window
+
+`ENGRAPHIS_LEGACY_LICENSE_MIGRATION_UNTIL` is a one-time vendor-control-plane escape hatch for
+signed keys sold before authoritative issuance rows existed. Set it only to an absolute Unix
+timestamp in the future and no more than 30 days away. During that window, an otherwise valid
+legacy key missing from the registry is atomically enrolled and audited. Unset, malformed,
+expired, or overly distant values fail closed. Inventory and migrate the known legacy cohort,
+monitor `legacy_license_migrated` events, then delete the variable; it is not a standing
+compatibility or disaster-recovery mode.
+
 ## Billing
 
 Production requires `POLAR_ORGANIZATION_ID`, `POLAR_WEBHOOK_SECRET`, and all four exact
@@ -143,14 +233,32 @@ real Team monthly purchase/refund require designated inboxes and execution-time 
 
 Trial, purchase, invitation, reset, and key-reissue messages enter the durable outbox.
 `GET /ops/email` returns redacted state and provider-message fingerprints; failed operations
-remain recoverable, and `POST /ops/email/retry` retries due work. Verified Resend webhook
-events update delivered, bounced, and complained states. Readiness fails on terminal delivery
-failures, an old backlog, or a statistically meaningful bounce rate above the configured
-threshold. A provider-only outage leaves the key solely in that durable outbox; it does not
-create a redundant plaintext fallback. `undelivered_license_keys.tsv` is created only when
-durable enqueue itself fails. While that fallback exists, authenticated vendor operations
-readiness reports `manual_fulfillment=false` until an operator completes the documented
-reconcile/deliver/remove-or-encrypted-archive procedure.
+remain recoverable. An authenticated operator may retry exactly one selected failed row with
+`POST /ops/email/retry?message_id=eml_...`; each row has a permanent two-requeue cap, so this
+endpoint cannot amplify all failures into a bulk send. Verified Resend webhook events update
+delivered, bounced, and complained states. Readiness fails on terminal delivery failures, an
+old backlog, or a statistically meaningful bounce rate above the configured threshold.
+
+After manually delivering or otherwise reconciling one terminal failed message, close it with
+`POST /ops/email/resolve?message_id=eml_...&acknowledged=true`. This authenticated,
+one-selected-ID action is irreversible: it marks only a `failed` row `resolved` and atomically
+clears its recipient, subject, body, reply-to, retention claim, and last error. A paid-license
+row cannot be resolved until its durable Polar fulfillment tombstone exists; its registry
+recovery copy is then removed in the same relay-database transaction. The idempotency tombstone
+and redacted audit metadata remain. Readiness stays red until retry succeeds or this explicit
+operator close-out completes; there is no automatic purge of recoverable failures.
+
+The live vendor registry/outbox database is ordinary SQLite and can temporarily contain
+recipient PII and a signed license body while that message is pending, retryable, or retained
+for recovery after final failure. Put the vendor volume on encrypted storage and restrict its
+filesystem permissions. Once the provider accepts a message and the matching Polar
+fulfillment claim is durable, Engraphis clears the body, reply-to value, and retention link;
+startup recovery completes that cleanup after a crash. A provider-only outage leaves the key
+solely in that durable outbox; it does not create a redundant plaintext fallback.
+`undelivered_license_keys.tsv` is created only when durable enqueue itself fails. While that
+fallback exists, authenticated vendor operations readiness reports `manual_fulfillment=false`
+until an operator completes the documented reconcile/deliver/remove-or-encrypted-archive
+procedure.
 
 Customer deployments with no local provider relay password-reset requests server-to-server
 to `POST /license/v1/password-reset` using their active Pro/Team key. The control plane checks

@@ -590,8 +590,8 @@ def test_team_invite_relay_forwards_auth_key_and_one_time_url(monkeypatch):
     seen = {}
 
     class _Resp:
-        def read(self):
-            return json.dumps({"sent": True}).encode("utf-8")
+        def read(self, limit=-1):
+            return json.dumps({"sent": True}).encode("utf-8")[:limit]
         def __enter__(self):
             return self
         def __exit__(self, *a):
@@ -602,7 +602,7 @@ def test_team_invite_relay_forwards_auth_key_and_one_time_url(monkeypatch):
         seen["payload"] = json.loads(req.data.decode("utf-8"))
         return _Resp()
 
-    monkeypatch.setattr(CL.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(CL, "_urlopen_no_redirect", fake_urlopen)
     sent, reason = CL.send_team_invite(
         "https://relay.example", "ENGR-TEAM-XYZ", "m@e.com", "Mo", "member",
         "admin@corp.com",
@@ -831,7 +831,7 @@ def test_order_refunded_revokes_subscription_keys_immediately(monkeypatch):
     assert r.json()["status"] == "revoked"
     assert r.json()["reason"] == "refund"
     assert r.json()["revoked"] == 1
-    assert r.json()["subscription_id"] == "sub_refund"
+    assert "subscription_id" not in r.json()
     assert reg.is_revoked(key_id) is True
 
 
@@ -850,8 +850,20 @@ def test_order_refunded_without_subscription_revokes_by_order(monkeypatch):
     r = _post(client, WHSEC, "evt_order_only_refund", refund)
     assert r.status_code == 202
     assert r.json()["status"] == "revoked"
-    assert r.json()["order_id"] == "order_only"
+    assert "order_id" not in r.json()
     assert reg.is_revoked(key_id) is True
+
+
+def test_webhook_responses_never_reflect_provider_payload_fields(monkeypatch):
+    client = _inspector_client(monkeypatch)
+    marker = "provider-controlled-marker-never-reflect"
+    response = _post(
+        client, WHSEC, "evt_no_reflection",
+        _body({"type": marker, "data": {
+            "id": marker, "customer": {"email": marker + "@example.com"}}}))
+    assert response.status_code == 202
+    assert response.json() == {"status": "ignored"}
+    assert marker not in response.text
 
 
 def test_subscription_canceled_honors_paid_period(monkeypatch):
@@ -865,8 +877,7 @@ def test_subscription_canceled_honors_paid_period(monkeypatch):
     cancel = _body({"type": "subscription.canceled", "data": {"id": "sub_cancel"}})
     r = _post(client, WHSEC, "evt_cancel", cancel)
     assert r.status_code == 202
-    assert r.json() == {"status": "ignored", "reason": "paid period honored",
-                        "type": "subscription.canceled"}
+    assert r.json() == {"status": "ignored", "reason": "paid period honored"}
     assert _registry_rows()[0]["status"] == "active"
 
 
@@ -1014,9 +1025,9 @@ def test_route_trial_redelivery_no_second_key(monkeypatch):
 def test_trial_days_helper_is_short_and_bounded():
     from engraphis.inspector import webhooks as WH
     now = time.time()
-    assert 3 <= WH._trial_days(WH._parse_ts(_iso_in_days(3)), now=now) <= 4
-    assert WH._trial_days(None, now=now) == 4          # env default fallback
-    assert WH._trial_days(WH._parse_ts(_iso_in_days(-1)), now=now) == 4  # past -> fallback
+    assert WH._trial_days(WH._parse_ts(_iso_in_days(3)), now=now) == 3
+    assert WH._trial_days(None, now=now) == 3          # canonical trial fallback
+    assert WH._trial_days(WH._parse_ts(_iso_in_days(-1)), now=now) == 3  # past -> fallback
 
 
 # ── seats: "Engraphis Team" uses Polar's native seat-based pricing, NOT a flat
@@ -1110,8 +1121,7 @@ def test_first_sighting_of_subscription_updated_only_records_baseline(monkeypatc
     body = _sub_updated_body("sub_new", "active", 3)
     r = _post(client, WHSEC, "evt_su_first", body)
     assert r.status_code == 202
-    assert r.json() == {"status": "ignored", "reason": "baseline recorded",
-                        "type": "subscription.updated"}
+    assert r.json() == {"status": "ignored", "reason": "baseline recorded"}
 
 
 def test_seat_increase_reissues_key_with_new_count(monkeypatch):
@@ -1659,7 +1669,9 @@ def test_retry_after_finalize_failure_reuses_durable_purchase_email(monkeypatch)
     from engraphis.inspector import webhooks as WH
 
     product_id = _configure_vendor_product(monkeypatch, "POLAR_PRO_MONTHLY_PRODUCT_ID")
-    monkeypatch.setattr(email_outbox, "deliver_now", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        WH, "_deliver_text_email",
+        lambda *_args, **_kwargs: ("resend", "provider-finalize-retry"))
     real_issue = WH.issue_key
     issued = []
 
@@ -1689,6 +1701,17 @@ def test_retry_after_finalize_failure_reuses_durable_purchase_email(monkeypatch)
     }})
 
     first = _post(client, WHSEC, "evt_finalize_retry", body)
+    conn = email_outbox._connect()
+    try:
+        retained = conn.execute(
+            "SELECT text_body,retention_claim,status FROM email_outbox "
+            "WHERE idempotency_key=?",
+            ("purchase-license:order_finalize_retry",)).fetchone()
+        assert "ENGR1." in retained["text_body"]
+        assert retained["retention_claim"] == "ful:order:order_finalize_retry"
+        assert retained["status"] == "sent"
+    finally:
+        conn.close()
     retry = _post(client, WHSEC, "evt_finalize_retry", body)
 
     assert first.status_code == 503
@@ -1696,18 +1719,86 @@ def test_retry_after_finalize_failure_reuses_durable_purchase_email(monkeypatch)
     assert len(issued) == 1
     conn = email_outbox._connect()
     try:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM email_outbox WHERE idempotency_key=?",
-            ("purchase-license:order_finalize_retry",)).fetchone()[0] == 1
+        row = conn.execute(
+            "SELECT COUNT(*) AS n,text_body,retention_claim FROM email_outbox "
+            "WHERE idempotency_key=?",
+            ("purchase-license:order_finalize_retry",)).fetchone()
+        assert row["n"] == 1
+        assert row["text_body"] == "" and row["retention_claim"] == ""
     finally:
         conn.close()
+
+
+def test_host_death_before_outbox_enqueue_reuses_registry_journal_key(monkeypatch):
+    from engraphis.inspector import license_registry as LR
+    from engraphis.inspector import webhooks as WH
+
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", VENDOR_SEED)
+    fulfillment_id = "order:journal-crash"
+
+    def host_died(*_args, **_kwargs):
+        # BaseException deliberately escapes the ordinary delivery recovery handler,
+        # modeling process death after the registry transaction but before enqueue.
+        raise SystemExit("simulated host death")
+
+    monkeypatch.setattr(WH, "send_license_email", host_died)
+    with pytest.raises(SystemExit, match="simulated host death"):
+        WH._issue_and_email(
+            "buyer@example.com", "Engraphis Pro", 1, 35,
+            order_id="order-journal-crash", fulfillment_id=fulfillment_id)
+
+    claim = "ful:" + fulfillment_id
+    original = LR.fulfillment_key(claim)
+    assert original and original.startswith("ENGR1.")
+    sent = []
+    monkeypatch.setattr(
+        WH, "send_license_email",
+        lambda _to, key, **_kwargs: sent.append(key))
+
+    retry = WH._issue_and_email(
+        "buyer@example.com", "Engraphis Pro", 1, 35,
+        order_id="order-journal-crash", fulfillment_id=fulfillment_id)
+
+    assert retry == original
+    assert sent == [original]
+    conn = LR.connect()
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM issued_licenses WHERE order_id=?",
+            ("order-journal-crash",)).fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_post_commit_cleanup_failure_does_not_reopen_fulfilled_claims(monkeypatch):
+    from engraphis.inspector import license_registry as LR
+
+    delivery_id = "dlv:cleanup-crash"
+    fulfillment_id = "ful:cleanup-crash"
+    assert B.claim_webhook(delivery_id) == "claimed"
+    assert B.claim_webhook(fulfillment_id) == "claimed"
+    monkeypatch.setattr(
+        LR, "redact_fulfillment_key",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            sqlite3.OperationalError("registry unavailable")))
+
+    with pytest.raises(B.WebhookStateError, match="could not redact"):
+        B._finalize_webhook(delivery_id, fulfillment_id)
+    # This is the route's normal best-effort rollback after any finalize exception.
+    # It may release processing claims, but completed tombstones are permanent.
+    B._release_claims(delivery_id, fulfillment_id)
+
+    assert B.claim_webhook(delivery_id) == "fulfilled"
+    assert B.claim_webhook(fulfillment_id) == "fulfilled"
 
 
 def test_seat_change_finalize_retry_reuses_durable_key_and_email(monkeypatch):
     from engraphis import email_outbox
     from engraphis.inspector import webhooks as WH
 
-    monkeypatch.setattr(email_outbox, "deliver_now", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        WH, "_deliver_text_email",
+        lambda *_args, **_kwargs: ("resend", "provider-seat-finalize"))
     real_issue = WH.issue_key
     issued = []
 
@@ -1742,9 +1833,61 @@ def test_seat_change_finalize_retry_reuses_durable_key_and_email(monkeypatch):
         b"seatsync:sub_seat_finalize:evt_seat_finalize").hexdigest()
     conn = email_outbox._connect()
     try:
-        assert conn.execute(
-            "SELECT COUNT(*) FROM email_outbox WHERE idempotency_key=?",
-            (expected,)).fetchone()[0] == 1
+        row = conn.execute(
+            "SELECT COUNT(*) AS n,text_body,retention_claim FROM email_outbox "
+            "WHERE idempotency_key=?", (expected,)).fetchone()
+        assert row["n"] == 1
+        assert row["text_body"] == "" and row["retention_claim"] == ""
+    finally:
+        conn.close()
+
+
+def test_deferred_license_send_redacts_after_already_finalized_claim(monkeypatch):
+    from engraphis import email_outbox
+    from engraphis.inspector import webhooks as WH
+
+    product_id = _configure_vendor_product(
+        monkeypatch, "POLAR_PRO_MONTHLY_PRODUCT_ID")
+
+    def provider_down(*_args, **_kwargs):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(WH, "_deliver_text_email", provider_down)
+    client = _inspector_client(monkeypatch)
+    body = _body({"type": "order.paid", "data": {
+        "id": "order_deferred_redaction",
+        "organization_id": "org_engraphis",
+        "customer": {"email": "buyer@example.com"},
+        "product": {"id": product_id, "name": "Engraphis Pro Monthly"},
+    }})
+    response = _post(client, WHSEC, "evt_deferred_redaction", body)
+    assert response.json() == {"status": "fulfilled", "key_issued": True}
+
+    conn = email_outbox._connect()
+    try:
+        row = conn.execute(
+            "SELECT id,status,text_body,retention_claim FROM email_outbox "
+            "WHERE idempotency_key='purchase-license:order_deferred_redaction'"
+        ).fetchone()
+        assert row["status"] == "retry"
+        assert "ENGR1." in row["text_body"]
+        assert row["retention_claim"] == "ful:order:order_deferred_redaction"
+        conn.execute(
+            "UPDATE email_outbox SET next_attempt_at=0 WHERE id=?", (row["id"],))
+        conn.commit()
+        message_id = row["id"]
+    finally:
+        conn.close()
+
+    assert email_outbox.deliver_now(
+        message_id, lambda *_args: ("resend", "provider-deferred"))
+    conn = email_outbox._connect()
+    try:
+        row = conn.execute(
+            "SELECT status,text_body,retention_claim FROM email_outbox WHERE id=?",
+            (message_id,)).fetchone()
+        assert row["status"] == "sent"
+        assert row["text_body"] == "" and row["retention_claim"] == ""
     finally:
         conn.close()
 
@@ -1800,10 +1943,10 @@ def test_vendor_registry_failure_never_emails_unusable_paid_key(monkeypatch):
 
     product_id = _configure_vendor_product(monkeypatch, "POLAR_PRO_MONTHLY_PRODUCT_ID")
 
-    def fail_record(_key):
+    def fail_record(*_args, **_kwargs):
         raise sqlite3.OperationalError("registry down")
 
-    monkeypatch.setattr(LR, "record_issued", fail_record)
+    monkeypatch.setattr(LR, "record_fulfillment_key", fail_record)
     sent = []
     monkeypatch.setattr(
         WH, "send_license_email",

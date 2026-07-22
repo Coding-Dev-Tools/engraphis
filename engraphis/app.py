@@ -105,6 +105,9 @@ def create_app() -> FastAPI:
     if mode == "vendor":
         from engraphis.vendor_app import create_app as create_vendor_app
         return create_vendor_app()
+    if mode == "relay":
+        from engraphis.relay_app import create_app as create_relay_app
+        return create_relay_app()
 
     app = FastAPI(
         title="Engraphis",

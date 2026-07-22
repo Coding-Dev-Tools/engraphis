@@ -930,6 +930,17 @@ def activate(key: str) -> License:
         except OSError:
             pass
         raise
+    # ENGRDT1 relay credentials are short-lived derivatives of one exact license key.
+    # Activation/reissue must never leave the previous account's bearer selected merely
+    # because it is still unexpired. Preserve the device's read-only policy, but remove
+    # cached credential material so the next relay round exchanges this newly installed
+    # key. The loader also checks key_id and fails closed if removal was impossible.
+    try:
+        from engraphis.backends.sync_relay import clear_cached_sync_credential
+    except ImportError:
+        pass
+    else:
+        clear_cached_sync_credential()
     return current_license(refresh=True)
 
 

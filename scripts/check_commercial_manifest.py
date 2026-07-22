@@ -78,8 +78,14 @@ def _check_repository(manifest: dict, errors: list[str]) -> None:
         _fail(errors, "pyproject version does not match the commercial manifest")
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    if "version-%s-" % manifest["version"] not in readme:
-        _fail(errors, "README version badge does not match the commercial manifest")
+    live_badge = (
+        "[![PyPI version](https://img.shields.io/pypi/v/engraphis.svg)]"
+        "(https://pypi.org/project/engraphis/)"
+    )
+    if live_badge not in readme:
+        _fail(errors, "README must use the live PyPI version badge")
+    if re.search(r"img\.shields\.io/badge/version-[^\s)]+", readme):
+        _fail(errors, "README must not advertise an unpublished hard-coded version badge")
 
     template = json.loads((ROOT / "deploy" / "railway-template.json").read_text(
         encoding="utf-8"))

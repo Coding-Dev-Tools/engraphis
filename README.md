@@ -1,6 +1,6 @@
 # Engraphis
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/Coding-Dev-Tools/engraphis)
+[![PyPI version](https://img.shields.io/pypi/v/engraphis.svg)](https://pypi.org/project/engraphis/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](https://github.com/Coding-Dev-Tools/engraphis/blob/main/LICENSE)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-yellow?style=for-the-badge&logo=buy-me-a-coffee)](https://buymeacoffee.com/Jaixii)
 
@@ -24,9 +24,11 @@ https://discord.com/invite/Wfr2ejBmY
 
 > Open-source users: update regularly for the latest fixes and improvements.
 >
-> **Version 1.0:** the core engine, dashboard, MCP server, Pro features, and Team layer
-> are generally available. Team includes multi-user authentication, roles, seat management,
-> invitation and password-reset flows, audit history, and scoped cloud-sync tokens.
+> **Version 1.0 release candidate:** the core engine, dashboard, MCP server, Pro features,
+> and Team layer are implemented on `main`, but 1.0 is not generally available until the
+> matching PyPI package and GitHub Release are published and the production readiness gates
+> pass. Team includes multi-user authentication, roles, seat management, invitation and
+> password-reset flows, audit history, and scoped cloud-sync tokens.
 
 ## The WebUI — one command, local-first
 
@@ -117,7 +119,9 @@ or structured consolidation.
   path queries, communities/hotspots, git/PR impact analysis, and portable graph exports.
 - **Sleep-time consolidation** — scheduled job distills recurring episodes, reports its compaction.
 - **Scoped** — `workspace → repo → session` hierarchy.
-- **Encryption at rest** — optional SQLCipher (AES-256) whole-database encryption via `ENGRAPHIS_DB_KEY`. No plaintext fallback when a key is set.
+- **Encryption at rest** — optional SQLCipher (AES-256) encryption for the main memory
+  database via `ENGRAPHIS_DB_KEY`. No plaintext fallback when a key is set; separate
+  auth/relay/vendor state requires an encrypted volume (see `SECURITY.md`).
 - **Cloud sync** — cross-device and cross-team memory sync with deterministic CRDT merge (folder transport for self-hosting, managed relay for zero-setup). One-click "Sync now" or automatic cadence in the dashboard.
 - **Import & ingest** — local documents/code/DOCX plus optional PDF text extraction, image OCR,
   audio/video transcription, and live PostgreSQL schema introspection.
@@ -218,7 +222,7 @@ SHA-256 digests. A local sync device necessarily retains its raw bearer in an ow
 credential file so it can authenticate future rounds. Roles are rechecked on every HTTP/MCP
 call; disabling a member or resetting their password permanently revokes existing agent tokens.
 The hosted `/mcp` endpoint exposes the same
-28-tool service as local `engraphis-mcp`. See [the Agent Connect guide](docs/AGENT_CONNECT.md).
+29-tool service as local `engraphis-mcp`. See [the Agent Connect guide](docs/AGENT_CONNECT.md).
 
 ## Install
 
@@ -396,19 +400,40 @@ pinned. The full multi-predecessor chain remains visible through inspection, Why
 The core engine, single-user dashboard, standalone MCP server, and governance tools are
 free and Apache-2.0, permanently. Paid Pro/Team keys are **server-authoritative**: the
 vendor signature is checked locally, then the key must hold a current machine-bound lease
-from the configured license service. Revoked, expired, or seat-exceeded keys fail closed;
-an unexpired lease provides bounded grace for transient network failures. **Pro is $10/mo
-($100/yr), Team is $20/seat/mo ($200/seat/yr)**, and the dashboard offers a **3-day
-server-issued Pro or Team trial** after email confirmation — no card required.
+from the configured license service. Revoked, expired, or seat-exceeded keys fail closed.
+**Pro is $10/mo ($100/yr), Team is $20/seat/mo ($200/seat/yr)**, and the dashboard offers
+a server-issued Pro or Team trial after email confirmation — no card required. The trial
+term is **exactly 3 active days**.
 
-Pro and Team are GA in v1.0.0. Cloud sync is opt-in and transported over HTTPS; Engraphis
-does not advertise end-to-end encryption. Paid entitlements require online lease renewal,
-while the Free core remains fully local and offline-capable.
+Separately, `workspace_write_grace` can preserve an already activated installation for up
+to 24 hours. It starts at the first authoritative denial, or at signed key expiry when that
+expiry has already passed; unused cached-lease time is not subtracted. Existing authenticated
+users may continue ordinary local-core workspace writes, but paid/cost-bearing features and
+MCP/agent writes still require a live lease and may stop immediately. Grace never extends trial expiry,
+enables a new activation, adds users or seats, or resets an expiry. After grace,
+`recovery_read_only` preserves the login wall plus authenticated reads, data export, password
+recovery, and relicensing while blocking normal mutations and Team administration.
+
+Pro and Team are release candidates for v1.0.0; they become GA only when matching tagged
+artifacts are published on PyPI and GitHub and the vendor service passes its production
+readiness gate. Cloud sync is opt-in and transported over HTTPS; Engraphis does not advertise
+end-to-end encryption. Paid entitlements require online lease renewal, while the Free core
+remains fully local and offline-capable.
+
+The published repository and clients are Apache-2.0; a paid subscription purchases access
+to the official hosted control plane and managed service, not extra rights over public code.
+See [`docs/LICENSING.md`](docs/LICENSING.md) for the source-license, service, grace, and
+recovery boundaries.
+
+The published repository and clients are Apache-2.0; a paid subscription purchases access
+to the official hosted control plane and managed service, not extra rights over public code.
+See [`docs/LICENSING.md`](docs/LICENSING.md) for the source-license, service, grace, and
+recovery boundaries.
 
 | | Free (available now) | Pro — $10/mo or $100/yr | Team — $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
 | Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
-| Memory engine + 28 MCP tools | ✓ | ✓ | ✓ |
+| Memory engine + 29 MCP tools | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Cloud sync (folder + managed relay) | | ✓ | ✓ |
 | Auto-sync (hands-off cadence) | | ✓ | ✓ |
@@ -455,6 +480,7 @@ while the Free core remains fully local and offline-capable.
 | Governance | `engraphis_promote` | Widen scope while preserving and linking narrow-scope history |
 | Session | `engraphis_start_session` / `engraphis_end_session` | Session lifecycle with cross-session handoff |
 | Ops | `engraphis_stats` | Memory counts for health checks |
+| Ops | `engraphis_check_update` | Check the release source for a newer Engraphis version |
 
 ---
 
@@ -492,8 +518,9 @@ tier, across a group — without giving up local-first ownership. It ships two t
 
 - **Folder transport** — any shared directory (Dropbox, iCloud, Syncthing, a git repo, a
   mounted drive). Zero infrastructure.
-- **Managed relay** — HTTPS against the customer service, authenticated by an expiring,
-  revocable per-user token. One-click in the dashboard or
+- **Managed relay** — HTTPS against a dedicated, isolated relay data plane, authenticated by an
+  expiring, revocable per-user token issued by the separate license control plane. One-click in
+  the dashboard or
   `python -m scripts.sync --relay --relay-token <token>`; viewers use `--read-only`.
 
 Sync is a **state-based CRDT**: deterministic merge, no conflict copies, no data loss.
@@ -516,8 +543,10 @@ The current shared and commercial surfaces enforce:
   writes. Only admins can change account-wide sync policy, import/index server-side
   resources, or delete/merge workspaces.
 - **License and billing lifecycle** — paid features require a current machine-bound lease;
-  process cache and device-id creation are serialized. Billing webhook fulfillment is
-  bounded, durable, retry-safe, and idempotent.
+  process cache and device-id creation are serialized. A lapsed, already provisioned Team
+  installation has only the bounded `workspace_write_grace` described above, followed by
+  authenticated `recovery_read_only`; neither state permits entitlement or account growth.
+  Billing webhook fulfillment is bounded, durable, retry-safe, and idempotent.
 - **SQLite transaction safety** — shared v2 connections serialize complete write transactions;
   a failed statement that opened a transaction rolls it back and releases its lock. Legacy
   decay is frequency-independent, and sync preserves future bi-temporal validity horizons.
@@ -548,8 +577,10 @@ Set `ENGRAPHIS_DB_KEY` (or `ENGRAPHIS_DB_KEY_FILE`) and install the extra:
 pip install "engraphis[encryption]"
 ```
 
-The entire database file is transparently encrypted with AES-256 via SQLCipher — full-text
-search, the graph, and every query keep working unchanged. When a key is set, Engraphis
+The entire main memory database file is transparently encrypted with AES-256 via SQLCipher —
+full-text search, the graph, and every query keep working unchanged. Separate users/sessions,
+relay, and vendor registry/email-outbox databases remain ordinary SQLite; run those services
+on encrypted, access-restricted volumes. When a key is set for the main database, Engraphis
 **fails loud** rather than silently falling back to plaintext. Generate a strong key:
 
 ```bash
@@ -639,7 +670,7 @@ All via environment (or `.env`):
 | `ENGRAPHIS_DB_PATH` | Source: `<repo>/engraphis.db`; installed: platform user-data directory | SQLite database file. Installed defaults are `%LOCALAPPDATA%\engraphis\engraphis.db` (Windows), `~/Library/Application Support/engraphis/engraphis.db` (macOS), and `$XDG_DATA_HOME/engraphis/engraphis.db` or `~/.local/share/engraphis/engraphis.db` (Linux). The environment variable overrides every default. |
 | `ENGRAPHIS_HOST` | `127.0.0.1` | Server bind address |
 | `ENGRAPHIS_PORT` | `8700` | Dashboard port |
-| `ENGRAPHIS_SERVICE_MODE` | `combined` | `customer` for hosted dashboards, `vendor` for the isolated license control plane, and `combined` for development only |
+| `ENGRAPHIS_SERVICE_MODE` | `customer` | `customer` is the fail-safe normal-install default; use `vendor` for the isolated official control plane, `relay` for the isolated managed-sync data plane, and `combined` only for development/test compatibility |
 | `ENGRAPHIS_API_TOKEN` | — | Optional service-wide REST bearer credential; per-user tokens are preferred for hosted agent access |
 | `ENGRAPHIS_DEPLOYMENT_TOKEN` | — | Secret ownership proof required by hosted trial activation and remote first-admin setup |
 | `ENGRAPHIS_CORS_ORIGINS` | loopback on `ENGRAPHIS_PORT` | Comma-separated REST CORS allow-list; defaults to `127.0.0.1` and `localhost` on the configured port |
@@ -731,4 +762,8 @@ LoCoMo / LongMemEval competitive numbers run separately with a real embedder —
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). "Engraphis" is a trademark of the
-Engraphis project; the license does not grant trademark rights.
+Engraphis project; the license does not grant trademark rights. Code already distributed
+under Apache-2.0 keeps that grant; later releases cannot retroactively withdraw it. The
+official hosted control plane, its production credentials and records, managed operations,
+support, and future separately delivered commercial modules are outside the public source
+grant. See [`docs/LICENSING.md`](docs/LICENSING.md) for the complete boundary.

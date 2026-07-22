@@ -13,7 +13,7 @@ import json
 import pytest
 
 from engraphis.backends.sync_folder import get_transport
-from engraphis.backends.sync_relay import RelayTransport
+from engraphis.backends.sync_relay import RelayError, RelayTransport
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import SyncTransport
 from scripts.sync import main as sync_main
@@ -23,12 +23,12 @@ from scripts.sync import main as sync_main
 
 def test_get_transport_relay_builds_relay_transport():
     t = get_transport("relay", base_url="https://sync.test/", workspace_id="acme",
-                      license_key="ENGR1.x.y")
+                      license_key="engr_ut_" + "x" * 32)
     assert isinstance(t, RelayTransport)
     assert isinstance(t, SyncTransport)          # satisfies the runtime-checkable protocol
     assert t.base == "https://sync.test"         # trailing slash stripped
     assert t.workspace_id == "acme"
-    assert t.key == "ENGR1.x.y"
+    assert t.key == "engr_ut_" + "x" * 32
 
 
 def test_get_transport_relay_requires_base_url_and_workspace():
@@ -99,6 +99,49 @@ def test_cli_selects_relay_and_namespaces_by_workspace_name(db_with_workspace, _
     # Namespace MUST be the workspace name, not a per-device id, or two devices never meet.
     assert kw["workspace_id"] == "acme"
     assert kw["license_key"] == "user-token-value"
+
+
+def test_cli_reports_relay_error_while_opening_transport(
+        db_with_workspace, monkeypatch, capsys):
+    from engraphis.config import settings
+    monkeypatch.setattr(settings, "allowed_workspaces", [])
+
+    def fail_open(*_args, **_kwargs):
+        raise RelayError("credential exchange is temporarily unavailable", status=503)
+
+    monkeypatch.setattr("engraphis.backends.sync_folder.get_transport", fail_open)
+
+    rc = sync_main([
+        "--db", db_with_workspace, "--workspace", "acme",
+        "--relay", "https://sync.test", "--relay-token", "user-token-value",
+    ])
+
+    assert rc == 2
+    assert "temporarily unavailable" in capsys.readouterr().err
+
+
+def test_cli_reports_relay_error_during_sync(db_with_workspace, monkeypatch, capsys):
+    from engraphis.config import settings
+    monkeypatch.setattr(settings, "allowed_workspaces", [])
+
+    class _FailingTransport(_FakeTransport):
+        def push(self, name, data):
+            raise RelayError("upload was not replayed; retry sync", status=401)
+
+    monkeypatch.setattr(
+        "engraphis.backends.sync_folder.get_transport",
+        lambda *_args, **_kwargs: _FailingTransport(),
+    )
+
+    rc = sync_main([
+        "--db", db_with_workspace, "--workspace", "acme",
+        "--relay", "https://sync.test", "--relay-token", "user-token-value",
+    ])
+
+    assert rc == 2
+    error = capsys.readouterr().err
+    assert "relay sync failed" in error
+    assert "was not replayed" in error
 
 
 def test_cli_viewer_token_pulls_without_pushing(db_with_workspace, _capture_transport):

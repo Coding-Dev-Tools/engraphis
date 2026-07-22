@@ -15,7 +15,6 @@ from engraphis.commercial import (
     service_mode,
     vendor_admin_token_ready,
     vendor_readiness,
-    vendor_serving_readiness,
 )
 from engraphis.inspector.auth import bearer_ok
 
@@ -31,7 +30,22 @@ def _admin_ok(request: Request) -> bool:
 
 def _email_worker_ok(app: FastAPI) -> bool:
     task = getattr(app.state, "email_worker", None)
-    return task is not None and not task.done()
+    return (
+        task is not None and not task.done()
+        and bool(getattr(app.state, "email_retention_cleanup_ok", False))
+    )
+
+
+def _valid_email_message_id(message_id: str) -> bool:
+    return bool(
+        message_id
+        and message_id.startswith("eml_")
+        and len(message_id) <= 64
+        and all(
+            char.isascii() and (char.isalnum() or char in "_-")
+            for char in message_id
+        )
+    )
 
 
 def create_app() -> FastAPI:
@@ -47,14 +61,29 @@ def create_app() -> FastAPI:
 
         stop = asyncio.Event()
         application.state.email_worker_stop = stop
+        try:
+            await asyncio.to_thread(email_outbox.redact_finalized_retention_claims)
+            application.state.email_retention_cleanup_ok = True
+        except Exception as exc:
+            application.state.email_retention_cleanup_ok = False
+            logger.error(
+                "commercial email retention cleanup failed (%s)",
+                type(exc).__name__)
 
         async def run():
             while not stop.is_set():
                 try:
                     await asyncio.to_thread(
                         email_outbox.process_due, _deliver_text_email, limit=20)
+                    # Retry the cross-database retention sweep every iteration. This
+                    # recovers both startup outages and a runtime crash after webhook
+                    # finalization without requiring a process restart.
+                    await asyncio.to_thread(
+                        email_outbox.redact_finalized_retention_claims)
+                    application.state.email_retention_cleanup_ok = True
                     application.state.email_worker_last_error = ""
                 except Exception as exc:
+                    application.state.email_retention_cleanup_ok = False
                     application.state.email_worker_last_error = type(exc).__name__[:80]
                     application.state.email_worker_last_failure_at = time.time()
                     # Provider exceptions can embed request URLs, recipients, or response
@@ -92,7 +121,11 @@ def create_app() -> FastAPI:
 
     @app.get("/api/ready")
     def ready():
-        ok = bool(vendor_serving_readiness().get("ready")) and _email_worker_ok(app)
+        # Public readiness is intentionally an aggregate boolean: live traffic must not
+        # be admitted while an authenticated operational gate (backup, webhook intake,
+        # outbox, manual fulfillment, or admin control) is red. Detailed checks remain
+        # confined to the authenticated /ops/ready endpoint.
+        ok = bool(vendor_readiness().get("ready")) and _email_worker_ok(app)
         return JSONResponse(
             {"ready": ok, "checks": {"control_plane": ok}, "version": __version__},
             status_code=200 if ok else 503)
@@ -133,15 +166,54 @@ def create_app() -> FastAPI:
             trial_checks, status_code=200 if trial_checks["ready"] else 503)
 
     @app.post("/ops/email/retry")
-    def retry_email_operations(request: Request):
+    def retry_email_operations(request: Request, message_id: str = ""):
         if not _admin_ok(request):
             return JSONResponse({"error": "vendor admin token required"}, status_code=401)
+        if not message_id:
+            return JSONResponse(
+                {"error": "one outbox message id is required"}, status_code=400)
+        if not _valid_email_message_id(message_id):
+            return JSONResponse({"error": "invalid outbox message id"}, status_code=400)
         from engraphis import email_outbox
         from engraphis.inspector.webhooks import _deliver_text_email
-        requeued = email_outbox.requeue_failed(limit=100)
-        result = email_outbox.process_due(_deliver_text_email, limit=100)
-        result["requeued"] = requeued
-        return result
+        requeued = email_outbox.requeue_failed([message_id], limit=1)
+        sent = failed = 0
+        if requeued:
+            try:
+                sent = int(email_outbox.deliver_now(message_id, _deliver_text_email))
+            except Exception:
+                failed = 1
+        return {
+            "processed": requeued,
+            "sent": sent,
+            "failed": failed,
+            "requeued": requeued,
+        }
+
+    @app.post("/ops/email/resolve")
+    def resolve_email_operations(request: Request, message_id: str = "",
+                                 acknowledged: bool = False):
+        """Irreversibly close one manually delivered/reconciled terminal failure."""
+        if not _admin_ok(request):
+            return JSONResponse({"error": "vendor admin token required"}, status_code=401)
+        if not message_id:
+            return JSONResponse(
+                {"error": "one outbox message id is required"}, status_code=400)
+        if not _valid_email_message_id(message_id):
+            return JSONResponse({"error": "invalid outbox message id"}, status_code=400)
+        if not acknowledged:
+            return JSONResponse(
+                {"error": "manual delivery acknowledgement is required"},
+                status_code=400)
+        from engraphis import email_outbox
+        try:
+            resolved = email_outbox.resolve_failed([message_id], limit=1)
+        except Exception as exc:  # noqa: BLE001 - do not reflect PII or key material
+            logger.error(
+                "commercial email resolution failed (%s)", type(exc).__name__)
+            return JSONResponse({"resolved": 0}, status_code=503)
+        return JSONResponse(
+            {"resolved": resolved}, status_code=200 if resolved else 409)
 
     @app.post("/ops/backup")
     def run_backup(request: Request):

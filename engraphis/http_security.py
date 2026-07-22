@@ -31,8 +31,9 @@ from __future__ import annotations
 
 import logging
 import os
+from urllib.parse import urlsplit, urlunsplit
 
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, RedirectResponse
 
 logger = logging.getLogger("engraphis.http")
 
@@ -87,6 +88,41 @@ def wants_https(request) -> bool:
     return _trusted_forwarded_proto(request) == "https"
 
 
+def _canonical_https_origin() -> str:
+    """Configured public HTTPS origin, or empty when no safe canonical host exists."""
+    value = (
+        os.environ.get("ENGRAPHIS_PUBLIC_URL", "").strip()
+        or os.environ.get("ENGRAPHIS_DASHBOARD_URL", "").strip()
+        or os.environ.get("ENGRAPHIS_RELAY_PUBLIC_URL", "").strip()
+    )
+    try:
+        parts = urlsplit(value)
+        parts.port
+    except ValueError:
+        return ""
+    if (
+        parts.scheme.lower() != "https"
+        or not parts.hostname
+        or parts.username is not None
+        or parts.password is not None
+        or parts.query
+        or parts.fragment
+        or chr(92) in parts.netloc
+        or any(char.isspace() or ord(char) < 32 for char in parts.netloc)
+    ):
+        return ""
+    return urlunsplit(("https", parts.netloc, "", "", "")).rstrip("/")
+
+
+def _host_matches_origin(request, origin: str) -> bool:
+    try:
+        expected = urlsplit(origin).hostname
+        supplied = urlsplit("//" + (request.headers.get("host") or "")).hostname
+    except ValueError:
+        return False
+    return bool(expected and supplied and expected.lower() == supplied.lower())
+
+
 def install(app) -> None:
     """Attach the baseline security headers middleware to *app*. Idempotent."""
     if getattr(app.state, "_security_headers_installed", False):
@@ -98,19 +134,33 @@ def install(app) -> None:
 
     hsts = os.environ.get("ENGRAPHIS_HSTS")
     hsts = DEFAULT_HSTS if hsts is None else hsts.strip()
+    https_origin = _canonical_https_origin()
 
     @app.middleware("http")
     async def _security_headers(request, call_next):
-        try:
-            response = await call_next(request)
-        except Exception as exc:  # noqa: BLE001 - boundary: never expose internals
-            logger.error(
-                "unhandled %s request failure (%s)",
-                request.method,
-                type(exc).__name__,
-            )
-            response = JSONResponse(
-                {"error": "internal server error"}, status_code=500)
+        if (
+            https_origin
+            and not wants_https(request)
+            and _host_matches_origin(request, https_origin)
+        ):
+            raw_path = request.scope.get("raw_path") or b"/"
+            path = raw_path.decode("ascii", "ignore")
+            if not path.startswith("/"):
+                path = "/"
+            query = (request.scope.get("query_string") or b"").decode("ascii", "ignore")
+            target = https_origin + path + (("?" + query) if query else "")
+            response = RedirectResponse(target, status_code=308)
+        else:
+            try:
+                response = await call_next(request)
+            except Exception as exc:  # noqa: BLE001 - boundary: never expose internals
+                logger.error(
+                    "unhandled %s request failure (%s)",
+                    request.method,
+                    type(exc).__name__,
+                )
+                response = JSONResponse(
+                    {"error": "internal server error"}, status_code=500)
         headers = response.headers
         # setdefault throughout: a route that set one of these on purpose wins.
         headers.setdefault("X-Content-Type-Options", "nosniff")

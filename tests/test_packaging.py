@@ -4,6 +4,47 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_compiled_wheel_staging_excludes_python_licensing_sources(
+        monkeypatch, tmp_path):
+    """Exercise the real build_py hook against a wheel-like staging tree.
+
+    setuptools returns ``(package, module, source)`` tuples. A prior predicate compared
+    the package to tuple element zero twice, silently shipping both source modules next
+    to the compiled extensions.
+    """
+    import runpy
+
+    import setuptools
+    from setuptools import Distribution
+
+    monkeypatch.setenv("ENGRAPHIS_SKIP_CYTHON", "1")
+    monkeypatch.setattr(setuptools, "setup", lambda **_kwargs: None)
+    setup_globals = runpy.run_path(str(ROOT / "setup.py"))
+    setup_globals["EXT_MODULES"].append(object())
+
+    source_root = tmp_path / "src"
+    package = source_root / "engraphis"
+    package.mkdir(parents=True)
+    for name in ("__init__.py", "licensing.py", "cloud_license.py", "feature.py"):
+        (package / name).write_text(f"# {name}\n", encoding="utf-8")
+
+    distribution = Distribution({
+        "packages": ["engraphis"],
+        "package_dir": {"": str(source_root)},
+    })
+    distribution.script_name = str(ROOT / "setup.py")
+    command = setup_globals["build_py"](distribution)
+    command.build_lib = str(tmp_path / "wheel-tree")
+    command.ensure_finalized()
+    command.run()
+
+    staged = Path(command.build_lib) / "engraphis"
+    assert (staged / "__init__.py").is_file()
+    assert (staged / "feature.py").is_file()
+    assert not (staged / "licensing.py").exists()
+    assert not (staged / "cloud_license.py").exists()
+
+
 def test_distribution_configuration_excludes_runtime_bytecode():
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
@@ -39,6 +80,8 @@ def test_every_vendored_browser_library_has_redistribution_notice():
     assert all(name in notice for name in (
         "D3 7.9.0", "Marked 12.0.2", "force-graph 1.51.4", "DOMPurify 3.4.11",
     ))
+    assert "galaxy-dependencies.json" not in notice
+    assert "galaxy-vendor.LICENSE.txt" not in notice
     assert "Trademark Policy" not in notice
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "license does not grant trademark rights" in readme

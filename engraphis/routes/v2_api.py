@@ -238,7 +238,6 @@ def bootstrap():
         "workspaces": wss,
         "stats": _run(current_service.stats, workspace=scoped_stats_workspace),
         "embedder": emb,
-        "features": {"graph_ui_v2": bool(settings.graph_ui_v2)},
         # Non-blocking best-known update snapshot; the dashboard renders an "update
         # available" banner from this and a background refresh warms the cache.
         "update": _update_snapshot(),
@@ -291,6 +290,13 @@ _llm_connection_state: dict = {
     "model": "",
     "tested_at": 0.0,
 }
+_LLM_PUBLIC_TEST_STATE_FIELDS = (
+    "extractor",
+    "extractor_enabled",
+    "auto_extract",
+    "auto_enabled",
+    "persisted",
+)
 _llm_extractor_lock = threading.RLock()
 _sync_token_state_lock = threading.RLock()
 
@@ -384,13 +390,37 @@ def _set_llm_extractor_locked(enabled: bool, *, persist: bool) -> dict:
 
 
 def _record_llm_test(result: dict) -> None:
+    provider = settings.llm_provider or "openai"
+    model = settings.llm_model or _LLM_DEFAULT_MODELS.get(provider, "")
     with _llm_extractor_lock:
         _llm_connection_state.update({
             "ok": bool(result.get("ok")),
-            "provider": str(result.get("provider") or settings.llm_provider),
-            "model": str(result.get("model") or settings.llm_model),
+            "provider": provider,
+            "model": model,
             "tested_at": time.time(),
         })
+
+
+def _public_llm_test_result(result: dict, *, error: str = "") -> dict:
+    """Return the strict HTTP allow-list for an LLM connection test.
+
+    Provider replies and arbitrary adapter fields are untrusted external payloads. They
+    may be useful inside the process, but must never cross the dashboard API boundary.
+    """
+    result = result if isinstance(result, dict) else {}
+    provider = settings.llm_provider or "openai"
+    model = settings.llm_model or _LLM_DEFAULT_MODELS.get(provider, "")
+    ok = bool(result.get("ok"))
+    public = {"ok": ok, "provider": provider, "model": model}
+    for field in _LLM_PUBLIC_TEST_STATE_FIELDS:
+        if field in result:
+            public[field] = result[field]
+    if not ok:
+        public["error"] = error or (
+            "The provider test failed. Check the configured provider, model, API key, "
+            "and network connection."
+        )
+    return public
 
 
 def _llm_is_verified(provider: str, model: str) -> bool:
@@ -406,7 +436,7 @@ def _llm_is_verified(provider: str, model: str) -> bool:
 def llm_status():
     """Report the configured LLM provider/model/key presence and the active extractor,
     plus a ready-to-paste .env snippet for the dashboard's "Connect your LLM" card.
-    Never returns the API key itself — only whether one is set."""
+    Never returns the API key or custom provider endpoint — only whether each is set."""
     provider = settings.llm_provider or "openai"
     model = settings.llm_model or _LLM_DEFAULT_MODELS.get(provider, "")
     key_set = bool(settings.llm_api_key)
@@ -415,7 +445,7 @@ def llm_status():
         "provider": provider,
         "model": model,
         "key_set": key_set,
-        "base_url": settings.llm_base_url or "",
+        "custom_base_url_configured": bool(settings.llm_base_url),
         "extractor": settings.extractor,
         "extractor_enabled": _extractor_enabled(),
         "auto_extract": bool(settings.llm_auto_extract),
@@ -428,7 +458,6 @@ def llm_status():
             f"ENGRAPHIS_LLM_PROVIDER={provider}\n"
             f"ENGRAPHIS_LLM_MODEL={model}\n"
             f"ENGRAPHIS_LLM_API_KEY=<your-key>\n"
-            + (f"ENGRAPHIS_LLM_BASE_URL={settings.llm_base_url}\n" if settings.llm_base_url else "")
             + ("ENGRAPHIS_EXTRACTOR=llm_structured\n" if key_set else "# set ENGRAPHIS_EXTRACTOR=llm_structured to use it\n")
             + "ENGRAPHIS_LLM_AUTO_EXTRACT=1\n"
         ),
@@ -439,16 +468,20 @@ def llm_status():
 def llm_test():
     """Live-test the configured LLM with a tiny completion. POST so the dashboard auth
     gate (member+ in team mode) applies — testing spends a fraction of a cent of the
-    instance's API credit, so it's not a viewer action. Returns the ping result; never
-    raises (the client's ping() already swallows every failure into ``ok=False``)."""
+    instance's API credit, so it's not a viewer action. Returns an allow-listed status,
+    never the provider reply; failures are mapped to a generic error."""
     if not settings.llm_api_key:
         _record_llm_test({"ok": False})
-        return {"ok": False, "error": "No API key configured. Set ENGRAPHIS_LLM_API_KEY in your .env and restart.",
-                "provider": settings.llm_provider, "model": settings.llm_model}
+        return _public_llm_test_result(
+            {"ok": False},
+            error=("No API key configured. Set ENGRAPHIS_LLM_API_KEY in your .env "
+                   "and restart."),
+        )
     try:
         from engraphis.llm.client import LLMClient
         with LLMClient() as llm:
             result = llm.ping()
+        result = result if isinstance(result, dict) else {"ok": False}
         _record_llm_test(result)
         if result.get("ok") and settings.llm_auto_extract:
             result.update(_set_llm_extractor(True))
@@ -460,13 +493,11 @@ def llm_test():
                 "auto_extract": bool(settings.llm_auto_extract),
                 "auto_enabled": False,
             })
-        return result
+        return _public_llm_test_result(result)
     except Exception as exc:  # noqa: BLE001
         _record_llm_test({"ok": False})
         logger.error("LLM connection test failed (%s)", type(exc).__name__)
-        return {"ok": False, "error": "The provider test failed. Check the configured "
-                                      "provider, model, and network connection.",
-                "provider": settings.llm_provider, "model": settings.llm_model}
+        return _public_llm_test_result({"ok": False})
 
 
 class _ExtractorToggleReq(BaseModel):
@@ -491,12 +522,14 @@ def llm_extractor_toggle(req: _ExtractorToggleReq):
         raise HTTPException(status_code=400, detail={
             "error": "The configured LLM could not be verified. Check the provider, "
                      "model, API key, and network connection."}) from None
+    result = result if isinstance(result, dict) else {"ok": False}
     _record_llm_test(result)
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail={
-            "error": result.get("error") or "The configured LLM is not working."})
-    return {"ok": True, "provider": result.get("provider"),
-            "model": result.get("model"), **_set_llm_extractor(True)}
+            "error": "The configured LLM could not be verified. Check the provider, "
+                     "model, API key, and network connection."})
+    return {"ok": True, "provider": settings.llm_provider,
+            "model": settings.llm_model, **_set_llm_extractor(True)}
 
 
 def _metadata_object(raw) -> dict:
@@ -1155,6 +1188,8 @@ def analytics(workspace: Optional[str] = None):
     _paid("analytics")
     svc = service()
     ws = workspace or _default_ws()
+    if ws:
+        ws = _run(svc._clean_ws, ws)
     wid = svc._lookup_workspace(ws) if ws else None
     if not wid:
         return _analytics_summary(workspace)
@@ -1171,7 +1206,7 @@ def analytics_export(workspace: Optional[str] = None):
     from engraphis.analytics import compute_analytics, render_analytics_html
     from fastapi.responses import HTMLResponse
     svc = service()
-    ws = workspace or _require_ws()
+    ws = _run(svc._clean_ws, workspace or _require_ws())
     wid = svc._lookup_workspace(ws)
     if not wid:
         raise HTTPException(status_code=400, detail={"error": "Unknown workspace '%s'." % ws})
@@ -1254,14 +1289,21 @@ def _sign_export(data: dict, workspace: str) -> dict:
 
 
 @router.get("/export")
-def export(workspace: Optional[str] = None, signed: bool = False):
+def export(request: Request, workspace: Optional[str] = None, signed: bool = False):
     """Full bi-temporal workspace dump (memories + sessions + audit). Pro-gated.
 
     ``signed=true`` wraps the dump in a SHA-256 compliance manifest (see
     :func:`_sign_export`) — a tamper-evident, self-verifying audit bundle."""
-    _paid("export")
+    recovery_export = False
+    auth_store = getattr(request.app.state, "auth_store", None)
+    if auth_store is not None and auth_store.count_users() > 0:
+        from engraphis.inspector.auth import ENTITLEMENT_ACTIVE
+        access = auth_store.entitlement_access(licensing.current_license())
+        recovery_export = access["state"] != ENTITLEMENT_ACTIVE
+    if not recovery_export:
+        _paid("export")
     ws = workspace or _default_ws()
-    data = _run(service().export_workspace, workspace=ws)
+    data = _run(service().export_workspace, workspace=ws, recovery=recovery_export)
     return _sign_export(data, ws or "") if signed else data
 
 
@@ -1942,7 +1984,7 @@ def configure_sync_token(req: _SyncTokenReq):
             # before replacing the token; relax it only after token persistence succeeds.
             save_sync_read_only(True)
             if not env_token:
-                save_sync_token(req.token)
+                save_sync_token(req.token, relay_origin=_relay_url())
             if not req.read_only:
                 save_sync_read_only(False)
     except ValueError as exc:

@@ -100,6 +100,79 @@ def _signer_matches() -> bool:
         return False
 
 
+def _relay_token_ttl_ready() -> bool:
+    """Reject an explicitly invalid relay-token lifetime instead of silently clamping it."""
+    raw = os.environ.get("ENGRAPHIS_RELAY_DEVICE_TOKEN_TTL_SECONDS", "").strip()
+    if not raw:
+        return True
+    try:
+        configured = int(raw)
+        from engraphis.inspector import license_registry
+        return (license_registry.RELAY_DEVICE_TOKEN_TTL_MIN <= configured
+                <= license_registry.RELAY_DEVICE_TOKEN_TTL_MAX)
+    except (ImportError, TypeError, ValueError):
+        return False
+
+
+def relay_token_issuer_ready() -> bool:
+    """Prove the control plane can mint relay tokens without exposing either key.
+
+    The issuer requires a dedicated 32-byte seed, its matching current public key, a
+    valid optional previous-key set, and an in-range TTL.  It deliberately does not reuse
+    the customer-license signer: compromise of one authority must not grant the other.
+    """
+    try:
+        from engraphis.inspector import license_registry
+        from engraphis.inspector.license_cloud import _load_relay_token_signing_secret
+        _load_relay_token_signing_secret()
+        license_registry.relay_token_audience()
+        return _relay_token_ttl_ready()
+    except Exception:
+        return False
+
+
+def relay_token_verifier_ready() -> bool:
+    """Prove a data plane has a valid current relay-token verifier/key-rotation set."""
+    try:
+        from engraphis.inspector import license_registry
+        license_registry.relay_token_audience()
+        return bool(license_registry.relay_token_verifiers())
+    except Exception:
+        return False
+
+
+def _relay_disk_ok() -> bool:
+    """Check free space on the dedicated relay bundle/verification database volume."""
+    try:
+        from engraphis.inspector import license_registry
+        db_path = Path(license_registry._db_path()).expanduser().resolve()
+        root = db_path.parent
+        root.mkdir(parents=True, exist_ok=True)
+        minimum = max(1, int(os.environ.get(
+            "ENGRAPHIS_RELAY_MIN_FREE_BYTES", str(256 * 1024 * 1024))))
+        return shutil.disk_usage(root).free >= minimum
+    except Exception:
+        return False
+
+
+def managed_relay_verifier_readiness() -> dict:
+    """Secret-free readiness contract for the dedicated managed-relay data plane.
+
+    This is intentionally separate from :func:`customer_operations_readiness`: ordinary
+    provisioned dashboards use locally issued named-user tokens and must not be forced to
+    install the vendor relay verifier.  A dedicated shared relay runs in ``relay`` mode
+    but its deployment probe must require this stricter contract.
+    """
+    checks = {
+        "service_mode": service_mode() == "relay",
+        "relay_token_verifier": relay_token_verifier_ready(),
+        "relay_db": _registry_writable(),
+        "disk": _relay_disk_ok(),
+    }
+    checks["ready"] = all(checks.values())
+    return checks
+
+
 def _registry_writable() -> bool:
     try:
         from engraphis.inspector import license_registry
@@ -246,6 +319,7 @@ def vendor_serving_readiness() -> dict:
     checks = {
         "service_mode": service_mode() == "vendor",
         "signer": _signer_matches(),
+        "relay_token_issuer": relay_token_issuer_ready(),
         "signer_release_ready": bool(VENDOR_SIGNER_RELEASE_READY),
         "registry": _registry_writable(),
         "polar_webhook": webhook_secret_ready(),

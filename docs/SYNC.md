@@ -65,11 +65,11 @@ your memory store (SQLite)                        another device's store
   Syncthing share, a mounted drive, even a git repo. Each device writes one full-state
   bundle (`bundle-<device_id>.json`) and overwrites it each sync, so the folder stays small.
 - **`engraphis/backends/sync_relay.py` — `RelayTransport`.** The managed transport: the
-  same three `SyncTransport` calls over HTTPS against the customer service
-  (`engraphis/inspector/sync_relay.py`), carrying an expiring, revocable, per-user token.
-  The server verifies owner, scope, role, and the account's active entitlement on every
-  request. Bundles are namespaced by the signed account entitlement, so customers never
-  see each other's data.
+  same three `SyncTransport` calls over HTTPS against `engraphis/inspector/sync_relay.py`.
+  Provisioned customer deployments use an expiring, revocable named-user token and verify
+  owner, scope, current role, and entitlement. The separate Engraphis-managed Pro relay uses
+  a short-lived relay-device token minted by the vendor control plane. In both cases the
+  authenticated account identity, not a caller-supplied email, selects the tenant namespace.
 - **`get_transport(kind, **kw)`** (in `sync_folder.py`) selects between them by name —
   `"folder"` (needs `root=`) or `"relay"` (needs `base_url=` + `workspace_id=`) — the same
   factory pattern as `get_embedder`/`get_vector_index`; `relay` is imported lazily so a
@@ -122,8 +122,8 @@ python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/eng
 python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/engraphis --repo frontend
 ```
 
-Or use the **managed relay** instead of a shared folder. Create your own device token in
-the Team dashboard, then save it in the local dashboard or provide it through
+Or use the **managed relay** instead of a shared folder. Create your own scoped sync token in
+the Pro/Team dashboard, then save it in the local dashboard or provide it through
 `ENGRAPHIS_SYNC_TOKEN` / `--relay-token`. The browser and email never receive the account
 license key:
 
@@ -145,11 +145,48 @@ token determines who may access it. Viewers have `sync:read`; members and admins
 `sync:write`. New tokens default to 90 days. Revoking a token or disabling/deleting its
 owner takes effect immediately. `--relay-key` exists only as a hidden v1.0 migration alias.
 
+For the Engraphis-managed Pro relay, an official client with only an active `ENGR1` license
+exchanges that key once at `license.engraphis.com` for an `ENGRDT1` bearer. The account key is
+never sent to a bundle route, redirects are refused during exchange, and the device bearer is
+valid for at most one hour. A split data plane has no copy of the vendor registry, so license
+revocation reaches an already-issued bearer when that bearer expires; the next exchange then
+fails closed. The device identifier is a client-supplied binding hint, not hardware attestation
+or proof of possession, so the bearer file must still be protected against copying.
+
 The hosted server stores only the token hash. A device configured through the dashboard
 must retain the raw bearer for later sync rounds, so it writes the value atomically to
 `$ENGRAPHIS_STATE_DIR/sync.token` (default `~/.engraphis/sync.token`) with owner-only
 permissions where the platform supports them. Treat that local file and
 `ENGRAPHIS_SYNC_TOKEN` as secrets; revocation makes either copy unusable.
+
+### Managed-relay deployment contract
+
+The Engraphis-operated control plane and managed relay are separate deployments:
+
+| Setting | License control plane | Managed relay data plane |
+|---|---:|---:|
+| `ENGRAPHIS_SERVICE_MODE` | `vendor` | `relay` |
+| `ENGRAPHIS_RELAY_TOKEN_SIGNING_KEY` | required, secret | never present |
+| `ENGRAPHIS_RELAY_TOKEN_PUBKEY` | required | required, same public key |
+| `ENGRAPHIS_RELAY_TOKEN_AUDIENCE` | required | required, exact relay origin |
+| `ENGRAPHIS_RELAY_TOKEN_PREVIOUS_KEYS` | during bounded rotation | during bounded rotation |
+| `ENGRAPHIS_RELAY_DEVICE_TOKEN_TTL_SECONDS` | optional, 300-3600 | not used for issuance |
+
+`ENGRAPHIS_RELAY_TOKEN_PREVIOUS_KEYS` is a strict JSON list of
+`{"public_key":"<64 hex>","issued_before":<epoch>,"not_after":<epoch>}` objects. A retiring
+key can verify only tokens minted before its cutover and only until its absolute `not_after`,
+which may be at most one hour later. The cutoff is exclusive: a token timestamp equal to it is
+rejected. Remove the entry when verifier time reaches `not_after`; stale metadata fails readiness
+and verification closed. The old unbounded `...PREVIOUS_PUBKEYS` setting is rejected.
+See [Commercial operations](COMMERCIAL_OPERATIONS.md#relay-token-issuer-audience-and-rotation)
+for the staged rotation procedure. The control-plane serving gate proves issuer readiness;
+the dedicated data-plane probe must require
+`commercial.managed_relay_verifier_readiness()["ready"]`.
+
+`ENGRAPHIS_LEGACY_LICENSE_MIGRATION_UNTIL` belongs only on the vendor control plane during a
+one-time pre-registry migration. It is an absolute Unix timestamp, must be no more than 30 days
+ahead, and fails closed when absent, invalid, or expired. It does not enable raw Team keys on
+customer bundle routes.
 
 Schedule it like any other local job:
 
@@ -201,8 +238,10 @@ cadence based on the writer's role.
 The relay namespace comes from the signed account entitlement, while authorization comes
 from each person's scoped token. Team members therefore share one converged store without
 sharing the Team license key. Viewer tokens can list/download only; member/admin tokens
-may upload/delete. The legacy Team-key route is disabled by default in customer mode and
-can be enabled only for a documented migration window.
+may upload/delete. Customer-mode bundle routes always reject raw Team account keys; there is
+no environment switch that re-enables them. The hidden `--relay-key` spelling remains only as
+a CLI argument-compatibility alias. Team members migrating from an old shared key must create
+named-user scoped tokens on their customer deployment.
 
 ---
 

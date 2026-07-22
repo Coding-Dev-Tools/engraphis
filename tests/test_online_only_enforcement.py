@@ -171,7 +171,8 @@ def test_request_trial_key_posts_plan_with_client_headers(monkeypatch):
     class _Resp:
         def __enter__(self): return self
         def __exit__(self, *a): return False
-        def read(self): return json.dumps({"key": "ENGR1.fake", "days": 3}).encode()
+        def read(self, limit=-1):
+            return json.dumps({"key": "ENGR1.fake", "days": 3}).encode()[:limit]
 
     def _urlopen(req, timeout=None):
         captured["url"] = req.full_url
@@ -180,7 +181,7 @@ def test_request_trial_key_posts_plan_with_client_headers(monkeypatch):
         captured["accept"] = req.get_header("Accept")
         return _Resp()
 
-    monkeypatch.setattr(cl.urllib.request, "urlopen", _urlopen)
+    monkeypatch.setattr(cl, "_urlopen_no_redirect", _urlopen)
     key, reason, pending = cl.request_trial_key(
         "http://127.0.0.1", "mid-1", plan="pro", email="a@b.co")
     assert key == "ENGR1.fake" and pending is False

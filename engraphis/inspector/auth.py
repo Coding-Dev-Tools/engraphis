@@ -56,6 +56,38 @@ API_TOKEN_TTL_SECONDS = 90 * 86400
 INVITATION_TTL_SECONDS = 72 * 3600
 API_TOKEN_SCOPES = frozenset({"agent", "sync:read", "sync:write"})
 
+# An entitlement lapse does not immediately strand an already-provisioned workspace.
+# Existing authenticated users retain ordinary/local workspace writes for at most 24 hours,
+# then the installation becomes read-only recovery.  This is deliberately separate from
+# the paid-feature lease: managed sync, analytics/automation and agent writes still require
+# a live entitlement throughout this window.  The environment knob may shorten the window
+# for stricter operators, but can never extend the product maximum.
+ENTITLEMENT_GRACE_HOURS = 24.0
+ENTITLEMENT_GRACE_SECONDS = int(ENTITLEMENT_GRACE_HOURS * 3600)
+
+ENTITLEMENT_ACTIVE = "active"
+ENTITLEMENT_FREE = "free"
+ENTITLEMENT_WRITE_GRACE = "workspace_write_grace"
+ENTITLEMENT_RECOVERY = "recovery_read_only"
+
+# POST endpoints which are reads despite their transport verb.  Recovery mode must keep
+# authenticated reads available while refusing every ordinary mutation.
+_RECOVERY_READ_POST_PATHS = frozenset({
+    "/api/proactive-context",
+    "/api/intent/recall",
+    "/api/code/path",
+    "/api/code/impact",
+})
+
+# Relicensing is part of recovery.  These remain behind the existing admin/session and
+# deployment-binding checks; this list only prevents the read-only gate from blocking them.
+_RECOVERY_RELICENSE_PATHS = frozenset({
+    "/api/license/activate",
+    "/api/license/trial",
+    "/api/license/team-trial",
+    "/api/license/trials",
+})
+
 ROLES = ("viewer", "member", "admin")
 _ROLE_RANK = {r: i for i, r in enumerate(ROLES)}
 
@@ -130,6 +162,26 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);
 CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_events(actor_id);
+-- Durable entitlement transition state.  The singleton records the last verified paid
+-- observation and the one bounded workspace-write grace deadline.  Keeping it beside the
+-- users DB makes the transition restart-safe without mixing auth state into memory exports.
+CREATE TABLE IF NOT EXISTS entitlement_state (
+    singleton        INTEGER PRIMARY KEY CHECK (singleton = 1),
+    ever_paid        INTEGER NOT NULL DEFAULT 0,
+    last_plan        TEXT NOT NULL DEFAULT '',
+    last_key_id      TEXT NOT NULL DEFAULT '',
+    last_paid_at     REAL,
+    last_expires_at  REAL,
+    grace_started_at REAL,
+    grace_until      REAL,
+    clock_high_water REAL NOT NULL DEFAULT 0,
+    updated_at       REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS auth_metadata (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 """
 
 
@@ -228,6 +280,52 @@ def min_role(method: str, path: str) -> str:
     # would have shipped viewer-writable by omission; the default must fail toward
     # more authority required, not less.
     return "viewer" if method in ("GET", "HEAD") else "member"
+
+
+def entitlement_grace_seconds() -> int:
+    """Configured workspace-write grace, bounded to the product maximum of 24 hours."""
+    raw = os.environ.get("ENGRAPHIS_ENTITLEMENT_GRACE_HOURS", "").strip()
+    try:
+        hours = ENTITLEMENT_GRACE_HOURS if not raw else float(raw)
+    except ValueError:
+        hours = ENTITLEMENT_GRACE_HOURS
+    if not math.isfinite(hours):
+        hours = ENTITLEMENT_GRACE_HOURS
+    return int(max(0.0, min(ENTITLEMENT_GRACE_HOURS, hours)) * 3600)
+
+
+def recovery_request_allowed(method: str, path: str) -> bool:
+    """Whether an authenticated request is safe in read-only recovery mode.
+
+    Authentication, role checks, workspace scoping and route-specific validation still run;
+    this only classifies reads and the minimum operations needed to recover entitlement.
+    """
+    verb = (method or "").upper()
+    if verb in ("GET", "HEAD", "OPTIONS"):
+        return True
+    if verb == "POST" and path in _RECOVERY_READ_POST_PATHS:
+        return True
+    if verb == "POST" and path in _RECOVERY_RELICENSE_PATHS:
+        return True
+    return False
+
+
+def entitlement_denial(access: dict, *, growth: bool = False) -> dict:
+    """Stable structured body shared by the unified and legacy HTTP surfaces."""
+    state = access.get("state") or ENTITLEMENT_RECOVERY
+    if growth and state == ENTITLEMENT_WRITE_GRACE:
+        message = ("account growth is unavailable during the workspace-write grace; "
+                   "renew the paid entitlement first")
+    else:
+        message = ("this installation is in read-only recovery because its paid "
+                   "entitlement lapsed; renew to resume writes")
+    return {
+        "error": message,
+        "entitlement_state": state,
+        "grace_until": access.get("grace_until"),
+        "workspace_writes_allowed": bool(access.get("workspace_writes_allowed")),
+        "recovery": state == ENTITLEMENT_RECOVERY,
+    }
 
 
 def _hash_password(password: str, *, iterations: int, salt: Optional[bytes] = None) -> str:
@@ -438,6 +536,165 @@ class AuthStore:
     def count_active_users(self) -> int:
         return int(self.conn.execute(
             "SELECT COUNT(*) AS n FROM users WHERE disabled=0").fetchone()["n"])
+
+    @_serialized
+    def organization_id(self) -> str:
+        """Stable opaque customer-deployment identity for relay tenant scoping.
+
+        It is random (128 bits), contains no email/license PII, and lives in the durable
+        users database so restarts do not create a new relay namespace.  ``INSERT OR
+        IGNORE`` also makes first use safe if two processes race on a shared database.
+        """
+        key = "organization_id"
+        row = self.conn.execute(
+            "SELECT value FROM auth_metadata WHERE key=?", (key,)
+        ).fetchone()
+        if row and re.fullmatch(r"org_[0-9a-f]{32}", str(row["value"])):
+            return str(row["value"])
+        candidate = "org_" + secrets.token_hex(16)
+        self.conn.execute(
+            "INSERT OR IGNORE INTO auth_metadata(key,value,created_at) VALUES(?,?,?)",
+            (key, candidate, time.time()),
+        )
+        row = self.conn.execute(
+            "SELECT value FROM auth_metadata WHERE key=?", (key,)
+        ).fetchone()
+        if row is None:  # pragma: no cover - SQLite INSERT/SELECT invariant
+            raise AuthError("could not initialize organization identity")
+        value = str(row["value"])
+        if not re.fullmatch(r"org_[0-9a-f]{32}", value):
+            # Never silently use malformed legacy/local metadata as a tenant boundary.
+            raise AuthError("stored organization identity is invalid")
+        self.conn.commit()
+        return value
+
+    @_serialized
+    def entitlement_access(self, entitlement, *, now: Optional[float] = None) -> dict:
+        """Return and durably advance this installation's entitlement access state.
+
+        A server-verified paid entitlement is ``active``.  Once at least one user has been
+        provisioned, the first authoritative loss starts a single workspace-write grace of
+        at most 24 hours.  If the last verified key had an already-passed signed expiry, the
+        deadline is anchored to that expiry rather than to this process's next restart.
+        Afterwards, the installation remains authenticated but read-only until a paid
+        entitlement is verified again.
+
+        ``clock_high_water`` prevents an ordinary wall-clock rollback or restart from
+        extending a deadline.  This is honest-client durability, not a claim that a user who
+        controls the SQLite file cannot patch local enforcement.
+        """
+        observed = time.time() if now is None else float(now)
+        if not math.isfinite(observed):
+            observed = time.time()
+
+        conn = self.conn
+        row = conn.execute(
+            "SELECT * FROM entitlement_state WHERE singleton=1"
+        ).fetchone()
+        previous = dict(row) if row else {}
+        effective_now = max(observed, float(previous.get("clock_high_water") or 0.0))
+        users = int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+        paid = bool(getattr(entitlement, "is_paid", False))
+        grace_seconds = entitlement_grace_seconds()
+
+        if paid:
+            expires = getattr(entitlement, "expires", None)
+            try:
+                expires = float(expires) if expires is not None else None
+                if expires is not None and not math.isfinite(expires):
+                    expires = None
+            except (TypeError, ValueError):
+                expires = None
+            conn.execute(
+                "INSERT INTO entitlement_state(singleton,ever_paid,last_plan,last_key_id,"
+                "last_paid_at,last_expires_at,grace_started_at,grace_until,clock_high_water,"
+                "updated_at) VALUES(1,1,?,?,?,?,NULL,NULL,?,?) "
+                "ON CONFLICT(singleton) DO UPDATE SET ever_paid=1,last_plan=excluded.last_plan,"
+                "last_key_id=excluded.last_key_id,last_paid_at=excluded.last_paid_at,"
+                "last_expires_at=excluded.last_expires_at,grace_started_at=NULL,"
+                "grace_until=NULL,clock_high_water=excluded.clock_high_water,"
+                "updated_at=excluded.updated_at",
+                (str(getattr(entitlement, "plan", ""))[:32],
+                 str(getattr(entitlement, "key_id", ""))[:128],
+                 effective_now, expires, effective_now, effective_now),
+            )
+            conn.commit()
+            return {
+                "state": ENTITLEMENT_ACTIVE,
+                "grace_started_at": None,
+                "grace_until": None,
+                "grace_remaining_seconds": None,
+                "workspace_writes_allowed": True,
+                "recovery": False,
+                "provisioned": bool(users),
+            }
+
+        # A never-provisioned free installation keeps the existing local-first behavior.
+        # It has no paid-to-lapsed transition and therefore no grace/recovery state.
+        if users == 0:
+            if row:
+                conn.execute(
+                    "UPDATE entitlement_state SET clock_high_water=?,updated_at=? "
+                    "WHERE singleton=1", (effective_now, effective_now))
+                conn.commit()
+            return {
+                "state": ENTITLEMENT_FREE,
+                "grace_started_at": None,
+                "grace_until": None,
+                "grace_remaining_seconds": None,
+                "workspace_writes_allowed": True,
+                "recovery": False,
+                "provisioned": False,
+            }
+
+        grace_started = previous.get("grace_started_at")
+        grace_until = previous.get("grace_until")
+        if grace_until is None:
+            # Legacy provisioned databases have no state row.  Give them one bounded
+            # transition window on upgrade.  For installations observed while paid, a
+            # signed expiry already in the past is the authoritative start anchor.
+            start = effective_now
+            last_expires = previous.get("last_expires_at")
+            try:
+                parsed_expiry = float(last_expires) if last_expires is not None else None
+            except (TypeError, ValueError):
+                parsed_expiry = None
+            if parsed_expiry is not None and math.isfinite(parsed_expiry):
+                start = min(start, parsed_expiry)
+            grace_started = start
+            grace_until = start + grace_seconds
+            conn.execute(
+                "INSERT INTO entitlement_state(singleton,ever_paid,last_plan,last_key_id,"
+                "last_paid_at,last_expires_at,grace_started_at,grace_until,clock_high_water,"
+                "updated_at) VALUES(1,1,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(singleton) DO UPDATE SET ever_paid=1,"
+                "grace_started_at=excluded.grace_started_at,"
+                "grace_until=excluded.grace_until,"
+                "clock_high_water=excluded.clock_high_water,updated_at=excluded.updated_at",
+                (str(previous.get("last_plan") or "")[:32],
+                 str(previous.get("last_key_id") or "")[:128],
+                 previous.get("last_paid_at"), previous.get("last_expires_at"),
+                 grace_started, grace_until, effective_now, effective_now),
+            )
+        else:
+            grace_started = float(grace_started) if grace_started is not None else None
+            grace_until = float(grace_until)
+            conn.execute(
+                "UPDATE entitlement_state SET clock_high_water=?,updated_at=? "
+                "WHERE singleton=1", (effective_now, effective_now))
+        conn.commit()
+
+        in_grace = effective_now < float(grace_until)
+        state = ENTITLEMENT_WRITE_GRACE if in_grace else ENTITLEMENT_RECOVERY
+        return {
+            "state": state,
+            "grace_started_at": grace_started,
+            "grace_until": float(grace_until),
+            "grace_remaining_seconds": max(0, int(float(grace_until) - effective_now)),
+            "workspace_writes_allowed": in_grace,
+            "recovery": not in_grace,
+            "provisioned": True,
+        }
 
     # -- one-time team invitations ---------------------------------------------
 

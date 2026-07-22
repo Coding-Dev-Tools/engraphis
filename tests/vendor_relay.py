@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import json
 import urllib.error
 import urllib.parse
 
@@ -13,8 +14,9 @@ from engraphis.inspector import license_cloud
 from engraphis.licensing import LicenseError
 
 
-def wire_vendor_relay(monkeypatch) -> TestClient:
+def wire_vendor_relay(monkeypatch, tmp_path) -> TestClient:
     """Route ``urllib`` vendor-client calls through the real FastAPI relay endpoints."""
+    monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(tmp_path / "vendor-relay.db"))
     app = FastAPI()
     app.include_router(license_cloud.router)
 
@@ -31,8 +33,8 @@ def wire_vendor_relay(monkeypatch) -> TestClient:
         def __init__(self, data: bytes):
             self._data = data
 
-        def read(self):
-            return self._data
+        def read(self, limit=-1):
+            return self._data if limit < 0 else self._data[:limit]
 
         def __enter__(self):
             return self
@@ -43,7 +45,23 @@ def wire_vendor_relay(monkeypatch) -> TestClient:
     def _urlopen(request, timeout=None):
         del timeout
         path = urllib.parse.urlsplit(request.full_url).path
-        response = vendor.post(path, content=request.data or b"", headers=dict(request.headers))
+        # The customer and vendor are separate production processes. This in-process
+        # adapter must therefore switch the shared test settings only for the vendor call.
+        from engraphis.config import settings
+        from engraphis.inspector import license_registry
+        prior_mode = settings.service_mode
+        settings.service_mode = "vendor"
+        try:
+            payload = json.loads((request.data or b"{}").decode("utf-8"))
+            key = payload.get("key") if isinstance(payload, dict) else None
+            if key:
+                # This fixture represents a previously fulfilled purchase. The hardened
+                # vendor gate accepts only keys present in its authoritative registry.
+                license_registry.record_issued(key)
+            response = vendor.post(
+                path, content=request.data or b"", headers=dict(request.headers))
+        finally:
+            settings.service_mode = prior_mode
         if response.status_code >= 400:
             raise urllib.error.HTTPError(
                 request.full_url, response.status_code, response.text,
@@ -51,5 +69,6 @@ def wire_vendor_relay(monkeypatch) -> TestClient:
             )
         return _Response(response.content)
 
-    monkeypatch.setattr("urllib.request.urlopen", _urlopen)
+    from engraphis import cloud_license
+    monkeypatch.setattr(cloud_license, "_urlopen_no_redirect", _urlopen)
     return vendor

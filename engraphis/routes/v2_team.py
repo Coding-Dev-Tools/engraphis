@@ -23,8 +23,8 @@ from engraphis import licensing
 from engraphis.config import resolve_license_server_url, settings
 from engraphis.netutil import client_ip, is_local_request
 from engraphis.inspector.auth import (
-    API_TOKEN_SCOPES, PBKDF2_ITERATIONS, SESSION_TTL_SECONDS, AccountLockedError,
-    AuthError, AuthStore, role_at_least)
+    API_TOKEN_SCOPES, ENTITLEMENT_ACTIVE, PBKDF2_ITERATIONS, SESSION_TTL_SECONDS,
+    AccountLockedError, AuthError, AuthStore, entitlement_denial, role_at_least)
 
 logger = logging.getLogger("engraphis.team")
 
@@ -267,17 +267,47 @@ def attach(app: FastAPI, service):
             raise HTTPException(status_code=403, detail={"error": "insufficient role"})
         return u
 
+    def _entitlement_access() -> dict:
+        return store.entitlement_access(licensing.current_license())
+
+    def _require_growth_entitlement() -> dict:
+        """Account growth never consumes the workspace-write grace.
+
+        Existing users may keep ordinary local workspace writes during the bounded grace,
+        but setup, seats, invitations, role promotion/reactivation and new agent tokens all
+        require a currently verified paid entitlement.
+        """
+        access = _entitlement_access()
+        if access["state"] != ENTITLEMENT_ACTIVE:
+            detail = entitlement_denial(access, growth=True)
+            error = licensing.LicenseError(detail["error"], feature="team")
+            error.entitlement_access = access
+            raise error
+        return access
+
     @router.get("/state")
     def state(request: Request):
         users = store.count_users()
         entitlement = licensing.current_license()
+        access = store.entitlement_access(entitlement)
         team_licensed = entitlement.has("team")
         paid = entitlement.is_paid
-        return {"enabled": bool(paid or users),
+        body = {"enabled": bool(paid or users),
                 "needs_setup": bool(paid and users == 0),
                 "licensed": team_licensed,
                 "team_locked": bool(users and not paid),
                 "user": _user(request)}
+        # Preserve the zero-user/free bootstrap response byte-for-byte for older clients;
+        # transition fields become relevant as soon as entitlement or users exist.
+        if paid or users:
+            body.update({
+                "entitlement_state": access["state"],
+                "grace_until": access["grace_until"],
+                "grace_remaining_seconds": access["grace_remaining_seconds"],
+                "workspace_writes_allowed": access["workspace_writes_allowed"],
+                "recovery_read_only": access["recovery"],
+            })
+        return body
 
     @router.post("/setup")
     def setup(body: SetupReq, request: Request, response: Response):
@@ -389,6 +419,7 @@ def attach(app: FastAPI, service):
 
     def _create_and_send_invitation(body, request: Request) -> dict:
         admin = _require(request, "admin")
+        _require_growth_entitlement()
         try:
             invitation = store.create_invitation(
                 body.email, body.name, body.role, created_by=admin["id"],
@@ -415,6 +446,7 @@ def attach(app: FastAPI, service):
 
     @router.post("/invitations/accept")
     def accept_invitation(body: InvitationAcceptReq, request: Request, response: Response):
+        _require_growth_entitlement()
         try:
             # Re-read the entitlement at acceptance time: an invitation may have been
             # issued under a larger Team plan and must not oversubscribe a downgrade.
@@ -448,6 +480,7 @@ def attach(app: FastAPI, service):
     @router.post("/invitations/{invite_id}/resend")
     def resend_invitation(invite_id: str, request: Request):
         admin = _require(request, "admin")
+        _require_growth_entitlement()
         try:
             invitation = store.resend_invitation(invite_id)
         except AuthError as exc:
@@ -496,6 +529,19 @@ def attach(app: FastAPI, service):
     def upd_user(body: UpdUserReq, request: Request):
         admin = _require(request, "admin")
         before = store.get_user(body.user_id)
+        # Disabling or demoting an account reduces access and remains available during the
+        # workspace-write grace.  Re-enabling or promoting grows authority and therefore
+        # requires a currently verified paid entitlement.
+        promoting = bool(
+            body.role is not None and before is not None
+            and role_at_least(body.role, "viewer")
+            and not role_at_least(before["role"], body.role)
+        )
+        reenabling = bool(
+            body.disabled is False and before is not None and before.get("disabled")
+        )
+        if promoting or reenabling:
+            _require_growth_entitlement()
         try:
             u = store.update_user(body.user_id, role=body.role, disabled=body.disabled,
                                   seat_limit=licensing.current_license().seats)
@@ -585,6 +631,7 @@ def attach(app: FastAPI, service):
     @router.post("/token")
     def create_token(body: TokenReq, request: Request):
         u = _require(request, "viewer")
+        _require_growth_entitlement()
         allowed = {"agent", "sync:read"}
         if role_at_least(u["role"], "member"):
             allowed.add("sync:write")

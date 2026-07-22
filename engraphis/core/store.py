@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import threading
 import time
 import unicodedata
@@ -425,20 +426,14 @@ class Store:
                  allowed_workspaces: Optional[set] = None,
                  connect: Optional[Callable[[str], Any]] = None) -> None:
         self.path = path
+        self._connect = connect
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        if connect is not None:
-            # Injected connection factory (e.g. the SQLCipher encrypted backend). It owns
-            # opening + keying + row_factory; the core never imports the concrete driver.
-            raw_conn = connect(path)
-        else:
-            raw_conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
-            raw_conn.row_factory = sqlite3.Row
+        raw_conn = self._open_connection(path)
         # Serialize the shared connection so concurrent threadpool handlers can't interleave
         # transactions on it (see _SerializedConnection). All Store/service/backend access
         # goes through self.conn, so wrapping here covers every writer.
         self.conn = _SerializedConnection(raw_conn)
-        self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.has_fts5 = False
@@ -446,49 +441,268 @@ class Store:
         self.allowed_workspaces: Optional[frozenset] = (
             frozenset(allowed_workspaces) if allowed_workspaces else None
         )
-        self.init_schema()
-
-    def _backup_before_v4_migration(self) -> None:
-        """Best-effort snapshot of the database file before running the v4
-        canonicalization/edge-support backfills below.
-
-        Uses SQLite's own online backup API via a second connection to the same file,
-        which is safe to run against a live WAL-mode database. This must never block or
-        fail startup — an upgrade that can't snapshot itself should still proceed rather
-        than refuse to start, so every failure here is swallowed silently."""
         try:
-            if self.path in (":memory:", "") or self.path.startswith("file::memory:"):
-                return
-            backup_path = f"{self.path}.pre-migration-v4.bak"
-            if os.path.exists(backup_path):
-                return  # already have one from a prior attempt; don't overwrite it
-            src = sqlite3.connect(self.path)
+            self.init_schema()
+            # journal_mode is persistent state, so set it only after a required backup
+            # and the transactional migration have completed successfully.
+            self.conn.execute("PRAGMA journal_mode=WAL")
+        except BaseException:
             try:
-                dst = sqlite3.connect(backup_path)
-                try:
-                    src.backup(dst)
-                    dst.execute("PRAGMA quick_check")
-                finally:
-                    dst.close()
+                if self.conn.in_transaction:
+                    self.conn.rollback()
             finally:
-                src.close()
-        except Exception:
-            pass
+                self.conn.close()
+            raise
+
+    def _open_connection(self, path: str):
+        """Open *path* with the primary database's connection semantics."""
+        if self._connect is not None:
+            # Injected factories own opening, keying, row_factory, and exception
+            # translation (notably the SQLCipher backend).
+            return self._connect(path)
+        conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    @staticmethod
+    def _raw_connection(conn):
+        """Unwrap core/backend adapters for sqlite3's type-checked backup API."""
+        seen: set[int] = set()
+        while hasattr(conn, "_raw") and id(conn) not in seen:
+            seen.add(id(conn))
+            conn = getattr(conn, "_raw")
+        return conn
+
+    @staticmethod
+    def _quick_check(conn) -> bool:
+        rows = conn.execute("PRAGMA quick_check").fetchall()
+        return len(rows) == 1 and str(rows[0][0]).casefold() == "ok"
+
+    @staticmethod
+    def _same_file(left, right) -> bool:
+        return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+    @staticmethod
+    def _checked_backup_file(path: str, *, allow_missing: bool = False):
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            if allow_missing:
+                return None
+            raise
+        attributes = getattr(info, "st_file_attributes", 0)
+        reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        if (stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode)
+                or (reparse and attributes & reparse)
+                or getattr(info, "st_nlink", 1) != 1):
+            raise RuntimeError("schema backup path is not a private regular file")
+        return info
+
+    @staticmethod
+    def _fsync_backup_parent(path: str) -> None:
+        if os.name == "nt":
+            return
+        descriptor = os.open(
+            str(Path(path).parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _logical_digest(conn) -> str:
+        digest = hashlib.sha256()
+        for statement in conn.iterdump():
+            digest.update(statement.encode("utf-8"))
+            digest.update(b"\n")
+        return digest.hexdigest()
+
+    def _cleanup_v4_backup_temps(self, backup_path: str) -> None:
+        stable = Path(backup_path)
+        pattern = re.compile(
+            r"^%s\.tmp-[0-9]+-[0-9]+-[0-9]+$" % re.escape(stable.name))
+        try:
+            entries = tuple(stable.parent.iterdir())
+        except OSError:
+            return
+        changed = False
+        for entry in entries:
+            if not pattern.fullmatch(entry.name):
+                continue
+            try:
+                info = os.lstat(str(entry))
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                if getattr(info, "st_nlink", 1) == 1:
+                    entry.unlink()
+                    changed = True
+                    continue
+                try:
+                    published = os.lstat(str(stable))
+                except FileNotFoundError:
+                    continue
+                if self._same_file(info, published):
+                    entry.unlink()
+                    changed = True
+            except OSError:
+                pass
+        if changed:
+            self._fsync_backup_parent(backup_path)
+
+    def _backup_before_v4_migration(self) -> str:
+        """Create and verify the mandatory pre-v4 backup without mutating source data.
+
+        Source and destination both use the injected connector, so SQLCipher databases
+        remain keyed throughout. The caller holds ``BEGIN IMMEDIATE`` on the primary
+        connection, preventing another writer from changing the source between this
+        snapshot and the migration commit. Only a quick-checked temporary backup may
+        atomically replace the stable backup path; every failure aborts the migration.
+        """
+        if self.path in (":memory:", "") or self.path.startswith("file::memory:"):
+            raise RuntimeError("schema v4 migration requires a durable pre-migration backup")
+        backup_path = f"{self.path}.pre-migration-v4.bak"
+        self._cleanup_v4_backup_temps(backup_path)
+        temp_path = (
+            f"{backup_path}.tmp-{os.getpid()}-{threading.get_ident()}-{time.time_ns()}"
+        )
+        source = destination = None
+        try:
+            flags = (
+                os.O_RDWR | os.O_CREAT | os.O_EXCL
+                | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            )
+            descriptor = os.open(temp_path, flags, 0o600)
+            created = os.fstat(descriptor)
+            os.close(descriptor)
+            source = self._open_connection(self.path)
+            destination = self._open_connection(temp_path)
+            current = self._checked_backup_file(temp_path)
+            if not self._same_file(created, current):
+                raise RuntimeError("schema backup path changed while opening")
+            self._raw_connection(source).backup(self._raw_connection(destination))
+            destination.commit()
+            if not self._quick_check(destination):
+                raise RuntimeError("backup quick_check did not return ok")
+            source_digest = self._logical_digest(source)
+            backup_digest = self._logical_digest(destination)
+            if source_digest != backup_digest:
+                raise RuntimeError("backup logical digest did not match source")
+            destination.close()
+            destination = None
+            source.close()
+            source = None
+            current = self._checked_backup_file(temp_path)
+            if not self._same_file(created, current):
+                raise RuntimeError("schema backup path changed while writing")
+            descriptor = os.open(
+                temp_path, os.O_RDWR | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOFOLLOW", 0))
+            try:
+                opened = os.fstat(descriptor)
+                if not self._same_file(current, opened):
+                    raise RuntimeError("schema backup path changed before flush")
+                fchmod = getattr(os, "fchmod", None)
+                if fchmod is not None:
+                    fchmod(descriptor, 0o600)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            try:
+                os.link(temp_path, backup_path)
+            except FileExistsError:
+                stable_info = self._checked_backup_file(backup_path)
+                stable = self._open_connection(backup_path)
+                try:
+                    if not self._quick_check(stable):
+                        raise RuntimeError("existing schema backup failed quick_check")
+                    if self._logical_digest(stable) != backup_digest:
+                        raise RuntimeError("existing schema backup does not match source")
+                finally:
+                    stable.close()
+                if not self._same_file(
+                        stable_info, self._checked_backup_file(backup_path)):
+                    raise RuntimeError("existing schema backup changed while validating")
+                os.unlink(temp_path)
+                self._fsync_backup_parent(backup_path)
+                return backup_path
+            published = os.lstat(backup_path)
+            if not self._same_file(current, published):
+                raise RuntimeError("schema backup publication changed")
+            os.unlink(temp_path)
+            stable_info = self._checked_backup_file(backup_path)
+            if not self._same_file(current, stable_info):
+                raise RuntimeError("schema backup publication was replaced")
+            self._fsync_backup_parent(backup_path)
+            return backup_path
+        except BaseException as exc:
+            for conn in (destination, source):
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+            try:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+            except OSError:
+                pass
+            raise RuntimeError(
+                "schema v4 migration aborted: could not create and verify the "
+                "pre-migration backup"
+            ) from exc
+
+    def _execute_script_transactional(self, script: str) -> None:
+        """Execute a SQLite script without ``executescript``'s implicit COMMIT."""
+        statement = ""
+        # Some callers compose adjacent string literals with no newline between their
+        # semicolon-terminated statements, so split at complete semicolon boundaries
+        # rather than assuming one statement per source line. ``complete_statement``
+        # correctly keeps trigger ``BEGIN ...; ...; END;`` bodies together.
+        for character in script:
+            statement += character
+            if character == ";" and sqlite3.complete_statement(statement):
+                sql = statement.strip()
+                if sql:
+                    self.conn.execute(sql)
+                statement = ""
+        if statement.strip():
+            raise sqlite3.OperationalError("incomplete schema statement")
 
     # ── schema ──────────────────────────────────────────────────────────────
     def init_schema(self) -> None:
+        objects = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table','view','index','trigger') "
+            "AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        object_names = {str(row[0]) for row in objects}
         previous_version = 0
-        try:
+        if "schema_migrations" in object_names:
             row = self.conn.execute(
                 "SELECT MAX(version) AS v FROM schema_migrations"
             ).fetchone()
-            previous_version = int(row["v"]) if row and row["v"] is not None else 0
-        except Exception:
-            # A new database has no migration table yet. Injected SQLite-compatible
-            # drivers may use their own exception types, so treat any probe failure as
-            # "no prior schema" and let the canonical schema create it below.
-            previous_version = 0
-        self.conn.executescript(SCHEMA_SQL)
+            value = row[0] if row is not None else None
+            previous_version = int(value) if value is not None else 0
+        if previous_version > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"database schema {previous_version} is newer than supported "
+                f"schema {SCHEMA_VERSION}"
+            )
+        needs_backup = bool(object_names) and previous_version < SCHEMA_VERSION
+        try:
+            # Reserve the writer before the snapshot. This is read/locking state only;
+            # every schema/data transform remains inside the transaction below.
+            self.conn.execute("BEGIN IMMEDIATE")
+            if needs_backup:
+                self._backup_before_v4_migration()
+            self._apply_schema(previous_version)
+            self.conn.commit()
+        except BaseException:
+            if self.conn.in_transaction:
+                self.conn.rollback()
+            raise
+
+    def _apply_schema(self, previous_version: int) -> None:
+        self._execute_script_transactional(SCHEMA_SQL)
         self.has_fts5 = _fts5_available(self.conn)
         self.conn.execute(FTS_SQL_FTS5 if self.has_fts5 else FTS_SQL_FALLBACK)
         # Additive columns for DBs created before they existed — CREATE TABLE IF NOT
@@ -531,11 +745,8 @@ class Store:
         # v4 makes canonical identity and edge evidence explicit and indexed. Run the
         # backfills before creating representative-only uniqueness indexes so exact
         # normalized aliases can safely converge onto one deterministic canonical id.
-        # A real upgrade (not a fresh DB) gets a best-effort pre-migration snapshot first.
-        if 1 <= previous_version < 4:
-            self._backup_before_v4_migration()
         self._backfill_entity_canonicalization()
-        self.conn.executescript(
+        self._execute_script_transactional(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_workspace_canonical "
             "ON entities(workspace_id, normalized_name, etype) "
             "WHERE repo_id IS NULL AND canonical_id=id AND normalized_name<>'';"
@@ -549,7 +760,7 @@ class Store:
         )
         self._backfill_edge_supports()
         self._deduplicate_live_edges()
-        self.conn.executescript(
+        self._execute_script_transactional(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_edge_workspace_live_unique "
             "ON edges(workspace_id, src, dst, relation, layer) "
             "WHERE workspace_id IS NOT NULL AND repo_id IS NULL "
@@ -593,7 +804,6 @@ class Store:
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?,?)",
             (SCHEMA_VERSION, now_ts()),
         )
-        self.conn.commit()
 
     def _backfill_entity_canonicalization(self) -> None:
         rows = [dict(row) for row in self.conn.execute(

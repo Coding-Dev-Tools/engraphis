@@ -178,9 +178,76 @@ def test_email_outbox_recovers_expired_claim_and_terminal_failure(monkeypatch, t
     assert result["processed"] == 2 and result["sent"] == 1
     assert delivered == ["person@example.com"]
     assert email_outbox.health()["failed"] == 1
-    assert email_outbox.requeue_failed() == 1
+    assert email_outbox.requeue_failed([terminal]) == 1
     assert email_outbox.process_due(lambda *_args: ("resend", "provider-terminal"))["sent"] == 1
     assert email_outbox.health()["healthy"] is True
+
+
+def test_manual_email_requeue_is_explicit_and_permanently_bounded(monkeypatch, tmp_path):
+    monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(tmp_path / "relay.db"))
+    message_id = email_outbox.enqueue(
+        "reset", "person@example.com", "Reset", "Private body", max_attempts=1)
+
+    def fail(*_args):
+        raise RuntimeError("provider down")
+
+    for cycle in range(email_outbox.MAX_MANUAL_REQUEUES + 1):
+        with pytest.raises(RuntimeError):
+            email_outbox.deliver_now(message_id, fail)
+        expected = 1 if cycle < email_outbox.MAX_MANUAL_REQUEUES else 0
+        assert email_outbox.requeue_failed([message_id]) == expected
+        if expected == 0:
+            break
+
+
+def test_failed_email_resolution_requires_durable_claim_and_redacts_atomically(
+        monkeypatch, tmp_path):
+    from engraphis import billing
+
+    monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(tmp_path / "relay.db"))
+    monkeypatch.setenv("ENGRAPHIS_WEBHOOK_STATE", str(tmp_path / "webhooks.db"))
+    claim = "ful:order:manual-closeout"
+    message_id = email_outbox.enqueue(
+        "purchase_license", "buyer@example.com", "Private subject",
+        "Your key is ENGR1.private.recovery", reply_to="support@example.com",
+        idempotency_key="purchase-license:manual-closeout",
+        retention_claim=claim, max_attempts=1)
+    conn = license_registry.connect()
+    try:
+        conn.execute(
+            "INSERT INTO license_fulfillment_keys(retention_claim,license_key,created_at) "
+            "VALUES (?,?,?)", (claim, "ENGR1.private.recovery", 1.0))
+        conn.commit()
+    finally:
+        conn.close()
+
+    with pytest.raises(RuntimeError):
+        email_outbox.deliver_now(
+            message_id,
+            lambda *_args: (_ for _ in ()).throw(RuntimeError("provider private body")))
+    assert email_outbox.health()["healthy"] is False
+    # Never destroy exact-key recovery while Polar can still retry an unfinished claim.
+    assert email_outbox.resolve_failed([message_id], limit=1) == 0
+
+    assert billing.claim_webhook(claim) == "claimed"
+    billing.complete_webhook(claim)
+    assert email_outbox.resolve_failed([message_id], limit=1) == 1
+    conn = license_registry.connect()
+    try:
+        row = conn.execute(
+            "SELECT status,recipient,subject,text_body,reply_to,retention_claim,last_error "
+            "FROM email_outbox WHERE id=?", (message_id,)).fetchone()
+        assert dict(row) == {
+            "status": "resolved", "recipient": "", "subject": "", "text_body": "",
+            "reply_to": None, "retention_claim": "", "last_error": "",
+        }
+        assert conn.execute(
+            "SELECT 1 FROM license_fulfillment_keys WHERE retention_claim=?", (claim,)
+        ).fetchone() is None
+    finally:
+        conn.close()
+    assert email_outbox.health()["healthy"] is True
+    assert email_outbox.resolve_failed([message_id], limit=1) == 0
 
 
 def test_email_outbox_preserves_strongest_event_across_delivery_race(
@@ -329,6 +396,14 @@ def test_vendor_readiness_proves_matching_signer_but_honors_release_gate(
     monkeypatch.setattr(licensing, "_VENDOR_PUBKEY_HEX", public)
     monkeypatch.setattr(licensing, "VENDOR_SIGNER_RELEASE_READY", False)
     monkeypatch.setenv("ENGRAPHIS_VENDOR_SIGNING_KEY", seed.hex())
+    relay_seed = b"\x53" * 32
+    monkeypatch.setenv("ENGRAPHIS_RELAY_TOKEN_SIGNING_KEY", relay_seed.hex())
+    monkeypatch.setenv(
+        "ENGRAPHIS_RELAY_TOKEN_PUBKEY",
+        licensing.ed25519_public_key(relay_seed).hex(),
+    )
+    monkeypatch.setenv(
+        "ENGRAPHIS_RELAY_TOKEN_AUDIENCE", "https://relay.example.test")
     admin_token = "vendor-admin-secret-at-least-32-characters"
     monkeypatch.setenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", admin_token)
     monkeypatch.setenv("POLAR_WEBHOOK_SECRET", "polar-webhook-secret")
@@ -376,6 +451,8 @@ def test_vendor_readiness_proves_matching_signer_but_honors_release_gate(
     operational = commercial.vendor_readiness()
     assert operational["backup"] is False and operational["ready"] is False
     assert operational["manual_fulfillment"] is True
+    with TestClient(app) as client:
+        assert client.get("/api/ready").status_code == 503
 
 
 def test_manual_fulfillment_fallback_is_an_authenticated_ops_alert(monkeypatch, tmp_path):
@@ -486,6 +563,70 @@ def test_expired_unconfirmed_trial_claim_does_not_squat_on_email(monkeypatch, tm
     )
     assert second_id != first_id
     assert second_token and second_state == "created"
+
+
+def test_confirmed_trial_keeps_permanent_deployment_tombstone_after_claim_sweep(
+        monkeypatch, tmp_path):
+    from engraphis.inspector import license_cloud, webhooks
+
+    monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(tmp_path / "relay.db"))
+    monkeypatch.setattr(webhooks, "issue_key", lambda *_args, **_kwargs: "signed-key")
+    deployment_token = "deployment-binding-" + "x" * 24
+    claim_id, confirmation, state = license_cloud._reserve_trial_claim(
+        "machine-original", "first@example.com", "team", deployment_token,
+        "https://memory.example.com")
+    assert claim_id and confirmation and state == "created"
+    assert license_cloud._verify_trial_claim_token(confirmation).status_code == 200
+
+    conn = license_registry.connect()
+    try:
+        conn.execute("UPDATE trial_claims SET expires_at=0 WHERE claim_id=?", (claim_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    new_id, new_token, new_state = license_cloud._reserve_trial_claim(
+        "machine-rotated", "second@example.com", "team", deployment_token,
+        "https://other.example.com")
+    assert new_id == "" and new_token is None and new_state == "used"
+    conn = license_registry.connect()
+    try:
+        grant = conn.execute(
+            "SELECT deployment_hash FROM trial_grants WHERE machine_id='machine-original'"
+        ).fetchone()
+        assert grant["deployment_hash"] == license_cloud._deployment_hash(deployment_token)
+        assert conn.execute(
+            "SELECT 1 FROM trial_claims WHERE claim_id=?", (claim_id,)).fetchone() is None
+    finally:
+        conn.close()
+
+
+def test_trial_grant_upgrade_backfills_deployment_binding_before_index(
+        monkeypatch, tmp_path):
+    from engraphis.inspector import license_cloud
+
+    monkeypatch.setenv("ENGRAPHIS_RELAY_DB", str(tmp_path / "relay.db"))
+    conn = license_registry.connect()
+    try:
+        conn.execute(
+            "CREATE TABLE trial_grants(machine_id TEXT PRIMARY KEY,email TEXT,"
+            "plan TEXT,issued_at REAL NOT NULL)")
+        conn.execute(
+            "INSERT INTO trial_grants VALUES ('legacy-machine','legacy@example.com',"
+            "'team',1)")
+        conn.executescript(license_cloud._TRIAL_CLAIM_SCHEMA)
+        conn.execute(
+            "INSERT INTO trial_claims(claim_id,confirmation_hash,deployment_hash,"
+            "machine_id,email,plan,created_at,expires_at,confirmed_at) "
+            "VALUES ('clm_legacy','confirmation','%s','legacy-machine',"
+            "'legacy@example.com','team',1,2,2)" % ("a" * 64))
+        license_cloud._ensure_trial_plan_column(conn)
+        row = conn.execute(
+            "SELECT deployment_hash FROM trial_grants WHERE machine_id='legacy-machine'"
+        ).fetchone()
+        assert row["deployment_hash"] == "a" * 64
+    finally:
+        conn.close()
 
 
 def test_commercial_backup_is_encrypted_verified_and_restorable(monkeypatch, tmp_path):
@@ -622,6 +763,63 @@ def test_vendor_backup_endpoint_requires_admin_and_redacts_storage(monkeypatch):
     assert response.json() == {"ok": True, "verified": True}
 
 
+def test_vendor_email_retry_requires_one_explicit_message(monkeypatch):
+    from engraphis import vendor_app
+    from engraphis.config import settings
+
+    monkeypatch.setattr(settings, "service_mode", "vendor")
+    admin_token = "vendor-admin-secret-at-least-32-characters"
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", admin_token)
+    selected = []
+    monkeypatch.setattr(
+        email_outbox, "requeue_failed",
+        lambda ids, *, limit: selected.extend(ids) or 1)
+    monkeypatch.setattr(
+        email_outbox, "deliver_now",
+        lambda message_id, _deliverer: message_id == "eml_selected")
+    app = vendor_app.create_app()
+    headers = {"Authorization": "Bearer " + admin_token}
+    with TestClient(app) as client:
+        assert client.post("/ops/email/retry").status_code == 401
+        assert client.post("/ops/email/retry", headers=headers).status_code == 400
+        response = client.post(
+            "/ops/email/retry?message_id=eml_selected", headers=headers)
+    assert response.json()["requeued"] == 1
+    assert selected == ["eml_selected"]
+
+
+def test_vendor_email_resolution_requires_auth_selected_id_and_ack(monkeypatch):
+    from engraphis import vendor_app
+    from engraphis.config import settings
+
+    monkeypatch.setattr(settings, "service_mode", "vendor")
+    admin_token = "vendor-admin-secret-at-least-32-characters"
+    monkeypatch.setenv("ENGRAPHIS_VENDOR_ADMIN_TOKEN", admin_token)
+    selected = []
+    monkeypatch.setattr(
+        email_outbox, "resolve_failed",
+        lambda ids, *, limit: selected.extend(ids) or 1)
+    app = vendor_app.create_app()
+    headers = {"Authorization": "Bearer " + admin_token}
+    with TestClient(app) as client:
+        assert client.post(
+            "/ops/email/resolve?message_id=eml_selected&acknowledged=true"
+        ).status_code == 401
+        assert client.post("/ops/email/resolve", headers=headers).status_code == 400
+        assert client.post(
+            "/ops/email/resolve?message_id=wrong&acknowledged=true", headers=headers
+        ).status_code == 400
+        assert client.post(
+            "/ops/email/resolve?message_id=eml_selected", headers=headers
+        ).status_code == 400
+        response = client.post(
+            "/ops/email/resolve?message_id=eml_selected&acknowledged=true",
+            headers=headers)
+    assert response.status_code == 200
+    assert response.json() == {"resolved": 1}
+    assert selected == ["eml_selected"]
+
+
 def test_customer_operations_readiness_is_boolean_only_and_fail_closed(monkeypatch):
     from engraphis import commercial
     from engraphis.config import settings
@@ -667,6 +865,15 @@ def test_commercial_manifest_rejects_product_mapping_and_checkout_drift():
     assert any("checkout URL" in error for error in errors)
 
 
+def test_commercial_manifest_repository_gate_accepts_live_pypi_badge():
+    from engraphis.commercial import manifest
+    from scripts.check_commercial_manifest import _check_repository
+
+    errors = []
+    _check_repository(manifest(), errors)
+    assert errors == []
+
+
 def _entrypoint_paths(application):
     """Collect every mounted path, descending into FastAPI's deferred ``_IncludedRouter``
     wrappers — ``app.routes`` stops flattening ``include_router`` in fastapi>=0.139, so a
@@ -699,7 +906,10 @@ def test_legacy_entrypoint_customer_mode_excludes_vendor_control_plane(monkeypat
     assert "/webhooks/polar" not in paths
     assert "/license/v1/register" not in paths
     assert "/license/v1/revoke/{key_id}" not in paths
-    assert "/license/v1/{compat_path:path}" in paths
+    assert "/license/v1/keys" not in paths
+    # Ordinary customer deployments are no longer public compatibility forwarders;
+    # only the explicit relay-mode entrypoint carries the bounded sunset proxy.
+    assert "/license/v1/{compat_path:path}" not in paths
     assert any(path.startswith("/relay/v1/") for path in paths)
 
 

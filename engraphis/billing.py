@@ -258,6 +258,23 @@ def webhook_backlog_healthy() -> bool:
             conn.close()
 
 
+def webhook_claim_fulfilled(claim_id: str) -> bool:
+    """Read-only fulfillment check used to release crash-recovery email bodies."""
+    if not claim_id:
+        return False
+    conn = _dedup_conn()
+    if conn is None:
+        return False
+    try:
+        row = conn.execute(
+            "SELECT state FROM processed WHERE webhook_id=?", (claim_id,)).fetchone()
+        return bool(row and str(row[0]) == "fulfilled")
+    except sqlite3.Error as exc:
+        raise WebhookStateError("could not read durable webhook state") from exc
+    finally:
+        conn.close()
+
+
 def claim_webhook(webhook_id: str) -> str:
     """Atomically determine this delivery's state and claim it if free.
 
@@ -349,7 +366,14 @@ def release_webhook(webhook_id: str) -> None:
         return
     try:
         with conn:
-            conn.execute("DELETE FROM processed WHERE webhook_id = ?", (webhook_id,))
+            # Never erase a completed idempotency tombstone. In particular,
+            # ``_finalize_webhook`` commits its claims before cross-database outbox
+            # redaction; if that cleanup then fails, the caller's best-effort rollback
+            # reaches this function. Deleting ``fulfilled`` here would reopen the exact
+            # delivery/fulfillment and permit another entitlement to be minted.
+            conn.execute(
+                "DELETE FROM processed WHERE webhook_id=? AND state='processing'",
+                (webhook_id,))
     except sqlite3.Error as exc:
         raise WebhookStateError("could not release durable webhook claim") from exc
     finally:
@@ -412,6 +436,25 @@ def record_known_seats(subscription_id: str, seats: int,
     finally:
         conn.close()
 
+
+def _redact_fulfillment_recovery(fulfillment_id: str) -> None:
+    """Best-effort both plaintext copies, failing retryably if either store is down."""
+    cleanup_error = None
+    try:
+        from engraphis.inspector import license_registry
+        license_registry.redact_fulfillment_key(fulfillment_id)
+    except Exception as exc:
+        cleanup_error = exc
+    try:
+        from engraphis import email_outbox
+        email_outbox.redact_retention_claim(fulfillment_id)
+    except Exception as exc:
+        cleanup_error = cleanup_error or exc
+    if cleanup_error is not None:
+        raise WebhookStateError(
+            "could not redact finalized license delivery") from cleanup_error
+
+
 def _finalize_webhook(delivery_id: str, fulfillment_id: str,
                       seat_baseline: Optional[tuple] = None,
                       transient_claim: str = "") -> None:
@@ -453,6 +496,14 @@ def _finalize_webhook(delivery_id: str, fulfillment_id: str,
         raise WebhookStateError("could not atomically finalize webhook") from exc
     finally:
         conn.close()
+    try:
+        _redact_fulfillment_recovery(fulfillment_id)
+    except WebhookStateError:
+        # The Polar claims are already durable. Return retryably until a redelivery (or
+        # startup sweep) can clear every plaintext crash-recovery copy; the fulfilled
+        # claim and state-filtered release guarantee that retry never mints a second
+        # entitlement.
+        raise
 
 
 def _release_claims(*claim_ids: str) -> None:
@@ -684,14 +735,14 @@ async def polar_webhook(request: Request):
     # deliberately not a second entitlement path on the production control plane.
     if vendor_mode and event_type == "subscription.created" \
             and str(data.get("status", "")).strip().lower() == "trialing":
-        return JSONResponse({"status": "ignored", "reason": "application trial only",
-                             "type": event_type}, status_code=202)
+        return JSONResponse(
+            {"status": "ignored", "reason": "application trial only"}, status_code=202)
 
     # Negative lifecycle. Refunds revoke immediately; ordinary cancel-at-period-end
     # intentionally does NOT revoke because the customer keeps the paid period.
     if event_type in ("subscription.canceled", "subscription.cancelled"):
-        return JSONResponse({"status": "ignored", "reason": "paid period honored",
-                             "type": event_type}, status_code=202)
+        return JSONResponse(
+            {"status": "ignored", "reason": "paid period honored"}, status_code=202)
     if event_type in _REVOKING_EVENTS or (
             event_type == "subscription.updated" and event_status == "revoked"):
         sub_id = _subscription_id(data)
@@ -724,8 +775,7 @@ async def polar_webhook(request: Request):
                 # look first-seen forever and never converge.
                 complete_webhook(unmappable_claim)
                 return JSONResponse(
-                    {"error": "missing revoke target", "type": event_type},
-                    status_code=503)
+                    {"error": "missing revoke target"}, status_code=503)
             if unmappable_state == "in_flight":
                 # Latch the claim so any FURTHER redelivery short-circuits straight to
                 # "fulfilled" above. Guarded because complete_webhook only accepts a claim
@@ -733,16 +783,15 @@ async def polar_webhook(request: Request):
                 # WebhookStateError, which would surface as a 500 and put us right back in
                 # the non-converging retry loop this branch exists to avoid.
                 complete_webhook(unmappable_claim)
-            return JSONResponse({"status": "unmappable", "reason": "missing revoke target",
-                                 "type": event_type}, status_code=202)
+            return JSONResponse(
+                {"status": "unmappable", "reason": "missing revoke target"},
+                status_code=202)
         try:
             from engraphis.inspector import license_registry as _reg
             if sub_id:
                 revoked = await asyncio.to_thread(_reg.revoke_by_subscription, sub_id)
-                target = {"subscription_id": sub_id}
             else:
                 revoked = await asyncio.to_thread(_reg.revoke_by_order, order_id)
-                target = {"order_id": order_id}
         except Exception as exc:  # noqa: BLE001 — retryable: let Polar redeliver the revoke
             logger.error(
                 "polar webhook: revocation failed target_ref=%s (%s)",
@@ -752,8 +801,9 @@ async def polar_webhook(request: Request):
         logger.info(
             "polar webhook: %s revoked %d key(s) target_ref=%s",
             event_type, revoked, _log_ref(sub_id or order_id))
-        return JSONResponse({"status": "revoked", "reason": reason, "revoked": revoked,
-                             "keys_revoked": revoked, **target}, status_code=202)
+        return JSONResponse(
+            {"status": "revoked", "reason": reason, "revoked": revoked,
+             "keys_revoked": revoked}, status_code=202)
 
     # Route by event type and derive a stable per-fulfillment key so we issue exactly
     # ONE key per order and ONE per trial, no matter which/how many events fire:
@@ -776,8 +826,8 @@ async def polar_webhook(request: Request):
     # A non-trial subscription.created is a no-op: its paid key comes from order.paid, so
     # a canceled trial can never keep Pro — the short trial key just expires.
     if event_type in ("subscription.canceled", "subscription.cancelled"):
-        return JSONResponse({"status": "ignored", "reason": "paid period honored",
-                             "type": event_type}, status_code=202)
+        return JSONResponse(
+            {"status": "ignored", "reason": "paid period honored"}, status_code=202)
     pending_seat_baseline = None  # (sub_id, seats, event_ts); persisted after key issuance
     seat_lock_claim = ""
     if event_type == "order.paid":
@@ -792,8 +842,8 @@ async def polar_webhook(request: Request):
             pending_seat_baseline = (sub_id, _extract_seats(data), None)
     elif event_type == "subscription.created":
         if str(data.get("status", "")).strip().lower() != "trialing":
-            return JSONResponse({"status": "ignored", "reason": "not a trial",
-                                 "type": event_type}, status_code=202)
+            return JSONResponse(
+                {"status": "ignored", "reason": "not a trial"}, status_code=202)
         from engraphis.inspector.webhooks import (
             _extract_seats, handle_subscription_created as _fulfill)
         sub_id = str(data.get("id") or webhook_id)
@@ -804,7 +854,7 @@ async def polar_webhook(request: Request):
         sub_id = str(data.get("id") or "").strip()[:128]
         if status != "active" or not sub_id:
             return JSONResponse({"status": "ignored", "reason": "not an active "
-                                 "subscription", "type": event_type}, status_code=202)
+                                 "subscription"}, status_code=202)
         # Different subscription.updated deliveries have different idempotency keys, so
         # delivery-level claims do not serialize them. Hold one durable per-subscription
         # mutex from baseline read through issuance/finalization: otherwise an older and
@@ -845,8 +895,8 @@ async def polar_webhook(request: Request):
                 return JSONResponse({"error": "webhook state unavailable"}, status_code=503)
             reason = "baseline recorded" if persisted else "durable baseline unavailable"
             _release_claims(seat_lock_claim)
-            return JSONResponse({"status": "ignored", "reason": reason,
-                                 "type": event_type}, status_code=202)
+            return JSONResponse(
+                {"status": "ignored", "reason": reason}, status_code=202)
         prior_seats, prior_ts = prior
         # Out-of-order guard: if this delivery is OLDER than the last one we acted on for
         # this subscription, ignore it — a delayed redelivery of a stale seat count must
@@ -854,8 +904,8 @@ async def polar_webhook(request: Request):
         # timestamps are known; without them we fall back to seat-count comparison.
         if event_ts is not None and prior_ts is not None and event_ts <= prior_ts:
             _release_claims(seat_lock_claim)
-            return JSONResponse({"status": "ignored", "reason": "out-of-order update",
-                                 "type": event_type}, status_code=202)
+            return JSONResponse(
+                {"status": "ignored", "reason": "out-of-order update"}, status_code=202)
         if prior_seats == new_seats:
             # No seat change. Keep the ordering anchor current (so a later, genuinely
             # older delivery is still recognized as stale) but do not re-issue.
@@ -870,8 +920,9 @@ async def polar_webhook(request: Request):
                     return JSONResponse({"error": "webhook state unavailable"},
                                         status_code=503)
             _release_claims(seat_lock_claim)
-            return JSONResponse({"status": "ignored", "reason": "no seat-count change",
-                                 "type": event_type}, status_code=202)
+            return JSONResponse(
+                {"status": "ignored", "reason": "no seat-count change"},
+                status_code=202)
         pending_seat_baseline = (sub_id, new_seats, event_ts)
         from engraphis.inspector.webhooks import handle_subscription_updated as _fulfill
         # webhook-id is covered by the signature and stable across retries of one
@@ -879,7 +930,7 @@ async def polar_webhook(request: Request):
         # retaining idempotency for a retried logical update.
         fulfillment_key = "seatsync:" + sub_id + ":" + webhook_id
     else:
-        return JSONResponse({"status": "ignored", "type": event_type}, status_code=202)
+        return JSONResponse({"status": "ignored"}, status_code=202)
 
     # Two-layer dedup: delivery-level (a retry of this exact webhook) and
     # fulfillment-level (one key per order/trial/update version). Each claim is
@@ -888,11 +939,13 @@ async def polar_webhook(request: Request):
     # before minting the key the purchase would be lost with no future delivery to
     # reclaim the slot at the TTL. Only a genuinely COMPLETED claim is a duplicate.
     delivery_claim = "dlv:" + webhook_id
-    fulfillment_claim = "ful:" + fulfillment_key
+    from engraphis.email_outbox import fulfillment_retention_claim
+    fulfillment_claim = fulfillment_retention_claim(fulfillment_key)
     delivery_reserved = False
     try:
         delivery_state = claim_webhook(delivery_claim)
         if delivery_state == "fulfilled":
+            _redact_fulfillment_recovery(fulfillment_claim)
             _release_claims(seat_lock_claim)
             logger.info(
                 "polar webhook: duplicate delivery ref=%s ignored", _log_ref(webhook_id))
@@ -908,6 +961,7 @@ async def polar_webhook(request: Request):
         delivery_reserved = True
         fulfillment_state = claim_webhook(fulfillment_claim)
         if fulfillment_state == "fulfilled":
+            _redact_fulfillment_recovery(fulfillment_claim)
             complete_webhook(delivery_claim)
             _release_claims(seat_lock_claim)
             logger.info(

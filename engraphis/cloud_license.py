@@ -29,8 +29,8 @@ import json
 import logging
 import math
 import os
+import re
 import sys
-import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -39,6 +39,13 @@ from pathlib import Path
 from typing import Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
+from engraphis.private_state import (
+    UnsafeStateFile,
+    atomic_private_text,
+    publish_private_text_if_absent,
+    read_private_text,
+)
+
 _LEASE_PREFIX = "ENGRLS1"
 _JSON_HEADERS = {
     "Content-Type": "application/json",
@@ -46,6 +53,32 @@ _JSON_HEADERS = {
     # Cloudflare rejects Python urllib's default signature with error 1010.
     "User-Agent": "Engraphis/1.0 (+https://engraphis.com)",
 }
+_CLOUD_POST_MAX_RESPONSE_BYTES = 16 * 1024
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never replay a credential- or token-bearing POST to a redirect target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _urlopen_no_redirect(req, *, timeout: float):
+    return urllib.request.build_opener(_NoRedirectHandler()).open(req, timeout=timeout)
+
+
+def _read_bounded_json_object(response) -> dict:
+    """Read a small control-plane JSON object without trusting Content-Length."""
+    raw = response.read(_CLOUD_POST_MAX_RESPONSE_BYTES + 1)
+    if len(raw) > _CLOUD_POST_MAX_RESPONSE_BYTES:
+        raise ValueError("cloud response exceeded the client safety limit")
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise ValueError("cloud response is not valid JSON") from None
+    if not isinstance(body, dict):
+        raise ValueError("cloud response is not a JSON object")
+    return body
 
 
 class Revoked(Exception):
@@ -56,6 +89,21 @@ class Revoked(Exception):
     authoritative server decision that must propagate immediately, while an unreachable
     server falls back to the cached lease (offline grace). ``revalidate`` and ``gate``
     treat a ``Revoked`` as fail-closed and an offline result as grace, respectively."""
+
+
+class RelayCredentialExchangeError(Exception):
+    """A relay-device credential could not be minted for a non-entitlement reason.
+
+    ``Revoked`` remains the authoritative paid-access denial. This separate error keeps
+    network outages, throttling, and malformed control-plane responses from collapsing
+    into a misleading "no credential configured" failure in the sync client.
+    """
+
+    def __init__(self, message: str, *, status: Optional[int] = None,
+                 transient: bool = True) -> None:
+        super().__init__(message)
+        self.status = status
+        self.transient = transient
 
 
 def _state_dir() -> Path:
@@ -135,6 +183,9 @@ def validate_cloud_base_url(value: str) -> str:
 _machine_id_cache: dict = {}
 # Serializes first-run id generation so concurrent threads don't each mint a device id.
 _machine_id_lock = threading.Lock()
+_MACHINE_ID_PATTERN = re.compile(r"[0-9a-f]{32}\Z")
+_MAX_MACHINE_ID_BYTES = 128
+_MAX_LEASE_BYTES = 64 * 1024
 
 
 def cloud_url() -> str:
@@ -160,44 +211,39 @@ def machine_id() -> str:
         if cached:
             return cached
         try:
-            mid = _MACHINE_ID_FILE.read_text(encoding="utf-8").strip()
-            if mid:
-                _machine_id_cache[key] = mid
-                return mid
-        except OSError:
-            pass
+            stored = read_private_text(
+                _MACHINE_ID_FILE, max_bytes=_MAX_MACHINE_ID_BYTES, allow_missing=True)
+        except UnsafeStateFile as exc:
+            # Never send content obtained through a caller-controlled link/reparse point.
+            raise RuntimeError("machine-id state is unsafe; repair the state file") from exc
+        except OSError as exc:
+            # Preserve the documented read-only-container behavior, but do not replace a
+            # path that exists and could not be safely inspected.
+            mid = uuid.uuid4().hex
+            logger.warning(
+                "machine_id: could not safely read device id (%s); using an in-process "
+                "id for this run", type(exc).__name__)
+            _machine_id_cache[key] = mid
+            return mid
+        if stored is not None:
+            if not _MACHINE_ID_PATTERN.fullmatch(stored):
+                raise RuntimeError(
+                    "machine-id state is malformed; expected 32 lowercase hexadecimal "
+                    "characters")
+            _machine_id_cache[key] = stored
+            return stored
         mid = uuid.uuid4().hex
         try:
-            _MACHINE_ID_FILE.parent.mkdir(parents=True, exist_ok=True)
-            # Publish a fully-written private file with an atomic create-if-absent link.
-            # Creating the destination first and then writing it exposes an empty file to
-            # a competing process, which can make that process cache a different id.
-            fd, temp_name = tempfile.mkstemp(
-                prefix=".machine_id.", dir=str(_MACHINE_ID_FILE.parent))
-            temp_path = Path(temp_name)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    fd = -1
-                    fh.write(mid)
-                    fh.flush()
-                    os.fsync(fh.fileno())
-                try:
-                    os.link(str(temp_path), str(_MACHINE_ID_FILE))
-                except FileExistsError:
-                    existing = _MACHINE_ID_FILE.read_text(encoding="utf-8").strip()
-                    if existing:
-                        mid = existing
-            finally:
-                if fd >= 0:
-                    os.close(fd)
-                try:
-                    temp_path.unlink()
-                except OSError:
-                    pass
-            try:
-                os.chmod(_MACHINE_ID_FILE, 0o600)
-            except OSError:
-                pass
+            created = publish_private_text_if_absent(_MACHINE_ID_FILE, mid)
+            if not created:
+                existing = read_private_text(
+                    _MACHINE_ID_FILE, max_bytes=_MAX_MACHINE_ID_BYTES)
+                if not _MACHINE_ID_PATTERN.fullmatch(existing or ""):
+                    raise RuntimeError(
+                        "machine-id state created concurrently is malformed")
+                mid = existing
+        except UnsafeStateFile as exc:
+            raise RuntimeError("machine-id state is unsafe; repair the state file") from exc
         except OSError as exc:
             logger.warning(
                 "machine_id: could not persist device id (%s); using an in-process id "
@@ -300,19 +346,28 @@ def verify_lease(token: str, *, now: Optional[float] = None) -> dict:
 
 def _read_lease() -> str:
     try:
-        return _LEASE_FILE.read_text(encoding="utf-8").strip()
-    except OSError:
+        raw = read_private_text(
+            _LEASE_FILE, max_bytes=_MAX_LEASE_BYTES, allow_missing=True)
+    except (OSError, UnsafeStateFile):
         return ""
+    if raw is None:
+        return ""
+    value = raw.rstrip("\r\n")
+    if (not value or value != value.strip() or "\r" in value or "\n" in value
+            or any(ord(char) < 32 or ord(char) > 126 for char in value)):
+        return ""
+    return value
 
 
 def _write_lease(token: str) -> None:
+    value = str(token or "")
+    if (not value or len(value.encode("utf-8")) > _MAX_LEASE_BYTES
+            or value != value.strip() or "\r" in value or "\n" in value
+            or any(ord(char) < 32 or ord(char) > 126 for char in value)):
+        return
     try:
-        _DIR.mkdir(parents=True, exist_ok=True)
-        tmp = _LEASE_FILE.with_name(_LEASE_FILE.name + ".tmp")
-        tmp.write_text(token, encoding="utf-8")
-        os.replace(tmp, _LEASE_FILE)
-        os.chmod(_LEASE_FILE, 0o600)
-    except OSError:
+        atomic_private_text(_LEASE_FILE, value)
+    except (OSError, UnsafeStateFile):
         pass
 
 
@@ -360,8 +415,8 @@ def register(base_url: str, key: str, mid: str, *, timeout: float = _REGISTER_TI
     req = urllib.request.Request(
         url, data=data, method="POST", headers=_JSON_HEADERS)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
-            body = json.loads(resp.read().decode("utf-8"))
+        with _urlopen_no_redirect(req, timeout=timeout) as resp:
+            body = _read_bounded_json_object(resp)
         return body.get("lease") or None
     except urllib.error.HTTPError as exc:
         if exc.code in (402, 403):
@@ -369,6 +424,85 @@ def register(base_url: str, key: str, mid: str, *, timeout: float = _REGISTER_TI
         return None  # transient/other HTTP status — no lease, but not a denial either
     except (urllib.error.URLError, ValueError, TimeoutError, OSError):
         return None  # offline / unreachable
+
+
+_DEVICE_TOKEN_TIMEOUT = 6.0
+_DEVICE_TOKEN_MAX_RESPONSE_BYTES = 16 * 1024
+
+
+def request_relay_device_token(
+        base_url: str, key: str, mid: str, *, timeout: float = _DEVICE_TOKEN_TIMEOUT,
+) -> str:
+    """Exchange a paid license for a short-lived, device-bound relay credential.
+
+    The long-lived ``ENGR1`` license is sent only to the control-plane exchange endpoint;
+    normal sync requests carry the returned ``ENGRDT1`` bearer instead. Redirects are
+    refused so a configured service cannot forward the license body to another origin.
+
+    A definitive 402/403 denial raises :class:`Revoked`, matching :func:`register`.
+    Network failures, throttling, malformed responses, and other non-denial failures raise
+    :class:`RelayCredentialExchangeError`, so callers can report a retryable control-plane
+    failure instead of pretending no credential was configured. The relay remains
+    authoritative: this client only bounds the opaque token; it does not attempt to verify
+    the control plane's separate relay-token signing key.
+    """
+    try:
+        base = validate_cloud_base_url(base_url)
+    except ValueError:
+        logger.warning("relay credential exchange blocked: invalid service URL")
+        raise RelayCredentialExchangeError(
+            "relay credential exchange is blocked by an invalid license service URL",
+            status=400,
+            transient=False,
+        ) from None
+    clean_key = str(key or "").strip()
+    clean_mid = str(mid or "").strip()
+    if (not clean_key or len(clean_key) > 8192
+            or any(ord(char) < 32 or ord(char) == 127 for char in clean_key)):
+        raise RelayCredentialExchangeError(
+            "relay credential exchange input is invalid", status=400, transient=False)
+    if (not clean_mid or len(clean_mid) > 200
+            or any(ord(char) < 32 or ord(char) == 127 for char in clean_mid)):
+        raise RelayCredentialExchangeError(
+            "relay credential exchange input is invalid", status=400, transient=False)
+
+    data = json.dumps({"key": clean_key, "machine_id": clean_mid}).encode("utf-8")
+    req = urllib.request.Request(
+        base + "/license/v1/device-token", data=data, method="POST",
+        headers=_JSON_HEADERS,
+    )
+    try:
+        with _urlopen_no_redirect(req, timeout=timeout) as resp:
+            raw = resp.read(_DEVICE_TOKEN_MAX_RESPONSE_BYTES + 1)
+        if len(raw) > _DEVICE_TOKEN_MAX_RESPONSE_BYTES:
+            raise RelayCredentialExchangeError(
+                "license service returned an oversized relay credential response")
+        body = json.loads(raw.decode("utf-8"))
+        token = body.get("device_token") if isinstance(body, dict) else None
+        if (not isinstance(token, str) or not token.startswith("ENGRDT1.")
+                or len(token) < 24 or len(token) > 8192
+                or any(ord(char) < 32 or ord(char) == 127 for char in token)):
+            raise RelayCredentialExchangeError(
+                "license service returned an invalid relay credential response")
+        return token
+    except urllib.error.HTTPError as exc:
+        if exc.code in (402, 403):
+            raise Revoked("license denied by the server (HTTP %d)" % exc.code)
+        transient = exc.code in (408, 425, 429) or 500 <= exc.code <= 599
+        message = (
+            "relay credential exchange is temporarily unavailable; retry later"
+            if transient else
+            "license service rejected the relay credential exchange"
+        )
+        raise RelayCredentialExchangeError(
+            message, status=exc.code, transient=transient) from None
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise RelayCredentialExchangeError(
+            "license service is unreachable during relay credential exchange; retry later"
+        ) from None
+    except (UnicodeDecodeError, ValueError):
+        raise RelayCredentialExchangeError(
+            "license service returned an invalid relay credential response") from None
 
 
 _INVITE_TIMEOUT = 10.0
@@ -401,8 +535,8 @@ def send_team_invite(base_url: str, key: str, to: str, name: str, role: str,
     req = urllib.request.Request(
         url, data=data, method="POST", headers=_JSON_HEADERS)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
-            body = json.loads(resp.read().decode("utf-8"))
+        with _urlopen_no_redirect(req, timeout=timeout) as resp:
+            body = _read_bounded_json_object(resp)
         return bool(body.get("sent")), ""
     except urllib.error.HTTPError as exc:
         if exc.code == 402:
@@ -442,8 +576,8 @@ def send_password_reset(base_url: str, key: str, to: str, name: str, reset_url: 
         headers=_JSON_HEADERS,
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
-            body = json.loads(resp.read().decode("utf-8"))
+        with _urlopen_no_redirect(req, timeout=timeout) as resp:
+            body = _read_bounded_json_object(resp)
             return bool(body.get("queued")), ""
     except urllib.error.HTTPError as exc:
         if exc.code == 402:
@@ -484,8 +618,8 @@ def request_trial_key(base_url: str, mid: str, plan: str = "team", email: str = 
     req = urllib.request.Request(
         url, data=data, method="POST", headers=_JSON_HEADERS)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
-            body = json.loads(resp.read().decode("utf-8"))
+        with _urlopen_no_redirect(req, timeout=timeout) as resp:
+            body = _read_bounded_json_object(resp)
         key = body.get("key")
         if key:
             return key, "", False
@@ -526,9 +660,9 @@ def create_trial_claim(base_url: str, deployment_token: str, mid: str,
         base + "/license/v1/trial-claims", data=data, method="POST",
         headers=_JSON_HEADERS)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
+        with _urlopen_no_redirect(req, timeout=timeout) as resp:
             try:
-                return json.loads(resp.read().decode("utf-8"))
+                return _read_bounded_json_object(resp)
             except (ValueError, UnicodeDecodeError):
                 raise RuntimeError(
                     "trial control plane returned an invalid response"
@@ -553,9 +687,9 @@ def claim_trial(base_url: str, claim_id: str, deployment_token: str, mid: str, *
     url = base + "/license/v1/trial-claims/%s/claim" % quote(claim_id, safe="")
     req = urllib.request.Request(url, data=data, method="POST", headers=_JSON_HEADERS)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
+        with _urlopen_no_redirect(req, timeout=timeout) as resp:
             try:
-                return json.loads(resp.read().decode("utf-8"))
+                return _read_bounded_json_object(resp)
             except (ValueError, UnicodeDecodeError):
                 raise RuntimeError(
                     "trial control plane returned an invalid response"

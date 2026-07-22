@@ -14,6 +14,7 @@ untrusted anyway), so an end-to-end-encrypted client can push ciphertext unchang
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -78,6 +79,53 @@ def _conn(db_path: Optional[str] = None) -> sqlite3.Connection:
     conn = reg.connect(db_path)          # same relay DB as the registry
     conn.executescript(_BUNDLE_SCHEMA)
     return conn
+
+
+def _migrate_customer_account_namespace(email: str, account_id: str) -> int:
+    """Move a provisioned customer's legacy email-hash bundles to its opaque org id.
+
+    Older customer relays used ``sha256(lower(email))[:16]`` as the tenant key. The
+    calculation remains only as an idempotent upgrade bridge; new authorization always
+    uses ``AuthStore.organization_id()`` and never derives identity from contact data.
+    Conflicts keep the newest bundle, preserving last-writer-wins sync semantics.
+    """
+    normalized = str(email or "").strip().lower()
+    opaque = str(account_id or "")
+    if not normalized or re.fullmatch(r"org_[0-9a-f]{32}", opaque) is None:
+        return 0
+    legacy = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    conn = _conn()
+    previous_isolation = conn.isolation_level
+    conn.isolation_level = None
+    try:
+        if conn.execute(
+                "SELECT 1 FROM sync_bundles WHERE account_id=? LIMIT 1", (legacy,)
+        ).fetchone() is None:
+            return 0
+        conn.execute("BEGIN IMMEDIATE")
+        count = int(conn.execute(
+            "SELECT COUNT(*) FROM sync_bundles WHERE account_id=?", (legacy,)
+        ).fetchone()[0])
+        conn.execute(
+            "INSERT INTO sync_bundles(account_id,workspace_id,name,data,updated_at) "
+            "SELECT ?,workspace_id,name,data,updated_at FROM sync_bundles "
+            "WHERE account_id=? "
+            "ON CONFLICT(account_id,workspace_id,name) DO UPDATE SET "
+            "data=CASE WHEN excluded.updated_at>=sync_bundles.updated_at "
+            "THEN excluded.data ELSE sync_bundles.data END,"
+            "updated_at=MAX(sync_bundles.updated_at,excluded.updated_at)",
+            (opaque, legacy),
+        )
+        conn.execute("DELETE FROM sync_bundles WHERE account_id=?", (legacy,))
+        conn.execute("COMMIT")
+        return count
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.isolation_level = previous_isolation
+        conn.close()
 
 
 def _safe_name(name: str) -> str:
@@ -181,11 +229,54 @@ def _authorize(request: Request):
     # Each Request owns its state, but initialize explicitly so the license-key path can
     # never inherit the scoped-user marker if an adapter reuses a request-like object.
     request.state.sync_user = None
+    auth_store = getattr(request.app.state, "auth_store", None)
+
+    # Managed-relay clients exchange the long-lived account license once at the isolated
+    # control plane, then use this short-lived, device-bound credential for bundle IO.
+    # Recognize the prefix before every legacy/user-token path so a malformed or expired
+    # device token can never fall through and be reinterpreted as a license key.
+    if bearer.startswith("ENGRDT1."):
+        if auth_store is not None and auth_store.count_users() > 0:
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": "this provisioned relay requires a per-user sync token"
+                },
+            )
+        from engraphis.config import settings
+        if settings.service_mode not in ("relay", "combined"):
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": "relay device credentials are accepted only by the managed "
+                    "relay data plane"
+                },
+            )
+        write_request = request.method.upper() in ("POST", "PUT", "PATCH", "DELETE")
+        required_scope = "sync:write" if write_request else "sync:read"
+        payload = reg.verify_relay_device_token(
+            bearer,
+            required_scope=required_scope,
+            expected_audience=reg.relay_token_audience(),
+            # The isolated customer relay has only the dedicated public verification
+            # key, not the vendor issuance database. One-hour token expiry bounds
+            # revocation there. Combined development mode retains the immediate registry
+            # check so tests can exercise both trust domains in one process.
+            check_registry=settings.vendor_service,
+        )
+        presented_device = _machine_id(request)
+        if not presented_device or presented_device != payload["device_id"]:
+            raise LicenseError(
+                "relay device token does not match this device", feature=SYNC_FEATURE)
+        request.state.sync_device = {
+            "device_id": payload["device_id"],
+            "key_id": payload["key_id"],
+        }
+        return payload, payload["account_id"]
 
     # Customer deployments authenticate Team members with their own hashed, revocable
     # API token. The active account license remains the entitlement and namespace anchor;
     # the user token supplies identity, role, and least-privilege sync scopes.
-    auth_store = getattr(request.app.state, "auth_store", None)
     if auth_store is not None:
         user = auth_store.resolve_api_token(bearer)
         if user is not None:
@@ -208,21 +299,24 @@ def _authorize(request: Request):
                 raise LicenseError("an active Pro or Team license is required for sync",
                                    feature=SYNC_FEATURE)
             request.state.sync_user = user
-            return lic, reg.account_id_for(lic)
+            account_id = auth_store.organization_id()
+            _migrate_customer_account_namespace(lic.email, account_id)
+            return lic, account_id
         if bearer.startswith("engr_ut_"):
             raise HTTPException(
                 status_code=401,
                 detail={"error": "sync token is expired, revoked, or invalid"},
             )
 
-    lic = reg.verify_for_feature(bearer, SYNC_FEATURE)
     from engraphis.config import settings
-    if lic.plan == "team" and settings.service_mode == "customer" \
-            and os.environ.get("ENGRAPHIS_LEGACY_TEAM_KEY_SYNC", "0").strip().lower() \
-            not in ("1", "true", "yes", "on"):
+    if settings.service_mode in ("customer", "relay"):
         raise LicenseError(
-            "Team license-key sync is disabled; use a per-user scoped device token",
+            "license-key sync is disabled; use a scoped user or relay device token",
             feature=SYNC_FEATURE)
+    # Raw ENGR1 authorization exists only in explicit combined development mode. It is
+    # intentionally not configurable on customer deployments: migration happens at the
+    # device-token exchange endpoint, never by sending the account key to bundle routes.
+    lic = reg.verify_for_feature(bearer, SYNC_FEATURE)
     if lic.plan == "team":
         mid = _machine_id(request)
         if not mid:
