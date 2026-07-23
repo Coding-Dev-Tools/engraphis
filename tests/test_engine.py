@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import tempfile
 
 import pytest
 
@@ -597,8 +598,8 @@ def test_index_repo_operator_roots_replace_local_defaults(tmp_path, monkeypatch)
     monkeypatch.setenv("ENGRAPHIS_INDEX_ROOTS", os.pathsep.join((str(first), str(second))))
 
     assert engine_module._approved_local_index_roots() == (
-        os.path.realpath(first),
-        os.path.realpath(second),
+        os.path.normcase(os.path.realpath(first)),
+        os.path.normcase(os.path.realpath(second)),
     )
 
     eng = MemoryEngine.create(":memory:")
@@ -607,6 +608,68 @@ def test_index_repo_operator_roots_replace_local_defaults(tmp_path, monkeypatch)
     assert eng.index_repo(rid, str(allowed_repo), prefer="regex")["files_indexed"] == 1
     with pytest.raises(ValueError, match="outside approved local roots"):
         eng.index_repo(rid, str(default_only), prefer="regex")
+
+
+def test_index_repo_rejects_relative_operator_roots(monkeypatch):
+    from engraphis.core import engine as engine_module
+
+    monkeypatch.setenv("ENGRAPHIS_INDEX_ROOTS", "relative-root")
+    with pytest.raises(ValueError, match="ENGRAPHIS_INDEX_ROOTS.*absolute"):
+        engine_module._approved_local_index_roots()
+
+
+def test_index_repo_preserves_default_roots_without_operator_configuration(monkeypatch):
+    from engraphis.core import engine as engine_module
+
+    monkeypatch.delenv("ENGRAPHIS_INDEX_ROOTS", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_HTTP_INDEX_ROOT", raising=False)
+    expected = tuple(dict.fromkeys((
+        os.path.normcase(os.path.realpath(os.getcwd())),
+        os.path.normcase(os.path.realpath(os.path.expanduser("~"))),
+        os.path.normcase(os.path.realpath(tempfile.gettempdir())),
+    )))
+
+    assert engine_module._approved_local_index_roots() == expected
+
+
+def test_index_repo_rejects_relative_http_operator_root(monkeypatch):
+    from engraphis.core import engine as engine_module
+
+    monkeypatch.delenv("ENGRAPHIS_INDEX_ROOTS", raising=False)
+    monkeypatch.setenv("ENGRAPHIS_HTTP_INDEX_ROOT", "relative-http-root")
+    with pytest.raises(ValueError, match="ENGRAPHIS_HTTP_INDEX_ROOT.*absolute"):
+        engine_module._approved_local_index_roots()
+
+
+def test_index_repo_http_root_is_an_approved_engine_root(tmp_path, monkeypatch):
+    from engraphis.core import engine as engine_module
+
+    http_root = tmp_path / "dedicated-http-root"
+    selected_repo = http_root / "project"
+    selected_repo.mkdir(parents=True)
+    (selected_repo / "module.py").write_text("def selected(): pass\n", encoding="utf-8")
+    monkeypatch.delenv("ENGRAPHIS_INDEX_ROOTS", raising=False)
+    monkeypatch.setenv("ENGRAPHIS_HTTP_INDEX_ROOT", str(http_root))
+
+    roots = engine_module._approved_local_index_roots()
+    assert os.path.normcase(os.path.realpath(http_root)) in roots
+
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    assert eng.index_repo(rid, str(selected_repo), prefer="regex")["files_indexed"] == 1
+
+
+def test_index_repo_deduplicates_canonical_operator_roots(tmp_path, monkeypatch):
+    from engraphis.core import engine as engine_module
+
+    root = tmp_path / "operator-root"
+    root.mkdir()
+    canonical = os.path.normcase(os.path.realpath(root))
+    monkeypatch.setenv("ENGRAPHIS_INDEX_ROOTS", os.pathsep.join((str(root), str(root / "."))))
+    monkeypatch.setenv("ENGRAPHIS_HTTP_INDEX_ROOT", str(root))
+
+    assert engine_module._approved_local_index_roots() == (canonical,)
 
 
 def test_index_repo_is_idempotent_per_file(tmp_path):

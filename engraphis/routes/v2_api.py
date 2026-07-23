@@ -46,6 +46,15 @@ def _invalid_request() -> HTTPException:
     return HTTPException(status_code=400, detail={"error": "invalid request"})
 
 
+class _HttpCodeIndexConfigurationError(RuntimeError):
+    """Raised when the operator's HTTP indexing boundary is unsafe."""
+
+
+def _http_index_configuration_error() -> HTTPException:
+    """Keep operator configuration failures distinct from invalid client paths."""
+    return HTTPException(status_code=500, detail={"error": "internal server error"})
+
+
 def _sanitized_http_exception(status_code: object) -> HTTPException:
     """Keep a downstream HTTP status without propagating its detail or traceback.
 
@@ -1602,6 +1611,9 @@ def _http_code_index_path(root_path: str) -> str:
     if not configured_root:
         configured_roots = os.environ.get("ENGRAPHIS_INDEX_ROOTS", "").split(os.pathsep)
         configured_root = next((value.strip() for value in configured_roots if value.strip()), "")
+    if configured_root and not os.path.isabs(configured_root):
+        raise _HttpCodeIndexConfigurationError("HTTP code index root must be configured absolutely")
+
     base = os.path.normcase(os.path.realpath(configured_root or os.getcwd()))
     candidate = os.path.normcase(os.path.realpath(os.path.join(base, root_path)))
 
@@ -1618,6 +1630,8 @@ def _http_code_index_path(root_path: str) -> str:
 def code_index(req: _CodeIndexReq):
     try:
         root_path = _http_code_index_path(req.root_path)
+    except _HttpCodeIndexConfigurationError:
+        raise _http_index_configuration_error() from None
     except ValidationError:
         raise _invalid_request() from None
     return _run(

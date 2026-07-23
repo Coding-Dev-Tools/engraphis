@@ -76,8 +76,10 @@ def test_code_index_rejects_outside_and_prefix_sibling_paths(indexed_client, mon
     sibling.mkdir()
     monkeypatch.setenv("ENGRAPHIS_HTTP_INDEX_ROOT", str(root))
 
-    assert _request(client, "../operator-root-copy").status_code == 400
-    assert _request(client, str(sibling)).status_code == 400
+    for path in ("../operator-root-copy", str(sibling)):
+        response = _request(client, path)
+        assert response.status_code == 400
+        assert response.json() == {"detail": {"error": "invalid request"}}
     assert service.calls == []
 
 
@@ -112,3 +114,41 @@ def test_code_index_uses_first_engine_root_when_http_root_is_unset(indexed_clien
 
     assert response.status_code == 200
     assert service.calls[0]["root_path"] == _canonical_with_sep(target)
+
+
+@pytest.mark.parametrize(
+    ("http_root", "engine_roots"),
+    [
+        ("relative-root", None),
+        (None, "relative-root"),
+    ],
+)
+def test_code_index_rejects_relative_operator_root_configuration(
+    indexed_client, monkeypatch, http_root, engine_roots,
+):
+    client, service = indexed_client
+    if http_root is None:
+        monkeypatch.delenv("ENGRAPHIS_HTTP_INDEX_ROOT", raising=False)
+    else:
+        monkeypatch.setenv("ENGRAPHIS_HTTP_INDEX_ROOT", http_root)
+    if engine_roots is None:
+        monkeypatch.delenv("ENGRAPHIS_INDEX_ROOTS", raising=False)
+    else:
+        monkeypatch.setenv("ENGRAPHIS_INDEX_ROOTS", engine_roots)
+
+    response = _request(client, "project")
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": {"error": "internal server error"}}
+    assert service.calls == []
+
+
+def test_code_index_uses_current_directory_without_operator_root_configuration(indexed_client, monkeypatch):
+    client, service = indexed_client
+    monkeypatch.delenv("ENGRAPHIS_HTTP_INDEX_ROOT", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_INDEX_ROOTS", raising=False)
+
+    response = _request(client, ".")
+
+    assert response.status_code == 200
+    assert service.calls[0]["root_path"] == _canonical_with_sep(os.getcwd())
