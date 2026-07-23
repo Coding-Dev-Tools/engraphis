@@ -68,6 +68,10 @@ Public 1.0.1 client reliability release.
   entitlement-gated managed-compute availability while preserving snapshot redaction and limits.
 - Commercial metadata now describes Pro as one owner account across that owner's local
   installations, matching the hosted entitlement model; Team remains billed per named seat.
+- API error responses and provider logs no longer expose arbitrary exception or configuration
+  text; local folder and repository reads resolve and re-check filesystem boundaries.
+- Entity extraction and dashboard asset migration avoid adversarial regular-expression
+  backtracking, and CI now fails when CodeQL emits any SARIF finding.
 
 ## [1.0.0] - 2026-07-23
 

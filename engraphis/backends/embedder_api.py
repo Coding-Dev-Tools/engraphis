@@ -56,10 +56,9 @@ class ApiEmbedder:
         # A custom endpoint can contain embedded credentials or signed query
         # parameters, while provider-controlled model identifiers are also untrusted
         # log input. Do not copy either into logs.
-        logger.info(
-            "ApiEmbedder(custom_endpoint=%s, dim=%s)",
-            bool(base_url), self._dim or "auto",
-        )
+        # Do not log endpoint, model, dimensions, or any authentication-related state:
+        # provider configuration can contain account identifiers or signed parameters.
+        logger.info("API embedder initialized")
 
     @property
     def dim(self) -> int:
@@ -89,10 +88,7 @@ class ApiEmbedder:
         import httpx
 
         if not self._api_key:
-            logger.error(
-                "No API key set — set %s env var or pass api_key",
-                _DEFAULT_API_KEY_ENV,
-            )
+            logger.error("No API key set for API embedder")
             raise RuntimeError(
                 f"ApiEmbedder requires an API key via {_DEFAULT_API_KEY_ENV} "
                 "env var or the api_key parameter"
@@ -114,9 +110,8 @@ class ApiEmbedder:
                 )
                 resp.raise_for_status()
                 data = resp.json()
-        except Exception as exc:
-            logger.warning("Batch embedding failed (%s), falling back per-item",
-                           type(exc).__name__)
+        except Exception:
+            logger.warning("Batch embedding request failed; falling back per-item")
             # Fallback: embed one at a time
             vecs = [self._embed_one(t) for t in texts]
             return np.asarray(vecs, dtype=np.float32)
@@ -172,8 +167,8 @@ class ApiEmbedder:
                 )
                 resp.raise_for_status()
                 data = resp.json()
-        except Exception as exc:
-            logger.error("Single embedding request failed (%s)", type(exc).__name__)
+        except Exception:
+            logger.error("Single embedding request failed")
             return [0.0] * (self._dim or 384)
 
         items = data.get("data", [])

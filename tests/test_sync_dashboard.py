@@ -167,3 +167,25 @@ def test_sync_fails_closed_on_invalid_workspace_visibility(monkeypatch, tmp_path
             error["workspace"] == "demo" and "visibility is invalid" in error["error"]
             for error in summary["errors"]
         )
+
+
+def test_sync_error_summary_does_not_echo_relay_exception_text(monkeypatch, tmp_path):
+    from engraphis.backends.sync_relay import RelayError
+
+    secret = "https://relay.example/?token=do-not-return-this"
+
+    def fail_transport(*args, **kwargs):
+        raise RelayError(secret, status=502)
+
+    monkeypatch.setattr("engraphis.backends.sync_folder.get_transport", fail_transport)
+    with _client(monkeypatch, tmp_path, cloud=True) as c:
+        response = c.post("/api/sync/run", json={})
+
+    assert response.status_code == 200
+    errors = response.json()["summary"]["errors"]
+    assert errors == [{
+        "workspace": "demo",
+        "error": "cloud relay synchronization failed",
+        "status": 502,
+    }]
+    assert secret not in repr(errors)

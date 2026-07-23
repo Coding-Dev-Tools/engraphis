@@ -7,7 +7,10 @@ read-only release gate: CI must fail on drift, never rewrite a dirty checkout an
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
+from typing import Optional
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,13 +21,87 @@ JS = STATIC / "dashboard.js"
 
 STYLE_ATTR = re.compile(r"\sstyle=(?:\"([^\"]*)\"|'([^']*)')")
 EVENT_ATTR = re.compile(r"\s(on[a-z]+)=(?:\"([^\"]*)\"|'([^']*)')")
-INLINE_SCRIPT = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>\r?\n?([\s\S]*?)</script>")
-INLINE_STYLE = re.compile(r"<style>\r?\n?([\s\S]*?)</style>")
 STYLE_REF = re.compile(r'data-csp-style=["\'](s\d+)["\']')
 STYLE_RULE = re.compile(r'\[data-csp-style=["\'](s\d+)["\']\]\{')
 HANDLER_REF = re.compile(r'data-on([a-z]+)=["\'](h\d+)["\']')
 HANDLER_DEF = re.compile(r'^\s*(h\d+):function\(event\)\{', re.MULTILINE)
 DELEGATED_EVENTS = re.compile(r"for\(const type of \[([^]]+)\]\)")
+
+
+@dataclass(frozen=True)
+class _InlineAsset:
+    start: int
+    end: int
+    content: str
+
+
+class _InlineAssetParser(HTMLParser):
+    """Locate inline dashboard assets with an HTML parser, not a tag regex.
+
+    Browser HTML parsing accepts malformed closing tags and mixed-case tag names;
+    using ``HTMLParser`` keeps the release gate aligned with that parsing model.
+    Offsets retain the source bytes exactly, so extraction remains mechanical.
+    """
+
+    def __init__(self, source: str) -> None:
+        super().__init__(convert_charrefs=False)
+        self.source = source
+        self._line_offsets = [0]
+        self._line_offsets.extend(
+            index + 1 for index, char in enumerate(source) if char == "\n"
+        )
+        self._open: dict[str, tuple[int, int]] = {}
+        self.styles: list[_InlineAsset] = []
+        self.scripts: list[_InlineAsset] = []
+
+    def _offset(self) -> int:
+        line, column = self.getpos()
+        return self._line_offsets[line - 1] + column
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        if tag not in {"style", "script"}:
+            return
+        if tag == "script" and any(name.lower() == "src" for name, _value in attrs):
+            return
+        start = self._offset()
+        self._open[tag] = (start, start + len(self.get_starttag_text()))
+
+    def handle_endtag(self, tag: str) -> None:
+        opened = self._open.pop(tag, None)
+        if opened is None:
+            return
+        close_start = self._offset()
+        close_end = self.source.find(">", close_start)
+        if close_end < 0:
+            return
+        asset = _InlineAsset(opened[0], close_end + 1, self.source[opened[1]:close_start])
+        (self.styles if tag == "style" else self.scripts).append(asset)
+
+    def finish_unclosed(self) -> None:
+        """Treat an asset tag that reaches EOF as inline browser content."""
+
+        for tag, opened in self._open.items():
+            asset = _InlineAsset(
+                opened[0],
+                len(self.source),
+                self.source[opened[1]:],
+            )
+            (self.styles if tag == "style" else self.scripts).append(asset)
+        self._open.clear()
+
+
+def _inline_assets(html: str) -> tuple[list[_InlineAsset], list[_InlineAsset]]:
+    parser = _InlineAssetParser(html)
+    parser.feed(html)
+    parser.close()
+    parser.finish_unclosed()
+    return parser.styles, parser.scripts
+
+
+def _replace_assets(html: str, replacements: list[tuple[_InlineAsset, str]]) -> str:
+    for asset, replacement in sorted(replacements, key=lambda item: item[0].start, reverse=True):
+        html = html[:asset.start] + replacement + html[asset.end:]
+    return html
 
 
 def _add_generated_listeners(source: str, handlers: dict[tuple[str, str], str]) -> str:
@@ -52,7 +129,8 @@ def _add_generated_listeners(source: str, handlers: dict[tuple[str, str], str]) 
 
 def migrate() -> None:
     html = INDEX.read_text(encoding="utf-8")
-    if not INLINE_STYLE.search(html) and not INLINE_SCRIPT.search(html):
+    style_assets, script_assets = _inline_assets(html)
+    if not style_assets and not script_assets:
         check()
         return
 
@@ -84,20 +162,21 @@ def migrate() -> None:
 
     html = EVENT_ATTR.sub(replace_handler, html).replace("[onclick]", "[data-onclick]")
 
-    style_match = INLINE_STYLE.search(html)
-    script_matches = list(INLINE_SCRIPT.finditer(html))
-    if style_match is None or len(script_matches) != 1:
+    style_assets, script_assets = _inline_assets(html)
+    if len(style_assets) != 1 or len(script_assets) != 1:
         raise RuntimeError("dashboard must contain exactly one inline style and script block")
 
-    css = style_match.group(1).rstrip()
+    css = style_assets[0].content.rstrip()
     css += "\n\n/* Generated from former static style attributes. */\n"
     css += "".join(
         f'[data-csp-style="{style_id}"]{{{value}}}\n'
         for value, style_id in styles.items()
     )
-    js = _add_generated_listeners(script_matches[0].group(1), handlers)
-    html = INLINE_STYLE.sub('<link rel="stylesheet" href="/static/dashboard.css">', html)
-    html = INLINE_SCRIPT.sub('<script src="/static/dashboard.js"></script>', html)
+    js = _add_generated_listeners(script_assets[0].content, handlers)
+    html = _replace_assets(html, [
+        (style_assets[0], '<link rel="stylesheet" href="/static/dashboard.css">'),
+        (script_assets[0], '<script src="/static/dashboard.js"></script>'),
+    ])
 
     CSS.write_text(css, encoding="utf-8", newline="\n")
     JS.write_text(js, encoding="utf-8", newline="\n")
@@ -111,9 +190,10 @@ def check() -> None:
     css = CSS.read_text(encoding="utf-8") if CSS.is_file() else ""
     js = JS.read_text(encoding="utf-8") if JS.is_file() else ""
     failures = []
-    if INLINE_STYLE.search(html):
+    style_assets, script_assets = _inline_assets(html)
+    if style_assets:
         failures.append("inline style block")
-    if INLINE_SCRIPT.search(html):
+    if script_assets:
         failures.append("inline script block")
     if STYLE_ATTR.search(html):
         failures.append("inline style attribute")

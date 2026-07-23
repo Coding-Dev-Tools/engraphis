@@ -21,6 +21,7 @@ apply to direct writes, and every node/edge is written scoped to the caller's
 """
 from __future__ import annotations
 
+import heapq
 import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -28,13 +29,13 @@ from typing import Any, Optional
 from engraphis.core.interfaces import Edge, Node
 
 # ── Regex NER (ported from engraphis/engines/ingest.py — the v1 heuristic path) ──
-# Capitalized multi-word sequences, emails, URLs/hashtags, quoted names/mentions.
-_ENTITY_RE = re.compile(
-    r"\b([A-Z][a-z]+(?:-[A-Za-z]+)*(?:\s+[A-Z][a-z]+(?:-[A-Za-z]+)*){0,3})\b"
-    r"|([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
-    r"|(#[a-zA-Z][a-zA-Z0-9_-]+)"
-    r"|(@[a-zA-Z][a-zA-Z0-9_-]+)"
-)
+# Capitalized multi-word sequences, emails, hashtags, and mentions.  Keep the
+# individual recognizers unambiguous: the old all-in-one expression could take
+# polynomial time while backtracking over a long email-like local part.
+_CAPITALIZED_WORD_RE = re.compile(r"\b[A-Z][a-z]+(?:-[A-Za-z]+)*\b")
+_EMAIL_RE = re.compile(r"(?<![a-zA-Z0-9._%+-])[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+_HASHTAG_RE = re.compile(r"#[a-zA-Z][a-zA-Z0-9_-]+")
+_MENTION_RE = re.compile(r"@[a-zA-Z][a-zA-Z0-9_-]+")
 _RELATION_RE = re.compile(
     r"\b(?:is|are|was|were|has|have|had|owns|works at|lives in|prefers|likes|"
     r"dislikes|uses|manages|created|founded|located in|part of|member of)\b",
@@ -105,24 +106,71 @@ class GraphExtraction:
 
 
 def _extract_entities(text: str) -> list[tuple[str, str]]:
+    text = text or ""
+
+    def capitalized_candidates():
+        # Assemble at most four whitespace-separated capitalized words, matching the
+        # former heuristic without placing a nested repetition over untrusted text.
+        words = iter(_CAPITALIZED_WORD_RE.finditer(text))
+        current = next(words, None)
+        while current is not None:
+            first = last = current
+            current = None
+            for _ in range(3):
+                following = next(words, None)
+                if following is None:
+                    break
+                if text[last.end():following.start()].isspace():
+                    last = following
+                    continue
+                current = following
+                break
+            else:
+                current = next(words, None)
+            yield (
+                first.start(),
+                0,
+                last.end(),
+                text[first.start():last.end()],
+                "person_or_concept",
+            )
+
+    # Merge four already-position-ordered iterators. This keeps memory bounded even
+    # for very large untrusted input and lets the entity fanout cap stop collection.
+    candidates = heapq.merge(
+        capitalized_candidates(),
+        (
+            (match.start(), 1, match.end(), match.group(0), "email")
+            for match in _EMAIL_RE.finditer(text)
+        ),
+        (
+            (match.start(), 2, match.end(), match.group(0), "hashtag")
+            for match in _HASHTAG_RE.finditer(text)
+        ),
+        (
+            (match.start(), 3, match.end(), match.group(0), "mention")
+            for match in _MENTION_RE.finditer(text)
+        ),
+    )
+
     seen: set[str] = set()
     out: list[tuple[str, str]] = []
-    for m in _ENTITY_RE.finditer(text or ""):
-        raw = (m.group(0) or "").strip()
+    matched_through = 0
+    for start, _priority, end, candidate, etype in candidates:
+        if start < matched_through:
+            continue
+        matched_through = end
+        raw = candidate.strip()
         if not raw or raw.casefold() in _STOPWORD_KEYS or raw.casefold() in (
             "user", "the user"
         ):
             continue
-        if raw.startswith("#"):
-            ent, etype = raw, "hashtag"
-        elif raw.startswith("@"):
-            ent, etype = raw, "mention"
-        elif "@" in raw and "." in raw:
-            ent, etype = raw, "email"
-        else:
+        if etype == "person_or_concept":
             ent, etype = _canon_concept(raw), "person_or_concept"
             if len(ent) < 2 or ent.casefold() in _STOPWORD_KEYS:
                 continue
+        else:
+            ent = raw
         key = ent.lower()
         if key not in seen:
             seen.add(key)

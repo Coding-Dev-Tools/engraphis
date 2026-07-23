@@ -98,6 +98,17 @@ def test_ci_and_release_default_to_read_only_repository_permissions():
         assert "\npermissions:\n  contents: read\n" in header
 
 
+def test_codeql_workflow_fails_when_sarif_contains_findings():
+    workflow = _text(".github/workflows/codeql.yml")
+
+    assert "id: analyze" in workflow
+    assert "output: codeql-results" in workflow
+    assert (
+        'python scripts/check_codeql_sarif.py '
+        '"${{ steps.analyze.outputs.sarif-output }}"'
+    ) in workflow
+
+
 def test_release_repair_requires_tag_sha_successful_build_publish_and_pypi_identity():
     repair = _text(".github/workflows/release.yml").split(
         "github-release-repair:", 1
