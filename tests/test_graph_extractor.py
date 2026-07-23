@@ -9,6 +9,7 @@ wiring on MemoryEngine.remember (regex on -> graph populated; default -> empty).
 """
 from __future__ import annotations
 
+import time
 
 from engraphis.backends import graph_extractor as graph_extractor_module
 from engraphis.backends.graph_extractor import (
@@ -75,6 +76,33 @@ def test_regex_and_feed_bound_per_memory_entity_fanout():
     assert store.conn.execute(
         "SELECT COUNT(*) AS n FROM entities WHERE workspace_id='w1'"
     ).fetchone()["n"] == graph_extractor_module._MAX_ENTITIES
+
+
+def test_regex_entity_extraction_rejects_long_non_email_in_linear_time():
+    """A no-``@`` local-part candidate used to make the unanchored email arm retry
+    from every character. It must remain a fast, empty extraction on untrusted text."""
+    for text in ("a" * 100_000, "%" * 100_000):
+        start = time.perf_counter()
+        extraction = RegexGraphExtractor().extract(text)
+        elapsed = time.perf_counter() - start
+
+        assert extraction.entities == []
+        assert elapsed < 1.0
+
+
+def test_regex_entity_extraction_bounds_large_capitalized_candidate_set():
+    # Four words form one candidate, so this input contains far more candidates than
+    # the public graph fanout limit while remaining deterministic and inexpensive.
+    text = " ".join(
+        "A" + chr(97 + (index // 26) % 26) + chr(97 + index % 26)
+        for index in range(10_000)
+    )
+    start = time.perf_counter()
+    extraction = RegexGraphExtractor().extract(text)
+    elapsed = time.perf_counter() - start
+
+    assert len(extraction.entities) == graph_extractor_module._MAX_ENTITIES
+    assert elapsed < 1.0
 
 
 # ── the feed() writer (scoped graph) ──────────────────────────────────────────

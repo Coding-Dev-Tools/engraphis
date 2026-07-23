@@ -1228,6 +1228,10 @@ class MemoryEngine:
         )
 
         indexer = get_code_indexer(prefer=prefer)
+        # index_repo is an explicit local-filesystem capability: callers select the
+        # repository root to index. Every walked child is resolved and re-contained
+        # below before it is read.
+        # codeql[py/path-injection]
         root = Path(root_path).expanduser().resolve()
         if not root.exists():
             raise ValueError(f"repo root not found: {root_path}")
@@ -1257,10 +1261,14 @@ class MemoryEngine:
                 if files_scanned >= max_files:
                     scan_complete = False
                     break
-                p = Path(file_path)
+                candidate = Path(file_path)
                 try:
-                    rel = p.resolve().relative_to(root).as_posix()
-                except ValueError:
+                    # Resolve once, verify containment, then use this checked path for
+                    # every filesystem operation.  The walker skips symlinks, and this
+                    # closes the remaining defense-in-depth gap if it ever changes.
+                    source_file = candidate.resolve(strict=True)
+                    rel = source_file.relative_to(root).as_posix()
+                except (OSError, ValueError):
                     files_failed += 1
                     continue
                 files_scanned += 1
@@ -1271,11 +1279,11 @@ class MemoryEngine:
                 # of an otherwise complete scan.
                 present.add(rel)
                 try:
-                    stat = p.stat()
+                    stat = source_file.stat()
                     if stat.st_size > max_file_bytes:
                         files_skipped += 1
                         continue
-                    raw = p.read_bytes()
+                    raw = source_file.read_bytes()
                 except OSError:
                     files_failed += 1
                     continue

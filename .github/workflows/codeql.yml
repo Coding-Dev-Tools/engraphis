@@ -28,4 +28,9 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: none
       - name: Analyze
+        id: analyze
         uses: github/codeql-action/analyze@3b0bd1d116c0bde30213346b22d4f634d96a2fb0 # v3
+        with:
+          output: codeql-results
+      - name: Require clean CodeQL results
+        run: python scripts/check_codeql_sarif.py "${{ steps.analyze.outputs.sarif-output }}"

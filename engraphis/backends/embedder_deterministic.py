@@ -32,6 +32,7 @@ class DeterministicEmbedder:
                 # SHA-1 is retained only to keep the established offline embedding
                 # mapping stable across upgrades. This is feature hashing, never a
                 # password, signature, integrity check, or other security primitive.
+                # codeql[py/weak-sensitive-data-hashing]
                 h = hashlib.sha1(
                     token.encode("utf-8"), usedforsecurity=False
                 ).digest()
