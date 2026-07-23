@@ -1,8 +1,8 @@
 {
   "schema": "engraphis-commercial/v2",
-  "version": "1.1.5",
+  "version": "1.0.0",
   "control_plane": "https://api.engraphis.com",
-  "account_portal": "https://api.engraphis.com/account",
+  "managed_dashboard": "https://team.engraphis.com",
   "billing": {
     "authority": "stripe",
     "new_subscriptions": "stripe",
@@ -19,18 +19,16 @@
   "entitlement_lifecycle": {
     "max_grace_hours": 24,
     "grace_mode": "workspace_write_grace",
-    "enforced_by": "private_control_plane",
-    "grace_for": "already_authorized_hosted_accounts",
-    "grace_allows": ["authenticated_existing_user_hosted_account_continuity"],
+    "grace_for": "already_activated_or_provisioned_installations",
+    "grace_allows": ["authenticated_existing_user_local_core_workspace_writes"],
     "live_authorization_still_required_for": [
       "paid_or_cost_bearing_features",
-      "hosted_mcp_or_agent_writes"
+      "mcp_or_agent_writes"
     ],
     "grace_blocks_account_growth": true,
     "trial_expiry_extended_by_grace": false,
     "recovery": {
       "mode": "recovery_read_only",
-      "enforced_by": "private_control_plane",
       "allows": [
         "login",
         "password_recovery",
@@ -50,7 +48,7 @@
     "pro": {
       "monthly_usd": 10,
       "annual_usd": 100,
-      "billing_unit": "owner",
+      "billing_unit": "installation",
       "products": {
         "monthly": {
           "provider": "stripe",
