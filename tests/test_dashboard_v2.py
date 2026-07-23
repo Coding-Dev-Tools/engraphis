@@ -12,7 +12,7 @@ from fastapi import HTTPException  # noqa: E402
 from engraphis.config import settings  # noqa: E402
 from engraphis.cloud_features import CloudFeatureError  # noqa: E402
 from engraphis.routes import v2_api  # noqa: E402
-from engraphis.service import MemoryService  # noqa: E402
+from engraphis.service import MemoryService, ValidationError  # noqa: E402
 
 
 def _client(monkeypatch, tmp_path):
@@ -279,6 +279,36 @@ def test_dashboard_exception_responses_do_not_echo_untrusted_exception_text():
     assert internal.value.status_code == 500
     assert internal.value.detail == {"error": "internal server error"}
     assert secret not in repr(internal.value.detail)
+
+    with pytest.raises(HTTPException) as validation:
+        v2_api._run(fail_with, ValidationError(secret))
+    assert validation.value.status_code == 400
+    assert validation.value.detail == {"error": "invalid request"}
+    assert secret not in repr(validation.value.detail)
+
+    with pytest.raises(HTTPException) as downstream:
+        v2_api._run(fail_with, HTTPException(status_code=418, detail={"error": secret}))
+    assert downstream.value.status_code == 418
+    assert downstream.value.detail == {"error": "request rejected"}
+    assert secret not in repr(downstream.value.detail)
+
+    with pytest.raises(HTTPException) as invalid_status:
+        v2_api._run(fail_with, HTTPException(status_code=999, detail={"error": secret}))
+    assert invalid_status.value.status_code == 500
+    assert invalid_status.value.detail == {"error": "internal server error"}
+    assert secret not in repr(invalid_status.value.detail)
+
+    with pytest.raises(HTTPException) as mismatch:
+        v2_api._run(fail_with, ValueError(f"{secret}: shapes 256 and 384 are not aligned"))
+    assert mismatch.value.status_code == 409
+    assert mismatch.value.detail["embedder"] is True
+    assert secret not in repr(mismatch.value.detail)
+
+    with pytest.raises(HTTPException) as ordinary_value_error:
+        v2_api._run(fail_with, ValueError(secret))
+    assert ordinary_value_error.value.status_code == 500
+    assert ordinary_value_error.value.detail == {"error": "internal server error"}
+    assert secret not in repr(ordinary_value_error.value.detail)
 
     with pytest.raises(HTTPException) as managed:
         v2_api._managed_call(fail_with, CloudFeatureError(secret, status=502))

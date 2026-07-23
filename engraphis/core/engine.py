@@ -14,7 +14,9 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
+import tempfile
 import threading
 import time
 from collections import defaultdict, deque
@@ -76,6 +78,44 @@ _WORD_CHAR_RE = re.compile(r"\w")
 # nodes and edges because the export is reachable at the lowest ('viewer') role.
 CODE_EXPORT_DEFAULT_LIMIT = 5_000
 CODE_EXPORT_MAX_LIMIT = 20_000
+
+
+def _approved_local_index_roots() -> tuple[str, ...]:
+    """Return canonical roots available to the explicit local indexing capability.
+
+    ``ENGRAPHIS_INDEX_ROOTS`` is an operator-owned, path-separator-delimited allow-list.
+    ``ENGRAPHIS_HTTP_INDEX_ROOT`` is a separately configured, single HTTP boundary;
+    include it here too so the checked path handed off by the HTTP route remains usable
+    by the engine.  Configured paths must be absolute: silently resolving a relative
+    operator setting against the process working directory would make the boundary
+    deployment-dependent.
+    When it is unset, the working directory, home directory, and system temporary
+    directory preserve the local-first defaults used by ordinary agent/project checkouts.
+    """
+    def canonical_configured_root(value: str, setting: str) -> str:
+        if not os.path.isabs(value):
+            raise ValueError(f"{setting} must contain only absolute paths")
+        return os.path.normcase(os.path.realpath(os.path.expanduser(value)))
+
+    configured = [
+        canonical_configured_root(value.strip(), "ENGRAPHIS_INDEX_ROOTS")
+        for value in os.environ.get("ENGRAPHIS_INDEX_ROOTS", "").split(os.pathsep)
+        if value.strip()
+    ]
+    if configured:
+        roots = configured
+    else:
+        roots = [
+            os.path.normcase(os.path.realpath(os.getcwd())),
+            os.path.normcase(os.path.realpath(os.path.expanduser("~"))),
+            os.path.normcase(os.path.realpath(tempfile.gettempdir())),
+        ]
+
+    http_root = os.environ.get("ENGRAPHIS_HTTP_INDEX_ROOT", "").strip()
+    if http_root:
+        roots.append(canonical_configured_root(http_root, "ENGRAPHIS_HTTP_INDEX_ROOT"))
+
+    return tuple(dict.fromkeys(roots))
 
 
 def _bounded_finite(value, *, default: float, minimum: float, maximum: float) -> float:
@@ -1228,11 +1268,32 @@ class MemoryEngine:
         )
 
         indexer = get_code_indexer(prefer=prefer)
-        # index_repo is an explicit local-filesystem capability: callers select the
-        # repository root to index. Every walked child is resolved and re-contained
-        # below before it is read.
-        # codeql[py/path-injection]
-        root = Path(root_path).expanduser().resolve()
+        # index_repo is an explicit local-filesystem capability: callers select a
+        # repository in one of the approved local roots. Canonicalizing then checking
+        # containment confines the capability to the operator's configured/default
+        # filesystem boundary. Every walked child is re-contained below before it is read.
+        # Normalize before the root-prefix check.  Keep this check at the filesystem
+        # call site (rather than hiding it in a helper) so both human review and static
+        # analysis can establish that every later path is constrained by this boundary.
+        canonical_root = os.path.normcase(
+            os.path.realpath(os.path.expanduser(os.fspath(root_path)))
+        )
+        # Retain a separator on the checked value.  This makes an approved root
+        # itself and every child use the same normalized-prefix check (and avoids
+        # accepting a sibling such as ``/work/repo-copy`` for ``/work/repo``).
+        # It also keeps the checked value, rather than the untrusted input, as
+        # the only path passed to filesystem APIs below.
+        canonical_root_with_sep = canonical_root.rstrip(os.sep) + os.sep
+        safe_root: Optional[str] = None
+        for approved_root in _approved_local_index_roots():
+            normalized_approved = os.path.normcase(os.path.realpath(approved_root))
+            approved_prefix = normalized_approved.rstrip(os.sep) + os.sep
+            if canonical_root_with_sep.startswith(approved_prefix):
+                safe_root = canonical_root_with_sep
+                break
+        if safe_root is None:
+            raise ValueError("repo root is outside approved local roots")
+        root = Path(safe_root)
         if not root.exists():
             raise ValueError(f"repo root not found: {root_path}")
         if not root.is_dir():
