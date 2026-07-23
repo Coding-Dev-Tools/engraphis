@@ -210,11 +210,9 @@ async def import_folder(req: FolderImportReq):
         raise HTTPException(403, "Import path must be under an allowed root (home directory or ENGRAPHIS_IMPORT_ROOTS)")
     folder = Path(real_path)
     # real_path was canonicalized and checked against the configured roots above.
-    # codeql[py/path-injection]
-    if not folder.exists():
+    if not folder.exists():  # codeql[py/path-injection]
         raise HTTPException(404, f"Path not found: {req.path}")
-    # codeql[py/path-injection]
-    if not folder.is_dir():
+    if not folder.is_dir():  # codeql[py/path-injection]
         raise HTTPException(400, f"Not a directory: {req.path}")
 
     ns = req.namespace

@@ -443,11 +443,9 @@ def _resolve_import_root(raw_path: str) -> Path:
             "ENGRAPHIS_IMPORT_ROOTS)")
     folder = Path(real_path)
     # real_path was canonicalized and checked against the configured roots above.
-    # codeql[py/path-injection]
-    if not folder.exists():
+    if not folder.exists():  # codeql[py/path-injection]
         raise ValidationError(f"path not found: {raw_path}")
-    # codeql[py/path-injection]
-    if not folder.is_dir():
+    if not folder.is_dir():  # codeql[py/path-injection]
         raise ValidationError(f"not a directory: {raw_path}")
     return folder
 
