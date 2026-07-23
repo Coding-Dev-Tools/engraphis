@@ -7,8 +7,11 @@ pytest.importorskip("fastapi", reason="full-stack extra not installed")
 pytest.importorskip("httpx", reason="httpx not installed")
 
 from fastapi.testclient import TestClient  # noqa: E402
+from fastapi import HTTPException  # noqa: E402
 
 from engraphis.config import settings  # noqa: E402
+from engraphis.cloud_features import CloudFeatureError  # noqa: E402
+from engraphis.routes import v2_api  # noqa: E402
 from engraphis.service import MemoryService  # noqa: E402
 
 
@@ -263,3 +266,25 @@ def test_health_and_readiness_remain_public(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         assert client.get("/api/health").status_code == 200
         assert client.get("/api/ready").status_code == 200
+
+
+def test_dashboard_exception_responses_do_not_echo_untrusted_exception_text():
+    secret = "https://provider.example/?api_key=do-not-return-this"
+
+    def fail_with(exc):
+        raise exc
+
+    with pytest.raises(HTTPException) as internal:
+        v2_api._run(fail_with, RuntimeError(secret))
+    assert internal.value.status_code == 500
+    assert internal.value.detail == {"error": "internal server error"}
+    assert secret not in repr(internal.value.detail)
+
+    with pytest.raises(HTTPException) as managed:
+        v2_api._managed_call(fail_with, CloudFeatureError(secret, status=502))
+    assert managed.value.status_code == 502
+    assert managed.value.detail == {
+        "error": "managed cloud operation failed", "managed_cloud": True,
+        "transient": False,
+    }
+    assert secret not in repr(managed.value.detail)
