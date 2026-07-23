@@ -196,9 +196,8 @@ def main(argv=None) -> int:
     print("\nNext steps:")
     print("  engraphis-dashboard      # product UI on http://127.0.0.1:8700")
     print("  engraphis-init --check   # verify the install")
-    print("  Free forever at the core - 3-day free trial for Pro (in the dashboard: "
-          "Settings -> License), or buy at "
-          "https://buy.polar.sh/polar_cl_n6CR3ERqOus2VUhRrGrsRUqOB8yjDTeEU7p1r3CRrae")
+    print("  Free forever at the core - start the 3-day Pro trial or subscribe at "
+          "https://api.engraphis.com/account?plan=pro&interval=monthly#billing")
     return 0
 
 

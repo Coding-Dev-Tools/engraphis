@@ -4,22 +4,23 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "engraphis" / "commercial_manifest.json"
+sys.path.insert(0, str(ROOT))
 
 
 def _fail(errors: list[str], message: str) -> None:
     errors.append(message)
 
 
-def _product_mapping(manifest: dict, errors: list[str]) -> dict:
-    """Validate billing identities and return env -> (plan, interval)."""
+def _checkout_mapping(manifest: dict, errors: list[str]) -> dict:
+    """Validate server-owned checkout targets and return (plan, interval) -> URL."""
     mapping = {}
-    ids = set()
     checkout_urls = set()
     plans = manifest.get("plans") if isinstance(manifest, dict) else None
     if not isinstance(plans, dict):
@@ -36,42 +37,55 @@ def _product_mapping(manifest: dict, errors: list[str]) -> dict:
             if not isinstance(product, dict):
                 _fail(errors, "%s %s product must be an object" % (plan, interval))
                 continue
-            product_id = product.get("id")
-            env_name = product.get("env")
+            if set(product) != {"provider", "checkout_url"}:
+                _fail(
+                    errors,
+                    "%s %s product exposes unsupported provider data" % (plan, interval),
+                )
+                continue
+            if product.get("provider") != "stripe":
+                _fail(errors, "%s %s product is not controlled by Stripe" % (plan, interval))
+                continue
             checkout_url = product.get("checkout_url")
-            if not isinstance(product_id, str) or not re.fullmatch(
-                    r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", product_id):
-                _fail(errors, "%s %s product id is not a canonical UUID" % (plan, interval))
-                continue
-            if product_id in ids:
-                _fail(errors, "Polar product id is duplicated: %s" % product_id)
-            ids.add(product_id)
-            if not isinstance(env_name, str) or not re.fullmatch(r"POLAR_[A-Z_]+_PRODUCT_ID",
-                                                                  env_name):
-                _fail(errors, "%s %s product env is invalid" % (plan, interval))
-                continue
-            if env_name in mapping:
-                _fail(errors, "Polar product environment is duplicated: %s" % env_name)
-            mapping[env_name] = (plan, interval)
             if not isinstance(checkout_url, str):
                 _fail(errors, "%s %s checkout URL is missing" % (plan, interval))
                 continue
             parsed = urlsplit(checkout_url)
             query = parse_qs(parsed.query)
-            if parsed.scheme != "https" or parsed.netloc != "buy.polar.sh" \
-                    or query.get("product_id") != [product_id]:
-                _fail(errors, "%s %s checkout URL does not match its product id" % (
-                    plan, interval))
+            if (
+                parsed.scheme != "https"
+                or parsed.netloc != "api.engraphis.com"
+                or parsed.path != "/account"
+                or parsed.fragment != "billing"
+                or query != {"plan": [plan], "interval": [interval]}
+            ):
+                _fail(
+                    errors,
+                    "%s %s checkout URL is not the canonical account portal" % (plan, interval),
+                )
+                continue
             if checkout_url in checkout_urls:
-                _fail(errors, "Polar checkout URL is duplicated: %s" % checkout_url)
+                _fail(errors, "checkout URL is duplicated: %s" % checkout_url)
             checkout_urls.add(checkout_url)
+            mapping[(plan, interval)] = checkout_url
     return mapping
 
 
 def _check_repository(manifest: dict, errors: list[str]) -> None:
-    if manifest.get("schema") != "engraphis-commercial/v1":
-        _fail(errors, "commercial manifest schema must be engraphis-commercial/v1")
-    mapping = _product_mapping(manifest, errors)
+    if manifest.get("schema") != "engraphis-commercial/v2":
+        _fail(errors, "commercial manifest schema must be engraphis-commercial/v2")
+    mapping = _checkout_mapping(manifest, errors)
+    expected_billing = {
+        "authority": "stripe",
+        "new_subscriptions": "stripe",
+        "legacy_providers": [],
+        "checkout_mode": "authenticated_server_session",
+        "portal_url": "https://api.engraphis.com/account#billing",
+        "provider_price_ids_public": False,
+    }
+    if manifest.get("billing") != expected_billing:
+        _fail(errors, "Stripe must be the sole launch billing authority")
+
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.MULTILINE)
     if not match or match.group(1) != manifest["version"]:
@@ -87,8 +101,9 @@ def _check_repository(manifest: dict, errors: list[str]) -> None:
     if re.search(r"img\.shields\.io/badge/version-[^\s)]+", readme):
         _fail(errors, "README must not advertise an unpublished hard-coded version badge")
 
-    template = json.loads((ROOT / "deploy" / "railway-template.json").read_text(
-        encoding="utf-8"))
+    template = json.loads(
+        (ROOT / "deploy" / "railway-template.json").read_text(encoding="utf-8")
+    )
     service = template.get("service", {})
     variables = template.get("variables", {})
     if service.get("healthcheck") != "/api/ready":
@@ -103,30 +118,40 @@ def _check_repository(manifest: dict, errors: list[str]) -> None:
         if variables.get(name, {}).get("value") != expected:
             _fail(errors, "Railway variable %s does not match manifest" % name)
     local_api = variables.get("ENGRAPHIS_API_TOKEN", {})
-    if not local_api.get("required") or not local_api.get("secret") \
-            or local_api.get("value") != "${{ secret(48) }}":
+    if (
+        not local_api.get("required")
+        or not local_api.get("secret")
+        or local_api.get("value") != "${{ secret(48) }}"
+    ):
         _fail(errors, "Railway template must generate a secret local API token")
 
-    from engraphis.commercial import PRODUCT_ENV, expected_product_ids
-    expected = expected_product_ids()
-    if mapping != PRODUCT_ENV:
-        _fail(errors, "Polar product environment mapping drifted from manifest")
+    from engraphis.commercial import BILLING_AUTHORITY, expected_checkout_targets
+
+    expected = expected_checkout_targets()
+    if BILLING_AUTHORITY != "stripe":
+        _fail(errors, "public billing authority drifted from Stripe")
     if set(expected) != set(mapping) or any(
-            expected[env].get("id") != manifest["plans"][plan]["products"][interval]["id"]
-            for env, (plan, interval) in mapping.items() if env in expected):
-        _fail(errors, "commercial product catalog parser drifted from manifest")
+        expected[key].get("provider") != "stripe"
+        or expected[key].get("checkout_url") != checkout_url
+        for key, checkout_url in mapping.items()
+        if key in expected
+    ):
+        _fail(errors, "commercial checkout catalog parser drifted from manifest")
 
 
 def _check_website(manifest: dict, website: Path, errors: list[str]) -> None:
-    files = [website / name for name in ("index.html", "product.html", "about.html",
-                                          "contact.html")]
+    files = [
+        website / name
+        for name in ("index.html", "product.html", "about.html", "contact.html")
+    ]
     missing = [str(path) for path in files if not path.is_file()]
     if missing:
         _fail(errors, "website files missing: " + ", ".join(missing))
         return
     website_manifest = website / "commercial_manifest.json"
-    if (not website_manifest.is_file()
-            or json.loads(website_manifest.read_text(encoding="utf-8")) != manifest):
+    if not website_manifest.is_file() or (
+        json.loads(website_manifest.read_text(encoding="utf-8")) != manifest
+    ):
         _fail(errors, "website commercial manifest copy differs from canonical manifest")
     text = "\n".join(path.read_text(encoding="utf-8") for path in files)
     public_text = "\n".join(
@@ -134,12 +159,17 @@ def _check_website(manifest: dict, website: Path, errors: list[str]) -> None:
     )
     lower = public_text.lower()
     for unsupported in (
-            "end-to-end encrypted", "no phone-home", "sso/rbac",
-            "it never leaves your machine"):
+        "end-to-end encrypted",
+        "no phone-home",
+        "sso/rbac",
+        "it never leaves your machine",
+    ):
         if unsupported in lower:
             _fail(errors, "website advertises unsupported claim: %s" % unsupported)
     if re.search(r"\bsla\b", public_text, re.IGNORECASE):
         _fail(errors, "website advertises unsupported claim: SLA")
+    if "polar" in lower:
+        _fail(errors, "website advertises Polar as a launch billing authority")
     required = [
         "v" + manifest["version"],
         "%d-day" % manifest["trial"]["days"],
@@ -150,12 +180,9 @@ def _check_website(manifest: dict, website: Path, errors: list[str]) -> None:
         if claim not in text:
             _fail(errors, "website is missing manifest claim: %s" % claim)
     for plan in ("pro", "team"):
-        for product in manifest["plans"][plan]["products"].values():
+        for interval, product in manifest["plans"][plan]["products"].items():
             if product["checkout_url"] not in text:
-                _fail(errors, "website is missing %s checkout %s" % (
-                    plan, product["id"]))
-    if re.search(r'href="[^"]*polar[^"]*"[^>]*>[^<]*trial', text, re.IGNORECASE):
-        _fail(errors, "trial links must use deployment onboarding, not Polar")
+                _fail(errors, "website is missing %s %s checkout" % (plan, interval))
 
 
 def main() -> int:
