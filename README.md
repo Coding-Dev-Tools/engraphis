@@ -601,15 +601,15 @@ Manual consolidation is free and remains local. Use the dashboard's **Consolidat
 `python -m scripts.consolidate`. Dry-run is the default.
 
 Pro and Team add **hosted** Auto Consolidation and Auto Dreaming. The public Automation tab is a
-policy/status client: it submits an explicitly consented, bounded snapshot to private managed
-compute and displays reviewable jobs or proposals. The scheduling, analytics, dreaming, and
+policy/status client: it submits a bounded snapshot to private managed compute and displays
+reviewable jobs or proposals. The scheduling, analytics, dreaming, and
 consolidation automation algorithms run in Engraphis Cloud; this repository ships no premium
 background loop, cron wrapper, or worker.
 
 Secret-class and session-scoped memories are excluded before a managed snapshot is serialized;
 secret-class rows are rejected again by the hosted service. The encoded payload is capped at
-16 MiB. Set `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1` only after reviewing that boundary. A managed
-proposal does not silently rewrite the local database.
+16 MiB. Managed compute is enabled automatically for authorized customers. A managed proposal
+does not silently rewrite the local database.
 
 Manual consolidation can also use schema-validated LLM output through
 `MemoryService.consolidate`, `POST /api/consolidate`, `engraphis_consolidate`, or
@@ -656,7 +656,6 @@ All via environment (or `.env`):
 | `ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL` | — | Bootstrap-only rotating hosted credential; after first use the owner-only cloud session replacement takes precedence |
 | `ENGRAPHIS_CLOUD_TOKEN_SUBJECT` | `member` | Subject fixed during hosted bootstrap (`device` or `member`); set explicitly with an environment-only refresh credential |
 | `ENGRAPHIS_CLOUD_ACCESS_TOKEN` | — | Optional short-lived access token for ephemeral jobs |
-| `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | `0` | Explicit opt-in required before uploading a bounded snapshot for hosted Analytics/Automation |
 
 See `.env.example` for the full customer-runtime and managed-service client options.
 

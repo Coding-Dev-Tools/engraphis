@@ -54,6 +54,19 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Graph GET requests are strictly read-only. While an explicit mutating index job runs, graph
   reads return a rebuilding conflict instead of mixing old and partially derived metrics.
 
+## [1.0.1] - 2026-07-23
+
+Public 1.0.1 client reliability release.
+
+### Fixed
+
+- Cloud Sync now defaults to `https://relay.engraphis.com` and safely migrates the former
+  dashboard host and retired Railway relay URL without changing customer-provided relay URLs.
+- Hosted Automation and maintenance requests now use the selected workspace end to end rather
+  than silently falling back to the first workspace.
+- The Automation tab has one proposal action, clear managed-upload disclosure, and automatic
+  entitlement-gated managed-compute availability while preserving snapshot redaction and limits.
+
 ## [1.0.0] - 2026-07-23
 
 Public 1.0.0 open-core GA release.
@@ -99,8 +112,8 @@ Public 1.0.0 open-core GA release.
   implementations from the public source and package artifacts.
 - Bare memory IDs, shared-workspace controls, graph entities, statistics, snapshots, exports,
   audit rows, and keyword fallbacks cannot cross authenticated session or workspace boundaries.
-- Managed uploads require explicit consent, are capped at 16 MiB and 100,000 rows, omit all
-  session-scoped and secret-class memories, and surface only fixed client-safe provider errors.
+- Managed uploads are capped at 16 MiB and 100,000 rows, omit all session-scoped and
+  secret-class memories, and surface only fixed client-safe provider errors.
 - Customer credentials remain owner-only, redirect-safe, serialized during rotation, and are
   never substituted with an unproven local machine identifier.
 

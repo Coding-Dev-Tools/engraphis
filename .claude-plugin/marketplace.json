@@ -9,7 +9,7 @@
       "name": "engraphis-memory",
       "source": "./",
       "description": "Discipline for giving agents durable, scoped, explainable memory across sessions and repos with the Engraphis MCP tools.",
-      "version": "1.0.0"
+      "version": "1.0.1"
     }
   ]
 }
