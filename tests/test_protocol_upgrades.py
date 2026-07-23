@@ -71,15 +71,15 @@ def test_link_infers_layer_for_response_receipt_and_persistence():
 
 def test_receipts_are_content_free_chained_and_tamper_evident():
     svc = MemoryService.create(":memory:", graph_extractor="none")
-    secret = "launch code ORANGE-UNICORN-991"
+    content_marker = "receipt exclusion marker ORANGE-UNICORN-991"
     svc.remember(
-        secret, workspace="w", scope="workspace",
+        content_marker, workspace="w", scope="workspace",
         source="alice@example.test",
     )
     svc.recall("ORANGE-UNICORN", workspace="w", reinforce=False)
     exported = svc.export_receipts(workspace="w")
     encoded = json.dumps(exported)
-    assert secret not in encoded
+    assert content_marker not in encoded
     assert "alice@example.test" not in encoded
     assert exported["verification"]["valid"] is True
     actor = svc.store.conn.execute(
