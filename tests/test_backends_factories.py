@@ -1,3 +1,5 @@
+import hashlib
+
 from engraphis.backends.embedder_deterministic import DeterministicEmbedder
 from engraphis.backends.embedder_st import get_embedder
 from engraphis.backends.reranker import IdentityReranker, get_reranker
@@ -10,6 +12,14 @@ def test_embedder_factory_falls_back_offline():
     assert isinstance(get_embedder(None, 128), DeterministicEmbedder)
     # An unresolvable model name must not crash — it falls back.
     assert isinstance(get_embedder("definitely-not-a-real-model-xyz", 128), DeterministicEmbedder)
+
+
+def test_deterministic_embedder_preserves_legacy_feature_hash_mapping():
+    """Changing the feature-hash algorithm would invalidate existing local vectors."""
+    vectors = DeterministicEmbedder(dim=64).embed(["alpha beta graph", "offline mapping 123"])
+    assert hashlib.sha256(vectors.tobytes()).hexdigest() == (
+        "c2378cd31c56863b0c65fe7b0634aa62250af35b94853298bfed34fbb71875df"
+    )
 
 
 def test_vector_index_factory_modes(monkeypatch):
