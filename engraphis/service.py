@@ -20,6 +20,7 @@ import re
 import json
 import hashlib
 import contextvars
+import logging
 import math
 import copy
 import time
@@ -42,6 +43,8 @@ from engraphis.core.ids import new_id as make_id
 from engraphis.core.interfaces import Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter
 from engraphis.core.store import _loads, _merge_edge_provenance, normalize_entity_name
 from engraphis.graphdata import build_graph_payload, empty_graph
+
+logger = logging.getLogger("engraphis.service")
 
 # ── validation limits (memory-poisoning / resource-exhaustion guards) ──────────
 MAX_CONTENT_CHARS = 100_000
@@ -419,20 +422,36 @@ def _resolve_import_root(raw_path: str) -> Path:
     ``/memory/vaults/import-folder`` endpoint's convention — home directory by default,
     widened via ``ENGRAPHIS_IMPORT_ROOTS`` (``os.pathsep``-separated) for server
     deployments that keep content outside ``$HOME``."""
-    folder = Path(raw_path).expanduser().resolve()
+    home = os.path.realpath(str(Path.home().expanduser()))
+    allowed_roots = [home]
+    env_roots = os.environ.get("ENGRAPHIS_IMPORT_ROOTS", "")
+    if env_roots:
+        allowed_roots.extend(
+            os.path.realpath(os.path.expanduser(root))
+            for root in env_roots.split(os.pathsep)
+            if root
+        )
+    real_path = os.path.realpath(os.path.expanduser(raw_path))
+    comparable_path = os.path.normcase(real_path)
+    safe_path = None
+    for root in allowed_roots:
+        comparable_root = os.path.normcase(root)
+        if comparable_path == comparable_root:
+            safe_path = comparable_root
+            break
+        root_prefix = comparable_root.rstrip(os.sep) + os.sep
+        if comparable_path.startswith(root_prefix):
+            safe_path = comparable_path
+            break
+    if safe_path is None:
+        raise ValidationError(
+            "import path must be under an allowed root (your home directory, or "
+            "ENGRAPHIS_IMPORT_ROOTS)")
+    folder = Path(safe_path)
     if not folder.exists():
         raise ValidationError(f"path not found: {raw_path}")
     if not folder.is_dir():
         raise ValidationError(f"not a directory: {raw_path}")
-    home = Path.home().resolve()
-    allowed_roots = [home]
-    env_roots = os.environ.get("ENGRAPHIS_IMPORT_ROOTS", "")
-    if env_roots:
-        allowed_roots.extend(Path(r).expanduser().resolve() for r in env_roots.split(os.pathsep) if r)
-    if not any(folder == r or folder.is_relative_to(r) for r in allowed_roots):
-        raise ValidationError(
-            "import path must be under an allowed root (your home directory, or "
-            "ENGRAPHIS_IMPORT_ROOTS)")
     return folder
 
 
@@ -452,16 +471,17 @@ def _iter_import_files(folder: Path, pattern: str, max_files: int) -> list:
             break
         if not f.is_file() or not fnmatch.fnmatch(f.name, pattern):
             continue
-        parts = f.relative_to(folder).parts
+        try:
+            # ``f`` came from a user-selected tree. Resolve and contain it before both
+            # deriving metadata and returning the path that ``import_folder`` will read.
+            real = f.resolve(strict=True)
+            rel = real.relative_to(folder)
+        except (OSError, ValueError):
+            continue
+        parts = rel.parts
         if any(p == "node_modules" or p == ".git" or p.startswith(".") for p in parts[:-1]):
             continue
-        try:
-            real = f.resolve()
-        except OSError:
-            continue
-        if not (real == folder or real.is_relative_to(folder)):
-            continue
-        files.append(f)
+        files.append(real)
     return files
 
 
@@ -1206,8 +1226,9 @@ class MemoryService:
                 if "no extractable text" in str(exc):
                     skipped += 1
                     continue
+                logger.warning("folder import failed for one file (%s)", type(exc).__name__)
                 errors += 1
-                details.append({"file": f.name, "error": str(exc)})
+                details.append({"file": f.name, "error": "file could not be imported"})
                 continue
             rel = f.relative_to(folder).as_posix()
             resource_meta = {
@@ -1241,7 +1262,9 @@ class MemoryService:
                     if note:
                         file_warnings.append(note)
                 except (OSError, ValueError) as exc:
-                    file_warnings.append(f"fact derivation failed: {exc}")
+                    logger.warning("fact derivation failed for one file (%s)",
+                                   type(exc).__name__)
+                    file_warnings.append("fact derivation failed")
             if file_warnings:
                 warnings.append({"file": rel, "warnings": file_warnings})
 
