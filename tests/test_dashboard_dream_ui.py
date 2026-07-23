@@ -14,7 +14,7 @@ def test_automation_form_renders_dream_controls():
     for el in ("au-dream", "au-dream-min", "au-dream-idle"):
         assert f'id="{el}"' in script, el
     assert 'id="au-infer"' not in script
-    assert "Automation executes in Engraphis Cloud" in script
+    assert "Requesting managed work uploads the selected workspace’s normal and sensitive memory content" in script
 
 
 def test_save_body_posts_dream_fields():

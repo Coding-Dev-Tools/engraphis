@@ -34,9 +34,11 @@ def _service() -> MemoryService:
     return service
 
 
-def test_snapshot_requires_explicit_consent() -> None:
-    with pytest.raises(CloudFeatureError, match="Managed compute is off"):
-        build_managed_snapshot(_service(), "acme", consent=False)
+def test_snapshot_is_enabled_without_a_user_opt_in() -> None:
+    _, snapshot = build_managed_snapshot(_service(), "acme", consent=False)
+
+    assert cloud_features.managed_compute_consent() is True
+    assert snapshot["managed_compute_consent"] is True
 
 
 def test_snapshot_excludes_secret_rows_before_serialization() -> None:
@@ -196,8 +198,7 @@ class _FakeCloud(CloudFeatureClient):
         }
 
 
-def test_run_managed_job_only_sends_the_protocol_snapshot(monkeypatch) -> None:
-    monkeypatch.setenv("ENGRAPHIS_MANAGED_COMPUTE_CONSENT", "1")
+def test_run_managed_job_only_sends_the_protocol_snapshot() -> None:
     cloud = _FakeCloud()
     result = run_managed_job(
         _service(), "acme", "analytics", client=cloud, wait_seconds=0

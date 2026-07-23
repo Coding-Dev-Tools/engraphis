@@ -60,7 +60,7 @@ The one-shot customer client remains available for explicit sync operations:
 python -m scripts.sync \
   --db engraphis.db \
   --workspace acme \
-  --relay https://team.engraphis.com
+  --relay https://relay.engraphis.com
 ```
 
 The dashboard's **Sync now** action invokes the same customer protocol. The public package does

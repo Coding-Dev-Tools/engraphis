@@ -116,8 +116,16 @@ def _default_ws() -> Optional[str]:
     return wss[0]["name"] if wss else None
 
 
-def _require_ws() -> str:
-    """Like _default_ws but raises 400 if no workspace exists yet."""
+def _require_ws(workspace: Optional[str] = None) -> str:
+    """Resolve an explicitly selected workspace, with a legacy default fallback.
+
+    Cloud automation is workspace-scoped.  Existing clients that omit the query
+    parameter retain the historic first-workspace behavior, but an explicit value
+    is cleaned and authorized before it is used.  Callers validate existence at
+    the cloud boundary so an unknown selection receives the documented 404.
+    """
+    if workspace is not None:
+        return service()._clean_ws(workspace)
     ws = _default_ws()
     if not ws:
         raise HTTPException(status_code=400, detail={"error": "No workspace exists yet. Create one first."})
@@ -1248,11 +1256,11 @@ class _AutomationReq(BaseModel):
 
 
 @router.get("/automation")
-def automation_get():
+def automation_get(workspace: Optional[str] = None):
     """Read the cloud-authoritative managed-maintenance policy."""
     from engraphis.cloud_features import CloudFeatureClient
 
-    ws = _require_ws()
+    ws = _require_ws(workspace)
     workspace_id = service()._lookup_workspace(ws)
     if not workspace_id:
         raise HTTPException(status_code=404, detail={
@@ -1285,11 +1293,11 @@ def automation_get():
 
 
 @router.post("/automation")
-def automation_set(req: _AutomationReq):
+def automation_set(req: _AutomationReq, workspace: Optional[str] = None):
     """Persist scheduling only in the private cloud data store."""
     from engraphis.cloud_features import CloudFeatureClient, build_managed_snapshot
 
-    ws = _require_ws()
+    ws = _require_ws(workspace)
     workspace_id = service()._lookup_workspace(ws)
     if not workspace_id:
         raise HTTPException(status_code=404, detail={
@@ -1337,11 +1345,11 @@ class _MaintenanceReq(BaseModel):
 
 
 @router.post("/maintenance/run")
-def maintenance_run(req: _MaintenanceReq):
+def maintenance_run(req: _MaintenanceReq, workspace: Optional[str] = None):
     """Submit consolidation to managed compute; results remain generation-bound."""
     from engraphis.cloud_features import run_managed_job
 
-    ws = _require_ws()
+    ws = _require_ws(workspace)
     envelope = _managed_call(run_managed_job, service(), ws, "consolidate")
     result = envelope.get("result", envelope)
     return {
