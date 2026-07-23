@@ -48,7 +48,7 @@
     "pro": {
       "monthly_usd": 10,
       "annual_usd": 100,
-      "billing_unit": "installation",
+      "billing_unit": "owner",
       "products": {
         "monthly": {
           "provider": "stripe",

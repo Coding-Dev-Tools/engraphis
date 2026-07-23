@@ -66,6 +66,8 @@ Public 1.0.1 client reliability release.
   than silently falling back to the first workspace.
 - The Automation tab has one proposal action, clear managed-upload disclosure, and automatic
   entitlement-gated managed-compute availability while preserving snapshot redaction and limits.
+- Commercial metadata now describes Pro as one owner account across that owner's local
+  installations, matching the hosted entitlement model; Team remains billed per named seat.
 
 ## [1.0.0] - 2026-07-23
 

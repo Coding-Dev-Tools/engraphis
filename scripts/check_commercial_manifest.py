@@ -75,6 +75,11 @@ def _check_repository(manifest: dict, errors: list[str]) -> None:
     if manifest.get("schema") != "engraphis-commercial/v2":
         _fail(errors, "commercial manifest schema must be engraphis-commercial/v2")
     mapping = _checkout_mapping(manifest, errors)
+    expected_units = {"free": "installation", "pro": "owner", "team": "seat"}
+    for plan, expected_unit in expected_units.items():
+        plan_data = manifest.get("plans", {}).get(plan, {})
+        if plan_data.get("billing_unit") != expected_unit:
+            _fail(errors, "%s billing unit must be %s" % (plan, expected_unit))
     expected_billing = {
         "authority": "stripe",
         "new_subscriptions": "stripe",
@@ -173,7 +178,7 @@ def _check_website(manifest: dict, website: Path, errors: list[str]) -> None:
     required = [
         "v" + manifest["version"],
         "%d-day" % manifest["trial"]["days"],
-        "$%d <span>/ mo" % manifest["plans"]["pro"]["monthly_usd"],
+        "$%d <span>/ mo / owner" % manifest["plans"]["pro"]["monthly_usd"],
         "$%d <span>/ seat / mo" % manifest["plans"]["team"]["monthly_usd"],
     ]
     for claim in required:
