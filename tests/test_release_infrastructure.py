@@ -108,10 +108,11 @@ def test_release_repair_requires_tag_sha_successful_build_publish_and_pypi_ident
     assert '"repos/${GH_REPO}/git/ref/tags/${RELEASE_TAG}"' in repair
     assert '"repos/${GH_REPO}/git/tags/${tag_sha}"' in repair
     assert 'test "$object_type" = "commit"' in repair
-    assert "--json databaseId,headBranch,headSha,event" in repair
+    assert "--json databaseId,headBranch,headSha,event,createdAt" in repair
     assert ".headBranch == $tag" in repair
     assert ".headSha == $sha" in repair
     assert '.event == "push"' in repair
+    assert "sort_by(.createdAt)" in repair
     assert '.name == "Build distributions"' in repair
     assert '.name == "Publish to PyPI"' in repair
     assert '.name == "Assemble distributions"' not in repair
