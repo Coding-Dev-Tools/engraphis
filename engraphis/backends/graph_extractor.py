@@ -33,9 +33,17 @@ from engraphis.core.interfaces import Edge, Node
 # individual recognizers unambiguous: the old all-in-one expression could take
 # polynomial time while backtracking over a long email-like local part.
 _CAPITALIZED_WORD_RE = re.compile(r"\b[A-Z][a-z]+(?:-[A-Za-z]+)*\b")
-_EMAIL_RE = re.compile(r"(?<![a-zA-Z0-9._%+-])[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 _HASHTAG_RE = re.compile(r"#[a-zA-Z][a-zA-Z0-9_-]+")
 _MENTION_RE = re.compile(r"@[a-zA-Z][a-zA-Z0-9_-]+")
+_EMAIL_LOCAL_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._%+-"
+)
+_EMAIL_DOMAIN_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-"
+)
+_EMAIL_SUFFIX_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+)
 _RELATION_RE = re.compile(
     r"\b(?:is|are|was|were|has|have|had|owns|works at|lives in|prefers|likes|"
     r"dislikes|uses|manages|created|founded|located in|part of|member of)\b",
@@ -78,6 +86,35 @@ _COOCCUR_WEIGHT = 0.5          # weaker than a specific relation so PPR prefers 
 # strip from real multi-word names like "May Smith").
 _LEADING_DROP = {"The", "This", "That", "These", "Those", "A", "An",
                  "My", "Our", "Your", "Their", "His", "Her", "Its"}
+
+
+def _iter_emails(text: str):
+    """Yield email-like spans in one pass without regex backtracking."""
+
+    index = 0
+    length = len(text)
+    while index < length:
+        if text[index] not in _EMAIL_LOCAL_CHARS:
+            index += 1
+            continue
+        if index > 0 and text[index - 1] in _EMAIL_LOCAL_CHARS:
+            index += 1
+            continue
+        start = index
+        while index < length and text[index] in _EMAIL_LOCAL_CHARS:
+            index += 1
+        if index >= length or text[index] != "@":
+            continue
+        domain_start = index + 1
+        end = domain_start
+        while end < length and text[end] in _EMAIL_DOMAIN_CHARS:
+            end += 1
+        domain = text[domain_start:end]
+        dot = domain.rfind(".")
+        suffix = domain[dot + 1:] if dot > 0 else ""
+        if len(suffix) >= 2 and all(char in _EMAIL_SUFFIX_CHARS for char in suffix):
+            yield start, end, text[start:end]
+        index = domain_start if end < length and text[end] == "@" else end
 
 
 def _defang(value: str) -> str:
@@ -140,8 +177,8 @@ def _extract_entities(text: str) -> list[tuple[str, str]]:
     candidates = heapq.merge(
         capitalized_candidates(),
         (
-            (match.start(), 1, match.end(), match.group(0), "email")
-            for match in _EMAIL_RE.finditer(text)
+            (start, 1, end, value, "email")
+            for start, end, value in _iter_emails(text)
         ),
         (
             (match.start(), 2, match.end(), match.group(0), "hashtag")

@@ -81,12 +81,13 @@ def test_regex_and_feed_bound_per_memory_entity_fanout():
 def test_regex_entity_extraction_rejects_long_non_email_in_linear_time():
     """A no-``@`` local-part candidate used to make the unanchored email arm retry
     from every character. It must remain a fast, empty extraction on untrusted text."""
-    start = time.perf_counter()
-    extraction = RegexGraphExtractor().extract("a" * 100_000)
-    elapsed = time.perf_counter() - start
+    for text in ("a" * 100_000, "%" * 100_000):
+        start = time.perf_counter()
+        extraction = RegexGraphExtractor().extract(text)
+        elapsed = time.perf_counter() - start
 
-    assert extraction.entities == []
-    assert elapsed < 1.0
+        assert extraction.entities == []
+        assert elapsed < 1.0
 
 
 def test_regex_entity_extraction_bounds_large_capitalized_candidate_set():

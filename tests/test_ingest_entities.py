@@ -98,9 +98,10 @@ def test_click_target_shape_has_namespace_and_documents():
 def test_entity_extraction_rejects_long_non_email_in_linear_time():
     """Keep ingestion responsive when untrusted text resembles an email local part
     but never supplies an ``@`` separator."""
-    start = time.perf_counter()
-    entities = ingest_engine._extract_entities("a" * 100_000)
-    elapsed = time.perf_counter() - start
+    for text in ("a" * 100_000, "%" * 100_000):
+        start = time.perf_counter()
+        entities = ingest_engine._extract_entities(text)
+        elapsed = time.perf_counter() - start
 
-    assert entities == []
-    assert elapsed < 1.0
+        assert entities == []
+        assert elapsed < 1.0
