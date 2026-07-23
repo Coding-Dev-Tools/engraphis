@@ -1,4 +1,6 @@
 """Unified local dashboard tests for the public open-core boundary."""
+from pathlib import Path
+
 import pytest
 
 pytest.importorskip("fastapi", reason="full-stack extra not installed")
@@ -23,6 +25,12 @@ def _client(monkeypatch, tmp_path):
         workspace="demo",
         scope="workspace",
         title="Database",
+    )
+    seeded.remember(
+        "A second workspace must stay isolated.",
+        workspace="beta",
+        scope="workspace",
+        title="Isolation",
     )
     seeded.store.close()
     from engraphis.dashboard_app import create_app
@@ -156,6 +164,81 @@ def test_reading_or_disabling_automation_never_uploads_memory_content(
         response = client.post("/api/automation", json={"enabled": False})
         assert response.status_code == 200
         assert saved["enabled"] is False
+
+
+def test_automation_and_maintenance_use_the_selected_workspace(monkeypatch, tmp_path):
+    policy_workspaces = []
+    snapshot_workspaces = []
+    maintenance_workspaces = []
+
+    class _Cloud:
+        def get_policy(self, workspace_id):
+            policy_workspaces.append(workspace_id)
+            return {"enabled": False, "cadence_minutes": 60, "dream_enabled": True}
+
+        def list_jobs(self, workspace_id, *, limit=10):
+            policy_workspaces.append(workspace_id)
+            return {"jobs": []}
+
+        def upload_snapshot(self, workspace_id, snapshot):
+            snapshot_workspaces.append(workspace_id)
+            return {"generation": snapshot["generation"]}
+
+        def save_policy(self, workspace_id, policy):
+            policy_workspaces.append(workspace_id)
+            return {"version": 1}
+
+    def snapshot(service, workspace):
+        snapshot_workspaces.append(workspace)
+        return service._lookup_workspace(workspace), {"generation": 1}
+
+    def managed_job(service, workspace, kind):
+        maintenance_workspaces.append((workspace, kind))
+        return {"result": {"kind": kind}}
+
+    monkeypatch.setattr("engraphis.cloud_features.build_managed_snapshot", snapshot)
+    monkeypatch.setattr("engraphis.cloud_features.run_managed_job", managed_job)
+    monkeypatch.setattr(
+        "engraphis.cloud_features.CloudFeatureClient.from_environment",
+        lambda workspace_id=None: _Cloud(),
+    )
+    with _client(monkeypatch, tmp_path) as client:
+        beta_id = client.app.state.service._lookup_workspace("beta")
+        demo_id = client.app.state.service._lookup_workspace("demo")
+        assert client.get("/api/automation?workspace=beta").status_code == 200
+        assert client.post(
+            "/api/automation?workspace=beta", json={"enabled": True}
+        ).status_code == 200
+        assert client.post(
+            "/api/maintenance/run?workspace=beta", json={"dry_run": True}
+        ).status_code == 200
+
+    assert beta_id in policy_workspaces
+    assert demo_id not in policy_workspaces
+    assert "beta" in snapshot_workspaces
+    assert maintenance_workspaces == [("beta", "consolidate")]
+
+
+def test_automation_workspace_query_unknown_is_not_replaced_by_legacy_default(
+    monkeypatch, tmp_path
+):
+    with _client(monkeypatch, tmp_path) as client:
+        for method, path, payload in (
+            (client.get, "/api/automation?workspace=missing", None),
+            (client.post, "/api/automation?workspace=missing", {"enabled": False}),
+            (client.post, "/api/maintenance/run?workspace=missing", {"dry_run": True}),
+        ):
+            response = method(path, json=payload) if payload is not None else method(path)
+            assert response.status_code == 404
+
+
+def test_dashboard_automation_uses_active_workspace_and_discloses_upload_boundary():
+    source = Path(__file__).parents[1] / "engraphis" / "static" / "dashboard.js"
+    source = source.read_text(encoding="utf-8")
+    assert "/automation?workspace=" in source
+    assert "/maintenance/run?workspace=" in source
+    assert "Preview snapshot" not in source
+    assert "Requesting managed work uploads the selected workspace’s normal and sensitive memory content" in source
 
 
 def test_portfolio_and_report_analytics_are_hosted_only(monkeypatch, tmp_path):

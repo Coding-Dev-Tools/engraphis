@@ -309,7 +309,7 @@ def _safe_bundle_name(name: object) -> str:
 class RelayTransport:
     """A ``SyncTransport`` backed by the customer sync relay.
 
-    ``base_url`` is the relay root (e.g. ``https://team.engraphis.com``). ``workspace_id``
+    ``base_url`` is the relay root (e.g. ``https://relay.engraphis.com``). ``workspace_id``
     scopes bundles to one workspace. ``access_token`` must be a short-lived scoped cloud
     bearer. The legacy-named ``license_key`` parameter is accepted only as a call-site
     alias for that bearer; values with the retired ``ENGR1`` prefix are rejected. With no
