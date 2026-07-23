@@ -49,6 +49,32 @@ def test_codeql_gate_reports_and_rejects_findings(tmp_path, capsys) -> None:
     assert "py/example at engraphis/example.py:12" in captured.err
 
 
+def test_codeql_gate_rejects_baselined_and_source_suppressed_findings(tmp_path, capsys) -> None:
+    _write_sarif(
+        tmp_path,
+        [
+            {
+                "ruleId": "py/baselined-example",
+                "baselineState": "unchanged",
+                "message": {"text": "existing finding"},
+            },
+            {
+                "ruleId": "py/source-suppressed-example",
+                "suppressions": [{"kind": "inSource"}],
+                "message": {"text": "suppressed finding"},
+            },
+        ],
+    )
+
+    # Count every raw result. Do not inherit pull-request baselining or silently
+    # ignore a SARIF suppression.
+    assert main([str(tmp_path)]) == 1
+    captured = capsys.readouterr()
+    assert "CodeQL gate: 2 finding(s)" in captured.err
+    assert "py/baselined-example" in captured.err
+    assert "py/source-suppressed-example" in captured.err
+
+
 def test_codeql_gate_rejects_missing_sarif(tmp_path, capsys) -> None:
     assert main([str(tmp_path)]) == 2
     assert "no SARIF files found" in capsys.readouterr().err

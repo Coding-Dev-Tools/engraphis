@@ -715,8 +715,8 @@ def engraphis_index_repo(
     repo: Annotated[str, Field(description="Repo name to index.", min_length=1,
                                max_length=200)],
     root_path: Annotated[str, Field(description="Local filesystem path to the repo root "
-                         "to parse (e.g. '/home/user/projects/myrepo'). Reads files from "
-                         "this path the same way any local tool you have would.",
+                         "to parse (e.g. '/home/user/projects/myrepo'). The path must be "
+                         "inside the local defaults or ENGRAPHIS_INDEX_ROOTS allow-list.",
                          min_length=1, max_length=4_000)],
     languages: Annotated[Optional[List[str]], Field(description="Restrict to these "
                          "languages (e.g. ['python','csharp']). Names are normalised "
@@ -739,7 +739,9 @@ def engraphis_index_repo(
     engraphis_remember). Re-indexing is safe to call again; each file's symbols are
     replaced, not duplicated. Reads files from ``root_path`` on the local filesystem —
     the same trust boundary as any other local tool you have, nothing is sent anywhere.
-    Each completed scan appends a fresh operation receipt, so the MCP call is
+    Set ``ENGRAPHIS_INDEX_ROOTS`` to a path-separator-delimited absolute-path allow-list when
+    repositories live outside the working, home, or temporary directories, or to narrow the
+    defaults. Each completed scan appends a fresh operation receipt, so the MCP call is
     non-idempotent even when the code graph itself is unchanged.
 
     Returns:

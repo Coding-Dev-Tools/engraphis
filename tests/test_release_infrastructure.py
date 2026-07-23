@@ -101,6 +101,9 @@ def test_ci_and_release_default_to_read_only_repository_permissions():
 def test_codeql_workflow_fails_when_sarif_contains_findings():
     workflow = _text(".github/workflows/codeql.yml")
 
+    # CodeQL's PR default is diff-informed and omits findings outside the
+    # patch. The release gate must instead inspect complete raw SARIF.
+    assert 'CODEQL_ACTION_DIFF_INFORMED_QUERIES: "false"' in workflow
     assert "id: analyze" in workflow
     assert "output: codeql-results" in workflow
     assert (
