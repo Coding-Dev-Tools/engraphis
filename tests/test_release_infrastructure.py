@@ -168,9 +168,9 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
 
     changelog = _text("CHANGELOG.md")
     assert "ForceGraph + D3 renderer" in changelog
-    assert "## [1.0.0] - Unreleased" in changelog
+    assert "## [1.0.0] - 2026-07-23" in changelog
     assert "## [1.0.0] - 2026-07-19" not in changelog
-    assert "Release candidate for the public 1.0.0 open-core GA" in changelog
+    assert "Public 1.0.0 open-core GA release." in changelog
 
     public_paths = [
         ROOT / name for name in (
