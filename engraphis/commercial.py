@@ -10,12 +10,7 @@ import json
 from pathlib import Path
 
 
-PRODUCT_ENV = {
-    "POLAR_PRO_MONTHLY_PRODUCT_ID": ("pro", "monthly"),
-    "POLAR_PRO_ANNUAL_PRODUCT_ID": ("pro", "annual"),
-    "POLAR_TEAM_MONTHLY_PRODUCT_ID": ("team", "monthly"),
-    "POLAR_TEAM_ANNUAL_PRODUCT_ID": ("team", "annual"),
-}
+BILLING_AUTHORITY = "stripe"
 
 
 def manifest() -> dict:
@@ -24,13 +19,14 @@ def manifest() -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def expected_product_ids() -> dict:
-    """Return the manifest's public product identifiers keyed by environment name."""
+def expected_checkout_targets() -> dict:
+    """Return public onboarding targets without exposing provider-side price identifiers."""
     expected = {}
     for plan_name in ("pro", "team"):
         for interval, product in manifest()["plans"][plan_name]["products"].items():
-            expected[product["env"]] = {
-                "id": product["id"],
+            expected[(plan_name, interval)] = {
+                "provider": product["provider"],
+                "checkout_url": product["checkout_url"],
                 "plan": plan_name,
                 "interval": interval,
             }

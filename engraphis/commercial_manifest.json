@@ -1,8 +1,16 @@
 {
-  "schema": "engraphis-commercial/v1",
+  "schema": "engraphis-commercial/v2",
   "version": "1.0.0",
   "control_plane": "https://api.engraphis.com",
   "managed_dashboard": "https://team.engraphis.com",
+  "billing": {
+    "authority": "stripe",
+    "new_subscriptions": "stripe",
+    "legacy_providers": [],
+    "checkout_mode": "authenticated_server_session",
+    "portal_url": "https://api.engraphis.com/account#billing",
+    "provider_price_ids_public": false
+  },
   "trial": {
     "days": 3,
     "card_required": false,
@@ -43,14 +51,12 @@
       "billing_unit": "installation",
       "products": {
         "monthly": {
-          "id": "6349d29a-b4c0-4b8e-b9e8-071705351c9c",
-          "env": "POLAR_PRO_MONTHLY_PRODUCT_ID",
-          "checkout_url": "https://buy.polar.sh/polar_cl_n6CR3ERqOus2VUhRrGrsRUqOB8yjDTeEU7p1r3CRrae?product_id=6349d29a-b4c0-4b8e-b9e8-071705351c9c"
+          "provider": "stripe",
+          "checkout_url": "https://api.engraphis.com/account?plan=pro&interval=monthly#billing"
         },
         "annual": {
-          "id": "5e10d5d2-607a-4e9c-ad1c-88cb48c37e11",
-          "env": "POLAR_PRO_ANNUAL_PRODUCT_ID",
-          "checkout_url": "https://buy.polar.sh/polar_cl_n6CR3ERqOus2VUhRrGrsRUqOB8yjDTeEU7p1r3CRrae?product_id=5e10d5d2-607a-4e9c-ad1c-88cb48c37e11"
+          "provider": "stripe",
+          "checkout_url": "https://api.engraphis.com/account?plan=pro&interval=annual#billing"
         }
       }
     },
@@ -60,14 +66,12 @@
       "billing_unit": "seat",
       "products": {
         "monthly": {
-          "id": "6444a48a-7a61-4c8e-8045-07a930f8f381",
-          "env": "POLAR_TEAM_MONTHLY_PRODUCT_ID",
-          "checkout_url": "https://buy.polar.sh/polar_cl_n6CR3ERqOus2VUhRrGrsRUqOB8yjDTeEU7p1r3CRrae?product_id=6444a48a-7a61-4c8e-8045-07a930f8f381"
+          "provider": "stripe",
+          "checkout_url": "https://api.engraphis.com/account?plan=team&interval=monthly#billing"
         },
         "annual": {
-          "id": "929d926a-2981-4ad7-95bd-f52dabf0794e",
-          "env": "POLAR_TEAM_ANNUAL_PRODUCT_ID",
-          "checkout_url": "https://buy.polar.sh/polar_cl_n6CR3ERqOus2VUhRrGrsRUqOB8yjDTeEU7p1r3CRrae?product_id=929d926a-2981-4ad7-95bd-f52dabf0794e"
+          "provider": "stripe",
+          "checkout_url": "https://api.engraphis.com/account?plan=team&interval=annual#billing"
         }
       }
     }

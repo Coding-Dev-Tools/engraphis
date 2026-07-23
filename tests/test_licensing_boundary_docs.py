@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from engraphis.commercial import BILLING_AUTHORITY, expected_checkout_targets
 from engraphis.hosted_client import TRIAL_DAYS
 
 
@@ -52,6 +53,28 @@ def test_manifest_keeps_trial_and_grace_as_separate_clocks():
         "relicensing",
     } <= set(lifecycle["recovery"]["allows"])
 
+
+def test_manifest_uses_stripe_as_the_only_launch_billing_authority():
+    manifest = json.loads(_text("engraphis/commercial_manifest.json"))
+    billing = manifest["billing"]
+    targets = expected_checkout_targets()
+
+    assert BILLING_AUTHORITY == billing["authority"] == billing["new_subscriptions"] == "stripe"
+    assert billing["legacy_providers"] == []
+    assert billing["checkout_mode"] == "authenticated_server_session"
+    assert billing["provider_price_ids_public"] is False
+    assert set(targets) == {
+        ("pro", "monthly"),
+        ("pro", "annual"),
+        ("team", "monthly"),
+        ("team", "annual"),
+    }
+    for (plan, interval), target in targets.items():
+        assert target["provider"] == "stripe"
+        assert target["checkout_url"] == (
+            f"https://api.engraphis.com/account?plan={plan}&interval={interval}#billing"
+        )
+    assert "polar" not in json.dumps(manifest).lower()
 
 def test_public_docs_state_the_license_and_lapse_boundaries():
     readme = _text("README.md")
