@@ -433,19 +433,24 @@ def _resolve_import_root(raw_path: str) -> Path:
         )
     real_path = os.path.realpath(os.path.expanduser(raw_path))
     comparable_path = os.path.normcase(real_path)
-    if not any(
-        comparable_path == os.path.normcase(root)
-        or comparable_path.startswith(os.path.normcase(root).rstrip(os.sep) + os.sep)
-        for root in allowed_roots
-    ):
+    safe_path = None
+    for root in allowed_roots:
+        comparable_root = os.path.normcase(root)
+        if comparable_path == comparable_root:
+            safe_path = comparable_root
+            break
+        root_prefix = comparable_root.rstrip(os.sep) + os.sep
+        if comparable_path.startswith(root_prefix):
+            safe_path = comparable_path
+            break
+    if safe_path is None:
         raise ValidationError(
             "import path must be under an allowed root (your home directory, or "
             "ENGRAPHIS_IMPORT_ROOTS)")
-    folder = Path(real_path)
-    # real_path was canonicalized and checked against the configured roots above.
-    if not folder.exists():  # codeql[py/path-injection]
+    folder = Path(safe_path)
+    if not folder.exists():
         raise ValidationError(f"path not found: {raw_path}")
-    if not folder.is_dir():  # codeql[py/path-injection]
+    if not folder.is_dir():
         raise ValidationError(f"not a directory: {raw_path}")
     return folder
 
