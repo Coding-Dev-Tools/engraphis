@@ -1,6 +1,6 @@
 {
   "name": "engraphis-memory",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Give agents durable, scoped, explainable memory across sessions and repos via the Engraphis MCP tools. Use when you learn something worth keeping, need prior context before acting, or ask why/how a fact changed. Covers remember/recall, why/timeline, forget/pin/correct, sessions, and code search.",
   "author": {
     "name": "The Engraphis Authors",

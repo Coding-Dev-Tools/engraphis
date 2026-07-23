@@ -48,10 +48,6 @@
     "ENGRAPHIS_CLOUD_COMPUTE_URL": {
       "value": "https://compute.engraphis.com",
       "required": false
-    },
-    "ENGRAPHIS_MANAGED_COMPUTE_CONSENT": {
-      "value": "0",
-      "required": true
     }
   }
 }

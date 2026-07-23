@@ -70,6 +70,12 @@ def test_sync_status_migrates_retired_relay_url(monkeypatch, tmp_path):
         assert c.get("/api/sync/status").json()["relay_url"] == DEFAULT_RELAY_URL
 
 
+def test_sync_status_migrates_former_dashboard_relay_url(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "relay_url", "https://team.engraphis.com/")
+    with _client(monkeypatch, tmp_path) as c:
+        assert c.get("/api/sync/status").json()["relay_url"] == DEFAULT_RELAY_URL
+
+
 def test_sync_run_requires_license(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as c:
         assert c.post("/api/sync/run", json={}).status_code == 402

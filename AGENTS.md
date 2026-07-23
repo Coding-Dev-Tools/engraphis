@@ -68,7 +68,7 @@ python -m scripts.consolidate --db engraphis.db --workspace acme --dry-run
 
 # ── Sync (local shared-folder transport or hosted Cloud Sync — see docs/SYNC.md) ──
 python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/engraphis --dry-run
-python -m scripts.sync --db engraphis.db --workspace acme --relay https://team.engraphis.com  # or bare --relay + ENGRAPHIS_RELAY_URL
+python -m scripts.sync --db engraphis.db --workspace acme --relay https://relay.engraphis.com  # or bare --relay + ENGRAPHIS_RELAY_URL
 
 # ── Run the v1 server (needs the full install) ───────────────────────────────
 python -m scripts.start_server      # http://127.0.0.1:8700  (dashboard at /, schema at /openapi.json)
