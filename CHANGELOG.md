@@ -54,10 +54,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Graph GET requests are strictly read-only. While an explicit mutating index job runs, graph
   reads return a rebuilding conflict instead of mixing old and partially derived metrics.
 
-## [1.0.0] - Unreleased
+## [1.0.0] - 2026-07-23
 
-Release candidate for the public 1.0.0 open-core GA. Replace `Unreleased` with the actual
-publication date only in the final authorized release commit.
+Public 1.0.0 open-core GA release.
 
 ### Added
 
