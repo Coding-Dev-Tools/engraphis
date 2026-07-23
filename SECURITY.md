@@ -62,6 +62,10 @@ any other local tool the agent has. Path is attacker-controlled if agent's instr
 Canonical roots are restricted to the working, home, or temporary directories by default.
 Set `ENGRAPHIS_INDEX_ROOTS` to a path-separator-delimited absolute-path operator allow-list to
 replace those defaults for nonstandard mounts or a narrower deployment boundary.
+Dashboard and REST `POST /api/code/index` use the stricter single-root boundary
+`ENGRAPHIS_HTTP_INDEX_ROOT`: submitted paths resolve beneath that root. It defaults to the first
+`ENGRAPHIS_INDEX_ROOTS` entry, or the current directory. MCP and CLI indexing retain the
+`ENGRAPHIS_INDEX_ROOTS` allow-list semantics.
 `max_files`/`max_file_bytes` bound resource use, not access within an allowed root. Traversal
 does not follow file symlinks outside the root, prunes dependency/build directories during the
 walk, and honors the root `.engraphisignore` without allowing negation rules to re-expose

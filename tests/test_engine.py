@@ -546,6 +546,22 @@ def test_index_repo_rejects_normalized_escape_from_approved_local_root(tmp_path,
         eng.index_repo(rid, str(escaped), prefer="regex")
 
 
+def test_index_repo_accepts_the_approved_root_itself(tmp_path, monkeypatch):
+    from engraphis.core import engine as engine_module
+
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    (allowed / "module.py").write_text("def selected(): pass\n", encoding="utf-8")
+    monkeypatch.setattr(engine_module, "_approved_local_index_roots", lambda: (str(allowed),))
+
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+
+    report = eng.index_repo(rid, str(allowed), prefer="regex")
+    assert report["files_indexed"] == 1
+
+
 def test_index_repo_rejects_root_symlink_that_resolves_outside_approved_root(tmp_path, monkeypatch):
     from engraphis.core import engine as engine_module
 

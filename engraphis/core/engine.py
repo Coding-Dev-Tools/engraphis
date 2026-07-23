@@ -1261,15 +1261,18 @@ class MemoryEngine:
         canonical_root = os.path.normcase(
             os.path.realpath(os.path.expanduser(os.fspath(root_path)))
         )
+        # Retain a separator on the checked value.  This makes an approved root
+        # itself and every child use the same normalized-prefix check (and avoids
+        # accepting a sibling such as ``/work/repo-copy`` for ``/work/repo``).
+        # It also keeps the checked value, rather than the untrusted input, as
+        # the only path passed to filesystem APIs below.
+        canonical_root_with_sep = canonical_root.rstrip(os.sep) + os.sep
         safe_root: Optional[str] = None
         for approved_root in _approved_local_index_roots():
             normalized_approved = os.path.normcase(os.path.realpath(approved_root))
             approved_prefix = normalized_approved.rstrip(os.sep) + os.sep
-            if canonical_root == normalized_approved:
-                safe_root = canonical_root
-                break
-            if canonical_root.startswith(approved_prefix):
-                safe_root = canonical_root
+            if canonical_root_with_sep.startswith(approved_prefix):
+                safe_root = canonical_root_with_sep
                 break
         if safe_root is None:
             raise ValueError("repo root is outside approved local roots")

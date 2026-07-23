@@ -1591,11 +1591,38 @@ class _CodeIndexReq(BaseModel):
     languages: Optional[list] = None
 
 
+def _http_code_index_path(root_path: str) -> str:
+    """Resolve an HTTP indexing target beneath the single operator-owned root.
+
+    The HTTP API is a remote trust boundary, unlike direct local MCP and CLI use.
+    Keep its root independent from the broader engine allow-list and pass only the
+    checked, canonical path to the service layer.
+    """
+    configured_root = os.environ.get("ENGRAPHIS_HTTP_INDEX_ROOT", "").strip()
+    if not configured_root:
+        configured_roots = os.environ.get("ENGRAPHIS_INDEX_ROOTS", "").split(os.pathsep)
+        configured_root = next((value.strip() for value in configured_roots if value.strip()), "")
+    base = os.path.normcase(os.path.realpath(configured_root or os.getcwd()))
+    candidate = os.path.normcase(os.path.realpath(os.path.join(base, root_path)))
+
+    # Keep a separator on both values so /operator/root-copy cannot pass as a
+    # child of /operator/root. The root itself remains an allowed target.
+    base_prefix = base.rstrip(os.sep) + os.sep
+    candidate_with_sep = candidate.rstrip(os.sep) + os.sep
+    if not candidate_with_sep.startswith(base_prefix):
+        raise ValidationError("code index root is outside the HTTP index root")
+    return candidate_with_sep
+
+
 @router.post("/code/index")
 def code_index(req: _CodeIndexReq):
+    try:
+        root_path = _http_code_index_path(req.root_path)
+    except ValidationError:
+        raise _invalid_request() from None
     return _run(
         service().index_repo, workspace=req.workspace, repo=req.repo,
-        root_path=req.root_path, languages=req.languages,
+        root_path=root_path, languages=req.languages,
     )
 
 

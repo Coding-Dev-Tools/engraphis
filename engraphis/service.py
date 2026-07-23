@@ -1141,7 +1141,8 @@ class MemoryService:
             )
             return {"file": name, "id": r["id"], "op": r["op"]}
         except ValidationError as exc:
-            return {"file": name, "error": str(exc)}
+            logger.info("uploaded resource import rejected (%s)", type(exc).__name__)
+            return {"file": name, "error": "resource could not be imported"}
 
     def _derive_import_facts(self, content: str, *, ws: str, mt: MemoryType,
                              resource_name: str, resource_kind: str,
@@ -1335,8 +1336,9 @@ class MemoryService:
                 if "no extractable text" in str(exc):
                     skipped += 1
                     continue
+                logger.info("uploaded resource extraction failed (%s)", type(exc).__name__)
                 errors += 1
-                details.append({"file": name, "error": str(exc)})
+                details.append({"file": name, "error": "resource could not be imported"})
                 continue
             resource_meta = {
                 **resource.metadata,
@@ -1368,7 +1370,9 @@ class MemoryService:
                     if note:
                         file_warnings.append(note)
                 except (OSError, ValueError) as exc:
-                    file_warnings.append(f"fact derivation failed: {exc}")
+                    logger.info("uploaded resource fact derivation failed (%s)",
+                                type(exc).__name__)
+                    file_warnings.append("fact derivation failed")
             if file_warnings:
                 warnings.append({"file": name, "warnings": file_warnings})
 
