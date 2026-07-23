@@ -104,6 +104,13 @@ def _replace_assets(html: str, replacements: list[tuple[_InlineAsset, str]]) -> 
     return html
 
 
+def _write_lf(path: Path, content: str) -> None:
+    # ``Path.write_text(..., newline=...)`` is Python 3.10+, while Engraphis keeps
+    # Python 3.9 as its package floor.
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(content)
+
+
 def _add_generated_listeners(source: str, handlers: dict[tuple[str, str], str]) -> str:
     lines = [
         "",
@@ -178,9 +185,9 @@ def migrate() -> None:
         (script_assets[0], '<script src="/static/dashboard.js"></script>'),
     ])
 
-    CSS.write_text(css, encoding="utf-8", newline="\n")
-    JS.write_text(js, encoding="utf-8", newline="\n")
-    INDEX.write_text(html, encoding="utf-8", newline="\n")
+    _write_lf(CSS, css)
+    _write_lf(JS, js)
+    _write_lf(INDEX, html)
     check()
     print(f"externalized {len(styles)} styles and {len(handlers)} event handlers")
 

@@ -109,6 +109,12 @@ def test_codeql_workflow_fails_when_sarif_contains_findings():
     ) in workflow
 
 
+def test_ci_linter_is_bounded_to_the_verified_release_series():
+    pyproject = _text("pyproject.toml")
+
+    assert pyproject.count('"ruff>=0.15.22,<0.16"') == 2
+
+
 def test_release_repair_requires_tag_sha_successful_build_publish_and_pypi_identity():
     repair = _text(".github/workflows/release.yml").split(
         "github-release-repair:", 1
