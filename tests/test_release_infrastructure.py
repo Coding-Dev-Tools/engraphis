@@ -122,6 +122,8 @@ def test_release_repair_requires_tag_sha_successful_build_publish_and_pypi_ident
     assert repair.count("scripts/verify_release_artifacts.py") == 2
     assert "--allow-subset" in repair
     assert "--retries 18 --delay 10" in repair
+    assert repair.count("Freeze verified distribution set") == 1
+    assert "--dist verified-dist" in repair
     assert "skip-existing: true" in repair
     assert "id-token: write" in repair
 
