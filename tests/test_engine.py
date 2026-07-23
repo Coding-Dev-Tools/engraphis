@@ -550,6 +550,24 @@ def test_index_repo_skips_unsupported_files(tmp_path):
     assert report["files_indexed"] == 0
 
 
+def test_index_repo_never_reads_a_symlink_that_escapes_root(tmp_path):
+    outside = tmp_path.parent / (tmp_path.name + "-outside-indexed-source.py")
+    outside.write_text("def leaked_secret(): pass\n", encoding="utf-8")
+    link = tmp_path / "escape.py"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported in this environment")
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+
+    report = eng.index_repo(rid, str(tmp_path), prefer="regex")
+
+    assert report["files_indexed"] == 0
+    assert eng.search_code("leaked_secret", repo_id=rid)["symbols"] == []
+
+
 def test_truncated_incremental_scan_does_not_delete_unseen_files(tmp_path):
     (tmp_path / "a.py").write_text("def alpha(): pass\n")
     (tmp_path / "b.py").write_text("def beta(): pass\n")

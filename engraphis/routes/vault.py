@@ -188,21 +188,37 @@ class FolderImportReq(BaseModel):
 @router.post("/vaults/import-folder")
 async def import_folder(req: FolderImportReq):
     """POST /memory/vaults/import-folder — import all .md files from a disk path."""
-    folder = Path(req.path).resolve()
+    # Guard against path traversal: only allow import from directories that are
+    # explicitly configured or under the user's home directory.
+    import os
+    home = os.path.realpath(str(Path.home().expanduser()))
+    allowed_roots = [home]
+    env_roots = os.environ.get("ENGRAPHIS_IMPORT_ROOTS", "")
+    if env_roots:
+        allowed_roots.extend(
+            os.path.realpath(os.path.expanduser(root))
+            for root in env_roots.split(os.pathsep)
+            if root
+        )
+    real_path = os.path.realpath(os.path.expanduser(req.path))
+    comparable_path = os.path.normcase(real_path)
+    safe_path = None
+    for root in allowed_roots:
+        comparable_root = os.path.normcase(root)
+        if comparable_path == comparable_root:
+            safe_path = comparable_root
+            break
+        root_prefix = comparable_root.rstrip(os.sep) + os.sep
+        if comparable_path.startswith(root_prefix):
+            safe_path = comparable_path
+            break
+    if safe_path is None:
+        raise HTTPException(403, "Import path must be under an allowed root (home directory or ENGRAPHIS_IMPORT_ROOTS)")
+    folder = Path(safe_path)
     if not folder.exists():
         raise HTTPException(404, f"Path not found: {req.path}")
     if not folder.is_dir():
         raise HTTPException(400, f"Not a directory: {req.path}")
-    # Guard against path traversal: only allow import from directories that are
-    # explicitly configured or under the user's home directory.
-    import os
-    home = Path.home().resolve()
-    allowed_roots = [home]
-    env_roots = os.environ.get("ENGRAPHIS_IMPORT_ROOTS", "")
-    if env_roots:
-        allowed_roots.extend(Path(r).resolve() for r in env_roots.split(os.pathsep) if r)
-    if not any(folder == r or folder.is_relative_to(r) for r in allowed_roots):
-        raise HTTPException(403, "Import path must be under an allowed root (home directory or ENGRAPHIS_IMPORT_ROOTS)")
 
     ns = req.namespace
     if not ns:
@@ -216,19 +232,27 @@ async def import_folder(req: FolderImportReq):
     import fnmatch
     files = []
     for f in folder.rglob("*"):
-        if f.is_file() and fnmatch.fnmatch(f.name, req.file_pattern):
-            if "node_modules" in str(f) or ".git" in str(f):
-                continue
-            files.append(f)
+        if not f.is_file() or not fnmatch.fnmatch(f.name, req.file_pattern):
+            continue
+        try:
+            # Read only the resolved, allowlisted file.  In particular, do not let a
+            # symlink inside an import root redirect this legacy route outside it.
+            real = f.resolve(strict=True)
+            rel = real.relative_to(folder)
+        except (OSError, ValueError):
+            continue
+        if any(part in {"node_modules", ".git"} for part in rel.parts[:-1]):
+            continue
+        files.append((real, rel))
 
     results = {"imported": 0, "errors": 0, "skipped": 0, "files": []}
-    for f in files:
+    for f, rel_path in files:
         try:
             content = f.read_text(encoding="utf-8", errors="replace")
             if not content.strip():
                 results["skipped"] += 1
                 continue
-            rel = f.relative_to(folder).as_posix()
+            rel = rel_path.as_posix()
             doc_id = rel.replace("/", "__").replace(".md", "").replace(".", "-")
             # Extract title from first H1
             import re
@@ -243,9 +267,9 @@ async def import_folder(req: FolderImportReq):
             )
             results["imported"] += 1
             results["files"].append({"path": rel, "title": title, "status": "ok"})
-        except Exception as e:
+        except Exception:
             results["errors"] += 1
-            results["files"].append({"path": str(f), "title": "", "status": "error", "error": str(e)})
+            results["files"].append({"path": rel_path.as_posix(), "title": "", "status": "error"})
 
     return _ok({"namespace": ns, "folder": req.path, **results})
 

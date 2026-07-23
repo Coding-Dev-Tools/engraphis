@@ -67,12 +67,17 @@ def _run(fn, *a, **k):
     try:
         return fn(*a, **k)
     except GraphIndexRebuilding as exc:
+        logger.info("graph index unavailable (%s, job_id=%s)", type(exc).__name__, exc.job_id)
         raise HTTPException(status_code=409, detail={
-            "error": str(exc), "index_state": "rebuilding", "job_id": exc.job_id,
-        })
+            "error": f"graph index rebuilding (job {exc.job_id})",
+            "index_state": "rebuilding",
+            "job_id": exc.job_id,
+        }) from None
     except GraphSceneCapacityExceeded as exc:
+        logger.info("graph scene exceeds capacity (%s, resource=%s, count=%s, limit=%s)",
+                    type(exc).__name__, exc.resource, exc.count, exc.limit)
         raise HTTPException(status_code=413, detail={
-            "error": str(exc),
+            "error": "graph scene exceeds the safety limit",
             "safety_state": "capacity_exceeded",
             "degraded": True,
             "truncated": False,
@@ -80,9 +85,13 @@ def _run(fn, *a, **k):
             "count": exc.count,
             "limit": exc.limit,
             "recommended_action": "narrow repository, time, type, or relation filters",
-        })
+        }) from None
     except ValidationError as exc:
-        raise HTTPException(status_code=400, detail={"error": str(exc)})
+        logger.info("dashboard request rejected (%s)", type(exc).__name__)
+        # ValidationError is the service layer's deliberately public, bounded input-error
+        # type. It is not a traceback or arbitrary provider exception.
+        # codeql[py/stack-trace-exposure]
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -105,10 +114,13 @@ def _managed_call(fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
     except CloudFeatureError as exc:
+        logger.warning("managed cloud operation failed (%s, status=%s, transient=%s)",
+                       type(exc).__name__, exc.status, exc.transient)
         raise HTTPException(
             status_code=exc.status or 503,
-            detail={"error": str(exc), "managed_cloud": True, "transient": exc.transient},
-        )
+            detail={"error": "managed cloud operation failed", "managed_cloud": True,
+                    "transient": exc.transient},
+        ) from None
 
 
 def _default_ws() -> Optional[str]:
@@ -565,7 +577,9 @@ def llm_activity(workspace: Optional[str] = None, limit: int = 100):
     try:
         ws = service()._clean_ws(ws)
     except ValidationError as exc:
-        raise HTTPException(status_code=400, detail={"error": str(exc)})
+        logger.info("LLM activity request rejected (%s)", type(exc).__name__)
+        # codeql[py/stack-trace-exposure] ValidationError is safe public input feedback.
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
     row = service().store.conn.execute(
         "SELECT id FROM workspaces WHERE name=?", (ws,)
     ).fetchone()
@@ -823,7 +837,9 @@ def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
     try:
         out = service().recall(q, workspace=ws, k=k, mtypes=mtypes, reinforce=False)
     except ValidationError as exc:
-        raise HTTPException(status_code=400, detail={"error": str(exc)})
+        logger.info("dashboard recall request rejected (%s)", type(exc).__name__)
+        # codeql[py/stack-trace-exposure] ValidationError is safe public input feedback.
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
     except Exception as exc:  # noqa: BLE001
         if not _is_embedder_mismatch(exc):
             logger.error("dashboard recall failed (%s)", type(exc).__name__)
@@ -851,7 +867,9 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = None, limit: in
     try:
         ws = service()._clean_ws(ws)
     except ValidationError as exc:
-        raise HTTPException(status_code=400, detail={"error": str(exc)})
+        logger.info("dashboard memories request rejected (%s)", type(exc).__name__)
+        # codeql[py/stack-trace-exposure] ValidationError is safe public input feedback.
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
     conn = _sql.connect("file:%s?mode=ro" % settings.db_path, uri=True)
     conn.row_factory = _sql.Row
     try:
@@ -905,7 +923,9 @@ def why(q: str = Query(...), workspace: Optional[str] = None, k: int = 5):
     try:
         out = service().why(q, workspace=ws, k=k)
     except ValidationError as exc:
-        raise HTTPException(status_code=400, detail={"error": str(exc)})
+        logger.info("dashboard why request rejected (%s)", type(exc).__name__)
+        # codeql[py/stack-trace-exposure] ValidationError is safe public input feedback.
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
     except Exception as exc:  # noqa: BLE001
         if not _is_embedder_mismatch(exc):
             logger.error("dashboard why failed (%s)", type(exc).__name__)
@@ -925,7 +945,9 @@ def timeline(q: str = Query(...), workspace: Optional[str] = None, limit: int = 
     try:
         out = service().timeline(q, workspace=ws, limit=limit)
     except ValidationError as exc:
-        raise HTTPException(status_code=400, detail={"error": str(exc)})
+        logger.info("dashboard timeline request rejected (%s)", type(exc).__name__)
+        # codeql[py/stack-trace-exposure] ValidationError is safe public input feedback.
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
     except Exception as exc:  # noqa: BLE001
         if not _is_embedder_mismatch(exc):
             logger.error("dashboard timeline failed (%s)", type(exc).__name__)
@@ -1773,12 +1795,17 @@ def _sync_all(svc) -> dict:
             read_only = sync_read_only()
             rep = syncer.sync(transport, row["id"], push=not read_only)
         except CloudSessionError as exc:
-            errors.append({"workspace": name, "error": str(exc), "status": 401})
+            logger.warning("cloud sync session failed (%s)", type(exc).__name__)
+            errors.append({"workspace": name, "error": "cloud session authorization failed",
+                           "status": 401})
             continue
         except RelayError as exc:
             # Record the HTTP status (402 == cloud authorization denied) instead of raising, so
             # one workspace can't abort the sweep; sync_run() promotes a 402 to the button.
-            errors.append({"workspace": name, "error": str(exc), "status": exc.status})
+            logger.warning("cloud sync relay failed (%s, status=%s)", type(exc).__name__,
+                           exc.status)
+            errors.append({"workspace": name, "error": "cloud relay synchronization failed",
+                           "status": exc.status})
             continue
         except Exception as exc:  # noqa: BLE001 — one bad workspace must not abort the rest
             logger.error("sync workspace failed (%s)", type(exc).__name__)
@@ -1859,7 +1886,9 @@ def configure_sync_token(req: _SyncTokenReq):
             if not req.read_only:
                 save_sync_read_only(False)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail={"error": str(exc)})
+        logger.info("sync token configuration rejected (%s)", type(exc).__name__)
+        raise HTTPException(status_code=400,
+                            detail={"error": "invalid sync token configuration"}) from None
     except OSError:
         raise HTTPException(status_code=503, detail={
             "error": "sync token state could not be persisted"})

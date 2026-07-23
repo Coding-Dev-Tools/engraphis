@@ -124,13 +124,13 @@ all = [
     "onnxruntime<1.24; python_version < '3.11'",
     "psycopg[binary]>=3.1",
 ]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.4"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.15.22,<0.16"]
 # Everything needed to run the FULL offline gate in CI (lint + all extras-gated tests)
 # WITHOUT pulling torch/sentence-transformers — no test needs the real embedder.
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
-    "ruff>=0.4",
+    "ruff>=0.15.22,<0.16",
     "python-dotenv>=1.0",
     "uvicorn[standard]>=0.29",
     "fastapi>=0.133.1,<1; python_version >= '3.10'",

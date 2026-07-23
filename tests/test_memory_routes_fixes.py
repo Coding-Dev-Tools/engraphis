@@ -110,3 +110,30 @@ def test_conversations_missing_content_is_400_not_500(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as c:
         r = c.post("/memory/conversations", json={"messages": [{"role": "user"}]})
         assert r.status_code == 400
+
+
+def test_query_context_does_not_echo_llm_exception_text(monkeypatch, tmp_path):
+    secret = "https://provider.example/?api_key=do-not-return-this"
+
+    class _FailingLLM:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def chat_with_context(self, **kwargs):
+            raise RuntimeError(secret)
+
+    monkeypatch.setattr("engraphis.routes.memory.LLMClient", _FailingLLM)
+    monkeypatch.setattr(
+        "engraphis.routes.memory.recall_engine.recall",
+        lambda **kwargs: {"llmContextMessage": "", "count": 0, "chunks": []},
+    )
+    with _client(monkeypatch, tmp_path) as c:
+        response = c.post("/memory/queries", json={"query": "what is stored?"})
+
+    assert response.status_code == 200
+    result = response.json()["data"]
+    assert result["llm_error"] == "LLM service unavailable"
+    assert secret not in repr(result)

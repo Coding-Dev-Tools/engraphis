@@ -200,8 +200,9 @@ async def query_memory_context(req: QueryContextRequest):
                     )
             answer = await asyncio.to_thread(_call)
             result["answer"] = answer
-        except Exception as e:
-            result["llm_error"] = str(e)
+        except Exception as exc:  # noqa: BLE001 - provider libraries expose many exception types
+            logger.warning("LLM query error (%s)", type(exc).__name__)
+            result["llm_error"] = "LLM service unavailable"
     return _ok(result)
 
 

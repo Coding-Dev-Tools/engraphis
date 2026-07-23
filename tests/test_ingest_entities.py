@@ -12,6 +12,8 @@ extracts entities from title and content as separate passes and merges by name.
 """
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pytest
 
@@ -91,3 +93,15 @@ def test_click_target_shape_has_namespace_and_documents():
     ent = ents["Zephyr"]
     assert ent["documents"] == ["doc-1"]
     assert "preview_title" in ent and "preview_content" in ent
+
+
+def test_entity_extraction_rejects_long_non_email_in_linear_time():
+    """Keep ingestion responsive when untrusted text resembles an email local part
+    but never supplies an ``@`` separator."""
+    for text in ("a" * 100_000, "%" * 100_000):
+        start = time.perf_counter()
+        entities = ingest_engine._extract_entities(text)
+        elapsed = time.perf_counter() - start
+
+        assert entities == []
+        assert elapsed < 1.0

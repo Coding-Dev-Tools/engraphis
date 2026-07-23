@@ -18,12 +18,19 @@ from engraphis.stores import ledger as ledger_store
 from engraphis.stores import vectors as mem_store
 
 # ── Lightweight entity extraction ────────────────────────────────────────────
-# Capitalized multi-word sequences, emails, URLs, hashtags, quoted names.
-_ENTITY_RE = re.compile(
-    r"\b([A-Z][a-z]+(?:-[A-Za-z]+)*(?:\s+[A-Z][a-z]+(?:-[A-Za-z]+)*){0,3})\b"
-    r"|([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"
-    r"|(#[a-zA-Z][a-zA-Z0-9_-]+)"
-    r"|(@[a-zA-Z][a-zA-Z0-9_-]+)"
+# Keep each recognizer unambiguous.  The previous combined expression nested a
+# repeated, unanchored branches and could take polynomial time on adversarial input.
+_CAPITALIZED_WORD_RE = re.compile(r"\b[A-Z][a-z]+(?:-[A-Za-z]+)*\b")
+_HASHTAG_RE = re.compile(r"#[a-zA-Z][a-zA-Z0-9_-]+")
+_MENTION_RE = re.compile(r"@[a-zA-Z][a-zA-Z0-9_-]+")
+_EMAIL_LOCAL_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._%+-"
+)
+_EMAIL_DOMAIN_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-"
+)
+_EMAIL_SUFFIX_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 )
 _RELATION_RE = re.compile(
     r"\b(?:is|are|was|were|has|have|had|owns|works at|lives in|prefers|likes|"
@@ -50,6 +57,37 @@ _STOPWORDS = {
     "For", "From", "To", "In", "On", "At", "By", "With", "About", "Between",
     "Through", "During", "After", "Above", "Below", "Under", "Over",
 }
+
+
+def _iter_emails(text: str):
+    """Yield email-like spans in one pass without regex backtracking."""
+
+    index = 0
+    length = len(text)
+    while index < length:
+        if text[index] not in _EMAIL_LOCAL_CHARS:
+            index += 1
+            continue
+        if index > 0 and text[index - 1] in _EMAIL_LOCAL_CHARS:
+            index += 1
+            continue
+        start = index
+        while index < length and text[index] in _EMAIL_LOCAL_CHARS:
+            index += 1
+        if index >= length or text[index] != "@":
+            continue
+        domain_start = index + 1
+        end = domain_start
+        while end < length and text[end] in _EMAIL_DOMAIN_CHARS:
+            end += 1
+        domain = text[domain_start:end]
+        dot = domain.rfind(".")
+        suffix = domain[dot + 1:] if dot > 0 else ""
+        if len(suffix) >= 2 and all(char in _EMAIL_SUFFIX_CHARS for char in suffix):
+            yield start, end, text[start:end]
+        # If another @ terminated an invalid domain, its domain run can be the local
+        # part of a later valid address (for example ``bad@name@valid.test``).
+        index = domain_start if end < length and text[end] == "@" else end
 
 
 def ingest_document(
@@ -146,24 +184,52 @@ def ingest_batch(items: list[dict[str, Any]]) -> dict[str, Any]:
 # ── Entity / relation extraction (heuristic, no LLM needed) ──────────────────
 
 def _extract_entities(text: str) -> list[tuple[str, str]]:
+    candidates: list[tuple[int, int, int, str, str]] = []
+
+    # Build the old maximum four-word capitalized sequence in Python rather than
+    # asking the backtracking engine to discover every possible word grouping.
+    words = list(_CAPITALIZED_WORD_RE.finditer(text))
+    index = 0
+    while index < len(words):
+        first = words[index]
+        last = first
+        index += 1
+        for _ in range(3):
+            if index >= len(words) or not text[last.end():words[index].start()].isspace():
+                break
+            last = words[index]
+            index += 1
+        candidates.append((first.start(), last.end(), 0, text[first.start():last.end()], "person_or_concept"))
+
+    candidates.extend(
+        (start, end, 1, value, "email")
+        for start, end, value in _iter_emails(text)
+    )
+    candidates.extend(
+        (match.start(), match.end(), 2, match.group(0), "hashtag")
+        for match in _HASHTAG_RE.finditer(text)
+    )
+    candidates.extend(
+        (match.start(), match.end(), 3, match.group(0), "mention")
+        for match in _MENTION_RE.finditer(text)
+    )
+
     seen: set[str] = set()
     out: list[tuple[str, str]] = []
-    for m in _ENTITY_RE.finditer(text):
-        raw = m.group(0).strip()
+    matched_through = 0
+    for start, end, _priority, candidate, etype in sorted(candidates):
+        if start < matched_through:
+            continue
+        matched_through = end
+        raw = candidate.strip()
         if not raw or raw in _STOPWORDS:
             continue
         if raw.lower() in ("user", "the user"):
             continue
-        if raw.startswith("#"):
-            ent, etype = raw, "hashtag"
-        elif raw.startswith("@") and "@" in raw and "." in raw:
-            ent, etype = raw, "email"
-        elif raw.startswith("@"):
-            ent, etype = raw, "mention"
-        elif "@" in raw and "." in raw and not raw.startswith("@"):
-            ent, etype = raw, "email"
-        else:
+        if etype == "person_or_concept":
             ent, etype = raw, "person_or_concept"
+        else:
+            ent = raw
         key = ent.lower()
         if key not in seen:
             seen.add(key)
@@ -175,7 +241,7 @@ def _extract_entities_from_doc(title: str, content: str) -> list[tuple[str, str]
     """Extract entities from title and content independently, then merge.
 
     Title and content must be processed as *separate* regex passes, never
-    concatenated first: the capitalized-word pattern in ``_ENTITY_RE`` has no notion
+    concatenated first: the capitalized-word recognizer has no notion
     of a title/content boundary, so matching it against ``f"{title}\\n\\n{content}"``
     lets it bridge across that boundary — e.g. title "Meeting Notes" + content
     "Alice Johnson met..." previously produced one garbled entity "Meeting
