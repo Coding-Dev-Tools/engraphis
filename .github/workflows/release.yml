@@ -298,13 +298,13 @@ jobs:
             --branch "$RELEASE_TAG" \
             --event push \
             --limit 20 \
-            --json databaseId,headBranch,headSha,event)"
+            --json databaseId,headBranch,headSha,event,createdAt)"
           run_id="$(jq -r \
             --arg tag "$RELEASE_TAG" \
             --arg sha "$tag_sha" \
-            'map(select(.headBranch == $tag and
-                        .headSha == $sha and
-                        .event == "push"))[0].databaseId // empty' \
+            'sort_by(.createdAt) | map(select(.headBranch == $tag and
+                                            .headSha == $sha and
+                                            .event == "push"))[0].databaseId // empty' \
             <<<"$runs")"
           test -n "$run_id"
           jobs="$(gh run view "$run_id" --repo "$GH_REPO" --json jobs)"
