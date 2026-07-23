@@ -35,6 +35,17 @@ logger = logging.getLogger("engraphis.api")
 _service: Optional[MemoryService] = None
 
 
+def _invalid_request() -> HTTPException:
+    """Return the stable public boundary for service-layer validation failures.
+
+    ``ValidationError`` can be raised after processing client-controlled names, ids, and
+    paths.  Its message is useful for local diagnostics, but is not a safe API contract:
+    it could echo an untrusted value or a future implementation detail.  Keep the HTTP
+    response deliberately fixed and never log the error text at API call sites.
+    """
+    return HTTPException(status_code=400, detail={"error": "invalid request"})
+
+
 def service() -> MemoryService:
     """Lazily bind a single MemoryService to the configured store (the live v2 DB)."""
     global _service
@@ -86,12 +97,9 @@ def _run(fn, *a, **k):
             "limit": exc.limit,
             "recommended_action": "narrow repository, time, type, or relation filters",
         }) from None
-    except ValidationError as exc:
-        logger.info("dashboard request rejected (%s)", type(exc).__name__)
-        # ValidationError is the service layer's deliberately public, bounded input-error
-        # type. It is not a traceback or arbitrary provider exception.
-        # codeql[py/stack-trace-exposure]
-        raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
+    except ValidationError:
+        logger.info("dashboard request rejected")
+        raise _invalid_request() from None
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -576,10 +584,9 @@ def llm_activity(workspace: Optional[str] = None, limit: int = 100):
         return {"workspace": "", "count": 0, "activities": []}
     try:
         ws = service()._clean_ws(ws)
-    except ValidationError as exc:
-        logger.info("LLM activity request rejected (%s)", type(exc).__name__)
-        # codeql[py/stack-trace-exposure] ValidationError is safe public input feedback.
-        raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
+    except ValidationError:
+        logger.info("LLM activity request rejected")
+        raise _invalid_request() from None
     row = service().store.conn.execute(
         "SELECT id FROM workspaces WHERE name=?", (ws,)
     ).fetchone()
@@ -836,10 +843,9 @@ def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
     mtypes = [mtype] if mtype else None
     try:
         out = service().recall(q, workspace=ws, k=k, mtypes=mtypes, reinforce=False)
-    except ValidationError as exc:
-        logger.info("dashboard recall request rejected (%s)", type(exc).__name__)
-        # codeql[py/stack-trace-exposure] ValidationError is safe public input feedback.
-        raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
+    except ValidationError:
+        logger.info("dashboard recall request rejected")
+        raise _invalid_request() from None
     except Exception as exc:  # noqa: BLE001
         if not _is_embedder_mismatch(exc):
             logger.error("dashboard recall failed (%s)", type(exc).__name__)
@@ -866,10 +872,9 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = None, limit: in
         return {"workspace": "", "count": 0, "memories": []}
     try:
         ws = service()._clean_ws(ws)
-    except ValidationError as exc:
-        logger.info("dashboard memories request rejected (%s)", type(exc).__name__)
-        # codeql[py/stack-trace-exposure] ValidationError is safe public input feedback.
-        raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
+    except ValidationError:
+        logger.info("dashboard memories request rejected")
+        raise _invalid_request() from None
     conn = _sql.connect("file:%s?mode=ro" % settings.db_path, uri=True)
     conn.row_factory = _sql.Row
     try:
@@ -922,10 +927,9 @@ def why(q: str = Query(...), workspace: Optional[str] = None, k: int = 5):
     ws = workspace or _require_ws()
     try:
         out = service().why(q, workspace=ws, k=k)
-    except ValidationError as exc:
-        logger.info("dashboard why request rejected (%s)", type(exc).__name__)
-        # codeql[py/stack-trace-exposure] ValidationError is safe public input feedback.
-        raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
+    except ValidationError:
+        logger.info("dashboard why request rejected")
+        raise _invalid_request() from None
     except Exception as exc:  # noqa: BLE001
         if not _is_embedder_mismatch(exc):
             logger.error("dashboard why failed (%s)", type(exc).__name__)
@@ -944,10 +948,9 @@ def timeline(q: str = Query(...), workspace: Optional[str] = None, limit: int = 
     ws = workspace or _default_ws()
     try:
         out = service().timeline(q, workspace=ws, limit=limit)
-    except ValidationError as exc:
-        logger.info("dashboard timeline request rejected (%s)", type(exc).__name__)
-        # codeql[py/stack-trace-exposure] ValidationError is safe public input feedback.
-        raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
+    except ValidationError:
+        logger.info("dashboard timeline request rejected")
+        raise _invalid_request() from None
     except Exception as exc:  # noqa: BLE001
         if not _is_embedder_mismatch(exc):
             logger.error("dashboard timeline failed (%s)", type(exc).__name__)
@@ -1448,6 +1451,13 @@ def graph_scene(workspace: Optional[str] = None, level: str = "overview",
         level.strip().lower() == "complete"
     )
     code_enabled = include_code if code_overlay is None else code_overlay
+    if level.strip().lower() == "complete" and (node_limit is not None or edge_limit is not None):
+        # This is route-owned, parameter-only validation.  It keeps the precise dashboard
+        # guidance without ever serializing a service exception.
+        raise HTTPException(status_code=400, detail={
+            "error": "complete scenes do not accept node_limit or edge_limit; "
+                     "use graph filters instead of silently truncating the chart",
+        })
     return _run(
         service().graph_scene, workspace=ws, level=level,
         center_id=center_id, system_id=system_id, seeds=_graph_csv(seeds),

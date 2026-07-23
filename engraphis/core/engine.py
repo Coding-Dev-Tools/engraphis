@@ -14,7 +14,9 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
+import tempfile
 import threading
 import time
 from collections import defaultdict, deque
@@ -76,6 +78,40 @@ _WORD_CHAR_RE = re.compile(r"\w")
 # nodes and edges because the export is reachable at the lowest ('viewer') role.
 CODE_EXPORT_DEFAULT_LIMIT = 5_000
 CODE_EXPORT_MAX_LIMIT = 20_000
+
+
+def _approved_local_index_roots() -> tuple[str, ...]:
+    """Return canonical roots available to the explicit local indexing capability.
+
+    ``ENGRAPHIS_INDEX_ROOTS`` is an operator-owned, path-separator-delimited allow-list.
+    When it is unset, the working directory, home directory, and system temporary
+    directory preserve the local-first defaults used by ordinary agent/project checkouts.
+    """
+    configured = tuple(
+        os.path.realpath(os.path.expanduser(value.strip()))
+        for value in os.environ.get("ENGRAPHIS_INDEX_ROOTS", "").split(os.pathsep)
+        if value.strip()
+    )
+    if configured:
+        return tuple(dict.fromkeys(configured))
+    return (
+        os.path.realpath(os.getcwd()),
+        os.path.realpath(os.path.expanduser("~")),
+        os.path.realpath(tempfile.gettempdir()),
+    )
+
+
+def _resolve_local_index_root(root_path: str) -> Path:
+    """Canonicalize a caller-selected local repo and require an approved root."""
+    canonical_root = os.path.normcase(
+        os.path.realpath(os.path.expanduser(os.fspath(root_path)))
+    )
+    for approved_root in _approved_local_index_roots():
+        normalized_approved = os.path.normcase(os.path.realpath(approved_root))
+        approved_prefix = normalized_approved.rstrip(os.sep) + os.sep
+        if canonical_root == normalized_approved or canonical_root.startswith(approved_prefix):
+            return Path(canonical_root)
+    raise ValueError("repo root is outside approved local roots")
 
 
 def _bounded_finite(value, *, default: float, minimum: float, maximum: float) -> float:
@@ -1228,11 +1264,11 @@ class MemoryEngine:
         )
 
         indexer = get_code_indexer(prefer=prefer)
-        # index_repo is an explicit local-filesystem capability: callers select the
-        # repository root to index. Every walked child is resolved and re-contained
-        # below before it is read.
-        # codeql[py/path-injection]
-        root = Path(root_path).expanduser().resolve()
+        # index_repo is an explicit local-filesystem capability: callers select a
+        # repository in one of the approved local roots. Canonicalizing then checking
+        # containment confines the capability to the operator's configured/default
+        # filesystem boundary. Every walked child is re-contained below before it is read.
+        root = _resolve_local_index_root(root_path)
         if not root.exists():
             raise ValueError(f"repo root not found: {root_path}")
         if not root.is_dir():

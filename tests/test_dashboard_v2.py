@@ -12,7 +12,7 @@ from fastapi import HTTPException  # noqa: E402
 from engraphis.config import settings  # noqa: E402
 from engraphis.cloud_features import CloudFeatureError  # noqa: E402
 from engraphis.routes import v2_api  # noqa: E402
-from engraphis.service import MemoryService  # noqa: E402
+from engraphis.service import MemoryService, ValidationError  # noqa: E402
 
 
 def _client(monkeypatch, tmp_path):
@@ -279,6 +279,12 @@ def test_dashboard_exception_responses_do_not_echo_untrusted_exception_text():
     assert internal.value.status_code == 500
     assert internal.value.detail == {"error": "internal server error"}
     assert secret not in repr(internal.value.detail)
+
+    with pytest.raises(HTTPException) as validation:
+        v2_api._run(fail_with, ValidationError(secret))
+    assert validation.value.status_code == 400
+    assert validation.value.detail == {"error": "invalid request"}
+    assert secret not in repr(validation.value.detail)
 
     with pytest.raises(HTTPException) as managed:
         v2_api._managed_call(fail_with, CloudFeatureError(secret, status=502))

@@ -59,9 +59,13 @@ DOMPurify at all render sites. Verified against payloads with `onerror` handlers
 ### 5. Code indexing
 `engraphis_index_repo` parses source files under a path you give it — same trust boundary as
 any other local tool the agent has. Path is attacker-controlled if agent's instructions are.
-`max_files`/`max_file_bytes` bound resource use, not access scope. Traversal does not follow
-file symlinks outside the root, prunes dependency/build directories during the walk, and honors
-the root `.engraphisignore` without allowing negation rules to re-expose hardcoded excludes.
+Canonical roots are restricted to the working, home, or temporary directories by default.
+Set `ENGRAPHIS_INDEX_ROOTS` to a path-separator-delimited absolute-path operator allow-list to
+replace those defaults for nonstandard mounts or a narrower deployment boundary.
+`max_files`/`max_file_bytes` bound resource use, not access within an allowed root. Traversal
+does not follow file symlinks outside the root, prunes dependency/build directories during the
+walk, and honors the root `.engraphisignore` without allowing negation rules to re-expose
+hardcoded excludes.
 Anyone who can reach an authenticated local mutation route has the authority of that local
 installation, so do not share its bearer token.
 

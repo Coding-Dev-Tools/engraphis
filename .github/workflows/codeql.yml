@@ -16,6 +16,11 @@ jobs:
   analyze:
     name: Analyze ${{ matrix.language }}
     runs-on: ubuntu-latest
+    # Pull-request analyses otherwise use diff-informed queries, whose SARIF
+    # intentionally omits findings outside changed lines. The release gate
+    # must inspect complete raw SARIF on both pull requests and pushes.
+    env:
+      CODEQL_ACTION_DIFF_INFORMED_QUERIES: "false"
     strategy:
       fail-fast: false
       matrix:

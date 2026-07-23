@@ -71,7 +71,8 @@ Public 1.0.1 client reliability release.
 - API error responses and provider logs no longer expose arbitrary exception or configuration
   text; local folder and repository reads resolve and re-check filesystem boundaries.
 - Entity extraction and dashboard asset migration avoid adversarial regular-expression
-  backtracking, and CI now fails when CodeQL emits any SARIF finding.
+  backtracking. CodeQL now disables pull-request diff-informed analysis and CI fails on every
+  raw SARIF result, including pre-existing and source-suppressed results.
 
 ## [1.0.0] - 2026-07-23
 
