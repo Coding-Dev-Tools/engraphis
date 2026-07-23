@@ -105,9 +105,9 @@ them back as `expected_head` / `expected_count` when independent evidence is req
   no paid-key parser, signer, issuer, local feature gate, or long-lived-key relay exchange.
 - **Server authority:** every hosted and cost-bearing operation is authorized by the private
   control plane; local plan labels and upgrade URLs are presentation metadata only.
-- **Managed-compute consent:** Analytics, Auto Dreaming, and Auto Consolidation upload a bounded
-  snapshot only after `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1`. Secret-class memories are excluded
-  before serialization and rejected again by the hosted service.
+- **Managed-compute boundaries:** Analytics, Auto Dreaming, and Auto Consolidation upload a
+  bounded snapshot for authorized customers. Secret-class memories are excluded before
+  serialization and rejected again by the hosted service.
 - **Trial and grace are separate:** an email-confirmed trial lasts exactly 3 active days. A
   separately bounded, maximum-24-hour local workspace-write grace never extends the trial,
   subscription, Cloud Sync, managed compute, Team access, seats, or credentials.

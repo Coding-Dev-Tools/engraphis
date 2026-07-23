@@ -1,14 +1,13 @@
 """Thin client protocol for private Engraphis managed-compute features.
 
 The open package deliberately contains no analytics, dreaming, or automatic-consolidation
-algorithm. It can prepare an explicitly consented workspace snapshot, exclude secret-classified
-memories, and send that snapshot to the separately operated Engraphis Cloud service. The service
-is authoritative for entitlements and performs all paid computation.
+algorithm. It prepares a bounded workspace snapshot, excludes secret-classified memories, and
+sends that snapshot to the separately operated Engraphis Cloud service. The service is
+authoritative for entitlements and performs all paid computation.
 """
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 import urllib.error
@@ -42,14 +41,14 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _truthy(name: str) -> bool:
-    return os.environ.get(name, "").strip().casefold() in {"1", "true", "yes", "on"}
-
-
 def managed_compute_consent() -> bool:
-    """Return the explicit opt-in flag; an entitlement alone is never consent."""
+    """Return whether managed compute is enabled for the customer client.
 
-    return _truthy("ENGRAPHIS_MANAGED_COMPUTE_CONSENT")
+    Managed compute is enabled automatically for every user with a valid cloud entitlement.
+    This compatibility helper intentionally no longer reads an environment variable.
+    """
+
+    return True
 
 
 def _public_http_error(status: int) -> tuple[str, bool]:
@@ -184,17 +183,10 @@ def _build_managed_snapshot_locked(service: Any, workspace: str, *,
                                    generation: Optional[int] = None) -> tuple[str, dict]:
     """Build the bounded client-side transport document for one local workspace.
 
-    Secret-classified rows are omitted before serialization. Sensitive (but not secret) content
-    is included only after the same explicit managed-compute consent as normal content.
+    Secret-classified rows are omitted before serialization. The ``consent`` parameter remains
+    accepted for source compatibility, but managed compute is enabled automatically.
     """
 
-    allowed = managed_compute_consent() if consent is None else bool(consent)
-    if not allowed:
-        raise CloudFeatureError(
-            "Managed compute is off. Opt in before uploading workspace content by setting "
-            "ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1.",
-            status=409,
-        )
     clean_workspace = service._clean_ws(workspace)
     workspace_id = service._lookup_workspace(clean_workspace)
     if not workspace_id:

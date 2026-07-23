@@ -37,7 +37,7 @@ def main(argv=None) -> int:
                     help="Shared folder both devices can see (Dropbox/iCloud/Syncthing/…).")
     ap.add_argument("--relay", "--relay-url", dest="relay", nargs="?", const="",
                     metavar="URL",
-                    help="Managed cloud relay root (e.g. https://team.engraphis.com). "
+                    help="Managed cloud relay root (e.g. https://relay.engraphis.com). "
                          "Bare --relay uses ENGRAPHIS_RELAY_URL. Mutually exclusive with --remote.")
     ap.add_argument("--relay-token", default=None, metavar="TOKEN",
                     help="Scoped user token for the relay (defaults to ENGRAPHIS_SYNC_TOKEN "

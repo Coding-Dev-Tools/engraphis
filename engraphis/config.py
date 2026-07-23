@@ -421,9 +421,9 @@ def _configured_db_path(root: Path = _PROJECT_ROOT) -> str:
     return str(target)
 
 
-#: Vendor-hosted managed sync service. Customer deployments normally override this with
-#: their own dashboard URL; local Pro clients retain the managed default.
-DEFAULT_RELAY_URL = "https://team.engraphis.com"
+#: Vendor-hosted managed sync service. The account dashboard remains at
+#: ``team.engraphis.com``; sync traffic goes to its separate relay endpoint.
+DEFAULT_RELAY_URL = "https://relay.engraphis.com"
 
 SERVICE_MODES = ("customer",)
 # The public package is a customer data plane and contains no vendor authority or hosted
@@ -435,6 +435,7 @@ DEFAULT_SERVICE_MODE = "customer"
 # managed service. Arbitrary signed URLs remain authoritative.
 RETIRED_RELAY_URLS = frozenset({
     "https://engraphis-production.up.railway.app",
+    "https://team.engraphis.com",
 })
 
 def _env(key: str, default: str = "") -> str:

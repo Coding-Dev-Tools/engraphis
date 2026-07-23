@@ -11,7 +11,10 @@ from engraphis import config
 from engraphis.config import Settings
 
 
-RETIRED_RELAY_URL = "https://engraphis-production.up.railway.app"
+RETIRED_RELAY_URLS = (
+    "https://engraphis-production.up.railway.app",
+    "https://team.engraphis.com",
+)
 
 
 def test_rerank_model_defaults_to_empty(monkeypatch):
@@ -64,8 +67,14 @@ def test_embed_dim_defaults_to_default_model_dimension(monkeypatch):
     assert Settings().embed_dim == 384
 
 
-def test_retired_relay_url_override_is_canonicalized():
-    assert config.canonicalize_relay_url(RETIRED_RELAY_URL) == config.DEFAULT_RELAY_URL
+@pytest.mark.parametrize("url", RETIRED_RELAY_URLS)
+def test_retired_relay_url_override_is_canonicalized(url):
+    assert config.canonicalize_relay_url(url) == config.DEFAULT_RELAY_URL
+
+
+def test_customer_relay_url_is_not_rewritten():
+    url = "https://relay.customer.example/team/"
+    assert config.canonicalize_relay_url(url) == url.rstrip("/")
 
 def test_invalid_service_mode_exits_process(monkeypatch):
     """Invalid ENGRAPHIS_SERVICE_MODE must fail-closed (sys.exit), not silently fall back."""
