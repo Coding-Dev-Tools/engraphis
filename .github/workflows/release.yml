@@ -197,6 +197,15 @@ jobs:
           python scripts/verify_release_artifacts.py --dist dist
           --version "${GITHUB_REF_NAME#v}" --allow-subset
 
+      # The trusted publisher may write a receipt beside the distributions.  Preserve
+      # the exact set that passed validation so the post-publish check cannot be
+      # affected by that implementation detail.
+      - name: Freeze verified distribution set
+        shell: bash
+        run: |
+          mkdir verified-dist
+          cp dist/*.whl dist/*.tar.gz verified-dist/
+
       - name: Publish distributions to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
@@ -205,7 +214,7 @@ jobs:
       - name: Require the exact complete PyPI file set
         shell: bash
         run: >-
-          python scripts/verify_release_artifacts.py --dist dist
+          python scripts/verify_release_artifacts.py --dist verified-dist
           --version "${GITHUB_REF_NAME#v}" --retries 18 --delay 10
 
   github-release:
@@ -319,6 +328,14 @@ jobs:
           python scripts/verify_release_artifacts.py --dist dist
           --version "${RELEASE_TAG#v}" --allow-subset
 
+      # gh-action-pypi-publish can leave its receipt in dist.  Keep the approved
+      # artifact set separate for the exact immutable-PyPI verification below.
+      - name: Freeze verified distribution set
+        shell: bash
+        run: |
+          mkdir verified-dist
+          cp dist/*.whl dist/*.tar.gz verified-dist/
+
       - name: Publish only missing verified distributions
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
@@ -329,7 +346,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         shell: bash
         run: >-
-          python scripts/verify_release_artifacts.py --dist dist
+          python scripts/verify_release_artifacts.py --dist verified-dist
           --version "${RELEASE_TAG#v}" --retries 18 --delay 10
 
       - name: Repair GitHub Release
