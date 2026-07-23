@@ -16,9 +16,9 @@ def test_embedder_factory_falls_back_offline():
 
 def test_deterministic_embedder_preserves_legacy_feature_hash_mapping():
     """Changing the feature-hash algorithm would invalidate existing local vectors."""
-    vectors = DeterministicEmbedder(dim=64).embed(["alpha beta graph", "secret-token 123"])
+    vectors = DeterministicEmbedder(dim=64).embed(["alpha beta graph", "offline mapping 123"])
     assert hashlib.sha256(vectors.tobytes()).hexdigest() == (
-        "a805cd2cd6575c6e8bf87df85afcfc17e2bf410d6f2130c6327ebe779192bde4"
+        "c2378cd31c56863b0c65fe7b0634aa62250af35b94853298bfed34fbb71875df"
     )
 
 

@@ -527,6 +527,47 @@ def test_index_repo_allows_selected_root_only_within_approved_local_roots(tmp_pa
         eng.index_repo(rid, str(outside), prefer="regex")
 
 
+def test_index_repo_rejects_normalized_escape_from_approved_local_root(tmp_path, monkeypatch):
+    from engraphis.core import engine as engine_module
+
+    allowed = tmp_path / "allowed"
+    selected_repo = allowed / "selected-project"
+    selected_repo.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.setattr(engine_module, "_approved_local_index_roots", lambda: (str(allowed),))
+
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+
+    escaped = selected_repo / ".." / ".." / "outside"
+    with pytest.raises(ValueError, match="outside approved local roots"):
+        eng.index_repo(rid, str(escaped), prefer="regex")
+
+
+def test_index_repo_rejects_root_symlink_that_resolves_outside_approved_root(tmp_path, monkeypatch):
+    from engraphis.core import engine as engine_module
+
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = allowed / "outside-link"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported in this environment")
+    monkeypatch.setattr(engine_module, "_approved_local_index_roots", lambda: (str(allowed),))
+
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+
+    with pytest.raises(ValueError, match="outside approved local roots"):
+        eng.index_repo(rid, str(link), prefer="regex")
+
+
 def test_index_repo_operator_roots_replace_local_defaults(tmp_path, monkeypatch):
     from engraphis.core import engine as engine_module
 

@@ -46,6 +46,20 @@ def _invalid_request() -> HTTPException:
     return HTTPException(status_code=400, detail={"error": "invalid request"})
 
 
+def _sanitized_http_exception(status_code: object) -> HTTPException:
+    """Keep a downstream HTTP status without propagating its detail or traceback.
+
+    A service dependency can deliberately signal an HTTP status, but its exception
+    object and detail are not part of this route's public contract.  Preserve a valid
+    error-class status while returning a route-owned, static body.
+    """
+    if isinstance(status_code, int) and 400 <= status_code <= 599:
+        if status_code < 500:
+            return HTTPException(status_code=status_code, detail={"error": "request rejected"})
+        return HTTPException(status_code=status_code, detail={"error": "internal server error"})
+    return HTTPException(status_code=500, detail={"error": "internal server error"})
+
+
 def service() -> MemoryService:
     """Lazily bind a single MemoryService to the configured store (the live v2 DB)."""
     global _service
@@ -100,11 +114,11 @@ def _run(fn, *a, **k):
     except ValidationError:
         logger.info("dashboard request rejected")
         raise _invalid_request() from None
-    except HTTPException:
-        raise
+    except HTTPException as exc:
+        logger.info("dashboard dependency rejected request (status=%s)", exc.status_code)
+        raise _sanitized_http_exception(exc.status_code) from None
     except Exception as exc:  # noqa: BLE001
-        msg = str(exc)
-        if "not aligned" in msg or ("256" in msg and "384" in msg):
+        if _is_embedder_mismatch(exc):
             raise HTTPException(status_code=409, detail={
                 "error": "Semantic search needs the embedding model that built your data "
                          "(sentence-transformers / all-MiniLM). Install it once — "
@@ -175,8 +189,9 @@ def _mem(m: dict) -> dict:
 
 
 def _is_embedder_mismatch(exc) -> bool:
-    msg = str(exc)
-    return "not aligned" in msg or ("256" in msg and "384" in msg)
+    """Recognize the legacy vector-shape failure without returning its text."""
+    message = str(exc)
+    return "not aligned" in message or ("256" in message and "384" in message)
 
 
 def _keyword_search(ws, q, limit=20):
@@ -254,13 +269,14 @@ def bootstrap():
         ).get("name")
     emb = None
     try:
-        from engraphis.backends import embedder_st as _est
         from engraphis.backends.embedder_deterministic import DeterministicEmbedder
         e = current_service.engine.embedder
         d = int(getattr(e, "dim", 0))
         semantic = not isinstance(e, DeterministicEmbedder)
+        # ``LAST_EMBEDDER_ERROR`` may contain a provider exception. The bootstrap
+        # contract exposes capability metadata only, never the failure text.
         emb = {"class": type(e).__name__, "dim": d, "semantic": semantic,
-               "model": settings.embed_model, "error": getattr(_est, "LAST_EMBEDDER_ERROR", "")}
+               "model": settings.embed_model}
     except Exception:  # noqa: BLE001
         pass
     return {

@@ -101,19 +101,6 @@ def _approved_local_index_roots() -> tuple[str, ...]:
     )
 
 
-def _resolve_local_index_root(root_path: str) -> Path:
-    """Canonicalize a caller-selected local repo and require an approved root."""
-    canonical_root = os.path.normcase(
-        os.path.realpath(os.path.expanduser(os.fspath(root_path)))
-    )
-    for approved_root in _approved_local_index_roots():
-        normalized_approved = os.path.normcase(os.path.realpath(approved_root))
-        approved_prefix = normalized_approved.rstrip(os.sep) + os.sep
-        if canonical_root == normalized_approved or canonical_root.startswith(approved_prefix):
-            return Path(canonical_root)
-    raise ValueError("repo root is outside approved local roots")
-
-
 def _bounded_finite(value, *, default: float, minimum: float, maximum: float) -> float:
     try:
         number = float(value)
@@ -1268,7 +1255,25 @@ class MemoryEngine:
         # repository in one of the approved local roots. Canonicalizing then checking
         # containment confines the capability to the operator's configured/default
         # filesystem boundary. Every walked child is re-contained below before it is read.
-        root = _resolve_local_index_root(root_path)
+        # Normalize before the root-prefix check.  Keep this check at the filesystem
+        # call site (rather than hiding it in a helper) so both human review and static
+        # analysis can establish that every later path is constrained by this boundary.
+        canonical_root = os.path.normcase(
+            os.path.realpath(os.path.expanduser(os.fspath(root_path)))
+        )
+        safe_root: Optional[str] = None
+        for approved_root in _approved_local_index_roots():
+            normalized_approved = os.path.normcase(os.path.realpath(approved_root))
+            approved_prefix = normalized_approved.rstrip(os.sep) + os.sep
+            if canonical_root == normalized_approved:
+                safe_root = canonical_root
+                break
+            if canonical_root.startswith(approved_prefix):
+                safe_root = canonical_root
+                break
+        if safe_root is None:
+            raise ValueError("repo root is outside approved local roots")
+        root = Path(safe_root)
         if not root.exists():
             raise ValueError(f"repo root not found: {root_path}")
         if not root.is_dir():
