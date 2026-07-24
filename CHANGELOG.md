@@ -62,6 +62,10 @@ Public 1.0.1 client reliability release.
 
 - Cloud Sync now defaults to `https://relay.engraphis.com` and safely migrates the former
   dashboard host and retired Railway relay URL without changing customer-provided relay URLs.
+- Default Pro and Team upgrade links now target the live authenticated account portal rather
+  than the retired Team dashboard host.
+- Hosted endpoint validation now fails closed when DNS resolution cannot establish that a
+  configured destination is public, preventing unresolved hosts from bypassing the SSRF guard.
 - Hosted Automation and maintenance requests now use the selected workspace end to end rather
   than silently falling back to the first workspace.
 - The Automation tab has one proposal action, clear managed-upload disclosure, and automatic
@@ -73,6 +77,7 @@ Public 1.0.1 client reliability release.
 - Entity extraction and dashboard asset migration avoid adversarial regular-expression
   backtracking. CodeQL now disables pull-request diff-informed analysis and CI fails on every
   raw SARIF result, including pre-existing and source-suppressed results.
+- The documented grounded-recall evaluation prints with the default Windows console encoding.
 
 ## [1.0.0] - 2026-07-23
 
