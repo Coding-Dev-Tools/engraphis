@@ -167,6 +167,13 @@ def _load() -> dict:
         raise CloudSessionError(
             "The saved cloud session has unsafe filesystem permissions.", status=409
         ) from exc
+    except (OSError, RuntimeError) as exc:
+        # An unreadable or stale state mount (and Path.home() failing outright) must
+        # surface as a structured, retryable cloud error rather than escaping as an
+        # unhandled filesystem exception and becoming an opaque 500.
+        raise CloudSessionError(
+            "The saved cloud session is temporarily unreadable."
+        ) from exc
     if not raw:
         return {}
     try:
@@ -291,10 +298,10 @@ def access_for_workspace(
         return direct_token, direct_org, compute_url
 
     # Do not create the owner-only state directory merely to report an unconnected
-    # installation.  In particular, a stale home-directory mount must produce the
-    # normal structured "connect first" response rather than an unhandled filesystem
-    # error.  The authoritative session record is still loaded again under the lock
-    # below before any refresh credential is used.
+    # installation.  An absent session yields the normal structured "connect first"
+    # response; a stale home-directory mount yields a structured, retryable error from
+    # ``_load`` rather than an unhandled filesystem exception.  The authoritative session
+    # record is still loaded again under the lock below before any credential is used.
     if not configured(require_compute=require_compute):
         raise CloudSessionError(
             "Connect this installation to Engraphis Cloud first.", status=401

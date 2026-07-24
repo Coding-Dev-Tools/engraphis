@@ -192,6 +192,24 @@ def test_refresh_lock_oserror_is_normalized(monkeypatch) -> None:
     assert caught.value.status == 409
 
 
+def test_unreadable_state_mount_is_normalized_before_the_refresh_lock(monkeypatch) -> None:
+    """A stale/unreadable state mount must not escape as a raw filesystem error.
+
+    ``access_for_workspace`` calls ``configured()`` -> ``_load()`` in its preflight,
+    before ``_refresh_lock()`` can normalize I/O failures, so an OSError there used to
+    reach the route layer as an opaque 500 instead of a structured cloud error.
+    """
+
+    monkeypatch.setattr(
+        cloud_session, "read_private_text",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("stale NFS handle")),
+    )
+
+    with pytest.raises(cloud_session.CloudSessionError, match="temporarily unreadable") as caught:
+        cloud_session.access_for_workspace("ws", require_compute=False)
+    assert 400 <= caught.value.status <= 599
+
+
 def test_unconfigured_client_does_not_create_the_state_directory(monkeypatch) -> None:
     monkeypatch.delenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("ENGRAPHIS_CLOUD_ORGANIZATION_ID", raising=False)

@@ -181,6 +181,78 @@ def test_pinned_https_proxy_tunnel_accepts_an_explicit_port_in_the_host(monkeypa
     assert connection._tls_server_hostname == "cloud.example"
 
 
+def test_pinned_https_proxy_tunnel_retries_every_vetted_address(monkeypatch):
+    """A CONNECT that fails on the first address must fall through to the rest.
+
+    Otherwise a dual-stack endpoint whose IPv6 address is unreachable from the proxy
+    makes every hosted request fail, unlike the direct path which already retries.
+    """
+
+    monkeypatch.setattr(
+        hosted_client.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:2800:220:1:248:1893:25c8:1946", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        ],
+    )
+    tunnelled = []
+
+    class _Sock:
+        def close(self):
+            pass
+
+    class _Context:
+        def wrap_socket(self, sock, *, server_hostname):
+            return sock
+
+    connection = hosted_client.PinnedHTTPSConnection("proxy.example", 3128)
+    connection._context = _Context()
+    connection._create_connection = lambda address, timeout, source: _Sock()
+
+    def fake_tunnel():
+        tunnelled.append(connection._tunnel_host)
+        if ":" in connection._tunnel_host:
+            raise OSError("Tunnel connection failed: 502 Bad Gateway")
+
+    connection._tunnel = fake_tunnel
+    connection.set_tunnel("cloud.example", 443)
+
+    connection.connect()
+
+    assert tunnelled == ["2606:2800:220:1:248:1893:25c8:1946", "93.184.216.34"]
+    assert connection._tunnel_host == "93.184.216.34"
+    assert connection._tls_server_hostname == "cloud.example"
+
+
+def test_pinned_https_proxy_tunnel_reports_the_last_failure_when_every_address_fails(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        hosted_client.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+        ],
+    )
+
+    class _Sock:
+        def close(self):
+            pass
+
+    connection = hosted_client.PinnedHTTPSConnection("proxy.example", 3128)
+    connection._create_connection = lambda address, timeout, source: _Sock()
+
+    def fake_tunnel():
+        raise OSError("Tunnel connection failed: 403 Forbidden")
+
+    connection._tunnel = fake_tunnel
+    connection.set_tunnel("cloud.example", 443)
+
+    with pytest.raises(OSError, match="403 Forbidden"):
+        connection.connect()
+
+
 def test_pinned_https_handler_forwards_only_supported_connection_arguments(monkeypatch):
     """Regression: 3.12 dropped ``HTTPSHandler._check_hostname`` and the matching kwarg.
 

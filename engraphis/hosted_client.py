@@ -124,6 +124,7 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
     def __init__(self, host, *args, **kwargs):
         super().__init__(host, *args, **kwargs)
         self._tls_server_hostname = self.host
+        self._tunnel_targets = []
 
     def set_tunnel(self, host, port=None, headers=None):
         # Make a configured proxy CONNECT to the vetted numeric target. TLS still
@@ -133,29 +134,55 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
         # the SNI name -- otherwise ``cloud.example:8443`` is looked up verbatim and fails.
         hostname, tunnel_port = self._get_hostport(host, port)
         self._tls_server_hostname = hostname
-        pinned = _validated_addresses(hostname)[0]
-        return super().set_tunnel(pinned, port=tunnel_port, headers=headers)
+        self._tunnel_targets = _validated_addresses(hostname)
+        return super().set_tunnel(self._tunnel_targets[0], port=tunnel_port, headers=headers)
 
     def connect(self):
-        targets = [self.host] if self._tunnel_host is not None else _validated_addresses(self.host)
-        last_error = None
-        for target in targets:
-            try:
-                self.sock = self._create_connection(
-                    (target, self.port), self.timeout, self.source_address
-                )
-                break
-            except OSError as exc:
-                last_error = exc
+        if self._tunnel_host is not None:
+            self._connect_through_proxy()
         else:
-            if last_error is None:
-                raise OSError("cloud service URL has no connectable address")
-            raise last_error
-        if self._tunnel_host:
-            self._tunnel()
+            self.sock = self._connect_directly()
         self.sock = self._context.wrap_socket(
             self.sock, server_hostname=self._tls_server_hostname
         )
+
+    def _connect_directly(self):
+        last_error = None
+        for target in _validated_addresses(self.host):
+            try:
+                return self._create_connection(
+                    (target, self.port), self.timeout, self.source_address
+                )
+            except OSError as exc:
+                last_error = exc
+        if last_error is None:
+            raise OSError("cloud service URL has no connectable address")
+        raise last_error
+
+    def _connect_through_proxy(self):
+        # Every vetted address is an equally valid CONNECT target, so a dual-stack
+        # endpoint whose first address is unreachable *from the proxy* must fall through
+        # to the rest exactly like the direct path does. A failed CONNECT leaves the
+        # proxy socket unusable, so each attempt redials the proxy.
+        last_error = None
+        for target in self._tunnel_targets or [self._tunnel_host]:
+            self._tunnel_host = target
+            try:
+                self.sock = self._create_connection(
+                    (self.host, self.port), self.timeout, self.source_address
+                )
+                self._tunnel()
+                return
+            except (OSError, UnicodeError) as exc:
+                # UnicodeError: http.client idna-encodes the tunnel host, which fails on
+                # a bare IPv6 literal -- a reason to try the next address, not to abort.
+                last_error = exc
+                if self.sock is not None:
+                    self.sock.close()
+                    self.sock = None
+        if last_error is None:
+            raise OSError("cloud service URL has no connectable address")
+        raise last_error
 
 
 class PinnedHTTPSHandler(urllib.request.HTTPSHandler):
