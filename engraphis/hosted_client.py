@@ -17,7 +17,10 @@ TRIAL_DAYS = 3
 TRIAL_SECONDS = 3 * 24 * 60 * 60
 MAX_LOCAL_WRITE_GRACE_SECONDS = 24 * 60 * 60
 
-DEFAULT_CLOUD_URL = "https://team.engraphis.com"
+# The hosted dashboard and the commercial account portal are separate surfaces.
+# Upgrade/connect actions must land on the authenticated control-plane portal; the
+# dashboard host does not serve its own ``/account`` route.
+DEFAULT_CLOUD_URL = "https://api.engraphis.com/account"
 
 _REQUIRED_PLAN = {
     "analytics": "pro",

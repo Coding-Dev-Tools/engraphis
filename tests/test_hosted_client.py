@@ -17,8 +17,8 @@ def test_upgrade_urls_are_hosted_metadata_only(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_TEAM_UPGRADE_URL", raising=False)
     monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
 
-    assert hosted_client.upgrade_url("pro") == "https://team.engraphis.com"
-    assert hosted_client.upgrade_url("team") == "https://team.engraphis.com"
+    assert hosted_client.upgrade_url("pro") == "https://api.engraphis.com/account"
+    assert hosted_client.upgrade_url("team") == "https://api.engraphis.com/account"
     assert hosted_client.required_plan("sync") == "pro"
     assert hosted_client.required_plan("team") == "team"
 

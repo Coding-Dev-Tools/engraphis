@@ -62,6 +62,8 @@ Public 1.0.1 client reliability release.
 
 - Cloud Sync now defaults to `https://relay.engraphis.com` and safely migrates the former
   dashboard host and retired Railway relay URL without changing customer-provided relay URLs.
+- Default Pro and Team upgrade links now target the live authenticated account portal rather
+  than the retired Team dashboard host.
 - Hosted endpoint validation now fails closed when DNS resolution cannot establish that a
   configured destination is public, preventing unresolved hosts from bypassing the SSRF guard.
 - Hosted Automation and maintenance requests now use the selected workspace end to end rather
