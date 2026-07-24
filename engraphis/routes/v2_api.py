@@ -1918,11 +1918,16 @@ async def sync_run():
     try:
         has_cloud_session = configured(require_compute=False)
     except CloudSessionError as exc:
-        status = exc.status if 400 <= exc.status <= 599 else 503
-        raise HTTPException(status_code=status, detail={
-            "error": "The saved cloud session is unavailable.",
-            "upgrade_url": licensing.upgrade_url(),
-        }) from None
+        # An unreadable cloud session must not strand installations that still authenticate
+        # to the relay with a legacy sync token -- surface it only when there is no other
+        # way in, otherwise fall through to the token path as before.
+        if not has_token:
+            status = exc.status if 400 <= exc.status <= 599 else 503
+            raise HTTPException(status_code=status, detail={
+                "error": "The saved cloud session is unavailable.",
+                "upgrade_url": licensing.upgrade_url(),
+            }) from None
+        has_cloud_session = False
     if not has_token and not has_cloud_session:
         raise HTTPException(status_code=402, detail={
             "error": "Connect this installation to Engraphis Cloud before syncing.",

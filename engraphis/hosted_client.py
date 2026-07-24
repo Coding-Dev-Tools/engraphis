@@ -128,9 +128,13 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
     def set_tunnel(self, host, port=None, headers=None):
         # Make a configured proxy CONNECT to the vetted numeric target. TLS still
         # authenticates the original hostname after the tunnel is established.
-        self._tls_server_hostname = host
-        pinned = _validated_addresses(host)[0]
-        return super().set_tunnel(pinned, port=port, headers=headers)
+        # urllib passes ``Request.host`` straight through, and that netloc may carry an
+        # explicit port, so split it the way http.client does before resolving or pinning
+        # the SNI name -- otherwise ``cloud.example:8443`` is looked up verbatim and fails.
+        hostname, tunnel_port = self._get_hostport(host, port)
+        self._tls_server_hostname = hostname
+        pinned = _validated_addresses(hostname)[0]
+        return super().set_tunnel(pinned, port=tunnel_port, headers=headers)
 
     def connect(self):
         targets = [self.host] if self._tunnel_host is not None else _validated_addresses(self.host)
@@ -144,7 +148,8 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
             except OSError as exc:
                 last_error = exc
         else:
-            assert last_error is not None
+            if last_error is None:
+                raise OSError("cloud service URL has no connectable address")
             raise last_error
         if self._tunnel_host:
             self._tunnel()
@@ -157,12 +162,15 @@ class PinnedHTTPSHandler(urllib.request.HTTPSHandler):
     """urllib handler using pinned connections for every HTTPS request."""
 
     def https_open(self, req):
-        return self.do_open(
-            PinnedHTTPSConnection,
-            req,
-            context=self._context,
-            check_hostname=self._check_hostname,
-        )
+        # Python 3.12 folded ``check_hostname`` into the SSL context: ``HTTPSHandler`` no
+        # longer keeps ``_check_hostname`` and ``HTTPSConnection`` no longer accepts the
+        # keyword. Forward it only on the interpreters that still track it, so a single
+        # code path works from 3.9 through 3.13.
+        kwargs = {"context": self._context}
+        check_hostname = getattr(self, "_check_hostname", None)
+        if check_hostname is not None:
+            kwargs["check_hostname"] = check_hostname
+        return self.do_open(PinnedHTTPSConnection, req, **kwargs)
 
 
 def build_pinned_https_opener(*handlers):

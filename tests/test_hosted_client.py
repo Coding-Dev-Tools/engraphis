@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+import urllib.request
 
 import pytest
 
@@ -160,6 +161,53 @@ def test_pinned_https_proxy_tunnel_uses_vetted_ip_and_original_tls_name(monkeypa
 
     assert connection._tunnel_host == "93.184.216.34"
     assert connection._tls_server_hostname == "cloud.example"
+
+
+def test_pinned_https_proxy_tunnel_accepts_an_explicit_port_in_the_host(monkeypatch):
+    monkeypatch.setattr(
+        hosted_client.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 8443))
+        ],
+    )
+    connection = hosted_client.PinnedHTTPSConnection("proxy.example")
+
+    # urllib hands the raw netloc to set_tunnel, port included.
+    connection.set_tunnel("cloud.example:8443")
+
+    assert connection._tunnel_host == "93.184.216.34"
+    assert connection._tunnel_port == 8443
+    assert connection._tls_server_hostname == "cloud.example"
+
+
+def test_pinned_https_handler_forwards_only_supported_connection_arguments(monkeypatch):
+    """Regression: 3.12 dropped ``HTTPSHandler._check_hostname`` and the matching kwarg.
+
+    Reading it unconditionally raised ``AttributeError`` on 3.12+, breaking every hosted
+    HTTPS request, and forwarding it would have raised ``TypeError`` inside
+    ``http.client.HTTPSConnection``.  Nothing exercised ``https_open`` before this test.
+    """
+
+    handler = hosted_client.PinnedHTTPSHandler()
+    captured = {}
+
+    def _capture(http_class, req, **kwargs):
+        captured["http_class"] = http_class
+        captured["kwargs"] = kwargs
+        return "response"
+
+    monkeypatch.setattr(handler, "do_open", _capture)
+
+    result = handler.https_open(urllib.request.Request("https://cloud.example/resource"))
+
+    assert result == "response"
+    assert captured["http_class"] is hosted_client.PinnedHTTPSConnection
+    assert captured["kwargs"]["context"] is handler._context
+    assert set(captured["kwargs"]) <= {"context", "check_hostname"}
+    # The forwarded arguments must actually be accepted by the connection class on this
+    # interpreter; constructing it does not open a socket.
+    hosted_client.PinnedHTTPSConnection("cloud.example", **captured["kwargs"])
 
 
 def test_licensing_facade_exposes_no_local_entitlement_engine():
