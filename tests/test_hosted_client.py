@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import socket
 import urllib.request
 
@@ -226,7 +227,7 @@ def test_pinned_https_proxy_tunnel_retries_every_vetted_address(monkeypatch):
     # The Host authority must follow the address actually being CONNECTed -- a strict
     # proxy rejects a retry whose Host still names the address that just failed.
     assert tunnelled == [
-        ("2606:2800:220:1:248:1893:25c8:1946", "[2606:2800:220:1:248:1893:25c8:1946]:443"),
+        ("[2606:2800:220:1:248:1893:25c8:1946]", "[2606:2800:220:1:248:1893:25c8:1946]:443"),
         ("93.184.216.34", "93.184.216.34:443"),
     ]
     assert connection._tunnel_host == "93.184.216.34"
@@ -259,6 +260,48 @@ def test_pinned_https_proxy_tunnel_reports_the_last_failure_when_every_address_f
 
     with pytest.raises(OSError, match="403 Forbidden"):
         connection.connect()
+
+
+def test_pinned_https_proxy_tunnel_brackets_ipv6_on_the_connect_request_line(monkeypatch):
+    """The CONNECT request target must be an unambiguous authority on every version.
+
+    Python 3.9 and 3.10 serialize ``_tunnel_host`` verbatim, so a bare IPv6 literal
+    would emit ``CONNECT 2606:...:443`` -- an ambiguous authority strict proxies reject.
+    3.11+ bracket it themselves and leave an already-bracketed value alone.
+    """
+
+    v6 = "2606:2800:220:1:248:1893:25c8:1946"
+    monkeypatch.setattr(
+        hosted_client.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", (v6, 443))],
+    )
+    sent = []
+
+    class _Sock(io.BytesIO):
+        def sendall(self, data):
+            sent.append(data)
+
+        def makefile(self, *args, **kwargs):
+            return io.BytesIO(b"HTTP/1.1 200 Connection established\r\n\r\n")
+
+        def close(self):
+            pass
+
+    class _Context:
+        def wrap_socket(self, sock, *, server_hostname):
+            return sock
+
+    connection = hosted_client.PinnedHTTPSConnection("proxy.example", 3128)
+    connection._context = _Context()
+    connection._create_connection = lambda address, timeout, source: _Sock()
+    connection.set_tunnel("cloud.example", 443)
+
+    connection.connect()
+
+    assert sent, "no CONNECT request was sent"
+    request_line = sent[0].split(b"\r\n")[0]
+    assert request_line.startswith(b"CONNECT [%s]:443 " % v6.encode()), request_line
 
 
 def test_pinned_https_handler_forwards_only_supported_connection_arguments(monkeypatch):

@@ -159,9 +159,16 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
             raise OSError("cloud service URL has no connectable address")
         raise last_error
 
+    @staticmethod
+    def _bracketed(target):
+        """Return *target* as an unambiguous URI host (IPv6 literals get brackets)."""
+
+        if ":" in target and not target.startswith("["):
+            return "[%s]" % target
+        return target
+
     def _tunnel_authority(self, target):
-        literal = "[%s]" % target if ":" in target else target
-        return "%s:%d" % (literal, self._tunnel_port)
+        return "%s:%d" % (self._bracketed(target), self._tunnel_port)
 
     def _connect_through_proxy(self):
         # Every vetted address is an equally valid CONNECT target, so a dual-stack
@@ -171,8 +178,13 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
         last_error = None
         base_headers = dict(self._tunnel_headers)
         for target in self._tunnel_targets or [self._tunnel_host]:
-            self._tunnel_host = target
-            # Python 3.12+ caches an authority in _tunnel_headers["Host"] when the tunnel
+            # Python 3.9 and 3.10 serialize the CONNECT request target verbatim, so a
+            # bare IPv6 literal becomes an ambiguous "<addr>:<port>" authority that
+            # strict proxies reject. 3.11+ bracket it themselves and leave an already
+            # bracketed value untouched, so normalizing here is right on every version
+            # this package supports.
+            self._tunnel_host = self._bracketed(target)
+            # 3.12+ also caches an authority in _tunnel_headers["Host"] when the tunnel
             # is configured. It must follow the address actually being CONNECTed, or a
             # strict proxy rejects the retry because the Host names the failed address.
             self._tunnel_headers = dict(base_headers)
@@ -186,8 +198,8 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
                 self._tunnel()
                 return
             except (OSError, UnicodeError) as exc:
-                # UnicodeError: http.client idna-encodes the tunnel host, which fails on
-                # a bare IPv6 literal -- a reason to try the next address, not to abort.
+                # UnicodeError: http.client encodes the tunnel host before sending it,
+                # which is a reason to try the next address rather than abort outright.
                 last_error = exc
                 if self.sock is not None:
                     self.sock.close()
