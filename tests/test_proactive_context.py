@@ -61,6 +61,7 @@ def test_service_proactive_context_logs_recall_failure_without_exception_text(
 
     assert out["workspace"] == "acme"
     assert "RuntimeError" in caplog.text
+    assert "acme" not in caplog.text
     assert "credential-like provider detail" not in caplog.text
 
 

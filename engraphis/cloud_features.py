@@ -27,7 +27,7 @@ MAX_MEMORIES = 100_000
 MAX_TEXT_CHARS = 100_000
 
 
-def _truthy(value: str | None) -> bool:
+def _truthy(value: Optional[str]) -> bool:
     return value is not None and value.strip().lower() in ("1", "true", "yes", "on")
 
 
@@ -35,10 +35,11 @@ class CloudFeatureError(RuntimeError):
     """A bounded, redacted managed-cloud failure suitable for an HTTP/UI boundary."""
 
     def __init__(self, message: str, *, status: Optional[int] = None,
-                 transient: bool = False) -> None:
+                 transient: bool = False, code: Optional[str] = None) -> None:
         super().__init__(message)
         self.status = status
         self.transient = transient
+        self.code = code
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -203,6 +204,7 @@ def _build_managed_snapshot_locked(service: Any, workspace: str, *,
             "Managed compute is off. Opt in before uploading workspace content by setting "
             "ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1.",
             status=409,
+            code="consent_required",
         )
     snapshot_generation = _reserve_snapshot_generation(
         service, workspace_id, requested=generation

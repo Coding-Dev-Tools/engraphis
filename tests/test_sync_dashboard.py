@@ -164,6 +164,8 @@ def test_sync_fails_closed_on_invalid_workspace_visibility(monkeypatch, tmp_path
         response = c.post("/api/sync/run", json={})
         assert response.status_code == 200
         summary = response.json()["summary"]
+        assert summary["attempted"] == 0
+        assert summary["succeeded"] == 0
         assert "demo" not in synced
         assert any(
             error["workspace"] == "demo" and "visibility is invalid" in error["error"]
@@ -209,6 +211,14 @@ def test_sync_run_surfaces_total_authorization_denial(monkeypatch, tmp_path, sta
     detail = response.json()["detail"]
     assert detail["error"] == "cloud relay synchronization failed"
     assert detail["upgrade_url"].startswith("https://api.engraphis.com/account")
+    last = c.get("/api/sync/status").json()["last"]
+    assert last["attempted"] == 1
+    assert last["succeeded"] == 0
+    assert last["errors"] == [{
+        "workspace": "demo",
+        "error": "cloud relay synchronization failed",
+        "status": status,
+    }]
 
 
 def test_sync_run_does_not_promote_partial_success_with_zero_exports(monkeypatch, tmp_path):
@@ -237,3 +247,27 @@ def test_sync_run_does_not_promote_partial_success_with_zero_exports(monkeypatch
         "error": "cloud relay synchronization failed",
         "status": 403,
     }]
+
+
+def test_sync_run_does_not_treat_cloud_session_outage_as_authorization_loss(
+    monkeypatch, tmp_path
+):
+    from engraphis.cloud_session import CloudSessionError
+
+    def fail_session(*args, **kwargs):
+        raise CloudSessionError("private network detail", status=503)
+
+    monkeypatch.setattr("engraphis.cloud_session.access_for_workspace", fail_session)
+    with _client(monkeypatch, tmp_path, cloud=True) as c:
+        response = c.post("/api/sync/run", json={})
+
+    assert response.status_code == 200
+    summary = response.json()["summary"]
+    assert summary["attempted"] == 1
+    assert summary["succeeded"] == 0
+    assert summary["errors"] == [{
+        "workspace": "demo",
+        "error": "cloud session is temporarily unavailable",
+        "status": 503,
+    }]
+    assert "private network detail" not in repr(summary)

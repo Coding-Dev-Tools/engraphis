@@ -319,3 +319,17 @@ def test_dashboard_exception_responses_do_not_echo_untrusted_exception_text():
         "transient": False,
     }
     assert secret not in repr(managed.value.detail)
+
+    with pytest.raises(HTTPException) as consent:
+        v2_api._managed_call(
+            fail_with,
+            CloudFeatureError(secret, status=409, code="consent_required"),
+        )
+    assert consent.value.status_code == 409
+    assert consent.value.detail == {
+        "error": "managed cloud operation failed",
+        "managed_cloud": True,
+        "transient": False,
+        "code": "consent_required",
+    }
+    assert secret not in repr(consent.value.detail)

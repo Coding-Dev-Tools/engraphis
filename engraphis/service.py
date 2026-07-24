@@ -1942,8 +1942,7 @@ class MemoryService:
                 memories.extend(recalled.get("memories") or [])
             except Exception as exc:
                 logger.warning(
-                    "proactive_context recall failed for workspace %s (%s)",
-                    workspace,
+                    "proactive_context recall failed (%s)",
                     type(exc).__name__,
                 )
         llm = None
@@ -5374,8 +5373,7 @@ class MemoryService:
                                 provenance={"source": "structured_backfill", "memory_id": r["id"]})
                 except Exception as exc:
                     logger.warning(
-                        "structured graph backfill failed for memory %s (%s)",
-                        r["id"],
+                        "structured graph backfill failed (%s)",
                         type(exc).__name__,
                     )
             if self.engine.graph_extractor is not None:
@@ -5386,8 +5384,7 @@ class MemoryService:
                                 provenance={"source": "lazy_backfill", "memory_id": r["id"]})
                 except Exception as exc:
                     logger.warning(
-                        "lazy graph backfill failed for memory %s (%s)",
-                        r["id"],
+                        "lazy graph backfill failed (%s)",
                         type(exc).__name__,
                     )
 

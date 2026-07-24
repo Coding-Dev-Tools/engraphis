@@ -16,6 +16,7 @@ const hostedLicense = {
 
 async function mockLocalClient(page, cloudStatus = 402, syncRunStatus = null) {
   const calls = [];
+  let syncLast = null;
 
   await page.route('**/api/**', async route => {
     const request = route.request();
@@ -53,9 +54,17 @@ async function mockLocalClient(page, cloudStatus = 402, syncRunStatus = null) {
         cloud_url: 'https://cloud.engraphis.test/team',
       };
     } else if (path === '/sync/status') {
-      body = { available: syncRunStatus !== null };
+      body = { available: syncRunStatus !== null, last: syncLast };
     } else if (path === '/sync/run' && syncRunStatus !== null) {
       status = syncRunStatus;
+      syncLast = {
+        at: Date.now() / 1000,
+        attempted: 1,
+        succeeded: 0,
+        exported: 0,
+        added: 0,
+        errors: [{ status: syncRunStatus }],
+      };
       body = {
         detail: {
           error: syncRunStatus === 402
@@ -79,11 +88,14 @@ async function mockLocalClient(page, cloudStatus = 402, syncRunStatus = null) {
       status = cloudStatus;
       body = {
         detail: {
-          error: cloudStatus === 401
+          error: cloudStatus === 409
+            ? 'managed cloud operation failed'
+            : cloudStatus === 401
             ? 'Connect this installation to Engraphis Cloud.'
             : cloudStatus === 402
               ? 'A hosted Pro or Team entitlement is required.'
               : 'This capability is available through Engraphis Cloud.',
+          ...(cloudStatus === 409 ? { code: 'consent_required' } : {}),
         },
       };
     }
@@ -112,6 +124,11 @@ test('Cloud Sync denial returns an unlicensed installation to the hosted upgrade
   await expect(sync.getByRole('link', { name: 'Start hosted Pro trial' }))
     .toHaveAttribute('href', 'https://cloud.engraphis.test/pro?plan=pro&trial=pro');
   await expect(calls.some(call => call.path === '/sync/run' && call.method === 'POST')).toBe(true);
+
+  await page.reload();
+  await openView(page, 'settings');
+  await expect(page.locator('#sync-body')).toContainText('Cloud Sync runs in Engraphis Pro Cloud');
+  await expect(page.getByRole('button', { name: 'Sync now' })).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
@@ -121,7 +138,7 @@ function recordBrowserErrors(page) {
     if (message.type() === 'error') {
       const location = message.location();
       const expectedCloudDenial = /\/api\/(analytics|automation)/.test(location.url || '')
-        && /status of (401|402|501)/.test(message.text());
+        && /status of (401|402|409|501)/.test(message.text());
       const expectedSyncDenial = /\/api\/sync\/run/.test(location.url || '')
         && /status of (401|402|403)/.test(message.text());
       if (expectedCloudDenial || expectedSyncDenial) return;
@@ -245,3 +262,17 @@ for (const cloudStatus of [401, 402, 501]) {
     expect(errors).toEqual([]);
   });
 }
+
+test('Analytics explains the local managed-compute consent step', async ({ page }) => {
+  const errors = recordBrowserErrors(page);
+  await mockLocalClient(page, 409);
+  await page.goto('/');
+  await openView(page, 'analytics');
+
+  const analytics = page.locator('#analytics-body');
+  await expect(analytics).toContainText('needs your explicit permission');
+  await expect(analytics).toContainText('ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1');
+  await expect(analytics).toContainText('restart Engraphis');
+  await expect(page.locator('#an-lock')).toHaveText('CLOUD');
+  expect(errors).toEqual([]);
+});

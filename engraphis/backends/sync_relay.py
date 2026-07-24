@@ -291,7 +291,9 @@ def _validated_base_url(value: str) -> str:
                     raise ValueError(
                         "relay URL must not target private/reserved IP ranges")
         except (_socket.gaierror, OSError):
-            pass  # DNS resolution failure; let the actual request fail later
+            raise ValueError(
+                "relay URL host could not be resolved to a public address"
+            ) from None
     return urlunsplit((scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
 
 

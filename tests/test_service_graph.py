@@ -320,6 +320,7 @@ def test_graph_lazy_backfill_logs_failure_without_exception_text(monkeypatch, ca
 
     assert graph["nodes"] == []
     assert "RuntimeError" in caplog.text
+    assert "mem_" not in caplog.text
     assert "credential-like graph detail" not in caplog.text
 
 
