@@ -110,7 +110,7 @@ test('Cloud Sync denial returns an unlicensed installation to the hosted upgrade
   const sync = page.locator('#sync-body');
   await expect(sync).toContainText('Cloud Sync runs in Engraphis Pro Cloud');
   await expect(sync.getByRole('link', { name: 'Start hosted Pro trial' }))
-    .toHaveAttribute('href', 'https://cloud.engraphis.test/pro?trial=pro');
+    .toHaveAttribute('href', 'https://cloud.engraphis.test/pro?plan=pro&trial=pro');
   await expect(calls.some(call => call.path === '/sync/run' && call.method === 'POST')).toBe(true);
   expect(errors).toEqual([]);
 });
