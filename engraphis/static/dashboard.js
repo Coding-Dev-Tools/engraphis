@@ -146,6 +146,10 @@ async function loadOverviewAnalytics(){
    lock.className='pill pill-muted';
    const used=LIC&&LIC.trial&&LIC.trial.used;
    el.innerHTML='<div data-csp-style="s68"><div data-csp-style="s69">Hosted growth, retention distribution, and decay forecast.</div>'+(used?'':'<button class="btn btn-primary btn-sm" data-onclick="h84">Start exactly '+TRIAL_DAYS+' days free</button> ')+'<button class="btn btn-ghost btn-sm" data-onclick="h85">Plan details</button></div>';
+  }else if(managedConsentRequired(e)){
+   lock.textContent='CLOUD';
+   lock.className='pill pill-accent';
+   el.innerHTML=managedConsentHtml('Analytics');
   }else el.innerHTML='<div class="empty" data-csp-style="s10">'+esc(e.message)+'</div>';
  }
 }
