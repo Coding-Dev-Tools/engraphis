@@ -115,5 +115,7 @@ def validate_cloud_base_url(value: str) -> str:
                         "cloud service URL must not target private/reserved IP ranges"
                     )
         except (socket.gaierror, OSError):
-            pass
+            raise ValueError(
+                "cloud service URL could not be resolved"
+            ) from None
     return urlunsplit((scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
