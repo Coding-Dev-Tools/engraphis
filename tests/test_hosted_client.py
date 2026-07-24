@@ -211,16 +211,24 @@ def test_pinned_https_proxy_tunnel_retries_every_vetted_address(monkeypatch):
     connection._create_connection = lambda address, timeout, source: _Sock()
 
     def fake_tunnel():
-        tunnelled.append(connection._tunnel_host)
+        tunnelled.append((connection._tunnel_host, connection._tunnel_headers.get("Host")))
         if ":" in connection._tunnel_host:
             raise OSError("Tunnel connection failed: 502 Bad Gateway")
 
     connection._tunnel = fake_tunnel
     connection.set_tunnel("cloud.example", 443)
+    # Python 3.12+ caches this authority at set_tunnel time; 3.11 does not. Set it
+    # explicitly so the rebuild is asserted identically on every interpreter.
+    connection._tunnel_headers["Host"] = "2606:2800:220:1:248:1893:25c8:1946:443"
 
     connection.connect()
 
-    assert tunnelled == ["2606:2800:220:1:248:1893:25c8:1946", "93.184.216.34"]
+    # The Host authority must follow the address actually being CONNECTed -- a strict
+    # proxy rejects a retry whose Host still names the address that just failed.
+    assert tunnelled == [
+        ("2606:2800:220:1:248:1893:25c8:1946", "[2606:2800:220:1:248:1893:25c8:1946]:443"),
+        ("93.184.216.34", "93.184.216.34:443"),
+    ]
     assert connection._tunnel_host == "93.184.216.34"
     assert connection._tls_server_hostname == "cloud.example"
 

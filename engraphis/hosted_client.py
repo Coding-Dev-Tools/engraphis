@@ -159,14 +159,26 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
             raise OSError("cloud service URL has no connectable address")
         raise last_error
 
+    def _tunnel_authority(self, target):
+        literal = "[%s]" % target if ":" in target else target
+        return "%s:%d" % (literal, self._tunnel_port)
+
     def _connect_through_proxy(self):
         # Every vetted address is an equally valid CONNECT target, so a dual-stack
         # endpoint whose first address is unreachable *from the proxy* must fall through
         # to the rest exactly like the direct path does. A failed CONNECT leaves the
         # proxy socket unusable, so each attempt redials the proxy.
         last_error = None
+        base_headers = dict(self._tunnel_headers)
         for target in self._tunnel_targets or [self._tunnel_host]:
             self._tunnel_host = target
+            # Python 3.12+ caches an authority in _tunnel_headers["Host"] when the tunnel
+            # is configured. It must follow the address actually being CONNECTed, or a
+            # strict proxy rejects the retry because the Host names the failed address.
+            self._tunnel_headers = dict(base_headers)
+            for name in list(self._tunnel_headers):
+                if name.lower() == "host":
+                    self._tunnel_headers[name] = self._tunnel_authority(target)
             try:
                 self.sock = self._create_connection(
                     (self.host, self.port), self.timeout, self.source_address
