@@ -66,9 +66,11 @@ def run() -> dict:
 def main() -> None:
     r = run()
     print("\nEngraphis grounded-recall eval (deterministic embedder)")
-    print(f"  answerable → grounded  : {r['answer_rate']:.3f}  "
+    # Keep the documented offline gate usable from the Windows console's default
+    # cp1252 encoding, which cannot emit a Unicode arrow.
+    print(f"  answerable -> grounded  : {r['answer_rate']:.3f}  "
           f"({r['grounded_hits']}/{r['n_answerable']})")
-    print(f"  off-topic  → abstained : {r['abstain_rate']:.3f}  "
+    print(f"  off-topic  -> abstained : {r['abstain_rate']:.3f}  "
           f"({r['abstain_hits']}/{r['n_unanswerable']})")
     print(f"  decision accuracy      : {r['accuracy']:.3f}  "
           f"({r['grounded_hits'] + r['abstain_hits']}/{r['n_answerable'] + r['n_unanswerable']})\n")
