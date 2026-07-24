@@ -8,6 +8,13 @@ A public deployment is therefore a remote **free customer node**, not a self-hos
 backend. Premium status/CTA surfaces connect authorized customers to the official private cloud.
 No service-mode or environment switch adds the missing server implementations.
 
+## Official Cloud early access
+
+The official Railway-hosted Cloud is offered as limited early access. Pro and Team onboarding is
+manual: [request access](https://engraphis.com/contact), then customer configuration and
+activation are arranged individually. This customer-runtime guide cannot provision a hosted
+account, and it does not promise immediate self-service checkout or activation.
+
 ## Deploy
 
 Use the `Dockerfile`, mount a private persistent volume at `/data`, and configure:

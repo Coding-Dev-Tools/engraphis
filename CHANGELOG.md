@@ -25,6 +25,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Changed
 
+- Documentation now describes the official Railway-hosted Cloud as limited early access with
+  manual onboarding, without representing a self-service paid lifecycle as generally available.
 - The legacy graph view now defaults to deterministic community islands, keeps sparse
   influence bridges visually subordinate, and renders bounded direct A-MEM links even when
   entity extraction is disabled. A reproducible repository-local screen-demo workflow exercises

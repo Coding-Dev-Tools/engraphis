@@ -193,6 +193,13 @@ outside code that a fork controls.
 - **Team** adds hosted organizations, invitations, named seats, roles, scoped credentials, and
   organization audit. Devices do not consume seats.
 
+### Railway-hosted Cloud early access
+
+The official Railway-hosted Cloud is currently offered as limited early access. Pro and Team
+onboarding is manual: [request access](https://engraphis.com/contact), then configuration and
+activation are arranged with each customer. Availability is limited; these plan descriptions do
+not promise immediate self-service checkout or activation.
+
 The no-card trial starts only after email confirmation and lasts **exactly 3 active days**.
 See [Licensing](docs/LICENSING.md), [Cloud Sync](docs/SYNC.md), and
 [Agent Connect](docs/AGENT_CONNECT.md). The public image can still be deployed as a free local
