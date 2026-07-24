@@ -134,9 +134,9 @@ test('local dashboard exposes hosted Pro and Team CTAs without local commercial 
   const team = page.locator('#team-body');
   await expect(team.getByText('Engraphis Team Cloud', { exact: false })).toBeVisible();
   await expect(team.getByRole('link', { name: 'Start hosted Team trial' }))
-    .toHaveAttribute('href', 'https://cloud.engraphis.test/team?trial=team');
+    .toHaveAttribute('href', 'https://cloud.engraphis.test/team?plan=team&trial=team');
   await expect(team.getByRole('link', { name: 'Open Team Cloud' }))
-    .toHaveAttribute('href', 'https://cloud.engraphis.test/team');
+    .toHaveAttribute('href', 'https://cloud.engraphis.test/team?plan=team');
   await expect(team).toContainText('exactly 3 active days');
   await expect(team).toContainText(
     'A separate local-only write grace is capped at 24 hours and never extends Team or other cloud access.',
@@ -187,9 +187,9 @@ for (const cloudStatus of [401, 402, 501]) {
       'Local-only write grace is separate, capped at 24 hours, and never extends cloud access.',
     );
     await expect(analytics.getByRole('link', { name: 'Start hosted Pro trial' }))
-      .toHaveAttribute('href', 'https://cloud.engraphis.test/pro?trial=pro');
+      .toHaveAttribute('href', 'https://cloud.engraphis.test/pro?plan=pro&trial=pro');
     await expect(analytics.getByRole('link', { name: 'View Pro plans' }))
-      .toHaveAttribute('href', 'https://cloud.engraphis.test/pro');
+      .toHaveAttribute('href', 'https://cloud.engraphis.test/pro?plan=pro');
     await expect(page.locator('#an-lock')).toHaveText('PRO');
 
     const automationBefore = calls.filter(call => call.path === '/automation').length;
@@ -206,9 +206,9 @@ for (const cloudStatus of [401, 402, 501]) {
       'Local-only write grace is separate, capped at 24 hours, and never extends cloud access.',
     );
     await expect(automation.getByRole('link', { name: 'Start hosted Pro trial' }))
-      .toHaveAttribute('href', 'https://cloud.engraphis.test/pro?trial=pro');
+      .toHaveAttribute('href', 'https://cloud.engraphis.test/pro?plan=pro&trial=pro');
     await expect(automation.getByRole('link', { name: 'View Pro plans' }))
-      .toHaveAttribute('href', 'https://cloud.engraphis.test/pro');
+      .toHaveAttribute('href', 'https://cloud.engraphis.test/pro?plan=pro');
     await expect(page.locator('#au-lock')).toHaveText('PRO');
 
     expect(calls.some(call => call.path === '/analytics' && call.method === 'GET')).toBe(true);
