@@ -1804,6 +1804,7 @@ def _sync_all(svc) -> dict:
     # device by its workspace count. Counting unique device ids gives the true peer total.
     peer_devices: set = set()
     exported, errors = 0, []
+    attempted, succeeded = 0, 0
     legacy_token_configured = has_sync_token()
     for w in wss:
         name = w.get("name")
@@ -1827,6 +1828,7 @@ def _sync_all(svc) -> dict:
         # convention (which collapses malformed settings to "shared"): this path
         # uploads the folder off-device, so a corrupted settings row must block the
         # push rather than silently treat a possibly-personal folder as shared.
+        attempted += 1
         try:
             raw_settings = json.loads(row["settings"] or "{}")
         except (TypeError, ValueError):
@@ -1878,6 +1880,7 @@ def _sync_all(svc) -> dict:
             logger.error("sync workspace failed (%s)", type(exc).__name__)
             errors.append({"workspace": name, "error": "sync workspace failed"})
             continue
+        succeeded += 1
         exported += int(rep.get("exported_memories", 0) or 0)
         for a in rep.get("applied") or []:
             dev = a.get("from_device")
@@ -1886,7 +1889,8 @@ def _sync_all(svc) -> dict:
         for k in totals:
             totals[k] += int((rep.get("totals") or {}).get(k, 0) or 0)
 
-    return {"at": time.time(), "workspaces": len(wss), "exported": exported,
+    return {"at": time.time(), "workspaces": len(wss), "attempted": attempted,
+            "succeeded": succeeded, "exported": exported,
             "peers": len(peer_devices), "added": totals["added"],
             "updated": totals["updated"], "unchanged": totals["unchanged"],
             "errors": errors}
@@ -1917,11 +1921,23 @@ async def sync_run():
     import asyncio
     summary = await asyncio.to_thread(_sync_all, svc)
     _SYNC_STATE["last"] = summary
-    # If cloud authorization failed for every workspace (nothing exported, a 402 seen),
-    # surface it as the button's upgrade/renew prompt rather than a silent partial success.
-    if summary["exported"] == 0 and any(e.get("status") == 402 for e in summary["errors"]):
-        first = next(e for e in summary["errors"] if e.get("status") == 402)
-        raise HTTPException(status_code=402, detail={
+    # Promote a total authorization loss to the dashboard's recovery CTA.  Successful
+    # empty/read-only workspaces still count as successes, so exported == 0 is not enough:
+    # every attempted shared workspace must have failed with an authorization status, and
+    # no different workspace error may be hidden behind the recovery prompt.
+    authorization_statuses = {401, 402, 403}
+    authorization_errors = [
+        error for error in summary["errors"]
+        if error.get("status") in authorization_statuses
+    ]
+    if (
+        summary["attempted"] > 0
+        and summary["succeeded"] == 0
+        and len(authorization_errors) == summary["attempted"]
+        and len(authorization_errors) == len(summary["errors"])
+    ):
+        first = authorization_errors[0]
+        raise HTTPException(status_code=first["status"], detail={
             "error": first["error"], "upgrade_url": licensing.upgrade_url()})
     return {"ok": True, "summary": summary}
 

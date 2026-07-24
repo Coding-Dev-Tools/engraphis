@@ -65,7 +65,10 @@ python -m scripts.sync \
 
 The dashboard's **Sync now** action invokes the same customer protocol. The public package does
 not run a local auto-sync loop or ship a cron/Task Scheduler wrapper. Hosted automation belongs
-to the private service.
+to the private service. If the relay denies every attempted shared workspace because the session
+is expired, revoked, or no longer entitled, the dashboard returns to the hosted Pro/Team recovery
+CTA instead of reporting a successful empty sync. A successful empty or read-only workspace keeps
+the result partial so another workspace's denial is not misreported as a total authorization loss.
 
 ### Local folder transport
 
