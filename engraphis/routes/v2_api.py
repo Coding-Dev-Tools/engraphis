@@ -35,6 +35,40 @@ logger = logging.getLogger("engraphis.api")
 _service: Optional[MemoryService] = None
 
 
+def _invalid_request() -> HTTPException:
+    """Return the stable public boundary for service-layer validation failures.
+
+    ``ValidationError`` can be raised after processing client-controlled names, ids, and
+    paths.  Its message is useful for local diagnostics, but is not a safe API contract:
+    it could echo an untrusted value or a future implementation detail.  Keep the HTTP
+    response deliberately fixed and never log the error text at API call sites.
+    """
+    return HTTPException(status_code=400, detail={"error": "invalid request"})
+
+
+class _HttpCodeIndexConfigurationError(RuntimeError):
+    """Raised when the operator's HTTP indexing boundary is unsafe."""
+
+
+def _http_index_configuration_error() -> HTTPException:
+    """Keep operator configuration failures distinct from invalid client paths."""
+    return HTTPException(status_code=500, detail={"error": "internal server error"})
+
+
+def _sanitized_http_exception(status_code: object) -> HTTPException:
+    """Keep a downstream HTTP status without propagating its detail or traceback.
+
+    A service dependency can deliberately signal an HTTP status, but its exception
+    object and detail are not part of this route's public contract.  Preserve a valid
+    error-class status while returning a route-owned, static body.
+    """
+    if isinstance(status_code, int) and 400 <= status_code <= 599:
+        if status_code < 500:
+            return HTTPException(status_code=status_code, detail={"error": "request rejected"})
+        return HTTPException(status_code=status_code, detail={"error": "internal server error"})
+    return HTTPException(status_code=500, detail={"error": "internal server error"})
+
+
 def service() -> MemoryService:
     """Lazily bind a single MemoryService to the configured store (the live v2 DB)."""
     global _service
@@ -86,17 +120,14 @@ def _run(fn, *a, **k):
             "limit": exc.limit,
             "recommended_action": "narrow repository, time, type, or relation filters",
         }) from None
-    except ValidationError as exc:
-        logger.info("dashboard request rejected (%s)", type(exc).__name__)
-        # ValidationError is the service layer's deliberately public, bounded input-error
-        # type. It is not a traceback or arbitrary provider exception.
-        # codeql[py/stack-trace-exposure]
-        raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
-    except HTTPException:
-        raise
+    except ValidationError:
+        logger.info("dashboard request rejected")
+        raise _invalid_request() from None
+    except HTTPException as exc:
+        logger.info("dashboard dependency rejected request (status=%s)", exc.status_code)
+        raise _sanitized_http_exception(exc.status_code) from None
     except Exception as exc:  # noqa: BLE001
-        msg = str(exc)
-        if "not aligned" in msg or ("256" in msg and "384" in msg):
+        if _is_embedder_mismatch(exc):
             raise HTTPException(status_code=409, detail={
                 "error": "Semantic search needs the embedding model that built your data "
                          "(sentence-transformers / all-MiniLM). Install it once — "
@@ -167,8 +198,9 @@ def _mem(m: dict) -> dict:
 
 
 def _is_embedder_mismatch(exc) -> bool:
-    msg = str(exc)
-    return "not aligned" in msg or ("256" in msg and "384" in msg)
+    """Recognize the legacy vector-shape failure without returning its text."""
+    message = str(exc)
+    return "not aligned" in message or ("256" in message and "384" in message)
 
 
 def _keyword_search(ws, q, limit=20):
@@ -246,13 +278,14 @@ def bootstrap():
         ).get("name")
     emb = None
     try:
-        from engraphis.backends import embedder_st as _est
         from engraphis.backends.embedder_deterministic import DeterministicEmbedder
         e = current_service.engine.embedder
         d = int(getattr(e, "dim", 0))
         semantic = not isinstance(e, DeterministicEmbedder)
+        # ``LAST_EMBEDDER_ERROR`` may contain a provider exception. The bootstrap
+        # contract exposes capability metadata only, never the failure text.
         emb = {"class": type(e).__name__, "dim": d, "semantic": semantic,
-               "model": settings.embed_model, "error": getattr(_est, "LAST_EMBEDDER_ERROR", "")}
+               "model": settings.embed_model}
     except Exception:  # noqa: BLE001
         pass
     return {
@@ -576,10 +609,9 @@ def llm_activity(workspace: Optional[str] = None, limit: int = 100):
         return {"workspace": "", "count": 0, "activities": []}
     try:
         ws = service()._clean_ws(ws)
-    except ValidationError as exc:
-        logger.info("LLM activity request rejected (%s)", type(exc).__name__)
-        # codeql[py/stack-trace-exposure] ValidationError is safe public input feedback.
-        raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
+    except ValidationError:
+        logger.info("LLM activity request rejected")
+        raise _invalid_request() from None
     row = service().store.conn.execute(
         "SELECT id FROM workspaces WHERE name=?", (ws,)
     ).fetchone()
@@ -836,10 +868,9 @@ def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
     mtypes = [mtype] if mtype else None
     try:
         out = service().recall(q, workspace=ws, k=k, mtypes=mtypes, reinforce=False)
-    except ValidationError as exc:
-        logger.info("dashboard recall request rejected (%s)", type(exc).__name__)
-        # codeql[py/stack-trace-exposure] ValidationError is safe public input feedback.
-        raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
+    except ValidationError:
+        logger.info("dashboard recall request rejected")
+        raise _invalid_request() from None
     except Exception as exc:  # noqa: BLE001
         if not _is_embedder_mismatch(exc):
             logger.error("dashboard recall failed (%s)", type(exc).__name__)
@@ -866,10 +897,9 @@ def memories(workspace: Optional[str] = None, q: Optional[str] = None, limit: in
         return {"workspace": "", "count": 0, "memories": []}
     try:
         ws = service()._clean_ws(ws)
-    except ValidationError as exc:
-        logger.info("dashboard memories request rejected (%s)", type(exc).__name__)
-        # codeql[py/stack-trace-exposure] ValidationError is safe public input feedback.
-        raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
+    except ValidationError:
+        logger.info("dashboard memories request rejected")
+        raise _invalid_request() from None
     conn = _sql.connect("file:%s?mode=ro" % settings.db_path, uri=True)
     conn.row_factory = _sql.Row
     try:
@@ -922,10 +952,9 @@ def why(q: str = Query(...), workspace: Optional[str] = None, k: int = 5):
     ws = workspace or _require_ws()
     try:
         out = service().why(q, workspace=ws, k=k)
-    except ValidationError as exc:
-        logger.info("dashboard why request rejected (%s)", type(exc).__name__)
-        # codeql[py/stack-trace-exposure] ValidationError is safe public input feedback.
-        raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
+    except ValidationError:
+        logger.info("dashboard why request rejected")
+        raise _invalid_request() from None
     except Exception as exc:  # noqa: BLE001
         if not _is_embedder_mismatch(exc):
             logger.error("dashboard why failed (%s)", type(exc).__name__)
@@ -944,10 +973,9 @@ def timeline(q: str = Query(...), workspace: Optional[str] = None, limit: int = 
     ws = workspace or _default_ws()
     try:
         out = service().timeline(q, workspace=ws, limit=limit)
-    except ValidationError as exc:
-        logger.info("dashboard timeline request rejected (%s)", type(exc).__name__)
-        # codeql[py/stack-trace-exposure] ValidationError is safe public input feedback.
-        raise HTTPException(status_code=400, detail={"error": str(exc)}) from None
+    except ValidationError:
+        logger.info("dashboard timeline request rejected")
+        raise _invalid_request() from None
     except Exception as exc:  # noqa: BLE001
         if not _is_embedder_mismatch(exc):
             logger.error("dashboard timeline failed (%s)", type(exc).__name__)
@@ -1448,6 +1476,13 @@ def graph_scene(workspace: Optional[str] = None, level: str = "overview",
         level.strip().lower() == "complete"
     )
     code_enabled = include_code if code_overlay is None else code_overlay
+    if level.strip().lower() == "complete" and (node_limit is not None or edge_limit is not None):
+        # This is route-owned, parameter-only validation.  It keeps the precise dashboard
+        # guidance without ever serializing a service exception.
+        raise HTTPException(status_code=400, detail={
+            "error": "complete scenes do not accept node_limit or edge_limit; "
+                     "use graph filters instead of silently truncating the chart",
+        })
     return _run(
         service().graph_scene, workspace=ws, level=level,
         center_id=center_id, system_id=system_id, seeds=_graph_csv(seeds),
@@ -1565,11 +1600,43 @@ class _CodeIndexReq(BaseModel):
     languages: Optional[list] = None
 
 
+def _http_code_index_path(root_path: str) -> str:
+    """Resolve an HTTP indexing target beneath the single operator-owned root.
+
+    The HTTP API is a remote trust boundary, unlike direct local MCP and CLI use.
+    Keep its root independent from the broader engine allow-list and pass only the
+    checked, canonical path to the service layer.
+    """
+    configured_root = os.environ.get("ENGRAPHIS_HTTP_INDEX_ROOT", "").strip()
+    if not configured_root:
+        configured_roots = os.environ.get("ENGRAPHIS_INDEX_ROOTS", "").split(os.pathsep)
+        configured_root = next((value.strip() for value in configured_roots if value.strip()), "")
+    if configured_root and not os.path.isabs(configured_root):
+        raise _HttpCodeIndexConfigurationError("HTTP code index root must be configured absolutely")
+
+    base = os.path.normcase(os.path.realpath(configured_root or os.getcwd()))
+    candidate = os.path.normcase(os.path.realpath(os.path.join(base, root_path)))
+
+    # Keep a separator on both values so /operator/root-copy cannot pass as a
+    # child of /operator/root. The root itself remains an allowed target.
+    base_prefix = base.rstrip(os.sep) + os.sep
+    candidate_with_sep = candidate.rstrip(os.sep) + os.sep
+    if not candidate_with_sep.startswith(base_prefix):
+        raise ValidationError("code index root is outside the HTTP index root")
+    return candidate_with_sep
+
+
 @router.post("/code/index")
 def code_index(req: _CodeIndexReq):
+    try:
+        root_path = _http_code_index_path(req.root_path)
+    except _HttpCodeIndexConfigurationError:
+        raise _http_index_configuration_error() from None
+    except ValidationError:
+        raise _invalid_request() from None
     return _run(
         service().index_repo, workspace=req.workspace, repo=req.repo,
-        root_path=req.root_path, languages=req.languages,
+        root_path=root_path, languages=req.languages,
     )
 
 
