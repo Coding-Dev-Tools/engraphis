@@ -103,6 +103,28 @@ def test_analytics_route_delegates_to_managed_compute(monkeypatch, tmp_path):
         assert response.json()["generation"] == 4
 
 
+def test_unconnected_automation_returns_a_structured_auth_error(monkeypatch, tmp_path):
+    for name in (
+        "ENGRAPHIS_CLOUD_ACCESS_TOKEN",
+        "ENGRAPHIS_CLOUD_ORGANIZATION_ID",
+        "ENGRAPHIS_CLOUD_COMPUTE_URL",
+        "ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL",
+        "ENGRAPHIS_CLOUD_CONTROL_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path / "unconnected-state"))
+
+    with _client(monkeypatch, tmp_path) as client:
+        response = client.get("/api/automation?workspace=demo")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == {
+        "error": "managed cloud operation failed",
+        "managed_cloud": True,
+        "transient": False,
+    }
+
+
 def test_hosted_automation_accepts_the_cloud_policy_field(monkeypatch, tmp_path):
     saved = {}
 

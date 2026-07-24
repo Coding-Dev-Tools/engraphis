@@ -248,7 +248,7 @@ def has_sync_token() -> bool:
 
 
 def _is_loopback_host(host: str) -> bool:
-    if host == "localhost" or host.endswith(".localhost"):
+    if host == "localhost":
         return True
     try:
         return ipaddress.ip_address(host).is_loopback

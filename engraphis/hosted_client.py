@@ -71,7 +71,7 @@ def upgrade_url(plan: Optional[str] = None) -> str:
 
 
 def _is_loopback_host(host: str) -> bool:
-    if host == "localhost" or host.endswith(".localhost"):
+    if host == "localhost":
         return True
     try:
         return ipaddress.ip_address(host).is_loopback
@@ -133,12 +133,19 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
         return super().set_tunnel(pinned, port=port, headers=headers)
 
     def connect(self):
-        target = self.host
-        if self._tunnel_host is None:
-            target = _validated_addresses(self.host)[0]
-        self.sock = self._create_connection(
-            (target, self.port), self.timeout, self.source_address
-        )
+        targets = [self.host] if self._tunnel_host is not None else _validated_addresses(self.host)
+        last_error = None
+        for target in targets:
+            try:
+                self.sock = self._create_connection(
+                    (target, self.port), self.timeout, self.source_address
+                )
+                break
+            except OSError as exc:
+                last_error = exc
+        else:
+            assert last_error is not None
+            raise last_error
         if self._tunnel_host:
             self._tunnel()
         self.sock = self._context.wrap_socket(

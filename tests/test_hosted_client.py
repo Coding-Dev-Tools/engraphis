@@ -63,6 +63,11 @@ def test_cloud_url_validation_rejects_every_non_global_address(address):
         hosted_client.validate_cloud_base_url("https://%s" % address)
 
 
+def test_cloud_url_validation_does_not_treat_arbitrary_localhost_subdomains_as_loopback():
+    with pytest.raises(ValueError, match="must use HTTPS"):
+        hosted_client.validate_cloud_base_url("http://attacker.localhost")
+
+
 def test_pinned_https_connection_uses_vetted_address_and_original_tls_name(monkeypatch):
     monkeypatch.setattr(
         hosted_client.socket,
@@ -89,6 +94,39 @@ def test_pinned_https_connection_uses_vetted_address_and_original_tls_name(monke
 
     assert connected == [("93.184.216.34", 443)]
     assert wrapped == ["cloud.example"]
+
+
+def test_pinned_https_connection_falls_back_to_next_vetted_address(monkeypatch):
+    monkeypatch.setattr(
+        hosted_client.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:2800:220:1:248:1893:25c8:1946", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        ],
+    )
+    connected = []
+
+    class _Context:
+        def wrap_socket(self, sock, *, server_hostname):
+            return sock
+
+    def connect(address, timeout, source):
+        connected.append(address)
+        if ":" in address[0]:
+            raise OSError("IPv6 route is unavailable")
+        return object()
+
+    connection = hosted_client.PinnedHTTPSConnection("cloud.example")
+    connection._context = _Context()
+    connection._create_connection = connect
+
+    connection.connect()
+
+    assert connected == [
+        ("2606:2800:220:1:248:1893:25c8:1946", 443),
+        ("93.184.216.34", 443),
+    ]
 
 
 def test_pinned_https_connection_rejects_rebound_private_address(monkeypatch):

@@ -192,6 +192,25 @@ def test_refresh_lock_oserror_is_normalized(monkeypatch) -> None:
     assert caught.value.status == 409
 
 
+def test_unconfigured_client_does_not_create_the_state_directory(monkeypatch) -> None:
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_ORGANIZATION_ID", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_COMPUTE_URL", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_CONTROL_URL", raising=False)
+    monkeypatch.setattr(cloud_session, "_load", lambda: {})
+    monkeypatch.setattr(
+        cloud_session.Path,
+        "mkdir",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not lock")),
+    )
+
+    with pytest.raises(cloud_session.CloudSessionError, match="Connect this installation") as caught:
+        cloud_session.access_for_workspace("ws")
+
+    assert caught.value.status == 401
+
+
 def test_refresh_http_error_response_is_closed(monkeypatch) -> None:
     error = urllib.error.HTTPError(
         "https://control.example.test/v1/tokens/refresh",

@@ -69,8 +69,8 @@ def _refresh_lock():
     """
     with _REFRESH_THREAD_LOCK:
         lock_path = _session_path().with_name(".cloud_session.refresh.lock")
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
         try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
             expected = private_file_stat(lock_path, allow_missing=True)
             flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
             if expected is None:
@@ -289,6 +289,16 @@ def access_for_workspace(
     if direct_token and direct_org and (direct_compute or not require_compute):
         compute_url = validate_cloud_base_url(direct_compute) if direct_compute else ""
         return direct_token, direct_org, compute_url
+
+    # Do not create the owner-only state directory merely to report an unconnected
+    # installation.  In particular, a stale home-directory mount must produce the
+    # normal structured "connect first" response rather than an unhandled filesystem
+    # error.  The authoritative session record is still loaded again under the lock
+    # below before any refresh credential is used.
+    if not configured(require_compute=require_compute):
+        raise CloudSessionError(
+            "Connect this installation to Engraphis Cloud first.", status=401
+        )
 
     with _refresh_lock():
         # Load only after acquiring both locks. The saved rotation is the current
