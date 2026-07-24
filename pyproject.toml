@@ -200,3 +200,11 @@ filterwarnings = [
     # dependency bump — silence just this one message so the suite output stays clean.
     "ignore:Using `httpx` with `starlette.testclient` is deprecated",
 ]
+
+[tool.coverage.run]
+source = ["engraphis"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

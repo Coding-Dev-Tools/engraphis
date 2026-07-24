@@ -68,8 +68,8 @@ Public 1.0.1 client reliability release.
   configured destination is public, preventing unresolved hosts from bypassing the SSRF guard.
 - Hosted Automation and maintenance requests now use the selected workspace end to end rather
   than silently falling back to the first workspace.
-- The Automation tab has one proposal action, clear managed-upload disclosure, and automatic
-  entitlement-gated managed-compute availability while preserving snapshot redaction and limits.
+- The Automation tab has one proposal action, clear managed-upload disclosure, and explicit
+  managed-compute consent in addition to entitlement checks, snapshot redaction, and limits.
 - Commercial metadata now describes Pro as one owner account across that owner's local
   installations, matching the hosted entitlement model; Team remains billed per named seat.
 - API error responses and provider logs no longer expose arbitrary exception or configuration
@@ -124,8 +124,9 @@ Public 1.0.0 open-core GA release.
   implementations from the public source and package artifacts.
 - Bare memory IDs, shared-workspace controls, graph entities, statistics, snapshots, exports,
   audit rows, and keyword fallbacks cannot cross authenticated session or workspace boundaries.
-- Managed uploads are capped at 16 MiB and 100,000 rows, omit all session-scoped and
-  secret-class memories, and surface only fixed client-safe provider errors.
+- Managed uploads require explicit customer consent, are capped at 16 MiB and 100,000 rows,
+  omit all session-scoped and secret-class memories, and surface only fixed client-safe
+  provider errors.
 - Customer credentials remain owner-only, redirect-safe, serialized during rotation, and are
   never substituted with an unproven local machine identifier.
 

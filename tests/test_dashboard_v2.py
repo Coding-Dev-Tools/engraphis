@@ -241,7 +241,8 @@ def test_dashboard_automation_uses_active_workspace_and_discloses_upload_boundar
     assert "/automation?workspace=" in source
     assert "/maintenance/run?workspace=" in source
     assert "Preview snapshot" not in source
-    assert "Requesting managed work uploads the selected workspace’s normal and sensitive memory content" in source
+    assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1" in source
+    assert "uploads the selected workspace’s normal and sensitive memory content" in source
 
 
 def test_portfolio_and_report_analytics_are_hosted_only(monkeypatch, tmp_path):

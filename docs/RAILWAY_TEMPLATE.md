@@ -14,8 +14,8 @@ issuer, relay, managed compute, Auto Dreaming, Auto Consolidation, or Team ident
 - No vendor signer, billing, mail, Team-admin, relay-storage, or worker secrets.
 
 Hosted customer endpoint variables may be exposed as optional inputs, but a refresh credential
-must be injected as a secret or mounted owner-only state file. Managed compute is enabled for
-authorized customers automatically.
+must be injected as a secret or mounted owner-only state file. Managed compute requires
+explicit opt-in via `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1`.
 
 ## Publish gate
 

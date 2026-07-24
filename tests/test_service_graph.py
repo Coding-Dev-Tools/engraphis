@@ -297,6 +297,32 @@ def test_graph_lazy_backfills_structured_metadata_without_regex_extractor():
             "label": "stores_in", "layer": "semantic"} in g["edges"]
 
 
+def test_graph_lazy_backfill_logs_failure_without_exception_text(monkeypatch, caplog):
+    from engraphis.backends import graph_extractor
+
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid = svc.store.get_or_create_workspace("acme")
+    svc.store.add_memory(MemoryRecord(
+        id="",
+        content="Engraphis stores memories in SQLite.",
+        workspace_id=wid,
+        scope=Scope.WORKSPACE,
+        mtype=MemoryType.SEMANTIC,
+        metadata={"entities": ["Engraphis", "SQLite"]},
+    ))
+
+    def fail_feed(*args, **kwargs):
+        raise RuntimeError("credential-like graph detail")
+
+    monkeypatch.setattr(graph_extractor, "feed", fail_feed)
+    with caplog.at_level("WARNING", logger="engraphis.service"):
+        graph = svc.graph(workspace="acme")
+
+    assert graph["nodes"] == []
+    assert "RuntimeError" in caplog.text
+    assert "credential-like graph detail" not in caplog.text
+
+
 def test_graph_lazy_backfills_preexisting_memories():
     """Memories written while extraction was OFF have no entities. When extraction
     is later enabled (an update), the first Graph-tab open backfills that

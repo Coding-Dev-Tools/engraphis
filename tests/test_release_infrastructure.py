@@ -28,6 +28,9 @@ def test_published_image_and_railway_template_fail_safe_to_customer_mode():
     assert local_api["value"] == "${{ secret(48) }}"
     assert local_api["secret"] is True
     assert local_api["required"] is True
+    managed_consent = template["variables"]["ENGRAPHIS_MANAGED_COMPUTE_CONSENT"]
+    assert managed_consent["value"] == "0"
+    assert managed_consent["required"] is False
     for removed in (
         "ENGRAPHIS_DEPLOYMENT_TOKEN",
         "ENGRAPHIS_LICENSE_KEY",

@@ -46,6 +46,24 @@ def test_service_proactive_context_is_deterministic_and_cited():
     assert any("Storage backend" in q or "persistence" in q for q in out["suggested_queries"])
 
 
+def test_service_proactive_context_logs_recall_failure_without_exception_text(
+    monkeypatch, caplog
+):
+    svc = MemoryService.create(":memory:", embed_model="")
+    svc.store.get_or_create_workspace("acme")
+
+    def fail_recall(*args, **kwargs):
+        raise RuntimeError("credential-like provider detail")
+
+    monkeypatch.setattr(svc, "recall", fail_recall)
+    with caplog.at_level("WARNING", logger="engraphis.service"):
+        out = svc.proactive_context(workspace="acme", task="resume work", k=5)
+
+    assert out["workspace"] == "acme"
+    assert "RuntimeError" in caplog.text
+    assert "credential-like provider detail" not in caplog.text
+
+
 def test_ai_context_treats_string_open_threads_as_one_query():
     out = build_proactive_context(
         memories=[], last_session={"open_threads": "finish the migration"})
