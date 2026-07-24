@@ -189,3 +189,21 @@ def test_sync_error_summary_does_not_echo_relay_exception_text(monkeypatch, tmp_
         "status": 502,
     }]
     assert secret not in repr(errors)
+
+
+@pytest.mark.parametrize("status", (401, 402, 403))
+def test_sync_run_surfaces_full_authorization_denial(monkeypatch, tmp_path, status):
+    """A denied session must not look like a successful zero-item dashboard sync."""
+    from engraphis.backends.sync_relay import RelayError
+
+    def fail_transport(*args, **kwargs):
+        raise RelayError("relay authorization denied", status=status)
+
+    monkeypatch.setattr("engraphis.backends.sync_folder.get_transport", fail_transport)
+    with _client(monkeypatch, tmp_path, cloud=True) as c:
+        response = c.post("/api/sync/run", json={})
+
+    assert response.status_code == status
+    detail = response.json()["detail"]
+    assert detail["error"] == "cloud relay synchronization failed"
+    assert detail["upgrade_url"].startswith("https://api.engraphis.com/account")

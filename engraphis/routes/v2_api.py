@@ -1917,11 +1917,18 @@ async def sync_run():
     import asyncio
     summary = await asyncio.to_thread(_sync_all, svc)
     _SYNC_STATE["last"] = summary
-    # If cloud authorization failed for every workspace (nothing exported, a 402 seen),
-    # surface it as the button's upgrade/renew prompt rather than a silent partial success.
-    if summary["exported"] == 0 and any(e.get("status") == 402 for e in summary["errors"]):
-        first = next(e for e in summary["errors"] if e.get("status") == 402)
-        raise HTTPException(status_code=402, detail={
+    # If the relay denied every workspace for authentication, authorization, or an
+    # inactive entitlement, surface that result to the dashboard.  Returning a 200
+    # here made a revoked/expired session look like a successful zero-item sync and
+    # left the user with only a retry prompt instead of the Cloud recovery CTA.
+    authorization_statuses = {401, 402, 403}
+    if summary["exported"] == 0 and any(
+        e.get("status") in authorization_statuses for e in summary["errors"]
+    ):
+        first = next(
+            e for e in summary["errors"] if e.get("status") in authorization_statuses
+        )
+        raise HTTPException(status_code=first["status"], detail={
             "error": first["error"], "upgrade_url": licensing.upgrade_url()})
     return {"ok": True, "summary": summary}
 

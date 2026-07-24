@@ -14,7 +14,7 @@ const hostedLicense = {
   trial: { used: false, trial_days: 3 },
 };
 
-async function mockLocalClient(page, cloudStatus = 402) {
+async function mockLocalClient(page, cloudStatus = 402, syncRunStatus = null) {
   const calls = [];
 
   await page.route('**/api/**', async route => {
@@ -53,7 +53,17 @@ async function mockLocalClient(page, cloudStatus = 402) {
         cloud_url: 'https://cloud.engraphis.test/team',
       };
     } else if (path === '/sync/status') {
-      body = { available: false };
+      body = { available: syncRunStatus !== null };
+    } else if (path === '/sync/run' && syncRunStatus !== null) {
+      status = syncRunStatus;
+      body = {
+        detail: {
+          error: syncRunStatus === 402
+            ? 'Cloud Sync entitlement is inactive (upgrade or renew required)'
+            : 'cloud relay synchronization failed',
+          upgrade_url: 'https://cloud.engraphis.test/pro',
+        },
+      };
     } else if (path === '/llm/status') {
       body = {
         configured: false,
@@ -88,6 +98,23 @@ async function mockLocalClient(page, cloudStatus = 402) {
   return calls;
 }
 
+test('Cloud Sync denial returns an unlicensed installation to the hosted upgrade CTA', async ({ page }) => {
+  const errors = recordBrowserErrors(page);
+  const calls = await mockLocalClient(page, 402, 402);
+  await page.goto('/');
+  await openView(page, 'settings');
+
+  await expect(page.getByRole('button', { name: 'Sync now' })).toBeVisible();
+  await page.getByRole('button', { name: 'Sync now' }).click();
+
+  const sync = page.locator('#sync-body');
+  await expect(sync).toContainText('Cloud Sync runs in Engraphis Pro Cloud');
+  await expect(sync.getByRole('link', { name: 'Start hosted Pro trial' }))
+    .toHaveAttribute('href', 'https://cloud.engraphis.test/pro?trial=pro');
+  await expect(calls.some(call => call.path === '/sync/run' && call.method === 'POST')).toBe(true);
+  expect(errors).toEqual([]);
+});
+
 function recordBrowserErrors(page) {
   const errors = [];
   page.on('console', message => {
@@ -95,7 +122,9 @@ function recordBrowserErrors(page) {
       const location = message.location();
       const expectedCloudDenial = /\/api\/(analytics|automation)/.test(location.url || '')
         && /status of (401|402|501)/.test(message.text());
-      if (expectedCloudDenial) return;
+      const expectedSyncDenial = /\/api\/sync\/run/.test(location.url || '')
+        && /status of (401|402|403)/.test(message.text());
+      if (expectedCloudDenial || expectedSyncDenial) return;
       errors.push(message.text() + (location.url
         ? ` @ ${location.url}:${location.lineNumber}`
         : ''));
