@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Tuple
 
-from engraphis.hosted_client import validate_cloud_base_url
+from engraphis.hosted_client import build_pinned_https_opener, validate_cloud_base_url
 from engraphis.private_state import (
     UnsafeStateFile,
     atomic_private_text,
@@ -29,7 +29,9 @@ _REFRESH_THREAD_LOCK = threading.RLock()
 
 
 class CloudSessionError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status: int = 503) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -40,7 +42,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 def _validated_token_subject(value: object) -> str:
     subject = str(value or "member").strip().lower()
     if subject not in {"device", "member"}:
-        raise CloudSessionError("Cloud token subject must be 'device' or 'member'.")
+        raise CloudSessionError(
+            "Cloud token subject must be 'device' or 'member'.", status=409
+        )
     return subject
 
 
@@ -65,8 +69,8 @@ def _refresh_lock():
     """
     with _REFRESH_THREAD_LOCK:
         lock_path = _session_path().with_name(".cloud_session.refresh.lock")
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
         try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
             expected = private_file_stat(lock_path, allow_missing=True)
             flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
             if expected is None:
@@ -98,7 +102,7 @@ def _refresh_lock():
                 raise
         except (OSError, UnsafeStateFile) as exc:
             raise CloudSessionError(
-                "The cloud session refresh lock is unavailable or unsafe."
+                "The cloud session refresh lock is unavailable or unsafe.", status=409
             ) from exc
 
         handle = os.fdopen(descriptor, "r+b")
@@ -123,7 +127,7 @@ def _refresh_lock():
         except (OSError, UnsafeStateFile) as exc:
             handle.close()
             raise CloudSessionError(
-                "The cloud session refresh lock is unavailable or unsafe."
+                "The cloud session refresh lock is unavailable or unsafe.", status=409
             ) from exc
 
         body_failed = False
@@ -152,7 +156,7 @@ def _refresh_lock():
                     cleanup_error = cleanup_error or exc
             if cleanup_error is not None and not body_failed:
                 raise CloudSessionError(
-                    "The cloud session refresh lock could not be released safely."
+                    "The cloud session refresh lock could not be released safely.", status=409
                 ) from cleanup_error
 
 
@@ -160,13 +164,17 @@ def _load() -> dict:
     try:
         raw = read_private_text(_session_path(), max_bytes=64 * 1024, allow_missing=True)
     except UnsafeStateFile as exc:
-        raise CloudSessionError("The saved cloud session has unsafe filesystem permissions.") from exc
+        raise CloudSessionError(
+            "The saved cloud session has unsafe filesystem permissions.", status=409
+        ) from exc
     if not raw:
         return {}
     try:
         value = json.loads(raw)
     except (ValueError, RecursionError) as exc:
-        raise CloudSessionError("The saved cloud session is invalid; connect again.") from exc
+        raise CloudSessionError(
+            "The saved cloud session is invalid; connect again.", status=409
+        ) from exc
     return value if isinstance(value, dict) else {}
 
 
@@ -220,7 +228,7 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: str,
         method="POST",
     )
     try:
-        with urllib.request.build_opener(_NoRedirect()).open(
+        with build_pinned_https_opener(_NoRedirect()).open(
             request, timeout=10.0
         ) as response:
             raw = response.read(_MAX_RESPONSE_BYTES + 1)
@@ -229,7 +237,8 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: str,
             exc.read(_MAX_RESPONSE_BYTES + 1)
             if exc.code in {401, 403}:
                 raise CloudSessionError(
-                    "The cloud session expired or was revoked; connect again."
+                    "The cloud session expired or was revoked; connect again.",
+                    status=exc.code,
                 )
             raise CloudSessionError("Engraphis Cloud could not refresh this session.")
         finally:
@@ -281,6 +290,16 @@ def access_for_workspace(
         compute_url = validate_cloud_base_url(direct_compute) if direct_compute else ""
         return direct_token, direct_org, compute_url
 
+    # Do not create the owner-only state directory merely to report an unconnected
+    # installation.  In particular, a stale home-directory mount must produce the
+    # normal structured "connect first" response rather than an unhandled filesystem
+    # error.  The authoritative session record is still loaded again under the lock
+    # below before any refresh credential is used.
+    if not configured(require_compute=require_compute):
+        raise CloudSessionError(
+            "Connect this installation to Engraphis Cloud first.", status=401
+        )
+
     with _refresh_lock():
         # Load only after acquiring both locks. The saved rotation is the current
         # single-use credential; reading it before the lock lets two workers spend the
@@ -294,7 +313,9 @@ def access_for_workspace(
         control = control or str(saved.get("control_url") or "").strip()
         compute = direct_compute or str(saved.get("compute_url") or "").strip()
         if not refresh or not control or (require_compute and not compute):
-            raise CloudSessionError("Connect this installation to Engraphis Cloud first.")
+            raise CloudSessionError(
+                "Connect this installation to Engraphis Cloud first.", status=401
+            )
         control = validate_cloud_base_url(control)
         compute = validate_cloud_base_url(compute) if compute else ""
         token_subject = _token_subject(saved)

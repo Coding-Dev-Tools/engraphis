@@ -6,9 +6,11 @@ private cloud control plane.  The public client keeps only safe destination meta
 """
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import os
 import socket
+import urllib.request
 from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -69,12 +71,104 @@ def upgrade_url(plan: Optional[str] = None) -> str:
 
 
 def _is_loopback_host(host: str) -> bool:
-    if host == "localhost" or host.endswith(".localhost"):
+    if host == "localhost":
         return True
     try:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def _validated_addresses(host: str) -> list[str]:
+    """Resolve *host* once and return only connection-safe numeric addresses."""
+
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if literal.is_loopback:
+            return [str(literal)]
+        if not literal.is_global:
+            raise ValueError("cloud service URL must not target private/reserved IP ranges")
+        return [str(literal)]
+
+    try:
+        resolved = socket.getaddrinfo(
+            host, None, socket.AF_UNSPEC, socket.SOCK_STREAM
+        )
+    except (socket.gaierror, OSError):
+        raise ValueError("cloud service URL could not be resolved") from None
+
+    addresses = []
+    loopback_name = _is_loopback_host(host)
+    for _, _, _, _, sockaddr in resolved:
+        try:
+            address = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            continue
+        if address.is_loopback and loopback_name:
+            addresses.append(str(address))
+            continue
+        if not address.is_global:
+            raise ValueError("cloud service URL must not target private/reserved IP ranges")
+        addresses.append(str(address))
+    if not addresses:
+        raise ValueError("cloud service URL could not be resolved")
+    return list(dict.fromkeys(addresses))
+
+
+class PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection pinned to a vetted address with original-host TLS checks."""
+
+    def __init__(self, host, *args, **kwargs):
+        super().__init__(host, *args, **kwargs)
+        self._tls_server_hostname = self.host
+
+    def set_tunnel(self, host, port=None, headers=None):
+        # Make a configured proxy CONNECT to the vetted numeric target. TLS still
+        # authenticates the original hostname after the tunnel is established.
+        self._tls_server_hostname = host
+        pinned = _validated_addresses(host)[0]
+        return super().set_tunnel(pinned, port=port, headers=headers)
+
+    def connect(self):
+        targets = [self.host] if self._tunnel_host is not None else _validated_addresses(self.host)
+        last_error = None
+        for target in targets:
+            try:
+                self.sock = self._create_connection(
+                    (target, self.port), self.timeout, self.source_address
+                )
+                break
+            except OSError as exc:
+                last_error = exc
+        else:
+            assert last_error is not None
+            raise last_error
+        if self._tunnel_host:
+            self._tunnel()
+        self.sock = self._context.wrap_socket(
+            self.sock, server_hostname=self._tls_server_hostname
+        )
+
+
+class PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    """urllib handler using pinned connections for every HTTPS request."""
+
+    def https_open(self, req):
+        return self.do_open(
+            PinnedHTTPSConnection,
+            req,
+            context=self._context,
+            check_hostname=self._check_hostname,
+        )
+
+
+def build_pinned_https_opener(*handlers):
+    """Build an opener that prevents DNS rebinding on credential-bearing HTTPS."""
+
+    return urllib.request.build_opener(*handlers, PinnedHTTPSHandler())
 
 
 def validate_cloud_base_url(value: str) -> str:
@@ -98,27 +192,5 @@ def validate_cloud_base_url(value: str) -> str:
     if scheme != "https" and not _is_loopback_host(hostname):
         raise ValueError("cloud service URL must use HTTPS unless it targets loopback")
     if not _is_loopback_host(hostname):
-        try:
-            addresses = socket.getaddrinfo(
-                hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM
-            )
-            for _, _, _, _, sockaddr in addresses:
-                try:
-                    address = ipaddress.ip_address(sockaddr[0])
-                except ValueError:
-                    continue
-                if (
-                    address.is_private
-                    or address.is_reserved
-                    or address.is_link_local
-                    or address.is_multicast
-                    or address.is_unspecified
-                ):
-                    raise ValueError(
-                        "cloud service URL must not target private/reserved IP ranges"
-                    )
-        except (socket.gaierror, OSError):
-            raise ValueError(
-                "cloud service URL could not be resolved"
-            ) from None
+        _validated_addresses(hostname)
     return urlunsplit((scheme, parts.netloc, parts.path.rstrip("/"), "", ""))

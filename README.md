@@ -65,6 +65,14 @@ a color palette and layout preset; or change the colors used for each type of no
 | **Team Cloud** *(hosted Team)* | Open the hosted organization dashboard for invitations, roles, named seats, scoped credentials, and team audit history |
 | **Settings** | Hosted-plan and Cloud Sync status, LLM provider setup/test, a live structured-extraction switch and activity viewer, appearance, and local engine/store info |
 
+### Managed compute
+
+The open package can upload bounded workspace snapshots to the Engraphis Cloud service
+for managed analytics, dreaming, and consolidation. This is **off by default** and
+requires explicit opt-in by setting `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1`. The cloud
+service is authoritative for all paid computation; no local setting turns this package
+into a compute worker or relay.
+
 The dashboard is powered by the v2 engine — the same `MemoryService` that backs the MCP server
 and the Python library. What you see in the UI is what your agents get.
 
@@ -608,8 +616,9 @@ background loop, cron wrapper, or worker.
 
 Secret-class and session-scoped memories are excluded before a managed snapshot is serialized;
 secret-class rows are rejected again by the hosted service. The encoded payload is capped at
-16 MiB. Managed compute is enabled automatically for authorized customers. A managed proposal
-does not silently rewrite the local database.
+16 MiB. Managed compute remains off until the customer explicitly sets
+`ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1`; cloud entitlement is also required. A managed proposal
+never silently rewrites the local database.
 
 Manual consolidation can also use schema-validated LLM output through
 `MemoryService.consolidate`, `POST /api/consolidate`, `engraphis_consolidate`, or
@@ -658,6 +667,7 @@ All via environment (or `.env`):
 | `ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL` | — | Bootstrap-only rotating hosted credential; after first use the owner-only cloud session replacement takes precedence |
 | `ENGRAPHIS_CLOUD_TOKEN_SUBJECT` | `member` | Subject fixed during hosted bootstrap (`device` or `member`); set explicitly with an environment-only refresh credential |
 | `ENGRAPHIS_CLOUD_ACCESS_TOKEN` | — | Optional short-lived access token for ephemeral jobs |
+| `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | `0` | Explicitly set to `1` before uploading a bounded workspace snapshot for hosted Analytics or Automation |
 
 See `.env.example` for the full customer-runtime and managed-service client options.
 
