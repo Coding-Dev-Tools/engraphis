@@ -7,7 +7,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 No unreleased changes.
 
-## [1.0.1] - 2026-07-23
+## [1.0.1] - 2026-07-24
 
 Public 1.0.1 client reliability release.
 
@@ -17,8 +17,9 @@ Public 1.0.1 client reliability release.
   dashboard host and retired Railway relay URL without changing customer-provided relay URLs.
 - Default Pro and Team upgrade links now target the live authenticated account portal rather
   than the retired Team dashboard host.
-- Hosted endpoint validation now fails closed when DNS resolution cannot establish that a
-  configured destination is public, preventing unresolved hosts from bypassing the SSRF guard.
+- Hosted endpoint validation now fails closed unless DNS establishes a globally routable
+  destination, and credential-bearing HTTPS connections pin the vetted address while preserving
+  original-host TLS verification to prevent DNS-rebinding SSRF.
 - Hosted Automation and maintenance requests now use the selected workspace end to end rather
   than silently falling back to the first workspace.
 - The Automation tab has one proposal action, clear managed-upload disclosure, and explicit

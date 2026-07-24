@@ -194,7 +194,7 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
 
     changelog = _text("CHANGELOG.md")
     assert "ForceGraph + D3 renderer" in changelog
-    assert "## [1.0.1] - 2026-07-23" in changelog
+    assert "## [1.0.1] - 2026-07-24" in changelog
     assert "Public 1.0.1 client reliability release." in changelog
     assert "## [1.0.0] - 2026-07-23" in changelog
     assert "## [1.0.0] - 2026-07-19" not in changelog

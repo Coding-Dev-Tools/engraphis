@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Tuple
 
-from engraphis.hosted_client import validate_cloud_base_url
+from engraphis.hosted_client import build_pinned_https_opener, validate_cloud_base_url
 from engraphis.private_state import (
     UnsafeStateFile,
     atomic_private_text,
@@ -228,7 +228,7 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: str,
         method="POST",
     )
     try:
-        with urllib.request.build_opener(_NoRedirect()).open(
+        with build_pinned_https_opener(_NoRedirect()).open(
             request, timeout=10.0
         ) as response:
             raw = response.read(_MAX_RESPONSE_BYTES + 1)

@@ -19,6 +19,7 @@ from typing import Any, Optional
 from urllib.parse import quote
 
 from engraphis.cloud_session import CloudSessionError, access_for_workspace
+from engraphis.hosted_client import build_pinned_https_opener
 
 SNAPSHOT_SCHEMA = "engraphis-managed-snapshot/v1"
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
@@ -303,8 +304,15 @@ class CloudFeatureClient:
     def from_environment(cls, workspace_id: str) -> "CloudFeatureClient":
         try:
             access_token, organization_id, base_url = access_for_workspace(workspace_id)
-        except (CloudSessionError, ValueError) as exc:
-            raise CloudFeatureError(str(exc), status=503) from exc
+        except CloudSessionError as exc:
+            status = exc.status if 400 <= exc.status <= 599 else 503
+            raise CloudFeatureError(
+                "The cloud session is unavailable.", status=status
+            ) from exc
+        except ValueError as exc:
+            raise CloudFeatureError(
+                "The cloud session configuration is invalid.", status=409
+            ) from exc
         return cls(base_url=base_url, organization_id=organization_id,
                    access_token=access_token)
 
@@ -325,7 +333,7 @@ class CloudFeatureClient:
         request = urllib.request.Request(self.base_url + path, data=encoded,
                                          headers=headers, method=method)
         try:
-            with urllib.request.build_opener(_NoRedirect()).open(
+            with build_pinned_https_opener(_NoRedirect()).open(
                 request, timeout=self.timeout_seconds
             ) as response:
                 raw = response.read(MAX_RESPONSE_BYTES + 1)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import socket
+
 import pytest
 
 from engraphis import hosted_client, licensing
@@ -53,6 +55,73 @@ def test_cloud_url_validation_rejects_unresolvable_hosts(monkeypatch):
     )
     with pytest.raises(ValueError, match="could not be resolved"):
         hosted_client.validate_cloud_base_url("https://unresolvable.example/")
+
+
+@pytest.mark.parametrize("address", ["10.0.0.1", "100.64.0.1", "169.254.169.254"])
+def test_cloud_url_validation_rejects_every_non_global_address(address):
+    with pytest.raises(ValueError, match="private/reserved"):
+        hosted_client.validate_cloud_base_url("https://%s" % address)
+
+
+def test_pinned_https_connection_uses_vetted_address_and_original_tls_name(monkeypatch):
+    monkeypatch.setattr(
+        hosted_client.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+        ],
+    )
+    connected = []
+    wrapped = []
+
+    class _Context:
+        def wrap_socket(self, sock, *, server_hostname):
+            wrapped.append(server_hostname)
+            return sock
+
+    connection = hosted_client.PinnedHTTPSConnection("cloud.example")
+    connection._context = _Context()
+    connection._create_connection = (
+        lambda address, timeout, source: connected.append(address) or object()
+    )
+
+    connection.connect()
+
+    assert connected == [("93.184.216.34", 443)]
+    assert wrapped == ["cloud.example"]
+
+
+def test_pinned_https_connection_rejects_rebound_private_address(monkeypatch):
+    monkeypatch.setattr(
+        hosted_client.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))
+        ],
+    )
+    connection = hosted_client.PinnedHTTPSConnection("cloud.example")
+    connection._create_connection = lambda *args: pytest.fail(
+        "private rebound address reached the socket"
+    )
+
+    with pytest.raises(ValueError, match="private/reserved"):
+        connection.connect()
+
+
+def test_pinned_https_proxy_tunnel_uses_vetted_ip_and_original_tls_name(monkeypatch):
+    monkeypatch.setattr(
+        hosted_client.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+        ],
+    )
+    connection = hosted_client.PinnedHTTPSConnection("proxy.example")
+
+    connection.set_tunnel("cloud.example", 443)
+
+    assert connection._tunnel_host == "93.184.216.34"
+    assert connection._tls_server_hostname == "cloud.example"
 
 
 def test_licensing_facade_exposes_no_local_entitlement_engine():

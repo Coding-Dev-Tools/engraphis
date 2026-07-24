@@ -122,7 +122,9 @@ them back as `expected_head` / `expected_count` when independent evidence is req
   separately bounded, maximum-24-hour local workspace-write grace never extends the trial,
   subscription, Cloud Sync, managed compute, Team access, seats, or credentials.
 - **Remote URL validation:** hosted endpoints require HTTPS except explicit loopback use,
-  reject embedded credentials and redirects, and block private/reserved literal targets.
+  reject embedded credentials and redirects, require globally routable resolved addresses,
+  and pin credential-bearing TLS connections to a vetted address while verifying the
+  original hostname.
 - **Bounded I/O:** credential-bearing JSON responses are read through strict byte limits;
   malformed, oversized, or authoritative denial responses fail closed.
 - **HTTP response headers:** every entrypoint sends `X-Content-Type-Options: nosniff`,

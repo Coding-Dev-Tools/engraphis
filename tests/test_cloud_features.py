@@ -53,6 +53,33 @@ def test_snapshot_accepts_environment_opt_in(monkeypatch) -> None:
     assert snapshot["managed_compute_consent"] is True
 
 
+@pytest.mark.parametrize("status", [401, 403, 409, 503])
+def test_cloud_client_preserves_cloud_session_status(monkeypatch, status) -> None:
+    def fail_access(*args, **kwargs):
+        raise cloud_features.CloudSessionError("private session detail", status=status)
+
+    monkeypatch.setattr(cloud_features, "access_for_workspace", fail_access)
+
+    with pytest.raises(CloudFeatureError) as caught:
+        CloudFeatureClient.from_environment("ws_test")
+
+    assert caught.value.status == status
+    assert "private session detail" not in str(caught.value)
+
+
+def test_cloud_client_reports_invalid_session_configuration_as_conflict(monkeypatch) -> None:
+    def fail_access(*args, **kwargs):
+        raise ValueError("private configuration detail")
+
+    monkeypatch.setattr(cloud_features, "access_for_workspace", fail_access)
+
+    with pytest.raises(CloudFeatureError) as caught:
+        CloudFeatureClient.from_environment("ws_test")
+
+    assert caught.value.status == 409
+    assert "private configuration detail" not in str(caught.value)
+
+
 def test_explicit_false_consent_cannot_be_overridden_by_environment(monkeypatch) -> None:
     monkeypatch.setenv("ENGRAPHIS_MANAGED_COMPUTE_CONSENT", "1")
 
