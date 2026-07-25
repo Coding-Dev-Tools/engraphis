@@ -8,6 +8,7 @@ authoritative for entitlements and performs all paid computation.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import urllib.error
@@ -18,6 +19,7 @@ from typing import Any, Optional
 from urllib.parse import quote
 
 from engraphis.cloud_session import CloudSessionError, access_for_workspace
+from engraphis.hosted_client import build_pinned_https_opener
 
 SNAPSHOT_SCHEMA = "engraphis-managed-snapshot/v1"
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
@@ -26,14 +28,19 @@ MAX_MEMORIES = 100_000
 MAX_TEXT_CHARS = 100_000
 
 
+def _truthy(value: Optional[str]) -> bool:
+    return value is not None and value.strip().lower() in ("1", "true", "yes", "on")
+
+
 class CloudFeatureError(RuntimeError):
     """A bounded, redacted managed-cloud failure suitable for an HTTP/UI boundary."""
 
     def __init__(self, message: str, *, status: Optional[int] = None,
-                 transient: bool = False) -> None:
+                 transient: bool = False, code: Optional[str] = None) -> None:
         super().__init__(message)
         self.status = status
         self.transient = transient
+        self.code = code
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -42,13 +49,13 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def managed_compute_consent() -> bool:
-    """Return whether managed compute is enabled for the customer client.
+    """Return whether the customer explicitly enabled managed snapshot uploads.
 
-    Managed compute is enabled automatically for every user with a valid cloud entitlement.
-    This compatibility helper intentionally no longer reads an environment variable.
+    Entitlement is enforced by the cloud service, but it is not consent to upload local
+    workspace content. The public client therefore remains off unless the customer sets
+    ``ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1``.
     """
-
-    return True
+    return _truthy(os.environ.get("ENGRAPHIS_MANAGED_COMPUTE_CONSENT"))
 
 
 def _public_http_error(status: int) -> tuple[str, bool]:
@@ -179,18 +186,27 @@ def build_managed_snapshot(service: Any, workspace: str, *,
 
 
 def _build_managed_snapshot_locked(service: Any, workspace: str, *,
-                                   consent: Optional[bool] = None,
-                                   generation: Optional[int] = None) -> tuple[str, dict]:
+                                    consent: Optional[bool] = None,
+                                    generation: Optional[int] = None) -> tuple[str, dict]:
     """Build the bounded client-side transport document for one local workspace.
 
-    Secret-classified rows are omitted before serialization. The ``consent`` parameter remains
-    accepted for source compatibility, but managed compute is enabled automatically.
+    Secret-classified rows are omitted before serialization. ``consent`` allows an
+    already-confirmed caller to pass its decision explicitly; otherwise the environment
+    opt-in is required.
     """
 
     clean_workspace = service._clean_ws(workspace)
     workspace_id = service._lookup_workspace(clean_workspace)
     if not workspace_id:
         raise CloudFeatureError("The selected workspace does not exist.", status=404)
+    allowed = managed_compute_consent() if consent is None else bool(consent)
+    if not allowed:
+        raise CloudFeatureError(
+            "Managed compute is off. Opt in before uploading workspace content by setting "
+            "ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1.",
+            status=409,
+            code="consent_required",
+        )
     snapshot_generation = _reserve_snapshot_generation(
         service, workspace_id, requested=generation
     )
@@ -288,8 +304,15 @@ class CloudFeatureClient:
     def from_environment(cls, workspace_id: str) -> "CloudFeatureClient":
         try:
             access_token, organization_id, base_url = access_for_workspace(workspace_id)
-        except (CloudSessionError, ValueError) as exc:
-            raise CloudFeatureError(str(exc), status=503) from exc
+        except CloudSessionError as exc:
+            status = exc.status if 400 <= exc.status <= 599 else 503
+            raise CloudFeatureError(
+                "The cloud session is unavailable.", status=status
+            ) from exc
+        except ValueError as exc:
+            raise CloudFeatureError(
+                "The cloud session configuration is invalid.", status=409
+            ) from exc
         return cls(base_url=base_url, organization_id=organization_id,
                    access_token=access_token)
 
@@ -310,7 +333,7 @@ class CloudFeatureClient:
         request = urllib.request.Request(self.base_url + path, data=encoded,
                                          headers=headers, method=method)
         try:
-            with urllib.request.build_opener(_NoRedirect()).open(
+            with build_pinned_https_opener(_NoRedirect()).open(
                 request, timeout=self.timeout_seconds
             ) as response:
                 raw = response.read(MAX_RESPONSE_BYTES + 1)

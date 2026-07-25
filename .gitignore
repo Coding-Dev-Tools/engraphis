@@ -55,6 +55,11 @@ internal/
 /demo/generated/
 /demo/output/
 
+# Local demo variants and large media assets are working files, not package inputs.
+/demo/*_killer.html
+/demo/*_social_demo.html
+/demo/assets/
+
 # FUSE mount artifacts: orphaned unlink-while-open handles from the Cowork
 # mount layer, not real content. Safe to ignore; delete host-side once the
 # holding process releases the handle (rm from the sandbox gets EPERM).

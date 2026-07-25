@@ -187,8 +187,46 @@ def test_refresh_lock_oserror_is_normalized(monkeypatch) -> None:
         lambda *args, **kwargs: (_ for _ in ()).throw(OSError("lock failure")),
     )
 
-    with pytest.raises(cloud_session.CloudSessionError, match="lock.*unsafe"):
+    with pytest.raises(cloud_session.CloudSessionError, match="lock.*unsafe") as caught:
         cloud_session.access_for_workspace("ws", require_compute=False)
+    assert caught.value.status == 409
+
+
+def test_unreadable_state_mount_is_normalized_before_the_refresh_lock(monkeypatch) -> None:
+    """A stale/unreadable state mount must not escape as a raw filesystem error.
+
+    ``access_for_workspace`` calls ``configured()`` -> ``_load()`` in its preflight,
+    before ``_refresh_lock()`` can normalize I/O failures, so an OSError there used to
+    reach the route layer as an opaque 500 instead of a structured cloud error.
+    """
+
+    monkeypatch.setattr(
+        cloud_session, "read_private_text",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("stale NFS handle")),
+    )
+
+    with pytest.raises(cloud_session.CloudSessionError, match="temporarily unreadable") as caught:
+        cloud_session.access_for_workspace("ws", require_compute=False)
+    assert 400 <= caught.value.status <= 599
+
+
+def test_unconfigured_client_does_not_create_the_state_directory(monkeypatch) -> None:
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_ORGANIZATION_ID", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_COMPUTE_URL", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_CONTROL_URL", raising=False)
+    monkeypatch.setattr(cloud_session, "_load", lambda: {})
+    monkeypatch.setattr(
+        cloud_session.Path,
+        "mkdir",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not lock")),
+    )
+
+    with pytest.raises(cloud_session.CloudSessionError, match="Connect this installation") as caught:
+        cloud_session.access_for_workspace("ws")
+
+    assert caught.value.status == 401
 
 
 def test_refresh_http_error_response_is_closed(monkeypatch) -> None:
@@ -217,6 +255,48 @@ def test_refresh_http_error_response_is_closed(monkeypatch) -> None:
             "https://control.example.test", "refresh", "ws", "member"
         )
     assert closed == [True]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_refresh_authorization_error_preserves_status(monkeypatch, status) -> None:
+    error = urllib.error.HTTPError(
+        "https://control.example.test/v1/tokens/refresh",
+        status,
+        "denied",
+        {},
+        BytesIO(b'{"detail":"private"}'),
+    )
+
+    class _Opener:
+        def open(self, request, timeout):
+            raise error
+
+    monkeypatch.setattr(
+        cloud_session.urllib.request, "build_opener", lambda *handlers: _Opener()
+    )
+    with pytest.raises(cloud_session.CloudSessionError) as caught:
+        cloud_session._post_refresh(
+            "https://control.example.test", "refresh", "ws", "member"
+        )
+
+    assert caught.value.status == status
+
+
+def test_refresh_network_error_is_service_unavailable(monkeypatch) -> None:
+    class _Opener:
+        def open(self, request, timeout):
+            raise urllib.error.URLError("private network detail")
+
+    monkeypatch.setattr(
+        cloud_session.urllib.request, "build_opener", lambda *handlers: _Opener()
+    )
+    with pytest.raises(cloud_session.CloudSessionError) as caught:
+        cloud_session._post_refresh(
+            "https://control.example.test", "refresh", "ws", "member"
+        )
+
+    assert caught.value.status == 503
+    assert "private network detail" not in str(caught.value)
 
 
 @pytest.mark.parametrize("subject", ["admin", "", "device member"])

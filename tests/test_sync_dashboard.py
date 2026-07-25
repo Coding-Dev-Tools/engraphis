@@ -103,6 +103,8 @@ def test_sync_run_pushes_and_records_summary(monkeypatch, tmp_path):
         assert r.status_code == 200, r.text
         su = r.json()["summary"]
         assert su["workspaces"] >= 1
+        assert su["attempted"] >= 1
+        assert su["succeeded"] >= 1
         assert su["exported"] >= 1                       # the seeded memory was pushed
         assert su["errors"] == []
         # the relay transport is namespaced by workspace NAME, at the managed relay
@@ -162,6 +164,8 @@ def test_sync_fails_closed_on_invalid_workspace_visibility(monkeypatch, tmp_path
         response = c.post("/api/sync/run", json={})
         assert response.status_code == 200
         summary = response.json()["summary"]
+        assert summary["attempted"] == 0
+        assert summary["succeeded"] == 0
         assert "demo" not in synced
         assert any(
             error["workspace"] == "demo" and "visibility is invalid" in error["error"]
@@ -189,3 +193,81 @@ def test_sync_error_summary_does_not_echo_relay_exception_text(monkeypatch, tmp_
         "status": 502,
     }]
     assert secret not in repr(errors)
+
+
+@pytest.mark.parametrize("status", (401, 402, 403))
+def test_sync_run_surfaces_total_authorization_denial(monkeypatch, tmp_path, status):
+    """A fully denied session must not look like a successful zero-item sync."""
+    from engraphis.backends.sync_relay import RelayError
+
+    def fail_transport(*args, **kwargs):
+        raise RelayError("relay authorization denied", status=status)
+
+    monkeypatch.setattr("engraphis.backends.sync_folder.get_transport", fail_transport)
+    with _client(monkeypatch, tmp_path, cloud=True) as c:
+        response = c.post("/api/sync/run", json={})
+
+    assert response.status_code == status
+    detail = response.json()["detail"]
+    assert detail["error"] == "cloud relay synchronization failed"
+    assert detail["upgrade_url"].startswith("https://api.engraphis.com/account")
+    last = c.get("/api/sync/status").json()["last"]
+    assert last["attempted"] == 1
+    assert last["succeeded"] == 0
+    assert last["errors"] == [{
+        "workspace": "demo",
+        "error": "cloud relay synchronization failed",
+        "status": status,
+    }]
+
+
+def test_sync_run_does_not_promote_partial_success_with_zero_exports(monkeypatch, tmp_path):
+    """A successful empty workspace prevents another workspace's denial from becoming total."""
+    from engraphis.backends.sync_relay import RelayError
+
+    def mixed_transport(*args, **kwargs):
+        if kwargs.get("workspace_id") == "demo":
+            raise RelayError("relay authorization denied", status=403)
+        return _FakeTransport()
+
+    monkeypatch.setattr("engraphis.backends.sync_folder.get_transport", mixed_transport)
+    with _client(monkeypatch, tmp_path, cloud=True) as c:
+        from engraphis.routes import v2_api
+        v2_api.service().create_workspace("empty-shared", visibility="shared", confirmed=True)
+
+        response = c.post("/api/sync/run", json={})
+
+    assert response.status_code == 200
+    summary = response.json()["summary"]
+    assert summary["attempted"] == 2
+    assert summary["succeeded"] == 1
+    assert summary["exported"] == 0
+    assert summary["errors"] == [{
+        "workspace": "demo",
+        "error": "cloud relay synchronization failed",
+        "status": 403,
+    }]
+
+
+def test_sync_run_does_not_treat_cloud_session_outage_as_authorization_loss(
+    monkeypatch, tmp_path
+):
+    from engraphis.cloud_session import CloudSessionError
+
+    def fail_session(*args, **kwargs):
+        raise CloudSessionError("private network detail", status=503)
+
+    monkeypatch.setattr("engraphis.cloud_session.access_for_workspace", fail_session)
+    with _client(monkeypatch, tmp_path, cloud=True) as c:
+        response = c.post("/api/sync/run", json={})
+
+    assert response.status_code == 200
+    summary = response.json()["summary"]
+    assert summary["attempted"] == 1
+    assert summary["succeeded"] == 0
+    assert summary["errors"] == [{
+        "workspace": "demo",
+        "error": "cloud session is temporarily unavailable",
+        "status": 503,
+    }]
+    assert "private network detail" not in repr(summary)
