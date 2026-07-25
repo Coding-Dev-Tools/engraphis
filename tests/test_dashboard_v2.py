@@ -103,6 +103,28 @@ def test_analytics_route_delegates_to_managed_compute(monkeypatch, tmp_path):
         assert response.json()["generation"] == 4
 
 
+def test_unconnected_automation_returns_a_structured_auth_error(monkeypatch, tmp_path):
+    for name in (
+        "ENGRAPHIS_CLOUD_ACCESS_TOKEN",
+        "ENGRAPHIS_CLOUD_ORGANIZATION_ID",
+        "ENGRAPHIS_CLOUD_COMPUTE_URL",
+        "ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL",
+        "ENGRAPHIS_CLOUD_CONTROL_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path / "unconnected-state"))
+
+    with _client(monkeypatch, tmp_path) as client:
+        response = client.get("/api/automation?workspace=demo")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == {
+        "error": "managed cloud operation failed",
+        "managed_cloud": True,
+        "transient": False,
+    }
+
+
 def test_hosted_automation_accepts_the_cloud_policy_field(monkeypatch, tmp_path):
     saved = {}
 
@@ -241,7 +263,8 @@ def test_dashboard_automation_uses_active_workspace_and_discloses_upload_boundar
     assert "/automation?workspace=" in source
     assert "/maintenance/run?workspace=" in source
     assert "Preview snapshot" not in source
-    assert "Requesting managed work uploads the selected workspace’s normal and sensitive memory content" in source
+    assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1" in source
+    assert "uploads the selected workspace’s normal and sensitive memory content" in source
 
 
 def test_portfolio_and_report_analytics_are_hosted_only(monkeypatch, tmp_path):
@@ -318,3 +341,17 @@ def test_dashboard_exception_responses_do_not_echo_untrusted_exception_text():
         "transient": False,
     }
     assert secret not in repr(managed.value.detail)
+
+    with pytest.raises(HTTPException) as consent:
+        v2_api._managed_call(
+            fail_with,
+            CloudFeatureError(secret, status=409, code="consent_required"),
+        )
+    assert consent.value.status_code == 409
+    assert consent.value.detail == {
+        "error": "managed cloud operation failed",
+        "managed_cloud": True,
+        "transient": False,
+        "code": "consent_required",
+    }
+    assert secret not in repr(consent.value.detail)

@@ -5,56 +5,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
-### Added
+No unreleased changes.
 
-- A search-first Analytical Galaxy Graph Explorer backed by canonical, evidence-weighted
-  scenes; deterministic hierarchical system gravity; compact edge backbones and aggregate
-  bridges; exact-ID evidence/history inspection; strongest-evidence paths; synchronized
-  accessible tables; responsive list-first mobile behavior; saved/shareable scene state; and
-  local PNG, JSON, and CSV exports.
-- Additive schema-v4 canonical identity and bi-temporal edge-support records, deterministic
-  `/api/graph/scene`, `/api/graph/suggest`, `/api/graph/entities/{canonical_id}`, and
-  `/api/graph/path` contracts with repository, memory-type, evidence-time, historical, and
-  weak-co-occurrence filtering, plus a persisted graph-index job with dry-run, progress,
-  cancellation, generation state, bounded error reporting, audit records, and tamper-evident
-  receipts.
-- Galaxy Explorer: a new Simple view (the default) renders a clean glowing galactic core with
-  soft bloom, plus an Advanced view toggle that keeps the fully decorated explorer available.
-  Default galaxy rotation is now ~10x slower for readability, and a new Freeze control
-  pauses/resumes the live rotation.
-
-### Changed
-
-- The legacy graph view now defaults to deterministic community islands, keeps sparse
-  influence bridges visually subordinate, and renders bounded direct A-MEM links even when
-  entity extraction is disabled. A reproducible repository-local screen-demo workflow exercises
-  session handoff, bi-temporal supersession, recall evidence, and history without external
-  services.
-- The public distribution is now structurally customer-only. License issuance, billing,
-  fulfillment, Team identity, hosted relay, managed compute, worker execution, vendor
-  administration, and commercial operations tooling moved to a private service repository;
-  the Apache package retains local core functionality and customer-side protocols.
-- Analytics, Cloud Sync service operation, Auto Dreaming, Auto Consolidation, automation
-  scheduling, and Team administration are now hosted-service capabilities. The public dashboard
-  keeps status, consent, and launch surfaces plus the free manual consolidation action; it no
-  longer ships local premium algorithms, schedulers, Team accounts, invitations, roles, or seats.
-- The hosted no-card trial remains **exactly 3 active days** after email confirmation. A distinct
-  `workspace_write_grace` may preserve ordinary writes to an already provisioned local workspace
-  for at most 24 hours; it never extends the trial or any cloud/paid access.
-- Documentation now states the legal boundary directly: Apache-2.0 rights in already published
-  releases and forks cannot be clawed back. Future proprietary value is protected through the
-  private hosted implementation and service authorization boundary.
-- Recall graph seeding now matches all entity names with one boundary-aware compiled pattern
-  instead of rescanning every memory once per entity, and the streamable-HTTP launcher warms
-  the singleton service before accepting clients.
-
-- The graph explorer uses its locally bundled ForceGraph + D3 renderer under the strict
-  same-origin CSP. The new scene APIs and synchronized accessible entity/relation tables are
-  additive to that shipped UI.
-- Graph GET requests are strictly read-only. While an explicit mutating index job runs, graph
-  reads return a rebuilding conflict instead of mixing old and partially derived metrics.
-
-## [1.0.1] - 2026-07-23
+## [1.0.1] - 2026-07-24
 
 Public 1.0.1 client reliability release.
 
@@ -64,12 +17,13 @@ Public 1.0.1 client reliability release.
   dashboard host and retired Railway relay URL without changing customer-provided relay URLs.
 - Default Pro and Team upgrade links now target the live authenticated account portal rather
   than the retired Team dashboard host.
-- Hosted endpoint validation now fails closed when DNS resolution cannot establish that a
-  configured destination is public, preventing unresolved hosts from bypassing the SSRF guard.
+- Hosted endpoint validation now fails closed unless DNS establishes a globally routable
+  destination, and credential-bearing HTTPS connections pin the vetted address while preserving
+  original-host TLS verification to prevent DNS-rebinding SSRF.
 - Hosted Automation and maintenance requests now use the selected workspace end to end rather
   than silently falling back to the first workspace.
-- The Automation tab has one proposal action, clear managed-upload disclosure, and automatic
-  entitlement-gated managed-compute availability while preserving snapshot redaction and limits.
+- The Automation tab has one proposal action, clear managed-upload disclosure, and explicit
+  managed-compute consent in addition to entitlement checks, snapshot redaction, and limits.
 - Commercial metadata now describes Pro as one owner account across that owner's local
   installations, matching the hosted entitlement model; Team remains billed per named seat.
 - API error responses and provider logs no longer expose arbitrary exception or configuration
@@ -78,6 +32,10 @@ Public 1.0.1 client reliability release.
   backtracking. CodeQL now disables pull-request diff-informed analysis and CI fails on every
   raw SARIF result, including pre-existing and source-suppressed results.
 - The documented grounded-recall evaluation prints with the default Windows console encoding.
+- Hosted Pro and Team links preserve the selected plan through account creation and Checkout.
+- A total `401`/`402`/`403` Cloud Sync authorization loss restores the hosted recovery CTA,
+  while a successful empty or read-only workspace remains a partial result instead of being
+  misreported as a total denial.
 
 ## [1.0.0] - 2026-07-23
 
@@ -85,9 +43,14 @@ Public 1.0.0 open-core GA release.
 
 ### Added
 
-- The Galaxy Knowledge Graph explorer with deterministic communities, entity/relation search,
-  temporal scenes, evidence and history inspection, accessible tables, and a locally bundled
-  ForceGraph + D3 renderer.
+- The search-first Galaxy Knowledge Graph explorer with deterministic communities, canonical
+  evidence-weighted scenes, entity/relation search, temporal filtering, evidence and history
+  inspection, strongest-evidence paths, synchronized accessible tables, saved scene state,
+  local PNG/JSON/CSV export, Simple and Advanced views, and a locally bundled ForceGraph + D3 renderer
+  under the strict same-origin CSP.
+- Additive schema-v4 canonical identity and bi-temporal edge-support records; deterministic
+  graph scene, suggestion, entity, and path APIs; and a persisted graph-index job with dry-run,
+  progress, cancellation, bounded errors, audit records, and tamper-evident receipts.
 - A 29-tool MCP surface with explicit behavior annotations, operation receipts, exact session
   retry semantics, portable plugin manifests, and checksummed skill assets.
 - Customer-side hosted protocols for scoped Cloud Sync, rotating cloud sessions, Analytics,
@@ -102,6 +65,15 @@ Public 1.0.0 open-core GA release.
   no environment variable turns the public package into a hosted Engraphis service.
 - Session identity is exact across workspace, repo, authenticated user, agent, and goal; callers
   can request a distinct run with `force_new=true` and observe retry reuse explicitly.
+- The legacy graph view defaults to deterministic community islands, keeps sparse influence
+  bridges subordinate, and renders bounded A-MEM links when entity extraction is disabled. The
+  repository screen demo proves session handoff, bi-temporal supersession, recall evidence, and
+  history without an external service.
+- The hosted no-card trial is exactly 3 active days after email confirmation. A separate
+  `workspace_write_grace` may preserve ordinary local writes for at most 24 hours but never
+  extends trial or paid cloud access.
+- Apache-2.0 rights in published releases remain irrevocable; proprietary hosted value is
+  enforced by the private implementation and service authorization boundary.
 
 ### Fixed
 
@@ -117,6 +89,11 @@ Public 1.0.0 open-core GA release.
   forgotten session-only graph evidence.
 - Windows private-state validation uses safe file metadata checks without weakening symlink,
   ownership, size, or atomic-publication protections.
+- Recall graph seeding uses one boundary-aware compiled pattern instead of rescanning every
+  memory per entity, and the streamable HTTP launcher warms the singleton service before
+  accepting clients.
+- Graph GET requests remain read-only and return a rebuilding conflict while an explicit
+  mutating index job is in progress.
 
 ### Security
 
@@ -124,8 +101,9 @@ Public 1.0.0 open-core GA release.
   implementations from the public source and package artifacts.
 - Bare memory IDs, shared-workspace controls, graph entities, statistics, snapshots, exports,
   audit rows, and keyword fallbacks cannot cross authenticated session or workspace boundaries.
-- Managed uploads are capped at 16 MiB and 100,000 rows, omit all session-scoped and
-  secret-class memories, and surface only fixed client-safe provider errors.
+- Managed uploads require explicit customer consent, are capped at 16 MiB and 100,000 rows,
+  omit all session-scoped and secret-class memories, and surface only fixed client-safe
+  provider errors.
 - Customer credentials remain owner-only, redirect-safe, serialized during rotation, and are
   never substituted with an unproven local machine identifier.
 

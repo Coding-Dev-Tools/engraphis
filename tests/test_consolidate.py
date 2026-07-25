@@ -501,6 +501,35 @@ def test_archive_pass_sees_transients_behind_newer_semantic_rows(monkeypatch):
     assert [row["id"] for row in report["archived"]] == [stale]
 
 
+def test_archive_logs_index_cleanup_failure_without_leaking_exception_text(
+    monkeypatch, caplog
+):
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    stale = eng.remember(
+        "Scratch note from an old session.",
+        workspace_id=wid,
+        mtype=MemoryType.WORKING,
+        resolve_conflicts=False,
+    )
+    eng.store.conn.execute(
+        "UPDATE memories SET stability=0.01, last_access=? WHERE id=?",
+        (time.time() - 86_400, stale),
+    )
+    eng.store.conn.commit()
+
+    def fail_delete(ids):
+        raise RuntimeError("credential-like index detail")
+
+    monkeypatch.setattr(eng.index, "delete", fail_delete)
+    with caplog.at_level("WARNING", logger="engraphis.core.consolidate"):
+        report = consolidate(eng, workspace_id=wid)
+
+    assert [row["id"] for row in report["archived"]] == [stale]
+    assert "RuntimeError" in caplog.text
+    assert "credential-like index detail" not in caplog.text
+
+
 # ── explicit local consolidation command ─────────────────────────────────────
 
 from scripts.consolidate import main as consolidate_main  # noqa: E402

@@ -1938,10 +1938,13 @@ class MemoryService:
         if query:
             try:
                 recalled = self.recall(query, workspace=workspace, repo=repo, k=k,
-                                       reinforce=False)
+                                        reinforce=False)
                 memories.extend(recalled.get("memories") or [])
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "proactive_context recall failed (%s)",
+                    type(exc).__name__,
+                )
         llm = None
         if synthesize:
             try:
@@ -5368,16 +5371,22 @@ class MemoryService:
                                 repo_id=r["repo_id"], title=r["title"] or "",
                                 extractor=StructuredMetadataGraphExtractor(meta),
                                 provenance={"source": "structured_backfill", "memory_id": r["id"]})
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "structured graph backfill failed (%s)",
+                        type(exc).__name__,
+                    )
             if self.engine.graph_extractor is not None:
                 try:
                     _graph_feed(self.store, r["content"] or "", workspace_id=wid,
                                 repo_id=r["repo_id"], title=r["title"] or "",
                                 extractor=self.engine.graph_extractor,
                                 provenance={"source": "lazy_backfill", "memory_id": r["id"]})
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "lazy graph backfill failed (%s)",
+                        type(exc).__name__,
+                    )
 
     # ── introspection ───────────────────────────────────────────────────────────
     def stats(self, *, workspace: Optional[str] = None) -> dict:

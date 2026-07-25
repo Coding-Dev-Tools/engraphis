@@ -213,3 +213,4 @@ def test_customer_hosting_docs_do_not_claim_private_cloud_authority():
     assert "license issuer" in combined
     assert "ENGRAPHIS_CLOUD_CONTROL_URL" in hosting
     assert "ENGRAPHIS_CLOUD_COMPUTE_URL" in hosting
+    assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1" in combined

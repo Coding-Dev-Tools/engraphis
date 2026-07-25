@@ -114,14 +114,17 @@ them back as `expected_head` / `expected_count` when independent evidence is req
   no paid-key parser, signer, issuer, local feature gate, or long-lived-key relay exchange.
 - **Server authority:** every hosted and cost-bearing operation is authorized by the private
   control plane; local plan labels and upgrade URLs are presentation metadata only.
-- **Managed-compute boundaries:** Analytics, Auto Dreaming, and Auto Consolidation upload a
-  bounded snapshot for authorized customers. Secret-class memories are excluded before
+- **Managed-compute consent:** Analytics, Auto Dreaming, and Auto Consolidation upload a
+  bounded snapshot only after explicit customer opt-in via
+  `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1`. Secret-class memories are excluded before
   serialization and rejected again by the hosted service.
 - **Trial and grace are separate:** an email-confirmed trial lasts exactly 3 active days. A
   separately bounded, maximum-24-hour local workspace-write grace never extends the trial,
   subscription, Cloud Sync, managed compute, Team access, seats, or credentials.
 - **Remote URL validation:** hosted endpoints require HTTPS except explicit loopback use,
-  reject embedded credentials and redirects, and block private/reserved literal targets.
+  reject embedded credentials and redirects, require globally routable resolved addresses,
+  and pin credential-bearing TLS connections to a vetted address while verifying the
+  original hostname.
 - **Bounded I/O:** credential-bearing JSON responses are read through strict byte limits;
   malformed, oversized, or authoritative denial responses fail closed.
 - **HTTP response headers:** every entrypoint sends `X-Content-Type-Options: nosniff`,
