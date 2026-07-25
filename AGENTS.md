@@ -42,7 +42,7 @@ python -m pytest tests/ -q                                          # unit tests
 python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5   # retrieval eval gate
 python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5  # larger eval; covers conflict resolution
 python -m eval.ablation                                             # vector-only vs 1-hop vs PPR
-ruff check .                                                        # lint (line-length 100, py39)
+ruff check .                                    # lint (line-length 100, py39, pinned rule set)
 
 # ── External benchmarks (real numbers need torch + the dataset; see eval/external.py) ──
 python -m eval.external --dataset locomo10.json --format locomo --k 10        # LoCoMo
