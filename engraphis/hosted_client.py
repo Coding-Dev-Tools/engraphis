@@ -10,6 +10,7 @@ import http.client
 import ipaddress
 import os
 import socket
+import sys
 import urllib.request
 from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -149,6 +150,11 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
     def _connect_directly(self):
         last_error = None
         for target in _validated_addresses(self.host):
+            # Overriding connect() skips the sys.audit call in HTTPConnection.connect,
+            # which would make every hosted request invisible to a host process auditing
+            # or blocking outbound connections. Emit it per dial, naming the vetted
+            # address actually opened rather than the hostname, so a hook sees the truth.
+            sys.audit("http.client.connect", self, target, self.port)
             try:
                 return self._create_connection(
                     (target, self.port), self.timeout, self.source_address
@@ -191,6 +197,9 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
             for name in list(self._tunnel_headers):
                 if name.lower() == "host":
                     self._tunnel_headers[name] = self._tunnel_authority(target)
+            # The socket opened here goes to the proxy, which is exactly what the stock
+            # implementation audits before a tunnelled request, so report the proxy.
+            sys.audit("http.client.connect", self, self.host, self.port)
             try:
                 self.sock = self._create_connection(
                     (self.host, self.port), self.timeout, self.source_address

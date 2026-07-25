@@ -304,6 +304,92 @@ def test_pinned_https_proxy_tunnel_brackets_ipv6_on_the_connect_request_line(mon
     assert request_line.startswith(b"CONNECT [%s]:443 " % v6.encode()), request_line
 
 
+def _record_connect_audits(monkeypatch):
+    """Capture only ``http.client.connect`` audit events raised by the pinned client."""
+
+    audited = []
+
+    def _audit(name, *args):
+        if name == "http.client.connect":
+            audited.append(args)
+
+    monkeypatch.setattr(hosted_client.sys, "audit", _audit)
+    return audited
+
+
+def test_pinned_connection_still_emits_the_standard_connect_audit_event(monkeypatch):
+    """Overriding connect() must not hide hosted requests from audit hooks.
+
+    ``HTTPConnection.connect`` raises ``http.client.connect`` before opening its socket,
+    which is how a host process records or blocks outbound connections. This class
+    bypasses that method, so it has to raise the event itself or every hosted request
+    becomes invisible to those hooks.
+    """
+
+    monkeypatch.setattr(
+        hosted_client.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))
+        ],
+    )
+    audited = _record_connect_audits(monkeypatch)
+
+    class _Context:
+        def wrap_socket(self, sock, *, server_hostname):
+            return sock
+
+    connection = hosted_client.PinnedHTTPSConnection("cloud.example", 443)
+    connection._context = _Context()
+    connection._create_connection = lambda address, timeout, source: object()
+
+    connection.connect()
+
+    # The vetted address actually dialled is reported, not the hostname, so a hook
+    # deciding by address sees the destination the socket really opens.
+    assert audited == [(connection, "93.184.216.34", 443)]
+
+
+def test_pinned_proxy_tunnel_audits_each_proxy_dial(monkeypatch):
+    monkeypatch.setattr(
+        hosted_client.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:2800:220:1:248:1893:25c8:1946", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+        ],
+    )
+
+    class _Sock:
+        def close(self):
+            pass
+
+    class _Context:
+        def wrap_socket(self, sock, *, server_hostname):
+            return sock
+
+    connection = hosted_client.PinnedHTTPSConnection("proxy.example", 3128)
+    connection._context = _Context()
+    connection._create_connection = lambda address, timeout, source: _Sock()
+
+    def fake_tunnel():
+        if ":" in connection._tunnel_host:
+            raise OSError("Tunnel connection failed: 502 Bad Gateway")
+
+    connection._tunnel = fake_tunnel
+    connection.set_tunnel("cloud.example", 443)
+    audited = _record_connect_audits(monkeypatch)
+
+    connection.connect()
+
+    # One event per redial of the proxy, naming the proxy -- which is the socket that
+    # actually gets opened on a tunnelled request.
+    assert audited == [
+        (connection, "proxy.example", 3128),
+        (connection, "proxy.example", 3128),
+    ]
+
+
 def test_pinned_https_handler_forwards_only_supported_connection_arguments(monkeypatch):
     """Regression: 3.12 dropped ``HTTPSHandler._check_hostname`` and the matching kwarg.
 
