@@ -34,11 +34,57 @@ def _service() -> MemoryService:
     return service
 
 
-def test_snapshot_is_enabled_without_a_user_opt_in() -> None:
-    _, snapshot = build_managed_snapshot(_service(), "acme", consent=False)
+def test_snapshot_requires_explicit_consent(monkeypatch) -> None:
+    monkeypatch.delenv("ENGRAPHIS_MANAGED_COMPUTE_CONSENT", raising=False)
+
+    assert cloud_features.managed_compute_consent() is False
+    with pytest.raises(CloudFeatureError, match="Managed compute is off") as captured:
+        build_managed_snapshot(_service(), "acme")
+
+    assert captured.value.status == 409
+
+
+def test_snapshot_accepts_environment_opt_in(monkeypatch) -> None:
+    monkeypatch.setenv("ENGRAPHIS_MANAGED_COMPUTE_CONSENT", "yes")
+
+    _, snapshot = build_managed_snapshot(_service(), "acme")
 
     assert cloud_features.managed_compute_consent() is True
     assert snapshot["managed_compute_consent"] is True
+
+
+@pytest.mark.parametrize("status", [401, 403, 409, 503])
+def test_cloud_client_preserves_cloud_session_status(monkeypatch, status) -> None:
+    def fail_access(*args, **kwargs):
+        raise cloud_features.CloudSessionError("private session detail", status=status)
+
+    monkeypatch.setattr(cloud_features, "access_for_workspace", fail_access)
+
+    with pytest.raises(CloudFeatureError) as caught:
+        CloudFeatureClient.from_environment("ws_test")
+
+    assert caught.value.status == status
+    assert "private session detail" not in str(caught.value)
+
+
+def test_cloud_client_reports_invalid_session_configuration_as_conflict(monkeypatch) -> None:
+    def fail_access(*args, **kwargs):
+        raise ValueError("private configuration detail")
+
+    monkeypatch.setattr(cloud_features, "access_for_workspace", fail_access)
+
+    with pytest.raises(CloudFeatureError) as caught:
+        CloudFeatureClient.from_environment("ws_test")
+
+    assert caught.value.status == 409
+    assert "private configuration detail" not in str(caught.value)
+
+
+def test_explicit_false_consent_cannot_be_overridden_by_environment(monkeypatch) -> None:
+    monkeypatch.setenv("ENGRAPHIS_MANAGED_COMPUTE_CONSENT", "1")
+
+    with pytest.raises(CloudFeatureError, match="Managed compute is off"):
+        build_managed_snapshot(_service(), "acme", consent=False)
 
 
 def test_snapshot_excludes_secret_rows_before_serialization() -> None:
@@ -198,7 +244,8 @@ class _FakeCloud(CloudFeatureClient):
         }
 
 
-def test_run_managed_job_only_sends_the_protocol_snapshot() -> None:
+def test_run_managed_job_only_sends_the_protocol_snapshot(monkeypatch) -> None:
+    monkeypatch.setenv("ENGRAPHIS_MANAGED_COMPUTE_CONSENT", "1")
     cloud = _FakeCloud()
     result = run_managed_job(
         _service(), "acme", "analytics", client=cloud, wait_seconds=0

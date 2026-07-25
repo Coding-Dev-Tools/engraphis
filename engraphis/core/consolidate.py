@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from dataclasses import replace as _replace
@@ -31,6 +32,8 @@ from typing import Any, Optional
 from engraphis.core import scoring
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
 from engraphis.core.textutil import estimate_tokens, jaccard, tokenize
+
+logger = logging.getLogger(__name__)
 
 # Cluster admission: same-subject signal, deliberately the resolver's threshold.
 SUBJECT_JACCARD = 0.40
@@ -222,8 +225,10 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
                 reason=f"retention {r:.4f} below {archive_below} (consolidation sweep)")
             try:
                 engine.index.delete([m.id])
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "index delete failed for memory %s (%s)", m.id, type(exc).__name__
+                )
 
     # ── compaction summary: the payoff of the sweep, as a number ─────────────
     report["compaction"] = {
@@ -368,8 +373,10 @@ def _loads_lenient(raw: Any) -> Any:
         if match:
             try:
                 return json.loads(match.group(1))
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "structured output fallback parse failed (%s)", type(exc).__name__
+                )
     return {}
 
 
@@ -642,8 +649,12 @@ def _write_structured_digests(engine, cluster: list[MemoryRecord], facts: list[d
                 memory.id, at=now, actor="consolidation", reason=reason)
             try:
                 engine.index.delete([memory.id])
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "index delete failed for memory %s (%s)",
+                    memory.id,
+                    type(exc).__name__,
+                )
     return ids
 
 
