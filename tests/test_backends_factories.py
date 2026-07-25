@@ -8,9 +8,33 @@ from engraphis.backends.vector_sqlitevec import get_vector_index
 from engraphis.core.store import Store
 
 
-def test_embedder_factory_falls_back_offline():
+def _force_load_failure(monkeypatch, module, attr: str) -> None:
+    """Make the heavy model adapter fail at construction, without touching the network.
+
+    The factories fall back when a model fails to load, but resolving an unknown model name
+    normally goes out to the Hugging Face Hub. On a host with no route to the Hub that
+    connect() blocks rather than erroring, so the offline gate would hang forever — the
+    fallback relies on the network failing *fast*, not on it being *absent* (AGENTS.md §3:
+    the core must run offline).
+
+    Patch the adapter the factory constructs, not sentence-transformers itself: the optional
+    heavy stack is then never imported here, so an install that raises something other than
+    ImportError (e.g. a RuntimeError from a mismatched torch) cannot fail this test. Every
+    such failure stays inside the factory, which catches Exception and falls back — which is
+    exactly the contract under test.
+    """
+    def _raise(*args, **kwargs):
+        raise OSError("simulated unresolvable model (offline)")
+
+    monkeypatch.setattr(module, attr, _raise)
+
+
+def test_embedder_factory_falls_back_offline(monkeypatch):
+    import engraphis.backends.embedder_st as embedder_st
+
     assert isinstance(get_embedder(None, 128), DeterministicEmbedder)
     # An unresolvable model name must not crash — it falls back.
+    _force_load_failure(monkeypatch, embedder_st, "SentenceTransformerEmbedder")
     assert isinstance(get_embedder("definitely-not-a-real-model-xyz", 128), DeterministicEmbedder)
 
 
@@ -46,6 +70,9 @@ def test_vector_index_factory_modes(monkeypatch):
     s.close()
 
 
-def test_reranker_factory_falls_back_offline():
+def test_reranker_factory_falls_back_offline(monkeypatch):
+    import engraphis.backends.reranker as reranker
+
     assert isinstance(get_reranker(None), IdentityReranker)
+    _force_load_failure(monkeypatch, reranker, "CrossEncoderReranker")
     assert isinstance(get_reranker("definitely-not-a-real-model-xyz"), IdentityReranker)
