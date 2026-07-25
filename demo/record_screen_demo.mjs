@@ -10,12 +10,17 @@ const repoRoot = resolve(demoDir, "..");
 const generatedDir = join(demoDir, "generated");
 const outputDir = join(demoDir, "output");
 const payload = join(generatedDir, "screen_demo_payload.json");
-const webm = join(outputDir, "engraphis-memory-demo.webm");
-const mp4 = join(outputDir, "engraphis-memory-demo.mp4");
+const html = "engraphis_screen_demo.html";
+const baseName = "engraphis-memory-demo";
+const width = 1920;
+const height = 1080;
+const durationMs = 56_500;
+const webm = join(outputDir, `${baseName}.webm`);
+const mp4 = join(outputDir, `${baseName}.mp4`);
 const port = 8790;
 const demoAssets = new Map([
-  ["/", join(demoDir, "engraphis_screen_demo.html")],
-  ["/engraphis_screen_demo.html", join(demoDir, "engraphis_screen_demo.html")],
+  ["/", join(demoDir, html)],
+  [`/${html}`, join(demoDir, html)],
   ["/generated/screen_demo_payload.json", payload],
 ]);
 
@@ -49,15 +54,15 @@ await new Promise((resolveServer) => server.listen(port, "127.0.0.1", resolveSer
 
 const browser = await chromium.launch({ headless: true });
 const context = await browser.newContext({
-  viewport: { width: 1920, height: 1080 },
-  recordVideo: { dir: outputDir, size: { width: 1920, height: 1080 } },
+  viewport: { width, height },
+  recordVideo: { dir: outputDir, size: { width, height } },
   deviceScaleFactor: 1,
 });
 const page = await context.newPage();
-await page.goto(`http://127.0.0.1:${port}/engraphis_screen_demo.html?autoplay=1`, { waitUntil: "networkidle" });
+await page.goto(`http://127.0.0.1:${port}/${html}?autoplay=1`, { waitUntil: "networkidle" });
 // Keep the capture clock independent from requestAnimationFrame throttling in
-// headless environments; the page itself still stops its progress bar at 56s.
-await page.waitForTimeout(56_500);
+// headless environments and leave a small tail after the page's 56-second animation.
+await page.waitForTimeout(durationMs);
 await context.close();
 await browser.close();
 server.close();

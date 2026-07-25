@@ -197,7 +197,7 @@ def test_relay_http_error_discards_response_body_and_request_url(monkeypatch, st
 
     monkeypatch.setattr(sync_relay, "_urlopen_no_redirect", fail)
     transport = RelayTransport(
-        "https://relay.example/%s" % url_marker, "workspace", license_key="safe-key"
+        "https://93.184.216.34/%s" % url_marker, "workspace", license_key="safe-key"
     )
 
     with pytest.raises(RelayError) as caught:
@@ -217,7 +217,7 @@ def test_relay_network_error_discards_base_url_and_reason(monkeypatch):
         lambda *_args, **_kwargs: (_ for _ in ()).throw(urllib.error.URLError(marker)),
     )
     transport = RelayTransport(
-        "https://relay.example/%s" % marker, "workspace", license_key="safe-key"
+        "https://93.184.216.34/%s" % marker, "workspace", license_key="safe-key"
     )
 
     with pytest.raises(RelayUnreachable) as caught:
