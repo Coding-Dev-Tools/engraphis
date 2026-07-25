@@ -126,13 +126,13 @@ all = [
     "onnxruntime<1.24; python_version < '3.11'",
     "psycopg[binary]>=3.1",
 ]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.15.22,<0.16"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.15.22,<0.17"]
 # Everything needed to run the FULL offline gate in CI (lint + all extras-gated tests)
 # WITHOUT pulling torch/sentence-transformers — no test needs the real embedder.
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
-    "ruff>=0.15.22,<0.16",
+    "ruff>=0.15.22,<0.17",
     "python-dotenv>=1.0",
     "uvicorn[standard]>=0.29",
     "fastapi>=0.133.1,<1; python_version >= '3.10'",
@@ -194,6 +194,13 @@ include = ["engraphis*", "scripts*"]
 [tool.ruff]
 line-length = 100
 target-version = "py39"
+
+# Pin the rule set explicitly instead of inheriting ruff's built-in default, which is not
+# stable across minor releases -- 0.16 widened it from 59 rules to 413 and turned every
+# routine linter bump into a repo-wide breakage. These are exactly the 59 rules ruff
+# 0.15.x enabled by default, so behaviour is unchanged; widening is now a deliberate edit.
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
