@@ -8,9 +8,30 @@ from engraphis.backends.vector_sqlitevec import get_vector_index
 from engraphis.core.store import Store
 
 
-def test_embedder_factory_falls_back_offline():
+def _force_unresolvable(monkeypatch, attr: str) -> None:
+    """Make the sentence-transformers loader fail immediately instead of hitting the network.
+
+    The factories fall back when a model fails to load, but resolving an unknown model name
+    normally goes out to the Hugging Face Hub. On a host with no route to the Hub that
+    connect() blocks rather than erroring, so the offline gate would hang forever — the
+    fallback relies on the network failing *fast*, not on it being *absent* (AGENTS.md §3.8:
+    the core must run offline). Patching the loader keeps this hermetic and instant.
+    """
+    try:
+        import sentence_transformers as st
+    except ImportError:
+        return  # not installed — the factory already fails fast with ModuleNotFoundError
+
+    def _raise(*args, **kwargs):
+        raise OSError("simulated unresolvable model (offline)")
+
+    monkeypatch.setattr(st, attr, _raise)
+
+
+def test_embedder_factory_falls_back_offline(monkeypatch):
     assert isinstance(get_embedder(None, 128), DeterministicEmbedder)
     # An unresolvable model name must not crash — it falls back.
+    _force_unresolvable(monkeypatch, "SentenceTransformer")
     assert isinstance(get_embedder("definitely-not-a-real-model-xyz", 128), DeterministicEmbedder)
 
 
@@ -46,6 +67,7 @@ def test_vector_index_factory_modes(monkeypatch):
     s.close()
 
 
-def test_reranker_factory_falls_back_offline():
+def test_reranker_factory_falls_back_offline(monkeypatch):
     assert isinstance(get_reranker(None), IdentityReranker)
+    _force_unresolvable(monkeypatch, "CrossEncoder")
     assert isinstance(get_reranker("definitely-not-a-real-model-xyz"), IdentityReranker)
