@@ -142,6 +142,41 @@ def _run(fn, *a, **k):
         raise HTTPException(status_code=500, detail={"error": "internal server error"})
 
 
+#: What the dashboard shows when a managed failure carries no usable public copy.
+_MANAGED_ERROR_FALLBACK = "managed cloud operation failed"
+#: Hard ceiling on the forwarded copy. Every message this boundary forwards is fixed,
+#: status-keyed public text (see ``_managed_error_message``), so nothing legitimate comes
+#: close; a message that does is by definition not the fixed copy and is dropped.
+_MANAGED_ERROR_MAX_CHARS = 300
+
+
+def _managed_error_message(exc) -> str:
+    """Return the public copy a ``CloudFeatureError`` carries, or the generic fallback.
+
+    ``CloudFeatureError`` is the *already redacted* form: every raise site in
+    ``cloud_features`` builds its message from fixed copy keyed on a status
+    (``_public_http_error`` / ``_public_session_error``) or from a local literal. Provider
+    bodies, ``CloudSessionError`` text and local state paths are all dropped before the
+    exception is constructed, which is the whole point of that type.
+
+    Flattening it again here cost the customer the only actionable part: a 429 or a 5xx
+    ("temporarily busy", "temporarily unavailable" — retry) and a 409 ("could not accept the
+    current workspace state" — do not retry, fix the session) all rendered as one fixed
+    string, so the dashboard's error branch could not tell an outage from a conflict.
+
+    The bound below is a boundary check, not the redaction: it keeps an unexpected message
+    (a future raise site that interpolates something, or a subclass raised elsewhere) from
+    becoming an unbounded, control-character-carrying string in a JSON error body.
+    """
+
+    message = " ".join(str(exc).split())
+    if not message or len(message) > _MANAGED_ERROR_MAX_CHARS:
+        return _MANAGED_ERROR_FALLBACK
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in message):
+        return _MANAGED_ERROR_FALLBACK
+    return message
+
+
 def _managed_call(fn, *args, **kwargs):
     """Map the public cloud-client protocol onto structured dashboard errors."""
     from engraphis.cloud_features import CloudFeatureError
@@ -151,7 +186,7 @@ def _managed_call(fn, *args, **kwargs):
     except CloudFeatureError as exc:
         logger.warning("managed cloud operation failed (%s, status=%s, transient=%s)",
                        type(exc).__name__, exc.status, exc.transient)
-        detail = {"error": "managed cloud operation failed", "managed_cloud": True,
+        detail = {"error": _managed_error_message(exc), "managed_cloud": True,
                   "transient": exc.transient}
         if exc.code == "consent_required":
             detail["code"] = exc.code
@@ -2014,13 +2049,19 @@ def _deny_entitlement_cache() -> None:
 
     The plan name is preserved so the UI can still say which plan lapsed; only the access
     flag and the grants are cleared. Never raises: this runs on the refresh thread.
+
+    ``fetched_at`` advances on *every* denial, including the repeat denial that finds the
+    cache already settled. That case used to return without writing anything, which left
+    ``_plan_entitlement`` serving a stale ``fetched_at`` and
+    ``_refresh_entitlement_in_background`` re-scheduling a token refresh on every request
+    against an account the control plane had already answered 402 for. A denial is an
+    authoritative read; it has to advance the clock exactly as
+    ``cloud_session.record_billing_denial`` now does one layer up.
     """
 
     try:
         cached = _read_entitlement_cache()
         if not cached:
-            return
-        if not cached.get("cloud_access_active") and not cached.get("features"):
             return
         denied = dict(cached)
         denied["cloud_access_active"] = False

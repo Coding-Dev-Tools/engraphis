@@ -297,8 +297,18 @@ def record_billing_denial() -> bool:
     surfaces disagreeing.
 
     The plan name is deliberately kept so the UI can still say which plan lapsed; only the
-    access flag and the grants are cleared. Returns whether anything changed. Never raises:
-    this runs on the boot path.
+    access flag and the grants are cleared. Never raises: this runs on the boot path.
+
+    A denial is also an *authoritative entitlement read*, so it stamps
+    ``entitlement_checked_at`` — on the repeat denial too, which is the steady state for a
+    lapsed account. Leaving the old timestamp in place kept ``saved_entitlement()``
+    answering with a stale ``entitlement_checked_at``, so the caller's refresh interval
+    never suppressed anything: every ``/api/license`` and ``/api/bootstrap``, in every
+    worker, spent and rotated the refresh credential again against a control plane that had
+    already answered 402. Advancing the clock is what bounds that.
+
+    Returns whether this denial newly revoked access; a repeat denial returns ``False`` even
+    though the timestamp was rewritten, so a caller can still tell the two apart.
     """
 
     try:
@@ -308,12 +318,11 @@ def record_billing_denial() -> bool:
         already_denied = (
             saved.get("cloud_access_active") is False and not saved.get("cloud_features")
         )
-        if already_denied:
-            return False
         saved["cloud_access_active"] = False
         saved["cloud_features"] = []
+        saved["entitlement_checked_at"] = time.time()
         _save(saved)
-        return True
+        return not already_denied
     except Exception:
         return False
 

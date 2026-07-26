@@ -78,7 +78,7 @@ def test_hosted_views_delegate_entitlement_to_cloud_proxy_responses():
         assert "unlockHtml" in body
     # The billing predicate itself, verbatim: the loaders delegate to it, so widening it
     # here is the only way a non-billing failure can reach ``unlockHtml``.
-    assert "error.status===401||error.status===402||error.status===501" in script
+    assert "error.status===402||error.status===501" in script
     assert "error.status===409" in script
     assert "Purchase Pro license" in script
 
@@ -202,11 +202,15 @@ def test_a_consent_required_conflict_is_answered_with_the_consent_panel(
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
 @pytest.mark.parametrize("view", ["analytics", "automation"])
-@pytest.mark.parametrize("status", [401, 402, 501])
+@pytest.mark.parametrize("status", [402, 501])
 def test_a_genuine_entitlement_failure_still_renders_the_upgrade_panel(
     tmp_path, view, status,
 ):
-    """401 unauthenticated, 402 not subscribed, 501 not offered: all billing answers."""
+    """402 not subscribed and 501 not offered are billing answers. 401 is not:
+
+    the cloud maps it to "connect again", so it must reach the customer as a reconnect
+    instruction rather than a panel selling a plan they may already own.
+    """
 
     rendered = _route(tmp_path, [{
         "name": "unentitled", "view": view, "error": {"status": status},
@@ -220,11 +224,16 @@ def test_a_genuine_entitlement_failure_still_renders_the_upgrade_panel(
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
 @pytest.mark.parametrize("view", ["analytics", "automation"])
-@pytest.mark.parametrize("status", [400, 500, 503])
+@pytest.mark.parametrize("status", [400, 401, 500, 503])
 def test_a_non_billing_failure_shows_the_error_instead_of_selling_pro(
     tmp_path, view, status,
 ):
-    """A bad request or a cloud outage is not an unpaid invoice."""
+    """A bad request, an expired session, or a cloud outage is not an unpaid invoice.
+
+    401 belongs here rather than with 402/501: the cloud maps it to "the cloud session
+    expired or was revoked; connect again". Drawing the purchase panel for it sold an
+    already-paying customer the plan they own, instead of telling them to reconnect.
+    """
 
     rendered = _route(tmp_path, [{
         "name": "broken", "view": view,
@@ -267,10 +276,10 @@ def test_only_an_entitlement_status_may_draw_the_purchase_panel():
     """
 
     helper = _dashboard_function("hostedFeatureUnavailable")
-    assert "error.status===401||error.status===402||error.status===501" in helper
+    assert "error.status===402||error.status===501" in helper
     # No view may widen it and no fourth status may join it.
     assert "CURRENT_VIEW" not in helper
-    assert sorted(set(re.findall(r"status\s*===\s*(\d+)", helper))) == ["401", "402", "501"]
+    assert sorted(set(re.findall(r"status\s*===\s*(\d+)", helper))) == ["402", "501"]
 
     consent = _dashboard_function("managedConsentRequired")
     assert "error.status===409" in consent

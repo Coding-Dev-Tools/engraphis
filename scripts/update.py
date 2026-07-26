@@ -15,6 +15,8 @@ Detects how you installed Engraphis and upgrades the same way:
 """
 from __future__ import annotations
 
+from typing import Optional
+
 
 import importlib.metadata
 import json
@@ -123,7 +125,7 @@ def _kill_process_tree(process: subprocess.Popen) -> None:
 
 
 def _bounded_call(cmd: list[str], what: str, timeout: int, capture: bool,
-                  env: dict | None) -> subprocess.CompletedProcess:
+                  env: Optional[dict]) -> subprocess.CompletedProcess:
     """Run *cmd* under a budget that **nothing in its process tree** can outlive.
 
     Every step lands here, because "bounded" has to mean the same thing for a step that is
@@ -165,7 +167,7 @@ def _bounded_call(cmd: list[str], what: str, timeout: int, capture: bool,
 
 
 def _run(cmd: list[str], what: str, timeout: int, check: bool = False,
-         capture: bool = False, env: dict | None = None) -> subprocess.CompletedProcess:
+         capture: bool = False, env: Optional[dict] = None) -> subprocess.CompletedProcess:
     """Run *cmd* under an explicit budget; a stall raises instead of hanging forever.
 
     ``capture`` stays opt-in — a pipe nobody reads is only another handle a grandchild can
@@ -181,7 +183,7 @@ def _run(cmd: list[str], what: str, timeout: int, check: bool = False,
 
 
 def _run_captured(cmd: list[str], what: str, timeout: int,
-                  env: dict | None = None) -> subprocess.CompletedProcess:
+                  env: Optional[dict] = None) -> subprocess.CompletedProcess:
     """Run *cmd* for its stdout under a budget that is actually enforced.
 
     For the steps that must be *parsed* rather than merely displayed, so simply not

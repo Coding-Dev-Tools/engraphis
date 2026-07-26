@@ -376,7 +376,7 @@ test('a lapsed Team subscription is sent to billing, not to a spent trial', asyn
   expect(errors).toEqual([]);
 });
 
-for (const cloudStatus of [401, 402, 501]) {
+for (const cloudStatus of [402, 501]) {
   test(`Analytics and Automation defer to cloud proxy status ${cloudStatus}`, async ({ page }) => {
     const errors = recordBrowserErrors(page);
     const calls = await mockLocalClient(page, cloudStatus);
@@ -422,6 +422,27 @@ for (const cloudStatus of [401, 402, 501]) {
     expect(errors).toEqual([]);
   });
 }
+
+// 401 is a credential problem, not a billing one: the cloud maps it to "the cloud session
+// expired or was revoked; connect again". Selling Pro to a customer who already owns it --
+// and who only needs to reconnect -- is the regression this guards.
+test('An expired cloud session asks the customer to reconnect, not to buy', async ({ page }) => {
+  const errors = recordBrowserErrors(page);
+  await mockLocalClient(page, 401);
+  await page.goto('/');
+
+  await openView(page, 'analytics');
+  const analytics = page.locator('#analytics-body');
+  await expect(analytics).not.toContainText('Unlock Analytics and more');
+  await expect(analytics.getByRole('link', { name: 'Purchase Pro license' })).toHaveCount(0);
+
+  await openView(page, 'automation');
+  const automation = page.locator('#automation-body');
+  await expect(automation).not.toContainText('Unlock Automation');
+  await expect(automation.getByRole('link', { name: 'Purchase Pro license' })).toHaveCount(0);
+
+  expect(errors).toEqual([]);
+});
 
 // Consent travels with the cloud account: connecting an installation accepts the terms
 // covering managed compute. A 409 consent_required therefore means "this installation is

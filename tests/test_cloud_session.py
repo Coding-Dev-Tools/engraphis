@@ -392,3 +392,44 @@ def test_environment_refresh_rejects_invalid_subject(monkeypatch, subject) -> No
     else:
         with pytest.raises(cloud_session.CloudSessionError, match="device.*member"):
             cloud_session.configured(require_compute=False)
+
+
+def test_record_billing_denial_stamps_every_denial_including_the_repeat() -> None:
+    """A 402 is an authoritative entitlement read, so it has to advance the clock.
+
+    ``entitlement_checked_at`` is what ``_session_entitlement`` reports as ``fetched_at``
+    and what the dashboard's 15-minute refresh interval throttles on. The denial used to
+    clear the grants without touching it -- and to write nothing whatsoever once the
+    session was already denied -- so a lapsed account re-rotated its single-use refresh
+    credential on every request, in every worker, forever.
+    """
+
+    cloud_session._save({
+        "plan": "team",
+        "cloud_access_active": True,
+        "cloud_features": ["analytics", "team"],
+        "entitlement_checked_at": 1.0,
+        "organization_id": "org_1",
+        "refresh_credential": "engr_rt_saved",
+    })
+
+    assert cloud_session.record_billing_denial() is True
+    first = cloud_session._load()
+    assert first["cloud_access_active"] is False
+    assert first["cloud_features"] == []
+    assert first["plan"] == "team", "the lapsed plan is still named for the UI"
+    assert first["refresh_credential"] == "engr_rt_saved", "the denial is not a disconnect"
+    stamped = first["entitlement_checked_at"]
+    assert stamped > 1.0, "the denial was never stamped as checked"
+
+    # The steady state for a lapsed account: already denied, and aged past the interval.
+    aged = dict(first)
+    aged["entitlement_checked_at"] = stamped - 3600.0
+    cloud_session._save(aged)
+
+    assert cloud_session.record_billing_denial() is False, "nothing new was revoked"
+    repeated = cloud_session._load()
+    assert repeated["entitlement_checked_at"] >= stamped, (
+        "a repeat denial must advance the clock the refresh interval reads"
+    )
+    assert cloud_session.saved_entitlement()["entitlement_checked_at"] >= stamped

@@ -981,6 +981,149 @@ def test_a_billing_denial_also_settles_the_compatibility_cache(monkeypatch) -> N
     assert cached["plan"] == "team", "the lapsed plan is still named for the UI"
 
 
+def _age_session_clock(seconds: float = 3600.0) -> None:
+    """Push the saved session's entitlement stamp past any refresh interval."""
+
+    record = cloud_session._load()
+    record["entitlement_checked_at"] = time.time() - seconds
+    cloud_session._save(record)
+
+
+def _lapsed_control_plane(monkeypatch) -> list:
+    """Answer every token refresh with the control plane's authoritative 402.
+
+    Returns the list the attempts are appended to, so a test can count how many times the
+    single-use refresh credential was spent.
+    """
+
+    attempts = []
+
+    def _lapsed(*_args, **_kwargs):
+        attempts.append(time.time())
+        raise cloud_session.CloudSessionError("Subscription is not active.", status=402)
+
+    monkeypatch.setattr(cloud_session, "access_for_workspace", _lapsed)
+    # The real dial, not the 0 that ``_settled_license`` leaves behind: the guard under
+    # test is precisely that a just-recorded denial suppresses the next attempt.
+    monkeypatch.setattr(v2_api, "_ENTITLEMENT_REFRESH_SECONDS", 15 * 60)
+    return attempts
+
+
+def test_a_billing_denial_is_stamped_so_the_next_refresh_is_suppressed(
+    monkeypatch,
+) -> None:
+    """A 402 is an authoritative read and has to advance the clock that throttles.
+
+    ``record_billing_denial`` cleared the grants but left ``entitlement_checked_at``
+    untouched, so ``_session_entitlement`` kept reporting the old ``fetched_at``, the
+    15-minute interval in ``_refresh_entitlement_in_background`` never matched, and every
+    subsequent ``/api/license`` -- in every worker -- spent and rotated the refresh
+    credential again against an account the control plane had already refused. Unbounded
+    credential rotation on a lapsed subscription.
+    """
+
+    _connect(monkeypatch, pinned_token=False)
+    _serve(monkeypatch, _FakeControlPlane(_entitlement_dto("team"),
+                                          registration=_registration_entitlement("team")))
+    assert _settled_license(monkeypatch)["cloud_access_active"] is True
+
+    attempts = _lapsed_control_plane(monkeypatch)
+    _age_session_clock()
+
+    v2_api.get_license()
+    _drain_refresh()
+    assert len(attempts) == 1, "the aged session did not schedule the first re-check"
+
+    settled = v2_api.get_license()
+    _drain_refresh()
+    assert settled["cloud_access_active"] is False
+    assert settled["features"] == []
+    assert len(attempts) == 1, (
+        "the denial left a stale clock, so the very next request rotated the credential "
+        "again against a control plane that had already answered 402"
+    )
+    assert settled["plan_checked_at"] > time.time() - 60, "the denial was never stamped"
+
+    v2_api.get_license()
+    _drain_refresh()
+    assert len(attempts) == 1, "the suppression did not hold for a second request"
+
+
+def test_a_repeat_billing_denial_still_advances_the_refresh_clock(monkeypatch) -> None:
+    """The already-denied session is the steady state, and it wrote nothing at all.
+
+    ``record_billing_denial`` returned early once ``cloud_access_active`` was already
+    ``False`` with no grants left, so the timestamp froze at whatever the last *successful*
+    read wrote. Every request after that saw an aged entitlement and refreshed again.
+    """
+
+    _connect(monkeypatch, pinned_token=False)
+    _serve(monkeypatch, _FakeControlPlane(_entitlement_dto("team"),
+                                          registration=_registration_entitlement("team")))
+    assert _settled_license(monkeypatch)["cloud_access_active"] is True
+
+    # The steady state: already denied, and aged past the refresh interval.
+    record = cloud_session._load()
+    record["cloud_access_active"] = False
+    record["cloud_features"] = []
+    record["entitlement_checked_at"] = time.time() - 3600.0
+    cloud_session._save(record)
+
+    attempts = _lapsed_control_plane(monkeypatch)
+
+    v2_api.get_license()
+    _drain_refresh()
+    assert len(attempts) == 1, "an aged denial must still be re-checked once"
+
+    v2_api.get_license()
+    _drain_refresh()
+    v2_api.get_license()
+    _drain_refresh()
+    assert len(attempts) == 1, (
+        "a repeat denial wrote nothing, so the clock never advanced and the lapsed "
+        "account kept being re-checked on every request"
+    )
+    assert cloud_session._load()["plan"] == "team", "the lapsed plan is still named"
+
+
+def test_a_repeat_denial_also_advances_the_compatibility_cache_clock(monkeypatch) -> None:
+    """The same freeze one layer down, on the control plane that has no session fields.
+
+    ``_deny_entitlement_cache`` returned without writing once the cache was already
+    settled, so ``_plan_entitlement`` served a stale ``fetched_at`` and the refresh was
+    re-scheduled on every request -- the identical unbounded rotation, reached by the
+    older-control-plane path instead.
+    """
+
+    _connect(monkeypatch, pinned_token=False)
+    # registration={} models the older control plane: no entitlement on the session.
+    _serve(monkeypatch, _FakeControlPlane(_entitlement_dto("team"), registration={}))
+    assert _settled_license(monkeypatch)["cloud_access_active"] is True
+    assert cloud_session.saved_entitlement() == {}, "the session must be planless here"
+
+    attempts = _lapsed_control_plane(monkeypatch)
+
+    # Already denied, and aged past the interval.
+    cached = v2_api._read_entitlement_cache()
+    cached["cloud_access_active"] = False
+    cached["features"] = []
+    cached["fetched_at"] = time.time() - 3600.0
+    v2_api._write_entitlement_cache(cached)
+
+    v2_api.get_license()
+    _drain_refresh()
+    assert len(attempts) == 1, "an aged cache must still be re-checked once"
+
+    v2_api.get_license()
+    _drain_refresh()
+    assert len(attempts) == 1, (
+        "the repeat denial left the cached clock stale, so the credential kept rotating"
+    )
+    settled = v2_api._read_entitlement_cache()
+    assert settled["cloud_access_active"] is False
+    assert settled["plan"] == "team", "the lapsed plan is still named for the UI"
+
+
 def test_a_lapsed_subscription_declared_on_the_refresh_keeps_its_name(
     monkeypatch,
 ) -> None:
