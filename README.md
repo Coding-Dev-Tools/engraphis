@@ -419,11 +419,11 @@ recovery boundaries.
 | Memory engine + 29 MCP tools | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Manual local consolidation (dry-run by default) | ✓ | ✓ | ✓ |
+| Local workspace export (JSON: memories, sessions, audit) | ✓ | ✓ | ✓ |
 | Hosted Cloud Sync | | ✓ | ✓ |
 | Hosted Analytics | | ✓ | ✓ |
 | Hosted Auto Consolidation + retention policy | | ✓ | ✓ |
 | Hosted Auto Dreaming + managed proposals | | ✓ | ✓ |
-| Signed compliance export (checksummed bi-temporal bundle) | | ✓ | ✓ |
 | Priority support | | ✓ | ✓ |
 | Hosted multi-user dashboard: invitations, logins, roles, seat management | | | ✓ |
 | Hosted Team audit log + CSV export | | | ✓ |
