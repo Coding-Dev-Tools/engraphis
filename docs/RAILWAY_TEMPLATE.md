@@ -14,8 +14,11 @@ issuer, relay, managed compute, Auto Dreaming, Auto Consolidation, or Team ident
 - No vendor signer, billing, mail, Team-admin, relay-storage, or worker secrets.
 
 Hosted customer endpoint variables may be exposed as optional inputs, but a refresh credential
-must be injected as a secret or mounted owner-only state file. Managed compute requires
-explicit opt-in via `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1`.
+must be injected as a secret or mounted owner-only state file. Managed compute is enabled by
+default once the deployed installation is connected to Engraphis Cloud; connecting accepts the
+terms that cover it, and a local-only node with no cloud session is never allowed. Expose
+`ENGRAPHIS_MANAGED_COMPUTE_CONSENT` only as an optional operator override (`0` to opt a
+connected installation back out), not as a required opt-in input.
 
 ## Publish gate
 

@@ -1,4 +1,7 @@
 """Unified local dashboard tests for the public open-core boundary."""
+import ast
+import io
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -9,6 +12,7 @@ pytest.importorskip("httpx", reason="httpx not installed")
 from fastapi.testclient import TestClient  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
+from engraphis import cloud_features  # noqa: E402
 from engraphis.config import settings  # noqa: E402
 from engraphis.cloud_features import CloudFeatureError  # noqa: E402
 from engraphis.routes import v2_api  # noqa: E402
@@ -118,8 +122,10 @@ def test_unconnected_automation_returns_a_structured_auth_error(monkeypatch, tmp
         response = client.get("/api/automation?workspace=demo")
 
     assert response.status_code == 401
+    # The copy is ``_public_session_error(401)``: fixed, status-keyed, and actionable. The
+    # generic placeholder told an unconnected customer nothing they could act on.
     assert response.json()["detail"] == {
-        "error": "managed cloud operation failed",
+        "error": "Connect this installation to Engraphis Cloud to use hosted features.",
         "managed_cloud": True,
         "transient": False,
     }
@@ -263,8 +269,11 @@ def test_dashboard_automation_uses_active_workspace_and_discloses_upload_boundar
     assert "/automation?workspace=" in source
     assert "/maintenance/run?workspace=" in source
     assert "Preview snapshot" not in source
-    assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1" in source
     assert "uploads the selected workspace’s normal and sensitive memory content" in source
+    # The upload boundary is still disclosed, but consent now travels with the cloud
+    # account: the dashboard must not name the operator override anywhere.
+    assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT" not in source
+    assert "managed compute is turned off for this installation" in source
 
 
 def test_portfolio_and_report_analytics_are_hosted_only(monkeypatch, tmp_path):
@@ -333,25 +342,156 @@ def test_dashboard_exception_responses_do_not_echo_untrusted_exception_text():
     assert ordinary_value_error.value.detail == {"error": "internal server error"}
     assert secret not in repr(ordinary_value_error.value.detail)
 
-    with pytest.raises(HTTPException) as managed:
-        v2_api._managed_call(fail_with, CloudFeatureError(secret, status=502))
-    assert managed.value.status_code == 502
-    assert managed.value.detail == {
-        "error": "managed cloud operation failed", "managed_cloud": True,
-        "transient": False,
-    }
-    assert secret not in repr(managed.value.detail)
+
+def test_managed_cloud_errors_forward_only_bounded_public_copy():
+    """``_managed_call`` forwards the message; the bound is the boundary's own check.
+
+    ``CloudFeatureError`` is the already-redacted form -- every raise site builds it from
+    fixed, status-keyed copy -- so its text is what the customer should read. The bound
+    here is not the redaction, it is the guard for a message that is *not* that fixed copy:
+    anything oversized, empty, or carrying control characters is dropped for the generic
+    placeholder rather than rendered into a JSON error body.
+    """
+
+    def fail_with(exc):
+        raise exc
+
+    for message in ("x" * 301, "", "connection\x00reset", "trace\x1b[31m"):
+        with pytest.raises(HTTPException) as caught:
+            v2_api._managed_call(fail_with, CloudFeatureError(message, status=502))
+        assert caught.value.status_code == 502
+        assert caught.value.detail == {
+            "error": v2_api._MANAGED_ERROR_FALLBACK, "managed_cloud": True,
+            "transient": False,
+        }
 
     with pytest.raises(HTTPException) as consent:
         v2_api._managed_call(
             fail_with,
-            CloudFeatureError(secret, status=409, code="consent_required"),
+            CloudFeatureError(
+                "Managed compute is turned off for this installation.",
+                status=409, code="consent_required",
+            ),
         )
     assert consent.value.status_code == 409
     assert consent.value.detail == {
-        "error": "managed cloud operation failed",
+        "error": "Managed compute is turned off for this installation.",
         "managed_cloud": True,
         "transient": False,
         "code": "consent_required",
     }
-    assert secret not in repr(consent.value.detail)
+
+
+def _managed_http_failure(monkeypatch, status: int) -> HTTPException:
+    """Drive one real hosted request against a control plane that answers ``status``."""
+
+    class _Opener:
+        def open(self, request, timeout=None):
+            raise urllib.error.HTTPError(
+                "https://compute.example.test/private", status, "failure", {},
+                io.BytesIO(b'{"detail": "provider-internals https://backend.invalid"}'),
+            )
+
+    monkeypatch.setattr(
+        cloud_features, "build_pinned_https_opener", lambda *handlers: _Opener()
+    )
+    client = cloud_features.CloudFeatureClient(
+        "https://compute.example.test", "org_1", "token"
+    )
+    with pytest.raises(HTTPException) as caught:
+        v2_api._managed_call(client._request, "GET", "/private")
+    return caught.value
+
+
+def test_a_managed_outage_is_distinguishable_from_a_workspace_conflict(monkeypatch):
+    """The defect: every hosted failure rendered as one fixed, unactionable string.
+
+    ``cloud_features._public_http_error`` already produces redacted, status-keyed copy that
+    tells a retryable outage apart from a conflict the customer has to fix -- and
+    ``_managed_call`` threw all of it away, so the dashboard's error branch could only ever
+    show "managed cloud operation failed" for a 429, a 5xx and a 409 alike.
+    """
+
+    busy = _managed_http_failure(monkeypatch, 429)
+    down = _managed_http_failure(monkeypatch, 503)
+    conflict = _managed_http_failure(monkeypatch, 409)
+
+    assert busy.status_code == 429
+    assert busy.detail["transient"] is True
+    assert "temporarily busy" in busy.detail["error"], busy.detail["error"]
+
+    assert down.status_code == 503
+    assert down.detail["transient"] is True
+    assert "temporarily unavailable" in down.detail["error"], down.detail["error"]
+
+    assert conflict.status_code == 409
+    assert conflict.detail["transient"] is False
+    assert "workspace state" in conflict.detail["error"], conflict.detail["error"]
+
+    messages = {busy.detail["error"], down.detail["error"], conflict.detail["error"]}
+    assert len(messages) == 3, "the dashboard still cannot tell these three apart"
+    assert v2_api._MANAGED_ERROR_FALLBACK not in messages
+    # Forwarding the public copy must not forward the provider's body with it.
+    assert all("provider-internals" not in text for text in messages)
+    assert all("backend.invalid" not in text for text in messages)
+
+
+def test_every_managed_cloud_error_message_is_fixed_local_copy():
+    """The invariant that makes forwarding safe, pinned against future raise sites.
+
+    ``_managed_call`` may forward a ``CloudFeatureError`` message only because every one of
+    them is built from a literal in this repository -- never from a provider body, a
+    ``CloudSessionError``, or a local path. A raise site that interpolated a runtime value
+    would silently turn this boundary into a reflection point, so the shape is asserted
+    rather than trusted.
+
+    Three forms are accepted: a string literal; a name bound from ``_public_http_error`` /
+    ``_public_session_error`` (both of which switch on a bare integer status and return
+    fixed copy); and the one audited ``%`` template, below.
+    """
+
+    source = Path(cloud_features.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    public_copy = {"_public_http_error", "_public_session_error"}
+    from_public_copy = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+            continue
+        called = node.value.func
+        if not isinstance(called, ast.Name) or called.id not in public_copy:
+            continue
+        for target in node.targets:
+            elements = target.elts if isinstance(target, ast.Tuple) else [target]
+            from_public_copy.update(
+                item.id for item in elements if isinstance(item, ast.Name)
+            )
+    assert from_public_copy, "the fixed-copy helpers are no longer bound to a name"
+
+    interpolated = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = node.func.id if isinstance(node.func, ast.Name) else None
+        if name != "CloudFeatureError" or not node.args:
+            continue
+        message = node.args[0]
+        if isinstance(message, ast.Constant) and isinstance(message.value, str):
+            continue
+        if isinstance(message, ast.Name) and message.id in from_public_copy:
+            continue
+        # ``"literal %s" % (...)`` is allowed only where the substituted values are
+        # themselves constrained to local literals; ``run_job`` is the single such site
+        # and its ``status`` is guarded by an ``in {"failed", "canceled"}`` membership
+        # test one line above. Anything else -- an f-string, a bare name, a concatenated
+        # response field -- is a reflection risk and fails here.
+        if (isinstance(message, ast.BinOp) and isinstance(message.op, ast.Mod)
+                and isinstance(message.left, ast.Constant)
+                and message.left.value == "Managed %s did not complete (%s)."):
+            continue
+        interpolated.append((node.lineno, ast.dump(message)[:120]))
+
+    assert interpolated == [], (
+        "a CloudFeatureError message is no longer fixed local copy; _managed_call "
+        "forwards it to the customer: %r" % (interpolated,)
+    )
