@@ -34,8 +34,12 @@ from pathlib import Path
 
 import pytest
 
-from engraphis import cloud_session
-from engraphis.routes import v2_api
+# ``engraphis.routes.v2_api`` imports FastAPI, which the numpy-only core floor job does not
+# install. Skip rather than error at collection, matching the rest of the suite.
+pytest.importorskip("fastapi", reason="full-stack extra not installed")
+
+from engraphis import cloud_session  # noqa: E402
+from engraphis.routes import v2_api  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD_JS = REPO_ROOT / "engraphis" / "static" / "dashboard.js"
