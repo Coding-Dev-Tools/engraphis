@@ -214,6 +214,14 @@ def _save(value: dict) -> None:
 
 #: Plans that carry no paid cloud access, used only to default an absent activity flag.
 _UNPAID_PLANS = ("free", "local")
+#: Entitlement status vocabulary the control plane can persist or compute
+#: (``engraphis_cloud/entitlements.py`` ``effective_status``, plus every provider status
+#: ``/internal/subscriptions/apply`` accepts). Kept as a bound, not an allow-list: an
+#: unrecognised value is stored verbatim so a future server release is not mistranslated,
+#: it is only length-capped like every other presentation string here.
+_MAX_STATUS_CHARS = 32
+#: An ISO-8601 timestamp is at most a few dozen characters; anything longer is not one.
+_MAX_TIMESTAMP_CHARS = 64
 #: Bounds on the entitlement fields before they are written into the session record. The
 #: record is read back under a 64 KiB private-state cap, so an unbounded provider value
 #: could grow the file past that cap and make the whole session permanently unreadable.
@@ -221,17 +229,36 @@ _UNPAID_PLANS = ("free", "local")
 _MAX_PLAN_CHARS = 64
 _MAX_FEATURES = 32
 _MAX_FEATURE_CHARS = 64
+#: Every entitlement key ``_declared_entitlement`` can put on the session record. The
+#: record is deliberately shaped like the wire response so one reader serves both, which
+#: is what keeps a saved answer and a fresh one from being parsed by different rules.
+_ENTITLEMENT_KEYS = (
+    "plan",
+    "cloud_access_active",
+    "cloud_features",
+    "status",
+    "is_trial",
+    "trial_consumed",
+    "trial_ends_at",
+)
 
 
 def _declared_entitlement(response: object) -> dict:
     """Return the entitlement fields a control-plane response carried, or ``{}``.
 
     ``DeviceRegistrationResponse`` — the body both ``/internal/devices/register`` and
-    ``POST /v1/tokens/refresh`` answer with — carries ``plan``, ``cloud_features`` and
-    ``cloud_access_active``.  They are read as *optional* on purpose: a control plane that
-    has not deployed them yet returns exactly what it always did, and this client must keep
-    working against it rather than requiring a newer server.  An absent or unusable ``plan``
-    therefore yields ``{}``, which leaves whatever the caller already knew in place.
+    ``POST /v1/tokens/refresh`` answer with — carries ``plan``, ``cloud_features``,
+    ``cloud_access_active``, and the trial facts (``status``, ``is_trial``,
+    ``trial_consumed``, ``trial_ends_at``).  They are read as *optional* on purpose: a
+    control plane that has not deployed them yet returns exactly what it always did, and
+    this client must keep working against it rather than requiring a newer server.  An
+    absent or unusable ``plan`` therefore yields ``{}``, which leaves whatever the caller
+    already knew in place.
+
+    The trial fields are each optional *individually* as well, because they shipped after
+    the plan fields did: a server that answers ``plan`` but not ``is_trial`` simply leaves
+    the key absent, and the caller keeps treating the customer as a non-trialist rather
+    than claiming a trial nobody declared.
 
     Nothing here is authority.  The cloud authorizes every paid call regardless of what
     this record says; persisting it only saves the dashboard from guessing.
@@ -259,6 +286,23 @@ def _declared_entitlement(response: object) -> dict:
             item.strip().lower()[:_MAX_FEATURE_CHARS]
             for item in features if isinstance(item, str) and item.strip()
         })[:_MAX_FEATURES]
+    # The trial half of the same answer.  Absent stays absent so a field-less older server
+    # cannot erase what a newer one already recorded, exactly as ``cloud_features`` behaves.
+    status = response.get("status")
+    if isinstance(status, str) and status.strip():
+        declared["status"] = status.strip().lower()[:_MAX_STATUS_CHARS]
+    for key in ("is_trial", "trial_consumed"):
+        value = response.get(key)
+        if isinstance(value, bool):
+            declared[key] = value
+    ends_at = response.get("trial_ends_at")
+    if isinstance(ends_at, str) and ends_at.strip():
+        declared["trial_ends_at"] = ends_at.strip()[:_MAX_TIMESTAMP_CHARS]
+    elif ends_at is None and "is_trial" in declared and not declared["is_trial"]:
+        # An explicit ``null`` from a server that *did* answer the trial question is
+        # meaningful: it is how a converted paying customer is told they have no live trial
+        # boundary. Clear a stale one rather than letting a past trial end survive forever.
+        declared["trial_ends_at"] = ""
     return declared
 
 
@@ -329,6 +373,13 @@ def record_billing_denial() -> bool:
             )
             saved["cloud_access_active"] = False
             saved["cloud_features"] = []
+            # The last status the server named ("active", "trialing", …) is now known to
+            # contradict this denial, so it must not survive as renderable copy. The trial
+            # facts are *not* invalidated by a lapse -- whether this was a trial, when it
+            # ended, and whether one was consumed are all still true -- and they are what
+            # lets the dashboard say "your free trial ended" rather than the generic
+            # "your subscription lapsed".
+            saved.pop("status", None)
             saved["entitlement_checked_at"] = time.time()
             # Inside the lock: a save that lands after release is exactly the race above.
             _save(saved)
@@ -543,17 +594,21 @@ def access_for_workspace(
         # plan re-confirms itself on every token rotation. An older cloud omits them and
         # the previously persisted answer (if any) is left untouched.
         declared = _declared_entitlement(body)
-        if declared and "cloud_features" not in declared:
-            # A *plan change* may never inherit the previous plan's grants.
-            # ``_declared_entitlement`` omits ``cloud_features`` whenever the body carried
-            # no feature list, so merging it onto the saved record left a Team feature list
-            # alive underneath a downgraded Pro plan and kept the Team tab unlocked
-            # indefinitely. Dropping the stale key hands the answer back to this client's
-            # own plan table, which is right for the plan the cloud just named. A refresh
-            # that re-confirms the *same* plan still keeps the richer saved list.
+        if declared:
+            # A *plan change* may never inherit the previous plan's state.
+            # ``_declared_entitlement`` omits any field the body did not carry, so merging
+            # it onto the saved record left a Team feature list alive underneath a
+            # downgraded Pro plan and kept the Team tab unlocked indefinitely. Dropping
+            # every entitlement key the new answer did not restate hands those back to this
+            # client's own defaults, which are right for the plan the cloud just named --
+            # and stops a finished trial's ``is_trial``/``trial_ends_at`` surviving under
+            # the paid plan it converted into. A refresh that re-confirms the *same* plan
+            # still keeps the richer saved answer.
             previous = str(saved.get("plan") or "").strip().lower()
             if previous != declared["plan"]:
-                updated.pop("cloud_features", None)
+                for key in _ENTITLEMENT_KEYS:
+                    if key not in declared:
+                        updated.pop(key, None)
         updated.update(declared)
         _save(updated)
         return access, organization_id, compute

@@ -7,6 +7,7 @@ Engraphis Cloud.
 """
 from __future__ import annotations
 
+import datetime as _datetime
 import json
 import hmac
 import logging
@@ -1896,6 +1897,95 @@ def _normalized_plan(value: object) -> str:
     return plan if plan in ("pro", "team") else "local"
 
 
+#: The control plane's entitlement status vocabulary, mirrored from (read-only)
+#: engraphis-cloud/engraphis_cloud/entitlements.py ``effective_status`` and the statuses
+#: ``/internal/subscriptions/apply`` accepts. Presentation only: an unrecognised value is
+#: reported as ``""`` rather than guessed at, which degrades the copy to the generic
+#: wording instead of asserting something the server never said.
+_ENTITLEMENT_STATUSES = frozenset({
+    "active", "trialing", "past_due", "canceled", "expired", "revoked", "scheduled",
+    "inactive",
+})
+
+
+def _normalized_status(value: object) -> str:
+    """Return the control plane's entitlement status, or ``""`` when it said nothing."""
+
+    status = str(value or "").strip().lower()
+    return status if status in _ENTITLEMENT_STATUSES else ""
+
+
+def _epoch_seconds(value: object) -> float:
+    """Return an ISO-8601 instant as epoch seconds, or ``0.0``. Never raises.
+
+    The control plane serializes ``trial_ends_at`` as an ISO-8601 UTC timestamp; the
+    dashboard renders instants as epoch seconds. Converting once, here, keeps the JS from
+    parsing dates the CSP-externalized asset cannot be unit-tested through.
+
+    ``datetime.fromisoformat`` on this package's Python 3.9 floor does not accept the
+    trailing ``Z`` that Pydantic emits for UTC, so it is rewritten to the explicit offset
+    first. Anything it still cannot parse is reported as "unknown" rather than raising on
+    the ``/api/bootstrap`` boot path.
+    """
+
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value) if value > 0 else 0.0
+    if not isinstance(value, str) or not value.strip():
+        return 0.0
+    text = value.strip()
+    if text[-1:] in ("Z", "z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = _datetime.datetime.fromisoformat(text)
+    except (ValueError, TypeError):
+        return 0.0
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_datetime.timezone.utc)
+    try:
+        return float(parsed.timestamp())
+    except (OverflowError, OSError, ValueError):
+        return 0.0
+
+
+def _trial_facts(source: object) -> dict:
+    """Read the control plane's trial disclosure off any entitlement-shaped mapping.
+
+    ``DeviceRegistrationResponse`` and ``GET /v1/entitlements/{org}`` carry the same four
+    fields, so one reader serves both and the two answers cannot be parsed by different
+    rules. Every field is optional: a control plane that predates them simply omits them,
+    and the honest answer is then "not a trial, none consumed" rather than a claim.
+
+    ``trial_consumed`` is deliberately widened by ``is_trial``: an organization that is on
+    a trial has by definition consumed one, so a server that answers only ``is_trial``
+    still stops this client offering a second trial the server would refuse.
+    """
+
+    if not isinstance(source, dict):
+        return {"status": "", "is_trial": False, "trial_consumed": False,
+                "trial_ends_at": 0.0}
+    is_trial = source.get("is_trial")
+    is_trial = bool(is_trial) if isinstance(is_trial, bool) else False
+    consumed = source.get("trial_consumed")
+    consumed = bool(consumed) if isinstance(consumed, bool) else False
+    return {
+        "status": _normalized_status(source.get("status")),
+        "is_trial": is_trial,
+        "trial_consumed": consumed or is_trial,
+        # A trial boundary is only meaningful for a trial. Replaying a converted
+        # customer's long-past trial end would tell a paying subscriber their access
+        # expired last month, which is exactly what the server refuses to do.
+        "trial_ends_at": _epoch_seconds(source.get("trial_ends_at")) if is_trial else 0.0,
+    }
+
+
+def _unknown_trial_facts() -> dict:
+    """Return the "the control plane has told us nothing" trial answer."""
+
+    return {"status": "", "is_trial": False, "trial_consumed": False, "trial_ends_at": 0.0}
+
+
 def _normalized_features(values: object, plan: str) -> list:
     """Keep the server's own grant, expanded to the names this dashboard renders.
 
@@ -1937,7 +2027,7 @@ def _session_entitlement() -> dict:
             return {}
         plan = _normalized_plan(declared.get("plan"))
         active = bool(declared.get("cloud_access_active"))
-        return {
+        resolved = {
             "plan": plan,
             # The server empties ``cloud_features`` the moment paid access stops being
             # live; mirror that, exactly as the entitlements route's answer does below.
@@ -1949,6 +2039,8 @@ def _session_entitlement() -> dict:
             "organization_id": str(declared.get("organization_id") or ""),
             "fetched_at": float(declared.get("entitlement_checked_at") or 0.0),
         }
+        resolved.update(_trial_facts(declared))
+        return resolved
     except Exception:  # noqa: BLE001 - a badge must never break /bootstrap
         return {}
 
@@ -2009,13 +2101,18 @@ def _read_entitlement_cache() -> dict:
     if not current or organization_id != current:
         return {}
     plan = _normalized_plan(stored_plan)
-    return {
+    resolved = {
         "plan": plan,
         "features": _normalized_features(value.get("features"), plan),
         "cloud_access_active": bool(value.get("cloud_access_active")),
         "organization_id": organization_id,
         "fetched_at": fetched_at,
     }
+    # The trial disclosure is cached under the same wire names the entitlements route uses,
+    # so a cache written by an older build simply has none of them and reads back as "not a
+    # trial" rather than as a corrupt entry.
+    resolved.update(_trial_facts(value))
+    return resolved
 
 
 def _write_entitlement_cache(entitlement: dict) -> None:
@@ -2039,6 +2136,13 @@ def _write_entitlement_cache(entitlement: dict) -> None:
             "cloud_access_active": bool(entitlement["cloud_access_active"]),
             "organization_id": str(entitlement.get("organization_id") or ""),
             "fetched_at": float(entitlement.get("fetched_at") or time.time()),
+            # Persisted under the wire names ``_trial_facts`` reads, so the cache round
+            # trips through exactly one parser. ``trial_ends_at`` is already epoch seconds
+            # by this point, which that parser also accepts.
+            "status": _normalized_status(entitlement.get("status")),
+            "is_trial": bool(entitlement.get("is_trial")),
+            "trial_consumed": bool(entitlement.get("trial_consumed")),
+            "trial_ends_at": float(entitlement.get("trial_ends_at") or 0.0),
         }, sort_keys=True, separators=(",", ":")))
     except Exception:  # noqa: BLE001 - losing the cache write must not surface anywhere
         logger.debug("entitlement cache write skipped")
@@ -2072,6 +2176,11 @@ def _deny_entitlement_cache() -> None:
         denied = dict(cached)
         denied["cloud_access_active"] = False
         denied["features"] = []
+        # The last status the server named now contradicts this denial, so it stops being
+        # renderable copy. The trial facts survive: a lapse does not un-consume a trial or
+        # move its boundary, and they are what distinguishes "your free trial ended" from
+        # "your subscription lapsed" in the panel this settles.
+        denied["status"] = ""
         denied["fetched_at"] = time.time()
         _write_entitlement_cache(denied)
     except Exception:  # noqa: BLE001 - a denial we cannot persist is still a denial
@@ -2196,7 +2305,7 @@ def _fetch_authoritative_entitlement() -> Optional[dict]:
     if not isinstance(active, bool):
         return None
     plan = _normalized_plan(declared_plan)
-    return {
+    resolved = {
         "plan": plan,
         # The server empties ``cloud_features`` the moment paid access stops being live.
         # Mirroring that re-draws the locks on a lapsed subscription while the badge keeps
@@ -2207,6 +2316,11 @@ def _fetch_authoritative_entitlement() -> Optional[dict]:
         "organization_id": organization_id,
         "fetched_at": time.time(),
     }
+    # ``is_trial``/``trial_consumed``/``trial_ends_at``/``status`` are optional here for the
+    # same reason the fields above the fallback are: a control plane that predates them
+    # omits them, and the honest answer is then "not a trial", not a refusal to cache.
+    resolved.update(_trial_facts(body))
+    return resolved
 
 
 def _refresh_entitlement_in_background(known: dict) -> None:
@@ -2287,34 +2401,61 @@ def _plan_entitlement() -> dict:
     declared = os.environ.get("ENGRAPHIS_CLOUD_PLAN", "").strip().lower()
     if declared in ("pro", "team", "free", "local"):
         plan = declared if declared in ("pro", "team") else "local"
-        return {"plan": plan, "features": entitled_features(plan),
-                "source": "environment", "cloud_access_active": plan != "local",
-                "checked_at": 0.0}
+        # An operator override names a plan, never a trial: it exists for air-gapped and
+        # pinned-token deployments that have no control plane to ask. Reporting "no trial,
+        # none consumed" is the honest answer, and it is what keeps the trial CTA off a
+        # deployment that cannot start one.
+        entitlement = {"plan": plan, "features": entitled_features(plan),
+                       "source": "environment", "cloud_access_active": plan != "local",
+                       "checked_at": 0.0}
+        entitlement.update(_unknown_trial_facts())
+        return entitlement
     try:
         from engraphis import cloud_session
         connected = cloud_session.configured(require_compute=False)
     except Exception:  # noqa: BLE001 - a badge must never break /bootstrap
         connected = False
     if not connected:
-        return {"plan": "local", "features": [], "source": "local",
-                "cloud_access_active": False, "checked_at": 0.0}
+        entitlement = {"plan": "local", "features": [], "source": "local",
+                       "cloud_access_active": False, "checked_at": 0.0}
+        entitlement.update(_unknown_trial_facts())
+        return entitlement
     session = _session_entitlement()
     if session:
         _refresh_entitlement_in_background(session)
-        return {"plan": session["plan"], "features": list(session["features"]),
-                "source": "session", "cloud_access_active": session["cloud_access_active"],
-                "checked_at": session["fetched_at"]}
+        return _resolved_entitlement(session, source="session")
     cached = _read_entitlement_cache()
     _refresh_entitlement_in_background(cached)
     if cached:
-        return {"plan": cached["plan"], "features": list(cached["features"]),
-                "source": "cloud", "cloud_access_active": cached["cloud_access_active"],
-                "checked_at": cached["fetched_at"]}
+        return _resolved_entitlement(cached, source="cloud")
     # Connected, but the control plane has never answered (first boot after onboarding, or
     # offline since). ``pro`` unlocks what every paid plan includes and leaves only the Team
     # upsell showing; the refresh scheduled above corrects it.
-    return {"plan": "pro", "features": entitled_features("pro"), "source": "connected",
-            "cloud_access_active": True, "checked_at": 0.0}
+    #
+    # It says nothing about a trial either way. Guessing "no trial consumed" here would
+    # re-offer the trial CTA to a connected organization the server will refuse -- a
+    # connected installation always has an organization, and that organization is on a
+    # trial, has spent one, or is paying -- so this reports the trial as consumed and lets
+    # the refresh replace the guess with the answer.
+    entitlement = {"plan": "pro", "features": entitled_features("pro"),
+                   "source": "connected", "cloud_access_active": True, "checked_at": 0.0}
+    entitlement.update(_unknown_trial_facts())
+    entitlement["trial_consumed"] = True
+    return entitlement
+
+
+def _resolved_entitlement(known: dict, *, source: str) -> dict:
+    """Shape one persisted answer into the resolver's return value."""
+
+    resolved = {
+        "plan": known["plan"],
+        "features": list(known["features"]),
+        "source": source,
+        "cloud_access_active": known["cloud_access_active"],
+        "checked_at": known["fetched_at"],
+    }
+    resolved.update(_trial_facts(known))
+    return resolved
 
 
 def _hosted_plan() -> str:
@@ -2355,13 +2496,48 @@ def hosted_plan_summary() -> dict:
             entitlement = {"plan": plan, "features": entitled_features(plan),
                            "source": "override", "cloud_access_active": plan != "local",
                            "checked_at": 0.0}
+            entitlement.update(_unknown_trial_facts())
     return {
         "plan": entitlement["plan"],
         "features": list(entitlement["features"]),
         "plan_source": entitlement["source"],
         "cloud_access_active": entitlement["cloud_access_active"],
         "plan_checked_at": entitlement["checked_at"],
+        "entitlement_status": entitlement["status"],
+        "is_trial": entitlement["is_trial"],
+        "trial_consumed": entitlement["trial_consumed"],
+        "trial_ends_at": entitlement["trial_ends_at"],
+        "access_state": _access_state(entitlement),
     }
+
+
+#: Why the customer's hosted features are, or are not, available right now. The dashboard
+#: renders one explanation per value; every one of them is a different thing to tell the
+#: customer and a different thing to ask them to do.
+#:
+#: * ``trial`` — a live trial. Say when it ends and offer to buy.
+#: * ``active`` — a live paid subscription. Nothing to explain.
+#: * ``trial_expired`` — the free trial ran out. Offer to buy; never offer another trial.
+#: * ``lapsed`` — a subscription that is no longer live (cancelled, expired, unpaid).
+#:   Send the customer to billing, not to a trial they cannot start.
+#: * ``inactive`` — no hosted plan at all. This is the only state a trial is offerable in.
+#:
+#: Before this existed, the last three were indistinguishable on screen: the client kept
+#: ``plan="pro"`` with an emptied feature list, so a customer whose trial had ended and a
+#: customer whose card had failed both saw a confident PRO badge over rows of locks with
+#: no reason given.
+_ACCESS_STATES = ("active", "trial", "trial_expired", "lapsed", "inactive")
+
+
+def _access_state(entitlement: dict) -> str:
+    """Classify why hosted features are available or locked. Never raises."""
+
+    if entitlement.get("plan") not in ("pro", "team"):
+        return "inactive"
+    is_trial = bool(entitlement.get("is_trial"))
+    if entitlement.get("cloud_access_active"):
+        return "trial" if is_trial else "active"
+    return "trial_expired" if is_trial else "lapsed"
 
 
 @router.get("/license")
@@ -2387,11 +2563,35 @@ def get_license():
         "plan_source": summary["plan_source"],
         "plan_checked_at": summary["plan_checked_at"],
         "cloud_access_active": summary["cloud_access_active"],
-        # The client cannot distinguish a trial from a paid subscription; the control
-        # plane owns that. Report the honest default so the badge falls back to the plan
-        # name instead of silently claiming a trial the customer may not be on.
-        "is_trial": False,
-        "trial": {"used": False, "trial_days": licensing.TRIAL_DAYS},
+        # Why the hosted features above are, or are not, live. The dashboard renders one
+        # explanation per value rather than a plan badge over unexplained locks.
+        "access_state": summary["access_state"],
+        # The control plane's own entitlement status, when it named one. ``""`` means it
+        # has not, or that its last answer was contradicted by a billing denial.
+        "entitlement_status": summary["entitlement_status"],
+        # The control plane owns the trial, and now says so on the calls this client
+        # already makes. Hardcoding these to ``False`` made the dashboard's TRIAL badge
+        # unreachable and, because ``used`` never became true, offered "Start your free
+        # trial" forever — to active subscribers and to customers whose trial was already
+        # spent, both of whom the server answers with ``TrialAlreadyConsumedError``.
+        "is_trial": summary["is_trial"],
+        "trial": {
+            "used": summary["trial_consumed"],
+            "active": summary["access_state"] == "trial",
+            # Epoch seconds, ``0`` when there is no live trial boundary to disclose. A
+            # converted paying customer is deliberately never told about a past one.
+            "ends_at": summary["trial_ends_at"],
+            # A trial is offerable only to an installation that belongs to no organization
+            # yet. ``start_trial`` refuses every organization that already holds an
+            # entitlement, so a connected customer — trialling, lapsed, or paying — can
+            # only ever be answered 409 by the button.
+            "available": (
+                not summary["trial_consumed"]
+                and summary["access_state"] == "inactive"
+                and summary["plan_source"] == "local"
+            ),
+            "trial_days": licensing.TRIAL_DAYS,
+        },
         "cloud_managed": True,
         "trial_seconds": 259_200,
         "grace_seconds": 86_400,

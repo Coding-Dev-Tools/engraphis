@@ -93,6 +93,11 @@ def test_hosted_views_delegate_entitlement_to_cloud_proxy_responses():
 # regression it guards (409 folded into ``hostedFeatureUnavailable``) kept every string
 # these files already assert on, and only a run can tell which branch actually won.
 _ROUTED_FUNCTIONS = (
+    # The access-state readers the panel copy is now derived from. They are bundled as the
+    # real shipped functions rather than stubbed, so "does this customer get offered a
+    # trial" is answered here by the code that answers it in the browser.
+    "licAccessState", "licAccessLive", "licTrialActive", "licTrialAvailable",
+    "licPlanName", "licTrialEnds", "fmtDay", "lockReason",
     "hostedPlanUrl", "unlockHtml", "managedConsentHtml",
     "managedConsentRequired", "hostedFeatureUnavailable",
     "loadAnalytics", "loadAutomation",
@@ -115,9 +120,15 @@ function fmtRel(){return 'just now'}
 function toast(){}
 const TRIAL_DAYS = 3, WS = 'workspace';
 let CURRENT_VIEW = 'overview';
-const LIC = {pro_upgrade_url:'https://engraphis.com/pricing',
+// The default is an unconnected installation: no hosted plan, unspent trial, and the
+// control plane says a trial may still be started. A case can replace ``access_state`` and
+// ``trial`` to model a trialist, a spent trial, a paying customer, or a lapsed one.
+const LIC_BASE = {pro_upgrade_url:'https://engraphis.com/pricing',
              team_upgrade_url:'https://engraphis.com/pricing?plan=team',
-             upgrade_url:'https://engraphis.com/pricing', trial:{used:false}};
+             upgrade_url:'https://engraphis.com/pricing',
+             plan:'local', access_state:'inactive',
+             trial:{used:false, active:false, available:true, ends_at:0}};
+let LIC = LIC_BASE;
 const location = {href:'https://127.0.0.1:8077/'};
 let THROWN = null;
 async function api(){if(THROWN) throw THROWN; return {}}
@@ -129,6 +140,7 @@ const CASES = JSON.parse(process.argv[2]);
   const out = [];
   for (const c of CASES) {
     THROWN = Object.assign(new Error(c.message || 'request failed'), c.error);
+    LIC = Object.assign({}, LIC_BASE, c.lic || {});
     CURRENT_VIEW = c.view;
     for (const key of Object.keys(NODES)) delete NODES[key];
     await (c.view === 'analytics' ? loadAnalytics() : loadAutomation());
@@ -220,6 +232,43 @@ def test_a_genuine_entitlement_failure_still_renders_the_upgrade_panel(
     assert "Purchase Pro license" in rendered["html"]
     assert "Start hosted Pro trial" in rendered["html"]
     assert rendered["pill"] == "PRO"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
+@pytest.mark.parametrize("view", ["analytics", "automation"])
+@pytest.mark.parametrize("state,reason", [
+    ("trial", "Your free trial is live"),
+    ("trial_expired", "Your free trial has ended"),
+    ("lapsed", "no longer active"),
+    ("active", "does not include this"),
+])
+def test_the_upgrade_panel_never_offers_a_trial_the_server_would_refuse(
+    tmp_path, view, state, reason,
+):
+    """``start_trial`` refuses every organization that already holds an entitlement.
+
+    ``trial.used`` was hardcoded false by ``/api/license``, so this panel offered "Start
+    hosted Pro trial" to every connected customer forever — a trialist mid-trial, a
+    customer whose trial had already been spent, and an active subscriber alike. All three
+    got a 409 from the control plane for clicking it. The panel now says which of those
+    four situations the customer is actually in, and only sells what is buyable.
+    """
+
+    rendered = _route(tmp_path, [{
+        "name": "gated", "view": view, "error": {"status": 402},
+        "lic": {
+            "plan": "pro", "access_state": state,
+            "trial": {"used": state != "active", "active": state == "trial",
+                      "available": False, "ends_at": 1785240000},
+        },
+    }])["gated"]
+
+    assert 'class="upgrade-panel"' in rendered["html"]
+    # The one thing that must always still be offered.
+    assert "Purchase Pro license" in rendered["html"]
+    # And the one thing that must not.
+    assert "Start hosted Pro trial" not in rendered["html"]
+    assert reason in rendered["html"]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
