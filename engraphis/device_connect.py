@@ -26,6 +26,7 @@ Design constraints, all of which have teeth:
 from __future__ import annotations
 
 import json
+import math
 import os
 import platform
 import re
@@ -85,6 +86,12 @@ _IDENTITY_SCHEMA = "engraphis-client-identity/v1"
 #: shipped control plane would otherwise leave a customer "connected" but not configured.
 #: Applied *only* when the control plane is the shipped one: a self-hosted or staging
 #: control URL gets no guess, and the caller is told to supply the compute URL.
+#:
+#: This is the *fallback*, not the authority: ``default_compute_url`` prefers the
+#: manifest's ``compute_plane`` whenever it carries one.  The shipped
+#: ``engraphis-commercial/v2`` manifest does not declare that key, so without a constant
+#: here a production connect would resolve an empty compute URL and save an unconfigured
+#: session.
 DEFAULT_COMPUTE_URL = "https://compute.engraphis.com"
 
 
@@ -241,21 +248,59 @@ def default_control_url() -> str:
 
 
 def default_compute_url(control_url: str) -> str:
-    """Resolve the compute plane, guessing only for the shipped control plane."""
+    """Resolve the compute plane, guessing only for the shipped control plane.
+
+    The manifest is the authority for shipped endpoint metadata, so a ``compute_plane``
+    key wins if one is ever published -- a manifest-only endpoint change then needs no
+    code change here.  The current ``engraphis-commercial/v2`` manifest declares only
+    ``control_plane``, so :data:`DEFAULT_COMPUTE_URL` is what production actually
+    resolves; reading the absent key alone would yield ``""`` and save a session
+    ``cloud_session.configured()`` rejects.
+    """
 
     configured = os.environ.get("ENGRAPHIS_CLOUD_COMPUTE_URL", "").strip()
     if configured:
         return configured
     shipped = ""
+    shipped_compute = ""
     try:
         from engraphis.commercial import manifest
 
-        shipped = str(manifest().get("control_plane") or "").strip()
+        data = manifest()
+        shipped = str(data.get("control_plane") or "").strip()
+        shipped_compute = str(data.get("compute_plane") or "").strip()
     except Exception:  # pragma: no cover - manifest ships with the package
         return ""
     if shipped and control_url.rstrip("/") == shipped.rstrip("/"):
-        return DEFAULT_COMPUTE_URL
+        return shipped_compute or DEFAULT_COMPUTE_URL
     return ""
+
+
+def _validated_timeout(value: object) -> float:
+    """Reject a timeout the socket layer cannot use, before any request is started.
+
+    ``float("nan")`` and ``float("inf")`` are values ``argparse``'s ``type=float``
+    accepts happily, but they reach the pinned opener's deadline arithmetic and raise
+    ``ValueError``/``OverflowError`` from inside ``urllib`` -- neither of which
+    :func:`post_connect` catches.  That breaks this module's contract that every failure
+    is a :class:`DeviceConnectError` with actionable copy, so ``--timeout nan`` printed a
+    traceback instead of an error and an exit code.  Non-positive values are refused for
+    the same reason: a ``0`` or negative socket timeout is not a shorter wait, it is a
+    different (non-blocking) mode the caller did not ask for.
+    """
+
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError) as exc:
+        raise DeviceConnectError(
+            "The connect timeout must be a number of seconds.", status=400
+        ) from exc
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise DeviceConnectError(
+            "The connect timeout must be a positive, finite number of seconds.",
+            status=400,
+        )
+    return timeout
 
 
 def _validated_control_url(value: str) -> str:
@@ -362,6 +407,7 @@ def post_connect(control_url: str, token: str, *, installation_client_id: str,
     deliberately no ``organization_id``: the token carries the organization.
     """
 
+    timeout = _validated_timeout(timeout)
     body = {
         "connect_token": token,
         "installation_client_id": installation_client_id,
@@ -491,6 +537,10 @@ def connect(token: object, *, control_url: Optional[str] = None,
     never containing the token.  Nothing is written unless the exchange succeeded.
     """
 
+    # Argument checks first: a bad ``--timeout`` must be reported as a bad timeout, not
+    # masked by whatever the identity or storage pre-flight happens to hit on the way to
+    # the same rejection inside ``post_connect``.
+    timeout = _validated_timeout(timeout)
     normalized = normalize_connect_token(token)
     resolved_control = _validated_control_url(
         control_url if control_url is not None else default_control_url()
@@ -541,6 +591,18 @@ def connect(token: object, *, control_url: Optional[str] = None,
         )
     except cloud_session.CloudSessionError as exc:
         raise DeviceConnectError(str(exc), status=getattr(exc, "status", 503)) from exc
+    except OSError as exc:
+        # The pre-flight cleared this exact path moments ago, so arriving here means the
+        # state directory changed underneath the exchange. ``UnsafeStateFile`` is an
+        # ``OSError`` and not a ``CloudSessionError``, so without this clause it escapes
+        # as a raw traceback at the worst possible moment -- the token is already spent,
+        # and the customer needs to be told that plainly rather than shown a stack.
+        raise DeviceConnectError(
+            "Engraphis Cloud accepted the token, but the session could not be written to "
+            "%s. Fix that path, then connect again with a new token from your account "
+            "portal -- this one has been used." % session_path,
+            status=409,
+        ) from exc
 
     summary = summarize(response)
     summary["control_url"] = resolved_control
