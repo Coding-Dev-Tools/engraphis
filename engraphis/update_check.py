@@ -168,7 +168,7 @@ def _fetch(url: str, timeout: float) -> Optional[dict]:
     # cloud_session, sync_relay): the vetted address is the one actually dialled, which
     # rejects private/reserved targets and closes the DNS-rebinding window between the
     # scheme check above and the connect. A plain ``build_opener`` had neither guard.
-    opener = build_pinned_https_opener(_NoRedirect)
+    opener = build_pinned_https_opener(_NoRedirect())
     try:
         with opener.open(req, timeout=timeout) as resp:  # nosec B310 - scheme checked above
             raw = resp.read(_MAX_BYTES + 1)

@@ -1830,6 +1830,30 @@ def _cloud_control_url() -> str:
     return str(saved.get("control_url") or "").strip().rstrip("/")
 
 
+def _configured_organization_id() -> str:
+    """Return the organization this installation is bound to *right now*, or ``""``.
+
+    A pinned ``ENGRAPHIS_CLOUD_ORGANIZATION_ID`` wins, exactly as it does in
+    ``cloud_session.access_for_workspace``; otherwise the saved session names it. Never
+    raises: an unreadable or absent session simply means "unknown", and an unknown
+    organization leaves the persisted answers in place rather than blanking a paying
+    customer's badge.
+    """
+
+    pinned = os.environ.get("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "").strip()
+    if pinned:
+        return pinned
+    try:
+        from engraphis import cloud_session
+        loader = getattr(cloud_session, "_load", None)
+        saved = loader() if loader is not None else None
+    except Exception:  # noqa: BLE001 - an unreadable session is simply "not configured"
+        return ""
+    if not isinstance(saved, dict):
+        return ""
+    return str(saved.get("organization_id") or "").strip()
+
+
 def _normalized_plan(value: object) -> str:
     """Map any control-plane plan name onto this client's presentation vocabulary."""
 
@@ -1931,12 +1955,24 @@ def _read_entitlement_cache() -> dict:
         fetched_at = float(value.get("fetched_at") or 0.0)
     except (TypeError, ValueError, OverflowError):
         fetched_at = 0.0
+    # Whose plan is this? The cache lives in the state directory, which outlives a
+    # reconnect and is shared by every organization this installation is ever pointed at.
+    # Serving it unchecked kept the PREVIOUS organization's Pro/Team badge and feature
+    # grants on screen for a whole refresh interval — and indefinitely with
+    # ``ENGRAPHIS_CLOUD_ENTITLEMENT_REFRESH=0``. Fail closed and ignore a cache that names
+    # anyone else (or names nobody), exactly as ``_session_entitlement`` refuses a session
+    # plan recorded for a different organization. The refresh scheduled by the caller then
+    # writes the right one.
+    organization_id = str(value.get("organization_id") or "")
+    current = _configured_organization_id()
+    if current and organization_id != current:
+        return {}
     plan = _normalized_plan(stored_plan)
     return {
         "plan": plan,
         "features": _normalized_features(value.get("features"), plan),
         "cloud_access_active": bool(value.get("cloud_access_active")),
-        "organization_id": str(value.get("organization_id") or ""),
+        "organization_id": organization_id,
         "fetched_at": fetched_at,
     }
 
@@ -2200,6 +2236,14 @@ def _hosted_plan() -> str:
     return _plan_entitlement()["plan"]
 
 
+#: The unpatched ``_hosted_plan``, captured so ``hosted_plan_summary`` can tell "nobody has
+#: replaced the seam" from "somebody has". Calling ``_hosted_plan()`` unconditionally
+#: resolved the entitlement a *second* time — two more state-file reads, and a second
+#: chance to schedule a background refresh — on every ``/api/license`` and therefore every
+#: ``/api/bootstrap`` request, for an answer already sitting in ``entitlement["plan"]``.
+_DEFAULT_HOSTED_PLAN = _hosted_plan
+
+
 def hosted_plan_summary() -> dict:
     """Return the one plan answer every license surface reports.
 
@@ -2209,12 +2253,16 @@ def hosted_plan_summary() -> dict:
 
     entitlement = _plan_entitlement()
     # ``_hosted_plan`` is the single override seam; when a caller replaces it, its answer
-    # wins and the feature list falls back to this client's plan table.
-    plan = _hosted_plan()
-    if plan != entitlement["plan"]:
-        entitlement = {"plan": plan, "features": entitled_features(plan),
-                       "source": "override", "cloud_access_active": plan != "local",
-                       "checked_at": 0.0}
+    # wins and the feature list falls back to this client's plan table. Left alone it
+    # returns exactly ``_plan_entitlement()["plan"]``, so it is consulted only when it has
+    # actually been replaced — calling it unconditionally repeated the resolution above
+    # verbatim, state-file reads and refresh scheduling included.
+    if _hosted_plan is not _DEFAULT_HOSTED_PLAN:
+        plan = _hosted_plan()
+        if plan != entitlement["plan"]:
+            entitlement = {"plan": plan, "features": entitled_features(plan),
+                           "source": "override", "cloud_access_active": plan != "local",
+                           "checked_at": 0.0}
     return {
         "plan": entitlement["plan"],
         "features": list(entitlement["features"]),

@@ -348,13 +348,15 @@ def _refresh_http_error(status: int) -> CloudSessionError:
     return CloudSessionError("Engraphis Cloud could not refresh this session.")
 
 
-def _post_refresh(control_url: str, refresh: str, workspace_id: str,
+def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
                   token_subject: str) -> dict:
-    payload = json.dumps({
-        "refresh_credential": refresh,
-        "workspace_id": workspace_id,
-        "token_subject": token_subject,
-    }, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    # An org-scoped entitlement read asks for an unbound token, so it passes no workspace.
+    # Serializing that as ``"workspace_id": null`` invites a 4xx from any control plane that
+    # requires the field to be a string; omit the key instead of sending an empty value.
+    body = {"refresh_credential": refresh, "token_subject": token_subject}
+    if workspace_id:
+        body["workspace_id"] = workspace_id
+    payload = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
     request = urllib.request.Request(
         control_url + "/v1/tokens/refresh",
         data=payload,
@@ -422,9 +424,13 @@ def configured(*, require_compute: bool = True) -> bool:
 
 
 def access_for_workspace(
-    workspace_id: str, *, require_compute: bool = True
+    workspace_id: Optional[str], *, require_compute: bool = True
 ) -> Tuple[str, str, str]:
-    """Return ``(access_token, organization_id, compute_url)`` for a bound workspace."""
+    """Return ``(access_token, organization_id, compute_url)`` for a bound workspace.
+
+    ``workspace_id`` may be ``None`` for an org-scoped read that deliberately wants an
+    unbound token; the refresh body then omits the field rather than sending ``null``.
+    """
 
     direct_token = os.environ.get("ENGRAPHIS_CLOUD_ACCESS_TOKEN", "").strip()
     direct_org = os.environ.get("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "").strip()

@@ -29,6 +29,7 @@ import re
 import socket
 import threading
 import time
+import typing
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -418,6 +419,38 @@ def test_a_vetted_https_control_url_is_still_reached(monkeypatch) -> None:
     assert [call["url"] for call in _entitlement_reads(cloud)] == [
         CONTROL_URL + "/v1/entitlements/" + ORGANIZATION
     ]
+
+
+def test_the_entitlement_refresh_never_sends_a_null_workspace_id(monkeypatch) -> None:
+    """The compatibility fallback mints an *unbound* token, so it passes no workspace.
+
+    ``access_for_workspace`` is annotated ``workspace_id: str`` but is called with ``None``,
+    which ``_post_refresh`` serialises as ``"workspace_id": null``. A control plane that
+    requires a non-null workspace id answers 4xx, ``_fetch_authoritative_entitlement``
+    swallows it and returns ``None``, and the cached ``GET /v1/entitlements/{org}`` answer
+    that older control planes depend on is never written at all. Omit the key instead.
+    """
+
+    _connect(monkeypatch, pinned_token=False)
+    cloud = _FakeControlPlane(_entitlement_dto("team"))
+    sent = []
+    record = cloud.open
+
+    def _capture(request, timeout=None):
+        sent.append(request.data)
+        return record(request, timeout=timeout)
+
+    monkeypatch.setattr(cloud, "open", _capture)
+    _serve(monkeypatch, cloud)
+
+    v2_api._fetch_authoritative_entitlement()
+
+    payloads = [json.loads(body.decode("utf-8")) for body in sent if body]
+    assert payloads, "the token refresh was never made"
+    for payload in payloads:
+        assert payload.get("workspace_id", "absent") is not None, payload
+    hints = typing.get_type_hints(cloud_session.access_for_workspace)
+    assert hints["workspace_id"] == typing.Optional[str]
 
 
 @pytest.mark.parametrize("failure", [
@@ -961,6 +994,68 @@ def test_a_session_plan_for_another_organization_is_refused(monkeypatch) -> None
     assert v2_api._session_entitlement()["plan"] == "team"
 
 
+def test_a_cached_entitlement_for_another_organization_is_refused(monkeypatch) -> None:
+    """The same guard, on the compatibility cache — which the session path already had.
+
+    The cache file lives in the state directory, which outlives a reconnect and is shared
+    by every organization the installation is ever pointed at. Serving it unchecked showed
+    the PREVIOUS organization's Team badge and Team grant for a whole refresh interval, and
+    for ever with the refresh disabled.
+    """
+
+    _connect(monkeypatch)
+    path = v2_api._entitlement_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    v2_api._write_entitlement_cache({
+        "plan": "team", "features": v2_api.entitled_features("team"),
+        "cloud_access_active": True, "organization_id": ORGANIZATION,
+        "fetched_at": time.time(),
+    })
+    assert v2_api._read_entitlement_cache()["plan"] == "team"
+
+    # Re-pinned to somebody else's organization, reusing the very same state directory.
+    # The kill switch models the worst case: nothing will ever correct a served stale answer.
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "org_somebody_else")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ENTITLEMENT_REFRESH", "0")
+
+    assert v2_api._read_entitlement_cache() == {}
+    payload = v2_api.get_license()
+    assert payload["plan_source"] != "cloud"
+    assert "team" not in payload["features"], "another organization's Team grant was served"
+
+    # Nothing was destroyed: the file is still correct for the organization it names.
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ORGANIZATION_ID", ORGANIZATION)
+    assert v2_api._read_entitlement_cache()["plan"] == "team"
+
+
+def test_a_cached_entitlement_follows_a_reconnected_session_not_just_a_pin(
+    monkeypatch,
+) -> None:
+    """No pin at all: reconnecting the installation rebinds it, and the cache must follow."""
+
+    _connect(monkeypatch, pinned_token=False)
+    cloud_session.save_bootstrap(
+        {"refresh_credential": "engr_rt_bootstrap", "organization_id": ORGANIZATION,
+         "installation_id": "inst_1", "device_id": "dev_1", "token_subject": "member"},
+        control_url=CONTROL_URL, compute_url=CONTROL_URL,
+    )
+    v2_api._write_entitlement_cache({
+        "plan": "team", "features": v2_api.entitled_features("team"),
+        "cloud_access_active": True, "organization_id": ORGANIZATION,
+        "fetched_at": time.time(),
+    })
+    assert v2_api._read_entitlement_cache()["plan"] == "team"
+
+    # The installation is connected again, this time to a different organization.
+    cloud_session.save_bootstrap(
+        {"refresh_credential": "engr_rt_bootstrap", "organization_id": "org_second_tenant",
+         "installation_id": "inst_1", "device_id": "dev_1", "token_subject": "member"},
+        control_url=CONTROL_URL, compute_url=CONTROL_URL,
+    )
+
+    assert v2_api._read_entitlement_cache() == {}
+
+
 def test_an_unreadable_session_yields_no_entitlement_rather_than_raising(
     monkeypatch,
 ) -> None:
@@ -1081,6 +1176,86 @@ def test_the_legacy_surface_still_reports_local_for_an_unconnected_installation(
 
     assert v1["plan"] == "local"
     assert v1["features"] == []
+
+
+# ── (6b) the boot path resolves the plan once, and the override seam still works ──
+def test_the_license_route_resolves_the_entitlement_exactly_once(monkeypatch) -> None:
+    """``_plan_entitlement`` reads the cloud session and the entitlement cache off disk and
+    can schedule a background refresh. ``hosted_plan_summary`` called it directly *and*
+    again through ``_hosted_plan``, doubling all of that on every ``/api/license`` — and
+    therefore on every ``/api/bootstrap``.
+    """
+
+    _connect(monkeypatch)
+    _serve(monkeypatch, _FakeControlPlane(_entitlement_dto("team")))
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ENTITLEMENT_REFRESH", "0")
+    resolutions = []
+    resolve = v2_api._plan_entitlement
+
+    def _counted() -> dict:
+        resolutions.append(1)
+        return resolve()
+
+    monkeypatch.setattr(v2_api, "_plan_entitlement", _counted)
+
+    payload = v2_api.get_license()
+
+    assert payload["plan"] == "pro"
+    assert len(resolutions) == 1, "the plan was resolved %d times per request" % len(
+        resolutions
+    )
+
+
+def test_one_resolution_also_covers_the_legacy_license_surface(monkeypatch) -> None:
+    """``/memory/license`` renders the same summary, so it inherited the same double read."""
+
+    import asyncio
+
+    from engraphis.routes import memory as memory_routes
+
+    _connect(monkeypatch)
+    _serve(monkeypatch, _FakeControlPlane(_entitlement_dto("team")))
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ENTITLEMENT_REFRESH", "0")
+    reads = []
+    read_cache = v2_api._read_entitlement_cache
+
+    def _counted() -> dict:
+        reads.append(1)
+        return read_cache()
+
+    monkeypatch.setattr(v2_api, "_read_entitlement_cache", _counted)
+
+    asyncio.new_event_loop().run_until_complete(memory_routes.get_license())
+
+    assert len(reads) == 1, "the entitlement cache was read %d times" % len(reads)
+
+
+def test_a_replaced_hosted_plan_still_overrides_the_resolved_entitlement(
+    monkeypatch,
+) -> None:
+    """The override seam is load-bearing (tests/test_client_launch.py patches it).
+
+    Resolving once must not mean ignoring a caller that replaced ``_hosted_plan``: its
+    answer still wins, and the feature list still falls back to this client's plan table.
+    """
+
+    _connect(monkeypatch)
+    _serve(monkeypatch, _FakeControlPlane(_entitlement_dto("team")))
+    assert _settled_license(monkeypatch)["plan"] == "team"
+
+    monkeypatch.setattr(v2_api, "_hosted_plan", lambda: "local")
+    payload = v2_api.get_license()
+
+    assert payload["plan"] == "local"
+    assert payload["features"] == []
+    assert payload["plan_source"] == "override"
+    assert payload["cloud_access_active"] is False
+
+    monkeypatch.setattr(v2_api, "_hosted_plan", lambda: "team")
+    upgraded = v2_api.get_license()
+
+    assert upgraded["plan"] == "team"
+    assert "team" in upgraded["features"]
 
 
 # ── (7) the shipped modules must still build on the supported floor ───────────
