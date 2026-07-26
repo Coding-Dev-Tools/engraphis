@@ -1,24 +1,54 @@
 const { test, expect } = require('@playwright/test');
 const AxeBuilder = require('@axe-core/playwright').default;
 
-const hostedLicense = {
-  plan: 'local',
-  features: [],
-  cloud_managed: true,
-  trial_seconds: 259_200,
-  grace_seconds: 86_400,
-  grace_scope: 'existing authenticated local workspace writes only',
-  pro_upgrade_url: 'https://cloud.engraphis.test/pro',
-  team_upgrade_url: 'https://cloud.engraphis.test/team',
-  upgrade_url: 'https://cloud.engraphis.test/pricing',
-  trial: { used: false, trial_days: 3 },
+// The dashboard's entitlement vocabulary, mirrored from v2_api._FEATURE_LABELS. The
+// license panel renders one row per key and ticks the ones `features` contains, so a
+// missing key here would silently stop a paying customer's capability being asserted on.
+const knownFeatures = {
+  analytics: 'Analytics',
+  automation: 'Automation',
+  consolidation: 'Auto Consolidation',
+  dreaming: 'Auto Dreaming',
+  export: 'Compliance export',
+  sync: 'Cloud Sync',
+  team: 'Team administration',
 };
+
+const proFeatures = ['analytics', 'automation', 'consolidation', 'dreaming', 'export', 'sync'];
+const teamFeatures = [...proFeatures, 'team'];
+
+function licenseFor(plan, features) {
+  return {
+    plan,
+    features,
+    known_features: knownFeatures,
+    cloud_managed: true,
+    cloud_access_active: plan !== 'local',
+    trial_seconds: 259_200,
+    grace_seconds: 86_400,
+    grace_scope: 'existing authenticated local workspace writes only',
+    pro_upgrade_url: 'https://cloud.engraphis.test/pro',
+    team_upgrade_url: 'https://cloud.engraphis.test/team',
+    upgrade_url: 'https://cloud.engraphis.test/pricing',
+    trial: { used: false, trial_days: 3 },
+  };
+}
+
+// A FREE customer. Every test below used to run against this one payload, which is why a
+// paying customer being shown a lock badge survived all the way to launch day.
+const hostedLicense = licenseFor('local', []);
+const proLicense = licenseFor('pro', proFeatures);
+const teamLicense = licenseFor('team', teamFeatures);
+// A Team subscription whose billing has lapsed: the plan is still Team, but the control
+// plane has withdrawn every feature.
+const lapsedTeamLicense = { ...licenseFor('team', []), cloud_access_active: false };
 
 async function mockLocalClient(
   page,
   cloudStatus = 402,
   syncRunStatus = null,
   automationPostStatus = null,
+  license = hostedLicense,
 ) {
   const calls = [];
   let syncLast = null;
@@ -36,7 +66,7 @@ async function mockLocalClient(
 
     if (path === '/bootstrap') {
       body = {
-        license: hostedLicense,
+        license,
         workspaces: [],
         embedder: { semantic: true },
       };
@@ -51,7 +81,7 @@ async function mockLocalClient(
         by_type: {},
       };
     } else if (path === '/license') {
-      body = hostedLicense;
+      body = license;
     } else if (path === '/auth/state') {
       body = {
         enabled: false,
@@ -151,14 +181,14 @@ test('Cloud Sync denial returns an unlicensed installation to the hosted upgrade
   await page.getByRole('button', { name: 'Sync now' }).click();
 
   const sync = page.locator('#sync-body');
-  await expect(sync).toContainText('Cloud Sync runs in Engraphis Pro Cloud');
+  await expect(sync).toContainText('Unlock Cloud Sync and more');
   await expect(sync.getByRole('link', { name: 'Start hosted Pro trial' }))
     .toHaveAttribute('href', 'https://cloud.engraphis.test/pro?plan=pro&trial=pro');
   await expect(calls.some(call => call.path === '/sync/run' && call.method === 'POST')).toBe(true);
 
   await page.reload();
   await openView(page, 'settings');
-  await expect(page.locator('#sync-body')).toContainText('Cloud Sync runs in Engraphis Pro Cloud');
+  await expect(page.locator('#sync-body')).toContainText('Unlock Cloud Sync and more');
   await expect(page.getByRole('button', { name: 'Try Cloud Sync again' })).toBeVisible();
 
   calls.setSyncRunStatus(200);
@@ -251,6 +281,101 @@ test('local dashboard exposes hosted Pro and Team CTAs without local commercial 
   expect(errors).toEqual([]);
 });
 
+// ── paying customers ─────────────────────────────────────────────────────────────────
+// Until these existed, every test in this file ran against one FREE payload, so the whole
+// end-to-end suite never once rendered a customer who had paid. That is exactly how a
+// paying customer being shown a lock badge on a feature they had bought survived to
+// launch day. `#nav-*-lock` is the element that carried the wrong badge, so it is what
+// these assert on directly.
+const navLocks = {
+  analytics: '#nav-analytics-lock',
+  automation: '#nav-automation-lock',
+  team: '#nav-team-lock',
+};
+
+test('a free installation is locked out of every hosted capability', async ({ page }) => {
+  const errors = recordBrowserErrors(page);
+  await mockLocalClient(page);
+  await page.goto('/');
+
+  // The baseline the paid cases below are the counterpart to: all three locks drawn.
+  await expect(page.getByLabel('Open hosted plan settings')).toHaveText('LOCAL');
+  await expect(page.locator(navLocks.analytics)).toHaveText('PRO');
+  await expect(page.locator(navLocks.automation)).toHaveText('PRO');
+  await expect(page.locator(navLocks.team)).toHaveText('TEAM');
+  expect(errors).toEqual([]);
+});
+
+test('a paying Team customer sees TEAM with Team administration unlocked', async ({ page }) => {
+  const errors = recordBrowserErrors(page);
+  await mockLocalClient(page, 200, null, null, teamLicense);
+  await page.goto('/');
+
+  // The badge settles before the locks: dashboard.js sets both inside loadLicense(),
+  // so asserting it first means the empty locks below cannot be read pre-render.
+  await expect(page.getByLabel('Open hosted plan settings')).toHaveText('TEAM');
+  for (const [feature, selector] of Object.entries(navLocks)) {
+    await expect(page.locator(selector), `${feature} is still locked for a Team customer`)
+      .toHaveText('');
+  }
+
+  await openView(page, 'settings');
+  const licensePanel = page.locator('.settings-license-panel');
+  await expect(licensePanel.getByText('TEAM', { exact: true })).toBeVisible();
+  // Every capability Team grants is ticked, including the two the server folds into
+  // `automation` and this client names separately.
+  for (const label of Object.values(knownFeatures)) {
+    await expect(licensePanel).toContainText(`✓ ${label}`);
+  }
+  await expect(licensePanel).not.toContainText('○');
+  // A paying customer is offered the account portal, never another trial.
+  await expect(licensePanel.getByRole('link', { name: 'Open Team Cloud' }))
+    .toHaveAttribute('href', 'https://cloud.engraphis.test/team?plan=team');
+  await expect(licensePanel.getByRole('button', { name: 'Start hosted Team trial' }))
+    .toHaveCount(0);
+  await expect(licensePanel.getByRole('button', { name: 'Start hosted Pro trial' }))
+    .toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test('a paying Pro customer keeps only the Team upsell', async ({ page }) => {
+  const errors = recordBrowserErrors(page);
+  await mockLocalClient(page, 200, null, null, proLicense);
+  await page.goto('/');
+
+  await expect(page.getByLabel('Open hosted plan settings')).toHaveText('PRO');
+  await expect(page.locator(navLocks.analytics)).toHaveText('');
+  await expect(page.locator(navLocks.automation)).toHaveText('');
+  await expect(page.locator(navLocks.team)).toHaveText('TEAM');
+
+  await openView(page, 'settings');
+  const licensePanel = page.locator('.settings-license-panel');
+  await expect(licensePanel.getByText('PRO', { exact: true })).toBeVisible();
+  await expect(licensePanel).toContainText(`✓ ${knownFeatures.analytics}`);
+  await expect(licensePanel).toContainText(`✓ ${knownFeatures.consolidation}`);
+  await expect(licensePanel).toContainText(`○ ${knownFeatures.team}`);
+  expect(errors).toEqual([]);
+});
+
+test('a lapsed Team subscription is sent to billing, not to a spent trial', async ({ page }) => {
+  const errors = recordBrowserErrors(page);
+  await mockLocalClient(page, 402, null, null, lapsedTeamLicense);
+  await page.goto('/');
+
+  // The plan name survives an inactive entitlement so the CTA stays the account portal;
+  // the locks come back because the control plane has withdrawn the features.
+  await expect(page.getByLabel('Open hosted plan settings')).toHaveText('TEAM');
+  await expect(page.locator(navLocks.team)).toHaveText('TEAM');
+  await expect(page.locator(navLocks.analytics)).toHaveText('PRO');
+
+  await openView(page, 'settings');
+  const licensePanel = page.locator('.settings-license-panel');
+  await expect(licensePanel.getByRole('link', { name: 'Open Team Cloud' })).toBeVisible();
+  await expect(licensePanel.getByRole('button', { name: 'Start hosted Team trial' }))
+    .toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
 for (const cloudStatus of [401, 402, 501]) {
   test(`Analytics and Automation defer to cloud proxy status ${cloudStatus}`, async ({ page }) => {
     const errors = recordBrowserErrors(page);
@@ -264,14 +389,13 @@ for (const cloudStatus of [401, 402, 501]) {
       () => calls.filter(call => call.path === '/analytics').length,
     ).toBeGreaterThan(analyticsBefore);
     const analytics = page.locator('#analytics-body');
-    await expect(analytics).toContainText('Analytics runs in Engraphis Pro Cloud');
+    await expect(analytics).toContainText('Unlock Analytics and more');
     await expect(analytics).toContainText('exactly 3 active days');
-    await expect(analytics).toContainText(
-      'Local-only write grace is separate, capped at 24 hours, and never extends cloud access.',
-    );
+    await expect(analytics).toContainText('$10/month or $100/year');
+    await expect(analytics).toContainText('Hosted Cloud Sync across your installations');
     await expect(analytics.getByRole('link', { name: 'Start hosted Pro trial' }))
       .toHaveAttribute('href', 'https://cloud.engraphis.test/pro?plan=pro&trial=pro');
-    await expect(analytics.getByRole('link', { name: 'View Pro plans' }))
+    await expect(analytics.getByRole('link', { name: 'Purchase Pro license' }))
       .toHaveAttribute('href', 'https://cloud.engraphis.test/pro?plan=pro');
     await expect(page.locator('#an-lock')).toHaveText('PRO');
 
@@ -282,15 +406,14 @@ for (const cloudStatus of [401, 402, 501]) {
     ).toBeGreaterThan(automationBefore);
     const automation = page.locator('#automation-body');
     await expect(automation).toContainText(
-      'Automation, Auto Consolidation, and Auto Dreaming runs in Engraphis Pro Cloud',
+      'Unlock Automation, Auto Consolidation, and Auto Dreaming and more',
     );
     await expect(automation).toContainText('exactly 3 active days');
-    await expect(automation).toContainText(
-      'Local-only write grace is separate, capped at 24 hours, and never extends cloud access.',
-    );
+    await expect(automation).toContainText('$10/month or $100/year');
+    await expect(automation).toContainText('Auto Dreaming with reviewable managed proposals');
     await expect(automation.getByRole('link', { name: 'Start hosted Pro trial' }))
       .toHaveAttribute('href', 'https://cloud.engraphis.test/pro?plan=pro&trial=pro');
-    await expect(automation.getByRole('link', { name: 'View Pro plans' }))
+    await expect(automation.getByRole('link', { name: 'Purchase Pro license' }))
       .toHaveAttribute('href', 'https://cloud.engraphis.test/pro?plan=pro');
     await expect(page.locator('#au-lock')).toHaveText('PRO');
 

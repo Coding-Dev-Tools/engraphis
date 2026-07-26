@@ -13,8 +13,12 @@ import logging
 import os
 import threading
 import time
+import urllib.error
+import urllib.request
 import weakref
+from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
@@ -1686,17 +1690,577 @@ def code_export(workspace: str, repo: str):
 
 
 # ── license ───────────────────────────────────────────────────────────────────
+# Mirror of the private control plane's plan→feature table (read-only reference:
+# engraphis-cloud/engraphis_cloud/entitlements.py ``PLAN_FEATURES``). Plans are lowercase
+# and only ``pro``/``team`` are paid; any other value — unknown, empty, or mis-cased —
+# resolves to no features, exactly as the server treats it.
+#
+# The server's own keys are {analytics, automation, export, sync, team}. This client's
+# commercial manifest additionally names Auto Consolidation and Auto Dreaming, which the
+# server grants under ``automation``. They are expanded here so the dashboard can never
+# draw a lock on a capability the customer's plan already includes.
+_AUTOMATION_FEATURES = ("automation", "consolidation", "dreaming")
+_PRO_FEATURES = ("analytics", "export", "sync") + _AUTOMATION_FEATURES
+_PLAN_FEATURES = {
+    "free": (),
+    "local": (),
+    "pro": _PRO_FEATURES,
+    "team": _PRO_FEATURES + ("team",),
+}
+
+# Labels for the dashboard's entitlement list; it renders one row per key and ticks the
+# ones ``features`` contains. Naming follows the customer-facing vocabulary in
+# .env.example and the commercial manifest.
+_FEATURE_LABELS = {
+    "analytics": "Analytics",
+    "automation": "Automation",
+    "consolidation": "Auto Consolidation",
+    "dreaming": "Auto Dreaming",
+    "export": "Compliance export",
+    "sync": "Cloud Sync",
+    "team": "Team administration",
+}
+
+
+def entitled_features(plan: str) -> list:
+    """Return the feature keys a hosted plan grants.
+
+    Presentation only. This decides which lock badges the dashboard draws, never whether
+    an operation is permitted: every paid operation is still authorized by Engraphis
+    Cloud and gated on its response status.
+    """
+
+    return sorted(_PLAN_FEATURES.get(str(plan or "").strip().lower(), ()))
+
+
+# ── authoritative plan resolution ─────────────────────────────────────────────────────
+# The control plane knows the plan; this client has to be told. Inferring "connected ⇒ pro"
+# showed a paying TEAM customer a PRO badge and a lock on the Team administration they were
+# paying for, so the plan is now read rather than guessed.
+#
+# ``DeviceRegistrationResponse`` — the body both ``/internal/devices/register`` and
+# ``POST /v1/tokens/refresh`` answer with — carries ``plan``, ``cloud_features`` and
+# ``cloud_access_active``. Those are the calls this client already makes, so the plan
+# arrives with credentials it was going to mint anyway: ``cloud_session`` persists the
+# fields on registration and re-confirms them on every token rotation, and
+# ``_session_entitlement`` reads them back. No extra request, no separate cache, correct on
+# the first boot after onboarding, and correct offline because the session record outlives
+# the connection.
+#
+# Those fields are OPTIONAL here. A control plane that has not deployed them yet simply
+# omits them, and the client falls back to ``GET /v1/entitlements/{organization_id}``,
+# which returns the same ``plan`` and ``cloud_features``. Every access token this client
+# can mint already carries the ``entitlement:read`` scope that route requires, and the
+# route is declared ``require_workspace_binding=False``, so no workspace context is needed.
+# That fallback answer is cached in its own file and is *strictly* outranked by the session
+# record above, so the two persisted answers can never disagree silently.
+#
+# Neither answer is ever fetched inline. ``/api/license`` is on the ``/api/bootstrap`` boot
+# path, and boot must not make a blocking, credential-bearing network call: a read answers
+# from persisted state immediately and, when that state is missing or stale, refreshes it on
+# a daemon thread so the next read is right. That background refresh is also what corrects a
+# plan the customer changed in the account portal — a Pro→Team upgrade unlocks a tab the
+# customer cannot click *until* it is unlocked, so nothing else would ever ask. Every
+# failure — offline, lapsed, revoked, unreadable state directory, malformed body — degrades
+# to the last known plan and finally to the inference below. Nothing here can raise into, or
+# delay, ``/api/bootstrap``.
+
+#: Cache envelope version; an unrecognised value is discarded rather than trusted.
+_ENTITLEMENT_CACHE_SCHEMA = "engraphis-cloud-entitlement/v1"
+#: How stale the cached entitlement may get before a read schedules a background refresh.
+_ENTITLEMENT_REFRESH_SECONDS = 15 * 60
+#: Bounded budget for the background fetch. It never runs on a request thread, but an
+#: unbounded dial would still pin a daemon thread and a rotated credential indefinitely.
+_ENTITLEMENT_TIMEOUT_SECONDS = 8.0
+_ENTITLEMENT_MAX_RESPONSE_BYTES = 64 * 1024
+_ENTITLEMENT_REFRESH_LOCK = threading.Lock()
+_entitlement_refreshing = False
+#: Same opt-out vocabulary as ``ENGRAPHIS_UPDATE_CHECK`` (see engraphis/update_check.py).
+_FALSY_SETTINGS = {"0", "false", "no", "off", "disable", "disabled"}
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Block redirects on the credential-bearing entitlement read.
+
+    The request carries a live bearer token, so a crafted 30x must not be able to replay
+    it at another host.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _entitlement_refresh_enabled() -> bool:
+    """Background entitlement refresh is on by default; any falsy value disables it."""
+
+    value = os.environ.get("ENGRAPHIS_CLOUD_ENTITLEMENT_REFRESH", "1").strip().lower()
+    return value not in _FALSY_SETTINGS
+
+
+def _entitlement_cache_path() -> Optional["Path"]:
+    """Return the cache leaf beside the cloud session, or ``None`` if unlocatable."""
+
+    try:
+        root = os.environ.get("ENGRAPHIS_STATE_DIR", "").strip()
+        base = Path(root).expanduser() if root else Path.home() / ".engraphis"
+    except (OSError, RuntimeError):  # no resolvable home directory
+        return None
+    return base / "cloud_entitlement.json"
+
+
+def _cloud_control_url() -> str:
+    """Return the configured control-plane base URL, or ``""``. Never raises.
+
+    ``cloud_session`` exposes no public accessor for the saved endpoint, so the saved
+    record is read through its loader defensively: a rename degrades to "not configured",
+    which merely skips the refresh rather than breaking the boot path.
+    """
+
+    value = os.environ.get("ENGRAPHIS_CLOUD_CONTROL_URL", "").strip()
+    if value:
+        return value.rstrip("/")
+    try:
+        from engraphis import cloud_session
+        loader = getattr(cloud_session, "_load", None)
+        saved = loader() if loader is not None else None
+    except Exception:  # noqa: BLE001 - an unreadable session is simply "not configured"
+        return ""
+    if not isinstance(saved, dict):
+        return ""
+    return str(saved.get("control_url") or "").strip().rstrip("/")
+
+
+def _normalized_plan(value: object) -> str:
+    """Map any control-plane plan name onto this client's presentation vocabulary."""
+
+    plan = str(value or "").strip().lower()
+    return plan if plan in ("pro", "team") else "local"
+
+
+def _normalized_features(values: object, plan: str) -> list:
+    """Keep the server's own grant, expanded to the names this dashboard renders.
+
+    The server folds Auto Consolidation and Auto Dreaming into ``automation``; the license
+    panel lists them separately, so echoing the server's keys verbatim would leave a Team
+    customer looking at two unticked rows for capabilities they are paying for. Anything
+    the dashboard cannot render is dropped, so ``features`` stays a subset of
+    ``known_features`` even if a future server release adds a key this build predates.
+    """
+
+    if not isinstance(values, (list, tuple)):
+        return entitled_features(plan)
+    granted = {str(item).strip().lower() for item in values if isinstance(item, str)}
+    if "automation" in granted:
+        granted.update(_AUTOMATION_FEATURES)
+    return sorted(granted & set(_FEATURE_LABELS))
+
+
+def _session_entitlement() -> dict:
+    """Return the entitlement the control plane put on this client's own session.
+
+    Shaped exactly like ``_read_entitlement_cache`` so both persisted answers feed the
+    resolver identically and only their precedence differs. Reads state only — no network —
+    and never raises: this is on the ``/api/bootstrap`` boot path.
+    """
+
+    try:
+        from engraphis import cloud_session
+        reader = getattr(cloud_session, "saved_entitlement", None)
+        declared = reader() if reader is not None else None
+        if not isinstance(declared, dict) or not declared:
+            return {}
+        # A deployment pinned to ``ENGRAPHIS_CLOUD_ORGANIZATION_ID`` may be pointed at a
+        # different organization than the saved session was registered for. Refuse to
+        # relabel one customer's plan with another's, exactly as the entitlements read
+        # refuses a mis-routed answer.
+        pinned = os.environ.get("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "").strip()
+        if pinned and pinned != str(declared.get("organization_id") or ""):
+            return {}
+        plan = _normalized_plan(declared.get("plan"))
+        active = bool(declared.get("cloud_access_active"))
+        return {
+            "plan": plan,
+            # The server empties ``cloud_features`` the moment paid access stops being
+            # live; mirror that, exactly as the entitlements route's answer does below.
+            # An older field-less body leaves ``cloud_features`` absent, and this client's
+            # own plan table fills it in.
+            "features": _normalized_features(declared.get("cloud_features"), plan)
+            if active else [],
+            "cloud_access_active": active,
+            "organization_id": str(declared.get("organization_id") or ""),
+            "fetched_at": float(declared.get("entitlement_checked_at") or 0.0),
+        }
+    except Exception:  # noqa: BLE001 - a badge must never break /bootstrap
+        return {}
+
+
+def _read_entitlement_cache() -> dict:
+    """Return the last cached ``GET /v1/entitlements`` answer, or ``{}``. Never raises.
+
+    Secondary to ``_session_entitlement``: this file exists only for a control plane that
+    does not yet return the entitlement on registration and refresh.
+    """
+
+    path = _entitlement_cache_path()
+    if path is None:
+        return {}
+    try:
+        from engraphis.private_state import read_private_text
+        raw = read_private_text(
+            path, max_bytes=_ENTITLEMENT_MAX_RESPONSE_BYTES, allow_missing=True
+        )
+    except Exception:  # noqa: BLE001 - an unreadable cache is just "nothing known yet"
+        return {}
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (ValueError, RecursionError):
+        return {}
+    if not isinstance(value, dict) or value.get("schema") != _ENTITLEMENT_CACHE_SCHEMA:
+        return {}
+    # Validate rather than coerce the plan: a corrupt value must be *discarded* so the
+    # caller falls through to its own inference. Coercing it would quietly downgrade a
+    # connected paying customer to the free local core on a damaged file.
+    stored_plan = value.get("plan")
+    if not isinstance(stored_plan, str) or stored_plan.strip().lower() not in (
+        "pro", "team", "local", "free"
+    ):
+        return {}
+    try:
+        fetched_at = float(value.get("fetched_at") or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        fetched_at = 0.0
+    plan = _normalized_plan(stored_plan)
+    return {
+        "plan": plan,
+        "features": _normalized_features(value.get("features"), plan),
+        "cloud_access_active": bool(value.get("cloud_access_active")),
+        "organization_id": str(value.get("organization_id") or ""),
+        "fetched_at": fetched_at,
+    }
+
+
+def _write_entitlement_cache(entitlement: dict) -> None:
+    """Persist the authoritative entitlement so the next boot starts correct.
+
+    Written through the owner-only atomic helper used for the cloud session itself: the
+    plan is not a secret, but it lives in the same private state directory and a partial
+    file must never be readable. Never raises — a read-only state directory costs
+    freshness across restarts, not the dashboard.
+    """
+
+    path = _entitlement_cache_path()
+    if path is None:
+        return
+    try:
+        from engraphis.private_state import atomic_private_text
+        atomic_private_text(path, json.dumps({
+            "schema": _ENTITLEMENT_CACHE_SCHEMA,
+            "plan": entitlement["plan"],
+            "features": list(entitlement["features"]),
+            "cloud_access_active": bool(entitlement["cloud_access_active"]),
+            "organization_id": str(entitlement.get("organization_id") or ""),
+            "fetched_at": float(entitlement.get("fetched_at") or time.time()),
+        }, sort_keys=True, separators=(",", ":")))
+    except Exception:  # noqa: BLE001 - losing the cache write must not surface anywhere
+        logger.debug("entitlement cache write skipped")
+
+
+def _fetch_authoritative_entitlement() -> Optional[dict]:
+    """Re-read the plan from the control plane. Returns ``None`` when nothing was cached.
+
+    Two steps, in order:
+
+    1. mint a token. ``access_for_workspace`` performs the ordinary token refresh, and a
+       control plane that returns the entitlement on ``DeviceRegistrationResponse`` has
+       *already answered* by the time it comes back — ``cloud_session`` persisted the plan
+       as a side effect of the call. That is the whole refresh; there is nothing to cache
+       separately, so this returns ``None`` and the session record stays the one source.
+    2. only if that produced no plan — an older control plane — fall back to
+       ``GET /v1/entitlements/{organization_id}`` and cache what it says.
+
+    Runs only on the background refresh thread; never on a request thread. No workspace
+    binding is requested, so the issued token carries only the organization-scoped read
+    scopes the entitlements route needs.
+    """
+
+    control = _cloud_control_url()
+    if not control:
+        return None
+    try:
+        from engraphis.cloud_session import access_for_workspace
+        from engraphis.hosted_client import (
+            build_pinned_https_opener,
+            validate_cloud_base_url,
+        )
+        # Vet the endpoint before minting a credential for it. ``access_for_workspace``
+        # validates the control URL on the saved-session path, but short-circuits without
+        # validating it when a pinned ``ENGRAPHIS_CLOUD_ACCESS_TOKEN`` is configured — and
+        # the pinned opener only replaces urllib's *HTTPS* handler, so an ``http://``
+        # value would put a live bearer token on the wire in cleartext to an unvetted,
+        # possibly private-range host. Validation also rejects embedded credentials and
+        # re-resolves the host, closing the same DNS-rebinding window every other
+        # outbound client in this package closes.
+        control = validate_cloud_base_url(control)
+        access_token, organization_id, _ = access_for_workspace(
+            None, require_compute=False
+        )
+    except Exception:  # noqa: BLE001 - offline, lapsed, revoked, invalid: all "not now"
+        return None
+    if not access_token or not organization_id:
+        return None
+    # Step 1 landed: the refresh above persisted plan/cloud_features/cloud_access_active,
+    # which outranks this cache anyway. A second round trip would buy nothing.
+    if _session_entitlement():
+        return None
+    request = urllib.request.Request(
+        control + "/v1/entitlements/" + quote(organization_id, safe=""),
+        headers={
+            "Accept": "application/json",
+            "Authorization": "Bearer " + access_token,
+            "User-Agent": "Engraphis/1.0 (+https://engraphis.com)",
+        },
+        method="GET",
+    )
+    try:
+        with build_pinned_https_opener(_NoRedirect()).open(
+            request, timeout=_ENTITLEMENT_TIMEOUT_SECONDS
+        ) as response:
+            raw = response.read(_ENTITLEMENT_MAX_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        # Draining and closing the error body can itself time out or reset, and a sibling
+        # ``except`` clause of this ``try`` does not cover an exception raised inside this
+        # handler. Leaving it unguarded is how a flaky cloud becomes an unhandled
+        # traceback on a background thread.
+        try:
+            exc.read(_ENTITLEMENT_MAX_RESPONSE_BYTES + 1)
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                exc.close()
+            except (OSError, ValueError):
+                pass
+        return None
+    except Exception:  # noqa: BLE001 - transport, TLS, and URL failures are all "not now"
+        return None
+    if len(raw) > _ENTITLEMENT_MAX_RESPONSE_BYTES:
+        return None
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    # Refuse an answer about a different organization than this session is bound to, so a
+    # mis-routed or replayed response can never relabel the customer's plan.
+    if str(body.get("organization_id") or "") != organization_id:
+        return None
+    # ``plan`` and ``cloud_access_active`` are required fields of the server's
+    # ``EntitlementDTO``. Demand both rather than defaulting them: a truncated or partial
+    # body would otherwise coerce to "free, no access" and cache a paying customer as the
+    # free local core. Absent means "no answer", which keeps the previous one.
+    declared_plan = body.get("plan")
+    active = body.get("cloud_access_active")
+    if not isinstance(declared_plan, str) or not declared_plan.strip():
+        return None
+    if not isinstance(active, bool):
+        return None
+    plan = _normalized_plan(declared_plan)
+    return {
+        "plan": plan,
+        # The server empties ``cloud_features`` the moment paid access stops being live.
+        # Mirroring that re-draws the locks on a lapsed subscription while the badge keeps
+        # naming the plan the customer is on, so the dashboard offers the account portal
+        # rather than a trial they have already used.
+        "features": _normalized_features(body.get("cloud_features"), plan) if active else [],
+        "cloud_access_active": active,
+        "organization_id": organization_id,
+        "fetched_at": time.time(),
+    }
+
+
+def _refresh_entitlement_in_background(known: dict) -> None:
+    """Re-confirm the plan off the request thread. Never blocks, never raises.
+
+    Secondary by design. The plan normally arrives on registration and on every token
+    refresh the client already makes, so this exists for the one case nothing else covers:
+    a plan changed in the account portal, on an installation whose newly bought tab is
+    locked and therefore cannot be clicked to trigger a refresh of its own.
+
+    ``known`` is the answer currently being served (session record, else cached
+    entitlement); its age decides whether to re-confirm. At most one refresh is in flight
+    per process, and no thread is started at all unless a control-plane endpoint is actually
+    configured, so an unconnected (or offline) process does no background work whatsoever.
+    """
+
+    global _entitlement_refreshing
+    if not _entitlement_refresh_enabled():
+        return
+    age = time.time() - float(known.get("fetched_at") or 0.0)
+    # A negative age means the clock moved backwards; re-check rather than trust it.
+    if known and 0.0 <= age < _ENTITLEMENT_REFRESH_SECONDS:
+        return
+    if not _cloud_control_url():
+        return
+    with _ENTITLEMENT_REFRESH_LOCK:
+        if _entitlement_refreshing:
+            return
+        _entitlement_refreshing = True
+
+    def _run() -> None:
+        global _entitlement_refreshing
+        try:
+            fetched = _fetch_authoritative_entitlement()
+            if fetched is not None:
+                _write_entitlement_cache(fetched)
+        except Exception:  # noqa: BLE001 - a daemon thread must never surface anything
+            pass
+        finally:
+            with _ENTITLEMENT_REFRESH_LOCK:
+                _entitlement_refreshing = False
+
+    try:
+        threading.Thread(
+            target=_run, name="engraphis-entitlement", daemon=True
+        ).start()
+    except Exception:  # noqa: BLE001 - a thread-starved host keeps the cached answer
+        with _ENTITLEMENT_REFRESH_LOCK:
+            _entitlement_refreshing = False
+
+
+def _plan_entitlement() -> dict:
+    """Resolve the customer's plan without ever blocking on the network.
+
+    Order of precedence. One source wins outright at each step, so the persisted answers
+    can never disagree silently:
+
+    1. ``ENGRAPHIS_CLOUD_PLAN`` — an explicit operator override, kept as an escape hatch
+       for air-gapped and pinned-token deployments;
+    2. the entitlement the control plane returned on this installation's own registration
+       or token refresh (``DeviceRegistrationResponse.plan`` / ``.cloud_features`` /
+       ``.cloud_access_active``), persisted by ``cloud_session``. Primary: it rides calls
+       the client already makes, costs no extra request, is re-confirmed on every token
+       rotation, and outlives the connection so it is still right offline;
+    3. the cached ``GET /v1/entitlements/{org}`` answer — the compatibility path for a
+       control plane that does not return (2) yet, warmed on a background thread;
+    4. inference — ``pro`` for a connected installation neither (2) nor (3) has answered
+       for, the smallest paid plan, so a paying customer is never shown the free local
+       core; ``local`` for an unconnected installation.
+
+    One deployment cannot reach (2) or (3) at all: a pinned ``ENGRAPHIS_CLOUD_ACCESS_TOKEN``
+    mints no refresh and so never re-confirms anything. That is precisely what (1) is
+    documented for in ``.env.example``.
+
+    Never raises: this feeds ``/api/license`` and therefore ``/api/bootstrap``.
+    """
+
+    declared = os.environ.get("ENGRAPHIS_CLOUD_PLAN", "").strip().lower()
+    if declared in ("pro", "team", "free", "local"):
+        plan = declared if declared in ("pro", "team") else "local"
+        return {"plan": plan, "features": entitled_features(plan),
+                "source": "environment", "cloud_access_active": plan != "local",
+                "checked_at": 0.0}
+    try:
+        from engraphis import cloud_session
+        connected = cloud_session.configured(require_compute=False)
+    except Exception:  # noqa: BLE001 - a badge must never break /bootstrap
+        connected = False
+    if not connected:
+        return {"plan": "local", "features": [], "source": "local",
+                "cloud_access_active": False, "checked_at": 0.0}
+    session = _session_entitlement()
+    if session:
+        _refresh_entitlement_in_background(session)
+        return {"plan": session["plan"], "features": list(session["features"]),
+                "source": "session", "cloud_access_active": session["cloud_access_active"],
+                "checked_at": session["fetched_at"]}
+    cached = _read_entitlement_cache()
+    _refresh_entitlement_in_background(cached)
+    if cached:
+        return {"plan": cached["plan"], "features": list(cached["features"]),
+                "source": "cloud", "cloud_access_active": cached["cloud_access_active"],
+                "checked_at": cached["fetched_at"]}
+    # Connected, but the control plane has never answered (first boot after onboarding, or
+    # offline since). ``pro`` unlocks what every paid plan includes and leaves only the Team
+    # upsell showing; the refresh scheduled above corrects it.
+    return {"plan": "pro", "features": entitled_features("pro"), "source": "connected",
+            "cloud_access_active": True, "checked_at": 0.0}
+
+
+def _hosted_plan() -> str:
+    """Return the hosted plan this installation is on, else ``local``.
+
+    The public client still holds no entitlement authority: this reports what the control
+    plane last said (or, failing that, how the installation was provisioned). Forging any
+    of its inputs grants nothing — the server authorizes every paid call.
+    """
+
+    return _plan_entitlement()["plan"]
+
+
+def hosted_plan_summary() -> dict:
+    """Return the one plan answer every license surface reports.
+
+    ``/api/license`` and the legacy ``/memory/license`` both render this, so the two can
+    never again disagree about what the customer has bought.
+    """
+
+    entitlement = _plan_entitlement()
+    # ``_hosted_plan`` is the single override seam; when a caller replaces it, its answer
+    # wins and the feature list falls back to this client's plan table.
+    plan = _hosted_plan()
+    if plan != entitlement["plan"]:
+        entitlement = {"plan": plan, "features": entitled_features(plan),
+                       "source": "override", "cloud_access_active": plan != "local",
+                       "checked_at": 0.0}
+    return {
+        "plan": entitlement["plan"],
+        "features": list(entitlement["features"]),
+        "plan_source": entitlement["source"],
+        "cloud_access_active": entitlement["cloud_access_active"],
+        "plan_checked_at": entitlement["checked_at"],
+    }
+
+
 @router.get("/license")
 def get_license():
-    """The local core has no Pro/Team authority; hosted entitlements live in Cloud."""
+    """Hosted plan presentation for the dashboard; Cloud remains the authority.
+
+    ``features`` drives the dashboard's lock badges. Hardcoding it empty drew a "PRO" or
+    "TEAM" lock over Analytics, Automation, and Team for customers who had already paid
+    for them, and inferring the plan drew a "PRO" badge plus a Team lock over a paying
+    Team customer. Both now follow the control plane's own answer once it has been read.
+    """
+    summary = hosted_plan_summary()
+    plan = summary["plan"]
     return {
-        "plan": "local",
-        "features": [],
+        "plan": plan,
+        "features": summary["features"],
+        "known_features": dict(_FEATURE_LABELS),
+        # Diagnostics for support: which resolution rule produced this plan — one of
+        # ``environment`` (the operator override), ``session`` (the entitlement the cloud
+        # returned on registration/refresh), ``cloud`` (the cached entitlements read),
+        # ``connected`` or ``local`` (inference) — and when the control plane last
+        # confirmed it (0 when it never has).
+        "plan_source": summary["plan_source"],
+        "plan_checked_at": summary["plan_checked_at"],
+        "cloud_access_active": summary["cloud_access_active"],
+        # The client cannot distinguish a trial from a paid subscription; the control
+        # plane owns that. Report the honest default so the badge falls back to the plan
+        # name instead of silently claiming a trial the customer may not be on.
+        "is_trial": False,
+        "trial": {"used": False, "trial_days": licensing.TRIAL_DAYS},
         "cloud_managed": True,
         "trial_seconds": 259_200,
         "grace_seconds": 86_400,
         "grace_scope": "existing authenticated local workspace writes only",
         "upgrade_url": licensing.upgrade_url(),
+        # Pro and Team bill through separate checkout targets. Emitting only the generic
+        # URL sent every Team upgrade click to the Pro page.
+        "pro_upgrade_url": licensing.upgrade_url("pro"),
+        "team_upgrade_url": licensing.upgrade_url("team"),
     }
 
 

@@ -34,8 +34,41 @@ _SEMVER = re.compile(
 )
 
 
-def _run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, check=check)
+# Every step below runs with an explicit, differentiated budget. The query steps capture
+# their output, so an unbounded call against a stalled package index or an unreachable git
+# remote is an indefinite and *silent* hang with nothing on screen to explain it. Sizes
+# follow the work each command actually does: a refs query is one round trip, a fetch may
+# transfer a whole object delta, and an install downloads and may build wheels.
+_GIT_LOCAL_TIMEOUT_S = 30        # plumbing on an existing clone (see scripts/graph_cli.py)
+_GIT_CHECKOUT_TIMEOUT_S = 120    # local, but runs checkout filters and hooks
+_GIT_LS_REMOTE_TIMEOUT_S = 60    # one network round trip for refs; no object transfer
+_GIT_FETCH_TIMEOUT_S = 600       # may transfer every object a long-stale clone is missing
+_PIP_METADATA_TIMEOUT_S = 60     # `pip show` is local, but a cold pip import is not fast
+_PIP_RESOLVE_TIMEOUT_S = 300     # `--dry-run` still queries and resolves against the index
+_PIP_INSTALL_TIMEOUT_S = 1800    # download plus build; an sdist with C extensions is slow
+_PIPX_TIMEOUT_S = 1800           # a pip install plus venv creation
+
+
+class UpdateTimeout(RuntimeError):
+    """A step exceeded its bounded budget.
+
+    Carries ready-to-print, actionable copy so a stalled remote never degrades into a
+    silent hang, and so the editable-install rollback below can treat a timeout exactly
+    like a failed reinstall instead of stranding a half-applied checkout.
+    """
+
+
+def _run(cmd: list[str], what: str, timeout: int, check: bool = False,
+         capture: bool = True) -> subprocess.CompletedProcess:
+    """Run *cmd* under an explicit budget; a stall raises instead of hanging forever."""
+    try:
+        return subprocess.run(cmd, capture_output=capture, text=True, check=check,
+                              timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise UpdateTimeout(
+            "%s timed out after %ds. Check your network connection, proxy settings, and "
+            "package index, then run `engraphis-update` again." % (what, timeout)
+        ) from None
 
 
 def _select_latest_tag(tags) -> str:
@@ -51,9 +84,9 @@ def _select_latest_tag(tags) -> str:
 
 
 def _remote_latest_tag(git: str, repo_url: str = REPO_URL) -> str:
-    result = subprocess.run(
+    result = _run(
         [git, "ls-remote", "--tags", "--refs", repo_url, "v*"],
-        capture_output=True, text=True,
+        "Listing release tags from the Git remote", _GIT_LS_REMOTE_TIMEOUT_S,
     )
     if result.returncode:
         return ""
@@ -96,9 +129,9 @@ def _detect_install() -> str:
     # installed it in develop mode. pip show engraphis will list an "Editable
     # project location" line.
     try:
-        result = subprocess.run(
+        result = _run(
             [sys.executable, "-m", "pip", "show", "engraphis"],
-            capture_output=True, text=True)
+            "Reading the installed Engraphis metadata", _PIP_METADATA_TIMEOUT_S)
         if result.returncode == 0:
             info = result.stdout
             if "Editable project location:" in info:
@@ -111,6 +144,10 @@ def _detect_install() -> str:
             if _installed_git_url():
                 return "git"
             return "pypi"
+    except UpdateTimeout:
+        # A stalled `pip show` must report why, not masquerade as "unknown install
+        # method" and send the user off to guess at a reinstall command.
+        raise
     except Exception:
         pass
 
@@ -120,9 +157,10 @@ def _detect_install() -> str:
 def _git_update(check_only: bool = False) -> None:
     """Update an editable install to a validated stable tag and reinstall it."""
     try:
-        result = subprocess.run(
+        result = _run(
             [sys.executable, "-m", "pip", "show", "engraphis"],
-            capture_output=True, text=True, check=True)
+            "Reading the installed Engraphis metadata", _PIP_METADATA_TIMEOUT_S,
+            check=True)
     except subprocess.CalledProcessError:
         print("Engraphis is not installed.", file=sys.stderr)
         sys.exit(1)
@@ -146,26 +184,29 @@ def _git_update(check_only: bool = False) -> None:
 
     # Fetch and compare. Fail closed on a network/ref error: selecting the highest LOCAL
     # tag would let a stray or malicious tag masquerade as the latest upstream release.
-    fetched = subprocess.run(
+    # Announce the network step: it captures its output, so without this line a slow or
+    # unreachable origin looks like a frozen terminal until the budget below expires.
+    print("Fetching release tags from origin...")
+    fetched = _run(
         [git, "-C", str(project_dir), "fetch", "--tags", "origin"],
-        capture_output=True, text=True,
+        "Fetching release tags from origin", _GIT_FETCH_TIMEOUT_S,
     )
     if fetched.returncode:
         print("Could not fetch release tags from origin; no update was applied.",
               file=sys.stderr)
         sys.exit(1)
-    local = subprocess.run([git, "-C", str(project_dir), "rev-parse", "HEAD"],
-                            capture_output=True, text=True).stdout.strip()
-    branch_result = subprocess.run(
+    local = _run([git, "-C", str(project_dir), "rev-parse", "HEAD"],
+                 "Reading the current revision", _GIT_LOCAL_TIMEOUT_S).stdout.strip()
+    branch_result = _run(
         [git, "-C", str(project_dir), "symbolic-ref", "--quiet", "--short", "HEAD"],
-        capture_output=True, text=True,
+        "Reading the current branch", _GIT_LOCAL_TIMEOUT_S,
     )
     original_ref = branch_result.stdout.strip() if branch_result.returncode == 0 else local
     tag = LATEST_TAG
     if not tag:
-        tags = subprocess.run(
+        tags = _run(
             [git, "-C", str(project_dir), "ls-remote", "--tags", "--refs", "origin", "v*"],
-            capture_output=True, text=True,
+            "Listing release tags from origin", _GIT_LS_REMOTE_TIMEOUT_S,
         )
         if tags.returncode:
             print("Could not list release tags from origin; no update was applied.",
@@ -180,9 +221,9 @@ def _git_update(check_only: bool = False) -> None:
         sys.exit(1)
     # ``rev-list`` peels annotated tags; comparing HEAD to the tag object itself would
     # report a false update forever.
-    remote = subprocess.run(
+    remote = _run(
         [git, "-C", str(project_dir), "rev-list", "-n", "1", tag],
-        capture_output=True, text=True,
+        "Resolving the release tag", _GIT_LOCAL_TIMEOUT_S,
     )
     remote_sha = remote.stdout.strip() if remote.returncode == 0 else ""
 
@@ -200,29 +241,50 @@ def _git_update(check_only: bool = False) -> None:
     if check_only:
         return
 
-    dirty = subprocess.run(
+    dirty = _run(
         [git, "-C", str(project_dir), "status", "--porcelain"],
-        capture_output=True, text=True,
+        "Checking the working tree", _GIT_LOCAL_TIMEOUT_S,
     )
     if dirty.stdout.strip():
         print("Refusing to update a working tree with uncommitted changes.", file=sys.stderr)
         sys.exit(1)
     print(f"Checking out release {tag}...")
-    subprocess.run([git, "-C", str(project_dir), "checkout", f"tags/{tag}"], check=True)
+    _run([git, "-C", str(project_dir), "checkout", f"tags/{tag}"],
+         "Checking out the release tag", _GIT_CHECKOUT_TIMEOUT_S,
+         check=True, capture=False)
+    print(f"Reinstalling from {project_dir}...")
     try:
-        subprocess.run(
+        _run(
             [sys.executable, "-m", "pip", "install", "-e", str(project_dir)],
-            check=True,
+            "Reinstalling the editable checkout", _PIP_INSTALL_TIMEOUT_S,
+            check=True, capture=False,
         )
-    except subprocess.CalledProcessError:
-        # A failed reinstall must not strand a previously working editable checkout at
-        # a half-applied detached release. Restore its original branch (or exact commit
-        # when it started detached) and best-effort reinstall before propagating failure.
-        subprocess.run([git, "-C", str(project_dir), "checkout", original_ref], check=False)
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-e", str(project_dir)],
-            check=False,
-        )
+    except (subprocess.CalledProcessError, UpdateTimeout):
+        # A failed *or stalled* reinstall must not strand a previously working editable
+        # checkout at a half-applied detached release. The tree is already on the new tag
+        # by this point, so a bare hang here is what wedges the install; catching the
+        # timeout is what lets this rollback run at all. Restore the original branch (or
+        # exact commit when it started detached) and best-effort reinstall, then
+        # propagate the original failure.
+        print("Restoring the previous checkout...", file=sys.stderr)
+        try:
+            _run([git, "-C", str(project_dir), "checkout", original_ref],
+                 "Restoring the previous checkout", _GIT_CHECKOUT_TIMEOUT_S,
+                 capture=False)
+            _run(
+                [sys.executable, "-m", "pip", "install", "-e", str(project_dir)],
+                "Reinstalling the previous checkout", _PIP_INSTALL_TIMEOUT_S,
+                capture=False,
+            )
+        except UpdateTimeout:
+            # Rollback itself stalled: name the two commands that finish it by hand
+            # rather than exiting on a tree the user does not know has moved.
+            print(
+                "Rollback did not finish. Run `git -C %s checkout %s` and "
+                "`%s -m pip install -e %s` to restore the previous installation."
+                % (project_dir, original_ref, sys.executable, project_dir),
+                file=sys.stderr,
+            )
         raise
     print(f"Updated to {tag}.")
 
@@ -243,22 +305,25 @@ def _pip_update(method: str, check_only: bool = False) -> None:
         if check_only:
             print(f"Latest stable Git release: {tag}")
             return
-        subprocess.run(
+        _run(
             [sys.executable, "-m", "pip", "install", "--upgrade",
              f"git+{remote}@{tag}#egg=engraphis"],
-            check=True)
+            "Installing the update from Git", _PIP_INSTALL_TIMEOUT_S,
+            check=True, capture=False)
         return
     version = LATEST_TAG[1:] if LATEST_TAG else ""
     target = "engraphis[server]" + ("==" + version if version else "")
     if check_only:
-        subprocess.run(
+        _run(
             [sys.executable, "-m", "pip", "install", "--dry-run", "--upgrade", target],
-            check=False,
+            "Checking the package index for a newer release", _PIP_RESOLVE_TIMEOUT_S,
+            capture=False,
         )
         return
-    subprocess.run(
+    _run(
         [sys.executable, "-m", "pip", "install", "--upgrade", target],
-        check=True)
+        "Installing the update from the package index", _PIP_INSTALL_TIMEOUT_S,
+        check=True, capture=False)
 
 
 def _pipx_update(check_only: bool = False) -> None:
@@ -266,20 +331,23 @@ def _pipx_update(check_only: bool = False) -> None:
     if check_only:
         if LATEST_TAG:
             target = "engraphis[server]==" + LATEST_TAG[1:]
-            subprocess.run(
+            _run(
                 ["pipx", "runpip", "engraphis", "install", "--dry-run", "--upgrade", target],
-                check=False,
+                "Checking the package index for a newer release", _PIP_RESOLVE_TIMEOUT_S,
+                capture=False,
             )
         else:
             print("pipx detected - run `pipx upgrade engraphis` to check for updates.")
         return
     if LATEST_TAG:
-        subprocess.run(
+        _run(
             ["pipx", "install", "--force", "engraphis[server]==" + LATEST_TAG[1:]],
-            check=True,
+            "Installing the update with pipx", _PIPX_TIMEOUT_S,
+            check=True, capture=False,
         )
         return
-    subprocess.run(["pipx", "upgrade", "engraphis"], check=True)
+    _run(["pipx", "upgrade", "engraphis"], "Upgrading with pipx", _PIPX_TIMEOUT_S,
+         check=True, capture=False)
 
 
 def _docker_update(check_only: bool = False) -> None:
@@ -332,6 +400,10 @@ def main(argv=None) -> None:
             1,
             "Error: update failed; the previous installation was restored when possible.\n",
         )
+    except UpdateTimeout as exc:
+        # Say which step stalled and what to do about it. Silence here is the bug: every
+        # network step used to be unbounded, so a stalled index simply never returned.
+        ap.exit(1, "Error: %s\n" % exc)
 
 
 if __name__ == "__main__":

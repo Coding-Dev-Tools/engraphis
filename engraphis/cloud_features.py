@@ -14,12 +14,12 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 from urllib.parse import quote
 
 from engraphis.cloud_session import CloudSessionError, access_for_workspace
-from engraphis.hosted_client import build_pinned_https_opener
+from engraphis.hosted_client import build_pinned_https_opener, upgrade_url
 
 SNAPSHOT_SCHEMA = "engraphis-managed-snapshot/v1"
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
@@ -67,7 +67,14 @@ def _public_http_error(status: int) -> tuple[str, bool]:
     if status in {401, 403}:
         return "Engraphis Cloud authorization was rejected.", False
     if status == 402:
-        return "This hosted feature is not available for the current plan.", False
+        # 402 is the control plane's "no active paid entitlement", which a lapsed or
+        # past_due subscription reaches just as often as a genuine free plan. Name the
+        # billing page so a paying customer can fix it instead of reading a dead end.
+        return (
+            "This hosted feature needs an active Engraphis Cloud subscription. Check "
+            "billing or upgrade at %s." % upgrade_url(),
+            False,
+        )
     if status == 404:
         return "The hosted workspace or feature was not found.", False
     if status == 409:
@@ -79,6 +86,43 @@ def _public_http_error(status: int) -> tuple[str, bool]:
     if status >= 500:
         return "Engraphis Cloud is temporarily unavailable.", True
     return "Engraphis Cloud rejected the request.", False
+
+
+def _public_session_error(status: int) -> tuple[str, bool]:
+    """Map a session-acquisition failure to fixed, actionable public copy.
+
+    ``CloudSessionError`` text is never forwarded across this boundary (it can quote local
+    state paths), but the bare status alone reads as an outage for every cause.  A customer
+    whose subscription lapsed, whose session was revoked, or who is simply offline each
+    need a different next step, and only the transient ones are worth retrying.
+    """
+
+    if status == 401:
+        return (
+            "Connect this installation to Engraphis Cloud to use hosted features.",
+            False,
+        )
+    if status == 402:
+        return (
+            "This hosted feature needs an active Engraphis Cloud subscription. Check "
+            "billing or upgrade at %s." % upgrade_url(),
+            False,
+        )
+    if status == 403:
+        return ("Engraphis Cloud authorization was rejected.", False)
+    if status == 409:
+        return (
+            "The saved cloud session is unusable; connect this installation again.",
+            False,
+        )
+    if status == 429:
+        return ("Engraphis Cloud is temporarily busy. Try again shortly.", True)
+    if status >= 500:
+        return (
+            "Engraphis Cloud is unreachable; hosted features resume once it responds.",
+            True,
+        )
+    return ("The cloud session is unavailable.", False)
 
 
 def _metadata(value: Any) -> dict:
@@ -297,7 +341,9 @@ def _build_managed_snapshot_locked(service: Any, workspace: str, *,
 class CloudFeatureClient:
     base_url: str
     organization_id: str
-    access_token: str
+    # A dataclass ``__repr__`` prints every field, so the default would put a live bearer
+    # token into any traceback, log line, or debugger frame that renders this client.
+    access_token: str = field(repr=False)
     timeout_seconds: float = 15.0
 
     @classmethod
@@ -306,8 +352,9 @@ class CloudFeatureClient:
             access_token, organization_id, base_url = access_for_workspace(workspace_id)
         except CloudSessionError as exc:
             status = exc.status if 400 <= exc.status <= 599 else 503
+            message, transient = _public_session_error(status)
             raise CloudFeatureError(
-                "The cloud session is unavailable.", status=status
+                message, status=status, transient=transient
             ) from exc
         except ValueError as exc:
             raise CloudFeatureError(

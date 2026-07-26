@@ -31,6 +31,10 @@ import urllib.error
 import urllib.request
 from typing import Callable, Optional
 
+# Stdlib-only itself (see the module docstring): importing it keeps this module free of
+# the config/server stack while giving the probe the package's vetted HTTPS connector.
+from engraphis.hosted_client import build_pinned_https_opener
+
 try:  # installed distribution → real version; source tree → pinned fallback
     from engraphis import __version__ as CURRENT_VERSION
 except Exception:  # pragma: no cover - engraphis always importable in practice
@@ -159,7 +163,12 @@ def _fetch(url: str, timeout: float) -> Optional[dict]:
         "User-Agent": "Engraphis/%s update-check" % CURRENT_VERSION,
         "Accept": "application/vnd.github+json, application/json;q=0.9, */*;q=0.1",
     })
-    opener = urllib.request.build_opener(_NoRedirect)
+    # ``ENGRAPHIS_UPDATE_URL`` makes this endpoint operator-controllable, so the probe
+    # gets the same pinned opener every other outbound client uses (hosted_client,
+    # cloud_session, sync_relay): the vetted address is the one actually dialled, which
+    # rejects private/reserved targets and closes the DNS-rebinding window between the
+    # scheme check above and the connect. A plain ``build_opener`` had neither guard.
+    opener = build_pinned_https_opener(_NoRedirect)
     try:
         with opener.open(req, timeout=timeout) as resp:  # nosec B310 - scheme checked above
             raw = resp.read(_MAX_BYTES + 1)
