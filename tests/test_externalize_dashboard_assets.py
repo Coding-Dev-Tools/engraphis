@@ -135,3 +135,68 @@ def test_check_rejects_a_lazy_reference_to_a_missing_file(tmp_path, monkeypatch)
 
     with pytest.raises(SystemExit, match=r"referenced script is missing: .*force-graph\.min\.mjs"):
         assets.check()
+
+
+# ── the eager-script rules must see every spelling a browser does ───────────────────────
+# HTML tag and attribute names are case-insensitive, so `<SCRIPT SRC=…>` loads exactly like
+# the lowercase spelling.  A case-sensitive tag regex saw neither, which silently switched
+# *both* script rules off for that tag: the CSP-hostile bundle could return to every page
+# view, and its path stopped being existence-checked.  `HTMLParser` normalises the case the
+# way a browser does, so these are parsed, never pattern-matched.
+
+
+def test_eager_scripts_are_parsed_in_any_tag_and_attribute_case():
+    found = assets._eager_scripts(
+        "<html><body>"
+        '<SCRIPT SRC="/static/vendor/force-graph.min.js"></SCRIPT>'
+        "<Script Src='/static/engraphis-graph.js'></Script>"
+        '<script src="/static/dashboard.js"></script>'
+        '<script SRC="https://cdn.example.com/x.js"></script>'
+        "<!-- <script src=\"/static/commented-out.js\"></script> -->"
+        "<script>inline()</script>"
+        "</body></html>"
+    )
+
+    assert found == [
+        "/static/vendor/force-graph.min.js",
+        "/static/engraphis-graph.js",
+        "/static/dashboard.js",
+    ]
+
+
+def test_check_rejects_an_eagerly_loaded_script_in_any_tag_case(tmp_path, monkeypatch):
+    """The uppercase spelling is loaded by browsers, so it must fail the same rule."""
+    _gate(
+        tmp_path,
+        monkeypatch,
+        '<html><body><SCRIPT SRC="/static/vendor/force-graph.min.js"></SCRIPT></body></html>',
+        _LOADERS,
+    )
+
+    with pytest.raises(SystemExit, match="must not eagerly load: /static/vendor/force-graph"):
+        assets.check()
+
+
+def test_check_rejects_a_mixed_case_reference_to_a_missing_file(tmp_path, monkeypatch):
+    """The existence check must not have a case-shaped hole either."""
+    _gate(
+        tmp_path,
+        monkeypatch,
+        "<html><body><Script SRC='/static/vendor/renamed-bundle.js'></Script></body></html>",
+        _LOADERS,
+    )
+
+    with pytest.raises(SystemExit, match=r"referenced script is missing: .*renamed-bundle\.js"):
+        assets.check()
+
+
+def test_uppercase_script_src_is_not_mistaken_for_an_inline_block(tmp_path, monkeypatch):
+    """The inline-block rule reads the same parse, so an external tag stays external."""
+    _gate(
+        tmp_path,
+        monkeypatch,
+        '<html><body><SCRIPT SRC="/static/dashboard.js"></SCRIPT></body></html>',
+        _LOADERS,
+    )
+
+    assets.check()
