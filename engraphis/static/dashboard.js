@@ -887,6 +887,12 @@ function graphRedraw(){
  if(!FG||GREDRAWFRAME)return;
  GREDRAWFRAME=requestAnimationFrame(()=>{GREDRAWFRAME=0;if(FG)FG.nodeCanvasObject(FG.nodeCanvasObject())});
 }
+/* ── on-demand graph assets ───────────────────────────────────────────────────────────────
+   Neither script is in index.html. force-graph.min.js applies inline styles at runtime, and
+   under the production CSP (`style-src 'self'`) every one of those is blocked and reported;
+   loading it on a page that never opens the graph turns a plain dashboard view into a wall of
+   console errors. Both loaders are memoized, so a re-entrant graphRender() reuses the in-flight
+   fetch rather than appending a second <script>. */
 let FORCE_GRAPH_LOADING=null;
 function loadForceGraph(){
  if(typeof ForceGraph!=='undefined')return Promise.resolve();
@@ -900,14 +906,52 @@ function loadForceGraph(){
  });
  return FORCE_GRAPH_LOADING;
 }
+let GRAPH_ENGINE_LOADING=null;
+function loadGraphEngine(){
+ if(typeof EngraphisGraph!=='undefined')return Promise.resolve();
+ if(GRAPH_ENGINE_LOADING)return GRAPH_ENGINE_LOADING;
+ GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
+  const script=document.createElement('script');
+  script.src='/static/engraphis-graph.js';
+  /* A 200 that never registers the global is a corrupt/truncated asset, not a success —
+     resolving there would hand graphRenderEngine() an undefined EngraphisGraph. */
+  script.onload=()=>{typeof EngraphisGraph==='undefined'?reject(new Error('Graph engine asset loaded without registering EngraphisGraph')):resolve()};
+  script.onerror=()=>reject(new Error('Graph engine could not load'));
+  document.head.appendChild(script);
+ });
+ /* Mark the memoized promise handled. graphRender() can start this fetch on a pass that
+    returns before attaching its own handler, and an unhandled rejection would print the exact
+    console error this lazy-loading exists to remove. Callers still receive the rejection. */
+ GRAPH_ENGINE_LOADING.catch(()=>{});
+ return GRAPH_ENGINE_LOADING;
+}
 function graphRender(fit=true,reheat=true){
  const empty=document.getElementById('graph-empty');
+ /* Kick the opt-in engine off alongside the vendor bundle instead of after it, so a
+    `?graph-engine=next` deep link costs one round trip rather than two. */
+ const enginePending=graphEngineEnabled()&&typeof EngraphisGraph==='undefined'?loadGraphEngine():null;
  if(typeof ForceGraph==='undefined'){
   showAs(empty,true,'flex');empty.textContent='Loading graph engine…';
   graphSetLayoutStatus('Loading engine',true);
   loadForceGraph().then(()=>graphRender(fit,reheat)).catch(error=>{
    empty.textContent=error.message+'; refresh or verify the installed static assets.';
    graphSetLayoutStatus('Engine unavailable',false);
+  });
+  return;
+ }
+ if(enginePending){
+  /* `?graph-engine=next` has to actually arrive on the next engine. Wait for the asset here
+     rather than falling through to graphRenderEngine(), whose `typeof EngraphisGraph` bail
+     cannot tell "not fetched yet" from "unavailable" and would quietly serve Classic to
+     someone who explicitly asked for next. Only a real load failure degrades, and it is
+     announced through graphEngineFallback() rather than silent. */
+  showAs(empty,true,'flex');empty.textContent='Loading graph engine…';
+  graphSetLayoutStatus('Loading engine',true);
+  enginePending.then(()=>graphRender(fit,reheat)).catch(error=>{
+   /* Latches GRAPH_ENGINE_FAILED, so the re-entry below takes the classic path and this
+      cannot loop. */
+   graphEngineFallback(error);
+   graphRender(fit,reheat);
   });
   return;
  }
