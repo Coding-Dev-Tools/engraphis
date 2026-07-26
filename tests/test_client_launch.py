@@ -185,10 +185,15 @@ def test_main_reports_a_stalled_step_and_exits(monkeypatch, capsys) -> None:
 
     monkeypatch.setattr(updater, "_detect_install", lambda: "pypi")
 
-    def _stall(cmd, **kwargs):
-        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+    class _Stalled:
+        pid = 5150
+        returncode = None
 
-    monkeypatch.setattr(updater.subprocess, "run", _stall)
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired("pip", timeout)
+
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda cmd, **kwargs: _Stalled())
+    monkeypatch.setattr(updater, "_kill_process_tree", lambda process: None)
 
     with pytest.raises(SystemExit) as excinfo:
         updater.main([])
@@ -216,48 +221,49 @@ def test_a_stalled_reinstall_still_rolls_back_the_checkout(monkeypatch, tmp_path
     calls = []
     reinstalls = {"n": 0}
 
-    def _fake_run(cmd, **kwargs):
-        cmd = list(cmd)
-        calls.append(cmd)
-        assert kwargs.get("timeout"), "every step must carry a budget: %s" % cmd
-
-        def done(stdout=""):
-            return subprocess.CompletedProcess(cmd, 0, stdout, "")
-
-        if cmd[:4] == [sys.executable, "-m", "pip", "show"]:
-            return done("Editable project location: %s\n" % project)
-        if cmd[:5] == [sys.executable, "-m", "pip", "install", "-e"]:
-            reinstalls["n"] += 1
-            if reinstalls["n"] == 1:  # the upgrade reinstall stalls
-                raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
-            return done()  # the rollback reinstall succeeds
-        if "rev-parse" in cmd:
-            return done("a" * 40 + "\n")
-        if "symbolic-ref" in cmd:
-            return done("main\n")
-        if "rev-list" in cmd:
-            return done("b" * 40 + "\n")
-        if "status" in cmd:
-            return done("")
-        assert "ls-remote" not in cmd, "the refs query must use the bounded reader"
-        return done()
-
-    class _Refs:
+    class _Proc:
         pid = 909
-        returncode = 0
+
+        def __init__(self, returncode=0, stdout="", stall=False):
+            self.returncode = returncode
+            self._stdout = stdout
+            self._stall = stall
 
         def communicate(self, timeout=None):
-            assert timeout, "the bounded drain must carry a budget"
-            return "%s\trefs/tags/v9.9.9\n" % ("b" * 40), None
+            assert timeout, "every step must carry a budget"
+            if self._stall:
+                raise subprocess.TimeoutExpired("cmd", timeout)
+            return self._stdout, None
 
     def _fake_popen(cmd, **kwargs):
         cmd = list(cmd)
         calls.append(cmd)
-        assert "ls-remote" in cmd, "only the parsed network query needs a pipe: %s" % cmd
-        return _Refs()
+        if cmd[:4] == [sys.executable, "-m", "pip", "show"]:
+            return _Proc(stdout="Editable project location: %s\n" % project)
+        if cmd[:5] == [sys.executable, "-m", "pip", "install", "-e"]:
+            reinstalls["n"] += 1
+            # the upgrade reinstall stalls; the rollback reinstall succeeds
+            return _Proc(stall=reinstalls["n"] == 1)
+        if "ls-remote" in cmd:
+            assert kwargs.get("stdout") is subprocess.PIPE, "the refs query must be parsed"
+            return _Proc(stdout="%s\trefs/tags/v9.9.9\n" % ("b" * 40))
+        if "rev-parse" in cmd:
+            return _Proc(stdout="a" * 40 + "\n")
+        if "symbolic-ref" in cmd:
+            return _Proc(stdout="main\n")
+        if "rev-list" in cmd:
+            return _Proc(stdout="b" * 40 + "\n")
+        if "status" in cmd:
+            return _Proc(stdout="")
+        return _Proc()
 
-    monkeypatch.setattr(updater.subprocess, "run", _fake_run)
     monkeypatch.setattr(updater.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(
+        updater.subprocess, "run",
+        lambda *a, **k: pytest.fail("no step may spawn through the unenforceable path"),
+    )
+    # Never let a fabricated pid reach the real ``taskkill``/``killpg``.
+    monkeypatch.setattr(updater, "_kill_process_tree", lambda process: None)
 
     with pytest.raises(updater.UpdateTimeout):
         updater._git_update()

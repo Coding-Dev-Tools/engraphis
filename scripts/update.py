@@ -55,7 +55,9 @@ _DRAIN_AFTER_KILL_S = 5          # reading a pipe whose writers were just destro
 # ``os.killpg`` must target *our* tree, never the shell that launched the updater, so the
 # POSIX child gets its own session. Windows has no equivalent at spawn time — the tree is
 # walked by ``taskkill /T`` instead — and the keyword's Windows meaning changed in 3.13,
-# so it is not passed there at all.
+# so it is not passed there at all. Every step is spawned this way, not just the captured
+# ones: a session is the only handle POSIX gives us on a *descendant*, and it has to exist
+# before the child runs, not after the budget has already expired.
 _OWN_PROCESS_GROUP = {} if os.name == "nt" else {"start_new_session": True}
 
 
@@ -120,43 +122,35 @@ def _kill_process_tree(process: subprocess.Popen) -> None:
         pass
 
 
-def _run(cmd: list[str], what: str, timeout: int, check: bool = False,
-         capture: bool = False, env: dict | None = None) -> subprocess.CompletedProcess:
-    """Run *cmd* under an explicit budget; a stall raises instead of hanging forever.
+def _bounded_call(cmd: list[str], what: str, timeout: int, capture: bool,
+                  env: dict | None) -> subprocess.CompletedProcess:
+    """Run *cmd* under a budget that **nothing in its process tree** can outlive.
 
-    ``capture`` is opt-in and deliberately defaults to *off*. ``subprocess.run`` honours
-    ``timeout`` only when it has no pipes left to drain: once the budget expires CPython
-    kills the direct child and then calls ``communicate()`` with **no** timeout, so the
-    reader threads keep waiting until every inherited write handle on those pipes closes —
-    grandchildren included. Use ``capture=True`` only for local commands that fork nothing
-    (``pip show``, git plumbing against an existing clone). Anything that reaches the
-    network must go through :func:`_run_captured`, which kills the whole tree first.
+    Every step lands here, because "bounded" has to mean the same thing for a step that is
+    merely displayed as for one that is parsed. ``subprocess.run(timeout=...)`` cannot
+    provide it, in two distinct ways:
 
-    ``stdin`` is closed for every step: a subprocess that stops to read from a terminal is
-    the same indefinite hang as a stalled socket, and none of these commands has anything
-    to read.
-    """
-    try:
-        return subprocess.run(cmd, capture_output=capture, text=True, check=check,
-                              timeout=timeout, stdin=subprocess.DEVNULL, env=env)
-    except subprocess.TimeoutExpired:
-        raise _timed_out(what, timeout) from None
+    * *With* pipes it does not even bound the call. Once the budget expires CPython kills
+      the direct child and then drains with an **unbounded** ``communicate()``, which waits
+      for every inherited write handle to close — ``git-remote-https`` included.
+    * *Without* pipes it returns on time but leaves the descendants running. ``pip``'s
+      resolver or a credential helper keeps writing to the environment and the repository
+      while the caller has already moved on to a rollback or a retry, which is precisely
+      the guarantee the budget is supposed to buy.
 
+    So the child is spawned into its own session (POSIX) and the whole tree is torn down
+    with ``taskkill /T`` (Windows) before the pipe is re-read — and that drain is bounded
+    too, so a pipe a dead writer still owns cannot re-hang the call.
 
-def _run_captured(cmd: list[str], what: str, timeout: int,
-                  env: dict | None = None) -> subprocess.CompletedProcess:
-    """Run *cmd* for its stdout under a budget that is actually enforced.
-
-    For the steps that must be *parsed* rather than merely displayed, so simply not
-    capturing is not an option. Only stdout is piped — stderr stays on the terminal, which
-    both surfaces git's own explanation of a failure and leaves one fewer inherited write
-    handle for a grandchild to hold open. On expiry the entire process tree is destroyed
-    *before* the pipe is drained, and even that drain is bounded, so the call returns on
-    schedule instead of waiting on ``git-remote-https``.
+    Only stdout is ever piped, and only when *capture* asks for it: stderr staying on the
+    terminal both surfaces git's own explanation of a failure and leaves one fewer
+    inherited write handle for a grandchild to hold open. ``stdin`` is closed for every
+    step — a subprocess that stops to read from a terminal is the same indefinite hang as
+    a stalled socket, and none of these commands has anything to read.
     """
     process = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, env=env,
-        **_OWN_PROCESS_GROUP,
+        cmd, stdout=subprocess.PIPE if capture else None, stdin=subprocess.DEVNULL,
+        text=True, env=env, **_OWN_PROCESS_GROUP,
     )
     try:
         stdout, _ = process.communicate(timeout=timeout)
@@ -168,6 +162,90 @@ def _run_captured(cmd: list[str], what: str, timeout: int,
             pass
         raise _timed_out(what, timeout) from None
     return subprocess.CompletedProcess(cmd, process.returncode, stdout or "", None)
+
+
+def _run(cmd: list[str], what: str, timeout: int, check: bool = False,
+         capture: bool = False, env: dict | None = None) -> subprocess.CompletedProcess:
+    """Run *cmd* under an explicit budget; a stall raises instead of hanging forever.
+
+    ``capture`` stays opt-in — a pipe nobody reads is only another handle a grandchild can
+    hold open — but it no longer selects between an enforceable path and an unenforceable
+    one. Both go through :func:`_bounded_call`, so a timeout kills the descendants either
+    way. ``check`` keeps ``subprocess.run``'s meaning: a non-zero exit raises
+    ``CalledProcessError``.
+    """
+    result = _bounded_call(cmd, what, timeout, capture, env)
+    if check and result.returncode:
+        raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, None)
+    return result
+
+
+def _run_captured(cmd: list[str], what: str, timeout: int,
+                  env: dict | None = None) -> subprocess.CompletedProcess:
+    """Run *cmd* for its stdout under a budget that is actually enforced.
+
+    For the steps that must be *parsed* rather than merely displayed, so simply not
+    capturing is not an option.
+    """
+    return _bounded_call(cmd, what, timeout, True, env)
+
+
+def _index_lock(project_dir: Path) -> Path:
+    """Path to this clone's ``index.lock``, following a ``.git`` *file* when there is one.
+
+    A worktree or submodule checkout records ``gitdir: <path>`` in a plain file instead of
+    holding a ``.git`` directory, and the lock lives in the pointed-to git dir. Guessing
+    ``<project>/.git/index.lock`` there would tell the user to delete a file that does not
+    exist while the real one keeps blocking every git command.
+    """
+    git_dir = project_dir / ".git"
+    if git_dir.is_file():
+        try:
+            pointer = git_dir.read_text(encoding="utf-8").strip()
+        except OSError:
+            pointer = ""
+        if pointer.startswith("gitdir:"):
+            target = Path(pointer.split(":", 1)[1].strip())
+            git_dir = target if target.is_absolute() else project_dir / target
+    return git_dir / "index.lock"
+
+
+def _release_index_lock(project_dir: Path, existed_before: bool, ours: bool) -> None:
+    """Clear the index lock our own killed checkout left — and only that one.
+
+    A ``git checkout`` terminated at its budget dies still holding ``index.lock``, and
+    every later git command in the clone then fails with "Another git process seems to be
+    running" — the restore below first of all. But deleting the lock unconditionally is
+    worse than the failure it fixes: an unrelated, *live* git in the same clone would have
+    its index pulled out from under it mid-write.
+
+    Two independent facts therefore have to line up before we touch it. The lock was absent
+    when this updater started the checkout, so it appeared during our own invocation; and
+    the checkout is one *we* killed. A git process that exits on its own always removes the
+    lock it created, so a lock surviving any other failure belongs to somebody else. When
+    it does, name the exact path and let the user decide — an unexplained wedged clone is
+    the outcome worth avoiding, not an unattended delete.
+    """
+    lock = _index_lock(project_dir)
+    if not lock.exists():
+        return
+    if ours and not existed_before:
+        try:
+            lock.unlink()
+        except OSError as exc:
+            print("Could not remove the index lock left by the interrupted checkout: %s "
+                  "(%s). Delete that file, then re-run `engraphis-update`." % (lock, exc),
+                  file=sys.stderr)
+        else:
+            print("Removed the index lock left by the interrupted checkout: %s" % lock,
+                  file=sys.stderr)
+        return
+    print(
+        "A git index lock is present that this update did not create: %s\n"
+        "Another git process may be running in %s. Close it — or delete that file if none "
+        "is — then re-run `engraphis-update`." % (lock, project_dir),
+        file=sys.stderr,
+    )
 
 
 def _select_latest_tag(tags) -> str:
@@ -356,42 +434,56 @@ def _git_update(check_only: bool = False) -> None:
         print("Refusing to update a working tree with uncommitted changes.", file=sys.stderr)
         sys.exit(1)
     print(f"Checking out release {tag}...")
-    _run([git, "-C", str(project_dir), "checkout", f"tags/{tag}"],
-         "Checking out the release tag", _GIT_CHECKOUT_TIMEOUT_S,
-         check=True, capture=False, env=_git_env())
-    print(f"Reinstalling from {project_dir}...")
+    # The checkout is the destructive step, so it belongs *inside* the rollback boundary,
+    # not above it. Run outside, a checkout that exceeded its budget or exited non-zero
+    # raised straight past the restore and left an editable install partially switched
+    # while the CLI reported nothing but a timeout.
+    lock_existed = _index_lock(project_dir).exists()
+    stage = "checkout"
     try:
+        _run([git, "-C", str(project_dir), "checkout", f"tags/{tag}"],
+             "Checking out the release tag", _GIT_CHECKOUT_TIMEOUT_S,
+             check=True, capture=False, env=_git_env())
+        stage = "reinstall"
+        print(f"Reinstalling from {project_dir}...")
         _run(
             [sys.executable, "-m", "pip", "install", "-e", str(project_dir)],
             "Reinstalling the editable checkout", _PIP_INSTALL_TIMEOUT_S,
             check=True, capture=False,
         )
-    except (subprocess.CalledProcessError, UpdateTimeout):
-        # A failed *or stalled* reinstall must not strand a previously working editable
-        # checkout at a half-applied detached release. The tree is already on the new tag
-        # by this point, so a bare hang here is what wedges the install; catching the
-        # timeout is what lets this rollback run at all. Restore the original branch (or
-        # exact commit when it started detached) and best-effort reinstall, then
-        # propagate the original failure.
+    except (subprocess.CalledProcessError, UpdateTimeout) as exc:
+        # A failed *or stalled* checkout or reinstall must not strand a previously working
+        # editable install on a half-applied detached release. Catching the timeout is what
+        # lets this rollback run at all. Restore the original branch (or exact commit when
+        # it started detached) and reinstall, then propagate the original failure.
         print("Restoring the previous checkout...", file=sys.stderr)
+        # Only a checkout *we* terminated can have abandoned a lock; see _release_index_lock.
+        _release_index_lock(
+            project_dir, lock_existed,
+            ours=stage == "checkout" and isinstance(exc, UpdateTimeout),
+        )
+        manual = (
+            "Run `git -C %s checkout %s` and `%s -m pip install -e %s` to restore the "
+            "previous installation." % (project_dir, original_ref, sys.executable, project_dir)
+        )
         try:
             _run([git, "-C", str(project_dir), "checkout", original_ref],
                  "Restoring the previous checkout", _GIT_CHECKOUT_TIMEOUT_S,
-                 capture=False, env=_git_env())
+                 check=True, capture=False, env=_git_env())
             _run(
                 [sys.executable, "-m", "pip", "install", "-e", str(project_dir)],
                 "Reinstalling the previous checkout", _PIP_INSTALL_TIMEOUT_S,
-                capture=False,
+                check=True, capture=False,
             )
         except UpdateTimeout:
             # Rollback itself stalled: name the two commands that finish it by hand
             # rather than exiting on a tree the user does not know has moved.
-            print(
-                "Rollback did not finish. Run `git -C %s checkout %s` and "
-                "`%s -m pip install -e %s` to restore the previous installation."
-                % (project_dir, original_ref, sys.executable, project_dir),
-                file=sys.stderr,
-            )
+            print("Rollback did not finish. " + manual, file=sys.stderr)
+        except subprocess.CalledProcessError:
+            # The restore ran unchecked before, so a *failed* one was silent and main()
+            # still told the user the previous installation had been restored. It had not.
+            print("Rollback FAILED: the working tree may still be on %s. %s"
+                  % (tag, manual), file=sys.stderr)
         raise
     print(f"Updated to {tag}.")
 
