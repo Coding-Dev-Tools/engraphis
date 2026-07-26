@@ -5,6 +5,24 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- **`engraphis connect --token engr_ct_…`** — the missing client half of device connect.
+  `cloud_session.save_bootstrap()` is the only writer of `~/.engraphis/cloud_session.json`,
+  and it had no production caller: the docs told paying customers to prefer a file nothing
+  created, so a purchased installation could not be connected without hand-writing state.
+  The new command redeems the one-time connect token from the account portal against
+  `POST /v1/devices/connect`, saves the returned session with owner-only permissions, and
+  verifies `cloud_session.configured()` before reporting success. The token is sent in the
+  request body and nowhere else — never printed, logged, or written to disk — and every
+  refusal maps to fixed, actionable copy (an expired or already-used token is not confused
+  with a lapsed subscription). Also installed as `engraphis-connect`.
+- An `engraphis` front-door command that dispatches to the existing `engraphis-<verb>`
+  entry points, so the command the account portal displays is runnable as shown.
+- A stable per-installation identity at `~/.engraphis/client_identity.json` (random ULIDs,
+  not a hardware fingerprint) so reconnecting a machine updates its existing installation
+  instead of registering a new device every time.
+
 ### Removed
 
 - **"Signed compliance export" is no longer advertised on any surface.** It was granted to
