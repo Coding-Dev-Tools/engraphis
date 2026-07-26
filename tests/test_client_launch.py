@@ -54,19 +54,53 @@ CLIENT_AUTOMATION_ALIASES = {"consolidation", "dreaming"}
 
 
 # ── (1) the updater must never hang on a stalled remote ───────────────────────
+_SPAWNERS = ("subprocess.run", "subprocess.call", "subprocess.check_output",
+             "subprocess.check_call", "subprocess.Popen")
+
+
+def _drains_under_a_deadline(scope: ast.AST) -> bool:
+    """True when *scope* reads its child's pipe with an explicit budget on the read."""
+
+    return any(
+        isinstance(node, ast.Call)
+        and ast.unparse(node.func).endswith(".communicate")
+        and any(keyword.arg == "timeout" for keyword in node.keywords)
+        for node in ast.walk(scope)
+    )
+
+
 def test_the_updater_runs_no_unbounded_subprocess() -> None:
-    """Every shell-out is routed through the one helper that always passes a budget."""
+    """Every shell-out is bounded — including the ones whose output must be parsed.
+
+    ``subprocess.run(capture_output=True, timeout=N)`` does not enforce ``N``: once the
+    budget expires CPython kills the direct child and then drains the pipes with an
+    *unbounded* ``communicate()``, which waits for every inherited write handle to close —
+    grandchildren such as ``git-remote-https`` included. So a ``timeout=`` keyword is not
+    on its own proof of a bound. A ``Popen`` is accepted only when the same function bounds
+    the read that follows it; anything else is the old silent hang wearing a budget.
+    """
 
     tree = ast.parse(UPDATER.read_text(encoding="utf-8"))
+    enclosing = {}
+    for scope in ast.walk(tree):
+        if isinstance(scope, ast.FunctionDef):
+            for node in ast.walk(scope):
+                enclosing[node] = scope
+
     unbounded = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         target = ast.unparse(node.func)
-        if target in ("subprocess.run", "subprocess.call", "subprocess.check_output",
-                      "subprocess.check_call", "subprocess.Popen"):
-            if not any(kw.arg == "timeout" for kw in node.keywords):
-                unbounded.append(target)
+        if target not in _SPAWNERS:
+            continue
+        if any(kw.arg == "timeout" for kw in node.keywords):
+            continue
+        scope = enclosing.get(node)
+        if target == "subprocess.Popen" and scope is not None:
+            if _drains_under_a_deadline(scope):
+                continue
+        unbounded.append(target)
 
     assert unbounded == [], "unbounded subprocess call(s) in scripts/update.py: %s" % unbounded
 
@@ -76,13 +110,15 @@ def test_the_updater_helper_makes_a_timeout_impossible_to_omit() -> None:
 
     import scripts.update as updater
 
-    timeout = inspect.signature(updater._run).parameters["timeout"]
-    assert timeout.default is inspect.Parameter.empty
+    for helper in (updater._run, updater._run_captured):
+        timeout = inspect.signature(helper).parameters["timeout"]
+        assert timeout.default is inspect.Parameter.empty, helper.__name__
 
     tree = ast.parse(UPDATER.read_text(encoding="utf-8"))
     call_sites = [
         node for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_run"
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", "") in ("_run", "_run_captured")
     ]
     assert call_sites, "expected the updater to shell out through _run"
     for node in call_sites:
@@ -91,22 +127,51 @@ def test_the_updater_helper_makes_a_timeout_impossible_to_omit() -> None:
 
 
 def test_a_stalled_remote_aborts_instead_of_waiting_forever(monkeypatch) -> None:
-    """The failing call is abandoned at its budget and reported, not awaited."""
+    """The failing call is abandoned at its budget and reported, not awaited.
+
+    ``ls-remote`` output has to be parsed, so this step cannot simply stop capturing. It
+    therefore has to kill the *whole* process tree before it reads the pipe again, and
+    bound that read too — otherwise the surviving ``git-remote-https`` still owns the write
+    handle and the "budget" expires into an indefinite wait.
+    """
 
     import scripts.update as updater
 
-    seen = {}
+    seen = {"drains": []}
 
-    def _stall(cmd, **kwargs):
-        seen["timeout"] = kwargs.get("timeout")
-        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+    class _Stalled:
+        pid = 4242
+        returncode = None
 
-    monkeypatch.setattr(updater.subprocess, "run", _stall)
+        def communicate(self, timeout=None):
+            seen["drains"].append(timeout)
+            raise subprocess.TimeoutExpired("git", timeout)
+
+    def _spawn(cmd, **kwargs):
+        seen["cmd"] = list(cmd)
+        seen["stdin"] = kwargs.get("stdin")
+        seen["env"] = kwargs.get("env")
+        return _Stalled()
+
+    monkeypatch.setattr(updater.subprocess, "Popen", _spawn)
+    monkeypatch.setattr(
+        updater.subprocess, "run",
+        lambda *a, **k: pytest.fail("a network query must not use the unenforceable path"),
+    )
+    monkeypatch.setattr(
+        updater, "_kill_process_tree",
+        lambda process: seen.__setitem__("killed", process.pid),
+    )
 
     with pytest.raises(updater.UpdateTimeout) as excinfo:
         updater._remote_latest_tag("/usr/bin/git", "https://example.test/engraphis.git")
 
-    assert isinstance(seen["timeout"], (int, float)) and seen["timeout"] > 0
+    assert isinstance(seen["drains"][0], (int, float)) and seen["drains"][0] > 0
+    assert seen["killed"] == 4242, "the grandchildren must die before the pipe is re-read"
+    assert len(seen["drains"]) == 2 and seen["drains"][1] > 0, "the drain is bounded too"
+    # Nothing may stop to ask a human for a password on a machine nobody is watching.
+    assert seen["stdin"] is subprocess.DEVNULL
+    assert seen["env"]["GIT_TERMINAL_PROMPT"] == "0"
     # A hang is only survivable if the user is told which step stalled and what to do.
     message = str(excinfo.value)
     assert "timed out" in message
@@ -170,15 +235,29 @@ def test_a_stalled_reinstall_still_rolls_back_the_checkout(monkeypatch, tmp_path
             return done("a" * 40 + "\n")
         if "symbolic-ref" in cmd:
             return done("main\n")
-        if "ls-remote" in cmd:
-            return done("%s\trefs/tags/v9.9.9\n" % ("b" * 40))
         if "rev-list" in cmd:
             return done("b" * 40 + "\n")
         if "status" in cmd:
             return done("")
+        assert "ls-remote" not in cmd, "the refs query must use the bounded reader"
         return done()
 
+    class _Refs:
+        pid = 909
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            assert timeout, "the bounded drain must carry a budget"
+            return "%s\trefs/tags/v9.9.9\n" % ("b" * 40), None
+
+    def _fake_popen(cmd, **kwargs):
+        cmd = list(cmd)
+        calls.append(cmd)
+        assert "ls-remote" in cmd, "only the parsed network query needs a pipe: %s" % cmd
+        return _Refs()
+
     monkeypatch.setattr(updater.subprocess, "run", _fake_run)
+    monkeypatch.setattr(updater.subprocess, "Popen", _fake_popen)
 
     with pytest.raises(updater.UpdateTimeout):
         updater._git_update()

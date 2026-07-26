@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -34,11 +35,12 @@ _SEMVER = re.compile(
 )
 
 
-# Every step below runs with an explicit, differentiated budget. The query steps capture
-# their output, so an unbounded call against a stalled package index or an unreachable git
-# remote is an indefinite and *silent* hang with nothing on screen to explain it. Sizes
-# follow the work each command actually does: a refs query is one round trip, a fetch may
-# transfer a whole object delta, and an install downloads and may build wheels.
+# Every step below runs with an explicit, differentiated budget. An unbounded call against
+# a stalled package index or an unreachable git remote is an indefinite hang, and a
+# *captured* one is a silent hang with nothing on screen to explain it. Sizes follow the
+# work each command actually does: a refs query is one round trip, a fetch may transfer a
+# whole object delta, and an install downloads and may build wheels. A budget is only real
+# if nothing can outlive it — see ``_run`` and ``_run_captured`` for how that is enforced.
 _GIT_LOCAL_TIMEOUT_S = 30        # plumbing on an existing clone (see scripts/graph_cli.py)
 _GIT_CHECKOUT_TIMEOUT_S = 120    # local, but runs checkout filters and hooks
 _GIT_LS_REMOTE_TIMEOUT_S = 60    # one network round trip for refs; no object transfer
@@ -47,6 +49,14 @@ _PIP_METADATA_TIMEOUT_S = 60     # `pip show` is local, but a cold pip import is
 _PIP_RESOLVE_TIMEOUT_S = 300     # `--dry-run` still queries and resolves against the index
 _PIP_INSTALL_TIMEOUT_S = 1800    # download plus build; an sdist with C extensions is slow
 _PIPX_TIMEOUT_S = 1800           # a pip install plus venv creation
+_TREE_KILL_TIMEOUT_S = 10        # bounding the kill itself; `taskkill` is local and fast
+_DRAIN_AFTER_KILL_S = 5          # reading a pipe whose writers were just destroyed
+
+# ``os.killpg`` must target *our* tree, never the shell that launched the updater, so the
+# POSIX child gets its own session. Windows has no equivalent at spawn time — the tree is
+# walked by ``taskkill /T`` instead — and the keyword's Windows meaning changed in 3.13,
+# so it is not passed there at all.
+_OWN_PROCESS_GROUP = {} if os.name == "nt" else {"start_new_session": True}
 
 
 class UpdateTimeout(RuntimeError):
@@ -58,17 +68,106 @@ class UpdateTimeout(RuntimeError):
     """
 
 
+def _timed_out(what: str, timeout: int) -> UpdateTimeout:
+    return UpdateTimeout(
+        "%s timed out after %ds. Check your network connection, proxy settings, and "
+        "package index, then run `engraphis-update` again." % (what, timeout)
+    )
+
+
+def _git_env() -> dict:
+    """Environment for every git call: never stop to ask a human for credentials.
+
+    An expired token, a revoked SSH key or a corporate proxy that wants authentication
+    otherwise drops the updater into git's terminal prompt — or, on Windows, the Git
+    Credential Manager dialog — and it blocks forever behind a question nobody is there
+    to answer. That is a hang with no network fault to diagnose, so the budgets above look
+    like they simply do not work. Fail the call instead; the caller already prints what to
+    do about it.
+    """
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "never"
+    return env
+
+
+def _kill_process_tree(process: subprocess.Popen) -> None:
+    """Kill *process* and every descendant it spawned. Best effort; already-dead is fine.
+
+    Killing only the direct child is what makes a "bounded" capture unbounded: git forks
+    ``git-remote-https`` (and credential helpers), those grandchildren inherit the pipe's
+    write handle, and a read of that pipe cannot complete until the last handle closes.
+    """
+    if os.name == "nt":
+        taskkill = shutil.which("taskkill")
+        if taskkill:
+            try:
+                subprocess.run(
+                    [taskkill, "/F", "/T", "/PID", str(process.pid)],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, timeout=_TREE_KILL_TIMEOUT_S,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+    else:
+        try:
+            os.killpg(os.getpgid(process.pid), getattr(signal, "SIGKILL", signal.SIGTERM))
+        except (OSError, AttributeError):
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+
+
 def _run(cmd: list[str], what: str, timeout: int, check: bool = False,
-         capture: bool = True) -> subprocess.CompletedProcess:
-    """Run *cmd* under an explicit budget; a stall raises instead of hanging forever."""
+         capture: bool = False, env: dict | None = None) -> subprocess.CompletedProcess:
+    """Run *cmd* under an explicit budget; a stall raises instead of hanging forever.
+
+    ``capture`` is opt-in and deliberately defaults to *off*. ``subprocess.run`` honours
+    ``timeout`` only when it has no pipes left to drain: once the budget expires CPython
+    kills the direct child and then calls ``communicate()`` with **no** timeout, so the
+    reader threads keep waiting until every inherited write handle on those pipes closes —
+    grandchildren included. Use ``capture=True`` only for local commands that fork nothing
+    (``pip show``, git plumbing against an existing clone). Anything that reaches the
+    network must go through :func:`_run_captured`, which kills the whole tree first.
+
+    ``stdin`` is closed for every step: a subprocess that stops to read from a terminal is
+    the same indefinite hang as a stalled socket, and none of these commands has anything
+    to read.
+    """
     try:
         return subprocess.run(cmd, capture_output=capture, text=True, check=check,
-                              timeout=timeout)
+                              timeout=timeout, stdin=subprocess.DEVNULL, env=env)
     except subprocess.TimeoutExpired:
-        raise UpdateTimeout(
-            "%s timed out after %ds. Check your network connection, proxy settings, and "
-            "package index, then run `engraphis-update` again." % (what, timeout)
-        ) from None
+        raise _timed_out(what, timeout) from None
+
+
+def _run_captured(cmd: list[str], what: str, timeout: int,
+                  env: dict | None = None) -> subprocess.CompletedProcess:
+    """Run *cmd* for its stdout under a budget that is actually enforced.
+
+    For the steps that must be *parsed* rather than merely displayed, so simply not
+    capturing is not an option. Only stdout is piped — stderr stays on the terminal, which
+    both surfaces git's own explanation of a failure and leaves one fewer inherited write
+    handle for a grandchild to hold open. On expiry the entire process tree is destroyed
+    *before* the pipe is drained, and even that drain is bounded, so the call returns on
+    schedule instead of waiting on ``git-remote-https``.
+    """
+    process = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, text=True, env=env,
+        **_OWN_PROCESS_GROUP,
+    )
+    try:
+        stdout, _ = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(process)
+        try:
+            process.communicate(timeout=_DRAIN_AFTER_KILL_S)
+        except subprocess.TimeoutExpired:
+            pass
+        raise _timed_out(what, timeout) from None
+    return subprocess.CompletedProcess(cmd, process.returncode, stdout or "", None)
 
 
 def _select_latest_tag(tags) -> str:
@@ -84,9 +183,10 @@ def _select_latest_tag(tags) -> str:
 
 
 def _remote_latest_tag(git: str, repo_url: str = REPO_URL) -> str:
-    result = _run(
+    result = _run_captured(
         [git, "ls-remote", "--tags", "--refs", repo_url, "v*"],
         "Listing release tags from the Git remote", _GIT_LS_REMOTE_TIMEOUT_S,
+        env=_git_env(),
     )
     if result.returncode:
         return ""
@@ -131,7 +231,8 @@ def _detect_install() -> str:
     try:
         result = _run(
             [sys.executable, "-m", "pip", "show", "engraphis"],
-            "Reading the installed Engraphis metadata", _PIP_METADATA_TIMEOUT_S)
+            "Reading the installed Engraphis metadata", _PIP_METADATA_TIMEOUT_S,
+            capture=True)
         if result.returncode == 0:
             info = result.stdout
             if "Editable project location:" in info:
@@ -160,7 +261,7 @@ def _git_update(check_only: bool = False) -> None:
         result = _run(
             [sys.executable, "-m", "pip", "show", "engraphis"],
             "Reading the installed Engraphis metadata", _PIP_METADATA_TIMEOUT_S,
-            check=True)
+            check=True, capture=True)
     except subprocess.CalledProcessError:
         print("Engraphis is not installed.", file=sys.stderr)
         sys.exit(1)
@@ -184,29 +285,33 @@ def _git_update(check_only: bool = False) -> None:
 
     # Fetch and compare. Fail closed on a network/ref error: selecting the highest LOCAL
     # tag would let a stray or malicious tag masquerade as the latest upstream release.
-    # Announce the network step: it captures its output, so without this line a slow or
-    # unreachable origin looks like a frozen terminal until the budget below expires.
+    # Nothing here parses the fetch's output, and capturing it would forfeit the budget
+    # below (see ``_run``), so let git report its own progress straight to the terminal.
     print("Fetching release tags from origin...")
     fetched = _run(
         [git, "-C", str(project_dir), "fetch", "--tags", "origin"],
         "Fetching release tags from origin", _GIT_FETCH_TIMEOUT_S,
+        env=_git_env(),
     )
     if fetched.returncode:
         print("Could not fetch release tags from origin; no update was applied.",
               file=sys.stderr)
         sys.exit(1)
     local = _run([git, "-C", str(project_dir), "rev-parse", "HEAD"],
-                 "Reading the current revision", _GIT_LOCAL_TIMEOUT_S).stdout.strip()
+                 "Reading the current revision", _GIT_LOCAL_TIMEOUT_S,
+                 capture=True, env=_git_env()).stdout.strip()
     branch_result = _run(
         [git, "-C", str(project_dir), "symbolic-ref", "--quiet", "--short", "HEAD"],
         "Reading the current branch", _GIT_LOCAL_TIMEOUT_S,
+        capture=True, env=_git_env(),
     )
     original_ref = branch_result.stdout.strip() if branch_result.returncode == 0 else local
     tag = LATEST_TAG
     if not tag:
-        tags = _run(
+        tags = _run_captured(
             [git, "-C", str(project_dir), "ls-remote", "--tags", "--refs", "origin", "v*"],
             "Listing release tags from origin", _GIT_LS_REMOTE_TIMEOUT_S,
+            env=_git_env(),
         )
         if tags.returncode:
             print("Could not list release tags from origin; no update was applied.",
@@ -224,6 +329,7 @@ def _git_update(check_only: bool = False) -> None:
     remote = _run(
         [git, "-C", str(project_dir), "rev-list", "-n", "1", tag],
         "Resolving the release tag", _GIT_LOCAL_TIMEOUT_S,
+        capture=True, env=_git_env(),
     )
     remote_sha = remote.stdout.strip() if remote.returncode == 0 else ""
 
@@ -244,6 +350,7 @@ def _git_update(check_only: bool = False) -> None:
     dirty = _run(
         [git, "-C", str(project_dir), "status", "--porcelain"],
         "Checking the working tree", _GIT_LOCAL_TIMEOUT_S,
+        capture=True, env=_git_env(),
     )
     if dirty.stdout.strip():
         print("Refusing to update a working tree with uncommitted changes.", file=sys.stderr)
@@ -251,7 +358,7 @@ def _git_update(check_only: bool = False) -> None:
     print(f"Checking out release {tag}...")
     _run([git, "-C", str(project_dir), "checkout", f"tags/{tag}"],
          "Checking out the release tag", _GIT_CHECKOUT_TIMEOUT_S,
-         check=True, capture=False)
+         check=True, capture=False, env=_git_env())
     print(f"Reinstalling from {project_dir}...")
     try:
         _run(
@@ -270,7 +377,7 @@ def _git_update(check_only: bool = False) -> None:
         try:
             _run([git, "-C", str(project_dir), "checkout", original_ref],
                  "Restoring the previous checkout", _GIT_CHECKOUT_TIMEOUT_S,
-                 capture=False)
+                 capture=False, env=_git_env())
             _run(
                 [sys.executable, "-m", "pip", "install", "-e", str(project_dir)],
                 "Reinstalling the previous checkout", _PIP_INSTALL_TIMEOUT_S,
@@ -378,10 +485,13 @@ def main(argv=None) -> None:
         if not LATEST_TAG:
             ap.error("version must be a stable MAJOR.MINOR.PATCH tag (for example v1.0.0)")
 
-    method = _detect_install()
-    print(f"Install method: {method}")
-
     try:
+        # Inside the guard, not before it. ``_detect_install`` re-raises ``UpdateTimeout``
+        # on purpose so a stalled `pip show` says which step hung and what to do about it;
+        # raising it outside this ``try`` threw that crafted message away and printed a
+        # traceback instead — the exact failure mode the exception exists to prevent.
+        method = _detect_install()
+        print(f"Install method: {method}")
         if method == "editable":
             _git_update(check_only=args.check)
         elif method == "pipx":
