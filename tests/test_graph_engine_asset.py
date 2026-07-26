@@ -532,6 +532,44 @@ def test_influence_relations_do_not_merge_two_topics_into_one_community() -> Non
 
 
 @requires_node
+def test_community_ids_are_ranked_by_size_so_the_legend_describes_the_right_nodes() -> None:
+    """Legend labels and canvas swatches must agree about which cluster is "Cluster 1".
+
+    ``graphRenderLegend()`` sorts communities by size and calls the largest "Cluster 1", but
+    node colour indexes the palette by the community *id* (``commPal()[community % n]``).
+    Assigning ids in raw payload order therefore made the legend describe one component with
+    another's colour whenever a smaller component appeared first — which the payload order
+    alone decides.  The classic ``graphComputeCommunities()`` sorts before assigning; so must
+    this.
+    """
+    report = _run_node(
+        """
+        // Payload order is deliberately worst-case: the singleton comes first, the largest
+        // component last, so raw iteration order and size order disagree completely.
+        const nodes = ['solo', 'm1', 'm2', 'a', 'b', 'c'].map(id => ({ id }));
+        const links = [
+          { source: 'm1', target: 'm2' },
+          { source: 'a', target: 'b' },
+          { source: 'b', target: 'c' },
+        ];
+        I.communities(nodes, links);
+        const byId = {};
+        nodes.forEach(n => { byId[n.id] = n.community; });
+        emit({ byId, distinct: new Set(nodes.map(n => n.community)).size });
+        """
+    )
+    assert report["distinct"] == 3
+    # Largest component (3 nodes) owns palette slot 0, i.e. the legend's "Cluster 1".
+    assert report["byId"]["a"] == 0
+    assert report["byId"]["b"] == 0
+    assert report["byId"]["c"] == 0
+    # Then the 2-node component, then the singleton — strictly by size, not by payload order.
+    assert report["byId"]["m1"] == 1
+    assert report["byId"]["m2"] == 1
+    assert report["byId"]["solo"] == 2
+
+
+@requires_node
 def test_max_helper_survives_arrays_past_the_spread_limit() -> None:
     """``Math.max(...array)`` throws RangeError long before a store is unrenderable."""
     report = _run_node("emit({ max: I.maxOf(new Array(400000).fill(7), 1) });")
@@ -593,6 +631,114 @@ def test_flow_particles_are_capped_on_a_large_relation_set() -> None:
     assert report["realistic"] == 0
 
 
+#: A canvas 2D stand-in that counts the fills the galaxy starfield performs.  The engine wraps
+#: ``onRenderFramePre`` in a try/catch, so a stub too thin to survive the real paint would read
+#: as "no stars drawn"; the small-graph leg of the test below is what proves it is thick enough.
+CANVAS_STUB = """
+let fills = 0;
+const ctx = {
+  globalAlpha: 1, globalCompositeOperation: '', fillStyle: '', strokeStyle: '', lineWidth: 1,
+  save() {}, restore() {}, beginPath() {}, arc() {}, ellipse() {}, stroke() {},
+  fill() { fills += 1; },
+  createRadialGradient() { return { addColorStop() {} }; },
+};
+"""
+
+
+@requires_node
+def test_galaxy_stops_animating_once_the_graph_is_large() -> None:
+    """A settled graph must fall off the CPU, and galaxy was the one style that never did.
+
+    The starfield lives in ``onRenderFramePre``, which force-graph's change detection cannot
+    see, so the engine holds ``autoPauseRedraw(false)`` for it — repainting every node and link
+    every frame, forever, even after particles and the simulation have stopped.  The classic
+    path simply drops the starfield past ``GPERF.large`` (``if(GPERF.large)return``); with the
+    stars gone there is nothing left that needs a frame the vendor would not schedule itself.
+    """
+    report = _run_engine(
+        CANVAS_STUB
+        + """
+        const api = G.create(el, {});
+        api.setStyle('galaxy');
+
+        api.setData(chain(40));
+        const smallAutoPause = store.autoPauseRedraw;
+        fills = 0; store.onRenderFramePre(ctx, 1);
+        const smallStars = fills;
+
+        // 3001 entities / 3000 relations — past the classic renderer's 600-node signal.
+        api.setData(chain(3000));
+        const bigAutoPause = store.autoPauseRedraw;
+        fills = 0; store.onRenderFramePre(ctx, 1);
+        const bigStars = fills;
+
+        // Style is what costs the frames, not size alone: cyber never asked for them.
+        api.setStyle('cyber');
+        api.setData(chain(40));
+        emit({ smallAutoPause, bigAutoPause, smallStars, bigStars,
+               cyberAutoPause: store.autoPauseRedraw });
+        """
+    )
+    # Small galaxy graph: the animation is affordable, so the engine keeps driving frames.
+    assert report["smallAutoPause"] is False
+    assert report["smallStars"] > 0, "canvas stub never reached the starfield"
+    # Large galaxy graph: no starfield, and the redraw loop is handed back to force-graph.
+    assert report["bigStars"] == 0
+    assert report["bigAutoPause"] is True, "a large galaxy graph repaints every frame forever"
+    assert report["cyberAutoPause"] is True
+
+
+@requires_node
+def test_type_colours_follow_the_active_theme_not_a_hard_coded_dark_palette() -> None:
+    """``applyTheme()`` recolours the canvas, but the engine had no theme to recolour to.
+
+    The legend and controls read the ``--entity-*`` custom properties, so switching to Light,
+    Midnight, Solarized or Sepia moved them while the canvas kept the dark-theme constants —
+    an inconsistent palette and, on the light themes, poor contrast.  The engine cannot read
+    CSS variables from a canvas, so the dashboard supplies the resolved values.
+    """
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        // setData first: the force-graph stand-in only starts answering graphData() once the
+        // engine has pushed data into it, where the real vendor seeds an empty graph.
+        // Linked, because the default scope hides degree-zero entities.
+        api.setData({
+          nodes: [{ id: 'a', etype: 'person_or_concept' }, { id: 'b', etype: 'person_or_concept' }],
+          links: [{ source: 'a', target: 'b', layer: 'entity' }],
+        });
+        api.setColorBy('type');
+        api.setStyle('classic');
+        // `store` holds the values handed to force-graph, so this is the node object the
+        // engine actually painted from — recoloured in place by refreshColors()/render().
+        const colour = () => store.graphData.nodes[0].color;
+
+        const fallback = colour();
+        api.setThemeColors({ person_or_concept: '#112233' });
+        const themed = colour();
+
+        // A style palette still outranks the theme, exactly as classic graphTypeColor() does.
+        api.setStyle('cyber');
+        const styled = colour();
+
+        // ...and an explicit user override still outranks both.
+        api.setStyle('classic');
+        api.setTypeColor('person_or_concept', '#abcdef');
+        const overridden = colour();
+
+        // A theme with no entry for the type must not strand the previous theme's colour.
+        api.setThemeColors({});
+        emit({ fallback, themed, styled, overridden, cleared: colour() });
+        """
+    )
+    assert report["fallback"] == "#8c83e8"
+    assert report["themed"] == "#112233", "the engine ignores the active theme"
+    assert report["styled"] == "#ff3ea5"
+    assert report["overridden"] == "#abcdef"
+    # The override survives; only the theme tier was replaced.
+    assert report["cleared"] == "#abcdef"
+
+
 @requires_node
 def test_hovering_a_node_asks_for_a_redraw() -> None:
     """A highlight nobody repaints is invisible.
@@ -651,16 +797,35 @@ const scenario = JSON.parse(process.argv[process.argv.length - 1]);
 const start = src.indexOf('function graphRenderEngine(');
 const slice = src.slice(start, src.indexOf('/* Nav away from the graph view', start));
 
-const log = { created: 0, paused: 0, seeded: 0, scope: null, error: null };
+/* The theme-colour lookup is sliced verbatim too, not stubbed: the property under test is
+   that the dashboard resolves the *active* CSS custom properties and hands them over, so
+   faking the resolver would assert nothing. Only `getComputedStyle` below is synthetic. */
+const between = (from, to) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)));
+const themeSrc = between('const ETYPE_TOKEN=', 'const GRAPH_PALETTES=')
+  + between('function cssvar(', 'function graphValidColor(')
+  + between('function graphThemeTypeColors(', 'function graphContrastColor(');
+
+/* A stand-in for a non-dark theme: every --entity-* token differs from the engine's
+   hard-coded THEME_ETYPE constants, so a renderer that ignored these would be visible. */
+const THEME_VARS = {
+  '--entity-concept': '#112233', '--entity-mention': '#223344', '--entity-hashtag': '#334455',
+  '--entity-email': '#445566', '--entity-organization': '#556677', '--entity-location': '#667788',
+  '--color-accent': '#778899',
+};
+globalThis.getComputedStyle = () => ({ getPropertyValue: name => THEME_VARS[name] || '' });
+
+const log = { created: 0, paused: 0, seeded: 0, scope: null, themeColors: null, error: null };
 const checkbox = { checked: scenario.showUnlinked };
 const element = { classList: { toggle() {} }, setAttribute() {}, set textContent(value) {} };
 globalThis.document = {
   getElementById: id => (id === 'graph-show-iso' ? checkbox : element),
   querySelectorAll: () => [],
+  body: {},
 };
 const engine = {
   setSettings() {}, setStyle() {}, setColorBy() {}, setPalette() {}, setTypeColors() {},
   setLayers() {}, setScope(patch) { log.scope = patch; },
+  setThemeColors(map) { log.themeColors = map; },
   setData(data) { log.seeded = data.nodes.length; },
 };
 const api = {
@@ -685,7 +850,7 @@ globalThis.graphEngineFallback = error => {
   log.error = String((error && error.message) || error);
 };
 
-const graphRenderEngine = new Function(slice + '\\nreturn graphRenderEngine;')();
+const graphRenderEngine = new Function(themeSrc + slice + '\\nreturn graphRenderEngine;')();
 const rendered = graphRenderEngine({
   nodes: [{ id: 'a' }, { id: 'b' }, { id: 'lonely' }],
   links: [{ source: 'a', target: 'b' }],
@@ -729,6 +894,34 @@ def test_dashboard_tells_the_engine_whether_to_show_unlinked_entities(checked: b
     assert report["scope"]["showUnlinked"] is checked
     # minDegree matters just as much: showUnlinked alone still loses to `degree >= 1`.
     assert report["scope"]["minDegree"] == (0 if checked else 1)
+
+
+@requires_node
+def test_dashboard_hands_the_engine_the_active_themes_entity_colours() -> None:
+    """The other half of the theme fix: the engine can only use what it is given."""
+    report = _run_render()
+
+    assert report["themeColors"] is not None, "the engine never learns the active theme"
+    # Resolved from the stubbed --entity-* custom properties, not from any JS constant.
+    assert report["themeColors"]["person_or_concept"] == "#112233"
+    assert report["themeColors"]["organization"] == "#556677"
+    # Every type the legend can show must be covered, or the canvas falls back per type.
+    assert set(report["themeColors"]) == {
+        "person_or_concept", "mention", "hashtag", "email", "organization", "location",
+    }
+
+
+def test_a_theme_switch_repaints_the_opt_in_canvas() -> None:
+    """``applyTheme()`` is the only place a theme change is observable.
+
+    It already calls ``graphRecolor()``; that path has to reach the engine, or the canvas keeps
+    the previous theme until the next full graph render.
+    """
+    source = DASHBOARD.read_text(encoding="utf-8")
+    assert "if(typeof graphRecolor==='function')graphRecolor()" in source
+    recolor = source[source.index("function graphRecolor()"):]
+    recolor = recolor[: recolor.index("\nfunction graphFit")]
+    assert "engine.setThemeColors(graphThemeTypeColors())" in recolor
 
 
 @requires_node

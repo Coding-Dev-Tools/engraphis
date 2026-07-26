@@ -55,6 +55,14 @@
      opt-in engine uses the same cutoff rather than inventing a second large-graph signal. */
   const PARTICLE_LINK_LIMIT = 800;
 
+  /* The classic renderer's large-graph signal (`GPERF` in dashboard.js, set from the rendered
+     data as `nodes>600 || links>2400`). Past it the classic path drops the galaxy starfield
+     outright — `if(GPERF.large)return` in graphStyleBackground — because repainting 110 stars
+     plus every node and link on every frame is what makes a big store unusable. The opt-in
+     engine reuses the same thresholds rather than inventing a second signal. */
+  const LARGE_NODE_LIMIT = 600;
+  const LARGE_LINK_LIMIT = 2400;
+
   function idOf(value) { return value && typeof value === 'object' ? value.id : value; }
   function nodeName(node) { return String(node.name || node.label || node.id || ''); }
   function linkEndpoint(link, side) {
@@ -138,7 +146,7 @@
     // otherwise fall back to connected-component BFS, as the dashboard does.
     if (nodes.length && nodes.every(n => typeof n.community === 'number')) return adj;
     const seen = new Set();
-    let group = 0;
+    const groups = [];
     nodes.forEach(n => {
       if (seen.has(n.id)) return;
       // Read head instead of Array#shift: shift() is O(n) per pop, which turns this BFS
@@ -148,11 +156,21 @@
       seen.add(n.id);
       while (head < queue.length) {
         const id = queue[head++];
-        const node = nodesById.get(id);
-        if (node) node.community = group;
         (clusterAdj[id] || []).forEach(next => { if (!seen.has(next)) { seen.add(next); queue.push(next); } });
       }
-      group++;
+      // `queue` has accumulated the whole component by now, so it *is* the group.
+      groups.push(queue);
+    });
+    /* Rank by size before the IDs become visible. `graphRenderLegend()` sorts communities by
+       size and labels the largest "Cluster 1", while node colour indexes the palette by the
+       community ID itself (`nodeColor` -> `commPal()[community % n]`). Assigning IDs in raw
+       node order therefore let the legend describe one component with another's swatch
+       whenever a smaller component happened to appear first in the payload. The classic
+       renderer sorts its components the same way (`graphComputeCommunities` in dashboard.js),
+       so largest == community 0 == palette slot 0 == "Cluster 1" on both paths. */
+    groups.sort((a, b) => b.length - a.length);
+    groups.forEach((group, index) => {
+      group.forEach(id => { const node = nodesById.get(id); if (node) node.community = index; });
     });
     return adj;
   }
@@ -267,13 +285,16 @@
       // Named `styleName`, not `style`: scripts/externalize_dashboard_assets.py scans this
       // asset for runtime inline-style mutation with a text pattern, and a plain data field
       // by the shorter name reads as one. The longer name keeps that gate honest.
-      styleName: 'cyber', colorBy: 'community', palette: 'theme', overrides: {},
+      styleName: 'cyber', colorBy: 'community', palette: 'theme', overrides: {}, themeColors: {},
       settings: Object.assign({}, PRESETS.communities, { mode: 'communities', labels: false, flow: true, frozen: false }),
       minDegree: 1, showUnlinked: false, focusId: null, depth: 2, layers: { temporal: true, entity: true, causal: true, semantic: true, code: false },
       path: null, asOf: null, ghost: true, sizeBy: 'degree', bridges: false, suggestions: false, collapse: 'auto'
     };
     let raw = { nodes: [], links: [], suggestions: [] }, adj = {}, hilite = null, hoverSet = null, maxDeg = 1;
     let zoom = 1, collapsed = false;
+    /* Recomputed from the *rendered* data on every render, exactly as the classic path
+       recomputes GPERF — filters and focus can take a huge store down to a small view. */
+    let large = false;
     let destroyed = false, running = true, fitTimer = 0, suspended = 0, pendingRender = null;
     let betweennessReady = false;
     const fg = ForceGraph()(el);
@@ -293,7 +314,7 @@
        to that change detection. Everywhere else, letting force-graph park the redraw is what
        keeps a settled graph off the CPU. */
     function needsContinuousFrames() {
-      return !reduced() && state.styleName === 'galaxy';
+      return !reduced() && state.styleName === 'galaxy' && !large;
     }
     /* Betweenness is the one analysis that is superlinear in the store size, and nothing in
        the default view consumes it — the bridge overlay and betweenness-sizing are both off.
@@ -317,10 +338,16 @@
       }
     }
 
+    /* Priority mirrors the classic renderer's graphTypeColor(): an explicit user override wins,
+       then a non-classic style's own palette, then the *active theme*. The theme tier is the
+       reason `themeColors` exists — it cannot be folded into `overrides`, which outrank
+       STYLE_PAL. The dashboard owns the CSS custom properties (`--entity-*`), so it supplies
+       the resolved values through setThemeColors() on every applyTheme()/graphRecolor();
+       THEME_ETYPE stays only as the standalone-embed fallback for a caller that never does. */
     function etypeColor(type) {
       if (state.overrides[type]) return state.overrides[type];
       if (state.styleName !== 'classic' && STYLE_PAL[state.styleName] && STYLE_PAL[state.styleName][type]) return STYLE_PAL[state.styleName][type];
-      return THEME_ETYPE[type] || '#8c83e8';
+      return state.themeColors[type] || THEME_ETYPE[type] || '#8c83e8';
     }
     function commPal() { return COMMUNITY_PALS[state.styleName] || COMMUNITY_PALS.classic; }
     function heatColor(node) {
@@ -438,6 +465,11 @@
 
     function styleBackground(ctx, scale) {
       if (state.styleName === 'galaxy') {
+        /* Matches the classic path's `if(GPERF.large)return`. Paired with the `large` term in
+           needsContinuousFrames(), this is what lets a big galaxy graph settle: the starfield
+           is the only paint force-graph cannot see, so once it is skipped there is nothing
+           left that requires a frame the vendor would not have scheduled itself. */
+        if (large) return;
         const t = performance.now() / 1000;
         ctx.save();
         ctx.globalCompositeOperation = 'lighter';
@@ -602,6 +634,7 @@
       }
       const motion = !reduced();
       const data = visible();
+      large = data.nodes.length > LARGE_NODE_LIMIT || data.links.length > LARGE_LINK_LIMIT;
       const sizeMetric = n => state.sizeBy === 'betweenness' ? (n.betweenness || 0) : ((n.degree || 0) / Math.max(1, maxDeg));
       data.nodes.forEach(n => {
         const base = (state.settings.size || 3);
@@ -738,6 +771,9 @@
     /* Rehydrating saved overrides is not a user edit, so it must not flip the palette
        selector to "custom" behind the user's back the way setTypeColor deliberately does. */
     api.setTypeColors = map => { Object.assign(state.overrides, map || {}); refreshColors(); };
+    /* The active theme's resolved `--entity-*` values. Replaced wholesale rather than merged:
+       a theme switch must not leave the previous theme's colour for a type the new one omits. */
+    api.setThemeColors = map => { state.themeColors = map && typeof map === 'object' ? { ...map } : {}; refreshColors(); };
     /* One render for a whole batch of setters — see `batch`. */
     api.apply = (fn, fit, reheat) => { batch(fn, fit, reheat); };
     api.setHighlight = id => {
