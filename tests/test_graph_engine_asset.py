@@ -951,6 +951,288 @@ def test_leaving_the_graph_view_records_the_pause_as_well_as_applying_it() -> No
     assert "GRAPH_ENGINE_PARKED=false" in pause
 
 
+#: Force-graph resolves each link's ``source``/``target`` from an id to the node object once it
+#: owns the data, and the paint callbacks read ``.x``/``.y`` off those objects.  The recording
+#: stand-in stores the arrays untouched, so a test that wants to *drive* a link painter has to
+#: do that resolution — and give the nodes coordinates — itself.
+LAY_OUT = """
+const layOut = () => {
+  const data = store.graphData;
+  const byId = new Map(data.nodes.map(n => [n.id, n]));
+  data.nodes.forEach((n, i) => { n.x = i * 10; n.y = i; });
+  data.links.forEach(l => {
+    const s = byId.get(l.source && l.source.id !== undefined ? l.source.id : l.source);
+    const t = byId.get(l.target && l.target.id !== undefined ? l.target.id : l.target);
+    if (s) l.source = s;
+    if (t) l.target = t;
+  });
+  return data;
+};
+let painted = [];
+const linkCtx = {
+  font: '', fillStyle: '', textAlign: '', textBaseline: '',
+  fillText(text) { painted.push(String(text)); },
+};
+const paintLinks = (scale, links) => {
+  painted = [];
+  const mode = store.linkCanvasObjectMode ? store.linkCanvasObjectMode() : undefined;
+  const draw = store.linkCanvasObject;
+  if (mode === 'after' && draw) (links || store.graphData.links).forEach(l => draw(l, linkCtx, scale));
+  return painted.slice();
+};
+"""
+
+
+@requires_node
+def test_relation_labels_are_painted_when_the_labels_box_is_ticked() -> None:
+    """**Labels** turns on two label layers on the classic path; the engine only had one.
+
+    ``graphToggleLabels`` forwards the checkbox straight to ``setSettings({labels})``, and the
+    classic renderer answers it with *both* entity names and a ``linkCanvasObject`` that paints
+    each ``link.label``.  The opt-in engine configured no link painter at all, so relation names
+    silently disappeared under ``?graph-engine=next`` and could only be read by hovering one
+    edge at a time.
+    """
+    report = _run_engine(
+        LAY_OUT
+        + """
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData({
+          nodes: [{ id: 'a' }, { id: 'b' }],
+          links: [{ source: 'a', target: 'b', layer: 'entity', label: 'mentions' }],
+        });
+        layOut();
+        const unticked = paintLinks(4);
+        api.setSettings({ labels: true });
+        const ticked = paintLinks(4);
+        // Relation labels are the noisiest layer: they stay off until the user zooms in.
+        const zoomedOut = paintLinks(1);
+        emit({ unticked, ticked, zoomedOut });
+        """
+    )
+    assert report["unticked"] == []
+    assert report["ticked"] == ["mentions"], "the Labels checkbox never paints relation names"
+    assert report["zoomedOut"] == []
+
+
+@requires_node
+def test_focusing_an_entity_the_canvas_is_not_showing_does_not_report_success() -> None:
+    """``zoomToNode`` is the dashboard's visibility oracle, and it was answering from memory.
+
+    ``graphFocus`` treats ``false`` as "offer the recovery path" — tick *Show unlinked*, retry,
+    and otherwise say *Entity not in view*.  The engine answered from ``raw.nodes``, which keeps
+    the coordinates force-graph left on a node from an earlier render, so a node hidden by the
+    auto-collapsed view (only ``cluster-*`` bubbles are drawn below zoom 0.55) or by a scope
+    filter still reported success — the camera moved to nothing and the user got no explanation.
+    """
+    report = _run_engine(
+        """
+        const collapses = [];
+        const api = G.create(el, {
+          reducedMotion: () => true, onCollapseChange: value => collapses.push(value),
+        });
+        api.setData({
+          nodes: [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'lonely' }],
+          links: [{ source: 'a', target: 'b' }, { source: 'b', target: 'c' }],
+        });
+        const shownIds = () => (store.graphData.nodes || []).map(n => n.id);
+        // Everything visible once, so every entity carries real coordinates from here on.
+        api.setScope({ showUnlinked: true, minDegree: 0 });
+        store.graphData.nodes.forEach((n, i) => { n.x = i * 10; n.y = i; });
+
+        // 1. Hidden by the scope filter, but still remembered with valid coordinates.
+        api.setScope({ showUnlinked: false, minDegree: 1 });
+        const filtered = { found: api.zoomToNode('lonely'), shown: shownIds() };
+
+        // 2. Hidden by the collapsed view, which paints cluster bubbles instead of entities.
+        api.setCollapse(true);
+        const whileCollapsed = shownIds();
+        const focused = api.zoomToNode('c');
+        emit({
+          filtered, whileCollapsed, focused, collapses,
+          afterFocus: shownIds(), collapsed: api.state().collapsed,
+        });
+        """
+    )
+    # A filtered-out entity is not in view, so the dashboard must be told to recover.
+    assert report["filtered"]["found"] is False, "a filtered-out entity reported as visible"
+    assert "lonely" not in report["filtered"]["shown"]
+    # A collapsed view really is showing only bubbles...
+    assert report["whileCollapsed"] == ["cluster-0"]
+    # ...so focusing a named entity has to expand it rather than claim it is already on screen.
+    assert report["focused"] is True
+    assert report["collapsed"] is False
+    assert "c" in report["afterFocus"], "the entity is still not on the canvas"
+    assert report["collapses"][-1] is False, "the dashboard was never told the view expanded"
+
+
+@requires_node
+def test_appearance_only_changes_do_not_restart_the_layout() -> None:
+    """Style, Color by, Labels and Flow repaint the graph; they must not re-run it.
+
+    ``visible()`` allocates fresh arrays on every call, and force-graph treats any ``graphData``
+    call as a data update: it re-copies the nodes and d3 resets the simulation alpha to 1.  So
+    every appearance-only setter threw the settled layout away and made the whole graph move.
+    The classic renderer guards the same seed with ``if(dataChanged)FG.graphData(data)``.
+    """
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => true });
+        const nodes = [{ id: 'lonely', etype: 'organization' }], links = [];
+        for (let i = 0; i < 12; i++) nodes.push({ id: 'n' + i, etype: 'person_or_concept' });
+        for (let i = 0; i < 11; i++) links.push({ source: 'n' + i, target: 'n' + (i + 1) });
+        api.setData({ nodes, links });
+        const seeded = calls.graphData;
+        const before = store.graphData.nodes[0].color;
+        const repaintsBefore = calls.nodeCanvasObject;
+
+        api.setStyle('galaxy');
+        api.setColorBy('type');
+        api.setSettings({ labels: true });
+        api.setSettings({ flow: false });
+        const paintOnly = calls.graphData;
+        const recoloured = store.graphData.nodes[0].color;
+        const repaintsAfter = calls.nodeCanvasObject;
+
+        // A genuine change to the visible set still has to reach force-graph.
+        api.setScope({ showUnlinked: true, minDegree: 0 });
+        emit({
+          seeded, paintOnly, afterScope: calls.graphData, before, recoloured,
+          repaintsBefore, repaintsAfter, shown: store.graphData.nodes.length,
+        });
+        """
+    )
+    assert report["paintOnly"] == report["seeded"], "an appearance change restarted the layout"
+    assert report["afterScope"] > report["seeded"], "a real view change never reached the canvas"
+    assert report["shown"] == 13
+    # Skipping the reseed must not mean skipping the paint.
+    assert report["recoloured"] != report["before"]
+    assert report["repaintsAfter"] > report["repaintsBefore"]
+
+
+@requires_node
+def test_simulation_time_is_bounded_on_a_large_graph() -> None:
+    """force-graph's default cooldown is 15 seconds; nothing here was overriding it.
+
+    The classic path caps a large graph at 1.1s / 80 ticks precisely because running the layout
+    — and therefore repainting every node and link — for the full default window is what makes a
+    big store feel broken on load and after every reheat.
+    """
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        api.setData(chain(40));
+        const small = {
+          time: store.cooldownTime, ticks: store.cooldownTicks, warmup: store.warmupTicks,
+          alpha: store.d3AlphaDecay, velocity: store.d3VelocityDecay,
+        };
+        // 3001 entities / 3000 relations — past the classic renderer's 600-node signal.
+        api.setData(chain(3000));
+        const big = {
+          time: store.cooldownTime, ticks: store.cooldownTicks, warmup: store.warmupTicks,
+          alpha: store.d3AlphaDecay, velocity: store.d3VelocityDecay,
+        };
+        const still = G.create(el, { reducedMotion: () => true });
+        still.setData(chain(40));
+        emit({
+          small, big,
+          reduced: { time: store.cooldownTime, ticks: store.cooldownTicks },
+        });
+        """
+    )
+    assert report["small"]["time"] == 2200
+    assert report["small"]["ticks"] == 160
+    # The number this guards: the vendor default left a 3k-relation store simulating for 15s.
+    assert report["big"]["time"] == 1100
+    assert report["big"]["ticks"] == 80
+    assert report["big"]["warmup"] == 18
+    # A large graph also settles harder, exactly as GPERF.large does on the classic path.
+    assert report["big"]["alpha"] > report["small"]["alpha"]
+    assert report["big"]["velocity"] > report["small"]["velocity"]
+    # Reduced motion asks for a static layout, not a shorter animation.
+    assert report["reduced"]["time"] == 0
+    assert report["reduced"]["ticks"] == 1
+
+
+@requires_node
+def test_curves_arrows_and_relation_labels_are_dropped_on_a_dense_graph() -> None:
+    """Three per-edge costs the classic path turns off past ``GPERF.dense`` (links > 1500).
+
+    A curved link is a quadratic bezier instead of a straight line, an arrowhead is a filled
+    triangle, and a relation label is a text layout — each per relation, each every frame.  At
+    this density they are unreadable anyway, so the classic renderer pays for none of them.
+    """
+    report = _run_engine(
+        LAY_OUT
+        + """
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setSettings({ labels: true });
+
+        api.setData(chain(1500));
+        const atLimit = {
+          curve: store.linkCurvature, arrow: store.linkDirectionalArrowLength,
+        };
+
+        api.setData(chain(1501));
+        const overLimit = {
+          curve: store.linkCurvature, arrow: store.linkDirectionalArrowLength,
+        };
+        // One laid-out relation is enough to drive the label painter at this size.
+        const data = layOut();
+        data.links[0].label = 'mentions';
+        const denseUnhighlighted = paintLinks(4, [data.links[0]]);
+        store.onNodeHover(data.nodes[0]);
+        const denseHighlighted = paintLinks(4, [data.links[0]]);
+        emit({ atLimit, overLimit, denseUnhighlighted, denseHighlighted });
+        """
+    )
+    # 1500 links is the classic threshold itself, so nothing is dropped yet.
+    assert report["atLimit"]["curve"] == 0.12
+    assert report["atLimit"]["arrow"] == 2.5
+    assert report["overLimit"]["curve"] == 0
+    assert report["overLimit"]["arrow"] == 0
+    # Relation labels come back for the one neighbourhood the user is actually pointing at.
+    assert report["denseUnhighlighted"] == []
+    assert report["denseHighlighted"] == ["mentions"]
+
+
+def _community_palettes(source: str) -> dict:
+    """Parse a ``COMMUNITY_PALS`` literal out of either renderer."""
+    # Anchor on the declaration: both files also name the table in prose comments.
+    match = re.search(r"COMMUNITY_PALS\s*=\s*\{", source)
+    assert match is not None, "COMMUNITY_PALS is not declared here"
+    block = source[match.end():source.index("};", match.end())]
+    return {
+        name: re.findall(r"#[0-9a-fA-F]{3,8}", body)
+        for name, body in re.findall(r"(\w+)\s*:\s*\[([^\]]*)\]", block)
+    }
+
+
+def test_community_colours_match_the_dashboard_and_the_legend_swatches() -> None:
+    """The cluster legend is painted from CSS, so palette *order* is a contract, not a taste.
+
+    ``graphRenderLegend`` sorts communities by size and gives the largest a
+    ``.graph-cluster-0`` swatch, while the canvas colours that same community with palette slot
+    0.  The swatch colours live in ``dashboard.css`` and encode the Cyber palette — the default
+    style — so a renderer whose slot 0 is a different colour makes the legend describe cluster 1
+    with cluster 2's colour, on the default style, for every workspace.
+    """
+    engine = _community_palettes(ASSET.read_text(encoding="utf-8"))
+    classic = _community_palettes(DASHBOARD.read_text(encoding="utf-8"))
+    assert engine, "COMMUNITY_PALS could not be parsed out of the engine"
+    assert engine == classic, "the opt-in renderer paints communities a different colour"
+
+    swatches = dict(
+        re.findall(r"\.graph-cluster-(\d+)\{background:(#[0-9a-fA-F]{3,8})\}",
+                   CSS.read_text(encoding="utf-8"))
+    )
+    assert swatches, "the cluster legend swatches are missing from the stylesheet"
+    for index, colour in sorted(swatches.items()):
+        assert engine["cyber"][int(index)].lower() == colour.lower(), (
+            f"legend swatch {index} does not match the canvas colour for that cluster"
+        )
+
+
 # ── CSP, styling and lifecycle ──────────────────────────────────────────────────────
 
 

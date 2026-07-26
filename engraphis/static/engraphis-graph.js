@@ -40,11 +40,17 @@
     contrast: { person_or_concept: '#0072b2', mention: '#009e73', hashtag: '#e69f00', email: '#56b4e9', organization: '#cc79a7', location: '#d55e00' }
   };
   const THEME_ETYPE = { person_or_concept: '#8c83e8', mention: '#5aafb3', hashtag: '#d7a84b', email: '#6f9fd8', organization: '#58b882', location: '#df7478' };
+  /* Community colour is the *palette slot*, not the node: `nodeColor` indexes this by the
+     community id, and communities are numbered by size (largest == 0). The legend beside the
+     canvas paints its swatches from `.graph-cluster-N` in dashboard.css, which encodes the
+     Cyber palette — the default style — slot for slot. These arrays must therefore stay
+     byte-identical to `COMMUNITY_PALS` in dashboard.js, or "Cluster 1" gets one colour in the
+     legend and another on the canvas. Ordering is load-bearing; this is not free-choice art. */
   const COMMUNITY_PALS = {
     classic: ['#8c83e8', '#5aafb3', '#d7a84b', '#6f9fd8', '#58b882', '#df7478', '#b07de0', '#4fb0a0', '#e0894a', '#7c9be0', '#e06a9a', '#9ac25a'],
     galaxy: ['#b789ff', '#7bb4ff', '#66e0d0', '#ffcf6b', '#ff7ea8', '#8aa2ff', '#c98bff', '#5ad0e0', '#ffa0d0', '#9d7bff', '#6ad0b0', '#ffb060'],
-    solar: ['#ffb454', '#3fd2c7', '#ffd68a', '#5b9bff', '#ff8f6b', '#8ea8ff', '#ffc98a', '#4fc0b0', '#ff9f5b', '#7fb0ff', '#ffd0a0', '#5ad0c0'],
-    cyber: ['#ff3ea5', '#22e0ff', '#b6ff3c', '#ffe14d', '#8b7bff', '#ff5c7a', '#3cffd0', '#ff9ae0', '#5ce0ff', '#d0ff3c', '#ffb03c', '#a06bff']
+    solar: ['#ffb454', '#5b9bff', '#3fd2c7', '#ffd68a', '#ff8f6b', '#8ea8ff', '#ffc24a', '#6ac0d0', '#ff9f7a', '#7ab0ff', '#e0b050', '#5fd0b0'],
+    cyber: ['#22e0ff', '#ff3ea5', '#b6ff3c', '#ffe14d', '#8b7bff', '#ff5c7a', '#3affd0', '#ff7be0', '#7affea', '#c0ff4a', '#5c9bff', '#ff9b3c']
   };
   const GRAPH_HEAT = ['#3f7bff', '#6a5cff', '#a24bff', '#e0479f', '#ff6b6b', '#ffc23d'];
 
@@ -62,6 +68,18 @@
      engine reuses the same thresholds rather than inventing a second signal. */
   const LARGE_NODE_LIMIT = 600;
   const LARGE_LINK_LIMIT = 2400;
+
+  /* The classic renderer's *dense* signal (`GPERF.dense`, `links>1500` in dashboard.js). Past
+     it the classic path turns off the two per-edge costs that scale with the link count and
+     buy nothing at that density: link curvature (a quadratic bezier per relation instead of a
+     straight line) and the directional arrowhead (a filled triangle per relation, recomputed
+     every frame). Relation labels get the same treatment unless one node is highlighted. Same
+     thresholds and same behaviour here — a second signal would only drift. */
+  const DENSE_LINK_LIMIT = 1500;
+
+  /* Relation labels are the noisiest layer on the canvas, so — exactly as the classic
+     `linkCanvasObject` does — they only appear once the user has zoomed in past this scale. */
+  const LINK_LABEL_MIN_SCALE = 2.4;
 
   function idOf(value) { return value && typeof value === 'object' ? value.id : value; }
   function nodeName(node) { return String(node.name || node.label || node.id || ''); }
@@ -294,7 +312,11 @@
     let zoom = 1, collapsed = false;
     /* Recomputed from the *rendered* data on every render, exactly as the classic path
        recomputes GPERF — filters and focus can take a huge store down to a small view. */
-    let large = false;
+    let large = false, dense = false;
+    /* The node/link arrays last handed to force-graph. Seeding is not free: the vendor copies
+       the data in and d3 resets the simulation alpha to 1, so a paint-only change would restart
+       the whole layout. See `sameData`/`render`. */
+    let seeded = null;
     let destroyed = false, running = true, fitTimer = 0, suspended = 0, pendingRender = null;
     let betweennessReady = false;
     const fg = ForceGraph()(el);
@@ -626,6 +648,61 @@
       invalidate();
     }
 
+    /* The dashboard's **Labels** checkbox turns on *both* label layers on the classic path:
+       entity names (painted by styleNode) and relation names (a `linkCanvasObject`, drawn
+       'after' the line so it sits on top of it). Without this second half the checkbox silently
+       did half its job under `?graph-engine=next` and a relation name could only be read by
+       hovering one edge at a time. Same gates as classic graphRender(): zoomed in past
+       LINK_LABEL_MIN_SCALE, the relation actually carries a label, and — on a dense graph —
+       only while something is highlighted, so thousands of overlapping strings are never
+       painted at once. Canvas text is not an HTML sink, so the raw label is drawn here; the
+       escaped copy is for `linkLabel`, whose tooltip *is* one. */
+    function applyLinkLabels() {
+      if (!fg.linkCanvasObject || !fg.linkCanvasObjectMode) return;
+      if (!state.settings.labels) { fg.linkCanvasObjectMode(() => undefined); return; }
+      fg.linkCanvasObjectMode(() => 'after').linkCanvasObject((link, ctx, scale) => {
+        if (!link || !link.label || scale < LINK_LABEL_MIN_SCALE) return;
+        if (dense && !hilite) return;
+        const source = link.source, target = link.target;
+        if (!source || !target || typeof source !== 'object' || typeof target !== 'object') return;
+        if (!Number.isFinite(source.x) || !Number.isFinite(source.y)) return;
+        if (!Number.isFinite(target.x) || !Number.isFinite(target.y)) return;
+        if (link.ghost) return;
+        ctx.font = ((state.settings.font || 12) * 0.82) / scale + 'px system-ui, sans-serif';
+        ctx.fillStyle = 'rgba(232,236,245,.62)';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(link.label), (source.x + target.x) / 2, (source.y + target.y) / 2);
+        ctx.textAlign = 'left';
+      });
+    }
+
+    /* Does this render show the same entities and relations as the one force-graph is already
+       holding? Compared by identity of the *view*, not of the payload: `visible()` allocates
+       fresh arrays every call (and `collapsedData` fresh cluster nodes), so an object compare
+       would report a change for Style, Color by, Labels and Flow — none of which move a node. */
+    function sameData(previous, next) {
+      if (!previous) return false;
+      if (previous.nodes.length !== next.nodes.length) return false;
+      if (previous.links.length !== next.links.length) return false;
+      for (let i = 0; i < next.nodes.length; i++) {
+        if (previous.nodes[i].id !== next.nodes[i].id) return false;
+      }
+      for (let i = 0; i < next.links.length; i++) {
+        const a = previous.links[i], b = next.links[i];
+        if (linkEndpoint(a, 'source') !== linkEndpoint(b, 'source')) return false;
+        if (linkEndpoint(a, 'target') !== linkEndpoint(b, 'target')) return false;
+        if ((a.layer || '') !== (b.layer || '')) return false;
+        if (!a.suggested !== !b.suggested) return false;
+        if (!a.ghost !== !b.ghost) return false;
+      }
+      return true;
+    }
+
+    /* Large graphs settle harder, exactly as the classic path does (`GPERF.large?.055:.035`).
+       Shared so reheat() and freeze() cannot drift back to the small-graph constant. */
+    function alphaDecay() { return large ? 0.055 : 0.035; }
+
     function render(fit, reheat) {
       if (destroyed) return;
       if (suspended) {
@@ -633,8 +710,14 @@
         return;
       }
       const motion = !reduced();
-      const data = visible();
+      const next = visible();
+      /* Reuse the arrays force-graph already holds when the view is unchanged: the sizing and
+         colouring pass below must write onto the objects the vendor is painting from, and the
+         collapsed view hands out freshly built cluster nodes on every call. */
+      const reused = sameData(seeded, next);
+      const data = reused ? seeded : next;
       large = data.nodes.length > LARGE_NODE_LIMIT || data.links.length > LARGE_LINK_LIMIT;
+      dense = data.links.length > DENSE_LINK_LIMIT;
       const sizeMetric = n => state.sizeBy === 'betweenness' ? (n.betweenness || 0) : ((n.degree || 0) / Math.max(1, maxDeg));
       data.nodes.forEach(n => {
         const base = (state.settings.size || 3);
@@ -645,13 +728,22 @@
         n.stroke = contrastOn(n.color);
       });
       applyChrome();
-      fg.graphData(data);
+      if (!reused) { fg.graphData(data); seeded = data; }
       applyForces();
       fg.autoPauseRedraw(!needsContinuousFrames());
-      if (fg.d3AlphaDecay) fg.d3AlphaDecay(0.035);
-      if (fg.d3VelocityDecay) fg.d3VelocityDecay(0.38);
-      if (fg.linkCurvature) fg.linkCurvature((PRESETS[state.settings.mode] || PRESETS.compact).curve || 0);
-      fg.linkDirectionalArrowLength(2.5).linkDirectionalArrowRelPos(1);
+      /* Bound the simulation the way the classic path does. Without these force-graph keeps its
+         15-second default window, so every load and every reheat of a large store runs the
+         layout — and repaints every node and link — for more than ten seconds longer. */
+      if (fg.cooldownTime) fg.cooldownTime(motion ? (large ? 1100 : 2200) : 0);
+      if (fg.cooldownTicks) fg.cooldownTicks(motion ? (large ? 80 : 160) : 1);
+      if (fg.warmupTicks) fg.warmupTicks(motion ? (large ? 18 : 40) : 45);
+      if (fg.d3AlphaDecay) fg.d3AlphaDecay(alphaDecay());
+      if (fg.d3VelocityDecay) fg.d3VelocityDecay(large ? 0.45 : 0.38);
+      if (fg.linkCurvature) {
+        fg.linkCurvature(dense ? 0 : ((PRESETS[state.settings.mode] || PRESETS.compact).curve || 0));
+      }
+      fg.linkDirectionalArrowLength(dense ? 0 : 2.5).linkDirectionalArrowRelPos(1);
+      applyLinkLabels();
       if (fg.linkDirectionalParticles) {
         const flowing = state.settings.flow !== false
           && motion
@@ -666,6 +758,9 @@
       }
       if (reheat && motion && !state.settings.frozen && fg.d3ReheatSimulation) fg.d3ReheatSimulation();
       if ((state.settings.frozen || !motion) && fg.d3AlphaDecay) { /* keep painting, stop layout */ fg.d3AlphaDecay(1); }
+      /* Nothing was reseeded, so force-graph's own change detection saw no reason to repaint —
+         but Style, Color by and Labels all just changed how the *same* data must be drawn. */
+      if (reused) invalidate();
       if (fit) {
         clearTimeout(fitTimer);
         fitTimer = setTimeout(() => { if (!destroyed) fg.zoomToFit(motion ? 600 : 0, 40); }, motion ? 320 : 0);
@@ -741,6 +836,10 @@
       const suggestions = (Array.isArray(data && data.suggestions) ? data.suggestions : [])
         .map(link => Object.assign({}, link, { source: linkEndpoint(link, 'source'), target: linkEndpoint(link, 'target') }))
         .filter(link => link.source != null && link.target != null);
+      /* A fresh payload means fresh node objects, so the cached seed is stale even when the
+         ids are identical — force-graph must be re-pointed at the new objects or the render
+         below would style ones nobody is painting from. */
+      seeded = null;
       raw = { nodes, links, suggestions };
       adj = communities(raw.nodes, raw.links);
       const deg = {};
@@ -789,19 +888,36 @@
     api.reheat = () => {
       if (destroyed || reduced()) return;
       raw.nodes.forEach(n => { n.fx = undefined; n.fy = undefined; });
-      if (fg.d3ReheatSimulation) { fg.d3AlphaDecay(0.035); fg.d3ReheatSimulation(); }
+      if (fg.d3ReheatSimulation) { fg.d3AlphaDecay(alphaDecay()); fg.d3ReheatSimulation(); }
     };
     api.freeze = on => {
       state.settings.frozen = on;
       if (on) { fg.d3Force('charge').strength(0); fg.d3AlphaDecay(1); return; }
       applyForces();
       if (reduced()) return;
-      fg.d3AlphaDecay(0.035);
+      fg.d3AlphaDecay(alphaDecay());
       if (fg.d3ReheatSimulation) fg.d3ReheatSimulation();
     };
+    /* Returning `false` is not a failure: it is the signal the dashboard's graphFocus() uses to
+       run its recovery path ("show unlinked", then retry, then say so). Reporting success for an
+       entity that is not on the canvas is therefore worse than reporting failure — the user gets
+       a camera move to nothing and no explanation. Two ways that happened: the auto-collapsed
+       view paints only `cluster-*` bubbles, and any filtered-out node keeps the x/y force-graph
+       left on it from an earlier render, so "found in `raw.nodes` with finite coordinates" was
+       never evidence of visibility. Expand a collapsed view first — focusing a named entity is
+       an explicit request to see it — then confirm against the data force-graph is holding. */
     api.zoomToNode = id => {
+      if (destroyed) return false;
       const n = raw.nodes.find(x => x.id === id);
-      if (!n || !Number.isFinite(n.x) || !Number.isFinite(n.y)) return false;
+      if (!n) return false;
+      if (collapsed) {
+        collapsed = false;
+        state.collapse = false;
+        render(false, true);
+        if (opts.onCollapseChange) opts.onCollapseChange(false);
+      }
+      const shown = ((fg.graphData() || {}).nodes || []).some(node => node && node.id === id);
+      if (!shown || !Number.isFinite(n.x) || !Number.isFinite(n.y)) return false;
       const duration = reduced() ? 0 : 500;
       fg.centerAt(n.x, n.y, duration);
       fg.zoom(3, duration);
@@ -872,6 +988,7 @@
       } catch (e) { /* teardown is best-effort: never let it block a view change */ }
       raw = { nodes: [], links: [], suggestions: [] };
       adj = {};
+      seeded = null;
       hilite = null;
       hoverSet = null;
     };
