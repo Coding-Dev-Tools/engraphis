@@ -164,6 +164,11 @@ Repository = "https://github.com/Coding-Dev-Tools/engraphis"
 Issues = "https://github.com/Coding-Dev-Tools/engraphis/issues"
 
 [project.scripts]
+# The front door. The account portal tells customers to run `engraphis connect --token ...`,
+# so the bare verb form has to exist; scripts.entry dispatches to the same main() each
+# engraphis-<verb> script below calls.
+engraphis = "scripts.entry:main"
+engraphis-connect = "scripts.connect:main"
 engraphis-server = "scripts.start_server:main"
 engraphis-cli = "scripts.cli:main"
 engraphis-mcp = "engraphis.mcp_cli:main"
