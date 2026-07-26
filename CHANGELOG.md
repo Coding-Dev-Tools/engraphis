@@ -36,7 +36,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
   verifies `cloud_session.configured()` before reporting success. The token is sent in the
   request body and nowhere else — never printed, logged, or written to disk — and every
   refusal maps to fixed, actionable copy (an expired or already-used token is not confused
-  with a lapsed subscription). Also installed as `engraphis-connect`.
+  with a lapsed subscription). Session storage is pre-flighted before the exchange, so an
+  unwritable state directory or a `cloud_session.json` replaced by a link fails the command
+  *without* spending the single-use token — the customer fixes the path and retries with the
+  same token instead of returning to the portal for a new one. Also installed as
+  `engraphis-connect`.
 - An `engraphis` front-door command that dispatches to the existing `engraphis-<verb>`
   entry points, so the command the account portal displays is runnable as shown.
 - A stable per-installation identity at `~/.engraphis/client_identity.json` (random ULIDs,
