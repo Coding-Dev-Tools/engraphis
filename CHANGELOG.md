@@ -19,7 +19,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
   with a lapsed subscription). Session storage is pre-flighted before the exchange, so an
   unwritable state directory or a `cloud_session.json` replaced by a link fails the command
   *without* spending the single-use token — the customer fixes the path and retries with the
-  same token instead of returning to the portal for a new one. Also installed as
+  same token instead of returning to the portal for a new one. Faults that can only happen
+  *after* the exchange — a reply truncated mid-body (`http.client.IncompleteRead`), or an
+  endpoint that stops resolving before the session is written (`CloudUrlUnresolved`) — are
+  reported as errors that say the token was already used, rather than escaping as tracebacks
+  that leave the customer unable to tell whether to retry. Also installed as
   `engraphis-connect`.
 - An `engraphis` front-door command that dispatches to the existing `engraphis-<verb>`
   entry points, so the command the account portal displays is runnable as shown.

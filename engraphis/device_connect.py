@@ -25,6 +25,7 @@ Design constraints, all of which have teeth:
 """
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import os
@@ -64,6 +65,17 @@ DEFAULT_TIMEOUT_SECONDS = 15.0
 
 #: The control plane answers with a small fixed record; anything larger is not ours.
 _MAX_RESPONSE_BYTES = 64 * 1024
+
+#: Copy for a reply that began but never completed.  Every other failure in this module can
+#: promise the connect token is untouched; this one cannot, because the request reached a
+#: control plane that started to answer, and a 200 consumes the token as it is written.
+#: Saying "try again" here would be a lie that costs the customer a second failed attempt,
+#: so the copy sends them to the one place that shows whether the device landed.
+_TRUNCATED_REPLY = (
+    "Engraphis Cloud started answering this connect request but the connection closed "
+    "before the reply was complete. Your connect token may already have been used: check "
+    "your account portal, and generate a new one if this device is not listed there."
+)
 
 #: The portal always mints tokens with this prefix.  Checking it locally turns a
 #: mistyped or truncated paste into an instant, free error instead of a round trip that
@@ -457,11 +469,25 @@ def post_connect(control_url: str, token: str, *, installation_client_id: str,
         raise _connect_http_error(status)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         # ``exc`` may quote an internal host or a proxy URL; never reflect it.
+        #
+        # Deliberately ahead of the ``HTTPException`` clause: ``RemoteDisconnected`` is
+        # both a ``ConnectionResetError`` and a ``BadStatusLine``, and it means the peer
+        # closed without answering at all. Nothing was consumed, so "try again" is the
+        # correct advice for it and it must not inherit the token-may-be-spent copy.
         raise DeviceConnectError(
             "Engraphis Cloud is temporarily unreachable. Check your network and try "
             "again.",
             status=503,
         ) from exc
+    except http.client.HTTPException as exc:
+        # A truncated chunked body makes ``HTTPResponse.read`` raise ``IncompleteRead``,
+        # which subclasses ``HTTPException``/``ValueError`` and is neither an ``OSError``
+        # nor a ``URLError`` -- so it escaped both clauses above as a raw traceback. That
+        # happened at the worst moment: the control plane had already answered, so the
+        # single-use token was very likely spent, and the customer saw a stack trace
+        # instead of being told to check the portal. ``LineTooLong``/``BadStatusLine`` from
+        # reading the status line and headers land here for the same reason.
+        raise DeviceConnectError(_TRUNCATED_REPLY, status=502) from exc
     if len(raw) > _MAX_RESPONSE_BYTES:
         raise DeviceConnectError(
             "Engraphis Cloud returned an oversized connect response.", status=502
@@ -601,6 +627,20 @@ def connect(token: object, *, control_url: Optional[str] = None,
             "Engraphis Cloud accepted the token, but the session could not be written to "
             "%s. Fix that path, then connect again with a new token from your account "
             "portal -- this one has been used." % session_path,
+            status=409,
+        ) from exc
+    except ValueError as exc:
+        # ``save_bootstrap`` re-runs ``validate_cloud_base_url`` on both endpoints, and
+        # that helper *resolves* the host. A resolver that dies between the pre-POST check
+        # and this line raises ``CloudUrlUnresolved``; an endpoint that starts resolving to
+        # a rejected address raises a bare ``ValueError``. Both are ``ValueError``, so
+        # neither the ``CloudSessionError`` nor the ``OSError`` clause above covered them
+        # and they escaped as a traceback -- again after the token was already spent.
+        raise DeviceConnectError(
+            "Engraphis Cloud accepted the token, but its endpoints could not be verified "
+            "in time to save the session, so nothing was written. Check your network, "
+            "then connect again with a new token from your account portal -- this one "
+            "has been used.",
             status=409,
         ) from exc
 
