@@ -902,6 +902,57 @@ def test_a_downgrade_drops_the_previous_plans_features_from_the_resolved_answer(
     assert set(SERVER_PLAN_FEATURES["pro"]) <= set(payload["features"])
 
 
+def test_a_billing_denial_stops_the_session_claiming_paid_access(monkeypatch) -> None:
+    """A 402 is an answer, not an outage.
+
+    The saved session outranks the entitlement cache, so folding the control plane's 402
+    in with offline/transport failures left ``cloud_access_active`` true and kept the
+    dashboard advertising paid features indefinitely -- while every hosted call was
+    denied. The plan name is kept so the UI can still say which plan lapsed.
+    """
+
+    _connect(monkeypatch, pinned_token=False)
+    _serve(monkeypatch, _FakeControlPlane(_entitlement_dto("team"),
+                                          registration=_registration_entitlement("team")))
+    assert _settled_license(monkeypatch)["cloud_access_active"] is True
+
+    def _lapsed(*_args, **_kwargs):
+        raise cloud_session.CloudSessionError("Subscription is not active.", status=402)
+
+    monkeypatch.setattr(cloud_session, "access_for_workspace", _lapsed)
+    assert v2_api._fetch_authoritative_entitlement() is None
+
+    record = cloud_session._load()
+    assert record.get("cloud_access_active") is False
+    assert record.get("cloud_features") == []
+    assert record.get("plan") == "team", "the lapsed plan is still named for the UI"
+
+    payload = v2_api.get_license()
+    assert payload["cloud_access_active"] is False
+    assert payload["features"] == []
+
+
+def test_a_transport_failure_is_not_mistaken_for_a_billing_denial(monkeypatch) -> None:
+    """Only 402 clears access. An outage must never look like a cancellation."""
+
+    _connect(monkeypatch, pinned_token=False)
+    _serve(monkeypatch, _FakeControlPlane(_entitlement_dto("team"),
+                                          registration=_registration_entitlement("team")))
+    assert _settled_license(monkeypatch)["cloud_access_active"] is True
+
+    def _offline(*_args, **_kwargs):
+        raise cloud_session.CloudSessionError(
+            "Engraphis Cloud is temporarily unreachable.", status=503, transient=True
+        )
+
+    monkeypatch.setattr(cloud_session, "access_for_workspace", _offline)
+    assert v2_api._fetch_authoritative_entitlement() is None
+
+    record = cloud_session._load()
+    assert record.get("cloud_access_active") is True, "an outage revoked a paying customer"
+    assert "team" in record.get("cloud_features", [])
+
+
 def test_a_lapsed_subscription_declared_on_the_refresh_keeps_its_name(
     monkeypatch,
 ) -> None:

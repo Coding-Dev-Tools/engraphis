@@ -2042,7 +2042,19 @@ def _fetch_authoritative_entitlement() -> Optional[dict]:
         access_token, organization_id, _ = access_for_workspace(
             None, require_compute=False
         )
-    except Exception:  # noqa: BLE001 - offline, lapsed, revoked, invalid: all "not now"
+    except Exception as exc:  # noqa: BLE001 - offline, lapsed, revoked, invalid
+        # A 402 is the control plane's authoritative answer that billing lapsed -- not a
+        # transport hiccup. The saved session outranks this cache, so treating it like any
+        # other failure left ``cloud_access_active`` true and kept paid features on the
+        # dashboard indefinitely while every hosted call was denied. Persist the denial so
+        # the two license surfaces cannot disagree; everything else is still "not now".
+        if getattr(exc, "status", None) == 402:
+            try:
+                from engraphis.cloud_session import record_billing_denial
+
+                record_billing_denial()
+            except Exception:  # noqa: BLE001 - a denial we cannot persist is still a denial
+                pass
         return None
     if not access_token or not organization_id:
         return None

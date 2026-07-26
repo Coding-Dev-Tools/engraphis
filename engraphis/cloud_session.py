@@ -287,6 +287,37 @@ def saved_entitlement() -> dict:
         return {}
 
 
+def record_billing_denial() -> bool:
+    """Mark the saved entitlement inactive after an authoritative billing denial.
+
+    A lapsed subscription answers ``402`` on token refresh. That is a *billing* answer, not
+    a transport failure, and the saved session outranks the entitlement cache — so leaving
+    ``cloud_access_active`` true kept a dashboard advertising paid features indefinitely
+    while every hosted call was denied. Persisting the denial is what stops the two license
+    surfaces disagreeing.
+
+    The plan name is deliberately kept so the UI can still say which plan lapsed; only the
+    access flag and the grants are cleared. Returns whether anything changed. Never raises:
+    this runs on the boot path.
+    """
+
+    try:
+        saved = _load()
+        if not saved:
+            return False
+        already_denied = (
+            saved.get("cloud_access_active") is False and not saved.get("cloud_features")
+        )
+        if already_denied:
+            return False
+        saved["cloud_access_active"] = False
+        saved["cloud_features"] = []
+        _save(saved)
+        return True
+    except Exception:
+        return False
+
+
 def save_bootstrap(response: dict, *, control_url: str,
                    compute_url: Optional[str] = None) -> None:
     """Persist the one-time bootstrap/refresh material returned by the control plane."""
