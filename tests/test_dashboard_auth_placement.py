@@ -93,6 +93,11 @@ def test_hosted_views_delegate_entitlement_to_cloud_proxy_responses():
 # regression it guards (409 folded into ``hostedFeatureUnavailable``) kept every string
 # these files already assert on, and only a run can tell which branch actually won.
 _ROUTED_FUNCTIONS = (
+    # The access-state readers the panel copy is now derived from. They are bundled as the
+    # real shipped functions rather than stubbed, so "does this customer get offered a
+    # trial" is answered here by the code that answers it in the browser.
+    "licAccessState", "licAccessLive", "licTrialActive", "licTrialAvailable",
+    "licPlanName", "licPlanKey", "licTrialEnds", "fmtDay", "lockReason",
     "hostedPlanUrl", "unlockHtml", "managedConsentHtml",
     "managedConsentRequired", "hostedFeatureUnavailable",
     "loadAnalytics", "loadAutomation",
@@ -115,9 +120,15 @@ function fmtRel(){return 'just now'}
 function toast(){}
 const TRIAL_DAYS = 3, WS = 'workspace';
 let CURRENT_VIEW = 'overview';
-const LIC = {pro_upgrade_url:'https://engraphis.com/pricing',
+// The default is an unconnected installation: no hosted plan, unspent trial, and the
+// control plane says a trial may still be started. A case can replace ``access_state`` and
+// ``trial`` to model a trialist, a spent trial, a paying customer, or a lapsed one.
+const LIC_BASE = {pro_upgrade_url:'https://engraphis.com/pricing',
              team_upgrade_url:'https://engraphis.com/pricing?plan=team',
-             upgrade_url:'https://engraphis.com/pricing', trial:{used:false}};
+             upgrade_url:'https://engraphis.com/pricing',
+             plan:'local', access_state:'inactive',
+             trial:{used:false, active:false, available:true, ends_at:0}};
+let LIC = LIC_BASE;
 const location = {href:'https://127.0.0.1:8077/'};
 let THROWN = null;
 async function api(){if(THROWN) throw THROWN; return {}}
@@ -129,6 +140,7 @@ const CASES = JSON.parse(process.argv[2]);
   const out = [];
   for (const c of CASES) {
     THROWN = Object.assign(new Error(c.message || 'request failed'), c.error);
+    LIC = Object.assign({}, LIC_BASE, c.lic || {});
     CURRENT_VIEW = c.view;
     for (const key of Object.keys(NODES)) delete NODES[key];
     await (c.view === 'analytics' ? loadAnalytics() : loadAutomation());
@@ -224,6 +236,43 @@ def test_a_genuine_entitlement_failure_still_renders_the_upgrade_panel(
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
 @pytest.mark.parametrize("view", ["analytics", "automation"])
+@pytest.mark.parametrize("state,reason", [
+    ("trial", "Your free trial is live"),
+    ("trial_expired", "Your free trial has ended"),
+    ("lapsed", "no longer active"),
+    ("active", "does not include this"),
+])
+def test_the_upgrade_panel_never_offers_a_trial_the_server_would_refuse(
+    tmp_path, view, state, reason,
+):
+    """``start_trial`` refuses every organization that already holds an entitlement.
+
+    ``trial.used`` was hardcoded false by ``/api/license``, so this panel offered "Start
+    hosted Pro trial" to every connected customer forever — a trialist mid-trial, a
+    customer whose trial had already been spent, and an active subscriber alike. All three
+    got a 409 from the control plane for clicking it. The panel now says which of those
+    four situations the customer is actually in, and only sells what is buyable.
+    """
+
+    rendered = _route(tmp_path, [{
+        "name": "gated", "view": view, "error": {"status": 402},
+        "lic": {
+            "plan": "pro", "access_state": state,
+            "trial": {"used": state != "active", "active": state == "trial",
+                      "available": False, "ends_at": 1785240000},
+        },
+    }])["gated"]
+
+    assert 'class="upgrade-panel"' in rendered["html"]
+    # The one thing that must always still be offered.
+    assert "Purchase Pro license" in rendered["html"]
+    # And the one thing that must not.
+    assert "Start hosted Pro trial" not in rendered["html"]
+    assert reason in rendered["html"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
+@pytest.mark.parametrize("view", ["analytics", "automation"])
 @pytest.mark.parametrize("status", [400, 401, 500, 503])
 def test_a_non_billing_failure_shows_the_error_instead_of_selling_pro(
     tmp_path, view, status,
@@ -263,6 +312,130 @@ def test_a_transient_hosted_conflict_is_not_answered_with_a_purchase_panel(
     assert "Purchase Pro license" not in rendered["html"]
     # The customer sees the real cause and can retry, rather than a panel selling Pro.
     assert "managed snapshot generation must advance" in rendered["html"]
+
+
+# ── the license panel's own actions, executed rather than grepped ─────────────
+# ``licActionsHtml`` is the second surface that turns an access state into a call to
+# action, and the one a lapsed customer actually clicks. Running it is the only way to see
+# which URL each button really carries.
+_ACTION_FUNCTIONS = (
+    "licAccessState", "licTrialAvailable", "licPlanName", "licPlanKey",
+    "hostedAccountUrl", "hostedPlanUrl", "licActionsHtml",
+)
+
+_ACTION_STUBS = """
+'use strict';
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g, c=>(
+  {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function safeUrl(u){return (u && typeof u === 'string') ? u : '#'}
+const TRIAL_DAYS = 3;
+// Three distinct hosted targets, so a button carrying the wrong one is visible rather
+// than hidden behind a shared URL.
+// ``upgrade_url`` is deliberately the Pro checkout here: that is what
+// ``licensing.upgrade_url()`` resolves to whenever ENGRAPHIS_PRO_UPGRADE_URL is set, so a
+// portal button reading it instead of ``account_url`` is visible as a wrong URL.
+const LIC_BASE = {pro_upgrade_url:'https://engraphis.example/checkout/pro',
+                  team_upgrade_url:'https://engraphis.example/checkout/team',
+                  upgrade_url:'https://engraphis.example/checkout/pro',
+                  account_url:'https://engraphis.example/account',
+                  plan:'local', access_state:'inactive',
+                  trial:{used:false, active:false, available:false, ends_at:0}};
+let LIC = LIC_BASE;
+const location = {href:'https://127.0.0.1:8700/'};
+"""
+
+_ACTION_DRIVER = """
+const CASES = JSON.parse(process.argv[2]);
+const out = [];
+for (const c of CASES) {
+  LIC = Object.assign({}, LIC_BASE, c.lic || {});
+  // Exactly how renderLicense calls it.
+  out.push({name: c.name, html: licActionsHtml(licAccessState())});
+}
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def _actions(tmp_path, cases):
+    """Run the shipped license-panel actions over ``cases`` and return what they rendered."""
+
+    bundle = "\n".join([
+        _ACTION_STUBS,
+        "\n".join(_dashboard_function(name) for name in _ACTION_FUNCTIONS),
+        _ACTION_DRIVER,
+    ])
+    runner = tmp_path / "lic_actions.js"
+    runner.write_text(bundle, encoding="utf-8")
+    result = subprocess.run(
+        ["node", str(runner), json.dumps(cases)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return {row["name"]: row["html"] for row in json.loads(result.stdout)}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
+@pytest.mark.parametrize("plan,mine,theirs", [
+    ("team", "team", "pro"),
+    ("pro", "pro", "team"),
+])
+def test_a_lapsed_customer_renews_the_plan_they_actually_hold(tmp_path, plan, mine, theirs):
+    """"Update billing" was hardcoded to ``hostedPlanUrl('pro')`` for every lapsed plan.
+
+    A lapsed Team customer's most prominent button therefore opened the *Pro* checkout with
+    ``?plan=pro`` — the wrong product offered to fix a billing problem on a subscription
+    they already have — while "Open account portal" sent a lapsed Pro customer to the Team
+    checkout. Neither is a place to update a payment method.
+    """
+
+    html = _actions(tmp_path, [{
+        "name": "lapsed", "lic": {"plan": plan, "access_state": "lapsed"},
+    }])["lapsed"]
+
+    assert "Update billing" in html and "Open account portal" in html
+    # The renewal follows the plan the customer holds.
+    assert "checkout/%s?plan=%s" % (mine, mine) in html
+    assert theirs not in html
+    # The portal is the plan-neutral hosted entry point; it must not be a checkout at all,
+    # so it carries no ``?plan=`` that would reframe it as one.
+    assert 'href="https://engraphis.example/account"' in html
+    # A lapsed customer is never offered a trial.
+    assert "Start hosted" not in html
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
+def test_a_lapsed_customer_with_no_readable_plan_still_gets_a_billing_target(tmp_path):
+    """``plan`` can be absent or unrecognised; the button must still go somewhere real."""
+
+    html = _actions(tmp_path, [{
+        "name": "lapsed", "lic": {"plan": "", "access_state": "lapsed"},
+    }])["lapsed"]
+
+    assert "Update billing" in html
+    assert "checkout/pro?plan=pro" in html
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
+@pytest.mark.parametrize("state,expected,absent", [
+    # Only the state a trial can actually be started in draws the trial buttons; the
+    # control plane refuses one for every organization that already holds an entitlement.
+    ("inactive", "Start hosted Pro trial", "Subscribe to Pro"),
+    ("trial_expired", "Subscribe to Pro", "Start hosted Pro trial"),
+    ("trial", "Open Pro Cloud", "Start hosted Pro trial"),
+    ("active", "Open Pro Cloud", "Start hosted Pro trial"),
+])
+def test_each_access_state_offers_the_one_action_that_can_succeed(
+    tmp_path, state, expected, absent,
+):
+    html = _actions(tmp_path, [{
+        "name": state,
+        "lic": {"plan": "pro", "access_state": state,
+                "trial": {"used": state != "inactive", "active": state == "trial",
+                          "available": state == "inactive", "ends_at": 0}},
+    }])[state]
+
+    assert expected in html
+    assert absent not in html
 
 
 def test_only_an_entitlement_status_may_draw_the_purchase_panel():

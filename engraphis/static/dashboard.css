@@ -255,6 +255,9 @@ body{
 .diff-ins{border-radius:var(--radius-sm);background:var(--color-success-bg);color:var(--color-success)}
 .diff-del{border-radius:var(--radius-sm);background:var(--color-danger-bg);color:var(--color-danger);text-decoration:line-through}
 .trial-banner{margin-bottom:var(--space-3);padding:var(--space-2) var(--space-3);border:var(--rule) solid var(--color-accent-strong);border-radius:var(--radius-sm);background:var(--accent-bg);color:var(--color-text);font-size:var(--text-xs)}
+.lic-banner{margin:var(--space-3) 0;padding:var(--space-3);border:var(--rule) solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-raised);color:var(--color-text-muted);font-size:var(--text-xs);line-height:1.5}
+.lic-banner strong{display:block;margin-bottom:var(--space-1);color:var(--color-text);font-size:var(--text-sm)}
+.lic-banner-warn{border-color:var(--color-accent-strong);background:var(--accent-bg)}
 .update-banner{display:flex;align-items:center;gap:var(--space-3);margin-bottom:var(--space-3);padding:var(--space-2) var(--space-3);border:var(--rule) solid var(--color-accent-strong);border-radius:var(--radius-sm);background:var(--accent-bg);color:var(--color-text);font-size:var(--text-xs)}
 .update-banner[hidden]{display:none}
 .update-banner .ub-text{flex:1;min-width:0}
