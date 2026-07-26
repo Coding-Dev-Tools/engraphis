@@ -312,17 +312,27 @@ def record_billing_denial() -> bool:
     """
 
     try:
-        saved = _load()
-        if not saved:
-            return False
-        already_denied = (
-            saved.get("cloud_access_active") is False and not saved.get("cloud_features")
-        )
-        saved["cloud_access_active"] = False
-        saved["cloud_features"] = []
-        saved["entitlement_checked_at"] = time.time()
-        _save(saved)
-        return not already_denied
+        # Under the same lock ``access_for_workspace`` rotates the credential with. This is a
+        # load-modify-save on the shared session file: unguarded, it could read the old
+        # single-use refresh credential while another worker was mid-rotation and then write
+        # that stale value back over the rotated one. The next hosted call would present a
+        # spent credential, which the control plane treats as replay and answers by revoking
+        # the whole credential family -- turning a lapsed subscription into a forced
+        # reconnect.
+        with _refresh_lock():
+            saved = _load()
+            if not saved:
+                return False
+            already_denied = (
+                saved.get("cloud_access_active") is False
+                and not saved.get("cloud_features")
+            )
+            saved["cloud_access_active"] = False
+            saved["cloud_features"] = []
+            saved["entitlement_checked_at"] = time.time()
+            # Inside the lock: a save that lands after release is exactly the race above.
+            _save(saved)
+            return not already_denied
     except Exception:
         return False
 

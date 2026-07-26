@@ -433,3 +433,56 @@ def test_record_billing_denial_stamps_every_denial_including_the_repeat() -> Non
         "a repeat denial must advance the clock the refresh interval reads"
     )
     assert cloud_session.saved_entitlement()["entitlement_checked_at"] >= stamped
+
+def test_record_billing_denial_writes_under_the_refresh_lock(tmp_path, monkeypatch) -> None:
+    """The denial is a load-modify-save on the shared session file, so it must be serialized.
+
+    Unguarded, it could read the old single-use refresh credential while another worker was
+    mid-rotation and write that stale value back over the rotated one. The control plane
+    treats a spent credential as replay and revokes the whole family, turning a lapsed
+    subscription into a forced reconnect.
+    """
+
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path))
+    cloud_session._save({
+        "schema": "engraphis-cloud-session/v1",
+        "control_url": "https://control.example.test",
+        "compute_url": "",
+        "organization_id": "org_paid",
+        "refresh_credential": "engr_rt_live",
+        "token_subject": "member",
+        "plan": "team",
+        "cloud_features": ["analytics", "team"],
+        "cloud_access_active": True,
+    })
+
+    held = []
+    real_lock = cloud_session._refresh_lock
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def _tracking_lock():
+        with real_lock():
+            held.append("in")
+            try:
+                yield
+            finally:
+                held.append("out")
+
+    saved_while = []
+    real_save = cloud_session._save
+    monkeypatch.setattr(cloud_session, "_refresh_lock", _tracking_lock)
+    monkeypatch.setattr(
+        cloud_session, "_save",
+        lambda v: (saved_while.append(held[-1] if held else None), real_save(v))[1],
+    )
+
+    assert cloud_session.record_billing_denial() is True
+    assert held == ["in", "out"], "the refresh lock was not taken"
+    assert saved_while == ["in"], "the session was written outside the refresh lock"
+
+    record = cloud_session._load()
+    assert record["cloud_access_active"] is False
+    assert record["cloud_features"] == []
+    assert record["refresh_credential"] == "engr_rt_live", "the credential was clobbered"

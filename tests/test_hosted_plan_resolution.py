@@ -1250,6 +1250,37 @@ def test_a_cached_entitlement_for_another_organization_is_refused(monkeypatch) -
     assert v2_api._read_entitlement_cache()["plan"] == "team"
 
 
+def test_a_cached_entitlement_is_refused_when_the_organization_is_unknown(
+    monkeypatch,
+) -> None:
+    """An unknown current organization is not permission to trust the cache either.
+
+    A fresh bootstrap carries only a refresh credential and a control URL, so
+    ``_configured_organization_id()`` is empty until the first refresh names the
+    organization. Rejecting only a *mismatch* left that window serving whatever the reused
+    state directory still held — the previous organization's paid plan, and for ever with
+    the refresh disabled.
+    """
+
+    _connect(monkeypatch)
+    path = v2_api._entitlement_cache_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    v2_api._write_entitlement_cache({
+        "plan": "team", "features": v2_api.entitled_features("team"),
+        "cloud_access_active": True, "organization_id": ORGANIZATION,
+        "fetched_at": time.time(),
+    })
+    assert v2_api._read_entitlement_cache()["plan"] == "team"
+
+    # The bootstrap window: connected, but nothing has named the organization yet.
+    monkeypatch.setattr(v2_api, "_configured_organization_id", lambda: "")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_ENTITLEMENT_REFRESH", "0")
+
+    assert v2_api._read_entitlement_cache() == {}, (
+        "a cache was trusted before the organization was known"
+    )
+
+
 def test_a_cached_entitlement_follows_a_reconnected_session_not_just_a_pin(
     monkeypatch,
 ) -> None:

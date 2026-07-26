@@ -1998,9 +1998,15 @@ def _read_entitlement_cache() -> dict:
     # anyone else (or names nobody), exactly as ``_session_entitlement`` refuses a session
     # plan recorded for a different organization. The refresh scheduled by the caller then
     # writes the right one.
+    # An *unknown* current organization is not permission to trust an organization-scoped
+    # cache either. A fresh bootstrap has only a refresh credential and a control URL until
+    # the first refresh names the organization, so a reused state directory would otherwise
+    # serve the previous organization's paid plan for that whole window -- indefinitely with
+    # ``ENGRAPHIS_CLOUD_ENTITLEMENT_REFRESH=0``. Require a match, not merely the absence of
+    # a mismatch; the refresh the caller schedules writes the right answer.
     organization_id = str(value.get("organization_id") or "")
     current = _configured_organization_id()
-    if current and organization_id != current:
+    if not current or organization_id != current:
         return {}
     plan = _normalized_plan(stored_plan)
     return {
