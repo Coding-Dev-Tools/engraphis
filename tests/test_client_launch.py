@@ -45,8 +45,8 @@ DASHBOARD_JS = REPO_ROOT / "engraphis" / "static" / "dashboard.js"
 # purchased capability silently renders as locked.
 SERVER_HOSTED_ENTITLEMENTS = {
     "free": set(),
-    "pro": {"analytics", "automation", "export", "sync"},
-    "team": {"analytics", "automation", "export", "sync", "team"},
+    "pro": {"analytics", "automation", "sync"},
+    "team": {"analytics", "automation", "sync", "team"},
 }
 # Named separately by this client's commercial manifest; the server grants both under
 # ``automation``, so any plan granting ``automation`` must grant these too.

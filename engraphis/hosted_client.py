@@ -39,7 +39,6 @@ _REQUIRED_PLAN = {
     "automation": "pro",
     "consolidation": "pro",
     "dreaming": "pro",
-    "export": "pro",
     "sync": "pro",
     "team": "team",
 }
