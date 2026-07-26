@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import tempfile
 import threading
 import time
 import urllib.error
@@ -80,6 +81,10 @@ def _session_path() -> Path:
     return base / "cloud_session.json"
 
 
+def _refresh_lock_path() -> Path:
+    return _session_path().with_name(".cloud_session.refresh.lock")
+
+
 @contextmanager
 def _refresh_lock():
     """Serialize spend-and-rotate of the single-use refresh credential.
@@ -89,7 +94,7 @@ def _refresh_lock():
     so every process coordinates on one stable filesystem object.
     """
     with _REFRESH_THREAD_LOCK:
-        lock_path = _session_path().with_name(".cloud_session.refresh.lock")
+        lock_path = _refresh_lock_path()
         try:
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             expected = private_file_stat(lock_path, allow_missing=True)
@@ -210,6 +215,67 @@ def _save(value: dict) -> None:
     path = _session_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_private_text(path, json.dumps(value, sort_keys=True, separators=(",", ":")))
+
+
+def preflight_save() -> Path:
+    """Verify the session file can be saved, without saving anything.  Returns its path.
+
+    :func:`save_bootstrap` runs *after* the control plane has answered, so a state
+    directory that lost its permissions, or a ``cloud_session.json`` that is a symlink or
+    a hard link, was only discovered once a single-use connect token had already been
+    consumed: the customer was left with a spent token, no session, and a trip back to
+    the portal for a new one.  Any caller about to spend a one-shot credential must run
+    this first, so a storage fault costs nothing.
+
+    The checks are the ones the write path itself applies -- :func:`private_file_stat` on
+    the session leaf and on its refresh lock, plus the randomized sibling temp file
+    :func:`atomic_private_text` has to create -- so the preflight cannot drift from what
+    the real save will accept.  It deliberately never opens, creates or replaces the
+    session leaf: an existing session survives a failed preflight untouched, and a first
+    connect is not turned into a half-written file.
+    """
+
+    path = _session_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise CloudSessionError(
+            "The Engraphis state directory %s could not be created." % path.parent,
+            status=409,
+        ) from exc
+    for candidate in (path, _refresh_lock_path()):
+        try:
+            private_file_stat(candidate, allow_missing=True)
+        except UnsafeStateFile as exc:
+            raise CloudSessionError(
+                "%s is not a plain private file -- a symlink, hard link or directory is "
+                "in its place. Remove it." % candidate,
+                status=409,
+            ) from exc
+        except OSError as exc:
+            raise CloudSessionError(
+                "%s could not be inspected; check its permissions." % candidate,
+                status=409,
+            ) from exc
+    # Probe the directory the way ``atomic_private_text`` will, rather than touching
+    # ``cloud_session.json``: a read-only mount or a lost ACL fails here, while a valid
+    # existing session is never created, truncated or replaced.
+    try:
+        descriptor, probe = tempfile.mkstemp(
+            prefix=".%s.preflight." % path.name, dir=str(path.parent)
+        )
+    except OSError as exc:
+        raise CloudSessionError(
+            "The Engraphis state directory %s is not writable, so the cloud session "
+            "cannot be saved there." % path.parent,
+            status=409,
+        ) from exc
+    os.close(descriptor)
+    try:
+        os.unlink(probe)
+    except OSError:  # pragma: no cover - the probe was just created in this directory
+        pass
+    return path
 
 
 #: Plans that carry no paid cloud access, used only to default an absent activity flag.
