@@ -833,6 +833,42 @@ def test_a_field_less_refresh_never_erases_a_plan_the_cloud_already_declared(
     assert v2_api.get_license()["plan"] == "team"
 
 
+def test_a_downgrade_drops_the_previous_plans_features_from_the_resolved_answer(
+    monkeypatch,
+) -> None:
+    """Team -> Pro must lock the Team tab, not leave it open on a stale grant list.
+
+    ``_declared_entitlement`` omits ``cloud_features`` when the refresh body carries no
+    feature list, so merging it onto the saved record swapped ``plan`` while the *old* list
+    stayed behind. ``/api/license`` then answered ``pro`` with ``team`` still in
+    ``features``, and the customer kept the Team administration they had stopped paying for.
+    """
+
+    _connect(monkeypatch, pinned_token=False)
+    _serve(monkeypatch, _FakeControlPlane(_entitlement_dto("team"),
+                                          registration=_registration_entitlement("team")))
+    assert "team" in _settled_license(monkeypatch)["features"]
+
+    # The downgrade as a control plane that names the plan but no features reports it.
+    _serve(monkeypatch, _FakeControlPlane(
+        _entitlement_dto("pro"),
+        registration={"plan": "pro", "cloud_access_active": True},
+    ))
+    cloud_session.access_for_workspace(None, require_compute=False)
+
+    saved = cloud_session.saved_entitlement()
+    assert saved["plan"] == "pro"
+    assert "team" not in saved.get("cloud_features", [])
+
+    payload = v2_api.get_license()
+
+    assert payload["plan"] == "pro"
+    assert payload["plan_source"] == "session"
+    assert "team" not in payload["features"], "Team is still unlocked on a Pro plan"
+    # A stale list is dropped, not blanked: everything Pro does grant is still granted.
+    assert set(SERVER_PLAN_FEATURES["pro"]) <= set(payload["features"])
+
+
 def test_a_lapsed_subscription_declared_on_the_refresh_keeps_its_name(
     monkeypatch,
 ) -> None:

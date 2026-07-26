@@ -299,6 +299,86 @@ def test_refresh_network_error_is_service_unavailable(monkeypatch) -> None:
     assert "private network detail" not in str(caught.value)
 
 
+def _downgrade_state(monkeypatch, *, body: dict) -> dict:
+    """A saved Team session, refreshed against a control plane that answers *body*."""
+
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_CONTROL_URL", raising=False)
+    state = {
+        "control_url": "https://control.example.test",
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+        "plan": "team",
+        "cloud_access_active": True,
+        "cloud_features": ["analytics", "automation", "export", "sync", "team"],
+    }
+
+    def _replace(value: dict) -> None:
+        state.clear()
+        state.update(value)
+
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(cloud_session, "_save", _replace)
+    monkeypatch.setattr(
+        cloud_session, "validate_cloud_base_url", lambda value: value.rstrip("/")
+    )
+    monkeypatch.setattr(cloud_session, "_post_refresh", lambda *_args: dict({
+        "access_token": "short-lived-access",
+        "organization_id": "org_1",
+        "refresh_credential": "rotated-refresh",
+        "token_subject": "member",
+    }, **body))
+    cloud_session.access_for_workspace("ws", require_compute=False)
+    return state
+
+
+def test_a_plan_downgrade_does_not_carry_the_previous_plans_features(monkeypatch) -> None:
+    """Team -> Pro must not leave ``team`` in the persisted grant list.
+
+    ``_declared_entitlement`` omits ``cloud_features`` whenever the body carries no feature
+    list, so merging it onto the saved record replaced ``plan`` while the *old* list
+    survived. ``/api/license`` then reported ``plan: "pro"`` with ``team`` still granted and
+    the Team tab stayed unlocked indefinitely — a paid capability handed out for free.
+    """
+
+    state = _downgrade_state(monkeypatch, body={
+        "plan": "pro", "cloud_access_active": True,
+    })
+
+    assert state["plan"] == "pro"
+    assert "cloud_features" not in state, "the Team grants outlived the Team plan"
+    # With no stale list left, the client's own plan table answers for Pro.
+    assert "team" not in cloud_session.saved_entitlement().get("cloud_features", [])
+
+
+def test_a_downgrade_that_declares_its_own_features_is_taken_verbatim(monkeypatch) -> None:
+    """A control plane that does send a list stays authoritative over the plan table."""
+
+    state = _downgrade_state(monkeypatch, body={
+        "plan": "pro", "cloud_access_active": True,
+        "cloud_features": ["analytics", "sync"],
+    })
+
+    assert state["plan"] == "pro"
+    assert state["cloud_features"] == ["analytics", "sync"]
+
+
+def test_a_refresh_reconfirming_the_same_plan_keeps_its_saved_features(monkeypatch) -> None:
+    """Only a plan *change* drops the list; re-confirming Team must not blank it.
+
+    Otherwise every token rotation against a control plane that reports the plan but not
+    the features would quietly demote a Team customer to the generic table.
+    """
+
+    state = _downgrade_state(monkeypatch, body={
+        "plan": "team", "cloud_access_active": True,
+    })
+
+    assert state["plan"] == "team"
+    assert "team" in state["cloud_features"]
+
+
 @pytest.mark.parametrize("subject", ["admin", "", "device member"])
 def test_environment_refresh_rejects_invalid_subject(monkeypatch, subject) -> None:
     monkeypatch.setenv("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", "env-refresh")

@@ -486,6 +486,18 @@ def access_for_workspace(
         # The refresh response carries the same entitlement fields as registration, so the
         # plan re-confirms itself on every token rotation. An older cloud omits them and
         # the previously persisted answer (if any) is left untouched.
-        updated.update(_declared_entitlement(body))
+        declared = _declared_entitlement(body)
+        if declared and "cloud_features" not in declared:
+            # A *plan change* may never inherit the previous plan's grants.
+            # ``_declared_entitlement`` omits ``cloud_features`` whenever the body carried
+            # no feature list, so merging it onto the saved record left a Team feature list
+            # alive underneath a downgraded Pro plan and kept the Team tab unlocked
+            # indefinitely. Dropping the stale key hands the answer back to this client's
+            # own plan table, which is right for the plan the cloud just named. A refresh
+            # that re-confirms the *same* plan still keeps the richer saved list.
+            previous = str(saved.get("plan") or "").strip().lower()
+            if previous != declared["plan"]:
+                updated.pop("cloud_features", None)
+        updated.update(declared)
         _save(updated)
         return access, organization_id, compute
