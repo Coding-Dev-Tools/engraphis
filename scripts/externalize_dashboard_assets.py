@@ -33,10 +33,9 @@ EXTRA_SCRIPTS = (STATIC / "engraphis-graph.js",)
 #: instead (``loadForceGraph`` / ``loadGraphEngine``).
 DEFERRED_SCRIPTS = ("/static/vendor/force-graph.min.js", "/static/engraphis-graph.js")
 
-SCRIPT_SRC = re.compile(r'<script[^>]+src=["\'](/static/[^"\']+)["\']')
 #: ``script.src = "/static/…"`` inside a first-party script — the lazy loaders.  Deferring a
-#: script moves it out of ``SCRIPT_SRC``'s reach, so without this the "referenced scripts
-#: exist" rule would quietly stop covering the assets whose breakage is hardest to notice.
+#: script moves it out of the parsed ``<script src>`` set, so without this the "referenced
+#: scripts exist" rule would quietly stop covering the assets whose breakage is hardest to notice.
 LAZY_SCRIPT_SRC = re.compile(r'\.src\s*=\s*["\'](/static/[^"\']+)["\']')
 
 STYLE_ATTR = re.compile(r"\sstyle=(?:\"([^\"]*)\"|'([^']*)')")
@@ -73,6 +72,8 @@ class _InlineAssetParser(HTMLParser):
         self._open: dict[str, tuple[int, int]] = {}
         self.styles: list[_InlineAsset] = []
         self.scripts: list[_InlineAsset] = []
+        #: ``src`` of every ``<script src>`` the page loads eagerly, in document order.
+        self.script_srcs: list[str] = []
 
     def _offset(self) -> int:
         line, column = self.getpos()
@@ -81,8 +82,14 @@ class _InlineAssetParser(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
         if tag not in {"style", "script"}:
             return
-        if tag == "script" and any(name.lower() == "src" for name, _value in attrs):
-            return
+        if tag == "script":
+            # ``HTMLParser`` lower-cases tag and attribute names exactly like a browser, so
+            # ``<SCRIPT SRC=…>`` — which browsers load eagerly — is recorded here rather than
+            # slipping past a case-sensitive tag regex and out of both script rules below.
+            sources = [value for name, value in attrs if name.lower() == "src"]
+            if sources:
+                self.script_srcs.extend(value for value in sources if value)
+                return
         start = self._offset()
         self._open[tag] = (start, start + len(self.get_starttag_text()))
 
@@ -110,12 +117,28 @@ class _InlineAssetParser(HTMLParser):
         self._open.clear()
 
 
-def _inline_assets(html: str) -> tuple[list[_InlineAsset], list[_InlineAsset]]:
+def _parse_page(html: str) -> _InlineAssetParser:
     parser = _InlineAssetParser(html)
     parser.feed(html)
     parser.close()
     parser.finish_unclosed()
+    return parser
+
+
+def _inline_assets(html: str) -> tuple[list[_InlineAsset], list[_InlineAsset]]:
+    parser = _parse_page(html)
     return parser.styles, parser.scripts
+
+
+def _eager_scripts(html: str) -> list[str]:
+    """``src`` of every locally served script the page loads on view.
+
+    Parsed, never pattern-matched: a case-sensitive tag regex misses ``<SCRIPT SRC=…>``,
+    which browsers load exactly like the lowercase spelling.  That gap would let a
+    CSP-hostile bundle back onto every page view *and* drop it from the existence check —
+    a gate that cannot fail.
+    """
+    return [src for src in _parse_page(html).script_srcs if src.startswith("/static/")]
 
 
 def _replace_assets(html: str, replacements: list[tuple[_InlineAsset, str]]) -> str:
@@ -233,7 +256,7 @@ def check() -> None:
     if missing_scripts:
         failures.append("missing first-party script: " + ", ".join(missing_scripts))
 
-    eager_scripts = SCRIPT_SRC.findall(html)
+    eager_scripts = _eager_scripts(html)
     lazy_scripts = [
         reference
         for source in [js, *extra.values()]

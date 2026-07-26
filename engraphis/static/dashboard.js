@@ -605,6 +605,11 @@ function graphRenderEngine(data,fit,reheat){
      the layout on each slider or preset change. The classic path guards the same way. */
   const dataChanged=created||GACTIVE_DATA!==data;
   const layers={};document.querySelectorAll('#graph-layer-filters input').forEach(input=>{layers[input.value]=input.checked});
+  /* "Show unlinked nodes" is applied twice: graphData() decides what is handed over, and the
+     engine re-filters by degree on its own state. Leaving the engine on its defaults
+     (showUnlinked:false, minDegree:1) drops every degree-zero entity graphData() just supplied,
+     so the checkbox appeared to do nothing under ?graph-engine=next. */
+  const isolated=document.getElementById('graph-show-iso'),showUnlinked=!!(isolated&&isolated.checked);
   GRAPH_ENGINE.apply(engine=>{
    engine.setSettings({...window.GSET});
    engine.setStyle(typeof GSTYLE!=='undefined'?GSTYLE:'cyber');
@@ -612,6 +617,7 @@ function graphRenderEngine(data,fit,reheat){
    engine.setPalette(typeof GCOLOR_PALETTE!=='undefined'?GCOLOR_PALETTE:'theme');
    engine.setTypeColors(GCOLOR_OVERRIDES||{});
    engine.setLayers(layers);
+   engine.setScope({showUnlinked,minDegree:showUnlinked?0:1});
    if(dataChanged)engine.setData(data);
   },fit,reheat&&!prefersReducedMotion());
   /* Mirror the engine's clustering back onto the dashboard's own node objects, or the
@@ -621,6 +627,11 @@ function graphRenderEngine(data,fit,reheat){
   GACTIVE_DATA=data;graphSyncReadouts();graphUpdateEditedBadge();graphUpdateHud(data);graphRenderLegend(GRAPH);
   if(dataChanged)graphSetHighlight(null);
   if(window.GSET.frozen)GRAPH_ENGINE.freeze(true);
+  /* The renderer can be born after the user has already left the view: /graph and both lazy
+     scripts resolve asynchronously, and the pause on nav-away ran while GRAPH_ENGINE was still
+     null. Re-apply the parked state here so a renderer created against a hidden pane never
+     starts a rAF that nothing will stop. */
+  if(GRAPH_ENGINE_PARKED)GRAPH_ENGINE.pause();
   graphSetSimulationStatus(prefersReducedMotion()?'Static layout':'Adaptive layout',false);
   return true;
  }catch(error){
@@ -629,9 +640,14 @@ function graphRenderEngine(data,fit,reheat){
  }
 }
 /* Nav away from the graph view: park the engine's animation frame. Without this the opt-in
-   renderer keeps repainting a hidden canvas for the rest of the session. */
-function graphEnginePause(){try{if(GRAPH_ENGINE)GRAPH_ENGINE.pause()}catch(e){}}
-function graphEngineResume(){try{if(GRAPH_ENGINE)GRAPH_ENGINE.resume()}catch(e){}}
+   renderer keeps repainting a hidden canvas for the rest of the session.
+   The intent is *recorded* as well as applied, because pausing an engine that does not exist
+   yet is a no-op: leaving Graph before /graph (or either lazy script) resolves would otherwise
+   let the pending callback create and start a renderer against a hidden pane with no later
+   pause to stop it. graphRenderEngine() re-applies GRAPH_ENGINE_PARKED for that case. */
+let GRAPH_ENGINE_PARKED=false;
+function graphEnginePause(){GRAPH_ENGINE_PARKED=true;try{if(GRAPH_ENGINE)GRAPH_ENGINE.pause()}catch(e){}}
+function graphEngineResume(){GRAPH_ENGINE_PARKED=false;try{if(GRAPH_ENGINE)GRAPH_ENGINE.resume()}catch(e){}}
 function graphInvalidateData(){
  if(GRAPH_ENGINE){try{GRAPH_ENGINE.destroy()}catch(e){}GRAPH_ENGINE=null}
  GDATA_CACHE=null;GACTIVE_DATA=null;GCOMPONENT_LAYOUT=null;GHILITE=null;GHOVERSET=null

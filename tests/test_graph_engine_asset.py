@@ -51,9 +51,51 @@ const emit = value => console.log(JSON.stringify(value));
 """
 
 
-def _run_node(script: str) -> object:
+#: Same, plus a recording stand-in for force-graph so ``create()`` can be *driven*.  Every
+#: accessor is a chainable setter that returns the stored value when called with no arguments —
+#: force-graph's own kapsule semantics — so the paint configuration the engine installs can be
+#: read back and invoked instead of pattern-matched.  ``calls`` counts the invalidations the
+#: engine requests, which is the only observable form a "redraw now" takes.
+ENGINE_PRELUDE = """
+const fs = require('fs');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const window = {};
+globalThis.requestAnimationFrame = () => {};
+const store = {}, calls = {};
+const fg = new Proxy({}, {
+  get: (_target, prop) => (...args) => {
+    if (!args.length) return store[prop];
+    calls[prop] = (calls[prop] || 0) + 1;
+    store[prop] = args.length === 1 ? args[0] : args;
+    return fg;
+  },
+});
+globalThis.ForceGraph = () => () => fg;
+const el = {
+  attrs: {}, innerHTML: '', clientWidth: 800, clientHeight: 600,
+  getAttribute(name) { return this.attrs[name] === undefined ? null : this.attrs[name]; },
+  setAttribute(name, value) { this.attrs[name] = value; },
+  removeAttribute(name) { delete this.attrs[name]; },
+  classList: { toggle() {}, remove() {} },
+};
+const chain = count => {
+  const nodes = [], links = [];
+  for (let i = 0; i <= count; i++) nodes.push({ id: 'n' + i });
+  for (let i = 0; i < count; i++) {
+    links.push({ source: 'n' + i, target: 'n' + (i + 1), layer: 'semantic' });
+  }
+  return { nodes, links };
+};
+new Function('window', source)(window);
+const G = window.EngraphisGraph;
+const I = G._internals;
+const emit = value => console.log(JSON.stringify(value));
+"""
+
+
+def _run_node(script: str, prelude: str = PRELUDE) -> object:
     result = subprocess.run(
-        [NODE, "-e", PRELUDE + script, str(ASSET)],
+        [NODE, "-e", prelude + script, str(ASSET)],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -61,6 +103,10 @@ def _run_node(script: str) -> object:
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def _run_engine(script: str) -> object:
+    return _run_node(script, prelude=ENGINE_PRELUDE)
 
 
 # ── load order and failure isolation ────────────────────────────────────────────────
@@ -451,6 +497,41 @@ def test_graph_analysis_is_stack_safe_and_bounded_on_a_large_store() -> None:
 
 
 @requires_node
+def test_influence_relations_do_not_merge_two_topics_into_one_community() -> None:
+    """Community Islands must not fuse two topics over a single cross-topic relation.
+
+    ``influences`` edges routinely span otherwise separate bodies of work.  The classic
+    renderer keeps them drawn and traversable but builds its clustering adjacency without
+    them (``GCOMM_ADJ``); adding every link to one adjacency gives both topics the same
+    colour and the same force centre.
+    """
+    report = _run_node(
+        """
+        const nodes = ['a', 'b', 'c', 'd'].map(id => ({ id }));
+        const links = [
+          { source: 'a', target: 'b', label: 'mentions' },
+          { source: 'c', target: 'd', label: 'mentions' },
+          { source: 'b', target: 'c', label: 'influences' },
+        ];
+        const adj = I.communities(nodes, links);
+        I.findBridges(nodes, links, adj);
+        emit({
+          groups: new Set(nodes.map(n => n.community)).size,
+          merged: nodes[1].community === nodes[2].community,
+          neighbours: (adj.b || []).slice().sort(),
+          bridges: links.filter(l => l.bridge).length,
+        });
+        """
+    )
+    assert report["groups"] == 2
+    assert report["merged"] is False
+    # The relation itself stays in the traversal adjacency: hover neighbourhood, focus depth
+    # and bridge detection all still see it.  Only the clustering ignores it.
+    assert report["neighbours"] == ["a", "c"]
+    assert report["bridges"] == 3
+
+
+@requires_node
 def test_max_helper_survives_arrays_past_the_spread_limit() -> None:
     """``Math.max(...array)`` throws RangeError long before a store is unrenderable."""
     report = _run_node("emit({ max: I.maxOf(new Array(400000).fill(7), 1) });")
@@ -475,6 +556,206 @@ def test_colour_helpers_handle_the_shorthand_hex_the_palettes_may_carry() -> Non
     assert report["empty"] == [140, 131, 232]
     assert report["light"] == "#111827"
     assert report["dark"] == "#f8fafc"
+
+
+# ── render configuration: what the engine actually installs on force-graph ──────────
+
+
+@requires_node
+def test_flow_particles_are_capped_on_a_large_relation_set() -> None:
+    """Three animated particles per relation does not survive a real ``/graph`` response.
+
+    force-graph advances every particle on every frame, so a few thousand relations is tens
+    of thousands of animated objects and an unusable canvas.  The classic renderer refuses to
+    draw them past 800 links; the opt-in engine must use the same cutoff rather than trusting
+    that no store is big.
+    """
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        const particlesFor = link => store.linkDirectionalParticles(link || { layer: 'semantic' });
+        api.setStyle('cyber');
+        api.setSettings({ flow: true });
+        api.setData(chain(40));
+        const small = particlesFor();
+        api.setData(chain(800));
+        const atLimit = particlesFor();
+        api.setData(chain(801));
+        const overLimit = particlesFor();
+        api.setData(chain(4000));
+        emit({ small, atLimit, overLimit, realistic: particlesFor() * 4000 });
+        """
+    )
+    assert report["small"] == 3
+    assert report["atLimit"] == 3
+    assert report["overLimit"] == 0
+    # The number this guards: 4k relations x 3 particles was 12,000 animated objects a frame.
+    assert report["realistic"] == 0
+
+
+@requires_node
+def test_hovering_a_node_asks_for_a_redraw() -> None:
+    """A highlight nobody repaints is invisible.
+
+    ``onNodeHover`` mutates closure state the paint callbacks read.  With reduced motion on,
+    flow disabled, or a settled simulation, force-graph's ``autoPauseRedraw`` loop has nothing
+    left to animate and will not repaint just because the callback fired.
+    """
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData({ nodes: [{ id: 'a' }, { id: 'b' }], links: [{ source: 'a', target: 'b' }] });
+        const settled = calls.nodeCanvasObject;
+        store.onNodeHover({ id: 'a' });
+        const hovered = calls.nodeCanvasObject;
+        store.onNodeHover(null);
+        emit({
+          settled, hovered, cleared: calls.nodeCanvasObject,
+          particles: store.linkDirectionalParticles({ layer: 'semantic' }),
+        });
+        """
+    )
+    # Reduced motion: nothing is in flight, so an unrequested redraw would never arrive.
+    assert report["particles"] == 0
+    assert report["hovered"] > report["settled"]
+    assert report["cleared"] > report["hovered"]
+
+
+@requires_node
+def test_unlinked_entities_are_shown_only_when_the_engine_is_told_to() -> None:
+    """The lever the dashboard has to pull for its "Show unlinked nodes" checkbox."""
+    report = _run_engine(
+        """
+        const seen = [];
+        const api = G.create(el, { onStats: stats => seen.push(stats.nodes) });
+        api.setData({
+          nodes: [{ id: 'a' }, { id: 'b' }, { id: 'lonely' }],
+          links: [{ source: 'a', target: 'b' }],
+        });
+        const hidden = seen[seen.length - 1];
+        api.setScope({ showUnlinked: true, minDegree: 0 });
+        emit({ hidden, shown: seen[seen.length - 1] });
+        """
+    )
+    assert report["hidden"] == 2
+    assert report["shown"] == 3
+
+
+#: Executes the *real* ``graphRenderEngine`` source against stubs.  Only its collaborators are
+#: faked; the function itself is a verbatim slice, so what it forwards to the engine — and when
+#: it parks a freshly created renderer — is observed rather than asserted about the source text.
+RENDER_HARNESS = """
+const fs = require('fs');
+const src = fs.readFileSync(process.argv.slice(1).find(a => a.endsWith('dashboard.js')), 'utf8');
+const scenario = JSON.parse(process.argv[process.argv.length - 1]);
+const start = src.indexOf('function graphRenderEngine(');
+const slice = src.slice(start, src.indexOf('/* Nav away from the graph view', start));
+
+const log = { created: 0, paused: 0, seeded: 0, scope: null, error: null };
+const checkbox = { checked: scenario.showUnlinked };
+const element = { classList: { toggle() {} }, setAttribute() {}, set textContent(value) {} };
+globalThis.document = {
+  getElementById: id => (id === 'graph-show-iso' ? checkbox : element),
+  querySelectorAll: () => [],
+};
+const engine = {
+  setSettings() {}, setStyle() {}, setColorBy() {}, setPalette() {}, setTypeColors() {},
+  setLayers() {}, setScope(patch) { log.scope = patch; },
+  setData(data) { log.seeded = data.nodes.length; },
+};
+const api = {
+  apply(fn) { fn(engine); }, communityMap: () => ({}),
+  freeze() {}, destroy() {}, resume() {}, pause() { log.paused += 1; },
+};
+globalThis.EngraphisGraph = { create() { log.created += 1; return api; } };
+globalThis.window = { GSET: { mode: 'compact', frozen: false } };
+globalThis.GRAPH = { nodes: [] };
+globalThis.GRAPH_ENGINE = null;
+globalThis.GACTIVE_DATA = null;
+globalThis.GCOLOR_OVERRIDES = {};
+/* The state the nav-away pause recorded while GRAPH_ENGINE was still null. */
+globalThis.GRAPH_ENGINE_PARKED = scenario.parked;
+globalThis.showAs = () => {};
+globalThis.prefersReducedMotion = () => false;
+for (const name of ['graphSetLayoutStatus', 'graphSyncReadouts', 'graphUpdateEditedBadge',
+                    'graphUpdateHud', 'graphRenderLegend', 'graphSetHighlight',
+                    'graphSetSimulationStatus', 'syncGraphExplorerSelection', 'graphNodeClick',
+                    'graphEngineEmptyMessage']) globalThis[name] = () => {};
+globalThis.graphEngineFallback = error => {
+  log.error = String((error && error.message) || error);
+};
+
+const graphRenderEngine = new Function(slice + '\\nreturn graphRenderEngine;')();
+const rendered = graphRenderEngine({
+  nodes: [{ id: 'a' }, { id: 'b' }, { id: 'lonely' }],
+  links: [{ source: 'a', target: 'b' }],
+}, true, true);
+console.log(JSON.stringify(Object.assign({ rendered }, log)));
+"""
+
+
+def _run_render(*, show_unlinked: bool = False, parked: bool = False) -> dict:
+    source = DASHBOARD.read_text(encoding="utf-8")
+    # The harness slices real source; keep its landmarks honest.
+    assert "function graphRenderEngine(" in source
+    assert "/* Nav away from the graph view" in source
+    scenario = json.dumps({"showUnlinked": show_unlinked, "parked": parked})
+    result = subprocess.run(
+        [NODE, "-e", RENDER_HARNESS, str(DASHBOARD), scenario],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert report["error"] is None, report["error"]
+    assert report["rendered"] is True
+    return report
+
+
+@requires_node
+@pytest.mark.parametrize("checked", [False, True])
+def test_dashboard_tells_the_engine_whether_to_show_unlinked_entities(checked: bool) -> None:
+    """"Show unlinked nodes" is filtered twice, and only one half was wired up.
+
+    ``graphData()`` starts supplying degree-zero entities when the box is ticked, but the
+    engine re-filters on its own ``showUnlinked``/``minDegree`` state — which stays at the
+    defaults that drop exactly those entities — unless the dashboard says otherwise.
+    """
+    report = _run_render(show_unlinked=checked)
+
+    assert report["scope"] is not None, "the engine never learns the checkbox state"
+    assert report["scope"]["showUnlinked"] is checked
+    # minDegree matters just as much: showUnlinked alone still loses to `degree >= 1`.
+    assert report["scope"]["minDegree"] == (0 if checked else 1)
+
+
+@requires_node
+def test_a_renderer_created_after_leaving_the_graph_view_is_born_paused() -> None:
+    """The rAF leak this PR already fixed once, reached by a different route.
+
+    ``/graph`` and both lazy scripts resolve asynchronously.  Leaving Graph before they do runs
+    the pause while ``GRAPH_ENGINE`` is still null, so the pending callback would create and
+    start a renderer against a hidden pane that nothing ever pauses again.
+    """
+    parked = _run_render(parked=True)
+    assert parked["created"] == 1
+    assert parked["paused"] == 1, "a renderer created off-view keeps repainting forever"
+
+    # On the view, the same path must not park a renderer the user is looking at.
+    live = _run_render(parked=False)
+    assert live["created"] == 1
+    assert live["paused"] == 0
+
+
+def test_leaving_the_graph_view_records_the_pause_as_well_as_applying_it() -> None:
+    source = DASHBOARD.read_text(encoding="utf-8")
+    assert "if(v==='graph')graphEngineResume();else graphEnginePause()" in source
+    pause = source[source.index("function graphEnginePause()"):]
+    pause = pause[: pause.index("\nfunction graphInvalidateData")]
+    assert "GRAPH_ENGINE_PARKED=true" in pause
+    assert "GRAPH_ENGINE_PARKED=false" in pause
 
 
 # ── CSP, styling and lifecycle ──────────────────────────────────────────────────────

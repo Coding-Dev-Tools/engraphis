@@ -48,6 +48,13 @@
   };
   const GRAPH_HEAT = ['#3f7bff', '#6a5cff', '#a24bff', '#e0479f', '#ff6b6b', '#ffc23d'];
 
+  /* Flow particles are per *relation*, and force-graph advances every one of them on every
+     frame — three particles on a few thousand relations is tens of thousands of animated
+     objects and a canvas that stops responding. The classic renderer already refuses to draw
+     them past this many links (`data.links.length>800` in dashboard.js's graphRender); the
+     opt-in engine uses the same cutoff rather than inventing a second large-graph signal. */
+  const PARTICLE_LINK_LIMIT = 800;
+
   function idOf(value) { return value && typeof value === 'object' ? value.id : value; }
   function nodeName(node) { return String(node.name || node.label || node.id || ''); }
   function linkEndpoint(link, side) {
@@ -102,14 +109,30 @@
   }
   const STARS = makeStars();
 
+  /* Relations that cross topics rather than describe one. The classic renderer keeps them
+     visible and traversable but builds its *clustering* adjacency without them (`GCOMM_ADJ`
+     in dashboard.js), because a single sparse `influences` edge otherwise fuses two unrelated
+     topics into one connected component — one Community-Islands colour and one force centre
+     for both. Same semantics here. */
+  const CLUSTER_EXCLUDED_LABELS = { influences: true };
+  function clustersAcross(link) {
+    return !!(link && CLUSTER_EXCLUDED_LABELS[link.label]);
+  }
+
   function communities(nodes, links) {
     const adj = {};
+    // Traversal adjacency (hover neighbourhood, focus depth, bridges, betweenness) keeps every
+    // relation; only the community BFS below reads `clusterAdj`.
+    const clusterAdj = {};
     const nodesById = new Map(nodes.map(node => [node.id, node]));
-    nodes.forEach(n => { adj[n.id] = []; });
+    nodes.forEach(n => { adj[n.id] = []; clusterAdj[n.id] = []; });
     links.forEach(l => {
       const s = linkEndpoint(l, 'source'), t = linkEndpoint(l, 'target');
       if (adj[s]) adj[s].push(t);
       if (adj[t]) adj[t].push(s);
+      if (clustersAcross(l)) return;
+      if (clusterAdj[s]) clusterAdj[s].push(t);
+      if (clusterAdj[t]) clusterAdj[t].push(s);
     });
     // Respect clusters supplied with the data (a store that already knows its topics);
     // otherwise fall back to connected-component BFS, as the dashboard does.
@@ -127,7 +150,7 @@
         const id = queue[head++];
         const node = nodesById.get(id);
         if (node) node.community = group;
-        (adj[id] || []).forEach(next => { if (!seen.has(next)) { seen.add(next); queue.push(next); } });
+        (clusterAdj[id] || []).forEach(next => { if (!seen.has(next)) { seen.add(next); queue.push(next); } });
       }
       group++;
     });
@@ -555,10 +578,20 @@
       el.setAttribute('data-graph-style', state.styleName);
     }
 
+    /* force-graph parks its redraw loop as soon as the simulation settles and no particle is in
+       flight (`autoPauseRedraw`), and it has no way to know that `hilite`/`hoverSet` — plain
+       closure state read by the paint callbacks — changed. Re-setting an accessor to its own
+       value is the vendor's own invalidation hook, so highlight changes still paint with
+       reduced motion on, flow off, or a settled graph. */
+    function invalidate() {
+      if (destroyed) return;
+      fg.nodeCanvasObject(fg.nodeCanvasObject());
+    }
+
     function refreshColors() {
       const nodes = fg.graphData().nodes || [];
       nodes.forEach(n => { n.color = nodeColor(n); n.stroke = contrastOn(n.color); });
-      fg.nodeCanvasObject(fg.nodeCanvasObject());
+      invalidate();
     }
 
     function render(fit, reheat) {
@@ -587,7 +620,10 @@
       if (fg.linkCurvature) fg.linkCurvature((PRESETS[state.settings.mode] || PRESETS.compact).curve || 0);
       fg.linkDirectionalArrowLength(2.5).linkDirectionalArrowRelPos(1);
       if (fg.linkDirectionalParticles) {
-        const particles = (state.settings.flow === false || !motion)
+        const flowing = state.settings.flow !== false
+          && motion
+          && data.links.length <= PARTICLE_LINK_LIMIT;
+        const particles = !flowing
           ? 0
           : (state.styleName === 'cyber' ? 3 : ((PRESETS[state.settings.mode] || {}).particles || 2));
         fg.linkDirectionalParticles(l => l.suggested || l.ghost ? 0 : particles)
@@ -638,6 +674,7 @@
         hilite = node ? node.id : null;
         hoverSet = node ? new Set([node.id].concat(adj[node.id] || [])) : null;
         el.classList.toggle('engraphis-graph-node-hover', !!node);
+        invalidate();
       })
       .onNodeClick(node => {
         if (node.cluster) { collapsed = false; state.collapse = false; render(false, true); setTimeout(() => { fg.centerAt(node.x, node.y, 500); fg.zoom(1.6, 500); }, 60); if (opts.onCollapseChange) opts.onCollapseChange(false); return; }
@@ -706,7 +743,7 @@
     api.setHighlight = id => {
       hilite = id == null ? null : id;
       hoverSet = id == null ? null : new Set([id].concat(adj[id] || []));
-      if (!destroyed) fg.nodeCanvasObject(fg.nodeCanvasObject());
+      invalidate();
     };
     api.setScope = patch => { Object.assign(state, patch); render(false, true); };
     api.setLayers = layers => { state.layers = layers; render(false, false); };
