@@ -2003,6 +2003,34 @@ def _write_entitlement_cache(entitlement: dict) -> None:
         logger.debug("entitlement cache write skipped")
 
 
+def _deny_entitlement_cache() -> None:
+    """Clear this cache's grants after an authoritative billing denial.
+
+    ``cloud_session.record_billing_denial`` settles the session record, but an older
+    control plane omits the entitlement fields from it entirely — that session stays
+    planless, ``saved_entitlement()`` keeps answering ``{}``, and ``_plan_entitlement``
+    falls through to *this* cache. Left alone it went on advertising paid features while
+    every cloud operation was denied, which is the same disagreement one layer down.
+
+    The plan name is preserved so the UI can still say which plan lapsed; only the access
+    flag and the grants are cleared. Never raises: this runs on the refresh thread.
+    """
+
+    try:
+        cached = _read_entitlement_cache()
+        if not cached:
+            return
+        if not cached.get("cloud_access_active") and not cached.get("features"):
+            return
+        denied = dict(cached)
+        denied["cloud_access_active"] = False
+        denied["features"] = []
+        denied["fetched_at"] = time.time()
+        _write_entitlement_cache(denied)
+    except Exception:  # noqa: BLE001 - a denial we cannot persist is still a denial
+        logger.debug("entitlement cache denial skipped")
+
+
 def _fetch_authoritative_entitlement() -> Optional[dict]:
     """Re-read the plan from the control plane. Returns ``None`` when nothing was cached.
 
@@ -2055,6 +2083,11 @@ def _fetch_authoritative_entitlement() -> Optional[dict]:
                 record_billing_denial()
             except Exception:  # noqa: BLE001 - a denial we cannot persist is still a denial
                 pass
+            # Settle both layers. Against an older control plane the session carries no
+            # entitlement fields at all, so the session write above leaves it planless and
+            # the resolver falls through to the compatibility cache -- which would keep
+            # advertising the paid plan on its own.
+            _deny_entitlement_cache()
         return None
     if not access_token or not organization_id:
         return None

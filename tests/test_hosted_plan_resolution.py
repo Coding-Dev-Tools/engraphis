@@ -953,6 +953,34 @@ def test_a_transport_failure_is_not_mistaken_for_a_billing_denial(monkeypatch) -
     assert "team" in record.get("cloud_features", [])
 
 
+def test_a_billing_denial_also_settles_the_compatibility_cache(monkeypatch) -> None:
+    """An older control plane leaves the session planless, so the cache must settle too.
+
+    ``record_billing_denial`` writes the denial onto a session that carries no entitlement
+    fields, so ``saved_entitlement()`` still answers ``{}`` and the resolver falls through
+    to the compatibility cache. Unless that cache is settled as well, the dashboard keeps
+    advertising the paid plan while every cloud operation is denied.
+    """
+
+    _connect(monkeypatch, pinned_token=False)
+    # registration={} models the older control plane: no entitlement on the session.
+    _serve(monkeypatch, _FakeControlPlane(_entitlement_dto("team"), registration={}))
+    assert _settled_license(monkeypatch)["cloud_access_active"] is True
+    assert cloud_session.saved_entitlement() == {}, "the session must be planless here"
+    assert v2_api._read_entitlement_cache()["cloud_access_active"] is True
+
+    def _lapsed(*_args, **_kwargs):
+        raise cloud_session.CloudSessionError("Subscription is not active.", status=402)
+
+    monkeypatch.setattr(cloud_session, "access_for_workspace", _lapsed)
+    assert v2_api._fetch_authoritative_entitlement() is None
+
+    cached = v2_api._read_entitlement_cache()
+    assert cached["cloud_access_active"] is False, "the cache still advertises paid access"
+    assert cached["features"] == []
+    assert cached["plan"] == "team", "the lapsed plan is still named for the UI"
+
+
 def test_a_lapsed_subscription_declared_on_the_refresh_keeps_its_name(
     monkeypatch,
 ) -> None:
