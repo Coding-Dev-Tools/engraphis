@@ -97,6 +97,12 @@ def test_refresh_survives_an_error_body_that_fails_to_read(monkeypatch) -> None:
             raise TimeoutError("the read timed out")
 
         def close(self):
+            if self.closed:
+                return
+            # Model a reset after the descriptor was released.  Leaving BytesIO open
+            # would make its finalizer repeat the synthetic failure as an unraisable
+            # warning after the behaviour under test has already handled it.
+            super().close()
             raise OSError("the socket was already reset")
 
     error = urllib.error.HTTPError(

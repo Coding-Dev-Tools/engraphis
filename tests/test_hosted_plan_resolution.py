@@ -24,6 +24,7 @@ from __future__ import annotations
 import ast
 import io
 import json
+import os
 import re
 import socket
 import threading
@@ -446,6 +447,11 @@ def test_an_unreadable_error_body_never_escapes_the_refresh_thread(monkeypatch) 
             raise TimeoutError("the read timed out")
 
         def close(self):
+            if self.closed:
+                return
+            # Model a reset after the descriptor was released so this deliberate
+            # cleanup failure does not recur from BytesIO's finalizer as a warning.
+            super().close()
             raise OSError("the socket was already reset")
 
     _connect(monkeypatch)
@@ -469,6 +475,17 @@ def test_an_unreadable_error_body_never_escapes_the_refresh_thread(monkeypatch) 
     json.dumps(_entitlement_dto("team", organization_id="org_someone_else")).encode(),
     b'{"organization_id":"org_paying_team","plan":"team","cloud_access_active":true,'
     + b'"pad":"' + b"x" * 70_000 + b'"}',
+], ids=[
+    "invalid-json",
+    "array",
+    "null",
+    "incomplete",
+    "missing-activity",
+    "empty-plan",
+    "numeric-plan",
+    "nonboolean-activity",
+    "wrong-organization",
+    "oversized",
 ])
 def test_a_malformed_or_misrouted_answer_never_relabels_the_plan(monkeypatch, body) -> None:
     _connect(monkeypatch)
@@ -613,7 +630,11 @@ def test_the_cache_is_written_owner_only_and_reread_across_processes(
 
     path = v2_api._entitlement_cache_path()
     assert path.exists()
-    assert (path.stat().st_mode & 0o777) == 0o600
+    # Windows does not project ACLs through POSIX mode bits.  The private-state helper
+    # still uses its race-safe write/read path there, but only POSIX can prove owner-only
+    # access with this portable ``st_mode`` check.
+    if os.name != "nt":
+        assert (path.stat().st_mode & 0o777) == 0o600
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["schema"] == "engraphis-cloud-entitlement/v1"
     assert saved["plan"] == "team"
