@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from engraphis import cloud_session, device_connect
+from engraphis.private_state import UnsafeStateFile
 from scripts import connect as connect_cli
 
 CONTROL_URL = "https://control.example.test"
@@ -40,7 +41,10 @@ REGISTRATION = {
     "entitlement_version": 7,
     "plan": "team",
     "cloud_access_active": True,
-    "cloud_features": ["analytics", "automation", "export", "sync", "team"],
+    # No ``export``: the signed compliance export was never implemented and is no longer
+    # in either repo's plan->feature table, so a fixture claiming the cloud grants it
+    # would re-establish exactly the drift that removal cleaned up.
+    "cloud_features": ["analytics", "automation", "sync", "team"],
 }
 
 
@@ -656,6 +660,93 @@ def test_control_url_defaults_to_the_shipped_manifest(monkeypatch):
     assert device_connect.default_compute_url(manifest()["control_plane"]) == \
         device_connect.DEFAULT_COMPUTE_URL
     assert device_connect.default_compute_url(CONTROL_URL) == ""
+
+
+def test_the_manifest_outranks_the_compute_constant(monkeypatch):
+    """A published ``compute_plane`` wins, so the manifest stays the endpoint authority.
+
+    The constant is only the fallback for today's manifest, which declares no
+    ``compute_plane``; reading the key alone would resolve ``""`` and save a session
+    ``configured()`` rejects.
+    """
+
+    from engraphis.commercial import manifest
+
+    shipped = manifest()["control_plane"]
+    monkeypatch.setattr(
+        "engraphis.commercial.manifest",
+        lambda: {"control_plane": shipped, "compute_plane": COMPUTE_URL},
+    )
+
+    assert device_connect.default_compute_url(shipped) == COMPUTE_URL
+    # A self-hosted control plane still gets no guess from either source.
+    assert device_connect.default_compute_url(CONTROL_URL) == ""
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "0", "-5"])
+def test_a_non_finite_timeout_is_refused_before_any_request(monkeypatch, bad):
+    """``argparse``'s ``type=float`` accepts ``nan``/``inf``; the socket layer does not.
+
+    Those reach ``urllib``'s deadline arithmetic and raise ``ValueError``/``OverflowError``
+    that ``post_connect`` does not catch, so the CLI printed a traceback instead of its
+    structured error.  Nothing may be sent, either.
+    """
+
+    class _Exploding:
+        @staticmethod
+        def open(request, timeout=None):  # pragma: no cover - must never run
+            raise AssertionError("a request was started with an unusable timeout")
+
+    _install_opener(monkeypatch, _Exploding())
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, timeout=float(bad))
+
+    assert caught.value.status == 400
+    assert "timeout" in str(caught.value)
+
+
+def test_the_cli_reports_a_bad_timeout_instead_of_a_traceback(monkeypatch, capsys):
+    class _Exploding:
+        @staticmethod
+        def open(request, timeout=None):  # pragma: no cover - must never run
+            raise AssertionError("a request was started with an unusable timeout")
+
+    _install_opener(monkeypatch, _Exploding())
+
+    code = connect_cli.main(
+        ["--token", TOKEN, "--control-url", CONTROL_URL, "--timeout", "nan"]
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "timeout" in err
+    assert "Traceback" not in err
+
+
+def test_a_storage_fault_racing_the_save_is_not_a_traceback(monkeypatch):
+    """``UnsafeStateFile`` is an ``OSError``, not a ``CloudSessionError``.
+
+    The pre-flight closes the common case, but the state directory can still change
+    between the pre-flight and the write.  The token is spent by then, so the customer
+    must be told that plainly rather than shown a stack trace.
+    """
+
+    _install_opener(monkeypatch, _Opener(body=REGISTRATION))
+
+    def _boom(*args, **kwargs):
+        raise UnsafeStateFile("cloud_session.json is not a plain private file")
+
+    monkeypatch.setattr(cloud_session, "save_bootstrap", _boom)
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL)
+
+    message = str(caught.value)
+    assert caught.value.status == 409
+    # The token is gone; the copy must not promise it can be reused.
+    assert "has been used" in message
+    assert TOKEN not in message
 
 
 def test_control_url_env_override_wins(monkeypatch):
