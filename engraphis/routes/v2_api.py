@@ -2190,6 +2190,18 @@ def _fetch_authoritative_entitlement() -> Optional[dict]:
                 exc.close()
             except (OSError, ValueError):
                 pass
+        # The compatibility endpoint is authoritative too.  An older control plane can
+        # refresh a token successfully yet answer 402 here because it does not include
+        # entitlement fields in the refresh response.  Do not leave its previous paid
+        # cache (or the session that outranks it) advertising access after that answer.
+        if exc.code == 402:
+            try:
+                from engraphis.cloud_session import record_billing_denial
+
+                record_billing_denial()
+            except Exception:  # noqa: BLE001 - a denial we cannot persist is still a denial
+                pass
+            _deny_entitlement_cache()
         return None
     except Exception:  # noqa: BLE001 - transport, TLS, and URL failures are all "not now"
         return None

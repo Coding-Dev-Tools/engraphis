@@ -986,6 +986,32 @@ def test_a_billing_denial_also_settles_the_compatibility_cache(monkeypatch) -> N
     assert cached["plan"] == "team", "the lapsed plan is still named for the UI"
 
 
+def test_a_compatibility_entitlement_402_settles_paid_access(monkeypatch) -> None:
+    """An old control plane can deny only the fallback entitlement request.
+
+    It refreshes tokens but puts no entitlement fields on those responses, so the GET
+    compatibility path owns the cached answer.  Its 402 is just as authoritative as a
+    token-refresh 402; treating it as a transport failure leaves stale paid features live.
+    """
+
+    _connect(monkeypatch, pinned_token=False)
+    cloud = _FakeControlPlane(_entitlement_dto("team"), registration={})
+    _serve(monkeypatch, cloud)
+    assert _settled_license(monkeypatch)["cloud_access_active"] is True
+    assert cloud_session.saved_entitlement() == {}
+
+    cloud.error = urllib.error.HTTPError(
+        CONTROL_URL, 402, "payment required", {}, io.BytesIO(b"{}")
+    )
+    assert v2_api._fetch_authoritative_entitlement() is None
+
+    cached = v2_api._read_entitlement_cache()
+    assert cached["cloud_access_active"] is False
+    assert cached["features"] == []
+    assert cached["plan"] == "team"
+    assert v2_api.get_license()["cloud_access_active"] is False
+
+
 def _age_session_clock(seconds: float = 3600.0) -> None:
     """Push the saved session's entitlement stamp past any refresh interval."""
 
