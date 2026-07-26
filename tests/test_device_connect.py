@@ -780,6 +780,47 @@ def test_compute_url_is_taken_from_the_environment(monkeypatch):
     assert cloud_session.configured() is True
 
 
+def test_non_shipped_control_plane_uses_its_vetted_compute_url(monkeypatch, tmp_path):
+    """The connect response, not a shipped-only fallback, configures custom planes."""
+
+    server_compute = "https://assigned-compute.example.test"
+    _install_opener(monkeypatch, _Opener(body=dict(REGISTRATION, compute_url=server_compute)))
+
+    summary = device_connect.connect(TOKEN, control_url=CONTROL_URL)
+
+    saved = json.loads((tmp_path / "cloud_session.json").read_text(encoding="utf-8"))
+    assert summary["compute_url"] == server_compute
+    assert saved["compute_url"] == server_compute
+    assert saved["compute_url_source"] == "server"
+    assert cloud_session.configured() is True
+
+
+@pytest.mark.parametrize("source", ["cli", "environment"])
+def test_explicit_compute_override_outranks_the_connect_response(monkeypatch, source):
+    """A server cannot replace an operator-selected endpoint during device connect."""
+
+    server_compute = "https://assigned-compute.example.test"
+    kwargs = {}
+    if source == "cli":
+        kwargs["compute_url"] = COMPUTE_URL
+    else:
+        monkeypatch.setenv("ENGRAPHIS_CLOUD_COMPUTE_URL", COMPUTE_URL)
+    _install_opener(monkeypatch, _Opener(body=dict(REGISTRATION, compute_url=server_compute)))
+
+    summary = device_connect.connect(TOKEN, control_url=CONTROL_URL, **kwargs)
+    assert summary["compute_url"] == COMPUTE_URL
+    assert cloud_session._load()["compute_url_source"] == "explicit"
+
+
+def test_empty_cli_compute_value_does_not_suppress_the_connect_response(monkeypatch):
+    server_compute = "https://assigned-compute.example.test"
+    _install_opener(monkeypatch, _Opener(body=dict(REGISTRATION, compute_url=server_compute)))
+
+    assert device_connect.connect(
+        TOKEN, control_url=CONTROL_URL, compute_url=""
+    )["compute_url"] == server_compute
+
+
 def test_control_url_defaults_to_the_shipped_manifest(monkeypatch):
     from engraphis.commercial import manifest
 

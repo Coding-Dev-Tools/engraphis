@@ -338,6 +338,24 @@ def _validated_control_url(value: str) -> str:
         ) from exc
 
 
+def _server_compute_url(response: dict) -> str:
+    """Return a vetted compute endpoint volunteered by the control plane, if any.
+
+    ``compute_url`` is endpoint metadata, not a redirect target: the registration body is
+    untrusted until it passes the same HTTPS, public-host, and DNS-rebinding validation as
+    configured endpoints.  A bad or temporarily unresolvable optional value must not erase
+    a valid manifest fallback after the one-time token was spent.
+    """
+
+    value = response.get("compute_url")
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    try:
+        return validate_cloud_base_url(value)
+    except (CloudUrlUnresolved, ValueError):
+        return ""
+
+
 def _default_device_name() -> str:
     try:
         name = socket.gethostname().strip()
@@ -571,12 +589,30 @@ def connect(token: object, *, control_url: Optional[str] = None,
     resolved_control = _validated_control_url(
         control_url if control_url is not None else default_control_url()
     )
-    resolved_compute = (
-        compute_url if compute_url is not None else default_compute_url(resolved_control)
-    )
+    cli_compute = str(compute_url or "").strip()
+    environment_compute = os.environ.get("ENGRAPHIS_CLOUD_COMPUTE_URL", "").strip()
+    has_explicit_compute = bool(cli_compute or environment_compute)
+    resolved_compute = cli_compute or environment_compute
+    # The shipped manifest/default remains a fallback, not an authority over a value the
+    # control plane returns for this installation.  Validate it before redeeming the
+    # single-use token, then let a separately validated server value supersede it below.
+    fallback_compute = "" if has_explicit_compute else default_compute_url(resolved_control)
     if resolved_compute:
         try:
             resolved_compute = validate_cloud_base_url(resolved_compute)
+        except CloudUrlUnresolved as exc:
+            raise DeviceConnectError(
+                "The Engraphis Cloud compute endpoint is temporarily unreachable.",
+                status=503,
+            ) from exc
+        except ValueError as exc:
+            raise DeviceConnectError(
+                "The Engraphis Cloud compute URL is not a valid HTTPS endpoint.",
+                status=400,
+            ) from exc
+    elif fallback_compute:
+        try:
+            fallback_compute = validate_cloud_base_url(fallback_compute)
         except CloudUrlUnresolved as exc:
             raise DeviceConnectError(
                 "The Engraphis Cloud compute endpoint is temporarily unreachable.",
@@ -611,9 +647,21 @@ def connect(token: object, *, control_url: Optional[str] = None,
             "Try again, and contact support if it repeats.",
             status=502,
         )
+    server_compute = "" if has_explicit_compute else _server_compute_url(response)
+    if not has_explicit_compute:
+        # The response wins for a non-shipped control plane too; otherwise those customers
+        # can redeem a token but never learn the compute endpoint the cloud assigned them.
+        resolved_compute = server_compute or fallback_compute
+    compute_source = (
+        "explicit" if has_explicit_compute else "server" if server_compute
+        else "fallback" if fallback_compute else None
+    )
     try:
         cloud_session.save_bootstrap(
-            response, control_url=resolved_control, compute_url=resolved_compute or None
+            response,
+            control_url=resolved_control,
+            compute_url=resolved_compute or None,
+            compute_url_source=compute_source,
         )
     except cloud_session.CloudSessionError as exc:
         raise DeviceConnectError(str(exc), status=getattr(exc, "status", 503)) from exc

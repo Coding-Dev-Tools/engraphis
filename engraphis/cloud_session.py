@@ -75,6 +75,21 @@ def _reachable_cloud_base_url(value: str) -> str:
         raise CloudSessionError("Engraphis Cloud is temporarily unreachable.") from exc
 
 
+def _server_compute_url(response: dict) -> str:
+    """Return the refresh response's compute endpoint only when it is safe to persist."""
+
+    value = response.get("compute_url")
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    try:
+        return validate_cloud_base_url(value)
+    except (CloudUrlUnresolved, ValueError):
+        # This optional field cannot be allowed to clear or poison a known-good endpoint.
+        # The rotated credential is still persisted below, so a later valid response can
+        # repair a session whose compute endpoint was not supplied yet.
+        return ""
+
+
 def _session_path() -> Path:
     root = os.environ.get("ENGRAPHIS_STATE_DIR", "").strip()
     base = Path(root).expanduser() if root else Path.home() / ".engraphis"
@@ -455,7 +470,8 @@ def record_billing_denial() -> bool:
 
 
 def save_bootstrap(response: dict, *, control_url: str,
-                   compute_url: Optional[str] = None) -> None:
+                   compute_url: Optional[str] = None,
+                   compute_url_source: Optional[str] = None) -> None:
     """Persist the one-time bootstrap/refresh material returned by the control plane."""
 
     refresh = str(response.get("refresh_credential") or "").strip()
@@ -476,6 +492,11 @@ def save_bootstrap(response: dict, *, control_url: str,
             response.get("token_subject") or "member"
         ),
     }
+    if compute_url_source in {"explicit", "server", "fallback"}:
+        # Keep an explicit CLI choice distinct from a server/distribution default.  A
+        # refresh may move cloud-assigned endpoints, but must never silently replace an
+        # endpoint the operator deliberately selected.
+        value["compute_url_source"] = compute_url_source
     # Whatever entitlement the control plane volunteered, so the dashboard knows the plan
     # from the first boot instead of inferring it. Absent on an older cloud; harmless.
     value.update(_declared_entitlement(response))
@@ -611,7 +632,9 @@ def access_for_workspace(
     # response; a stale home-directory mount yields a structured, retryable error from
     # ``_load`` rather than an unhandled filesystem exception.  The authoritative session
     # record is still loaded again under the lock below before any credential is used.
-    if not configured(require_compute=require_compute):
+    # A refresh can now supply a missing compute endpoint, so do not reject a valid saved
+    # control/refresh session before it has a chance to receive that authoritative value.
+    if not configured(require_compute=False):
         raise CloudSessionError(
             "Connect this installation to Engraphis Cloud first.", status=401
         )
@@ -627,8 +650,18 @@ def access_for_workspace(
         ).strip()
         control = os.environ.get("ENGRAPHIS_CLOUD_CONTROL_URL", "").strip()
         control = control or str(saved.get("control_url") or "").strip()
-        compute = direct_compute or str(saved.get("compute_url") or "").strip()
-        if not refresh or not control or (require_compute and not compute):
+        saved_compute = str(saved.get("compute_url") or "").strip()
+        compute = direct_compute or saved_compute
+        compute_source = "explicit" if direct_compute else str(
+            saved.get("compute_url_source") or ""
+        )
+        if saved_compute and compute_source not in {"explicit", "server", "fallback"}:
+            # Pre-source sessions cannot tell a cloud-assigned endpoint from a CLI/env
+            # override. Preserve the nonempty value rather than silently moving a
+            # potentially operator-selected endpoint; compute-less legacy sessions still
+            # accept a vetted response below.
+            compute_source = "explicit"
+        if not refresh or not control:
             raise CloudSessionError(
                 "Connect this installation to Engraphis Cloud first.", status=401
             )
@@ -646,6 +679,10 @@ def access_for_workspace(
         response_subject = _validated_token_subject(
             body.get("token_subject") or token_subject
         )
+        server_compute = _server_compute_url(body)
+        if server_compute and compute_source != "explicit":
+            compute = server_compute
+            compute_source = "server"
         updated = dict(saved)
         updated.update({
             "schema": "engraphis-cloud-session/v1",
@@ -656,6 +693,8 @@ def access_for_workspace(
             "refresh_expires_at": str(body.get("refresh_expires_at") or ""),
             "token_subject": response_subject,
         })
+        if compute_source in {"explicit", "server", "fallback"}:
+            updated["compute_url_source"] = compute_source
         # The refresh response carries the same entitlement fields as registration, so the
         # plan re-confirms itself on every token rotation. An older cloud omits them and
         # the previously persisted answer (if any) is left untouched.
@@ -677,4 +716,9 @@ def access_for_workspace(
                         updated.pop(key, None)
         updated.update(declared)
         _save(updated)
+        if require_compute and not compute:
+            raise CloudSessionError(
+                "Engraphis Cloud did not provide a compute endpoint for this installation.",
+                status=503,
+            )
         return access, organization_id, compute

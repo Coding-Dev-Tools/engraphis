@@ -61,6 +61,202 @@ def test_refresh_rotates_saved_credential_and_binds_client_workspace(monkeypatch
     assert writes[0]["refresh_credential"] == "rotated-refresh"
 
 
+def test_refresh_updates_the_saved_compute_endpoint_from_a_valid_response(monkeypatch) -> None:
+    """The cloud can move a connected installation to a new compute endpoint."""
+
+    previous = "https://compute-old.example.test"
+    assigned = "https://compute-new.example.test"
+    state = {
+        "control_url": "https://control.example.test",
+        "compute_url": previous,
+        "compute_url_source": "server",
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+    }
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(cloud_session, "_save", lambda value: state.update(value))
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", lambda value: value.rstrip("/"))
+    monkeypatch.setattr(cloud_session, "_post_refresh", lambda *_args: {
+        "access_token": "short-lived-access",
+        "organization_id": "org_1",
+        "refresh_credential": "rotated-refresh",
+        "token_subject": "member",
+        "compute_url": assigned,
+    })
+
+    assert cloud_session.access_for_workspace("ws_client_1") == (
+        "short-lived-access", "org_1", assigned,
+    )
+    assert state["compute_url"] == assigned
+
+
+def test_refresh_can_supply_a_missing_compute_endpoint_before_require_compute(monkeypatch) -> None:
+    """A compute-less saved session must reach the refresh that repairs it."""
+
+    assigned = "https://compute-new.example.test"
+    state = {
+        "control_url": "https://control.example.test",
+        "compute_url": "",
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+    }
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(cloud_session, "_save", lambda value: state.update(value))
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", lambda value: value.rstrip("/"))
+    monkeypatch.setattr(cloud_session, "_post_refresh", lambda *_args: {
+        "access_token": "short-lived-access",
+        "organization_id": "org_1",
+        "refresh_credential": "rotated-refresh",
+        "token_subject": "member",
+        "compute_url": assigned,
+    })
+
+    assert cloud_session.access_for_workspace("ws_client_1") == (
+        "short-lived-access", "org_1", assigned,
+    )
+    assert state["compute_url"] == assigned
+    assert state["compute_url_source"] == "server"
+    assert state["refresh_credential"] == "rotated-refresh"
+
+
+@pytest.mark.parametrize("server_compute", [None, "http://private.example.test"])
+def test_compute_less_refresh_persists_rotation_before_a_structured_compute_error(
+    monkeypatch, server_compute
+) -> None:
+    """Missing or unsafe endpoint metadata must not roll back the one-time rotation."""
+
+    state = {
+        "control_url": "https://control.example.test",
+        "compute_url": "",
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+    }
+
+    def validate(value):
+        if value == server_compute:
+            raise ValueError("not an allowed endpoint")
+        return value.rstrip("/")
+
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(cloud_session, "_save", lambda value: state.update(value))
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", validate)
+    body = {
+        "access_token": "short-lived-access",
+        "organization_id": "org_1",
+        "refresh_credential": "rotated-refresh",
+        "token_subject": "member",
+    }
+    if server_compute is not None:
+        body["compute_url"] = server_compute
+    monkeypatch.setattr(cloud_session, "_post_refresh", lambda *_args: body)
+
+    with pytest.raises(cloud_session.CloudSessionError) as caught:
+        cloud_session.access_for_workspace("ws_client_1")
+
+    assert caught.value.status == 503
+    assert state["refresh_credential"] == "rotated-refresh"
+    assert state["compute_url"] == ""
+
+
+def test_refresh_ignores_an_invalid_compute_endpoint_without_clearing_the_saved_one(
+    monkeypatch,
+) -> None:
+    """An untrusted response value cannot poison or erase a usable compute endpoint."""
+
+    previous = "https://compute-old.example.test"
+    invalid = "http://private.example.test"
+    state = {
+        "control_url": "https://control.example.test",
+        "compute_url": previous,
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+    }
+
+    def validate(value):
+        if value == invalid:
+            raise ValueError("not an allowed endpoint")
+        return value.rstrip("/")
+
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(cloud_session, "_save", lambda value: state.update(value))
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", validate)
+    monkeypatch.setattr(cloud_session, "_post_refresh", lambda *_args: {
+        "access_token": "short-lived-access",
+        "organization_id": "org_1",
+        "refresh_credential": "rotated-refresh",
+        "token_subject": "member",
+        "compute_url": invalid,
+    })
+
+    assert cloud_session.access_for_workspace("ws_client_1") == (
+        "short-lived-access", "org_1", previous,
+    )
+    assert state["compute_url"] == previous
+
+
+def test_legacy_nonempty_compute_endpoint_is_preserved_against_a_server_update(monkeypatch) -> None:
+    """Pre-source sessions may hold an operator override, so keep it conservatively."""
+
+    previous = "https://legacy-operator-compute.example.test"
+    assigned = "https://assigned-compute.example.test"
+    state = {
+        "control_url": "https://control.example.test",
+        "compute_url": previous,
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+    }
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(cloud_session, "_save", lambda value: state.update(value))
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", lambda value: value.rstrip("/"))
+    monkeypatch.setattr(cloud_session, "_post_refresh", lambda *_args: {
+        "access_token": "short-lived-access",
+        "organization_id": "org_1",
+        "refresh_credential": "rotated-refresh",
+        "token_subject": "member",
+        "compute_url": assigned,
+    })
+
+    assert cloud_session.access_for_workspace("ws_client_1") == (
+        "short-lived-access", "org_1", previous,
+    )
+    assert state["compute_url"] == previous
+    assert state["compute_url_source"] == "explicit"
+
+
+def test_refresh_does_not_replace_a_persisted_explicit_compute_override(monkeypatch) -> None:
+    previous = "https://operator-compute.example.test"
+    assigned = "https://assigned-compute.example.test"
+    state = {
+        "control_url": "https://control.example.test",
+        "compute_url": previous,
+        "compute_url_source": "explicit",
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+    }
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(cloud_session, "_save", lambda value: state.update(value))
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", lambda value: value.rstrip("/"))
+    monkeypatch.setattr(cloud_session, "_post_refresh", lambda *_args: {
+        "access_token": "short-lived-access",
+        "organization_id": "org_1",
+        "refresh_credential": "rotated-refresh",
+        "token_subject": "member",
+        "compute_url": assigned,
+    })
+
+    assert cloud_session.access_for_workspace("ws_client_1") == (
+        "short-lived-access", "org_1", previous,
+    )
+    assert state["compute_url"] == previous
+    assert state["compute_url_source"] == "explicit"
+
+
 def test_direct_access_token_path_never_reads_refresh_state(monkeypatch) -> None:
     monkeypatch.setenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", "direct-token")
     monkeypatch.setenv("ENGRAPHIS_CLOUD_ORGANIZATION_ID", "org_direct")
