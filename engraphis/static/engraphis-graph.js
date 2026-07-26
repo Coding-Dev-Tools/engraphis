@@ -349,8 +349,9 @@
     /* Apply a batch of setters with exactly one render at the end. Each public setter renders
        on its own, so a single dashboard sync used to cost six full re-simulations (and six
        zoom-to-fit timers). The caller also states the intent explicitly, because the merged
-       intent of the individual setters is not the caller's: `setSettings` always asks for a
-       reheat, which would reheat even on a `render(false, false)` refresh. */
+       intent of the individual setters is not the caller's: `setSettings` asks for a reheat
+       whenever the patch carries a physics key, and the dashboard's sync hands it the whole
+       GSET — so it would reheat even on a `render(false, false)` refresh. */
     function batch(fn, fit, reheat) {
       suspended++;
       try { fn(api); } finally {
@@ -855,7 +856,19 @@
       if (state.bridges || state.sizeBy === 'betweenness') ensureBetweenness();
       render(true, true);
     };
-    api.setSettings = patch => { Object.assign(state.settings, patch); render(false, patch.mode !== undefined); };
+    /* Which of these settings changes the *layout* rather than just the paint, matching the
+       classic path's `key==='repel'||key==='link'||key==='gravity'||key==='size'` in
+       dashboard.js::graphSet — `size` counts because it feeds d3.forceCollide, and `mode`
+       swaps the whole force arrangement. applyForces() only writes the new charge / link /
+       forceX-forceY / collide values into the simulation force-graph is already running, and a
+       settled graph sits at alpha~0, so without the reheat those sliders install a force that
+       moves nothing. The paint-only settings must keep the arrangement the user is reading.
+       render() applies the reduced-motion exemption (`if(layout&&!prefersReducedMotion())`). */
+    const LAYOUT_KEYS = ['mode', 'repel', 'link', 'gravity', 'size'];
+    api.setSettings = patch => {
+      Object.assign(state.settings, patch);
+      render(false, LAYOUT_KEYS.some(k => patch && patch[k] !== undefined));
+    };
     api.setPreset = name => {
       const p = PRESETS[name] || PRESETS.compact;
       state.settings.mode = PRESETS[name] ? name : 'compact';

@@ -55,16 +55,18 @@ const emit = value => console.log(JSON.stringify(value));
 #: accessor is a chainable setter that returns the stored value when called with no arguments —
 #: force-graph's own kapsule semantics — so the paint configuration the engine installs can be
 #: read back and invoked instead of pattern-matched.  ``calls`` counts the invalidations the
-#: engine requests, which is the only observable form a "redraw now" takes.
+#: engine requests, which is the only observable form a "redraw now" takes.  ``invocations``
+#: counts the *argument-less* calls, which under kapsule semantics are the commands rather than
+#: the setters — ``d3ReheatSimulation()`` is one, and it has no other observable effect here.
 ENGINE_PRELUDE = """
 const fs = require('fs');
 const source = fs.readFileSync(process.argv[1], 'utf8');
 const window = {};
 globalThis.requestAnimationFrame = () => {};
-const store = {}, calls = {};
+const store = {}, calls = {}, invocations = {};
 const fg = new Proxy({}, {
   get: (_target, prop) => (...args) => {
-    if (!args.length) return store[prop];
+    if (!args.length) { invocations[prop] = (invocations[prop] || 0) + 1; return store[prop]; }
     calls[prop] = (calls[prop] || 0) + 1;
     store[prop] = args.length === 1 ? args[0] : args;
     return fg;
@@ -1152,6 +1154,59 @@ def test_simulation_time_is_bounded_on_a_large_graph() -> None:
     # Reduced motion asks for a static layout, not a shorter animation.
     assert report["reduced"]["time"] == 0
     assert report["reduced"]["ticks"] == 1
+
+
+@requires_node
+def test_physics_sliders_reheat_the_simulation_the_way_the_classic_renderer_does() -> None:
+    """Installing a new force on a settled graph moves nothing without a reheat.
+
+    ``graphSet`` (dashboard.js) routes Repel/Link/Gravity/Size/Font/Link-width/Label-density
+    through ``setSettings`` under ``?graph-engine=next``.  The classic branch of that same
+    function treats ``repel|link|gravity|size`` as *layout* changes: it re-applies the forces
+    and then reheats unless the user asked for reduced motion.  The engine's ``applyForces()``
+    only swaps the charge/link/forceX-forceY/collide values into the running simulation — and a
+    settled graph sits at alpha~0 — so without the reheat those four sliders are inert until
+    the user finds the Reheat button.  The paint-only settings must *not* reheat: restarting
+    the layout because a label got bigger throws away the arrangement the user is reading.
+    """
+    report = _run_engine(
+        """
+        const reheats = () => invocations.d3ReheatSimulation || 0;
+        const bump = (api, patch) => { const before = reheats(); api.setSettings(patch); return reheats() - before; };
+
+        const api = G.create(el, {});
+        api.setData(chain(40));
+        const layout = {
+          repel: bump(api, { repel: 260 }),
+          link: bump(api, { link: 90 }),
+          gravity: bump(api, { gravity: 12 }),
+          size: bump(api, { size: 5 }),
+          mode: bump(api, { mode: 'radial' }),
+        };
+        const paint = {
+          font: bump(api, { font: 11 }),
+          linkw: bump(api, { linkw: 2.4 }),
+          labelDensity: bump(api, { labelDensity: 40 }),
+          labels: bump(api, { labels: true }),
+          flow: bump(api, { flow: false }),
+        };
+
+        // The classic path's `if(layout&&!prefersReducedMotion())` exemption.
+        const still = G.create(el, { reducedMotion: () => true });
+        still.setData(chain(40));
+        const reducedMotion = bump(still, { repel: 260 });
+        emit({ layout, paint, reducedMotion });
+        """
+    )
+    # The four sliders the classic renderer calls a layout change, plus the preset itself.
+    assert report["layout"] == {
+        "repel": 1, "link": 1, "gravity": 1, "size": 1, "mode": 1
+    }, "a physics slider installed new forces on a settled graph and nothing moved"
+    # Appearance-only settings keep the arrangement the user is looking at.
+    assert report["paint"] == {
+        "font": 0, "linkw": 0, "labelDensity": 0, "labels": 0, "flow": 0
+    }, "an appearance change restarted the layout"
+    assert report["reducedMotion"] == 0, "reduced motion still got an animated relayout"
 
 
 @requires_node
