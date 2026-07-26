@@ -5,7 +5,15 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
-No unreleased changes.
+### Changed
+
+- Managed compute consent now travels with the cloud account: an installation connected to
+  Engraphis Cloud is enabled for managed analytics, dreaming, and consolidation **by
+  default**, because connecting already accepts the terms that cover it. A local-only
+  installation with no cloud session is still never allowed.
+  `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` remains as an explicit operator override (`=0` opts a
+  connected installation back out, `=1` forces it on regardless of session state) and is no
+  longer surfaced anywhere in the UI.
 
 ## [1.0.1] - 2026-07-24
 

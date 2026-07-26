@@ -11,6 +11,7 @@ import ipaddress
 import os
 import socket
 import sys
+import time
 import urllib.request
 from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -19,6 +20,14 @@ from urllib.parse import urlsplit, urlunsplit
 TRIAL_DAYS = 3
 TRIAL_SECONDS = 3 * 24 * 60 * 60
 MAX_LOCAL_WRITE_GRACE_SECONDS = 24 * 60 * 60
+
+# A credential-bearing cloud connection must never inherit "block forever".  urllib hands
+# ``socket._GLOBAL_DEFAULT_TIMEOUT`` to the connection whenever a caller omits ``timeout=``,
+# so substitute a bounded default rather than letting a customer's agent hang on launch day.
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 15.0
+# One vetted address must not be able to spend the whole budget and leave nothing for the
+# rest, but every attempt still gets a usable floor so a slow first hop is not aborted.
+MIN_ATTEMPT_TIMEOUT_SECONDS = 0.5
 
 # The hosted dashboard and the commercial account portal are separate surfaces.
 # Upgrade/connect actions must land on the authenticated control-plane portal; the
@@ -34,6 +43,16 @@ _REQUIRED_PLAN = {
     "sync": "pro",
     "team": "team",
 }
+
+
+class CloudUrlUnresolved(ValueError):
+    """The cloud endpoint could not be resolved right now.
+
+    This is a *reachability* failure, not a misconfiguration: an offline laptop and a
+    broken resolver both land here.  It stays a ``ValueError`` so existing callers keep
+    working, but lets a caller degrade an offline paying customer to a retryable
+    "temporarily unreachable" instead of a permanent "your configuration is invalid".
+    """
 
 
 class HostedFeatureError(RuntimeError):
@@ -99,7 +118,7 @@ def _validated_addresses(host: str) -> list[str]:
             host, None, socket.AF_UNSPEC, socket.SOCK_STREAM
         )
     except (socket.gaierror, OSError):
-        raise ValueError("cloud service URL could not be resolved") from None
+        raise CloudUrlUnresolved("cloud service URL could not be resolved") from None
 
     addresses = []
     loopback_name = _is_loopback_host(host)
@@ -115,7 +134,7 @@ def _validated_addresses(host: str) -> list[str]:
             raise ValueError("cloud service URL must not target private/reserved IP ranges")
         addresses.append(str(address))
     if not addresses:
-        raise ValueError("cloud service URL could not be resolved")
+        raise CloudUrlUnresolved("cloud service URL could not be resolved")
     return list(dict.fromkeys(addresses))
 
 
@@ -124,8 +143,28 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
 
     def __init__(self, host, *args, **kwargs):
         super().__init__(host, *args, **kwargs)
+        # ``http.client`` stores ``socket._GLOBAL_DEFAULT_TIMEOUT`` (or ``None``) when no
+        # timeout was supplied, and both mean "block forever" at the socket layer.  Neither
+        # is acceptable for a credential-bearing hosted call, so pin a bounded default.
+        if not isinstance(self.timeout, (int, float)) or isinstance(self.timeout, bool):
+            self.timeout = DEFAULT_CONNECT_TIMEOUT_SECONDS
         self._tls_server_hostname = self.host
         self._tunnel_targets = []
+
+    def _connect_deadline(self):
+        """Return the monotonic instant by which every dial attempt must be finished."""
+
+        return time.monotonic() + max(float(self.timeout), 0.0)
+
+    def _attempt_timeout(self, deadline):
+        """Share one caller-supplied budget across every vetted address.
+
+        Handing each address the full timeout turns a 10s budget into N x 10s for a
+        multi-homed endpoint that blackholes traffic -- and ``cloud_session`` dials while
+        holding an exclusive cross-process refresh lock, so every other worker waits too.
+        """
+
+        return max(deadline - time.monotonic(), MIN_ATTEMPT_TIMEOUT_SECONDS)
 
     def set_tunnel(self, host, port=None, headers=None):
         # Make a configured proxy CONNECT to the vetted numeric target. TLS still
@@ -149,6 +188,7 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
 
     def _connect_directly(self):
         last_error = None
+        deadline = self._connect_deadline()
         for target in _validated_addresses(self.host):
             # Overriding connect() skips the sys.audit call in HTTPConnection.connect,
             # which would make every hosted request invisible to a host process auditing
@@ -157,10 +197,13 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
             sys.audit("http.client.connect", self, target, self.port)
             try:
                 return self._create_connection(
-                    (target, self.port), self.timeout, self.source_address
+                    (target, self.port), self._attempt_timeout(deadline),
+                    self.source_address,
                 )
             except OSError as exc:
                 last_error = exc
+                if time.monotonic() >= deadline:
+                    break
         if last_error is None:
             raise OSError("cloud service URL has no connectable address")
         raise last_error
@@ -182,6 +225,7 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
         # to the rest exactly like the direct path does. A failed CONNECT leaves the
         # proxy socket unusable, so each attempt redials the proxy.
         last_error = None
+        deadline = self._connect_deadline()
         base_headers = dict(self._tunnel_headers)
         for target in self._tunnel_targets or [self._tunnel_host]:
             # Python 3.9 and 3.10 serialize the CONNECT request target verbatim, so a
@@ -202,7 +246,8 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
             sys.audit("http.client.connect", self, self.host, self.port)
             try:
                 self.sock = self._create_connection(
-                    (self.host, self.port), self.timeout, self.source_address
+                    (self.host, self.port), self._attempt_timeout(deadline),
+                    self.source_address,
                 )
                 self._tunnel()
                 return
@@ -213,6 +258,8 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
                 if self.sock is not None:
                     self.sock.close()
                     self.sock = None
+                if time.monotonic() >= deadline:
+                    break
         if last_error is None:
             raise OSError("cloud service URL has no connectable address")
         raise last_error

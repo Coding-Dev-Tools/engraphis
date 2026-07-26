@@ -707,10 +707,26 @@ async def memory_analytics():
 
 @router.get("/license")
 async def get_license():
-    """GET /memory/license — local core metadata; hosted plans live in Cloud."""
+    """GET /memory/license — the same hosted-plan answer ``/api/license`` reports.
+
+    This surface used to hardcode ``plan: "local", features: []``. That describes the
+    *local core*, not the customer: a paying Team installation was told it was on the free
+    plan here while ``/api/license`` reported Team, so two endpoints of one product
+    disagreed about what had been bought. The response keys are unchanged — this stays the
+    legacy ``{"data": ...}`` SDK shape with the same trial and grace disclosure — and only
+    the two fields that were lying now tell the truth.
+
+    Resolution is local and non-blocking (see ``v2_api._plan_entitlement``): no network
+    call happens on this path, and an unconnected installation still reports ``local``
+    with no features, exactly as before. The plan stays presentation only; Engraphis Cloud
+    remains the sole authority for every paid operation.
+    """
+    from engraphis.routes.v2_api import hosted_plan_summary
+
+    summary = hosted_plan_summary()
     return _ok({
-        "plan": "local",
-        "features": [],
+        "plan": summary["plan"],
+        "features": summary["features"],
         "cloud_managed": True,
         "trial_seconds": 259_200,
         "grace_seconds": 86_400,
