@@ -7,6 +7,7 @@ token -- a bearer credential -- never escapes the request body.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import urllib.error
@@ -17,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from engraphis import cloud_session, device_connect
+from engraphis.hosted_client import CloudUrlUnresolved
 from engraphis.private_state import UnsafeStateFile
 from scripts import connect as connect_cli
 
@@ -348,6 +350,132 @@ def test_a_non_object_response_is_rejected(monkeypatch, payload):
 
     with pytest.raises(device_connect.DeviceConnectError, match="invalid connect"):
         device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+
+# ------------------------------------------- failures *after* the token has been spent
+#
+# Once ``opener.open`` has returned, the control plane has answered and the single-use
+# connect token is gone.  Every fault from that point on has to arrive as a
+# ``DeviceConnectError`` that says so -- a traceback here is the worst possible outcome,
+# because the customer cannot tell whether to retry or fetch a new token.
+
+
+class _TruncatedBody:
+    """A 200 whose body stops mid-stream, the way a dropped chunked reply does."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+    def read(self, size: int = -1) -> bytes:
+        # What ``HTTPResponse._read_chunked`` raises for a truncated body.  It subclasses
+        # ``HTTPException``/``ValueError`` -- neither ``OSError`` nor ``URLError``.
+        raise http.client.IncompleteRead(b'{"organization_id":"org_al')
+
+
+@pytest.mark.parametrize("failure", [
+    http.client.IncompleteRead(b'{"organization_id":"org_al'),
+    http.client.LineTooLong("header line"),
+    http.client.BadStatusLine("garbage"),
+])
+def test_a_truncated_reply_reports_the_token_state_not_a_traceback(
+    monkeypatch, tmp_path, failure
+):
+    """``IncompleteRead`` is an ``HTTPException``, so the transport clause never saw it."""
+
+    class _Broken(_Opener):
+        def open(self, request, timeout):
+            self.calls.append({"body": request.data})
+            if isinstance(failure, http.client.IncompleteRead):
+                return _TruncatedBody()
+            raise failure
+
+    opener = _Broken()
+    _install_opener(monkeypatch, opener)
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    message = str(caught.value)
+    assert caught.value.status == 502
+    # The customer must be told the token may be gone rather than told to just retry.
+    assert "may already have been used" in message
+    assert TOKEN not in message
+    assert not (tmp_path / "cloud_session.json").exists()
+
+
+def test_a_connection_reset_before_any_reply_still_says_retry(monkeypatch):
+    """``RemoteDisconnected`` is *both* an ``OSError`` and an ``HTTPException``.
+
+    Nothing was read, so the token is untouched and "try again" remains the right copy;
+    it must not be swept into the token-may-be-spent message by the new clause.
+    """
+
+    _install_opener(
+        monkeypatch, _Opener(error=http.client.RemoteDisconnected("closed early"))
+    )
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    assert caught.value.status == 503
+    assert "temporarily unreachable" in str(caught.value)
+
+
+@pytest.mark.parametrize("failure", [
+    CloudUrlUnresolved("cloud service URL could not be resolved"),
+    ValueError("cloud service URL must not target private/reserved IP ranges"),
+])
+def test_endpoint_validation_failing_after_redemption_is_not_a_traceback(
+    monkeypatch, tmp_path, failure
+):
+    """``save_bootstrap`` re-resolves both endpoints *after* the POST spent the token.
+
+    ``CloudUrlUnresolved`` is a ``ValueError``, so neither the ``CloudSessionError`` nor
+    the ``OSError`` handler in ``connect()`` covers it: a resolver that dies mid-connect,
+    or a host that starts resolving to a rejected address, escaped as a raw traceback.
+    """
+
+    opener = _Opener(body=REGISTRATION)
+    _install_opener(monkeypatch, opener)
+
+    def _rejects(value):
+        raise failure
+
+    # Only the save path: the pre-POST checks in ``connect()`` already passed.
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", _rejects)
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    message = str(caught.value)
+    assert caught.value.status == 409
+    assert opener.calls, "the token was spent; the copy has to admit it"
+    assert "has been used" in message
+    assert TOKEN not in message
+    assert not (tmp_path / "cloud_session.json").exists()
+
+
+def test_the_cli_reports_a_post_redemption_fault_instead_of_a_traceback(
+    monkeypatch, capsys
+):
+    _install_opener(monkeypatch, _Opener(body=REGISTRATION))
+
+    def _rejects(value):
+        raise CloudUrlUnresolved("cloud service URL could not be resolved")
+
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", _rejects)
+
+    code = connect_cli.main([
+        "--token", TOKEN, "--control-url", CONTROL_URL, "--compute-url", COMPUTE_URL,
+    ])
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "Traceback" not in err
+    assert "has been used" in err
 
 
 # ------------------------------------------------------ pre-flight on session storage
