@@ -66,13 +66,159 @@ def _run_node(script: str) -> object:
 # ── load order and failure isolation ────────────────────────────────────────────────
 
 
-def test_opt_in_graph_asset_is_loaded_after_its_dependencies() -> None:
+def test_graph_assets_are_never_loaded_on_a_plain_page_view() -> None:
+    """Neither graph script may sit in index.html.
+
+    force-graph applies inline styles at runtime, so under the production CSP
+    (``style-src 'self'``) every page load that fetched it reported a violation per attempt —
+    including the pages that never open the graph.
+    """
     html = INDEX.read_text(encoding="utf-8")
-    d3 = html.index("/static/vendor/d3.min.js")
-    force_graph = html.index("/static/vendor/force-graph.min.js")
-    engine = html.index("/static/engraphis-graph.js")
-    dashboard = html.index("/static/dashboard.js")
-    assert d3 < force_graph < engine < dashboard
+    eager = re.findall(r'<script[^>]+src=["\'](/static/[^"\']+)["\']', html)
+    assert "/static/vendor/d3.min.js" in eager
+    assert "/static/dashboard.js" in eager
+    assert "/static/vendor/force-graph.min.js" not in eager
+    assert "/static/engraphis-graph.js" not in eager
+
+
+def test_opt_in_graph_asset_is_lazily_loaded_after_its_dependencies() -> None:
+    """The load order the removed script tags used to guarantee now lives in graphRender().
+
+    ``graphRender`` returns early until ForceGraph is defined, so by the time the engine
+    branch runs its dependency is already in scope.
+    """
+    source = DASHBOARD.read_text(encoding="utf-8")
+    assert "script.src='/static/vendor/force-graph.min.js'" in source
+    assert "script.src='/static/engraphis-graph.js'" in source
+    render = source[source.index("function graphRender("):]
+    render = render[: render.index("\nfunction ")]
+    force_graph_gate = render.index("typeof ForceGraph==='undefined'")
+    engine_gate = render.index("if(enginePending)")
+    classic = render.index("graphRenderEngine(data,fit,reheat)")
+    assert force_graph_gate < engine_gate < classic
+
+
+#: Executes dashboard.js's real graph-render *routing* decision against a stub DOM.
+#: ``graphEngineEnabled``, ``graphEngineFallback``, ``loadForceGraph``, ``loadGraphEngine`` and
+#: the routing half of ``graphRender`` are verbatim source slices — nothing is re-implemented.
+#: Only the classic renderer body below the routing decision is swapped for a ``CLASSIC()``
+#: marker, so the test can see which renderer a deep link actually reaches.
+ROUTING_HARNESS = """
+const fs = require('fs');
+const src = fs.readFileSync(process.argv.slice(1).find(a => a.endsWith('dashboard.js')), 'utf8');
+const scenario = process.argv[process.argv.length - 1];
+const between = (from, to) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)));
+const flags = between('let GRAPH_ENGINE_FAILED=false;', 'function graphEngineEmptyMessage');
+const loaders = between('let FORCE_GRAPH_LOADING=null;', 'function graphRender(');
+const DECISION = 'if(graphEngineEnabled()&&graphRenderEngine(data,fit,reheat))return;';
+const start = src.indexOf('function graphRender(');
+const routing = src.slice(start, src.indexOf(DECISION, start) + DECISION.length) +
+  '\\n CLASSIC();\\n}';
+
+const log = { appended: [], warned: [], engine: 0, classic: 0 };
+let pending = null;
+const element = { clientWidth: 800, clientHeight: 600, classList: { toggle() {} },
+                  setAttribute() {}, set textContent(v) {} };
+globalThis.document = {
+  getElementById: () => element,
+  querySelectorAll: () => [],
+  createElement: () => (pending = {}),
+  head: { appendChild: s => log.appended.push(s.src) },
+};
+globalThis.window = { location: { search: '?graph-engine=next' }, GSET: { mode: 'compact' },
+                      console: globalThis.console };
+globalThis.console = { warn: (...a) => log.warned.push(String(a[0])) };
+globalThis.showAs = () => {};
+globalThis.graphSetLayoutStatus = () => {};
+globalThis.graphData = () => ({ nodes: [], links: [] });
+/* Mirrors graphRenderEngine's real first line — `if(!element||typeof EngraphisGraph===
+   'undefined')return false` — because that bail is exactly what a naive lazy-load would turn
+   into a silent Classic fallback. Asserted against the real source below. */
+globalThis.graphRenderEngine = () => {
+  if (typeof EngraphisGraph === 'undefined') return false;
+  log.engine += 1;
+  return true;
+};
+globalThis.CLASSIC = () => { log.classic += 1; };
+globalThis.GRAPH_PRESETS = { compact: {} };
+globalThis.GRAPH_ENGINE = globalThis.GACTIVE_DATA = globalThis.GCOMPONENT_LAYOUT = null;
+globalThis.GHILITE = globalThis.GHOVERSET = null;
+/* The vendor bundle is already in scope: this exercises the engine gate, not the vendor gate. */
+globalThis.ForceGraph = function () {};
+
+new Function(flags + loaders + routing + '\\nreturn {graphRender};')().graphRender();
+const settled = { engine: log.engine, classic: log.classic };
+if (scenario === 'loads') { globalThis.EngraphisGraph = { create() {} }; pending.onload(); }
+else { pending.onerror(); }
+setTimeout(() => process.stdout.write(JSON.stringify({
+  beforeSettle: settled, engine: log.engine, classic: log.classic,
+  appended: log.appended, warned: log.warned,
+})), 0);
+"""
+
+
+def _run_routing(scenario: str) -> dict:
+    result = subprocess.run(
+        [NODE, "-e", ROUTING_HARNESS, str(DASHBOARD), scenario],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+@requires_node
+def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> None:
+    """``?graph-engine=next`` must not degrade just because its asset is not loaded yet.
+
+    ``graphRenderEngine`` bails when ``EngraphisGraph`` is undefined, and that bail cannot tell
+    "not fetched yet" from "unavailable".  Deferring the script would turn every deep link into
+    that bail — the user asks for the new engine and silently gets Classic.  So graphRender
+    fetches the asset and waits, then renders.
+    """
+    # Keep the harness's stub honest: it only proves anything while the real function really
+    # does bail on an undefined global.
+    source = DASHBOARD.read_text(encoding="utf-8")
+    engine_path = source[source.index("function graphRenderEngine"):]
+    assert "typeof EngraphisGraph==='undefined')return false" in engine_path[:400]
+
+    report = _run_routing("loads")
+
+    assert report["appended"] == ["/static/engraphis-graph.js"]
+    # It waits rather than rendering something wrong in the meantime.
+    assert report["beforeSettle"] == {"engine": 0, "classic": 0}
+    # And it lands on the next engine, never touching the classic renderer.
+    assert report["engine"] == 1
+    assert report["classic"] == 0
+    assert report["warned"] == []
+
+
+@requires_node
+def test_graph_engine_deep_link_degrades_loudly_when_the_asset_cannot_load() -> None:
+    """A genuine load failure is the only thing that reaches Classic, and it says so."""
+    report = _run_routing("fails")
+
+    assert report["engine"] == 0
+    assert report["classic"] == 1
+    assert report["warned"] == [
+        "graph-engine=next failed; falling back to the classic renderer"
+    ]
+
+
+def test_lazy_graph_engine_load_cannot_raise_an_unhandled_rejection() -> None:
+    """An unhandled rejection prints a console error — the exact thing this fix removes.
+
+    ``graphRender`` can start the engine fetch on a pass that returns at the ForceGraph gate,
+    before it attaches its own handler, so the memoized promise carries its own.
+    """
+    source = DASHBOARD.read_text(encoding="utf-8")
+    loader = source[source.index("function loadGraphEngine()"):]
+    loader = loader[: loader.index("\nfunction ")]
+    assert "GRAPH_ENGINE_LOADING.catch(()=>{})" in loader
+    # A 200 that never registers the global is a corrupt asset, not a success.
+    assert "reject(new Error('Graph engine asset loaded without registering EngraphisGraph'))" in loader
 
 
 @requires_node

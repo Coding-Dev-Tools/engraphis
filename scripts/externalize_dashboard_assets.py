@@ -25,7 +25,19 @@ JS = STATIC / "dashboard.js"
 #: do not rewrite, and pinning them is the job of the commercial-manifest check.
 EXTRA_SCRIPTS = (STATIC / "engraphis-graph.js",)
 
+#: Scripts that must never be referenced from a ``<script src>`` in ``index.html``.
+#: ``force-graph.min.js`` applies inline styles at runtime; under the production CSP
+#: (``style-src 'self'``) the browser blocks and reports every one of them.  Loading it on
+#: *every* dashboard page rather than only when the graph is opened floods the console and
+#: fails unrelated e2e assertions on a clean console.  ``dashboard.js`` fetches both on demand
+#: instead (``loadForceGraph`` / ``loadGraphEngine``).
+DEFERRED_SCRIPTS = ("/static/vendor/force-graph.min.js", "/static/engraphis-graph.js")
+
 SCRIPT_SRC = re.compile(r'<script[^>]+src=["\'](/static/[^"\']+)["\']')
+#: ``script.src = "/static/…"`` inside a first-party script — the lazy loaders.  Deferring a
+#: script moves it out of ``SCRIPT_SRC``'s reach, so without this the "referenced scripts
+#: exist" rule would quietly stop covering the assets whose breakage is hardest to notice.
+LAZY_SCRIPT_SRC = re.compile(r'\.src\s*=\s*["\'](/static/[^"\']+)["\']')
 
 STYLE_ATTR = re.compile(r"\sstyle=(?:\"([^\"]*)\"|'([^']*)')")
 EVENT_ATTR = re.compile(r"\s(on[a-z]+)=(?:\"([^\"]*)\"|'([^']*)')")
@@ -221,17 +233,38 @@ def check() -> None:
     if missing_scripts:
         failures.append("missing first-party script: " + ", ".join(missing_scripts))
 
-    # Every /static asset the page asks for must exist, or the dashboard 404s at load time
-    # and the strict CSP turns a typo into a silently broken view.
+    eager_scripts = SCRIPT_SRC.findall(html)
+    lazy_scripts = [
+        reference
+        for source in [js, *extra.values()]
+        for reference in LAZY_SCRIPT_SRC.findall(source)
+    ]
+
+    # Every /static asset the page can ask for must exist, or the dashboard 404s at load time
+    # and the strict CSP turns a typo into a silently broken view.  Lazily loaded scripts count:
+    # their only reference is a JavaScript string literal, so nothing else catches a rename.
     absent = sorted(
         {
             reference
-            for reference in SCRIPT_SRC.findall(html)
+            for reference in [*eager_scripts, *lazy_scripts]
             if not (ROOT / "engraphis" / reference.lstrip("/")).is_file()
         }
     )
     if absent:
-        failures.append("index.html loads missing script: " + ", ".join(absent))
+        failures.append("referenced script is missing: " + ", ".join(absent))
+
+    # Matched against parsed ``<script src>`` values, not raw text, so index.html may still
+    # explain in a comment *why* these are absent.
+    eager = sorted(set(eager_scripts) & set(DEFERRED_SCRIPTS))
+    if eager:
+        failures.append("index.html must not eagerly load: " + ", ".join(eager))
+
+    # The other half of the contract: deferring a script must not orphan it.  Without a loader
+    # the graph view has no way to reach force-graph, and ``?graph-engine=next`` degrades to
+    # the classic renderer with nothing on the page saying so.
+    orphaned = sorted(set(DEFERRED_SCRIPTS) - set(lazy_scripts))
+    if orphaned:
+        failures.append("deferred script has no lazy loader: " + ", ".join(orphaned))
 
     for name, source in [("dashboard.js", js), *extra.items()]:
         if STYLE_ATTR.search(source):
