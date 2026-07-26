@@ -282,16 +282,28 @@ def test_portfolio_and_report_analytics_are_hosted_only(monkeypatch, tmp_path):
         assert client.get("/api/analytics/export?workspace=demo").status_code == 501
 
 
-def test_raw_owner_export_is_free_but_signed_report_is_cloud_only(
+def test_raw_owner_export_is_free_and_signed_export_is_honestly_unimplemented(
     monkeypatch, tmp_path
 ):
+    """The signed variant must not claim to exist somewhere else.
+
+    It previously answered ``cloud_only: True`` — but Engraphis Cloud has no export route,
+    no ``export:*`` token scope, and no export job kind, so that pointed a customer at a
+    product that does not exist. The 501 now says the capability is unimplemented and names
+    the working unsigned export instead.
+    """
+
     with _client(monkeypatch, tmp_path) as client:
         raw = client.get("/api/export?workspace=demo")
         assert raw.status_code == 200
         assert raw.json()["counts"]["memories"] >= 1
         signed = client.get("/api/export?workspace=demo&signed=true")
         assert signed.status_code == 501
-        assert signed.json()["detail"]["cloud_only"] is True
+        detail = signed.json()["detail"]
+        assert detail["implemented"] is False
+        assert detail["alternative"] == "/export"
+        assert "cloud_only" not in detail
+        assert "Engraphis Cloud" not in detail["error"]
 
 
 def test_health_and_readiness_remain_public(monkeypatch, tmp_path):

@@ -53,8 +53,8 @@ CONTROL_URL = "https://control.example.test"
 # engraphis-cloud/engraphis_cloud/entitlements.py ``EntitlementDTO`` / ``PLAN_FEATURES``.
 SERVER_PLAN_FEATURES = {
     "free": [],
-    "pro": ["analytics", "automation", "export", "sync"],
-    "team": ["analytics", "automation", "export", "sync", "team"],
+    "pro": ["analytics", "automation", "sync"],
+    "team": ["analytics", "automation", "sync", "team"],
 }
 
 
