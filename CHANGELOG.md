@@ -5,6 +5,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Removed
+
+- Removed an unimplemented hosted export claim from public product surfaces.
+
 ### Changed
 
 - Managed compute consent now travels with the cloud account: an installation connected to
@@ -698,7 +702,7 @@ and safe hosted deployment.
 - Sleep-time consolidation with compaction accounting
 - Personalized PageRank graph arm (HippoRAG-style)
 - Offline signed license keys (no phone-home)
-- Pro analytics dashboard and compliance export
+- Pro analytics dashboard
 - Code-symbol graph via tree-sitter or regex fallback
 - Docker + docker-compose deployment
 - 300+ tests, eval harness, ablation suite

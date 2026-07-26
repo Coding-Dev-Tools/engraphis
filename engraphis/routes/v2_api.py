@@ -1287,11 +1287,20 @@ def analytics(workspace: Optional[str] = None):
 
 @router.get("/analytics/export")
 def analytics_export(workspace: Optional[str] = None):
-    """Self-contained HTML analytics report (inline CSS, zero CDN) — a shareable,
-    archivable artifact. Same Pro gate as the analytics view it renders."""
+    """Not implemented here. A self-contained HTML analytics *report artifact* was planned
+    for this route and never built.
+
+    The previous 501 told customers to "download analytics reports from the Engraphis Cloud
+    dashboard", which overstates what is reachable: the control plane serves analytics as
+    JSON (``GET /analytics/latest``), and this client already surfaces exactly that through
+    ``GET /analytics``. Point callers at the data that exists rather than at a file that may
+    not. Kept as an explicit 501 rather than removed so an older dashboard build calling this
+    path gets a truthful answer instead of a 404."""
     raise HTTPException(status_code=501, detail={
-        "error": "Download analytics reports from the Engraphis Cloud dashboard.",
-        "managed_cloud": True,
+        "error": "This build does not generate analytics report files. Use GET /analytics "
+                 "for the same data as JSON.",
+        "implemented": False,
+        "alternative": "/analytics",
     })
 
 
@@ -1314,19 +1323,25 @@ def ready():
                         status_code=200 if is_ready else 503)
 
 
-# ── compliance export (Pro) ───────────────────────────────────────────────────
+# ── workspace export (local, free) ────────────────────────────────────────────
 @router.get("/export")
 def export(workspace: Optional[str] = None, signed: bool = False):
-    """Full bi-temporal workspace dump (memories + sessions + audit). Pro-gated.
+    """Full bi-temporal workspace dump (memories + sessions + audit).
 
-    ``signed=true`` wraps the dump in a SHA-256 compliance manifest (see
-    :func:`_sign_export`) — a tamper-evident, self-verifying audit bundle."""
+    Local and free: this is the data-portability path that must keep working even in
+    recovery mode, so it is deliberately not entitlement-gated.
+
+    ``signed=true`` was specified as a SHA-256 compliance manifest wrapping the same dump —
+    a tamper-evident, self-verifying audit bundle. It was never implemented; no signing
+    code exists in this client and Engraphis Cloud has no export route, no supported hosted export capability. It answers 501 rather than silently returning an
+    *unsigned* bundle, because a caller asking for tamper-evidence must not be handed
+    something that merely looks like it."""
     if signed:
         raise HTTPException(status_code=501, detail={
-            "error": "Signed compliance exports are available in Engraphis Cloud.",
-            "cloud_only": True,
-            "feature": "export",
-            "upgrade_url": licensing.upgrade_url(),
+            "error": "Signed compliance exports are not implemented. Omit signed=true for "
+                     "the unsigned workspace export, which contains the same data.",
+            "implemented": False,
+            "alternative": "/export",
         })
     ws = workspace or _default_ws()
     return _run(service().export_workspace, workspace=ws, recovery=True)
@@ -1730,12 +1745,17 @@ def code_export(workspace: str, repo: str):
 # and only ``pro``/``team`` are paid; any other value — unknown, empty, or mis-cased —
 # resolves to no features, exactly as the server treats it.
 #
-# The server's own keys are {analytics, automation, export, sync, team}. This client's
+# The server's own keys are {analytics, automation, sync, team}. This client's
 # commercial manifest additionally names Auto Consolidation and Auto Dreaming, which the
 # server grants under ``automation``. They are expanded here so the dashboard can never
 # draw a lock on a capability the customer's plan already includes.
+#
+# ``export`` was removed from both tables: it was disclosed by the server and rendered here
+# for the whole pre-launch period while no signed-export capability existed on either side.
+# Plain local workspace export is unaffected — it is a free, local-only route (``GET
+# /export``) and was never a hosted entitlement.
 _AUTOMATION_FEATURES = ("automation", "consolidation", "dreaming")
-_PRO_FEATURES = ("analytics", "export", "sync") + _AUTOMATION_FEATURES
+_PRO_FEATURES = ("analytics", "sync") + _AUTOMATION_FEATURES
 _HOSTED_ENTITLEMENTS = {
     "free": (),
     "local": (),
@@ -1751,7 +1771,6 @@ _FEATURE_LABELS = {
     "automation": "Automation",
     "consolidation": "Auto Consolidation",
     "dreaming": "Auto Dreaming",
-    "export": "Compliance export",
     "sync": "Cloud Sync",
     "team": "Team administration",
 }
