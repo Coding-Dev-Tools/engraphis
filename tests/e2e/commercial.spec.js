@@ -9,12 +9,11 @@ const knownFeatures = {
   automation: 'Automation',
   consolidation: 'Auto Consolidation',
   dreaming: 'Auto Dreaming',
-  export: 'Compliance export',
   sync: 'Cloud Sync',
   team: 'Team administration',
 };
 
-const proFeatures = ['analytics', 'automation', 'consolidation', 'dreaming', 'export', 'sync'];
+const proFeatures = ['analytics', 'automation', 'consolidation', 'dreaming', 'sync'];
 const teamFeatures = [...proFeatures, 'team'];
 
 function licenseFor(plan, features) {

@@ -311,7 +311,7 @@ def _downgrade_state(monkeypatch, *, body: dict) -> dict:
         "token_subject": "member",
         "plan": "team",
         "cloud_access_active": True,
-        "cloud_features": ["analytics", "automation", "export", "sync", "team"],
+        "cloud_features": ["analytics", "automation", "sync", "team"],
     }
 
     def _replace(value: dict) -> None:
