@@ -19,6 +19,14 @@ INDEX = STATIC / "index.html"
 CSS = STATIC / "dashboard.css"
 JS = STATIC / "dashboard.js"
 
+#: First-party scripts the dashboard page loads besides ``dashboard.js``.  They run under the
+#: same strict CSP, so they are held to the same no-inline-style/no-inline-handler contract.
+#: Vendored bundles under ``static/vendor`` are excluded: they are third-party artefacts we
+#: do not rewrite, and pinning them is the job of the commercial-manifest check.
+EXTRA_SCRIPTS = (STATIC / "engraphis-graph.js",)
+
+SCRIPT_SRC = re.compile(r'<script[^>]+src=["\'](/static/[^"\']+)["\']')
+
 STYLE_ATTR = re.compile(r"\sstyle=(?:\"([^\"]*)\"|'([^']*)')")
 EVENT_ATTR = re.compile(r"\s(on[a-z]+)=(?:\"([^\"]*)\"|'([^']*)')")
 STYLE_REF = re.compile(r'data-csp-style=["\'](s\d+)["\']')
@@ -208,24 +216,44 @@ def check() -> None:
         failures.append("inline event attribute")
     if not CSS.is_file() or not JS.is_file():
         failures.append("missing external asset")
-    if STYLE_ATTR.search(js):
-        failures.append("inline style attribute in generated dashboard markup")
-    if EVENT_ATTR.search(js):
-        failures.append("inline event attribute in generated dashboard markup")
-    if re.search(r"\.(?:style|cssText)\b|(?:get|set)Attribute\([\"']style[\"']", js):
-        failures.append("runtime inline-style mutation")
-    if re.search(r"\[on[a-z]+|(?:get|set)Attribute\([\"']on[a-z]+[\"']", js):
-        failures.append("legacy inline-handler selector")
+    extra = {path.name: path.read_text(encoding="utf-8") for path in EXTRA_SCRIPTS if path.is_file()}
+    missing_scripts = sorted(path.name for path in EXTRA_SCRIPTS if not path.is_file())
+    if missing_scripts:
+        failures.append("missing first-party script: " + ", ".join(missing_scripts))
+
+    # Every /static asset the page asks for must exist, or the dashboard 404s at load time
+    # and the strict CSP turns a typo into a silently broken view.
+    absent = sorted(
+        {
+            reference
+            for reference in SCRIPT_SRC.findall(html)
+            if not (ROOT / "engraphis" / reference.lstrip("/")).is_file()
+        }
+    )
+    if absent:
+        failures.append("index.html loads missing script: " + ", ".join(absent))
+
+    for name, source in [("dashboard.js", js), *extra.items()]:
+        if STYLE_ATTR.search(source):
+            failures.append(f"inline style attribute in {name}")
+        if EVENT_ATTR.search(source):
+            failures.append(f"inline event attribute in {name}")
+        if re.search(r"\.(?:style|cssText)\b|(?:get|set)Attribute\([\"']style[\"']", source):
+            failures.append(f"runtime inline-style mutation in {name}")
+        if re.search(r"\[on[a-z]+|(?:get|set)Attribute\([\"']on[a-z]+[\"']", source):
+            failures.append(f"legacy inline-handler selector in {name}")
     if "${" in css or "'+" in css or "+'" in css:
         failures.append("unresolved JavaScript interpolation in CSS")
 
-    style_refs = set(STYLE_REF.findall(html + "\n" + js))
+    style_refs = set(STYLE_REF.findall("\n".join([html, js, *extra.values()])))
     style_rules = set(STYLE_RULE.findall(css))
     missing_styles = sorted(style_refs - style_rules)
     if missing_styles:
         failures.append("missing CSP style rules: " + ", ".join(missing_styles))
 
-    handler_refs = HANDLER_REF.findall(html + "\n" + js)
+    # Handler *definitions* only ever live in the generated dashboard.js registry, but any
+    # first-party script may reference one, so references are collected across all of them.
+    handler_refs = HANDLER_REF.findall("\n".join([html, js, *extra.values()]))
     handler_ids = {handler_id for _event, handler_id in handler_refs}
     handler_defs = set(HANDLER_DEF.findall(js))
     missing_handlers = sorted(handler_ids - handler_defs)
