@@ -510,6 +510,10 @@ function graphLoadColorPreferences(){
 }
 function graphSaveColorPreferences(){try{localStorage.setItem(GRAPH_COLOR_KEY,JSON.stringify({palette:GCOLOR_PALETTE,colors:GCOLOR_OVERRIDES}))}catch(e){}}
 function graphTypeColor(type){if(GCOLOR_OVERRIDES[type])return GCOLOR_OVERRIDES[type];if(typeof GSTYLE!=='undefined'&&GSTYLE&&GSTYLE!=='classic'&&STYLE_PAL[GSTYLE]&&STYLE_PAL[GSTYLE][type])return STYLE_PAL[GSTYLE][type];return cssvar(ETYPE_TOKEN[type]||'--entity-concept',cssvar('--color-accent','#8c83e8'))}
+/* The engine renders to a canvas, so it cannot read `--entity-*` itself the way the legend and
+   the controls do. Resolve the active theme's values here and hand them over; without this the
+   opt-in canvas keeps dark-theme node colours after a switch to Light/Solarized/Sepia. */
+function graphThemeTypeColors(){const colors={},fallback=cssvar('--color-accent','#8c83e8');Object.keys(ETYPE_TOKEN).forEach(type=>{colors[type]=cssvar(ETYPE_TOKEN[type],fallback)});return colors}
 function graphContrastColor(color){if(!graphValidColor(color))return cssvar('--color-canvas','#0e1014');const n=parseInt(color.slice(1),16),lum=.2126*(n>>16)+.7152*((n>>8)&255)+.0722*(n&255);return lum>150?'#111827':'#f8fafc'}
 const ETYPE_COLOR=new Proxy({},{get:(_,type)=>graphTypeColor(type)});
 graphLoadColorPreferences();
@@ -614,6 +618,7 @@ function graphRenderEngine(data,fit,reheat){
    engine.setSettings({...window.GSET});
    engine.setStyle(typeof GSTYLE!=='undefined'?GSTYLE:'cyber');
    engine.setColorBy(typeof GCOLORBY!=='undefined'?GCOLORBY:'community');
+   engine.setThemeColors(graphThemeTypeColors());
    engine.setPalette(typeof GCOLOR_PALETTE!=='undefined'?GCOLOR_PALETTE:'theme');
    engine.setTypeColors(GCOLOR_OVERRIDES||{});
    engine.setLayers(layers);
@@ -1137,7 +1142,7 @@ function graphToggleFreeze(control){
 function graphToggleLabels(control){window.GSET.labels=control.checked;if(GRAPH_ENGINE)GRAPH_ENGINE.setSettings({labels:control.checked});else if(FG)graphRender(false,false)}
 function graphRecolor(){
  renderGraphColorControls();
- if(GRAPH_ENGINE){GRAPH_ENGINE.apply(engine=>{engine.setPalette(typeof GCOLOR_PALETTE!=='undefined'?GCOLOR_PALETTE:'theme');engine.setTypeColors(GCOLOR_OVERRIDES||{})},false,false);return}
+ if(GRAPH_ENGINE){GRAPH_ENGINE.apply(engine=>{engine.setThemeColors(graphThemeTypeColors());engine.setPalette(typeof GCOLOR_PALETTE!=='undefined'?GCOLOR_PALETTE:'theme');engine.setTypeColors(GCOLOR_OVERRIDES||{})},false,false);return}
  if(!FG)return;
  window.GCOL=graphReadThemeColors();graphRefreshNodeColors();
  FG.linkColor(FG.linkColor());FG.linkWidth(FG.linkWidth());graphRedraw();
