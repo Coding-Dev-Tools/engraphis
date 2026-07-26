@@ -28,8 +28,8 @@ SERVER_PLANS = {"free", "pro", "team"}
 SERVER_PAID_PLANS = {"pro", "team"}
 SERVER_HOSTED_ENTITLEMENTS = {
     "free": set(),
-    "pro": {"analytics", "automation", "export", "sync"},
-    "team": {"analytics", "automation", "export", "sync", "team"},
+    "pro": {"analytics", "automation", "sync"},
+    "team": {"analytics", "automation", "sync", "team"},
 }
 SERVER_TRIAL_DURATION_SECONDS = 259_200
 SERVER_WORKSPACE_WRITE_GRACE_MAX_SECONDS = 86_400

@@ -53,8 +53,8 @@ CONTROL_URL = "https://control.example.test"
 # the hosted entitlement contract the hosted entitlement response / the hosted plan-feature contract.
 SERVER_HOSTED_ENTITLEMENTS = {
     "free": [],
-    "pro": ["analytics", "automation", "export", "sync"],
-    "team": ["analytics", "automation", "export", "sync", "team"],
+    "pro": ["analytics", "automation", "sync"],
+    "team": ["analytics", "automation", "sync", "team"],
 }
 
 
