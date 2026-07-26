@@ -299,6 +299,86 @@ def test_refresh_network_error_is_service_unavailable(monkeypatch) -> None:
     assert "private network detail" not in str(caught.value)
 
 
+def _downgrade_state(monkeypatch, *, body: dict) -> dict:
+    """A saved Team session, refreshed against a control plane that answers *body*."""
+
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("ENGRAPHIS_CLOUD_CONTROL_URL", raising=False)
+    state = {
+        "control_url": "https://control.example.test",
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+        "plan": "team",
+        "cloud_access_active": True,
+        "cloud_features": ["analytics", "automation", "export", "sync", "team"],
+    }
+
+    def _replace(value: dict) -> None:
+        state.clear()
+        state.update(value)
+
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(cloud_session, "_save", _replace)
+    monkeypatch.setattr(
+        cloud_session, "validate_cloud_base_url", lambda value: value.rstrip("/")
+    )
+    monkeypatch.setattr(cloud_session, "_post_refresh", lambda *_args: dict({
+        "access_token": "short-lived-access",
+        "organization_id": "org_1",
+        "refresh_credential": "rotated-refresh",
+        "token_subject": "member",
+    }, **body))
+    cloud_session.access_for_workspace("ws", require_compute=False)
+    return state
+
+
+def test_a_plan_downgrade_does_not_carry_the_previous_plans_features(monkeypatch) -> None:
+    """Team -> Pro must not leave ``team`` in the persisted grant list.
+
+    ``_declared_entitlement`` omits ``cloud_features`` whenever the body carries no feature
+    list, so merging it onto the saved record replaced ``plan`` while the *old* list
+    survived. ``/api/license`` then reported ``plan: "pro"`` with ``team`` still granted and
+    the Team tab stayed unlocked indefinitely — a paid capability handed out for free.
+    """
+
+    state = _downgrade_state(monkeypatch, body={
+        "plan": "pro", "cloud_access_active": True,
+    })
+
+    assert state["plan"] == "pro"
+    assert "cloud_features" not in state, "the Team grants outlived the Team plan"
+    # With no stale list left, the client's own plan table answers for Pro.
+    assert "team" not in cloud_session.saved_entitlement().get("cloud_features", [])
+
+
+def test_a_downgrade_that_declares_its_own_features_is_taken_verbatim(monkeypatch) -> None:
+    """A control plane that does send a list stays authoritative over the plan table."""
+
+    state = _downgrade_state(monkeypatch, body={
+        "plan": "pro", "cloud_access_active": True,
+        "cloud_features": ["analytics", "sync"],
+    })
+
+    assert state["plan"] == "pro"
+    assert state["cloud_features"] == ["analytics", "sync"]
+
+
+def test_a_refresh_reconfirming_the_same_plan_keeps_its_saved_features(monkeypatch) -> None:
+    """Only a plan *change* drops the list; re-confirming Team must not blank it.
+
+    Otherwise every token rotation against a control plane that reports the plan but not
+    the features would quietly demote a Team customer to the generic table.
+    """
+
+    state = _downgrade_state(monkeypatch, body={
+        "plan": "team", "cloud_access_active": True,
+    })
+
+    assert state["plan"] == "team"
+    assert "team" in state["cloud_features"]
+
+
 @pytest.mark.parametrize("subject", ["admin", "", "device member"])
 def test_environment_refresh_rejects_invalid_subject(monkeypatch, subject) -> None:
     monkeypatch.setenv("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", "env-refresh")
@@ -312,3 +392,97 @@ def test_environment_refresh_rejects_invalid_subject(monkeypatch, subject) -> No
     else:
         with pytest.raises(cloud_session.CloudSessionError, match="device.*member"):
             cloud_session.configured(require_compute=False)
+
+
+def test_record_billing_denial_stamps_every_denial_including_the_repeat() -> None:
+    """A 402 is an authoritative entitlement read, so it has to advance the clock.
+
+    ``entitlement_checked_at`` is what ``_session_entitlement`` reports as ``fetched_at``
+    and what the dashboard's 15-minute refresh interval throttles on. The denial used to
+    clear the grants without touching it -- and to write nothing whatsoever once the
+    session was already denied -- so a lapsed account re-rotated its single-use refresh
+    credential on every request, in every worker, forever.
+    """
+
+    cloud_session._save({
+        "plan": "team",
+        "cloud_access_active": True,
+        "cloud_features": ["analytics", "team"],
+        "entitlement_checked_at": 1.0,
+        "organization_id": "org_1",
+        "refresh_credential": "engr_rt_saved",
+    })
+
+    assert cloud_session.record_billing_denial() is True
+    first = cloud_session._load()
+    assert first["cloud_access_active"] is False
+    assert first["cloud_features"] == []
+    assert first["plan"] == "team", "the lapsed plan is still named for the UI"
+    assert first["refresh_credential"] == "engr_rt_saved", "the denial is not a disconnect"
+    stamped = first["entitlement_checked_at"]
+    assert stamped > 1.0, "the denial was never stamped as checked"
+
+    # The steady state for a lapsed account: already denied, and aged past the interval.
+    aged = dict(first)
+    aged["entitlement_checked_at"] = stamped - 3600.0
+    cloud_session._save(aged)
+
+    assert cloud_session.record_billing_denial() is False, "nothing new was revoked"
+    repeated = cloud_session._load()
+    assert repeated["entitlement_checked_at"] >= stamped, (
+        "a repeat denial must advance the clock the refresh interval reads"
+    )
+    assert cloud_session.saved_entitlement()["entitlement_checked_at"] >= stamped
+
+def test_record_billing_denial_writes_under_the_refresh_lock(tmp_path, monkeypatch) -> None:
+    """The denial is a load-modify-save on the shared session file, so it must be serialized.
+
+    Unguarded, it could read the old single-use refresh credential while another worker was
+    mid-rotation and write that stale value back over the rotated one. The control plane
+    treats a spent credential as replay and revokes the whole family, turning a lapsed
+    subscription into a forced reconnect.
+    """
+
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(tmp_path))
+    cloud_session._save({
+        "schema": "engraphis-cloud-session/v1",
+        "control_url": "https://control.example.test",
+        "compute_url": "",
+        "organization_id": "org_paid",
+        "refresh_credential": "engr_rt_live",
+        "token_subject": "member",
+        "plan": "team",
+        "cloud_features": ["analytics", "team"],
+        "cloud_access_active": True,
+    })
+
+    held = []
+    real_lock = cloud_session._refresh_lock
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def _tracking_lock():
+        with real_lock():
+            held.append("in")
+            try:
+                yield
+            finally:
+                held.append("out")
+
+    saved_while = []
+    real_save = cloud_session._save
+    monkeypatch.setattr(cloud_session, "_refresh_lock", _tracking_lock)
+    monkeypatch.setattr(
+        cloud_session, "_save",
+        lambda v: (saved_while.append(held[-1] if held else None), real_save(v))[1],
+    )
+
+    assert cloud_session.record_billing_denial() is True
+    assert held == ["in", "out"], "the refresh lock was not taken"
+    assert saved_while == ["in"], "the session was written outside the refresh lock"
+
+    record = cloud_session._load()
+    assert record["cloud_access_active"] is False
+    assert record["cloud_features"] == []
+    assert record["refresh_credential"] == "engr_rt_live", "the credential was clobbered"

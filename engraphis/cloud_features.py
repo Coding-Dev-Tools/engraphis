@@ -14,12 +14,13 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 from urllib.parse import quote
 
 from engraphis.cloud_session import CloudSessionError, access_for_workspace
-from engraphis.hosted_client import build_pinned_https_opener
+from engraphis.cloud_session import configured as cloud_session_configured
+from engraphis.hosted_client import build_pinned_https_opener, upgrade_url
 
 SNAPSHOT_SCHEMA = "engraphis-managed-snapshot/v1"
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
@@ -49,13 +50,26 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def managed_compute_consent() -> bool:
-    """Return whether the customer explicitly enabled managed snapshot uploads.
+    """Return whether this installation may upload workspace content for managed work.
 
-    Entitlement is enforced by the cloud service, but it is not consent to upload local
-    workspace content. The public client therefore remains off unless the customer sets
-    ``ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1``.
+    Consent travels with the cloud account: connecting an installation to Engraphis Cloud
+    accepts the terms that cover managed compute, so a connected installation is allowed by
+    default and the customer is never asked to hand-edit an environment variable.
+
+    A local installation with no cloud session is never allowed — there is no account, so
+    there is no agreement to rely on.
+
+    ``ENGRAPHIS_MANAGED_COMPUTE_CONSENT`` remains an explicit override for operators who want
+    to force the answer either way; ``=0`` opts a connected installation back out.
     """
-    return _truthy(os.environ.get("ENGRAPHIS_MANAGED_COMPUTE_CONSENT"))
+    override = os.environ.get("ENGRAPHIS_MANAGED_COMPUTE_CONSENT")
+    if override is not None and override.strip() != "":
+        return _truthy(override)
+    try:
+        return bool(cloud_session_configured(require_compute=False))
+    except Exception:
+        # Consent must never be the reason a dashboard fails to render.
+        return False
 
 
 def _public_http_error(status: int) -> tuple[str, bool]:
@@ -67,7 +81,14 @@ def _public_http_error(status: int) -> tuple[str, bool]:
     if status in {401, 403}:
         return "Engraphis Cloud authorization was rejected.", False
     if status == 402:
-        return "This hosted feature is not available for the current plan.", False
+        # 402 is the control plane's "no active paid entitlement", which a lapsed or
+        # past_due subscription reaches just as often as a genuine free plan. Name the
+        # billing page so a paying customer can fix it instead of reading a dead end.
+        return (
+            "This hosted feature needs an active Engraphis Cloud subscription. Check "
+            "billing or upgrade at %s." % upgrade_url(),
+            False,
+        )
     if status == 404:
         return "The hosted workspace or feature was not found.", False
     if status == 409:
@@ -79,6 +100,43 @@ def _public_http_error(status: int) -> tuple[str, bool]:
     if status >= 500:
         return "Engraphis Cloud is temporarily unavailable.", True
     return "Engraphis Cloud rejected the request.", False
+
+
+def _public_session_error(status: int) -> tuple[str, bool]:
+    """Map a session-acquisition failure to fixed, actionable public copy.
+
+    ``CloudSessionError`` text is never forwarded across this boundary (it can quote local
+    state paths), but the bare status alone reads as an outage for every cause.  A customer
+    whose subscription lapsed, whose session was revoked, or who is simply offline each
+    need a different next step, and only the transient ones are worth retrying.
+    """
+
+    if status == 401:
+        return (
+            "Connect this installation to Engraphis Cloud to use hosted features.",
+            False,
+        )
+    if status == 402:
+        return (
+            "This hosted feature needs an active Engraphis Cloud subscription. Check "
+            "billing or upgrade at %s." % upgrade_url(),
+            False,
+        )
+    if status == 403:
+        return ("Engraphis Cloud authorization was rejected.", False)
+    if status == 409:
+        return (
+            "The saved cloud session is unusable; connect this installation again.",
+            False,
+        )
+    if status == 429:
+        return ("Engraphis Cloud is temporarily busy. Try again shortly.", True)
+    if status >= 500:
+        return (
+            "Engraphis Cloud is unreachable; hosted features resume once it responds.",
+            True,
+        )
+    return ("The cloud session is unavailable.", False)
 
 
 def _metadata(value: Any) -> dict:
@@ -191,8 +249,9 @@ def _build_managed_snapshot_locked(service: Any, workspace: str, *,
     """Build the bounded client-side transport document for one local workspace.
 
     Secret-classified rows are omitted before serialization. ``consent`` allows an
-    already-confirmed caller to pass its decision explicitly; otherwise the environment
-    opt-in is required.
+    already-confirmed caller to pass its decision explicitly; otherwise
+    :func:`managed_compute_consent` decides, which allows cloud-connected installations and
+    denies purely local ones.
     """
 
     clean_workspace = service._clean_ws(workspace)
@@ -202,8 +261,8 @@ def _build_managed_snapshot_locked(service: Any, workspace: str, *,
     allowed = managed_compute_consent() if consent is None else bool(consent)
     if not allowed:
         raise CloudFeatureError(
-            "Managed compute is off. Opt in before uploading workspace content by setting "
-            "ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1.",
+            "Managed compute is turned off for this installation, so no workspace content "
+            "was uploaded. Connect this installation to Engraphis Cloud to use it.",
             status=409,
             code="consent_required",
         )
@@ -297,7 +356,9 @@ def _build_managed_snapshot_locked(service: Any, workspace: str, *,
 class CloudFeatureClient:
     base_url: str
     organization_id: str
-    access_token: str
+    # A dataclass ``__repr__`` prints every field, so the default would put a live bearer
+    # token into any traceback, log line, or debugger frame that renders this client.
+    access_token: str = field(repr=False)
     timeout_seconds: float = 15.0
 
     @classmethod
@@ -306,8 +367,9 @@ class CloudFeatureClient:
             access_token, organization_id, base_url = access_for_workspace(workspace_id)
         except CloudSessionError as exc:
             status = exc.status if 400 <= exc.status <= 599 else 503
+            message, transient = _public_session_error(status)
             raise CloudFeatureError(
-                "The cloud session is unavailable.", status=status
+                message, status=status, transient=transient
             ) from exc
         except ValueError as exc:
             raise CloudFeatureError(
