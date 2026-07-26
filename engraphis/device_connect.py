@@ -460,6 +460,26 @@ def summarize(response: dict) -> dict:
     return summary
 
 
+def _preflight_session_storage() -> Path:
+    """Refuse a connect *before* the token is spent when the session cannot be saved.
+
+    The exchange is the point of no return: the control plane consumes the single-use
+    connect token as it answers, so any storage fault discovered afterwards costs the
+    customer a fresh token from the portal.  Delegated to :mod:`engraphis.cloud_session`
+    because that module owns the paths, the lock and the atomic write this is checking --
+    a private copy of those rules here would drift from the save it is meant to predict.
+    """
+
+    try:
+        return cloud_session.preflight_save()
+    except cloud_session.CloudSessionError as exc:
+        raise DeviceConnectError(
+            "%s Your connect token has not been used, so you can fix this and run "
+            "`engraphis connect --token ...` again with the same token." % exc,
+            status=getattr(exc, "status", 409),
+        ) from exc
+
+
 def connect(token: object, *, control_url: Optional[str] = None,
             compute_url: Optional[str] = None, workspace_id: Optional[str] = None,
             installation_label: Optional[str] = None, device_name: Optional[str] = None,
@@ -493,6 +513,10 @@ def connect(token: object, *, control_url: Optional[str] = None,
             ) from exc
 
     installation_client_id, device_client_id = client_identity()
+    # Last check before the point of no return.  ``client_identity`` may have written its
+    # file minutes or months ago, so a writable state directory then is no evidence of one
+    # now; prove the session can land *before* the POST spends the token, not after.
+    session_path = _preflight_session_storage()
     response = post_connect(
         resolved_control,
         normalized,
@@ -521,5 +545,5 @@ def connect(token: object, *, control_url: Optional[str] = None,
     summary = summarize(response)
     summary["control_url"] = resolved_control
     summary["compute_url"] = resolved_compute
-    summary["session_path"] = str(_state_dir() / "cloud_session.json")
+    summary["session_path"] = str(session_path)
     return summary

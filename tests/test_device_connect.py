@@ -8,6 +8,7 @@ token -- a bearer credential -- never escapes the request body.
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 from io import BytesIO
@@ -343,6 +344,154 @@ def test_a_non_object_response_is_rejected(monkeypatch, payload):
 
     with pytest.raises(device_connect.DeviceConnectError, match="invalid connect"):
         device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+
+# ------------------------------------------------------ pre-flight on session storage
+#
+# The POST is the point of no return: the control plane consumes the single-use connect
+# token as it answers.  ``save_bootstrap`` runs afterwards, so before the pre-flight a
+# state directory that had lost its permissions -- or a ``cloud_session.json`` replaced
+# by a link -- spent the customer's token and then failed, leaving them with nothing to
+# retry with.  Every test here asserts the same thing: no request was put on the wire.
+
+
+def _probe_files(root: Path):
+    """Temporary files the writability probe must never leave behind."""
+
+    return sorted(path.name for path in Path(root).iterdir() if ".preflight." in path.name)
+
+
+def test_an_unsafe_session_path_fails_before_the_token_is_spent(monkeypatch, tmp_path):
+    """The reported regression: a session leaf that is not a plain private file.
+
+    A directory stands in for the symlink/hard-link family because it trips exactly the
+    same ``private_file_stat`` rejection on every platform, including a Windows runner
+    without the privilege to create a symlink at all.
+    """
+
+    opener = _Opener(body=REGISTRATION)
+    _install_opener(monkeypatch, opener)
+    # The identity file already exists, which is precisely why its earlier success is no
+    # evidence that the directory is still writable now.
+    device_connect.client_identity()
+    session_path = tmp_path / "cloud_session.json"
+    session_path.mkdir()
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    # The one assertion that matters: the token was never presented, so it is still live.
+    assert opener.calls == []
+    assert caught.value.status == 409
+    # The customer has to be told which path to fix, by name.
+    assert str(session_path) in str(caught.value)
+    assert "has not been used" in str(caught.value)
+    assert session_path.is_dir()
+    assert _probe_files(tmp_path) == []
+
+
+def test_an_unsafe_refresh_lock_also_fails_before_the_token_is_spent(monkeypatch, tmp_path):
+    """``save_bootstrap`` takes the refresh lock first, so an unusable lock spends it too."""
+
+    opener = _Opener(body=REGISTRATION)
+    _install_opener(monkeypatch, opener)
+    lock_path = tmp_path / ".cloud_session.refresh.lock"
+    lock_path.mkdir()
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    assert opener.calls == []
+    assert str(lock_path) in str(caught.value)
+    assert not (tmp_path / "cloud_session.json").exists()
+
+
+def test_a_hard_linked_session_is_refused_before_the_token_is_spent(monkeypatch, tmp_path):
+    """A second pathname to the session would keep resolving to the rotated credential."""
+
+    opener = _Opener(body=REGISTRATION)
+    _install_opener(monkeypatch, opener)
+    session_path = tmp_path / "cloud_session.json"
+    session_path.write_text("{}", encoding="utf-8")
+    try:
+        os.link(str(session_path), str(tmp_path / "session_alias.json"))
+    except (OSError, AttributeError, NotImplementedError) as exc:  # pragma: no cover
+        pytest.skip("hard links are unavailable on this filesystem: %s" % exc)
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    assert opener.calls == []
+    assert str(session_path) in str(caught.value)
+    # Inspection only: a pre-existing file is never opened, truncated or replaced.
+    assert session_path.read_text(encoding="utf-8") == "{}"
+
+
+def test_an_uncreatable_state_directory_fails_before_the_token_is_spent(
+    monkeypatch, tmp_path
+):
+    """``ENGRAPHIS_STATE_DIR`` under a regular file: the directory can never be made."""
+
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("ENGRAPHIS_STATE_DIR", str(blocker / "state"))
+    opener = _Opener(body=REGISTRATION)
+    _install_opener(monkeypatch, opener)
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    assert opener.calls == []
+    assert str(blocker / "state") in str(caught.value)
+    assert blocker.read_text(encoding="utf-8") == "not a directory"
+
+
+def test_an_unwritable_state_directory_fails_before_the_token_is_spent(
+    monkeypatch, tmp_path
+):
+    """A read-only mount, which is the failure the report describes.
+
+    Simulated at the probe rather than with ``chmod``: POSIX modes are advisory for root
+    and Windows has no equivalent, so a mode-based test would silently stop failing.  The
+    probe is the only thing standing between the caller and ``atomic_private_text``.
+    """
+
+    opener = _Opener(body=REGISTRATION)
+    _install_opener(monkeypatch, opener)
+    device_connect.client_identity()
+
+    def _read_only(*args, **kwargs):
+        raise PermissionError(13, "read-only file system")
+
+    monkeypatch.setattr(cloud_session.tempfile, "mkstemp", _read_only)
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    assert opener.calls == []
+    assert caught.value.status == 409
+    assert str(tmp_path) in str(caught.value)
+    assert "not writable" in str(caught.value)
+    assert not (tmp_path / "cloud_session.json").exists()
+
+
+def test_the_preflight_creates_nothing_and_leaves_nothing_behind(monkeypatch, tmp_path):
+    """A pre-flight that wrote the session would defeat the "nothing on failure" rule."""
+
+    session_path = cloud_session.preflight_save()
+
+    assert session_path == tmp_path / "cloud_session.json"
+    assert not session_path.exists()
+    assert _probe_files(tmp_path) == []
+
+    # Idempotent, and equally inert once a real session exists.
+    _install_opener(monkeypatch, _Opener(body=REGISTRATION))
+    device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+    saved = session_path.read_bytes()
+
+    assert cloud_session.preflight_save() == session_path
+    assert session_path.read_bytes() == saved
+    assert _probe_files(tmp_path) == []
 
 
 # ------------------------------------------------------------- pre-flight token hygiene

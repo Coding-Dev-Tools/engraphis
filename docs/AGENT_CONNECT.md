@@ -70,6 +70,12 @@ already redeemed, or never valid — with the same `401`, so the client reports 
 possibilities and the fix is always the same: generate a new token in the account portal. A `402`
 means the subscription itself has lapsed; fix billing rather than the token.
 
+Because the token is single-use, the client checks that it can actually write the session file
+*before* redeeming it. If the state directory is not writable, or `cloud_session.json` has been
+replaced by a symlink, a hard link, or a directory, the command fails immediately, names the path
+to fix, and sends nothing — your token is untouched, so you can correct the path and rerun the
+same command rather than issuing a new token.
+
 The token is a credential. It is sent in the request body and nowhere else — it is never
 printed, never logged, and never written to disk. What *is* written is the rotating refresh
 credential the service returns, which is why the session file is owner-only.
