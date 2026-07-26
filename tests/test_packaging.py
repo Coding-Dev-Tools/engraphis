@@ -213,4 +213,7 @@ def test_customer_hosting_docs_do_not_claim_private_cloud_authority():
     assert "license issuer" in combined
     assert "ENGRAPHIS_CLOUD_CONTROL_URL" in hosting
     assert "ENGRAPHIS_CLOUD_COMPUTE_URL" in hosting
-    assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1" in combined
+    # Managed compute follows the cloud account now. The hosting docs may still document
+    # the operator override, but they must never present hand-setting it as the way a
+    # customer turns managed compute on.
+    assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1" not in combined

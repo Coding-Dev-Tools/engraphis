@@ -19,6 +19,7 @@ from typing import Any, Optional
 from urllib.parse import quote
 
 from engraphis.cloud_session import CloudSessionError, access_for_workspace
+from engraphis.cloud_session import configured as cloud_session_configured
 from engraphis.hosted_client import build_pinned_https_opener, upgrade_url
 
 SNAPSHOT_SCHEMA = "engraphis-managed-snapshot/v1"
@@ -49,13 +50,26 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def managed_compute_consent() -> bool:
-    """Return whether the customer explicitly enabled managed snapshot uploads.
+    """Return whether this installation may upload workspace content for managed work.
 
-    Entitlement is enforced by the cloud service, but it is not consent to upload local
-    workspace content. The public client therefore remains off unless the customer sets
-    ``ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1``.
+    Consent travels with the cloud account: connecting an installation to Engraphis Cloud
+    accepts the terms that cover managed compute, so a connected installation is allowed by
+    default and the customer is never asked to hand-edit an environment variable.
+
+    A local installation with no cloud session is never allowed — there is no account, so
+    there is no agreement to rely on.
+
+    ``ENGRAPHIS_MANAGED_COMPUTE_CONSENT`` remains an explicit override for operators who want
+    to force the answer either way; ``=0`` opts a connected installation back out.
     """
-    return _truthy(os.environ.get("ENGRAPHIS_MANAGED_COMPUTE_CONSENT"))
+    override = os.environ.get("ENGRAPHIS_MANAGED_COMPUTE_CONSENT")
+    if override is not None and override.strip() != "":
+        return _truthy(override)
+    try:
+        return bool(cloud_session_configured(require_compute=False))
+    except Exception:
+        # Consent must never be the reason a dashboard fails to render.
+        return False
 
 
 def _public_http_error(status: int) -> tuple[str, bool]:
@@ -235,8 +249,9 @@ def _build_managed_snapshot_locked(service: Any, workspace: str, *,
     """Build the bounded client-side transport document for one local workspace.
 
     Secret-classified rows are omitted before serialization. ``consent`` allows an
-    already-confirmed caller to pass its decision explicitly; otherwise the environment
-    opt-in is required.
+    already-confirmed caller to pass its decision explicitly; otherwise
+    :func:`managed_compute_consent` decides, which allows cloud-connected installations and
+    denies purely local ones.
     """
 
     clean_workspace = service._clean_ws(workspace)
@@ -246,8 +261,8 @@ def _build_managed_snapshot_locked(service: Any, workspace: str, *,
     allowed = managed_compute_consent() if consent is None else bool(consent)
     if not allowed:
         raise CloudFeatureError(
-            "Managed compute is off. Opt in before uploading workspace content by setting "
-            "ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1.",
+            "Managed compute is turned off for this installation, so no workspace content "
+            "was uploaded. Connect this installation to Engraphis Cloud to use it.",
             status=409,
             code="consent_required",
         )

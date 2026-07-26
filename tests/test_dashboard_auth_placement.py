@@ -76,6 +76,9 @@ def test_hosted_views_delegate_entitlement_to_cloud_proxy_responses():
     for body in (analytics, automation):
         assert "hostedFeatureUnavailable(e)" in body
         assert "unlockHtml" in body
+    # The billing predicate itself, verbatim: the loaders delegate to it, so widening it
+    # here is the only way a non-billing failure can reach ``unlockHtml``.
+    assert "error.status===401||error.status===402||error.status===501" in script
     assert "error.status===409" in script
     assert "Purchase Pro license" in script
 
@@ -83,7 +86,8 @@ def test_hosted_views_delegate_entitlement_to_cloud_proxy_responses():
 # ── a paying customer must never be sold the plan they already own ────────────
 # The hosted views route a failed request to one of three answers. Only an entitlement
 # status may draw the purchase panel; a 409 is a conflict, and ``consent_required`` in
-# particular is a customer who HAS paid and only has to set one environment variable.
+# particular is a customer who HAS paid and whose installation simply has managed compute
+# turned off — connecting it to Engraphis Cloud is what turns it on.
 #
 # ``_route`` below executes the shipped routing rather than asserting on its source: the
 # regression it guards (409 folded into ``hostedFeatureUnavailable``) kept every string
@@ -173,29 +177,36 @@ def _route(tmp_path, cases):
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
 @pytest.mark.parametrize("view", ["analytics", "automation"])
-def test_a_consent_required_conflict_is_answered_with_a_purchase_panel(
+def test_a_consent_required_conflict_is_answered_with_the_consent_panel(
     tmp_path, view,
 ):
-    """Analytics and Automation are Pro sales surfaces, not error consoles."""
+    """A 409 ``consent_required`` is a conflict, not a bill — never sell Pro for it.
+
+    Analytics and Automation are the two views that reach managed compute, so they are
+    exactly the views this panel has to appear in.
+    """
 
     rendered = _route(tmp_path, [{
         "name": "consent", "view": view,
         "error": {"status": 409, "detail": {"code": "consent_required"}},
     }])["consent"]
 
-    assert 'class="upgrade-panel"' in rendered["html"]
-    assert "Purchase Pro license" in rendered["html"]
-    assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1" not in rendered["html"]
-    assert rendered["pill"] == "PRO"
+    assert "managed compute is turned off for this installation" in rendered["html"]
+    assert "Connect this installation to Engraphis Cloud" in rendered["html"]
+    assert 'class="upgrade-panel"' not in rendered["html"]
+    assert "Purchase Pro license" not in rendered["html"]
+    # Consent travels with the cloud account; the customer is never sent to edit ``.env``.
+    assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT" not in rendered["html"]
+    assert rendered["pill"] == "CLOUD"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
 @pytest.mark.parametrize("view", ["analytics", "automation"])
-@pytest.mark.parametrize("status", [400, 401, 402, 500, 501])
+@pytest.mark.parametrize("status", [401, 402, 501])
 def test_a_genuine_entitlement_failure_still_renders_the_upgrade_panel(
     tmp_path, view, status,
 ):
-    """Every failed hosted request renders the Pro upgrade panel in these tabs."""
+    """401 unauthenticated, 402 not subscribed, 501 not offered: all billing answers."""
 
     rendered = _route(tmp_path, [{
         "name": "unentitled", "view": view, "error": {"status": status},
@@ -209,8 +220,29 @@ def test_a_genuine_entitlement_failure_still_renders_the_upgrade_panel(
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
 @pytest.mark.parametrize("view", ["analytics", "automation"])
-def test_an_internal_hosted_conflict_is_answered_with_a_purchase_panel(tmp_path, view):
-    """Backend failures never expose internal messages in hosted tabs."""
+@pytest.mark.parametrize("status", [400, 500, 503])
+def test_a_non_billing_failure_shows_the_error_instead_of_selling_pro(
+    tmp_path, view, status,
+):
+    """A bad request or a cloud outage is not an unpaid invoice."""
+
+    rendered = _route(tmp_path, [{
+        "name": "broken", "view": view,
+        "message": "the hosted service is briefly unavailable",
+        "error": {"status": status},
+    }])["broken"]
+
+    assert 'class="upgrade-panel"' not in rendered["html"]
+    assert "Purchase Pro license" not in rendered["html"]
+    assert "the hosted service is briefly unavailable" in rendered["html"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
+@pytest.mark.parametrize("view", ["analytics", "automation"])
+def test_a_transient_hosted_conflict_is_not_answered_with_a_purchase_panel(
+    tmp_path, view,
+):
+    """A 409 that is not ``consent_required`` is a state conflict, not a billing answer."""
 
     rendered = _route(tmp_path, [{
         "name": "conflict", "view": view,
@@ -218,22 +250,34 @@ def test_an_internal_hosted_conflict_is_answered_with_a_purchase_panel(tmp_path,
         "error": {"status": 409, "detail": {"error": "generation conflict"}},
     }])["conflict"]
 
-    assert 'class="upgrade-panel"' in rendered["html"]
-    assert "Purchase Pro license" in rendered["html"]
-    assert "managed snapshot generation must advance" not in rendered["html"]
+    assert 'class="upgrade-panel"' not in rendered["html"]
+    assert "Purchase Pro license" not in rendered["html"]
+    # The customer sees the real cause and can retry, rather than a panel selling Pro.
+    assert "managed snapshot generation must advance" in rendered["html"]
 
 
-def test_analytics_and_automation_suppress_hosted_error_details():
-    """Only these sales surfaces redirect every failed hosted request to Pro."""
+def test_only_an_entitlement_status_may_draw_the_purchase_panel():
+    """Pin both routing predicates literally.
+
+    The regression these guard folded a view name into ``hostedFeatureUnavailable`` and out
+    of ``managedConsentRequired``, which made every failure on Analytics and Automation --
+    including a 409 from a paying customer -- render the panel selling Pro. A loose
+    substring check passed straight through that, so assert the exact predicate and the
+    exhaustive set of statuses it may test.
+    """
 
     helper = _dashboard_function("hostedFeatureUnavailable")
-    assert "CURRENT_VIEW==='analytics'" in helper
-    assert "CURRENT_VIEW==='automation'" in helper
-    for entitlement_status in ("401", "402", "501"):
-        assert entitlement_status in helper
+    assert "error.status===401||error.status===402||error.status===501" in helper
+    # No view may widen it and no fourth status may join it.
+    assert "CURRENT_VIEW" not in helper
+    assert sorted(set(re.findall(r"status\s*===\s*(\d+)", helper))) == ["401", "402", "501"]
+
     consent = _dashboard_function("managedConsentRequired")
-    assert "CURRENT_VIEW!=='analytics'" in consent
-    assert "CURRENT_VIEW!=='automation'" in consent
+    assert "error.status===409" in consent
+    assert "code==='consent_required'" in consent
+    assert sorted(set(re.findall(r"status\s*===\s*(\d+)", consent))) == ["409"]
+    # The consent branch must fire in every view, including the two sales surfaces.
+    assert "CURRENT_VIEW" not in consent
 
     for name in (
         "loadOverviewAnalytics",

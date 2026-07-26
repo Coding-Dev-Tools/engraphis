@@ -28,8 +28,11 @@ def test_published_image_and_railway_template_fail_safe_to_customer_mode():
     assert local_api["value"] == "${{ secret(48) }}"
     assert local_api["secret"] is True
     assert local_api["required"] is True
+    # Managed-compute consent travels with the cloud account. A template that shipped a
+    # hard-coded value would override that for every deployment made from it -- "0" would
+    # silently opt a connected deployment back out -- so the default must stay blank.
     managed_consent = template["variables"]["ENGRAPHIS_MANAGED_COMPUTE_CONSENT"]
-    assert managed_consent["value"] == "0"
+    assert not managed_consent["value"]
     assert managed_consent["required"] is False
     for removed in (
         "ENGRAPHIS_DEPLOYMENT_TOKEN",

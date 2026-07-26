@@ -50,8 +50,8 @@
       "required": false
     },
     "ENGRAPHIS_MANAGED_COMPUTE_CONSENT": {
-      "value": "0",
-      "prompt": "Change to 1 only after reviewing the managed snapshot upload boundary.",
+      "value": "",
+      "prompt": "Optional override. Leave blank: managed compute follows the cloud account, so a connected deployment is allowed and a local-only one is not. Set 0 to opt this deployment out.",
       "required": false
     }
   }

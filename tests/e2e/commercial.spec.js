@@ -423,21 +423,26 @@ for (const cloudStatus of [401, 402, 501]) {
   });
 }
 
-test('Analytics explains the local managed-compute consent step', async ({ page }) => {
+// Consent travels with the cloud account: connecting an installation accepts the terms
+// covering managed compute. A 409 consent_required therefore means "this installation is
+// not connected", never "go and hand-edit an environment variable", and it must never be
+// mistaken for an unpaid invoice and answered with the Pro purchase panel.
+test('Analytics explains that managed compute follows the cloud connection', async ({ page }) => {
   const errors = recordBrowserErrors(page);
   await mockLocalClient(page, 409);
   await page.goto('/');
   await openView(page, 'analytics');
 
   const analytics = page.locator('#analytics-body');
-  await expect(analytics).toContainText('needs your explicit permission');
-  await expect(analytics).toContainText('ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1');
-  await expect(analytics).toContainText('restart Engraphis');
+  await expect(analytics).toContainText('managed compute is turned off for this installation');
+  await expect(analytics).toContainText('Connect this installation to Engraphis Cloud');
+  await expect(analytics).not.toContainText('ENGRAPHIS_MANAGED_COMPUTE_CONSENT');
+  await expect(analytics).not.toContainText('Purchase Pro license');
   await expect(page.locator('#an-lock')).toHaveText('CLOUD');
   expect(errors).toEqual([]);
 });
 
-test('Automation policy save explains the managed-compute consent step', async ({ page }) => {
+test('Automation policy save explains that managed compute follows the cloud connection', async ({ page }) => {
   const errors = recordBrowserErrors(page);
   await mockLocalClient(page, 200, null, 409);
   await page.goto('/');
@@ -446,8 +451,9 @@ test('Automation policy save explains the managed-compute consent step', async (
   await page.locator('#au-enabled').check();
   await page.getByRole('button', { name: 'Save hosted policy' }).click();
   const result = page.locator('#au-result');
-  await expect(result).toContainText('needs your explicit permission');
-  await expect(result).toContainText('ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1');
-  await expect(result).toContainText('restart Engraphis');
+  await expect(result).toContainText('managed compute is turned off for this installation');
+  await expect(result).toContainText('Connect this installation to Engraphis Cloud');
+  await expect(result).not.toContainText('ENGRAPHIS_MANAGED_COMPUTE_CONSENT');
+  await expect(result).not.toContainText('Purchase Pro license');
   expect(errors).toEqual([]);
 });

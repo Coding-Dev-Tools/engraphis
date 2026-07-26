@@ -263,8 +263,11 @@ def test_dashboard_automation_uses_active_workspace_and_discloses_upload_boundar
     assert "/automation?workspace=" in source
     assert "/maintenance/run?workspace=" in source
     assert "Preview snapshot" not in source
-    assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1" in source
     assert "uploads the selected workspace’s normal and sensitive memory content" in source
+    # The upload boundary is still disclosed, but consent now travels with the cloud
+    # account: the dashboard must not name the operator override anywhere.
+    assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT" not in source
+    assert "managed compute is turned off for this installation" in source
 
 
 def test_portfolio_and_report_analytics_are_hosted_only(monkeypatch, tmp_path):

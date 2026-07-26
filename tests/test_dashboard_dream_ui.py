@@ -14,8 +14,10 @@ def test_automation_form_renders_dream_controls():
     for el in ("au-dream", "au-dream-min", "au-dream-idle"):
         assert f'id="{el}"' in script, el
     assert 'id="au-infer"' not in script
-    assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT=1" in script
     assert "uploads the selected workspace’s normal and sensitive memory content" in script
+    # Consent travels with the cloud account. The dashboard must never name the operator
+    # override, so the string cannot appear anywhere the browser could render it.
+    assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT" not in script
 
 
 def test_save_body_posts_dream_fields():
