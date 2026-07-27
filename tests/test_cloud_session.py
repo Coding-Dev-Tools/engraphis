@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 from io import BytesIO
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -476,6 +477,82 @@ def test_refresh_authorization_error_preserves_status(monkeypatch, status) -> No
         )
 
     assert caught.value.status == status
+
+
+@pytest.mark.parametrize("failure", [
+    http.client.IncompleteRead(b'{"access_'),
+    http.client.LineTooLong("header line"),
+    http.client.BadStatusLine("garbage"),
+])
+def test_a_truncated_refresh_reply_is_an_error_not_a_traceback(monkeypatch, failure) -> None:
+    """Every paid feature refreshes through here, so a traceback is never acceptable.
+
+    ``IncompleteRead``'s MRO is ``(IncompleteRead, HTTPException, Exception, BaseException,
+    object)`` -- it is neither an ``OSError`` nor a ``URLError``, so before the
+    ``HTTPException`` clause existed a reply that stopped mid-body escaped ``_post_refresh``
+    raw.
+    """
+
+    class _Truncated:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> bool:
+            return False
+
+        def read(self, size: int = -1) -> bytes:
+            raise failure
+
+    class _Opener:
+        def open(self, request, timeout):
+            if isinstance(failure, http.client.IncompleteRead):
+                return _Truncated()
+            raise failure
+
+    monkeypatch.setattr(
+        cloud_session.urllib.request, "build_opener", lambda *handlers: _Opener()
+    )
+    with pytest.raises(cloud_session.CloudSessionError) as caught:
+        cloud_session._post_refresh(
+            "https://control.example.test", "refresh", "ws", "member"
+        )
+
+    assert caught.value.status == 503
+    assert "temporarily unreachable" in str(caught.value)
+
+
+def test_a_truncated_refresh_error_body_still_reports_the_status(monkeypatch) -> None:
+    """The drain runs inside the ``except HTTPError`` block, so it needs its own guard.
+
+    An exception raised there cannot reach the sibling ``except HTTPException`` clause of
+    the same ``try``, so an ``(OSError, ValueError)`` guard let ``IncompleteRead`` replace
+    the 401 copy with a traceback.
+    """
+
+    error = urllib.error.HTTPError(
+        "https://control.example.test/v1/tokens/refresh",
+        401, "denied", {}, BytesIO(b'{"detail":"private"}'),
+    )
+
+    def _boom(*args, **kwargs):
+        raise http.client.IncompleteRead(b'{"detail":"pri')
+
+    error.read = _boom
+    error.close = _boom
+
+    class _Opener:
+        def open(self, request, timeout):
+            raise error
+
+    monkeypatch.setattr(
+        cloud_session.urllib.request, "build_opener", lambda *handlers: _Opener()
+    )
+    with pytest.raises(cloud_session.CloudSessionError) as caught:
+        cloud_session._post_refresh(
+            "https://control.example.test", "refresh", "ws", "member"
+        )
+
+    assert caught.value.status == 401
 
 
 def test_refresh_network_error_is_service_unavailable(monkeypatch) -> None:
