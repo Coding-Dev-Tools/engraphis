@@ -329,9 +329,83 @@ def test_network_failure_reports_an_outage_without_leaking_the_detail(monkeypatc
     assert "proxy.internal" not in str(caught.value)
 
 
-def test_a_success_without_a_refresh_credential_writes_nothing(monkeypatch, tmp_path):
+@pytest.mark.parametrize("credential", [
+    ["tok_abc"],            # str(["tok_abc"]) == "['tok_abc']" -- truthy, and not a token
+    {"value": "tok_abc"},
+    12345,
+    True,
+])
+def test_a_non_string_refresh_credential_is_refused(monkeypatch, tmp_path, credential):
+    """``str(value or "")`` is a coercion, not a validation.
+
+    A JSON array or object arrives as a Python ``list``/``dict`` and ``str()`` renders its
+    ``repr`` -- truthy and non-empty. The old check accepted it, ``save_bootstrap`` wrote
+    the literal text ``['tok_abc']``, ``configured()`` read it back as a usable session and
+    the CLI reported success, while the next refresh submitted that junk. By then the
+    single-use connect token was spent, so the customer could not simply retry.
+    """
+
     body = dict(REGISTRATION)
-    body.pop("refresh_credential")
+    body["refresh_credential"] = credential
+    _install_opener(monkeypatch, _Opener(body=body))
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    assert caught.value.status == 502
+    assert "generate a new one" in str(caught.value).lower()
+    assert not (tmp_path / "cloud_session.json").exists()
+    assert cloud_session.configured() is False
+
+
+def test_the_writer_refuses_a_non_string_credential_too(tmp_path):
+    """Defence at the boundary, not only at the one call site above."""
+
+    body = dict(REGISTRATION)
+    body["refresh_credential"] = ["tok_abc"]
+
+    with pytest.raises(cloud_session.CloudSessionError):
+        cloud_session.save_bootstrap(
+            body, control_url=CONTROL_URL, compute_url=COMPUTE_URL
+        )
+
+    assert not (tmp_path / "cloud_session.json").exists()
+
+
+def test_non_string_identity_fields_are_dropped_not_stringified(monkeypatch, tmp_path):
+    """A ``repr`` in the session file is junk the dashboard would display verbatim."""
+
+    body = dict(REGISTRATION)
+    body["installation_id"] = ["instl_alpha"]
+    body["device_id"] = {"id": "devc_alpha"}
+    body["refresh_expires_at"] = ["2026-08-21T00:00:00Z"]
+    _install_opener(monkeypatch, _Opener(body=body))
+
+    device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    saved = json.loads((tmp_path / "cloud_session.json").read_text(encoding="utf-8"))
+    assert saved["installation_id"] == ""
+    assert saved["device_id"] == ""
+    assert saved["refresh_expires_at"] == ""
+    assert "[" not in saved["installation_id"]
+    # The valid fields still land.
+    assert saved["refresh_credential"] == "rotating-refresh-credential"
+    assert saved["organization_id"] == "org_alpha"
+
+
+@pytest.mark.parametrize("credential", [None, "", "   "])
+def test_a_success_without_a_refresh_credential_writes_nothing(
+    monkeypatch, tmp_path, credential
+):
+    """A 200 spends the token even when the body is unusable, so "try again" is wrong.
+
+    The control plane consumes the single-use connect token as it writes a 200.  Re-running
+    the same command therefore cannot succeed -- it deterministically produces a 401 -- so
+    the copy has to send the customer to the portal for a fresh token, exactly like the
+    truncated-reply path does.
+    """
+    body = dict(REGISTRATION)
+    body["refresh_credential"] = credential
     _install_opener(monkeypatch, _Opener(body=body))
 
     with pytest.raises(device_connect.DeviceConnectError) as caught:

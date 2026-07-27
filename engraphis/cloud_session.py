@@ -483,13 +483,31 @@ def record_billing_denial() -> bool:
         return False
 
 
+def text_field(response: dict, key: str) -> str:
+    """Return ``response[key]`` when it is a string, else ``""``.  Never a ``repr``.
+
+    ``str(response.get(key) or "")`` looks like a coercion but is not a validation: JSON
+    arrays and objects arrive as Python ``list``/``dict``, and ``str()`` renders their
+    *repr*, which is both truthy and non-empty.  A control-plane reply carrying
+    ``"refresh_credential": ["tok"]`` was therefore stored as the literal text ``['tok']``;
+    ``configured()`` read that back as a usable session and connect reported success, while
+    the next refresh submitted the junk and failed -- after the single-use connect token had
+    already been spent, so the customer could not simply retry.
+
+    Provider bodies are untrusted, so a field that must be a string is required to be one.
+    """
+
+    value = response.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
 def save_bootstrap(response: dict, *, control_url: str,
                    compute_url: Optional[str] = None,
                    compute_url_source: Optional[str] = None) -> None:
     """Persist the one-time bootstrap/refresh material returned by the control plane."""
 
-    refresh = str(response.get("refresh_credential") or "").strip()
-    organization_id = str(response.get("organization_id") or "").strip()
+    refresh = text_field(response, "refresh_credential")
+    organization_id = text_field(response, "organization_id")
     if not refresh or not organization_id:
         raise CloudSessionError("Cloud bootstrap did not return a refresh credential.")
     value = {
@@ -497,11 +515,11 @@ def save_bootstrap(response: dict, *, control_url: str,
         "control_url": validate_cloud_base_url(control_url),
         "compute_url": validate_cloud_base_url(compute_url) if compute_url else "",
         "organization_id": organization_id,
-        "installation_id": str(response.get("installation_id") or ""),
-        "device_id": str(response.get("device_id") or ""),
-        "member_id": str(response.get("member_id") or ""),
+        "installation_id": text_field(response, "installation_id"),
+        "device_id": text_field(response, "device_id"),
+        "member_id": text_field(response, "member_id"),
         "refresh_credential": refresh,
-        "refresh_expires_at": str(response.get("refresh_expires_at") or ""),
+        "refresh_expires_at": text_field(response, "refresh_expires_at"),
         "token_subject": _validated_token_subject(
             response.get("token_subject") or "member"
         ),
@@ -744,11 +762,13 @@ def access_for_workspace(
         compute = _reachable_cloud_base_url(compute) if compute else ""
         token_subject = _token_subject(saved)
         body = _post_refresh(control, refresh, workspace_id, token_subject)
-        access = str(body.get("access_token") or "").strip()
-        organization_id = str(
-            body.get("organization_id") or saved.get("organization_id") or ""
-        ).strip()
-        rotated = str(body.get("refresh_credential") or "").strip()
+        # Same untrusted-provider boundary as ``save_bootstrap``: a non-string credential
+        # would otherwise be stored as its ``repr`` and submitted on the next refresh.
+        access = text_field(body, "access_token")
+        organization_id = (
+            text_field(body, "organization_id") or text_field(saved, "organization_id")
+        )
+        rotated = text_field(body, "refresh_credential")
         if not access or not organization_id or not rotated:
             # Also post-response: the submitted credential is spent and no rotation was
             # saved, so this must not be reported as a retryable outage either.
@@ -771,7 +791,7 @@ def access_for_workspace(
             "compute_url": compute,
             "organization_id": organization_id,
             "refresh_credential": rotated,
-            "refresh_expires_at": str(body.get("refresh_expires_at") or ""),
+            "refresh_expires_at": text_field(body, "refresh_expires_at"),
             "token_subject": response_subject,
         })
         if compute_source in {"explicit", "server", "fallback"}:
