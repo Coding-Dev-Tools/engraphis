@@ -356,6 +356,15 @@ test('a paying Team customer sees TEAM with Team administration unlocked', async
     .toHaveCount(0);
   await expect(licensePanel.getByRole('button', { name: 'Start hosted Pro trial' }))
     .toHaveCount(0);
+
+  // The Team tab is a description of the hosted service, not an answer to a denial: it
+  // renders for everyone, so its copy must not tell the customer paying for Team that
+  // their subscription excludes it.
+  await openView(page, 'team');
+  const team = page.locator('#team-body');
+  await expect(team).toContainText('Your TEAM subscription includes this');
+  await expect(team).not.toContainText('does not include');
+  await expect(team.getByRole('link', { name: 'Start hosted Team trial' })).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
@@ -375,6 +384,11 @@ test('a paying Pro customer keeps only the Team upsell', async ({ page }) => {
   await expect(licensePanel).toContainText(`✓ ${knownFeatures.analytics}`);
   await expect(licensePanel).toContainText(`✓ ${knownFeatures.consolidation}`);
   await expect(licensePanel).toContainText(`○ ${knownFeatures.team}`);
+
+  // A Pro subscriber genuinely does not have Team; the denial copy is accurate for them.
+  await openView(page, 'team');
+  await expect(page.locator('#team-body'))
+    .toContainText('Your PRO subscription does not include this.');
   expect(errors).toEqual([]);
 });
 

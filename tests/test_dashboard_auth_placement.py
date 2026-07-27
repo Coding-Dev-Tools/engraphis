@@ -319,7 +319,8 @@ def test_a_transient_hosted_conflict_is_not_answered_with_a_purchase_panel(
 # action, and the one a lapsed customer actually clicks. Running it is the only way to see
 # which URL each button really carries.
 _ACTION_FUNCTIONS = (
-    "licAccessState", "licTrialAvailable", "licPlanName", "licPlanKey",
+    "licAccessState", "licAccessLive", "licTrialAvailable", "licPlanName", "licPlanKey",
+    "licTrialEnds", "fmtDay", "lockReason", "teamTeaserNote",
     "hostedAccountUrl", "hostedPlanUrl", "licActionsHtml",
 )
 
@@ -349,8 +350,9 @@ const CASES = JSON.parse(process.argv[2]);
 const out = [];
 for (const c of CASES) {
   LIC = Object.assign({}, LIC_BASE, c.lic || {});
-  // Exactly how renderLicense calls it.
-  out.push({name: c.name, html: licActionsHtml(licAccessState())});
+  // Exactly how renderLicense and loadTeam call them.
+  out.push({name: c.name, html: licActionsHtml(licAccessState()),
+            teamNote: teamTeaserNote()});
 }
 process.stdout.write(JSON.stringify(out));
 """
@@ -371,7 +373,7 @@ def _actions(tmp_path, cases):
         capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, result.stderr
-    return {row["name"]: row["html"] for row in json.loads(result.stdout)}
+    return {row["name"]: row for row in json.loads(result.stdout)}
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
@@ -390,7 +392,7 @@ def test_a_lapsed_customer_renews_the_plan_they_actually_hold(tmp_path, plan, mi
 
     html = _actions(tmp_path, [{
         "name": "lapsed", "lic": {"plan": plan, "access_state": "lapsed"},
-    }])["lapsed"]
+    }])["lapsed"]["html"]
 
     assert "Update billing" in html and "Open account portal" in html
     # The renewal follows the plan the customer holds.
@@ -409,7 +411,7 @@ def test_a_lapsed_customer_with_no_readable_plan_still_gets_a_billing_target(tmp
 
     html = _actions(tmp_path, [{
         "name": "lapsed", "lic": {"plan": "", "access_state": "lapsed"},
-    }])["lapsed"]
+    }])["lapsed"]["html"]
 
     assert "Update billing" in html
     assert "checkout/pro?plan=pro" in html
@@ -432,10 +434,54 @@ def test_each_access_state_offers_the_one_action_that_can_succeed(
         "lic": {"plan": "pro", "access_state": state,
                 "trial": {"used": state != "inactive", "active": state == "trial",
                           "available": state == "inactive", "ends_at": 0}},
-    }])[state]
+    }])[state]["html"]
 
     assert expected in html
     assert absent not in html
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
+def test_a_paying_team_customer_is_not_told_team_is_excluded(tmp_path):
+    """The Team tab is a description of the hosted service, not an answer to a denial.
+
+    It renders for every customer on every visit, so handing it ``lockReason(true)`` — the
+    copy for a *refused* request — told a live Team subscriber "Your TEAM subscription does
+    not include this" directly above an unlocked Team nav item and an Open Team Cloud
+    button, while the backend plan table grants them the ``team`` feature.
+    """
+
+    rows = _actions(tmp_path, [
+        {"name": "team-active", "lic": {"plan": "team", "access_state": "active"}},
+        {"name": "team-trial", "lic": {
+            "plan": "team", "access_state": "trial",
+            "trial": {"used": True, "active": True, "available": False,
+                      "ends_at": 1751068800}}},
+        # Everyone the denial copy is actually about still gets it.
+        {"name": "pro-active", "lic": {"plan": "pro", "access_state": "active"}},
+        {"name": "team-lapsed", "lic": {"plan": "team", "access_state": "lapsed"}},
+        {"name": "team-expired", "lic": {"plan": "team", "access_state": "trial_expired"}},
+        {"name": "free", "lic": {"plan": "local", "access_state": "inactive",
+                                 "trial": {"used": False, "active": False,
+                                           "available": True, "ends_at": 0}}},
+    ])
+
+    assert rows["team-active"]["teamNote"] == (
+        "Your TEAM subscription includes this. Organizations, roles, and seats are "
+        "managed in Engraphis Cloud."
+    )
+    assert rows["team-trial"]["teamNote"] == (
+        "Your free trial includes Team until 2025-06-28. Organizations, roles, and seats "
+        "are managed in Engraphis Cloud."
+    )
+    for name in ("team-active", "team-trial"):
+        assert "does not include" not in rows[name]["teamNote"], name
+
+    # A Pro subscriber genuinely does not have Team, and a plan that is no longer live
+    # grants nothing — both keep the accurate denial sentence.
+    assert rows["pro-active"]["teamNote"] == "Your PRO subscription does not include this."
+    assert "no longer active" in rows["team-lapsed"]["teamNote"]
+    assert "free trial has ended" in rows["team-expired"]["teamNote"]
+    assert "exactly 3 active days" in rows["free"]["teamNote"]
 
 
 def test_only_an_entitlement_status_may_draw_the_purchase_panel():
