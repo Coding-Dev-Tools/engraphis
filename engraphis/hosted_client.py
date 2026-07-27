@@ -92,8 +92,13 @@ def upgrade_url(plan: Optional[str] = None) -> str:
 def account_url() -> str:
     """Return the plan-neutral hosted account URL.
 
-    ``upgrade_url()`` is a checkout selector and defaults to Pro, so it can resolve to a
-    plan-specific checkout. Account and billing actions must prefer the generic portal.
+    ``upgrade_url()`` is a *checkout* selector, not an account entry point: with no
+    argument it resolves ``plan="pro"`` and therefore prefers
+    ``ENGRAPHIS_PRO_UPGRADE_URL``. Wherever those are configured as distinct pages, a
+    lapsed customer sent to "the account portal" would land on the Pro checkout — the
+    wrong product offered to someone whose problem is a payment method on a subscription
+    they already hold. Resolve the generic value directly instead, and fall back to the
+    hosted account root rather than to either plan's page.
     """
 
     return os.environ.get("ENGRAPHIS_UPGRADE_URL", "").strip() or DEFAULT_CLOUD_URL

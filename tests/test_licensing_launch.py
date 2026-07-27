@@ -14,6 +14,7 @@ import io
 import json
 import socket
 import urllib.error
+import http.client
 
 import pytest
 
@@ -28,8 +29,8 @@ SERVER_PLANS = {"free", "pro", "team"}
 SERVER_PAID_PLANS = {"pro", "team"}
 SERVER_HOSTED_ENTITLEMENTS = {
     "free": set(),
-    "pro": {"analytics", "automation", "sync"},
-    "team": {"analytics", "automation", "sync", "team"},
+    "pro": {"analytics", "automation", "export", "sync"},
+    "team": {"analytics", "automation", "export", "sync", "team"},
 }
 SERVER_TRIAL_DURATION_SECONDS = 259_200
 SERVER_WORKSPACE_WRITE_GRACE_MAX_SECONDS = 86_400
@@ -158,6 +159,7 @@ def test_malformed_refresh_json_is_a_structured_error(monkeypatch) -> None:
     [
         urllib.error.URLError(ConnectionRefusedError("connection refused")),
         urllib.error.URLError(socket.gaierror("name resolution failed")),
+        urllib.error.URLError(TimeoutError("timed out before send")),
     ],
 )
 def test_transport_failures_report_a_retryable_outage(monkeypatch, error) -> None:
@@ -169,26 +171,37 @@ def test_transport_failures_report_a_retryable_outage(monkeypatch, error) -> Non
         cloud_session._post_refresh("https://control.example.test", "r", "ws", "member")
 
 
-@pytest.mark.parametrize(
-    "error",
-    [
-        TimeoutError("timed out"),
-        ConnectionResetError("reset waiting for status"),
-        OSError("TLS connection failed while reading status"),
-    ],
-)
-def test_ambiguous_refresh_transport_requires_a_non_retryable_reconnect(
-    monkeypatch, error
-) -> None:
-    """An unwrapped post-write transport failure may leave the credential spent."""
+@pytest.mark.parametrize("error", [
+    TimeoutError("timed out waiting for status"),
+    http.client.RemoteDisconnected("closed waiting for status"),
+    ConnectionResetError("reset waiting for status"),
+    OSError("TLS connection failed while reading status"),
+])
+def test_post_send_refresh_transport_failures_require_reconnect(monkeypatch, error) -> None:
+    """Unwrapped getresponse failures are ambiguous after the refresh POST was written."""
 
     monkeypatch.setattr(
-        cloud_session,
-        "build_pinned_https_opener",
-        _opener_raising(error),
+        cloud_session, "build_pinned_https_opener", _opener_raising(error)
     )
 
-    with pytest.raises(CloudSessionError, match="rotated credential could not be saved") as caught:
+    with pytest.raises(CloudSessionError, match="Connect this installation again") as caught:
+        cloud_session._post_refresh("https://control.example.test", "r", "ws", "member")
+
+    assert caught.value.status == 409
+
+
+@pytest.mark.parametrize("error", [
+    http.client.BadStatusLine("garbled status"),
+    http.client.LineTooLong("status line too long"),
+])
+def test_malformed_refresh_status_after_post_requires_reconnect(monkeypatch, error) -> None:
+    """The POST may have spent the credential before ``getresponse`` rejects its status."""
+
+    monkeypatch.setattr(
+        cloud_session, "build_pinned_https_opener", _opener_raising(error)
+    )
+
+    with pytest.raises(CloudSessionError, match="Connect this installation again") as caught:
         cloud_session._post_refresh("https://control.example.test", "r", "ws", "member")
 
     assert caught.value.status == 409

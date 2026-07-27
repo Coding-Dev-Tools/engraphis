@@ -1,7 +1,4 @@
-/* Engraphis knowledge graph — the unified v2 dashboard's opt-in force-graph engine.
-   `engraphis.dashboard_app` owns this renderer and serves it from `/v2-assets`; the legacy
-   server exposes only the compatibility marker in `engraphis/static/engraphis-graph.js`.
-
+/* Engraphis knowledge graph — the dashboard's opt-in force-graph engine.
    Restores the shipped behaviour: GRAPH_PRESETS, GSTYLE render modes (cyber/galaxy/solar/classic),
    STYLE_PAL / STYLE_LAYERS / STYLE_BG, COMMUNITY_PALS, GRAPH_HEAT, colour-by community/type/connections,
    GRAPH_PALETTES with per-entity-type overrides, d3 force wiring, directional particles, label ranking,
@@ -312,8 +309,8 @@
       path: null, asOf: null, ghost: true, sizeBy: 'degree', bridges: false, suggestions: false, collapse: 'auto'
     };
     let raw = { nodes: [], links: [], suggestions: [] }, adj = {}, hilite = null, hoverSet = null, maxDeg = 1;
-    // Match the classic renderer's ranked label cap. Computing the selected IDs once per
-    // render also keeps per-frame canvas work bounded on dense graphs.
+    // The classic renderer treats label density as a hard ranked cap, not merely a looser
+    // degree threshold. Keeping chosen IDs outside the paint callback bounds fillText work.
     let labelIds = new Set();
     let zoom = 1, collapsed = false;
     /* Recomputed from the *rendered* data on every render, exactly as the classic path
@@ -640,14 +637,14 @@
         // The dashboard setting is a screen-space font size.  As on the classic renderer,
         // compensate only for graph zoom; an extra artistic divisor makes a configured 12px
         // label unreadable at normal zoom and makes the Font size control misleading.
-        const size = state.settings.font / scale;
+        const size = Math.max(2, state.settings.font / scale);
         ctx.font = '500 ' + size + 'px system-ui, sans-serif';
         ctx.textBaseline = 'middle';
         ctx.fillStyle = 'rgba(0,0,0,.5)';
         ctx.fillText(nodeName(node), node.x + r + 1.6 + 0.3, node.y + 0.3);
-        // The canvas sits on both light and dark themes. A hard-coded pale label disappears
-        // on the light canvas, including for a highlighted node.
-        ctx.fillStyle = state.themeColors.label || '#e7e9ee';
+        // Node names sit directly on the canvas, so Classic's light and sepia themes need
+        // the dashboard-resolved text colour just like relation and collapsed-cluster labels.
+        ctx.fillStyle = state.themeColors.label || (node.id === hilite ? '#ffffff' : 'rgba(232,236,245,.86)');
         ctx.fillText(nodeName(node), node.x + r + 1.6, node.y);
       }
       ctx.globalAlpha = 1;
@@ -940,11 +937,10 @@
     api.freeze = on => {
       state.settings.frozen = on;
       if (on) { fg.d3Force('charge').strength(0); fg.d3AlphaDecay(1); return; }
-      applyForces();
-      // Dragging pins nodes with fx/fy. "Unfreeze" must release those pins even when reduced
-      // motion suppresses the reheat below; otherwise the control claims movement is restored
-      // while every dragged node remains immobile.
+      // Dragging pins a node with fx/fy. Unfreezing is a request to resume the layout, not
+      // merely the unpinned subset, so release those anchors before the simulation reheats.
       raw.nodes.forEach(n => { n.fx = undefined; n.fy = undefined; });
+      applyForces();
       if (reduced()) return;
       fg.d3AlphaDecay(alphaDecay());
       if (fg.d3ReheatSimulation) fg.d3ReheatSimulation();

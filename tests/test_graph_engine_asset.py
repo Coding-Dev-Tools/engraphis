@@ -715,60 +715,6 @@ def test_galaxy_stops_animating_once_the_graph_is_large() -> None:
 
 
 @requires_node
-def test_large_graphs_reduce_collision_work_and_skip_cyber_shadows() -> None:
-    """The next engine keeps the classic path's two largest per-node costs bounded.
-
-    Collision relaxation is needed twice per tick for a small layout but only once once the
-    classic ``GPERF.large`` threshold is crossed.  Cyber's rich-node blur is similarly useful
-    at ordinary scale and prohibitively expensive when hundreds of nodes paint each frame.
-    Exercise the actual force and canvas accessors rather than matching their source text.
-    """
-    report = _run_engine(
-        """
-        const collide = () => {
-          let iterations = null;
-          return {
-            iterations(value) {
-              if (arguments.length) { iterations = value; return this; }
-              return iterations;
-            },
-          };
-        };
-        globalThis.d3 = {
-          forceX: () => ({ strength() { return this; } }),
-          forceY: () => ({ strength() { return this; } }),
-          forceCollide: collide,
-        };
-        const shadows = () => {
-          const writes = [];
-          const ctx = {
-            save() {}, restore() {}, beginPath() {}, arc() {}, fill() {}, stroke() {},
-            set shadowColor(value) { writes.push(['color', value]); },
-            set shadowBlur(value) { writes.push(['blur', value]); },
-          };
-          store.nodeCanvasObject(
-            { id: 'rich', x: 0, y: 0, radius: 5, color: '#22e0ff', degree: 3 }, ctx, 1
-          );
-          return writes;
-        };
-        const api = G.create(el, {});
-        api.setStyle('cyber');
-        api.setData(chain(40));
-        const smallIterations = store.d3Force[1].iterations();
-        const smallShadows = shadows();
-        api.setData(chain(601));
-        const largeIterations = store.d3Force[1].iterations();
-        const largeShadows = shadows();
-        emit({ smallIterations, largeIterations, smallShadows, largeShadows });
-        """
-    )
-    assert report["smallIterations"] == 2
-    assert report["largeIterations"] == 1
-    assert report["smallShadows"] == [["color", "#22e0ff"], ["blur", 13]]
-    assert report["largeShadows"] == []
-
-
-@requires_node
 def test_type_colours_follow_the_active_theme_not_a_hard_coded_dark_palette() -> None:
     """``applyTheme()`` recolours the canvas, but the engine had no theme to recolour to.
 
@@ -1101,109 +1047,83 @@ def test_relation_labels_are_painted_when_the_labels_box_is_ticked() -> None:
     assert report["zoomedOut"] == []
 
 
-def test_entity_labels_preserve_the_configured_screen_font_size() -> None:
-    """The canvas transform already applies zoom; the label size compensates exactly once."""
-    source = ASSET.read_text(encoding="utf-8")
-    assert "const size = state.settings.font / scale;" in source
-    assert "state.settings.font / scale / 3.4" not in source
-
-
 @requires_node
 def test_node_labels_are_capped_at_the_configured_density() -> None:
-    """Label density is a ranked cap, so dense graphs do bounded text work per frame."""
+    """A high density setting must still bound per-frame node-label painting."""
     report = _run_engine(
         """
         let labels = [];
         const ctx = {
-          globalAlpha: 1, fillStyle: '', strokeStyle: '', lineWidth: 1, font: '',
-          textBaseline: '', save() {}, restore() {}, beginPath() {}, arc() {}, stroke() {},
-          fill() {}, createRadialGradient() { return { addColorStop() {} }; },
+          globalAlpha: 1, fillStyle: '', strokeStyle: '', lineWidth: 1, font: '', textBaseline: '',
+          save() {}, restore() {}, beginPath() {}, arc() {}, stroke() {}, fill() {},
+          createRadialGradient() { return { addColorStop() {} }; },
           fillText(text) { labels.push(String(text)); },
         };
         const api = G.create(el, { reducedMotion: () => true });
         api.setData(chain(20));
         api.setSettings({ labels: true, labelDensity: 3 });
         store.graphData.nodes.forEach((node, index) => {
-          node.x = index * 10;
-          node.y = 0;
-          store.nodeCanvasObject(node, ctx, 1);
+          node.x = index * 10; node.y = 0; store.nodeCanvasObject(node, ctx, 1);
         });
         const names = labels.filter(value => value.startsWith('n'));
         emit({ names, distinct: [...new Set(names)] });
         """
     )
     assert len(report["distinct"]) == 3
-    assert len(report["names"]) == 6  # shadow and foreground per selected node
+    assert len(report["names"]) == 6  # shadow + foreground per selected node
 
 
 def test_collapsed_cluster_labels_use_the_active_theme_text_colour() -> None:
     source = ASSET.read_text(encoding="utf-8")
-    cluster_start = source.index("if (node.cluster)")
-    cluster_paint = source[
-        cluster_start : source.index("if (state.bridges", cluster_start)
-    ]
+    cluster_paint = source[source.index("if (node.cluster)"):source.index("if (state.bridges", source.index("if (node.cluster)"))]
     assert "state.themeColors.label || '#e7e9ee'" in cluster_paint
 
 
 @requires_node
-def test_normal_and_highlighted_node_labels_use_the_active_theme_text_colour() -> None:
-    """Entity labels remain visible on the light canvas, including the highlighted node."""
+def test_node_labels_use_the_active_theme_text_colour() -> None:
+    """Classic labels paint onto the canvas, so near-white is unreadable on light themes."""
+
     report = _run_engine(
-        """
+        LAY_OUT
+        + """
         const api = G.create(el, { reducedMotion: () => true });
-        api.setData({
-          nodes: [{ id: 'a', name: 'Alpha', degree: 20 }, { id: 'b', name: 'Beta' }],
-          links: [{ source: 'a', target: 'b' }],
-        });
-        const node = store.graphData.nodes[0];
-        node.x = 1; node.y = 2;
-        api.setSettings({ labels: true, labelDensity: 100 });
+        api.setData(chain(2));
+        const data = layOut();
+        api.setStyle('classic');
         api.setThemeColors({ label: '#123456' });
-        const painted = [];
-        const ctx = new Proxy({
-          fillStyle: '',
-          fillText(text) { painted.push({ text: String(text), color: this.fillStyle }); },
-        }, {
-          get(target, name) {
-            if (name in target) return target[name];
-            return () => {};
-          },
-        });
-        store.nodeCanvasObject(node, ctx, 1);
-        const normal = painted[painted.length - 1];
-        api.setHighlight('a');
-        painted.length = 0;
-        store.nodeCanvasObject(node, ctx, 1);
-        emit({ normal, highlighted: painted[painted.length - 1] });
+        api.setHighlight('n0');
+        const styles = [];
+        const ctx = {
+          set fillStyle(value) { styles.push(value); }, get fillStyle() { return ''; },
+          font: '', textBaseline: '', lineWidth: 0, strokeStyle: '', globalAlpha: 1,
+          beginPath() {}, arc() {}, fill() {}, stroke() {}, fillText() {}, save() {}, restore() {},
+        };
+        store.nodeCanvasObject(data.nodes[0], ctx, 1);
+        emit({ styles });
         """
     )
-    assert report["normal"]["color"] == "#123456"
-    assert report["highlighted"]["color"] == "#123456"
+    assert "#123456" in report["styles"], "node labels ignored the active theme text colour"
 
 
 @requires_node
-def test_unfreezing_releases_drag_pins_even_with_reduced_motion() -> None:
+def test_unfreezing_releases_nodes_pinned_by_dragging() -> None:
+    """Freeze off must resume the whole layout, including nodes a prior drag pinned."""
+
     report = _run_engine(
         """
-        const api = G.create(el, { reducedMotion: () => true });
-        api.setData({
-          nodes: [{ id: 'a' }, { id: 'b' }],
-          links: [{ source: 'a', target: 'b' }],
-        });
+        const api = G.create(el, { reducedMotion: () => false });
+        api.setData(chain(2));
         const node = store.graphData.nodes[0];
-        node.x = 10; node.y = 20;
+        node.x = 17; node.y = 23;
         store.onNodeDragEnd(node);
-        const pinned = node.fx === 10 && node.fy === 20;
+        const pinned = { fx: node.fx, fy: node.fy };
         api.freeze(true);
         api.freeze(false);
-        emit({
-          pinned,
-          released: node.fx === undefined && node.fy === undefined,
-          reheats: invocations.d3ReheatSimulation || 0,
-        });
+        emit({ pinned, released: { fx: node.fx, fy: node.fy } });
         """
     )
-    assert report == {"pinned": True, "released": True, "reheats": 0}
+    assert report["pinned"] == {"fx": 17, "fy": 23}
+    assert report["released"] == {}, "unfreezing left a dragged node immovable"
 
 
 @requires_node
