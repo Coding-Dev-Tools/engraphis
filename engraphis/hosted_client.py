@@ -89,6 +89,16 @@ def upgrade_url(plan: Optional[str] = None) -> str:
     return value or DEFAULT_CLOUD_URL
 
 
+def account_url() -> str:
+    """Return the plan-neutral hosted account URL.
+
+    ``upgrade_url()`` is a checkout selector and defaults to Pro, so it can resolve to a
+    plan-specific checkout. Account and billing actions must prefer the generic portal.
+    """
+
+    return os.environ.get("ENGRAPHIS_UPGRADE_URL", "").strip() or DEFAULT_CLOUD_URL
+
+
 def _is_loopback_host(host: str) -> bool:
     if host == "localhost":
         return True

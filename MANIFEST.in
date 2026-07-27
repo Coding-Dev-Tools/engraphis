@@ -3,6 +3,7 @@ global-exclude *.pyo
 
 recursive-include engraphis/static *.html *.css *.js *.png *.ico
 recursive-include engraphis/static/vendor *
+recursive-include engraphis/dashboard_assets *.js
 include engraphis/commercial_manifest.json
 include LICENSE NOTICE README.md CHANGELOG.md
 include pyproject.toml

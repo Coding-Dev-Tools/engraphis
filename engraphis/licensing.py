@@ -13,6 +13,7 @@ from engraphis.hosted_client import (
     TRIAL_DAYS,
     TRIAL_SECONDS,
     HostedFeatureError,
+    account_url,
     required_plan,
     upgrade_url,
 )
@@ -29,6 +30,7 @@ def production_warnings() -> list:
 
 __all__ = [
     "LicenseError",
+    "account_url",
     "MAX_LOCAL_WRITE_GRACE_SECONDS",
     "TRIAL_DAYS",
     "TRIAL_SECONDS",

@@ -23,6 +23,7 @@ from engraphis.routes import v2_api
 from engraphis.service import MemoryService
 
 _STATIC = Path(__file__).resolve().parent / "static"
+_V2_ASSETS = Path(__file__).resolve().parent / "dashboard_assets"
 _INDEX = _STATIC / "index.html"
 
 # The public package is a single-user local runtime. Hosted account, Team, trial, and
@@ -231,6 +232,10 @@ def create_app() -> FastAPI:
             )
         return await call_next(request)
 
+    # New dashboard capabilities belong to the v2 application surface.  The old ``static``
+    # directory remains mounted for the legacy shell and compatibility adapters only.
+    if _V2_ASSETS.is_dir():
+        app.mount("/v2-assets", StaticFiles(directory=str(_V2_ASSETS)), name="v2-assets")
     if _STATIC.is_dir():
         app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
 

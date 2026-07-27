@@ -25,8 +25,9 @@ organization:
 
 1. The organization owner starts Team or purchases a subscription in Engraphis Cloud.
 2. The owner invites named members and assigns roles in the hosted dashboard.
-3. A member accepts the invitation and creates a scoped agent/device credential.
-4. The member configures their agent with the hosted URL and the one-time credential.
+3. A member accepts the invitation and generates a one-time **connect token** (`engr_ct_…`).
+   The account portal shows the exact command to run.
+4. The member runs that command on the machine being connected (see below).
 5. The hosted service rechecks organization membership, role, scopes, entitlement version, and
    workspace binding on every request.
 
@@ -37,6 +38,53 @@ The hosted onboarding flow provides the exact endpoint and client snippet for th
 organization. Do not substitute the URL of a public self-hosted image: that image intentionally
 has no Team identity backend.
 
+## Connect a machine: `engraphis connect`
+
+Copy the command from your account portal and run it on the machine you are connecting:
+
+```bash
+engraphis connect --token engr_ct_...
+```
+
+That redeems the token against `POST /v1/devices/connect` on the control plane and writes the
+owner-only session file `~/.engraphis/cloud_session.json` (mode `0600`). The dashboard, the MCP
+server, and Cloud Sync all read that file, so no environment secret is needed afterwards. Rerun
+`engraphis connect` with a fresh token on every machine you want connected.
+
+Useful options:
+
+| Option | Effect |
+| --- | --- |
+| `--token -` | Read the token from stdin, so it never enters shell history. |
+| `--workspace WS_ID` | Bind this device to a single workspace. |
+| `--label TEXT` | Name this installation in your account portal. |
+| `--device-name TEXT` | Override the device name (defaults to the hostname). |
+| `--control-url URL` | Point at a non-default control plane. |
+| `--compute-url URL` | Set the managed compute endpoint (also `ENGRAPHIS_CLOUD_COMPUTE_URL`). |
+| `--json` | Print a redacted, machine-readable summary. |
+
+The same command is installed as `engraphis-connect`, matching the other `engraphis-*` scripts.
+
+Connect tokens are **single-use and short-lived**. The service answers every refusal — expired,
+already redeemed, or never valid — with the same `401`, so the client reports all three
+possibilities and the fix is always the same: generate a new token in the account portal. A `402`
+means the subscription itself has lapsed; fix billing rather than the token.
+
+Because the token is single-use, the client checks that it can actually write the session file
+*before* redeeming it. If the state directory is not writable, or `cloud_session.json` has been
+replaced by a symlink, a hard link, or a directory, the command fails immediately, names the path
+to fix, and sends nothing — your token is untouched, so you can correct the path and rerun the
+same command rather than issuing a new token.
+
+The token is a credential. It is sent in the request body and nowhere else — it is never
+printed, never logged, and never written to disk. What *is* written is the rotating refresh
+credential the service returns, which is why the session file is owner-only.
+
+The command also mints a stable per-installation identity at `~/.engraphis/client_identity.json`
+(random ULIDs, not a hardware fingerprint) so reconnecting the same machine updates the existing
+installation instead of registering a new device every time. Both files honour
+`ENGRAPHIS_STATE_DIR`; a distinct state directory is a distinct installation.
+
 ## Credential lifecycle
 
 Hosted access uses short-lived access tokens plus rotating refresh credentials. A refresh family
@@ -45,7 +93,10 @@ service; the raw replacement is returned once and must be kept in an owner-only 
 or secrets manager.
 
 Customer-side environment variables are documented in [`.env.example`](../.env.example). Prefer
-the onboarding-created `~/.engraphis/cloud_session.json` over long-lived environment secrets.
+the `~/.engraphis/cloud_session.json` that `engraphis connect --token` writes over long-lived
+environment secrets: it holds a rotating credential, it is owner-only, and it is the path the
+client keeps up to date on its own. Environment secrets are for non-interactive deployments that
+cannot run the connect command.
 
 ## Trial and grace
 

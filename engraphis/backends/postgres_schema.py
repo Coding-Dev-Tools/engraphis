@@ -6,8 +6,11 @@ returned, logged, or embedded in memory; provenance contains a one-way digest in
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
-from typing import Any, Optional
+import socket
+from typing import Any, Optional, Union
+from urllib.parse import urlparse
 
 from engraphis.core.interfaces import SchemaSnapshot
 
@@ -32,19 +35,91 @@ def _bounded_env_int(name: str, default: int, maximum: int) -> int:
     return max(1, min(maximum, value))
 
 
+def _global_unicast(
+    address: Union[ipaddress.IPv4Address, ipaddress.IPv6Address],
+) -> bool:
+    """Return whether *address* is safe for an untrusted outbound connection."""
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        address = mapped
+    return (
+        address.is_global
+        and not address.is_multicast
+        and not address.is_unspecified
+        and not address.is_loopback
+        and not address.is_link_local
+        and not address.is_private
+        and not address.is_reserved
+    )
+
+
+def _validate_dsn_host(dsn: str) -> tuple[str, Optional[str]]:
+    """Return the TLS hostname and pinned socket address for a safe DSN."""
+    env_dsn = os.environ.get("ENGRAPHIS_POSTGRES_DSN", "")
+    if env_dsn and dsn.strip() == env_dsn.strip():
+        return "", None
+    try:
+        parsed = urlparse(dsn)
+        hostname = parsed.hostname
+    except (TypeError, ValueError) as exc:
+        raise PostgresIntrospectionError("invalid PostgreSQL DSN") from exc
+    if not hostname:
+        raise PostgresIntrospectionError("PostgreSQL DSN must include a hostname")
+    loopback = {
+        "localhost": "127.0.0.1",
+        "127.0.0.1": "127.0.0.1",
+        "::1": "::1",
+    }
+    if hostname.lower() in loopback:
+        return hostname, loopback[hostname.lower()]
+    try:
+        infos = socket.getaddrinfo(
+            hostname,
+            parsed.port or 5432,
+            type=socket.SOCK_STREAM,
+            proto=socket.IPPROTO_TCP,
+        )
+    except (OSError, ValueError) as exc:
+        raise PostgresIntrospectionError("cannot resolve PostgreSQL host") from exc
+    addresses: list[str] = []
+    for _, _, _, _, sockaddr in infos:
+        try:
+            addr = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            raise PostgresIntrospectionError(
+                "PostgreSQL host resolved to an invalid address"
+            )
+        if not _global_unicast(addr):
+            raise PostgresIntrospectionError(
+                "PostgreSQL DSN must resolve only to global unicast addresses"
+            )
+        canonical = str(addr)
+        if canonical not in addresses:
+            addresses.append(canonical)
+    if not addresses:
+        raise PostgresIntrospectionError("cannot resolve PostgreSQL host")
+    return hostname, addresses[0]
+
+
 def _connect(dsn: str):
+    hostname, hostaddr = _validate_dsn_host(dsn)
     timeout = _bounded_env_int(
         "ENGRAPHIS_POSTGRES_CONNECT_TIMEOUT",
         _DEFAULT_CONNECT_TIMEOUT_SECONDS,
         _MAX_CONNECT_TIMEOUT_SECONDS,
     )
+    connect_kwargs: dict[str, Any] = {"connect_timeout": timeout}
+    if hostaddr is not None:
+        # libpq connects to hostaddr without another DNS lookup, while host remains
+        # available for TLS certificate verification and password-file matching.
+        connect_kwargs.update(host=hostname, hostaddr=hostaddr)
     try:
         import psycopg
-        return psycopg.connect(dsn, connect_timeout=timeout)
+        return psycopg.connect(dsn, **connect_kwargs)
     except ImportError:
         try:
             import psycopg2
-            return psycopg2.connect(dsn, connect_timeout=timeout)
+            return psycopg2.connect(dsn, **connect_kwargs)
         except ImportError as exc:
             raise PostgresIntrospectionError(
                 "PostgreSQL introspection needs psycopg: "

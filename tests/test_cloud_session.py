@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 from io import BytesIO
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -59,6 +60,233 @@ def test_refresh_rotates_saved_credential_and_binds_client_workspace(monkeypatch
         "member",
     )]
     assert writes[0]["refresh_credential"] == "rotated-refresh"
+
+
+@pytest.mark.parametrize("field", ["access_token", "refresh_credential"])
+def test_refresh_rejects_non_string_credentials_without_saving(monkeypatch, field) -> None:
+    """Provider JSON types are validated, never coerced into a credential repr."""
+
+    saved = {
+        "control_url": "https://control.example.test",
+        "compute_url": "https://compute.example.test",
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+    }
+    writes = []
+    body = {
+        "access_token": "short-lived-access",
+        "organization_id": "org_1",
+        "refresh_credential": "rotated-refresh",
+        "token_subject": "member",
+    }
+    body[field] = ["not", "a", "credential"]
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(saved))
+    monkeypatch.setattr(cloud_session, "_save", writes.append)
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", lambda value: value.rstrip("/"))
+    monkeypatch.setattr(cloud_session, "_post_refresh", lambda *_args: body)
+
+    with pytest.raises(cloud_session.CloudSessionError) as caught:
+        cloud_session.access_for_workspace("ws_client_1")
+
+    assert caught.value.status == 409
+    assert writes == []
+
+
+def test_refresh_updates_the_saved_compute_endpoint_from_a_valid_response(monkeypatch) -> None:
+    """The cloud can move a connected installation to a new compute endpoint."""
+
+    previous = "https://compute-old.example.test"
+    assigned = "https://compute-new.example.test"
+    state = {
+        "control_url": "https://control.example.test",
+        "compute_url": previous,
+        "compute_url_source": "server",
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+    }
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(cloud_session, "_save", lambda value: state.update(value))
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", lambda value: value.rstrip("/"))
+    monkeypatch.setattr(cloud_session, "_post_refresh", lambda *_args: {
+        "access_token": "short-lived-access",
+        "organization_id": "org_1",
+        "refresh_credential": "rotated-refresh",
+        "token_subject": "member",
+        "compute_url": assigned,
+    })
+
+    assert cloud_session.access_for_workspace("ws_client_1") == (
+        "short-lived-access", "org_1", assigned,
+    )
+    assert state["compute_url"] == assigned
+
+
+def test_refresh_can_supply_a_missing_compute_endpoint_before_require_compute(monkeypatch) -> None:
+    """A compute-less saved session must reach the refresh that repairs it."""
+
+    assigned = "https://compute-new.example.test"
+    state = {
+        "control_url": "https://control.example.test",
+        "compute_url": "",
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+    }
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(cloud_session, "_save", lambda value: state.update(value))
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", lambda value: value.rstrip("/"))
+    monkeypatch.setattr(cloud_session, "_post_refresh", lambda *_args: {
+        "access_token": "short-lived-access",
+        "organization_id": "org_1",
+        "refresh_credential": "rotated-refresh",
+        "token_subject": "member",
+        "compute_url": assigned,
+    })
+
+    assert cloud_session.access_for_workspace("ws_client_1") == (
+        "short-lived-access", "org_1", assigned,
+    )
+    assert state["compute_url"] == assigned
+    assert state["compute_url_source"] == "server"
+    assert state["refresh_credential"] == "rotated-refresh"
+
+
+@pytest.mark.parametrize("server_compute", [None, "http://private.example.test"])
+def test_compute_less_refresh_persists_rotation_before_a_structured_compute_error(
+    monkeypatch, server_compute
+) -> None:
+    """Missing or unsafe endpoint metadata must not roll back the one-time rotation."""
+
+    state = {
+        "control_url": "https://control.example.test",
+        "compute_url": "",
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+    }
+
+    def validate(value):
+        if value == server_compute:
+            raise ValueError("not an allowed endpoint")
+        return value.rstrip("/")
+
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(cloud_session, "_save", lambda value: state.update(value))
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", validate)
+    body = {
+        "access_token": "short-lived-access",
+        "organization_id": "org_1",
+        "refresh_credential": "rotated-refresh",
+        "token_subject": "member",
+    }
+    if server_compute is not None:
+        body["compute_url"] = server_compute
+    monkeypatch.setattr(cloud_session, "_post_refresh", lambda *_args: body)
+
+    with pytest.raises(cloud_session.CloudSessionError) as caught:
+        cloud_session.access_for_workspace("ws_client_1")
+
+    assert caught.value.status == 503
+    assert state["refresh_credential"] == "rotated-refresh"
+    assert state["compute_url"] == ""
+
+
+def test_refresh_ignores_an_invalid_compute_endpoint_without_clearing_the_saved_one(
+    monkeypatch,
+) -> None:
+    """An untrusted response value cannot poison or erase a usable compute endpoint."""
+
+    previous = "https://compute-old.example.test"
+    invalid = "http://private.example.test"
+    state = {
+        "control_url": "https://control.example.test",
+        "compute_url": previous,
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+    }
+
+    def validate(value):
+        if value == invalid:
+            raise ValueError("not an allowed endpoint")
+        return value.rstrip("/")
+
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(cloud_session, "_save", lambda value: state.update(value))
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", validate)
+    monkeypatch.setattr(cloud_session, "_post_refresh", lambda *_args: {
+        "access_token": "short-lived-access",
+        "organization_id": "org_1",
+        "refresh_credential": "rotated-refresh",
+        "token_subject": "member",
+        "compute_url": invalid,
+    })
+
+    assert cloud_session.access_for_workspace("ws_client_1") == (
+        "short-lived-access", "org_1", previous,
+    )
+    assert state["compute_url"] == previous
+
+
+def test_legacy_nonempty_compute_endpoint_is_preserved_against_a_server_update(monkeypatch) -> None:
+    """Pre-source sessions may hold an operator override, so keep it conservatively."""
+
+    previous = "https://legacy-operator-compute.example.test"
+    assigned = "https://assigned-compute.example.test"
+    state = {
+        "control_url": "https://control.example.test",
+        "compute_url": previous,
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+    }
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(cloud_session, "_save", lambda value: state.update(value))
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", lambda value: value.rstrip("/"))
+    monkeypatch.setattr(cloud_session, "_post_refresh", lambda *_args: {
+        "access_token": "short-lived-access",
+        "organization_id": "org_1",
+        "refresh_credential": "rotated-refresh",
+        "token_subject": "member",
+        "compute_url": assigned,
+    })
+
+    assert cloud_session.access_for_workspace("ws_client_1") == (
+        "short-lived-access", "org_1", previous,
+    )
+    assert state["compute_url"] == previous
+    assert state["compute_url_source"] == "explicit"
+
+
+def test_refresh_does_not_replace_a_persisted_explicit_compute_override(monkeypatch) -> None:
+    previous = "https://operator-compute.example.test"
+    assigned = "https://assigned-compute.example.test"
+    state = {
+        "control_url": "https://control.example.test",
+        "compute_url": previous,
+        "compute_url_source": "explicit",
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+    }
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(cloud_session, "_save", lambda value: state.update(value))
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", lambda value: value.rstrip("/"))
+    monkeypatch.setattr(cloud_session, "_post_refresh", lambda *_args: {
+        "access_token": "short-lived-access",
+        "organization_id": "org_1",
+        "refresh_credential": "rotated-refresh",
+        "token_subject": "member",
+        "compute_url": assigned,
+    })
+
+    assert cloud_session.access_for_workspace("ws_client_1") == (
+        "short-lived-access", "org_1", previous,
+    )
+    assert state["compute_url"] == previous
+    assert state["compute_url_source"] == "explicit"
 
 
 def test_direct_access_token_path_never_reads_refresh_state(monkeypatch) -> None:
@@ -280,6 +508,153 @@ def test_refresh_authorization_error_preserves_status(monkeypatch, status) -> No
         )
 
     assert caught.value.status == status
+
+
+@pytest.mark.parametrize("failure", [
+    http.client.LineTooLong("header line"),
+    http.client.BadStatusLine("garbage"),
+    http.client.RemoteDisconnected("peer closed"),
+])
+def test_a_mangled_refresh_status_line_requires_reconnect(monkeypatch, failure) -> None:
+    """A missing or malformed status line happens after the refresh POST was written.
+
+    The server may have spent the single-use credential before the response failed. Marking
+    this transient invites an unsafe replay; reconnecting is the conservative recovery.
+    """
+
+    class _Opener:
+        def open(self, request, timeout):
+            raise failure
+
+    monkeypatch.setattr(
+        cloud_session.urllib.request, "build_opener", lambda *handlers: _Opener()
+    )
+    with pytest.raises(cloud_session.CloudSessionError) as caught:
+        cloud_session._post_refresh(
+            "https://control.example.test", "refresh", "ws", "member"
+        )
+
+    assert caught.value.status == 409
+    assert "rotated credential could not be saved" in str(caught.value)
+
+
+@pytest.mark.parametrize("failure", [
+    http.client.IncompleteRead(b'{"access_'),
+    TimeoutError("read timed out"),
+    ConnectionResetError("reset mid-body"),
+])
+def test_a_truncated_refresh_body_is_not_reported_as_a_retryable_outage(
+    monkeypatch, failure
+) -> None:
+    """A post-response failure must not invite a retry that replays a spent credential.
+
+    Once the status line parses, the control plane consumed the submitted credential, but
+    the rotation it returned only reaches disk after the body parses -- so the stale value
+    is still there. ``_public_session_error`` maps 503 to ``transient=True``, which
+    ``CloudFeatureClient.run_job`` acts on by retrying, and this module documents that the
+    control plane answers a replayed credential by revoking the whole family. 409 is the
+    existing non-transient "connect this installation again" bucket.
+    """
+
+    class _Truncated:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> bool:
+            return False
+
+        def read(self, size: int = -1) -> bytes:
+            raise failure
+
+    class _Opener:
+        def open(self, request, timeout):
+            return _Truncated()
+
+    monkeypatch.setattr(
+        cloud_session.urllib.request, "build_opener", lambda *handlers: _Opener()
+    )
+    with pytest.raises(cloud_session.CloudSessionError) as caught:
+        cloud_session._post_refresh(
+            "https://control.example.test", "refresh", "ws", "member"
+        )
+
+    assert caught.value.status == 409
+    assert "Connect this installation again" in str(caught.value)
+
+    # The status must survive translation to the public error as non-transient, or the
+    # retry this whole change exists to prevent happens anyway.
+    from engraphis.cloud_features import _public_session_error
+
+    _message, transient = _public_session_error(caught.value.status)
+    assert transient is False
+
+
+@pytest.mark.parametrize("payload", [
+    b"{not json",
+    b'"a string"',
+    b"[]",
+])
+def test_an_unparseable_refresh_body_is_also_non_transient(monkeypatch, payload) -> None:
+    """Same hazard as a truncated body: answered, credential spent, rotation not saved."""
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> bool:
+            return False
+
+        def read(self, size: int = -1) -> bytes:
+            return payload
+
+    class _Opener:
+        def open(self, request, timeout):
+            return _Response()
+
+    monkeypatch.setattr(
+        cloud_session.urllib.request, "build_opener", lambda *handlers: _Opener()
+    )
+    with pytest.raises(cloud_session.CloudSessionError) as caught:
+        cloud_session._post_refresh(
+            "https://control.example.test", "refresh", "ws", "member"
+        )
+
+    assert caught.value.status == 409
+    assert "invalid session response" in str(caught.value)
+
+
+def test_a_truncated_refresh_error_body_still_reports_the_status(monkeypatch) -> None:
+    """The drain runs inside the ``except HTTPError`` block, so it needs its own guard.
+
+    An exception raised there cannot reach the sibling ``except HTTPException`` clause of
+    the same ``try``, so an ``(OSError, ValueError)`` guard let ``IncompleteRead`` replace
+    the 401 copy with a traceback.
+    """
+
+    error = urllib.error.HTTPError(
+        "https://control.example.test/v1/tokens/refresh",
+        401, "denied", {}, BytesIO(b'{"detail":"private"}'),
+    )
+
+    def _boom(*args, **kwargs):
+        raise http.client.IncompleteRead(b'{"detail":"pri')
+
+    error.read = _boom
+    error.close = _boom
+
+    class _Opener:
+        def open(self, request, timeout):
+            raise error
+
+    monkeypatch.setattr(
+        cloud_session.urllib.request, "build_opener", lambda *handlers: _Opener()
+    )
+    with pytest.raises(cloud_session.CloudSessionError) as caught:
+        cloud_session._post_refresh(
+            "https://control.example.test", "refresh", "ws", "member"
+        )
+
+    assert caught.value.status == 401
 
 
 def test_refresh_network_error_is_service_unavailable(monkeypatch) -> None:
