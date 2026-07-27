@@ -14,6 +14,7 @@ import io
 import json
 import socket
 import urllib.error
+import http.client
 
 import pytest
 
@@ -168,6 +169,23 @@ def test_transport_failures_report_a_retryable_outage(monkeypatch, error) -> Non
 
     with pytest.raises(CloudSessionError, match="temporarily unreachable"):
         cloud_session._post_refresh("https://control.example.test", "r", "ws", "member")
+
+
+@pytest.mark.parametrize("error", [
+    http.client.BadStatusLine("garbled status"),
+    http.client.LineTooLong("status line too long"),
+])
+def test_malformed_refresh_status_after_post_requires_reconnect(monkeypatch, error) -> None:
+    """The POST may have spent the credential before ``getresponse`` rejects its status."""
+
+    monkeypatch.setattr(
+        cloud_session, "build_pinned_https_opener", _opener_raising(error)
+    )
+
+    with pytest.raises(CloudSessionError, match="Connect this installation again") as caught:
+        cloud_session._post_refresh("https://control.example.test", "r", "ws", "member")
+
+    assert caught.value.status == 409
 
 
 # ── (a)/(6) billing and authorization copy must be actionable ─────────────────

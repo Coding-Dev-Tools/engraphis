@@ -572,15 +572,21 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
         raise _refresh_http_error(code)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise CloudSessionError("Engraphis Cloud is temporarily unreachable.") from exc
+    except (http.client.BadStatusLine, http.client.LineTooLong) as exc:
+        # ``getresponse()`` raises these only after urllib has sent the POST.  The control
+        # plane may therefore have consumed the single-use refresh credential, while its
+        # replacement never reached disk.  Retrying would replay the stale credential and can
+        # revoke its whole family, so prefer reconnecting over an unsafe transient retry.
+        # ``RemoteDisconnected`` is also a ``BadStatusLine`` but reaches the earlier OSError
+        # transport clause through its ``ConnectionResetError`` base.
+        raise CloudSessionError(
+            "Engraphis Cloud returned a malformed refresh response, so the rotated "
+            "credential could not be saved. Connect this installation again.",
+            status=409,
+        ) from exc
     except http.client.HTTPException as exc:
-        # ``LineTooLong``/``BadStatusLine`` from a mangled status line or headers. None of
-        # them are ``OSError``, so without this clause they escaped as a traceback out of
-        # every paid feature's token refresh.
-        #
-        # Deliberately *after* the transport clause: ``RemoteDisconnected`` is both a
-        # ``ConnectionResetError`` and a ``BadStatusLine``, and it keeps the transport copy
-        # it already had.  Nothing was parsed here, so the credential is untouched and the
-        # retryable outage status is correct.
+        # Other malformed HTTP replies have no useful protocol status, but unlike a malformed
+        # status line they do not establish that this request reached the control plane.
         raise CloudSessionError("Engraphis Cloud is temporarily unreachable.") from exc
 
     try:
