@@ -390,6 +390,67 @@ def test_an_unusable_2xx_body_says_the_token_was_spent(monkeypatch, tmp_path, pa
     assert not (tmp_path / "cloud_session.json").exists()
 
 
+@pytest.mark.parametrize("failure", [
+    TimeoutError("read timed out"),
+    ConnectionResetError("peer reset mid-body"),
+    OSError("device disappeared"),
+])
+def test_a_body_read_failure_after_success_headers_is_not_a_plain_retry(
+    monkeypatch, tmp_path, failure
+):
+    """``OSError`` means opposite things either side of ``opener.open()``.
+
+    Once ``open`` returns, urllib has already parsed a success status line, so the control
+    plane answered and the single-use token is spent. While the open and the body read
+    shared one ``try``, a socket that timed out or reset *mid-body* inherited the
+    connection-phase copy -- "temporarily unreachable ... try again" -- and sent the
+    customer back with a token that could not work.
+    """
+
+    class _DiesMidBody:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> bool:
+            return False
+
+        def read(self, size: int = -1) -> bytes:
+            raise failure
+
+    class _Opened(_Opener):
+        def open(self, request, timeout):
+            self.calls.append({"body": request.data})
+            return _DiesMidBody()
+
+    _install_opener(monkeypatch, _Opened())
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    message = str(caught.value)
+    assert caught.value.status == 502
+    assert "may already have been used" in message
+    # The connection-phase copy must not be what a post-response fault reports.
+    assert "temporarily unreachable" not in message
+    assert TOKEN not in message
+    assert not (tmp_path / "cloud_session.json").exists()
+
+
+def test_a_reset_before_any_reply_keeps_the_plain_retry_copy(monkeypatch):
+    """The other side of the split: nothing was consumed, so "try again" is still right."""
+
+    _install_opener(
+        monkeypatch, _Opener(error=ConnectionResetError("closed before answering"))
+    )
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    assert caught.value.status == 503
+    assert "temporarily unreachable" in str(caught.value)
+    assert "may already have been used" not in str(caught.value)
+
+
 def test_a_lock_failure_racing_the_save_says_the_token_was_spent(monkeypatch):
     """``_refresh_lock`` wraps a filesystem fault in ``CloudSessionError``.
 
@@ -730,6 +791,39 @@ def test_the_preflight_creates_nothing_and_leaves_nothing_behind(monkeypatch, tm
     assert cloud_session.preflight_save() == session_path
     assert session_path.read_bytes() == saved
     assert _probe_files(tmp_path) == []
+
+
+def test_a_probe_that_cannot_be_removed_fails_the_preflight(monkeypatch, tmp_path):
+    """Creating a file and removing one are separate rights.
+
+    A directory ACL granting add-file but denying delete lets ``mkstemp`` succeed and
+    ``unlink`` fail. ``atomic_private_text`` finishes with ``os.replace`` over the session
+    leaf, which needs exactly the right that just failed -- so swallowing the ``unlink``
+    error let the preflight pass on a directory the real save cannot use, redeeming the
+    single-use token before failing, and littered a probe file on every attempt.
+    """
+
+    opener = _Opener(body=REGISTRATION)
+    _install_opener(monkeypatch, opener)
+
+    real_unlink = cloud_session.os.unlink
+
+    def _no_delete(target):
+        if ".preflight." in str(target):
+            raise PermissionError("delete denied by ACL")
+        return real_unlink(target)
+
+    monkeypatch.setattr(cloud_session.os, "unlink", _no_delete)
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    # The token was never put on the wire, so it is still usable once the ACL is fixed.
+    assert opener.calls == []
+    assert caught.value.status == 409
+    assert "replaced" in str(caught.value)
+    assert str(tmp_path) in str(caught.value)
+    assert not (tmp_path / "cloud_session.json").exists()
 
 
 # ------------------------------------------------------------- pre-flight token hygiene

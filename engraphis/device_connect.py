@@ -488,11 +488,17 @@ def post_connect(control_url: str, token: str, *, installation_client_id: str,
         },
         method="POST",
     )
+    # The open and the body read are deliberately separate ``try`` blocks.  They look like
+    # one operation but they sit on opposite sides of the point of no return: once ``open``
+    # returns, urllib has already parsed a success status line, so the control plane
+    # answered and the single-use token is spent.  A ``TimeoutError`` or
+    # ``ConnectionResetError`` is an ``OSError`` in both phases, and while they shared one
+    # ``try`` the body-read case inherited the connection-phase copy and told the customer
+    # to retry a token that was already gone.
     try:
-        with build_pinned_https_opener(_NoRedirect()).open(
+        response = build_pinned_https_opener(_NoRedirect()).open(
             request, timeout=timeout
-        ) as response:  # nosec B310 - scheme validated by validate_cloud_base_url
-            raw = response.read(_MAX_RESPONSE_BYTES + 1)
+        )  # nosec B310 - scheme validated by validate_cloud_base_url
     except urllib.error.HTTPError as exc:
         status = exc.code
         # Draining the error body can itself raise; a sibling ``except`` of this ``try``
@@ -529,6 +535,17 @@ def post_connect(control_url: str, token: str, *, installation_client_id: str,
         # instead of being told to check the portal. ``LineTooLong``/``BadStatusLine`` from
         # reading the status line and headers land here for the same reason.
         raise DeviceConnectError(_TRUNCATED_REPLY, status=502) from exc
+
+    # Past this line the control plane has answered with a success status, so the token is
+    # spent no matter what goes wrong next.  ``OSError`` covers a socket that times out or
+    # resets mid-body, ``HTTPException`` a truncated chunked body, ``ValueError`` a read
+    # from an already-closed response; all three mean the same thing to the customer.
+    try:
+        with response:
+            raw = response.read(_MAX_RESPONSE_BYTES + 1)
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        raise DeviceConnectError(_TRUNCATED_REPLY, status=502) from exc
+
     # Everything below here runs only after a 2xx, so the token is already spent -- see
     # ``_SPENT_TOKEN_SUFFIX``.  A bare "invalid response" would leave the customer retrying
     # a consumed token forever.
