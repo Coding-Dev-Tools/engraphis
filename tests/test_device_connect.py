@@ -510,19 +510,24 @@ def test_a_body_read_failure_after_success_headers_is_not_a_plain_retry(
     assert not (tmp_path / "cloud_session.json").exists()
 
 
-def test_a_reset_before_any_reply_keeps_the_plain_retry_copy(monkeypatch):
-    """The other side of the split: nothing was consumed, so "try again" is still right."""
+def test_a_bare_reset_from_the_open_phase_is_also_ambiguous(monkeypatch):
+    """A bare ``ConnectionResetError`` reaching us unwrapped came from ``getresponse()``.
+
+    urllib wraps connect-and-send failures in ``URLError``; only ``getresponse()`` raises
+    through. So an unwrapped reset means the POST was already written, and the token may be
+    spent -- see ``test_a_failure_before_the_request_goes_out_still_says_retry`` for the
+    ``URLError`` half that still says "try again".
+    """
 
     _install_opener(
-        monkeypatch, _Opener(error=ConnectionResetError("closed before answering"))
+        monkeypatch, _Opener(error=ConnectionResetError("reset awaiting the reply"))
     )
 
     with pytest.raises(device_connect.DeviceConnectError) as caught:
         device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
 
-    assert caught.value.status == 503
-    assert "temporarily unreachable" in str(caught.value)
-    assert "may already have been used" not in str(caught.value)
+    assert caught.value.status == 502
+    assert "may already have been used" in str(caught.value)
 
 
 def test_a_lock_failure_racing_the_save_says_the_token_was_spent(monkeypatch):
@@ -647,11 +652,17 @@ def test_a_truncated_reply_reports_the_token_state_not_a_traceback(
     assert not (tmp_path / "cloud_session.json").exists()
 
 
-def test_a_connection_reset_before_any_reply_still_says_retry(monkeypatch):
-    """``RemoteDisconnected`` is *both* an ``OSError`` and an ``HTTPException``.
+def test_a_reset_with_no_reply_is_ambiguous_not_a_clean_miss(monkeypatch):
+    """This assertion is the reverse of what it once was, and the reversal is the point.
 
-    Nothing was read, so the token is untouched and "try again" remains the right copy;
-    it must not be swept into the token-may-be-spent message by the new clause.
+    The old copy claimed ``RemoteDisconnected`` meant "the peer closed without answering at
+    all. Nothing was consumed." That was an overclaim: ``RemoteDisconnected`` is raised when
+    ``getresponse()`` reads zero bytes for the status line, which happens *after*
+    ``h.request(...)`` has written the POST in full. The control plane may well have
+    received and processed it, and a processed connect spends the token -- so telling the
+    customer to retry sent them into a 401 reading "the token I just generated is invalid".
+
+    ``_TRUNCATED_REPLY`` is the honest copy under ambiguity: check the portal, then decide.
     """
 
     _install_opener(
@@ -661,8 +672,34 @@ def test_a_connection_reset_before_any_reply_still_says_retry(monkeypatch):
     with pytest.raises(device_connect.DeviceConnectError) as caught:
         device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
 
+    assert caught.value.status == 502
+    assert "may already have been used" in str(caught.value)
+    assert "temporarily unreachable" not in str(caught.value)
+
+
+@pytest.mark.parametrize("reason", [
+    ConnectionRefusedError("connection refused"),
+    OSError("dns failure"),
+    TimeoutError("connect timed out"),
+])
+def test_a_failure_before_the_request_goes_out_still_says_retry(monkeypatch, reason):
+    """The other half of the same split, and the reason it is not blanket-ambiguous.
+
+    ``AbstractHTTPHandler.do_open`` wraps everything from establishing the connection and
+    from ``h.request(...)`` in ``URLError``, and lets ``h.getresponse()`` raise unwrapped.
+    So a ``URLError`` is the one honest "nothing was consumed" signal -- DNS, refused, TLS,
+    a write that never completed -- and those customers must not be told to fetch a new
+    token for what is just flaky wifi.
+    """
+
+    _install_opener(monkeypatch, _Opener(error=urllib.error.URLError(reason)))
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
     assert caught.value.status == 503
     assert "temporarily unreachable" in str(caught.value)
+    assert "may already have been used" not in str(caught.value)
 
 
 @pytest.mark.parametrize("failure", [
@@ -865,6 +902,39 @@ def test_the_preflight_creates_nothing_and_leaves_nothing_behind(monkeypatch, tm
     assert cloud_session.preflight_save() == session_path
     assert session_path.read_bytes() == saved
     assert _probe_files(tmp_path) == []
+
+
+def test_an_unopenable_refresh_lock_fails_before_the_token_is_spent(monkeypatch, tmp_path):
+    """``private_file_stat`` is an ``lstat``; it does not prove the lock can be opened.
+
+    ``_refresh_lock`` opens it ``O_RDWR``, so a lock file left behind by another UID passes
+    the stat, the preflight passes, the token is redeemed -- and then ``save_bootstrap``
+    fails opening a file whose inaccessibility was detectable before the POST.
+    """
+
+    lock_path = tmp_path / ".cloud_session.refresh.lock"
+    lock_path.write_bytes(b"")
+
+    opener = _Opener(body=REGISTRATION)
+    _install_opener(monkeypatch, opener)
+
+    real_open = cloud_session.os.open
+
+    def _denied(path, flags, *args):
+        if str(path).endswith(".cloud_session.refresh.lock"):
+            raise PermissionError("owned by another uid")
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(cloud_session.os, "open", _denied)
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    # Detected before the POST, so the token is untouched.
+    assert opener.calls == []
+    assert caught.value.status == 409
+    assert "refresh lock" in str(caught.value)
+    assert not (tmp_path / "cloud_session.json").exists()
 
 
 def test_a_probe_that_cannot_be_removed_fails_the_preflight(monkeypatch, tmp_path):
@@ -1161,7 +1231,90 @@ def test_the_manifest_outranks_the_compute_constant(monkeypatch):
     assert device_connect.default_compute_url(CONTROL_URL) == ""
 
 
-@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "0", "-5", "10000000000"])
+@pytest.mark.parametrize("spelling", [
+    "https://api.engraphis.test",
+    "HTTPS://API.ENGRAPHIS.TEST",
+    "https://API.engraphis.test",
+    "https://api.engraphis.test:443",
+    "https://api.engraphis.test/",
+    "HTTPS://API.ENGRAPHIS.TEST:443/",
+])
+def test_equivalent_spellings_of_the_shipped_control_url_still_get_compute(
+    monkeypatch, spelling
+):
+    """``validate_cloud_base_url`` normalises the scheme but not the netloc.
+
+    It returns ``urlunsplit((scheme, parts.netloc, ...))``, so ``HTTPS://API.EXAMPLE`` keeps
+    its upper-case host and ``:443`` is never dropped. A raw string comparison against the
+    shipped URL therefore missed, ``default_compute_url`` returned "", and a customer who
+    typed the production endpoint with a different case or an explicit port connected
+    successfully and then found every hosted feature off, because
+    ``cloud_session.configured()`` needs a compute endpoint.
+    """
+
+    monkeypatch.setattr(
+        "engraphis.commercial.manifest",
+        lambda: {
+            "control_plane": "https://api.engraphis.test",
+            "compute_plane": COMPUTE_URL,
+        },
+    )
+
+    assert device_connect.default_compute_url(spelling) == COMPUTE_URL
+
+
+@pytest.mark.parametrize("other", [
+    "https://api.engraphis.test:8443",   # a different port really is a different endpoint
+    "http://api.engraphis.test",         # and so is a different scheme
+    "https://api.engraphis.test/v2",     # and a different path
+    "https://evil.example.test",
+])
+def test_a_genuinely_different_control_url_still_gets_no_compute(monkeypatch, other):
+    """The normalisation must not become a wildcard: only equivalents may match."""
+
+    monkeypatch.setattr(
+        "engraphis.commercial.manifest",
+        lambda: {
+            "control_plane": "https://api.engraphis.test",
+            "compute_plane": COMPUTE_URL,
+        },
+    )
+
+    assert device_connect.default_compute_url(other) == ""
+
+
+def test_an_unresolvable_home_directory_is_an_error_not_a_traceback(monkeypatch, capsys):
+    """``Path.home()`` raises ``RuntimeError`` on a service account with no home.
+
+    ``_read_identity`` swallowed it and returned ``{}``, but the *next* ``_identity_path()``
+    call sits outside that guard and raised it again. The CLI catches only
+    ``DeviceConnectError``, so a command whose whole selling point is being non-interactive
+    and scriptable printed a traceback.
+    """
+
+    monkeypatch.delenv("ENGRAPHIS_STATE_DIR", raising=False)
+
+    def _no_home():
+        raise RuntimeError("Could not determine home directory")
+
+    monkeypatch.setattr(device_connect.Path, "home", staticmethod(_no_home))
+
+    opener = _Opener(body=REGISTRATION)
+    _install_opener(monkeypatch, opener)
+
+    code = connect_cli.main(
+        ["--token", TOKEN, "--control-url", CONTROL_URL, "--compute-url", COMPUTE_URL]
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "ENGRAPHIS_STATE_DIR" in err
+    # Nothing was sent, so the token is still good once the variable is set.
+    assert opener.calls == []
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "0", "-5", "1e9", "10000000000"])
 def test_an_unusable_timeout_is_refused_before_any_request(monkeypatch, bad):
     """``argparse``'s ``type=float`` accepts ``nan``/``inf``; the socket layer does not.
 

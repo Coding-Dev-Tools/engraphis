@@ -101,6 +101,11 @@ def _refresh_lock_path() -> Path:
     return _session_path().with_name(".cloud_session.refresh.lock")
 
 
+#: Exactly the flags ``_refresh_lock`` opens the lock with, so ``preflight_save`` cannot
+#: drift from the access the real save needs.
+_LOCK_OPEN_FLAGS = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
 @contextmanager
 def _refresh_lock():
     """Serialize spend-and-rotate of the single-use refresh credential.
@@ -114,7 +119,7 @@ def _refresh_lock():
         try:
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             expected = private_file_stat(lock_path, allow_missing=True)
-            flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            flags = _LOCK_OPEN_FLAGS
             if expected is None:
                 try:
                     descriptor = os.open(
@@ -273,6 +278,24 @@ def preflight_save() -> Path:
                 "%s could not be inspected; check its permissions." % candidate,
                 status=409,
             ) from exc
+    # ``private_file_stat`` above is an ``lstat``: it proves the lock is a plain, private,
+    # unlinked file, not that this process can *open* it.  ``_refresh_lock`` opens it
+    # ``O_RDWR``, so a lock left behind by another UID -- or one whose mode changed --
+    # passes the stat and fails the save, after the token is spent.  Open it here with the
+    # same flags when it already exists.  When it does not, ``_refresh_lock`` creates it in
+    # a directory the probe below proves writable, so there is nothing to pre-check and
+    # nothing is created here.
+    lock_path = _refresh_lock_path()
+    if lock_path.exists():
+        try:
+            descriptor = os.open(str(lock_path), _LOCK_OPEN_FLAGS)
+        except OSError as exc:
+            raise CloudSessionError(
+                "The cloud session refresh lock %s exists but cannot be opened; check its "
+                "ownership and permissions." % lock_path,
+                status=409,
+            ) from exc
+        os.close(descriptor)
     # Probe the directory the way ``atomic_private_text`` will, rather than touching
     # ``cloud_session.json``: a read-only mount or a lost ACL fails here, while a valid
     # existing session is never created, truncated or replaced.
