@@ -9,16 +9,19 @@ const knownFeatures = {
   automation: 'Automation',
   consolidation: 'Auto Consolidation',
   dreaming: 'Auto Dreaming',
+  export: 'Compliance export',
   sync: 'Cloud Sync',
   team: 'Team administration',
 };
 
-const proFeatures = ['analytics', 'automation', 'consolidation', 'dreaming', 'sync'];
+const proFeatures = ['analytics', 'automation', 'consolidation', 'dreaming', 'export', 'sync'];
 const teamFeatures = [...proFeatures, 'team'];
 
 // Mirrored from v2_api.get_license(). Every key the dashboard branches on is produced
 // here the way the route produces it, so a fixture cannot drift into a shape the server
-// can never send.
+// can never send — `access_state` and `trial.available` in particular are *derived*
+// server-side (v2_api._access_state / the plan_source gate) and are what decide the badge,
+// the panel copy, and whether any surface offers a trial at all.
 function licenseFor(plan, features, overrides = {}) {
   const paid = plan === 'pro' || plan === 'team';
   return {
@@ -37,7 +40,13 @@ function licenseFor(plan, features, overrides = {}) {
     grace_scope: 'existing authenticated local workspace writes only',
     pro_upgrade_url: 'https://cloud.engraphis.test/pro',
     team_upgrade_url: 'https://cloud.engraphis.test/team',
-    upgrade_url: 'https://cloud.engraphis.test/pricing',
+    upgrade_url: 'https://cloud.engraphis.test/pro',
+    // Plan-neutral by construction: `upgrade_url` above is what licensing.upgrade_url()
+    // returns, and that resolves plan="pro". Only `account_url` is safe for the portal.
+    account_url: 'https://cloud.engraphis.test/account',
+    // The control plane refuses a second trial for any organization that already holds an
+    // entitlement, so a connected customer is never offered one — only an installation
+    // that belongs to no organization is.
     trial: { used: false, active: false, ends_at: 0, available: !paid, trial_days: 3 },
     ...overrides,
   };
@@ -349,6 +358,9 @@ test('a paying Team customer sees TEAM with Team administration unlocked', async
   await expect(licensePanel.getByRole('button', { name: 'Start hosted Pro trial' }))
     .toHaveCount(0);
 
+  // The Team tab is a description of the hosted service, not an answer to a denial: it
+  // renders for everyone, so its copy must not tell the customer paying for Team that
+  // their subscription excludes it.
   await openView(page, 'team');
   const team = page.locator('#team-body');
   await expect(team).toContainText('Your TEAM subscription includes this');
@@ -374,6 +386,7 @@ test('a paying Pro customer keeps only the Team upsell', async ({ page }) => {
   await expect(licensePanel).toContainText(`✓ ${knownFeatures.consolidation}`);
   await expect(licensePanel).toContainText(`○ ${knownFeatures.team}`);
 
+  // A Pro subscriber genuinely does not have Team; the denial copy is accurate for them.
   await openView(page, 'team');
   await expect(page.locator('#team-body'))
     .toContainText('Your PRO subscription does not include this.');
@@ -385,21 +398,26 @@ test('a lapsed Team subscription is sent to billing, not to a spent trial', asyn
   await mockLocalClient(page, 402, null, null, lapsedTeamLicense);
   await page.goto('/');
 
-  // The badge says the plan AND that it is no longer live; the locks come back because
-  // the control plane has withdrawn the features.
+  // The badge says the plan AND that it is no longer live: a bare `TEAM` over rows of
+  // locks was the defect. The locks come back because the control plane withdrew the
+  // features.
   await expect(page.getByLabel('Open hosted plan settings')).toHaveText('TEAM INACTIVE');
   await expect(page.locator(navLocks.team)).toHaveText('TEAM');
   await expect(page.locator(navLocks.analytics)).toHaveText('PRO');
 
   await openView(page, 'settings');
   const licensePanel = page.locator('.settings-license-panel');
+  // Why it is locked, in the customer's own terms, including the status the cloud named.
   await expect(licensePanel).toContainText('subscription is no longer active');
   await expect(licensePanel).toContainText('The last payment did not go through');
   await expect(licensePanel).toContainText('Your local memories are unaffected');
+  // Renewal goes to the plan they actually hold — never the Pro checkout — and the portal
+  // is the plan-neutral hosted entry point rather than a second checkout.
   await expect(licensePanel.getByRole('link', { name: 'Update billing' }))
     .toHaveAttribute('href', 'https://cloud.engraphis.test/team?plan=team');
   await expect(licensePanel.getByRole('link', { name: 'Open account portal' }))
-    .toHaveAttribute('href', 'https://cloud.engraphis.test/pricing');
+    .toHaveAttribute('href', 'https://cloud.engraphis.test/account');
+  // A lapsed subscription is a billing problem, not an unspent trial.
   await expect(licensePanel.getByRole('button', { name: 'Start hosted Team trial' }))
     .toHaveCount(0);
   await expect(licensePanel.getByRole('button', { name: 'Start hosted Pro trial' }))
@@ -409,18 +427,14 @@ test('a lapsed Team subscription is sent to billing, not to a spent trial', asyn
 
 test('a spent trial says so, and is never offered another one', async ({ page }) => {
   const errors = recordBrowserErrors(page);
+  // The state that was unreachable before this client read `access_state`: the trial ran
+  // out, so the plan name is still Pro but nothing it grants is live.
   await mockLocalClient(page, 402, null, null, licenseFor('pro', [], {
     cloud_access_active: false,
     access_state: 'trial_expired',
     entitlement_status: 'expired',
     is_trial: true,
-    trial: {
-      used: true,
-      active: false,
-      ends_at: 1751068800,
-      available: false,
-      trial_days: 3,
-    },
+    trial: { used: true, active: false, ends_at: 1751068800, available: false, trial_days: 3 },
   }));
   await page.goto('/');
 
@@ -431,6 +445,7 @@ test('a spent trial says so, and is never offered another one', async ({ page })
   await expect(licensePanel).toContainText('Your free trial has ended on 2025-06-28');
   await expect(licensePanel).toContainText('still in your local database');
   await expect(licensePanel).toContainText('cannot be started again');
+  // Buyable, not trialable.
   await expect(licensePanel.getByRole('link', { name: 'Subscribe to Pro' }))
     .toHaveAttribute('href', 'https://cloud.engraphis.test/pro?plan=pro');
   await expect(licensePanel.getByRole('link', { name: 'Subscribe to Team' }))

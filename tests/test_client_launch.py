@@ -33,7 +33,7 @@ import pytest
 # install. Skip rather than error at collection, matching the rest of the suite.
 pytest.importorskip("fastapi", reason="full-stack extra not installed")
 
-from engraphis import update_check  # noqa: E402
+from engraphis import hosted_client, update_check  # noqa: E402
 from engraphis.routes import v2_api  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -425,7 +425,7 @@ def test_license_route_emits_every_field_the_dashboard_reads(monkeypatch) -> Non
 
     for field in ("plan", "features", "known_features", "is_trial", "trial",
                   "access_state", "entitlement_status",
-                  "upgrade_url", "pro_upgrade_url", "team_upgrade_url"):
+                  "upgrade_url", "pro_upgrade_url", "team_upgrade_url", "account_url"):
         assert field in payload, field
     # ``used`` gates every "Start your free trial" affordance; ``available`` is what stops
     # one being offered to a customer the control plane will answer 409 for; ``active`` and
@@ -434,6 +434,36 @@ def test_license_route_emits_every_field_the_dashboard_reads(monkeypatch) -> Non
         assert field in payload["trial"], field
     # Pro and Team bill through separate checkout targets.
     assert payload["pro_upgrade_url"] and payload["team_upgrade_url"]
+    assert payload["account_url"]
+
+
+def test_the_account_url_is_plan_neutral_where_the_checkouts_are_separate(
+    monkeypatch,
+) -> None:
+    """"Open account portal" must not be the Pro checkout wearing a neutral name.
+
+    ``licensing.upgrade_url()`` takes no argument here but resolves ``plan="pro"`` inside,
+    so it prefers ``ENGRAPHIS_PRO_UPGRADE_URL`` — which is exactly the page a lapsed
+    customer with a payment-method problem must not be sent to. ``account_url`` resolves
+    the generic value directly.
+    """
+
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_PLAN", "pro")
+    monkeypatch.setenv("ENGRAPHIS_UPGRADE_URL", "https://cloud.test/account")
+    monkeypatch.setenv("ENGRAPHIS_PRO_UPGRADE_URL", "https://cloud.test/checkout/pro")
+    monkeypatch.setenv("ENGRAPHIS_TEAM_UPGRADE_URL", "https://cloud.test/checkout/team")
+
+    payload = v2_api.get_license()
+
+    assert payload["account_url"] == "https://cloud.test/account"
+    assert payload["pro_upgrade_url"] == "https://cloud.test/checkout/pro"
+    assert payload["team_upgrade_url"] == "https://cloud.test/checkout/team"
+    # The regression itself: the generic key really is the Pro checkout here.
+    assert payload["upgrade_url"] == "https://cloud.test/checkout/pro"
+
+    # With nothing configured it falls back to the hosted account root, never to a plan.
+    monkeypatch.delenv("ENGRAPHIS_UPGRADE_URL")
+    assert v2_api.get_license()["account_url"] == hosted_client.DEFAULT_CLOUD_URL
     # Every advertised key must be renderable, and every grantable key advertised.
     assert set(payload["features"]) <= set(payload["known_features"])
     assert set(v2_api.entitled_features("team")) == set(payload["known_features"])

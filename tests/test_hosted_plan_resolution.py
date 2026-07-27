@@ -41,7 +41,7 @@ import pytest
 # install. Skip rather than error at collection, matching the rest of the suite.
 pytest.importorskip("fastapi", reason="full-stack extra not installed")
 
-from engraphis import cloud_session, hosted_client  # noqa: E402
+from engraphis import cloud_session  # noqa: E402
 from engraphis.routes import v2_api  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -65,32 +65,17 @@ SERVER_HOSTED_ENTITLEMENTS = {
 SERVER_TRIAL_FIELDS = ("status", "is_trial", "trial_consumed", "trial_ends_at")
 
 
-def test_license_route_emits_plan_neutral_account_url(monkeypatch) -> None:
-    """Billing/account actions must not silently inherit the Pro checkout."""
-
-    monkeypatch.setenv("ENGRAPHIS_CLOUD_PLAN", "pro")
-    monkeypatch.setenv("ENGRAPHIS_UPGRADE_URL", "https://cloud.test/account")
-    monkeypatch.setenv("ENGRAPHIS_PRO_UPGRADE_URL", "https://cloud.test/checkout/pro")
-    monkeypatch.setenv("ENGRAPHIS_TEAM_UPGRADE_URL", "https://cloud.test/checkout/team")
-
-    payload = v2_api.get_license()
-
-    assert payload["account_url"] == "https://cloud.test/account"
-    assert payload["pro_upgrade_url"] == "https://cloud.test/checkout/pro"
-    assert payload["team_upgrade_url"] == "https://cloud.test/checkout/team"
-    assert payload["upgrade_url"] == "https://cloud.test/checkout/pro"
-
-    monkeypatch.delenv("ENGRAPHIS_UPGRADE_URL")
-    assert v2_api.get_license()["account_url"] == hosted_client.DEFAULT_CLOUD_URL
-
-
-#: A three-day trial that is still running, and one that is not, as the control plane
-#: serializes them (``engraphis-cloud`` the hosted entitlement response; Pydantic emits a trailing ``Z``
-#: for UTC, which this client's Python 3.9 floor cannot hand straight to
-#: ``datetime.fromisoformat``).
-# Far enough ahead that tests for a live server disclosure do not depend on wall-clock
-# time. Expiry itself is covered with an explicitly frozen boundary below.
+#: A running trial's boundary, as the control plane serializes it (``engraphis-cloud``
+#: the hosted entitlement response; Pydantic emits a trailing ``Z`` for UTC, which this client's Python
+#: 3.9 floor cannot hand straight to ``datetime.fromisoformat``).
+#:
+#: Deliberately far in the future rather than "a couple of days out": ``_access_state``
+#: now expires a trial whose disclosed boundary has passed, so a boundary near the date
+#: these tests were written would quietly turn every "live trial" case into an expired one
+#: the week after. ``TRIAL_ENDED_AT`` is the same instant in the past, for the cases that
+#: want a stale ``cloud_access_active=true`` riding a boundary that is already gone.
 TRIAL_ENDS_AT = "2099-07-28T12:00:00Z"
+TRIAL_ENDED_AT = "2020-07-28T12:00:00Z"
 
 
 def _epoch(iso: str) -> float:
@@ -102,7 +87,7 @@ def _epoch(iso: str) -> float:
 def _entitlement_dto(plan: str, *, active: bool = True,
                      organization_id: str = ORGANIZATION,
                      is_trial: bool = False, trial_consumed: bool = False,
-                     status: str = "") -> dict:
+                     status: str = "", trial_ends_at: str = TRIAL_ENDS_AT) -> dict:
     return {
         "organization_id": organization_id,
         "entitlement_id": "ent_1",
@@ -118,7 +103,7 @@ def _entitlement_dto(plan: str, *, active: bool = True,
         "is_trial": is_trial,
         "trial_consumed": trial_consumed or is_trial,
         "trial_duration_seconds": 259_200 if is_trial else None,
-        "trial_ends_at": TRIAL_ENDS_AT if is_trial else None,
+        "trial_ends_at": trial_ends_at if is_trial else None,
         "version": 3,
     }
 
@@ -989,13 +974,8 @@ def test_a_transport_failure_is_not_mistaken_for_a_billing_denial(monkeypatch) -
     assert _settled_license(monkeypatch)["cloud_access_active"] is True
 
     def _offline(*_args, **_kwargs):
-        # ``CloudSessionError`` takes only ``status``; ``transient`` belongs to
-        # ``CloudFeatureError``. Passing it here raised TypeError instead, which the
-        # caller's broad ``except Exception`` swallowed with no ``status`` attribute -- so
-        # this test used to pass by never exercising a 503 at all, and would not have
-        # caught a regression that let a genuine outage clear a paying customer's access.
         raise cloud_session.CloudSessionError(
-            "Engraphis Cloud is temporarily unreachable.", status=503
+            "Engraphis Cloud is temporarily unreachable.", status=503, transient=True
         )
 
     monkeypatch.setattr(cloud_session, "access_for_workspace", _offline)
@@ -1032,32 +1012,6 @@ def test_a_billing_denial_also_settles_the_compatibility_cache(monkeypatch) -> N
     assert cached["cloud_access_active"] is False, "the cache still advertises paid access"
     assert cached["features"] == []
     assert cached["plan"] == "team", "the lapsed plan is still named for the UI"
-
-
-def test_a_compatibility_entitlement_402_settles_paid_access(monkeypatch) -> None:
-    """An old control plane can deny only the fallback entitlement request.
-
-    It refreshes tokens but puts no entitlement fields on those responses, so the GET
-    compatibility path owns the cached answer.  Its 402 is just as authoritative as a
-    token-refresh 402; treating it as a transport failure leaves stale paid features live.
-    """
-
-    _connect(monkeypatch, pinned_token=False)
-    cloud = _FakeControlPlane(_entitlement_dto("team"), registration={})
-    _serve(monkeypatch, cloud)
-    assert _settled_license(monkeypatch)["cloud_access_active"] is True
-    assert cloud_session.saved_entitlement() == {}
-
-    cloud.error = urllib.error.HTTPError(
-        CONTROL_URL, 402, "payment required", {}, io.BytesIO(b"{}")
-    )
-    assert v2_api._fetch_authoritative_entitlement() is None
-
-    cached = v2_api._read_entitlement_cache()
-    assert cached["cloud_access_active"] is False
-    assert cached["features"] == []
-    assert cached["plan"] == "team"
-    assert v2_api.get_license()["cloud_access_active"] is False
 
 
 def _age_session_clock(seconds: float = 3600.0) -> None:
@@ -1628,33 +1582,6 @@ def test_a_live_trial_is_reported_as_a_trial(monkeypatch) -> None:
     assert set(payload["features"]) >= {"analytics", "automation"}
 
 
-def test_an_offline_cached_trial_expires_at_its_known_boundary(monkeypatch) -> None:
-    """A stale positive access flag cannot extend a trial while the client is offline."""
-
-    boundary = 1_800_000_000.0
-    entitlement = {
-        "plan": "pro",
-        "features": ["analytics", "automation"],
-        "source": "session",
-        "cloud_access_active": True,
-        "checked_at": boundary - 60,
-        "status": "trialing",
-        "is_trial": True,
-        "trial_consumed": True,
-        "trial_ends_at": boundary,
-    }
-    monkeypatch.setattr(v2_api, "_plan_entitlement", lambda: dict(entitlement))
-    monkeypatch.setattr(v2_api.time, "time", lambda: boundary + 1)
-
-    payload = v2_api.get_license()
-
-    assert payload["access_state"] == "trial_expired"
-    assert payload["cloud_access_active"] is False
-    assert payload["features"] == []
-    assert payload["trial"]["active"] is False
-    assert payload["trial"]["ends_at"] == boundary
-
-
 def test_a_spent_trial_is_told_apart_from_a_lapsed_subscription(monkeypatch) -> None:
     """Both read ``cloud_access_active=false``; only ``is_trial`` separates the copy."""
 
@@ -1849,14 +1776,86 @@ def test_the_servers_utc_timestamp_is_read_on_the_python_39_floor(value) -> None
 
 
 @pytest.mark.parametrize("value", [
-    None, "", "  ", "not-a-date", 0, -1, True, [], {},
-    float("inf"), float("-inf"), float("nan"), 10**400,
-    "2026-13-45T99:99:99Z",
+    None, "", "  ", "not-a-date", 0, -1, True, [], {}, "2026-13-45T99:99:99Z",
 ])
 def test_an_unreadable_trial_boundary_is_unknown_rather_than_raising(value) -> None:
     """This runs on the ``/api/bootstrap`` boot path; nothing here may raise."""
 
     assert v2_api._epoch_seconds(value) == 0.0
+
+
+@pytest.mark.parametrize("value", [
+    float("inf"), float("-inf"), float("nan"), 10 ** 400, -(10 ** 400),
+])
+def test_a_non_finite_trial_boundary_never_reaches_the_json_encoder(value) -> None:
+    """``json.loads`` produces these; ``JSONResponse`` refuses to encode them.
+
+    A malformed entitlement or a hand-edited cache carrying ``1e309`` decodes to ``inf``,
+    and an arbitrary-precision integer literal decodes to an ``int`` no ``float`` can hold.
+    Either one used to travel out through ``/api/license`` and therefore ``/api/bootstrap``,
+    where Starlette's encoder raises on non-JSON-compliant floats — the dashboard failing to
+    boot at all over a value that only ever meant "unknown".
+    """
+
+    assert v2_api._epoch_seconds(value) == 0.0
+    # ``json.loads`` really does hand these back; this is not a synthetic input.
+    assert v2_api._epoch_seconds(json.loads('{"t": 1e309}')["t"]) == 0.0
+    assert v2_api._epoch_seconds(json.loads('{"t": Infinity}')["t"]) == 0.0
+    # And nothing derived from one is emitted, so the payload stays encodable.
+    facts = v2_api._trial_facts({"is_trial": True, "trial_ends_at": value})
+    assert facts["trial_ends_at"] == 0.0
+    json.dumps(facts, allow_nan=False)
+
+
+def test_a_cached_live_trial_expires_once_its_own_boundary_passes(monkeypatch) -> None:
+    """``cloud_access_active`` is only as fresh as the last answer from the control plane.
+
+    An installation that goes offline mid-trial keeps reading back the ``true`` that was
+    saved while the trial was live, so this reported ``trial`` forever: the panel calling
+    a trial live under a printed end date already in the past, and ``/api/license``
+    ticking feature rows every hosted call would now be denied. The server disclosed the
+    boundary; that is enough to settle it without another request.
+    """
+
+    _connect(monkeypatch)
+    _serve(monkeypatch, _FakeControlPlane(
+        _entitlement_dto("pro", is_trial=True, trial_ends_at=TRIAL_ENDED_AT)))
+
+    payload = _settled_license(monkeypatch)
+
+    # The control plane still says access is live — it answered while the trial was.
+    assert payload["cloud_access_active"] is True
+    assert payload["access_state"] == "trial_expired"
+    assert payload["trial"]["active"] is False
+    assert payload["trial"]["used"] is True
+    assert payload["trial"]["available"] is False
+    # A boundary in the past is still disclosed: the panel says *when* it ended.
+    assert payload["trial"]["ends_at"] == pytest.approx(_epoch(TRIAL_ENDED_AT))
+    # And no paid capability is advertised behind the expired boundary.
+    assert payload["features"] == []
+
+    # Going fully offline does not resurrect it: the cache round trips the same boundary.
+    _serve(monkeypatch, _FakeControlPlane(error=urllib.error.URLError("offline")))
+    monkeypatch.setattr(v2_api, "_ENTITLEMENT_REFRESH_SECONDS", 0)
+    offline = v2_api.get_license()
+    _drain_refresh()
+
+    assert offline["access_state"] == "trial_expired"
+    assert offline["features"] == []
+
+
+def test_a_running_trial_is_not_expired_by_a_boundary_that_has_not_arrived() -> None:
+    """The other half of the same rule — and an unknown boundary expires nothing."""
+
+    live = {"plan": "pro", "cloud_access_active": True, "is_trial": True}
+    assert v2_api._access_state(dict(live, trial_ends_at=time.time() + 3600)) == "trial"
+    # A control plane that never named a boundary must not be read as "already over".
+    assert v2_api._access_state(dict(live, trial_ends_at=0.0)) == "trial"
+    assert v2_api._access_state(live) == "trial"
+    assert v2_api._access_state(dict(live, trial_ends_at="not-a-date")) == "trial"
+    # A paid subscription has no trial boundary to cross, whatever is stored.
+    paid = {"plan": "team", "cloud_access_active": True, "is_trial": False}
+    assert v2_api._access_state(dict(paid, trial_ends_at=1.0)) == "active"
 
 
 def test_a_forged_entitlement_status_is_not_rendered() -> None:

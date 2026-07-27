@@ -76,21 +76,6 @@ def _reachable_cloud_base_url(value: str) -> str:
         raise CloudSessionError("Engraphis Cloud is temporarily unreachable.") from exc
 
 
-def _server_compute_url(response: dict) -> str:
-    """Return the refresh response's compute endpoint only when it is safe to persist."""
-
-    value = response.get("compute_url")
-    if not isinstance(value, str) or not value.strip():
-        return ""
-    try:
-        return validate_cloud_base_url(value)
-    except (CloudUrlUnresolved, ValueError):
-        # This optional field cannot be allowed to clear or poison a known-good endpoint.
-        # The rotated credential is still persisted below, so a later valid response can
-        # repair a session whose compute endpoint was not supplied yet.
-        return ""
-
-
 def _session_path() -> Path:
     root = os.environ.get("ENGRAPHIS_STATE_DIR", "").strip()
     base = Path(root).expanduser() if root else Path.home() / ".engraphis"
@@ -525,8 +510,7 @@ def text_field(response: dict, key: str) -> str:
 
 
 def save_bootstrap(response: dict, *, control_url: str,
-                   compute_url: Optional[str] = None,
-                   compute_url_source: Optional[str] = None) -> None:
+                   compute_url: Optional[str] = None) -> None:
     """Persist the one-time bootstrap/refresh material returned by the control plane."""
 
     refresh = text_field(response, "refresh_credential")
@@ -547,11 +531,6 @@ def save_bootstrap(response: dict, *, control_url: str,
             response.get("token_subject") or "member"
         ),
     }
-    if compute_url_source in {"explicit", "server", "fallback"}:
-        # Keep an explicit CLI choice distinct from a server/distribution default.  A
-        # refresh may move cloud-assigned endpoints, but must never silently replace an
-        # endpoint the operator deliberately selected.
-        value["compute_url_source"] = compute_url_source
     # Whatever entitlement the control plane volunteered, so the dashboard knows the plan
     # from the first boot instead of inferring it. Absent on an older cloud; harmless.
     value.update(_declared_entitlement(response))
@@ -594,13 +573,6 @@ def _refresh_http_error(status: int) -> CloudSessionError:
 #: What a best-effort drain of an error body is allowed to fail with.  See the comment in
 #: :func:`_post_refresh`; ``engraphis.device_connect`` guards its drain with the same tuple.
 _DRAIN_FAILURES = (OSError, ValueError, http.client.HTTPException)
-
-#: Public copy for every ambiguous refresh response. Once the POST is written, replaying the
-#: single-use credential can revoke its family; reconnecting is the safe recovery.
-_INCOMPLETE_REFRESH_RESPONSE = (
-    "Engraphis Cloud answered this session refresh but the reply was incomplete, "
-    "so the rotated credential could not be saved. Connect this installation again."
-)
 
 
 def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
@@ -649,21 +621,35 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
             except _DRAIN_FAILURES:
                 pass
         raise _refresh_http_error(code)
+    # urllib wraps failures before or while sending the request in URLError.  That is the one
+    # distinguishable pre-send path, so the credential was not spent and retry remains safe.
     except urllib.error.URLError as exc:
         raise CloudSessionError("Engraphis Cloud is temporarily unreachable.") from exc
-    except (TimeoutError, OSError, http.client.HTTPException) as exc:
-        # These failures arise while ``open`` is waiting for the response, after urllib has
-        # written the POST. The control plane may have spent the single-use credential even
-        # though no usable status line reached us.
-        #
-        # Keep ``URLError`` separate above: urllib uses it for failures while establishing or
-        # sending the request, the only phase where retrying the same credential is safe.
-        # ``RemoteDisconnected`` has both OSError and BadStatusLine ancestry and therefore
-        # deliberately lands in this non-transient bucket.
+    except (TimeoutError, http.client.RemoteDisconnected, OSError) as exc:
+        # These escape directly from getresponse() after urllib wrote the POST.  The control
+        # plane may have spent the single-use credential even though no status line arrived;
+        # retrying the unchanged on-disk value risks revoking its entire credential family.
         raise CloudSessionError(
-            _INCOMPLETE_REFRESH_RESPONSE,
+            "Engraphis Cloud did not complete this refresh response, so the rotated "
+            "credential could not be saved. Connect this installation again.",
             status=409,
         ) from exc
+    except (http.client.BadStatusLine, http.client.LineTooLong) as exc:
+        # ``getresponse()`` raises these only after urllib has sent the POST.  The control
+        # plane may therefore have consumed the single-use refresh credential, while its
+        # replacement never reached disk.  Retrying would replay the stale credential and can
+        # revoke its whole family, so prefer reconnecting over an unsafe transient retry.
+        # ``RemoteDisconnected`` is also a ``BadStatusLine`` but reaches the earlier OSError
+        # transport clause through its ``ConnectionResetError`` base.
+        raise CloudSessionError(
+            "Engraphis Cloud returned a malformed refresh response, so the rotated "
+            "credential could not be saved. Connect this installation again.",
+            status=409,
+        ) from exc
+    except http.client.HTTPException as exc:
+        # Other malformed HTTP replies have no useful protocol status, but unlike a malformed
+        # status line they do not establish that this request reached the control plane.
+        raise CloudSessionError("Engraphis Cloud is temporarily unreachable.") from exc
 
     try:
         with response:
@@ -682,7 +668,12 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
         # happened before the server committed the rotation the old credential was still
         # good and the reconnect was unnecessary, but the opposite mistake revokes every
         # credential in the family and forces the same reconnect anyway, from a worse state.
-        raise CloudSessionError(_INCOMPLETE_REFRESH_RESPONSE, status=409) from exc
+        raise CloudSessionError(
+            "Engraphis Cloud answered this session refresh but the reply was incomplete, "
+            "so the rotated credential could not be saved. Connect this installation "
+            "again.",
+            status=409,
+        ) from exc
 
     # These are post-response too, so they carry the same replay hazard as the truncated
     # body above and take the same non-transient status: the server consumed the credential
@@ -753,9 +744,7 @@ def access_for_workspace(
     # response; a stale home-directory mount yields a structured, retryable error from
     # ``_load`` rather than an unhandled filesystem exception.  The authoritative session
     # record is still loaded again under the lock below before any credential is used.
-    # A refresh can now supply a missing compute endpoint, so do not reject a valid saved
-    # control/refresh session before it has a chance to receive that authoritative value.
-    if not configured(require_compute=False):
+    if not configured(require_compute=require_compute):
         raise CloudSessionError(
             "Connect this installation to Engraphis Cloud first.", status=401
         )
@@ -771,18 +760,8 @@ def access_for_workspace(
         ).strip()
         control = os.environ.get("ENGRAPHIS_CLOUD_CONTROL_URL", "").strip()
         control = control or str(saved.get("control_url") or "").strip()
-        saved_compute = str(saved.get("compute_url") or "").strip()
-        compute = direct_compute or saved_compute
-        compute_source = "explicit" if direct_compute else str(
-            saved.get("compute_url_source") or ""
-        )
-        if saved_compute and compute_source not in {"explicit", "server", "fallback"}:
-            # Pre-source sessions cannot tell a cloud-assigned endpoint from a CLI/env
-            # override. Preserve the nonempty value rather than silently moving a
-            # potentially operator-selected endpoint; compute-less legacy sessions still
-            # accept a vetted response below.
-            compute_source = "explicit"
-        if not refresh or not control:
+        compute = direct_compute or str(saved.get("compute_url") or "").strip()
+        if not refresh or not control or (require_compute and not compute):
             raise CloudSessionError(
                 "Connect this installation to Engraphis Cloud first.", status=401
             )
@@ -808,10 +787,6 @@ def access_for_workspace(
         response_subject = _validated_token_subject(
             body.get("token_subject") or token_subject
         )
-        server_compute = _server_compute_url(body)
-        if server_compute and compute_source != "explicit":
-            compute = server_compute
-            compute_source = "server"
         updated = dict(saved)
         updated.update({
             "schema": "engraphis-cloud-session/v1",
@@ -822,8 +797,6 @@ def access_for_workspace(
             "refresh_expires_at": text_field(body, "refresh_expires_at"),
             "token_subject": response_subject,
         })
-        if compute_source in {"explicit", "server", "fallback"}:
-            updated["compute_url_source"] = compute_source
         # The refresh response carries the same entitlement fields as registration, so the
         # plan re-confirms itself on every token rotation. An older cloud omits them and
         # the previously persisted answer (if any) is left untouched.
@@ -845,9 +818,4 @@ def access_for_workspace(
                         updated.pop(key, None)
         updated.update(declared)
         _save(updated)
-        if require_compute and not compute:
-            raise CloudSessionError(
-                "Engraphis Cloud did not provide a compute endpoint for this installation.",
-                status=503,
-            )
         return access, organization_id, compute

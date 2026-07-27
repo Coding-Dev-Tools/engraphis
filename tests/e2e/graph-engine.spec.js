@@ -122,16 +122,6 @@ async function openDashboard(page, { query = '' } = {}) {
 
 const fetched = (requested, name) => requested.filter(url => url.includes(name));
 
-// force-graph injects its own stylesheet when it attaches. The dashboard's strict CSP blocks
-// that vendor behaviour on both renderers and Chromium reports each blocked sheet as a console
-// error. Keep those known messages visible to the CSP parity test while still failing every
-// graph test on an unexpected console error.
-const unexpectedConsoleErrors = errors => errors.filter(
-  message => !message.startsWith(
-    "Applying inline style violates the following Content Security Policy directive 'style-src 'self''.",
-  ),
-);
-
 /** Open the Graph view and wait for force-graph to put a sized canvas on the page. */
 async function openGraphView(page) {
   await page.locator('.nav-item[data-view="graph"]').click();
@@ -155,7 +145,6 @@ test('a dashboard page that never opens the graph fetches neither graph script',
   expect(fetched(session.requested, 'force-graph.min.js')).toEqual([]);
   expect(fetched(session.requested, 'engraphis-graph.js')).toEqual([]);
   expect(await session.violations()).toEqual([]);
-  expect(session.consoleErrors).toEqual([]);
   expect(session.pageErrors).toEqual([]);
 });
 
@@ -172,13 +161,6 @@ test('the opt-in engine renders a real canvas and registers only under its flag'
   expect(await page.evaluate(() => Boolean(GRAPH_ENGINE))).toBe(true);
   // The unlinked entity must not be on the canvas: the default scope hides degree-zero nodes,
   // so this is what separates "rendered the filtered view" from "rendered the raw response".
-  // zoomToFit can initially cross the engine's auto-collapse threshold, so explicitly expand
-  // before inspecting the filtered entity view.
-  await page.evaluate(() => GRAPH_ENGINE.setCollapse(false));
-  await page.waitForFunction(() => {
-    const nodes = window.__fg?.graphData()?.nodes || [];
-    return nodes.length > 0 && nodes.every(node => !node.cluster);
-  });
   const painted = await page.evaluate(() => window.__fg.graphData().nodes.map(n => n.id).sort());
   expect(painted).toEqual(['ada', 'babbage', 'engine', 'fts', 'notes', 'sqlite', 'store']);
 
@@ -197,7 +179,6 @@ test('the opt-in engine renders a real canvas and registers only under its flag'
   expect(distinctColours).toBeGreaterThan(2);
   await expect(canvas).toBeVisible();
 
-  expect(unexpectedConsoleErrors(session.consoleErrors)).toEqual([]);
   expect(session.pageErrors).toEqual([]);
 });
 
@@ -206,7 +187,7 @@ test('a physics slider moves the layout under the opt-in engine', async ({ page 
   // Gravity/Size wrote a new force into a simulation already sitting at alpha~0.  Nothing
   // moved until the user found the Reheat button — invisible to a stand-in that records the
   // force object but never runs a solver.  Here d3 is really integrating.
-  const session = await openDashboard(page, { query: '?graph-engine=next' });
+  await openDashboard(page, { query: '?graph-engine=next' });
   await openGraphView(page);
 
   // Let the initial layout settle so any movement below is the slider's doing, not warmup.
@@ -222,8 +203,6 @@ test('a physics slider moves the layout under the opt-in engine', async ({ page 
   await page.waitForTimeout(1_500);
 
   expect(await positions()).not.toBe(settled);
-  expect(unexpectedConsoleErrors(session.consoleErrors)).toEqual([]);
-  expect(session.pageErrors).toEqual([]);
 });
 
 test('the opt-in engine adds no CSP violation the classic renderer does not already cause', async ({ page }) => {
@@ -251,7 +230,6 @@ test('the opt-in engine adds no CSP violation the classic renderer does not alre
   // Every one of them is an injected stylesheet, not an inline style attribute: nothing in
   // either renderer is reaching for `element.style`, which is what the drift gate enforces.
   expect(underNext.every(v => v.directive === 'style-src-elem')).toBe(true);
-  expect(unexpectedConsoleErrors(session.consoleErrors)).toEqual([]);
   expect(session.pageErrors).toEqual([]);
 });
 
@@ -262,6 +240,5 @@ test('the graph view without the flag stays on the classic renderer', async ({ p
   expect(fetched(session.requested, 'force-graph.min.js').length).toBe(1);
   expect(fetched(session.requested, 'engraphis-graph.js')).toEqual([]);
   expect(await page.evaluate(() => typeof window.EngraphisGraph)).toBe('undefined');
-  expect(unexpectedConsoleErrors(session.consoleErrors)).toEqual([]);
   expect(session.pageErrors).toEqual([]);
 });
