@@ -13,6 +13,7 @@ import sqlite3
 
 import pytest
 
+from engraphis import config
 from engraphis.config import (
     Settings,
     _configured_db_path,
@@ -113,6 +114,70 @@ def test_concurrent_first_start_serializes_migration(tmp_path):
     assert results == [target, target]
     assert _value(target) == "memory-data"
     assert _value(Path(str(target) + ".users.db")) == "auth-data"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows CRT lock mode")
+def test_windows_migration_lock_uses_native_blocking_mode(tmp_path, monkeypatch):
+    import msvcrt
+
+    calls = []
+    native_locking = msvcrt.locking
+
+    def recording_lock(fd, mode, size):
+        calls.append((mode, size))
+        return native_locking(fd, mode, size)
+
+    monkeypatch.setattr(msvcrt, "locking", recording_lock)
+    with config._migration_lock(tmp_path / "engraphis.db"):
+        pass
+
+    assert calls == [(msvcrt.LK_LOCK, 1), (msvcrt.LK_UNLCK, 1)]
+
+
+def test_windows_migration_lock_retries_expected_crt_contention(monkeypatch):
+    import errno
+
+    class Handle:
+        def fileno(self):
+            return 7
+
+    class FakeMsvcrt:
+        LK_LOCK = 1
+        calls = []
+
+        @classmethod
+        def locking(cls, _fd, _mode, _size):
+            cls.calls.append((_fd, _mode, _size))
+            if len(cls.calls) == 1:
+                raise OSError(errno.EACCES, "locked by another process")
+            if len(cls.calls) == 2:
+                raise OSError(errno.EDEADLK, "retry lock acquisition")
+
+    sleeps = []
+    monkeypatch.setattr(config.time, "sleep", sleeps.append)
+
+    config._lock_windows_migration_file(Handle(), FakeMsvcrt)
+
+    assert len(FakeMsvcrt.calls) == 3
+    assert sleeps == [config._WINDOWS_LOCK_RETRY_SECONDS] * 2
+
+
+def test_windows_migration_lock_reraises_unexpected_crt_error():
+    import errno
+
+    class Handle:
+        def fileno(self):
+            return 7
+
+    class FakeMsvcrt:
+        LK_LOCK = 1
+
+        @staticmethod
+        def locking(_fd, _mode, _size):
+            raise OSError(errno.EIO, "disk failure")
+
+    with pytest.raises(OSError, match="disk failure"):
+        config._lock_windows_migration_file(Handle(), FakeMsvcrt)
 
 
 def test_upgrade_includes_committed_wal_content(tmp_path):

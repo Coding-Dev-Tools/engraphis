@@ -381,5 +381,6 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
             text = text.rsplit("```", 1)[0]
     try:
         return json.loads(text)
-    except Exception:
+    except Exception as exc:
+        logger.debug("LLM JSON parse fallback to raw (%s)", type(exc).__name__)
         return {"raw": raw}

@@ -424,9 +424,14 @@ def test_license_route_emits_every_field_the_dashboard_reads(monkeypatch) -> Non
     payload = v2_api.get_license()
 
     for field in ("plan", "features", "known_features", "is_trial", "trial",
+                  "access_state", "entitlement_status",
                   "upgrade_url", "pro_upgrade_url", "team_upgrade_url"):
         assert field in payload, field
-    assert "used" in payload["trial"]
+    # ``used`` gates every "Start your free trial" affordance; ``available`` is what stops
+    # one being offered to a customer the control plane will answer 409 for; ``active`` and
+    # ``ends_at`` are what let the panel name a live trial and its boundary.
+    for field in ("used", "active", "available", "ends_at", "trial_days"):
+        assert field in payload["trial"], field
     # Pro and Team bill through separate checkout targets.
     assert payload["pro_upgrade_url"] and payload["team_upgrade_url"]
     # Every advertised key must be renderable, and every grantable key advertised.

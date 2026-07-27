@@ -5,6 +5,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-26
+
+Public 1.1.0 hosted-connect and graph-experience release.
+
 ### Removed
 
 - Removed an unimplemented hosted export claim from public product surfaces.
@@ -18,6 +22,12 @@ All notable changes to Engraphis are documented here. Format loosely follows
   `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` remains as an explicit operator override (`=0` opts a
   connected installation back out, `=1` forces it on regardless of session state) and is no
   longer surfaced anywhere in the UI.
+- Hosted plan presentation now follows the control plane's active, trial, expired, and
+  lapsed states; renewal follows the plan actually held, account actions use the
+  plan-neutral portal, and a spent trial is never offered again.
+- Device-connect and refresh responses validate credential fields as strings, preserve
+  single-use-token semantics across truncated responses, and refuse unsafe session-storage
+  paths before redeeming a token.
 
 ## [1.0.1] - 2026-07-24
 
