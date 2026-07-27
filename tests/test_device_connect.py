@@ -10,6 +10,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import socket
 import urllib.error
 import urllib.request
 from io import BytesIO
@@ -317,6 +318,77 @@ def test_http_error_body_is_drained_and_closed(monkeypatch):
     assert closed == [True]
 
 
+def test_incomplete_read_is_not_an_oserror_or_a_valueerror():
+    """Pins the premise the drain guard is built on, so a wrong comment cannot return.
+
+    ``http.client.IncompleteRead.__mro__`` is
+    ``(IncompleteRead, HTTPException, Exception, BaseException, object)``.  It is *only* an
+    ``HTTPException``; an earlier version of this module claimed it also subclassed
+    ``ValueError`` and guarded the drain with ``(OSError, ValueError)`` on that basis.
+    """
+
+    assert not issubclass(http.client.IncompleteRead, OSError)
+    assert not issubclass(http.client.IncompleteRead, ValueError)
+    assert issubclass(http.client.IncompleteRead, http.client.HTTPException)
+
+
+@pytest.mark.parametrize("failure", [
+    http.client.IncompleteRead(b'{"detail":"pri'),
+    http.client.LineTooLong("chunk size"),
+    ConnectionResetError("peer went away mid-drain"),
+])
+def test_a_truncated_error_body_still_reports_the_status(monkeypatch, failure):
+    """A flaky drain must not replace the status copy with a traceback.
+
+    ``exc.read()`` is called from *inside* the ``except HTTPError`` block, so the sibling
+    ``except http.client.HTTPException`` clause of the same ``try`` can never catch what it
+    raises -- the drain needs its own guard, and that guard has to name ``HTTPException``
+    because ``IncompleteRead`` is neither an ``OSError`` nor a ``ValueError``.
+    """
+
+    error = _http_error(401)
+
+    def _boom(*args, **kwargs):
+        raise failure
+
+    error.read = _boom
+    error.close = _boom
+    _install_opener(monkeypatch, _Opener(error=error))
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    # The customer gets the 401 copy they would have got from a well-behaved body.
+    assert caught.value.status == 401
+    assert "Generate a new one" in str(caught.value)
+    assert TOKEN not in str(caught.value)
+
+
+def test_the_cli_reports_a_truncated_error_body_instead_of_a_traceback(
+    monkeypatch, capsys
+):
+    """End-to-end proof of the same path: exit 1 and clean copy, no stack trace."""
+
+    error = _http_error(401)
+
+    def _boom(*args, **kwargs):
+        raise http.client.IncompleteRead(b'{"detail":"pri')
+
+    error.read = _boom
+    error.close = _boom
+    _install_opener(monkeypatch, _Opener(error=error))
+
+    code = connect_cli.main(
+        ["--token", TOKEN, "--control-url", CONTROL_URL, "--compute-url", COMPUTE_URL]
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "IncompleteRead" not in err
+    assert "Generate a new one" in err
+
+
 def test_network_failure_reports_an_outage_without_leaking_the_detail(monkeypatch):
     _install_opener(
         monkeypatch, _Opener(error=urllib.error.URLError("proxy.internal refused"))
@@ -329,14 +401,34 @@ def test_network_failure_reports_an_outage_without_leaking_the_detail(monkeypatc
     assert "proxy.internal" not in str(caught.value)
 
 
-def test_a_success_without_a_refresh_credential_writes_nothing(monkeypatch, tmp_path):
+@pytest.mark.parametrize("credential", [None, "", "   "])
+def test_a_success_without_a_refresh_credential_writes_nothing(
+    monkeypatch, tmp_path, credential
+):
+    """A 200 spends the token even when the body is unusable, so "try again" is wrong.
+
+    The control plane consumes the single-use connect token as it writes a 200.  Re-running
+    the same command therefore cannot succeed -- it deterministically produces a 401 -- so
+    the copy has to send the customer to the portal for a fresh token, exactly like the
+    truncated-reply path does.
+    """
+
     body = dict(REGISTRATION)
-    body.pop("refresh_credential")
+    if credential is None:
+        body.pop("refresh_credential")
+    else:
+        body["refresh_credential"] = credential
     _install_opener(monkeypatch, _Opener(body=body))
 
-    with pytest.raises(device_connect.DeviceConnectError):
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
         device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
 
+    message = str(caught.value)
+    assert caught.value.status == 502
+    assert "generate a new one" in message.lower()
+    # The old copy sent the customer back into a guaranteed 401.
+    assert "Try again," not in message
+    assert TOKEN not in message
     assert not (tmp_path / "cloud_session.json").exists()
 
 
@@ -370,8 +462,9 @@ class _TruncatedBody:
         return False
 
     def read(self, size: int = -1) -> bytes:
-        # What ``HTTPResponse._read_chunked`` raises for a truncated body.  It subclasses
-        # ``HTTPException``/``ValueError`` -- neither ``OSError`` nor ``URLError``.
+        # What ``HTTPResponse._read_chunked`` raises for a truncated body.  Its only base
+        # is ``HTTPException`` -- it is neither an ``OSError``, a ``ValueError``, nor a
+        # ``URLError``.  See ``test_incomplete_read_is_not_an_oserror_or_a_valueerror``.
         raise http.client.IncompleteRead(b'{"organization_id":"org_al')
 
 
@@ -811,7 +904,7 @@ def test_the_manifest_outranks_the_compute_constant(monkeypatch):
     assert device_connect.default_compute_url(CONTROL_URL) == ""
 
 
-@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "0", "-5"])
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "0", "-5", "1e9", "10000000000"])
 def test_a_non_finite_timeout_is_refused_before_any_request(monkeypatch, bad):
     """``argparse``'s ``type=float`` accepts ``nan``/``inf``; the socket layer does not.
 
@@ -832,6 +925,48 @@ def test_a_non_finite_timeout_is_refused_before_any_request(monkeypatch, bad):
 
     assert caught.value.status == 400
     assert "timeout" in str(caught.value)
+
+
+def test_a_huge_finite_timeout_is_refused_before_the_socket_overflows():
+    """``math.isfinite`` is not the same test as "a socket can use this".
+
+    ``socket.settimeout`` computes an absolute deadline, so a large but finite value raises
+    ``OverflowError`` ("timeout doesn't fit into C timeval" / "timestamp out of range for
+    platform time_t") -- an exception ``post_connect`` does not catch, so ``--timeout
+    10000000000`` printed a traceback.  The bound is checked against a real socket here so
+    the constant cannot drift into the range that overflows.
+    """
+
+    sock = socket.socket()
+    try:
+        sock.settimeout(device_connect._MAX_TIMEOUT_SECONDS)
+        assert sock.gettimeout() == device_connect._MAX_TIMEOUT_SECONDS
+    finally:
+        sock.close()
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect._validated_timeout(device_connect._MAX_TIMEOUT_SECONDS + 1)
+
+    assert caught.value.status == 400
+    assert "timeout" in str(caught.value)
+
+
+def test_the_cli_reports_an_oversized_timeout_instead_of_a_traceback(monkeypatch, capsys):
+    class _Exploding:
+        @staticmethod
+        def open(request, timeout=None):  # pragma: no cover - must never run
+            raise AssertionError("a request was started with an unusable timeout")
+
+    _install_opener(monkeypatch, _Exploding())
+
+    code = connect_cli.main(
+        ["--token", TOKEN, "--control-url", CONTROL_URL, "--timeout", "10000000000"]
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "timeout" in err
+    assert "Traceback" not in err
 
 
 def test_the_cli_reports_a_bad_timeout_instead_of_a_traceback(monkeypatch, capsys):

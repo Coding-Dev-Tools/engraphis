@@ -63,6 +63,14 @@ CONNECT_PATH = "/v1/devices/connect"
 #: human's prompt, once, and a spurious timeout costs the customer a fresh token.
 DEFAULT_TIMEOUT_SECONDS = 15.0
 
+#: Upper bound on ``--timeout``.  Not a policy number -- a platform one.  ``socket``
+#: converts a timeout into an absolute deadline, so a large but *finite* value raises
+#: ``OverflowError`` ("timeout doesn't fit into C timeval", "timestamp out of range for
+#: platform time_t") from inside ``urllib``: ``1e9`` already overflows on CPython 3.12.
+#: One hour is orders of magnitude more than a single interactive POST can need and orders
+#: of magnitude below the first value any supported platform rejects.
+_MAX_TIMEOUT_SECONDS = 3600.0
+
 #: The control plane answers with a small fixed record; anything larger is not ours.
 _MAX_RESPONSE_BYTES = 64 * 1024
 
@@ -299,6 +307,12 @@ def _validated_timeout(value: object) -> float:
     traceback instead of an error and an exit code.  Non-positive values are refused for
     the same reason: a ``0`` or negative socket timeout is not a shorter wait, it is a
     different (non-blocking) mode the caller did not ask for.
+
+    ``math.isfinite`` is necessary but *not sufficient*: ``socket.settimeout`` turns the
+    value into an absolute deadline, so a merely large finite number
+    (``--timeout 10000000000``, and in fact anything from about ``1e9`` up) raises
+    ``OverflowError`` from the same uncaught place.  Hence the explicit
+    :data:`_MAX_TIMEOUT_SECONDS` ceiling rather than a finiteness check alone.
     """
 
     try:
@@ -310,6 +324,11 @@ def _validated_timeout(value: object) -> float:
     if not math.isfinite(timeout) or timeout <= 0:
         raise DeviceConnectError(
             "The connect timeout must be a positive, finite number of seconds.",
+            status=400,
+        )
+    if timeout > _MAX_TIMEOUT_SECONDS:
+        raise DeviceConnectError(
+            "The connect timeout must be at most %d seconds." % int(_MAX_TIMEOUT_SECONDS),
             status=400,
         )
     return timeout
@@ -454,17 +473,26 @@ def post_connect(control_url: str, token: str, *, installation_client_id: str,
             raw = response.read(_MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
         status = exc.code
-        # Draining the error body can itself raise; a sibling ``except`` of this ``try``
-        # would not cover it, so an unguarded read escapes as a raw traceback exactly
-        # when the cloud is flaky. Same shape as cloud_session._post_refresh.
+        # Draining the error body can itself raise, and this runs *inside* an ``except``
+        # block, so the sibling ``except http.client.HTTPException`` clause below cannot
+        # cover it -- an unguarded read escapes as a raw traceback exactly when the cloud
+        # is flaky, replacing the status copy the customer needs.
+        #
+        # ``HTTPException`` has to be named explicitly: a truncated chunked error body
+        # raises ``http.client.IncompleteRead``, whose MRO is ``(IncompleteRead,
+        # HTTPException, Exception, BaseException, object)`` -- it is neither an ``OSError``
+        # nor a ``ValueError``, so an ``(OSError, ValueError)`` guard let it straight
+        # through.  ``tests/test_device_connect.py`` pins that MRO so the mistake cannot
+        # come back. Same shape as cloud_session._post_refresh.
+        _DRAIN_FAILURES = (OSError, ValueError, http.client.HTTPException)
         try:
             exc.read(_MAX_RESPONSE_BYTES + 1)
-        except (OSError, ValueError):
+        except _DRAIN_FAILURES:
             pass
         finally:
             try:
                 exc.close()
-            except (OSError, ValueError):
+            except _DRAIN_FAILURES:
                 pass
         raise _connect_http_error(status)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -481,8 +509,8 @@ def post_connect(control_url: str, token: str, *, installation_client_id: str,
         ) from exc
     except http.client.HTTPException as exc:
         # A truncated chunked body makes ``HTTPResponse.read`` raise ``IncompleteRead``,
-        # which subclasses ``HTTPException``/``ValueError`` and is neither an ``OSError``
-        # nor a ``URLError`` -- so it escaped both clauses above as a raw traceback. That
+        # whose only base is ``HTTPException``: it is neither an ``OSError``, a
+        # ``ValueError``, nor a ``URLError`` -- so it escaped both clauses above. That
         # happened at the worst moment: the control plane had already answered, so the
         # single-use token was very likely spent, and the customer saw a stack trace
         # instead of being told to check the portal. ``LineTooLong``/``BadStatusLine`` from
@@ -606,9 +634,15 @@ def connect(token: object, *, control_url: Optional[str] = None,
         timeout=timeout,
     )
     if not str(response.get("refresh_credential") or "").strip():
+        # Reaching here means a 200 was parsed, and the control plane consumes the
+        # single-use connect token as it writes one.  So "try again" would be actively
+        # wrong: re-running the same command deterministically returns 401 and still leaves
+        # no session.  Point at the portal, the same way the truncated-reply copy does.
         raise DeviceConnectError(
-            "Engraphis Cloud accepted the token but returned no session credential. "
-            "Try again, and contact support if it repeats.",
+            "Engraphis Cloud accepted the token but returned no session credential, so "
+            "no session was saved. This connect token has now been used -- generate a new "
+            "one in your Engraphis account portal and try again, and contact support if "
+            "it repeats.",
             status=502,
         )
     try:
