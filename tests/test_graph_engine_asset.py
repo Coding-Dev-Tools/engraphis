@@ -1047,6 +1047,32 @@ def test_relation_labels_are_painted_when_the_labels_box_is_ticked() -> None:
     assert report["zoomedOut"] == []
 
 
+@requires_node
+def test_node_labels_are_capped_at_the_configured_density() -> None:
+    """A high density setting must still bound per-frame node-label painting."""
+    report = _run_engine(
+        """
+        let labels = [];
+        const ctx = {
+          globalAlpha: 1, fillStyle: '', strokeStyle: '', lineWidth: 1, font: '', textBaseline: '',
+          save() {}, restore() {}, beginPath() {}, arc() {}, stroke() {}, fill() {},
+          createRadialGradient() { return { addColorStop() {} }; },
+          fillText(text) { labels.push(String(text)); },
+        };
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData(chain(20));
+        api.setSettings({ labels: true, labelDensity: 3 });
+        store.graphData.nodes.forEach((node, index) => {
+          node.x = index * 10; node.y = 0; store.nodeCanvasObject(node, ctx, 1);
+        });
+        const names = labels.filter(value => value.startsWith('n'));
+        emit({ names, distinct: [...new Set(names)] });
+        """
+    )
+    assert len(report["distinct"]) == 3
+    assert len(report["names"]) == 6  # shadow + foreground per selected node
+
+
 def test_collapsed_cluster_labels_use_the_active_theme_text_colour() -> None:
     source = ASSET.read_text(encoding="utf-8")
     cluster_paint = source[source.index("if (node.cluster)"):source.index("if (state.bridges", source.index("if (node.cluster)"))]
