@@ -174,6 +174,8 @@ def test_transport_failures_report_a_retryable_outage(monkeypatch, error) -> Non
 @pytest.mark.parametrize("error", [
     TimeoutError("timed out waiting for status"),
     http.client.RemoteDisconnected("closed waiting for status"),
+    ConnectionResetError("reset waiting for status"),
+    OSError("TLS connection failed while reading status"),
 ])
 def test_post_send_refresh_transport_failures_require_reconnect(monkeypatch, error) -> None:
     """Unwrapped getresponse failures are ambiguous after the refresh POST was written."""
