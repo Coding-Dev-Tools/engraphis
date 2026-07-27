@@ -9,26 +9,6 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 Public 1.1.0 hosted-connect and graph-experience release.
 
-### Removed
-
-- **"Signed compliance export" is no longer advertised on any surface.** It was granted to
-  Pro and Team by the control plane's plan→feature table and promoted in the account portal,
-  the dashboard upgrade panel, this changelog, and the README pricing table — but it was
-  never implemented on either side: no signing code in this client, and no export route, no
-  `export:*` token scope, and no export job kind in Engraphis Cloud. The `export` key is
-  removed from the plan→feature tables in both repos and from the dashboard's entitlement
-  vocabulary.
-  - **No entitlement behaviour changes.** Those tables are read only to decide which lock
-    badges and plan bullets to draw; every paid operation was, and still is, authorized by
-    the cloud's token scopes and paid-entitlement dependencies.
-  - **Local workspace export is unaffected and always was free.** `GET /export` returns the
-    full bi-temporal dump (memories, sessions, audit) on every plan and is deliberately not
-    entitlement-gated so data portability survives recovery mode. It is now listed in the
-    README as the free capability it is.
-  - `GET /export?signed=true` and `GET /analytics/export` still answer `501`, but now say
-    the capability is not implemented and name the working alternative, instead of implying
-    it is available in Engraphis Cloud.
-
 ### Added
 
 - **`engraphis connect --token engr_ct_…`** — the missing client half of device connect.
@@ -54,9 +34,26 @@ Public 1.1.0 hosted-connect and graph-experience release.
 - A stable per-installation identity at `~/.engraphis/client_identity.json` (random ULIDs,
   not a hardware fingerprint) so reconnecting a machine updates its existing installation
   instead of registering a new device every time.
-- An opt-in canvas graph engine (`?graph-engine=next`) with the existing ForceGraph + D3
-  visual modes, deterministic communities, accessible classic fallback, lazy CSP-confined
-  assets, bounded simulations, and large/dense-graph rendering guards.
+
+### Removed
+
+- **"Signed compliance export" is no longer advertised on any surface.** It was granted to
+  Pro and Team by the control plane's plan→feature table and promoted in the account portal,
+  the dashboard upgrade panel, this changelog, and the README pricing table — but it was
+  never implemented on either side: no signing code in this client, and no export route, no
+  `export:*` token scope, and no export job kind in Engraphis Cloud. The `export` key is
+  removed from the plan→feature tables in both repos and from the dashboard's entitlement
+  vocabulary.
+  - **No entitlement behaviour changes.** Those tables are read only to decide which lock
+    badges and plan bullets to draw; every paid operation was, and still is, authorized by
+    the cloud's token scopes and paid-entitlement dependencies.
+  - **Local workspace export is unaffected and always was free.** `GET /export` returns the
+    full bi-temporal dump (memories, sessions, audit) on every plan and is deliberately not
+    entitlement-gated so data portability survives recovery mode. It is now listed in the
+    README as the free capability it is.
+  - `GET /export?signed=true` and `GET /analytics/export` still answer `501`, but now say
+    the capability is not implemented and name the working alternative, instead of implying
+    it is available in Engraphis Cloud.
 
 ### Changed
 
@@ -67,12 +64,6 @@ Public 1.1.0 hosted-connect and graph-experience release.
   `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` remains as an explicit operator override (`=0` opts a
   connected installation back out, `=1` forces it on regardless of session state) and is no
   longer surfaced anywhere in the UI.
-- Hosted plan presentation now follows the control plane's active, trial, expired, and
-  lapsed states; renewal follows the plan actually held, account actions use the
-  plan-neutral portal, and a spent trial is never offered again.
-- Device-connect and refresh responses validate credential fields as strings, preserve
-  single-use-token semantics across truncated responses, and refuse unsafe session-storage
-  paths before redeeming a token.
 
 ## [1.0.1] - 2026-07-24
 
