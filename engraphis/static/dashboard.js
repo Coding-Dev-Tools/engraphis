@@ -579,7 +579,7 @@ function graphTypeColor(type){if(GCOLOR_OVERRIDES[type])return GCOLOR_OVERRIDES[
 /* The engine renders to a canvas, so it cannot read `--entity-*` itself the way the legend and
    the controls do. Resolve the active theme's values here and hand them over; without this the
    opt-in canvas keeps dark-theme node colours after a switch to Light/Solarized/Sepia. */
-function graphThemeTypeColors(){const colors={},fallback=cssvar('--color-accent','#8c83e8');Object.keys(ETYPE_TOKEN).forEach(type=>{colors[type]=cssvar(ETYPE_TOKEN[type],fallback)});colors.relation_label=cssvar('--color-text-dim','#7e8795');return colors}
+function graphThemeTypeColors(){const colors={},fallback=cssvar('--color-accent','#8c83e8');Object.keys(ETYPE_TOKEN).forEach(type=>{colors[type]=cssvar(ETYPE_TOKEN[type],fallback)});colors.relation_label=cssvar('--color-text-dim','#7e8795');colors.label=cssvar('--color-text','#e7e9ee');return colors}
 function graphContrastColor(color){if(!graphValidColor(color))return cssvar('--color-canvas','#0e1014');const n=parseInt(color.slice(1),16),lum=.2126*(n>>16)+.7152*((n>>8)&255)+.0722*(n&255);return lum>150?'#111827':'#f8fafc'}
 const ETYPE_COLOR=new Proxy({},{get:(_,type)=>graphTypeColor(type)});
 graphLoadColorPreferences();

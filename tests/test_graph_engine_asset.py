@@ -986,10 +986,11 @@ def test_dashboard_hands_the_engine_the_active_themes_entity_colours() -> None:
     assert report["themeColors"]["person_or_concept"] == "#112233"
     assert report["themeColors"]["organization"] == "#556677"
     assert report["themeColors"]["relation_label"] == "#123456"
+    assert report["themeColors"]["label"] == "#e7e9ee"
     # Every type the legend can show must be covered, or the canvas falls back per type.
     assert set(report["themeColors"]) == {
         "person_or_concept", "mention", "hashtag", "email", "organization", "location",
-        "relation_label",
+        "relation_label", "label",
     }
 
 
@@ -1105,6 +1106,15 @@ def test_entity_labels_preserve_the_configured_screen_font_size() -> None:
     source = ASSET.read_text(encoding="utf-8")
     assert "const size = state.settings.font / scale;" in source
     assert "state.settings.font / scale / 3.4" not in source
+
+
+def test_collapsed_cluster_labels_use_the_active_theme_text_colour() -> None:
+    source = ASSET.read_text(encoding="utf-8")
+    cluster_start = source.index("if (node.cluster)")
+    cluster_paint = source[
+        cluster_start : source.index("if (state.bridges", cluster_start)
+    ]
+    assert "state.themeColors.label || '#e7e9ee'" in cluster_paint
 
 
 @requires_node

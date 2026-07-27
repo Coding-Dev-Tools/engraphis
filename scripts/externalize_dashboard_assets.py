@@ -149,7 +149,11 @@ def _eager_scripts(html: str) -> list[str]:
     CSP-hostile bundle back onto every page view *and* drop it from the existence check —
     a gate that cannot fail.
     """
-    return [src for src in _parse_page(html).script_srcs if src.startswith("/static/")]
+    return [
+        src
+        for src in _parse_page(html).script_srcs
+        if src.startswith(("/static/", "/v2-assets/"))
+    ]
 
 
 def _replace_assets(html: str, replacements: list[tuple[_InlineAsset, str]]) -> str:

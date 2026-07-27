@@ -108,6 +108,18 @@ def test_check_rejects_an_eagerly_loaded_csp_hostile_script(tmp_path, monkeypatc
         assets.check()
 
 
+def test_check_rejects_an_eagerly_loaded_v2_graph_engine(tmp_path, monkeypatch):
+    _gate(
+        tmp_path,
+        monkeypatch,
+        '<html><body><script src="/v2-assets/engraphis-graph.js"></script></body></html>',
+        _LOADERS,
+    )
+
+    with pytest.raises(SystemExit, match="must not eagerly load: /v2-assets/engraphis-graph"):
+        assets.check()
+
+
 def test_check_allows_a_deferred_script_named_only_in_a_comment(tmp_path, monkeypatch):
     """The rule reads parsed ``<script src>`` values, so index.html can still say why."""
     _gate(
