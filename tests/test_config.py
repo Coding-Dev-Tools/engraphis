@@ -5,12 +5,15 @@ precision win on top of hybrid retrieval) can be turned on by config
 instead of only in code. The default must stay empty so the offline/numpy-only CI path is
 unchanged (empty -> None -> IdentityReranker, no torch).
 """
+from pathlib import Path
+
 import pytest
 
 from engraphis import config
 from engraphis.config import Settings
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
 RETIRED_RELAY_URLS = (
     "https://engraphis-production.up.railway.app",
     "https://team.engraphis.com",
@@ -37,6 +40,29 @@ def test_cors_origins_use_engraphis_port_env(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_PORT", "9100")
     assert Settings().cors_origins == [
         "http://127.0.0.1:9100", "http://localhost:9100"]
+
+
+def test_sample_operational_config_matches_runtime_contract(monkeypatch):
+    example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+    monkeypatch.delenv("ENGRAPHIS_RATE_LIMIT", raising=False)
+    assert Settings().rate_limit == 0
+    assert "# ENGRAPHIS_RATE_LIMIT=0" in example
+
+    monkeypatch.setenv("ENGRAPHIS_WORKSPACES", "acme,personal")
+    assert Settings().allowed_workspaces == ["acme", "personal"]
+    assert "# ENGRAPHIS_WORKSPACES=acme,personal" in example
+
+    assert "http://127.0.0.1:<ENGRAPHIS_PORT>" in example
+    assert "http://localhost:<ENGRAPHIS_PORT>" in example
+    assert "These settings do not change CORS" in example
+    assert "# ENGRAPHIS_DASHBOARD_URL=https://engraphis.example.com" in example
+
+    monkeypatch.delenv("ENGRAPHIS_LLM_AUTO_EXTRACT", raising=False)
+    assert Settings().llm_auto_extract is False
+    assert "ENGRAPHIS_LLM_AUTO_EXTRACT=0" in example
+    assert "| `ENGRAPHIS_LLM_AUTO_EXTRACT` | `0` |" in readme
 
 
 def test_rerank_model_read_from_env(monkeypatch):

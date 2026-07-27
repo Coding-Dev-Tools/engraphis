@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 from typing import Any, Optional
+import logging
 
 from engraphis.stores import get_conn, now_ts
+
+logger = logging.getLogger("engraphis.stores.graph")
 
 
 def upsert_entity(namespace: str, name: str, entity_type: Optional[str] = None) -> None:
@@ -91,8 +94,8 @@ def graph_snapshot(namespace: Optional[str] = None, limit: int = 200,
                 did = payload.get("document_id")
                 if did and did not in doc_ids:
                     doc_ids.append(did)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Entity document payload parse skipped (%s)", type(exc).__name__)
         ent["documents"] = doc_ids[:10]
         # Get a preview from the first document
         if ent["documents"]:
