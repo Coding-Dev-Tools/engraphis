@@ -9,6 +9,32 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 Public 1.1.0 hosted-connect and graph-experience release.
 
+### Added
+
+- **`engraphis connect --token engr_ct_…`** — the missing client half of device connect.
+  `cloud_session.save_bootstrap()` is the only writer of `~/.engraphis/cloud_session.json`,
+  and it had no production caller: the docs told paying customers to prefer a file nothing
+  created, so a purchased installation could not be connected without hand-writing state.
+  The new command redeems the one-time connect token from the account portal against
+  `POST /v1/devices/connect`, saves the returned session with owner-only permissions, and
+  verifies `cloud_session.configured()` before reporting success. The token is sent in the
+  request body and nowhere else — never printed, logged, or written to disk — and every
+  refusal maps to fixed, actionable copy (an expired or already-used token is not confused
+  with a lapsed subscription). Session storage is pre-flighted before the exchange, so an
+  unwritable state directory or a `cloud_session.json` replaced by a link fails the command
+  *without* spending the single-use token — the customer fixes the path and retries with the
+  same token instead of returning to the portal for a new one. Faults that can only happen
+  *after* the exchange — a reply truncated mid-body (`http.client.IncompleteRead`), or an
+  endpoint that stops resolving before the session is written (`CloudUrlUnresolved`) — are
+  reported as errors that say the token was already used, rather than escaping as tracebacks
+  that leave the customer unable to tell whether to retry. Also installed as
+  `engraphis-connect`.
+- An `engraphis` front-door command that dispatches to the existing `engraphis-<verb>`
+  entry points, so the command the account portal displays is runnable as shown.
+- A stable per-installation identity at `~/.engraphis/client_identity.json` (random ULIDs,
+  not a hardware fingerprint) so reconnecting a machine updates its existing installation
+  instead of registering a new device every time.
+
 ### Removed
 
 - Removed an unimplemented hosted export claim from public product surfaces.
@@ -22,12 +48,6 @@ Public 1.1.0 hosted-connect and graph-experience release.
   `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` remains as an explicit operator override (`=0` opts a
   connected installation back out, `=1` forces it on regardless of session state) and is no
   longer surfaced anywhere in the UI.
-- Hosted plan presentation now follows the control plane's active, trial, expired, and
-  lapsed states; renewal follows the plan actually held, account actions use the
-  plan-neutral portal, and a spent trial is never offered again.
-- Device-connect and refresh responses validate credential fields as strings, preserve
-  single-use-token semantics across truncated responses, and refuse unsafe session-storage
-  paths before redeeming a token.
 
 ## [1.0.1] - 2026-07-24
 

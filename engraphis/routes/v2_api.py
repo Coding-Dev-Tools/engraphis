@@ -1289,15 +1289,7 @@ def analytics(workspace: Optional[str] = None):
 
 @router.get("/analytics/export")
 def analytics_export(workspace: Optional[str] = None):
-    """Not implemented here. A self-contained HTML analytics *report artifact* was planned
-    for this route and never built.
-
-    The previous 501 told customers to "download analytics reports from the Engraphis Cloud
-    dashboard", which overstates what is reachable: the control plane serves analytics as
-    JSON (``GET /analytics/latest``), and this client already surfaces exactly that through
-    ``GET /analytics``. Point callers at the data that exists rather than at a file that may
-    not. Kept as an explicit 501 rather than removed so an older dashboard build calling this
-    path gets a truthful answer instead of a 404."""
+    """Not implemented here; use the same analytics data as JSON instead."""
     raise HTTPException(status_code=501, detail={
         "error": "This build does not generate analytics report files. Use GET /analytics "
                  "for the same data as JSON.",
@@ -1330,14 +1322,9 @@ def ready():
 def export(workspace: Optional[str] = None, signed: bool = False):
     """Full bi-temporal workspace dump (memories + sessions + audit).
 
-    Local and free: this is the data-portability path that must keep working even in
-    recovery mode, so it is deliberately not entitlement-gated.
-
-    ``signed=true`` was specified as a SHA-256 compliance manifest wrapping the same dump —
-    a tamper-evident, self-verifying audit bundle. It was never implemented; no signing
-    code exists in this client and Engraphis Cloud has no export route, no supported hosted export capability. It answers 501 rather than silently returning an
-    *unsigned* bundle, because a caller asking for tamper-evidence must not be handed
-    something that merely looks like it."""
+    This is the free local data-portability path. ``signed=true`` was never
+    implemented, so it must not claim availability in Engraphis Cloud either.
+    """
     if signed:
         raise HTTPException(status_code=501, detail={
             "error": "Signed compliance exports are not implemented. Omit signed=true for "
@@ -1747,15 +1734,10 @@ def code_export(workspace: str, repo: str):
 # and only ``pro``/``team`` are paid; any other value — unknown, empty, or mis-cased —
 # resolves to no features, exactly as the server treats it.
 #
-# The server's own keys are {analytics, automation, sync, team}. This client's
+# The server's own keys are {analytics, automation, export, sync, team}. This client's
 # commercial manifest additionally names Auto Consolidation and Auto Dreaming, which the
 # server grants under ``automation``. They are expanded here so the dashboard can never
 # draw a lock on a capability the customer's plan already includes.
-#
-# ``export`` was removed from both tables: it was disclosed by the server and rendered here
-# for the whole pre-launch period while no signed-export capability existed on either side.
-# Plain local workspace export is unaffected — it is a free, local-only route (``GET
-# /export``) and was never a hosted entitlement.
 _AUTOMATION_FEATURES = ("automation", "consolidation", "dreaming")
 _PRO_FEATURES = ("analytics", "sync") + _AUTOMATION_FEATURES
 _HOSTED_ENTITLEMENTS = {
@@ -1946,6 +1928,14 @@ def _epoch_seconds(value: object) -> float:
     trailing ``Z`` that Pydantic emits for UTC, so it is rewritten to the explicit offset
     first. Anything it still cannot parse is reported as "unknown" rather than raising on
     the ``/api/bootstrap`` boot path.
+
+    Numeric input must additionally be *finite*. ``json.loads`` accepts the non-finite
+    literals ``Infinity``/``NaN`` and turns an out-of-range value such as ``1e309`` into
+    ``inf``, and either one would travel out through ``/api/license`` and ``/api/bootstrap``
+    into Starlette's ``JSONResponse``, which raises ``ValueError`` on non-JSON-compliant
+    floats — breaking the dashboard's boot path over a malformed cache entry. An
+    unrepresentable instant is not a boundary; report it as unknown like any other
+    unparseable value.
     """
 
     if isinstance(value, bool):
@@ -1953,11 +1943,9 @@ def _epoch_seconds(value: object) -> float:
     if isinstance(value, (int, float)):
         try:
             number = float(value)
-        except (OverflowError, ValueError):
-            # JSON integers are arbitrary precision. An unrepresentable instant is not a
-            # boundary and must not break /api/license or the dashboard bootstrap path.
+        except (OverflowError, ValueError):  # an arbitrary-precision JSON integer
             return 0.0
-        return number if number > 0 and math.isfinite(number) else 0.0
+        return number if math.isfinite(number) and number > 0 else 0.0
     if not isinstance(value, str) or not value.strip():
         return 0.0
     text = value.strip()
@@ -1970,10 +1958,9 @@ def _epoch_seconds(value: object) -> float:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=_datetime.timezone.utc)
     try:
-        number = float(parsed.timestamp())
+        return float(parsed.timestamp())
     except (OverflowError, OSError, ValueError):
         return 0.0
-    return number if number > 0 and math.isfinite(number) else 0.0
 
 
 def _trial_facts(source: object) -> dict:
@@ -2306,18 +2293,6 @@ def _fetch_authoritative_entitlement() -> Optional[dict]:
                 exc.close()
             except (OSError, ValueError):
                 pass
-        # The compatibility endpoint is authoritative too.  An older control plane can
-        # refresh a token successfully yet answer 402 here because it does not include
-        # entitlement fields in the refresh response.  Do not leave its previous paid
-        # cache (or the session that outranks it) advertising access after that answer.
-        if exc.code == 402:
-            try:
-                from engraphis.cloud_session import record_billing_denial
-
-                record_billing_denial()
-            except Exception:  # noqa: BLE001 - a denial we cannot persist is still a denial
-                pass
-            _deny_entitlement_cache()
         return None
     except Exception:  # noqa: BLE001 - transport, TLS, and URL failures are all "not now"
         return None
@@ -2536,21 +2511,25 @@ def hosted_plan_summary() -> dict:
                            "source": "override", "cloud_access_active": plan != "local",
                            "checked_at": 0.0}
             entitlement.update(_unknown_trial_facts())
-    access_state = _access_state(entitlement)
-    access_live = access_state in ("active", "trial")
+    state = _access_state(entitlement)
+    # A grant this client cannot honour is not a grant. When the control plane itself
+    # denies access it empties ``cloud_features`` and this is a no-op; when the *disclosed
+    # trial boundary* is what ended the access, the last live answer's grants are still
+    # sitting in the session record and the cache, and echoing them would tick feature rows
+    # every hosted call is about to reject. One rule for both: the features are the ones
+    # that are live right now.
+    features = list(entitlement["features"]) if state in ("active", "trial") else []
     return {
         "plan": entitlement["plan"],
-        # A cached trial can cross its known boundary while this installation is offline.
-        # Keep the durable server answer intact, but never present its stale grants as live.
-        "features": list(entitlement["features"]) if access_live else [],
+        "features": features,
         "plan_source": entitlement["source"],
-        "cloud_access_active": access_live,
+        "cloud_access_active": entitlement["cloud_access_active"],
         "plan_checked_at": entitlement["checked_at"],
         "entitlement_status": entitlement["status"],
         "is_trial": entitlement["is_trial"],
         "trial_consumed": entitlement["trial_consumed"],
         "trial_ends_at": entitlement["trial_ends_at"],
-        "access_state": access_state,
+        "access_state": state,
     }
 
 
@@ -2572,18 +2551,33 @@ def hosted_plan_summary() -> dict:
 _ACCESS_STATES = ("active", "trial", "trial_expired", "lapsed", "inactive")
 
 
-def _access_state(entitlement: dict) -> str:
+def _trial_boundary_passed(ends_at: object, now: Optional[float] = None) -> bool:
+    """Has the disclosed trial boundary already gone by? Unknown boundaries say no."""
+
+    boundary = _epoch_seconds(ends_at)
+    if boundary <= 0:
+        return False
+    return (time.time() if now is None else float(now)) >= boundary
+
+
+def _access_state(entitlement: dict, now: Optional[float] = None) -> str:
     """Classify why hosted features are available or locked. Never raises."""
 
     if entitlement.get("plan") not in ("pro", "team"):
         return "inactive"
     is_trial = bool(entitlement.get("is_trial"))
-    trial_ends_at = _epoch_seconds(entitlement.get("trial_ends_at")) if is_trial else 0.0
-    if trial_ends_at and trial_ends_at <= time.time():
+    if not entitlement.get("cloud_access_active"):
+        return "trial_expired" if is_trial else "lapsed"
+    # ``cloud_access_active`` is only ever as fresh as the last answer from the control
+    # plane, and a cached one can outlive the trial it describes: an installation that
+    # stays offline past ``trial_ends_at`` keeps reading back the ``true`` saved while the
+    # trial was live. Left alone this reported ``trial`` indefinitely — the dashboard
+    # calling a trial live under a printed end date already in the past, and
+    # ``/api/license`` advertising paid features every hosted call would be denied. The
+    # boundary the server itself disclosed settles it without another request.
+    if is_trial and _trial_boundary_passed(entitlement.get("trial_ends_at"), now):
         return "trial_expired"
-    if entitlement.get("cloud_access_active"):
-        return "trial" if is_trial else "active"
-    return "trial_expired" if is_trial else "lapsed"
+    return "trial" if is_trial else "active"
 
 
 @router.get("/license")
@@ -2643,13 +2637,16 @@ def get_license():
         "grace_seconds": 86_400,
         "grace_scope": "existing authenticated local workspace writes only",
         "upgrade_url": licensing.upgrade_url(),
-        # Plan-neutral account and billing entry point. ``upgrade_url()`` defaults to the
-        # Pro checkout and is therefore not a safe substitute when the targets differ.
-        "account_url": licensing.account_url(),
         # Pro and Team bill through separate checkout targets. Emitting only the generic
         # URL sent every Team upgrade click to the Pro page.
         "pro_upgrade_url": licensing.upgrade_url("pro"),
         "team_upgrade_url": licensing.upgrade_url("team"),
+        # The plan-neutral account entry point, for the actions that are not a purchase —
+        # "Open account portal" on a lapsed subscription above all. ``upgrade_url()``
+        # cannot serve that: with no argument it resolves ``plan="pro"`` and prefers
+        # ``ENGRAPHIS_PRO_UPGRADE_URL``, so wherever the checkout and the portal are
+        # configured as distinct pages it is the Pro checkout wearing a neutral name.
+        "account_url": licensing.account_url(),
     }
 
 

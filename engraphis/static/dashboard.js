@@ -105,8 +105,6 @@ function selectView(v){
  /* Plan pills live in the topbar; clear them on navigation so only the active
     view's loader can repopulate one. */
  ['an-lock','au-lock'].forEach(id=>{const p=document.getElementById(id);if(p){p.textContent='';p.className='pill pill-muted topbar-lock'}});
- /* The graph canvas is the only view that owns an animation loop. Park it while it is not
-    on screen so navigating away does not leave a hidden canvas repainting forever. */
  if(v==='graph')graphEngineResume();else graphEnginePause();
  closeMobileNav();
  (LOADERS[v]||function(){})();
@@ -175,35 +173,43 @@ function licTrialActive(){return licAccessState()==='trial'}
 function licTrialAvailable(){return !!(LIC&&LIC.trial&&LIC.trial.available)}
 function licPlanName(){return licPlanKey()?licPlanKey().toUpperCase():'LOCAL'}
 /* The plan the customer actually holds, as the wire spells it: '' when they hold none.
-   Renewal and billing actions must follow this, not a hardcoded default. */
+   Renewal and billing actions must follow this, not a hardcoded 'pro'. */
 function licPlanKey(){const raw=String((LIC&&LIC.plan)||'local').toLowerCase();return raw==='pro'||raw==='team'?raw:''}
 function licTrialEnds(){return fmtDay(LIC&&LIC.trial&&LIC.trial.ends_at)}
 function fmtDay(epoch){const n=Number(epoch)||0;if(!(n>0))return '';try{const d=new Date(n*1000);return Number.isFinite(d.getTime())?d.toISOString().slice(0,10):''}catch(e){return ''}}
 
 /* ── shared hosted upgrade / trial CTA ── */
-/* The plan-neutral hosted entry point. An account portal is not a checkout, so it must
-   not carry the ?plan= parameter that would reframe it as one. */
+/* The plan-neutral hosted entry point. An account portal is not a checkout for either
+   plan, so it must not carry the ?plan= that would reframe it as one — and it cannot be
+   LIC.upgrade_url either: that is licensing.upgrade_url(), which resolves plan="pro" and
+   prefers ENGRAPHIS_PRO_UPGRADE_URL, so where the portal and the checkout are configured
+   separately it is the Pro checkout under a neutral name. LIC.account_url resolves the
+   generic value directly; the fallback only matters against a build that predates it. */
 function hostedAccountUrl(){return safeUrl((LIC&&LIC.account_url)||(LIC&&LIC.upgrade_url))}
 function hostedPlanUrl(plan,trial){const raw=(LIC&&(plan==='team'?LIC.team_upgrade_url:LIC.pro_upgrade_url))||(LIC&&LIC.upgrade_url);const safe=safeUrl(raw);if(!safe||safe==='#')return '#';try{const url=new URL(safe,location.href);if(plan==='pro'||plan==='team')url.searchParams.set('plan',plan);if(trial)url.searchParams.set('trial',plan);return url.href}catch(e){return safe}}
-/* Why is this feature locked? This helper returns plain text; every HTML sink escapes it.
-   One sentence per access state keeps the panel from claiming a trial the customer cannot
-   start or blaming billing for a trial that simply ran out. */
-function lockReason(team){const st=licAccessState(),ends=licTrialEnds(),plan=licPlanName();
- if(team&&plan==='TEAM'&&(st==='active'||st==='trial'))return `Team administration runs in Engraphis Team Cloud, not this local dashboard.${st==='trial'&&ends?` Your Team trial is live until ${ends}.`:''}`;
- if(st==='trial')return `Your free trial is live${ends?` until ${ends}`:''}. ${team?'Team':'Pro'} needs a subscription of its own.`;
- if(st==='trial_expired')return `Your free trial has ended${ends?` (${ends})`:''}, so hosted features are locked. The trial cannot be started again.`;
- if(st==='lapsed')return `Your ${plan} subscription is no longer active, so hosted features are locked until billing is up to date.`;
- if(st==='active')return `Your ${plan} subscription does not include this.`;
+/* Why is this feature locked? One sentence per access state, so the panel never claims a
+   trial the customer cannot start nor blames billing for a trial that simply ran out.
+   This is DENIAL copy: every caller reaches it because a hosted request was refused. The
+   one surface that is not a denial — the Team tab, which renders for everyone on every
+   visit — must go through teamTeaserNote() instead. */
+function lockReason(team){const st=licAccessState(),ends=licTrialEnds();
+ if(st==='trial')return `Your free trial is live${ends?` until ${esc(ends)}`:''}. ${team?'Team':'Pro'} needs a subscription of its own.`;
+ if(st==='trial_expired')return `Your free trial has ended${ends?` (${esc(ends)})`:''}, so hosted features are locked. The trial cannot be started again.`;
+ if(st==='lapsed')return `Your ${esc(licPlanName())} subscription is no longer active, so hosted features are locked until billing is up to date.`;
+ if(st==='active')return `Your ${esc(licPlanName())} subscription does not include this.`;
  if(licTrialAvailable())return `The email-confirmed, no-card trial lasts exactly ${TRIAL_DAYS} active days.`;
  return 'Your free trial has already been used.'}
-/* The Team tab describes the hosted service; it is not an answer to a refused request.
-   A live Team customer therefore gets affirmative plan copy while every other state keeps
-   the denial explanation that applies to it. */
+/* The Team tab describes the hosted service; it is not an answer to a refused request, and
+   it renders for every customer including the ones who are paying for Team. Handing it
+   lockReason(true) told a live Team subscriber "Your TEAM subscription does not include
+   this" directly above an unlocked Team nav item and an Open Team Cloud button. A customer
+   whose live plan already grants Team gets the truth; everyone else still gets the denial
+   copy, which for them is accurate. */
 function teamTeaserNote(){const ends=licTrialEnds();
  if(licPlanKey()!=='team'||!licAccessLive())return lockReason(true);
- if(licAccessState()==='trial')return `Your free trial includes Team${ends?` until ${ends}`:''}. Organizations, roles, and seats are managed in Engraphis Cloud.`;
+ if(licAccessState()==='trial')return `Your free trial includes Team${ends?` until ${esc(ends)}`:''}. Organizations, roles, and seats are managed in Engraphis Cloud.`;
  return 'Your TEAM subscription includes this. Organizations, roles, and seats are managed in Engraphis Cloud.'}
-function unlockHtml(feature,plan){const url=hostedPlanUrl(plan),trialUrl=hostedPlanUrl(plan,true),team=plan==='team';const offerTrial=licTrialAvailable();const trial=team?'Start hosted Team trial':'Start hosted Pro trial';const purchase=team?'Purchase Team license':'Purchase Pro license';const price=team?'$20 per seat/month or $200 per seat/year':'$10/month or $100/year';const detail=lockReason(team);const benefits=team?['Everything in Pro','Hosted organizations, invitations, and named seats','Roles, scoped credentials, and Team audit history']:['Hosted Cloud Sync across your installations','Growth, retention, decay, and entity Analytics','Auto Consolidation with hosted retention policies','Auto Dreaming with reviewable managed proposals','Priority support'];return `<section class="upgrade-panel" aria-label="Engraphis ${team?'Team':'Pro'} upgrade"><div class="upgrade-panel-kicker">ENGRAPHIS ${team?'TEAM':'PRO'}</div><h2>Unlock ${esc(feature)} and more</h2><p class="upgrade-panel-lede">Make the local memory engine work across your installations—and keep improving without manual upkeep.</p><div class="upgrade-panel-price">${price}</div><div class="upgrade-panel-benefits"><div class="upgrade-panel-benefits-title">Your license unlocks</div><ul>${benefits.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div><p class="upgrade-panel-trial">${esc(detail)}</p><div class="upgrade-panel-actions">${offerTrial?`<a class="btn btn-primary" href="${esc(trialUrl)}" target="_blank" rel="noopener">${trial}</a>`:''}<a class="btn btn-ghost" href="${esc(url)}" target="_blank" rel="noopener">${purchase}</a></div></section>`}
+function unlockHtml(feature,plan){const url=hostedPlanUrl(plan),trialUrl=hostedPlanUrl(plan,true),team=plan==='team';const offerTrial=licTrialAvailable();const trial=team?'Start hosted Team trial':'Start hosted Pro trial';const purchase=team?'Purchase Team license':'Purchase Pro license';const price=team?'$20 per seat/month or $200 per seat/year':'$10/month or $100/year';const detail=lockReason(team);const benefits=team?['Everything in Pro','Hosted organizations, invitations, and named seats','Roles, scoped credentials, and Team audit history']:['Hosted Cloud Sync across your installations','Growth, retention, decay, and entity Analytics','Auto Consolidation with hosted retention policies','Auto Dreaming with reviewable managed proposals','Priority support'];return `<section class="upgrade-panel" aria-label="Engraphis ${team?'Team':'Pro'} upgrade"><div class="upgrade-panel-kicker">ENGRAPHIS ${team?'TEAM':'PRO'}</div><h2>Unlock ${esc(feature)} and more</h2><p class="upgrade-panel-lede">Make the local memory engine work across your installations—and keep improving without manual upkeep.</p><div class="upgrade-panel-price">${price}</div><div class="upgrade-panel-benefits"><div class="upgrade-panel-benefits-title">Your license unlocks</div><ul>${benefits.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div><p class="upgrade-panel-trial">${detail}</p><div class="upgrade-panel-actions">${offerTrial?`<a class="btn btn-primary" href="${esc(trialUrl)}" target="_blank" rel="noopener">${trial}</a>`:''}<a class="btn btn-ghost" href="${esc(url)}" target="_blank" rel="noopener">${purchase}</a></div></section>`}
 function startTrialPlan(plan){const url=hostedPlanUrl(plan,true);if(url==='#'){toast('Hosted signup URL is not configured','err');return}const link=document.createElement('a');link.href=url;link.target='_blank';link.rel='noopener';link.click()}
 function startTrial(){return startTrialPlan('pro')}
 function startTeamTrial(){return startTrialPlan('team')}
@@ -487,7 +493,11 @@ function licStateBanner(state,plan,ends,status){
  return ''}
 function licActionsHtml(state){
  if(licTrialAvailable())return `<div data-csp-style="s123"><button class="btn btn-primary btn-sm" data-onclick="h84">Start hosted Pro trial</button><button class="btn btn-ghost btn-sm" data-onclick="h87">Start hosted Team trial</button></div>`;
- /* A lapsed customer is renewing the subscription they already hold, not shopping. */
+ /* A lapsed customer is renewing the subscription they already hold, not shopping. Both
+    buttons used to be fixed to pro/team regardless of plan, so "Update billing" walked a
+    lapsed Team customer into the Pro checkout (?plan=pro) — the wrong product offered to
+    fix a billing problem — and "Open account portal" sent a lapsed Pro customer to the
+    Team one. */
  if(state==='lapsed')return `<div data-csp-style="s123"><a class="btn btn-primary btn-sm" href="${esc(hostedPlanUrl(licPlanKey()||'pro'))}" target="_blank" rel="noopener">Update billing</a><a class="btn btn-ghost btn-sm" href="${esc(hostedAccountUrl())}" target="_blank" rel="noopener">Open account portal</a></div>`;
  const buy=state==='trial_expired';
  const primary=buy?'Subscribe to Pro':'Open Pro Cloud';

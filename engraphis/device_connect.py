@@ -64,11 +64,13 @@ CONNECT_PATH = "/v1/devices/connect"
 #: human's prompt, once, and a spurious timeout costs the customer a fresh token.
 DEFAULT_TIMEOUT_SECONDS = 15.0
 
-#: A device connection is one interactive request.  Letting a caller supply an arbitrary
-#: finite float is not portable: values that fit Python's ``float`` can still overflow the
-#: platform socket timeout.  Two minutes leaves room for a slow network without turning a
-#: mistyped CLI value into an unbounded wait or a raw ``OverflowError`` from ``urllib``.
-_MAX_TIMEOUT_SECONDS = 120.0
+#: Upper bound on ``--timeout``.  Not a policy number -- a platform one.  ``socket``
+#: converts a timeout into an absolute deadline, so a large but *finite* value raises
+#: ``OverflowError`` ("timeout doesn't fit into C timeval", "timestamp out of range for
+#: platform time_t") from inside ``urllib``: ``1e9`` already overflows on CPython 3.12.
+#: One hour is orders of magnitude more than a single interactive POST can need and orders
+#: of magnitude below the first value any supported platform rejects.
+_MAX_TIMEOUT_SECONDS = 3600.0
 
 #: The control plane answers with a small fixed record; anything larger is not ours.
 _MAX_RESPONSE_BYTES = 64 * 1024
@@ -370,6 +372,12 @@ def _validated_timeout(value: object) -> float:
     traceback instead of an error and an exit code.  Non-positive values are refused for
     the same reason: a ``0`` or negative socket timeout is not a shorter wait, it is a
     different (non-blocking) mode the caller did not ask for.
+
+    ``math.isfinite`` is necessary but *not sufficient*: ``socket.settimeout`` turns the
+    value into an absolute deadline, so a merely large finite number
+    (``--timeout 10000000000``, and in fact anything from about ``1e9`` up) raises
+    ``OverflowError`` from the same uncaught place.  Hence the explicit
+    :data:`_MAX_TIMEOUT_SECONDS` ceiling rather than a finiteness check alone.
     """
 
     try:
@@ -385,8 +393,7 @@ def _validated_timeout(value: object) -> float:
         )
     if timeout > _MAX_TIMEOUT_SECONDS:
         raise DeviceConnectError(
-            "The connect timeout must not exceed %d seconds."
-            % _MAX_TIMEOUT_SECONDS,
+            "The connect timeout must be at most %d seconds." % int(_MAX_TIMEOUT_SECONDS),
             status=400,
         )
     return timeout
@@ -413,24 +420,6 @@ def _validated_control_url(value: str) -> str:
         raise DeviceConnectError(
             "The Engraphis Cloud control URL is not a valid HTTPS endpoint.", status=400
         ) from exc
-
-
-def _server_compute_url(response: dict) -> str:
-    """Return a vetted compute endpoint volunteered by the control plane, if any.
-
-    ``compute_url`` is endpoint metadata, not a redirect target: the registration body is
-    untrusted until it passes the same HTTPS, public-host, and DNS-rebinding validation as
-    configured endpoints.  A bad or temporarily unresolvable optional value must not erase
-    a valid manifest fallback after the one-time token was spent.
-    """
-
-    value = response.get("compute_url")
-    if not isinstance(value, str) or not value.strip():
-        return ""
-    try:
-        return validate_cloud_base_url(value)
-    except (CloudUrlUnresolved, ValueError):
-        return ""
 
 
 def _default_device_name() -> str:
@@ -555,17 +544,26 @@ def post_connect(control_url: str, token: str, *, installation_client_id: str,
         )  # nosec B310 - scheme validated by validate_cloud_base_url
     except urllib.error.HTTPError as exc:
         status = exc.code
-        # Draining the error body can itself raise; a sibling ``except`` of this ``try``
-        # would not cover it, so an unguarded read escapes as a raw traceback exactly
-        # when the cloud is flaky. Same shape as cloud_session._post_refresh.
+        # Draining the error body can itself raise, and this runs *inside* an ``except``
+        # block, so the sibling ``except http.client.HTTPException`` clause below cannot
+        # cover it -- an unguarded read escapes as a raw traceback exactly when the cloud
+        # is flaky, replacing the status copy the customer needs.
+        #
+        # ``HTTPException`` has to be named explicitly: a truncated chunked error body
+        # raises ``http.client.IncompleteRead``, whose MRO is ``(IncompleteRead,
+        # HTTPException, Exception, BaseException, object)`` -- it is neither an ``OSError``
+        # nor a ``ValueError``, so an ``(OSError, ValueError)`` guard let it straight
+        # through.  ``tests/test_device_connect.py`` pins that MRO so the mistake cannot
+        # come back. Same shape as cloud_session._post_refresh.
+        _DRAIN_FAILURES = (OSError, ValueError, http.client.HTTPException)
         try:
             exc.read(_MAX_RESPONSE_BYTES + 1)
-        except (OSError, ValueError, http.client.HTTPException):
+        except _DRAIN_FAILURES:
             pass
         finally:
             try:
                 exc.close()
-            except (OSError, ValueError, http.client.HTTPException):
+            except _DRAIN_FAILURES:
                 pass
         raise _connect_http_error(status)
     except urllib.error.URLError as exc:
@@ -703,30 +701,12 @@ def connect(token: object, *, control_url: Optional[str] = None,
     resolved_control = _validated_control_url(
         control_url if control_url is not None else default_control_url()
     )
-    cli_compute = str(compute_url or "").strip()
-    environment_compute = os.environ.get("ENGRAPHIS_CLOUD_COMPUTE_URL", "").strip()
-    has_explicit_compute = bool(cli_compute or environment_compute)
-    resolved_compute = cli_compute or environment_compute
-    # The shipped manifest/default remains a fallback, not an authority over a value the
-    # control plane returns for this installation.  Validate it before redeeming the
-    # single-use token, then let a separately validated server value supersede it below.
-    fallback_compute = "" if has_explicit_compute else default_compute_url(resolved_control)
+    resolved_compute = (
+        compute_url if compute_url is not None else default_compute_url(resolved_control)
+    )
     if resolved_compute:
         try:
             resolved_compute = validate_cloud_base_url(resolved_compute)
-        except CloudUrlUnresolved as exc:
-            raise DeviceConnectError(
-                "The Engraphis Cloud compute endpoint is temporarily unreachable.",
-                status=503,
-            ) from exc
-        except ValueError as exc:
-            raise DeviceConnectError(
-                "The Engraphis Cloud compute URL is not a valid HTTPS endpoint.",
-                status=400,
-            ) from exc
-    elif fallback_compute:
-        try:
-            fallback_compute = validate_cloud_base_url(fallback_compute)
         except CloudUrlUnresolved as exc:
             raise DeviceConnectError(
                 "The Engraphis Cloud compute endpoint is temporarily unreachable.",
@@ -770,21 +750,9 @@ def connect(token: object, *, control_url: Optional[str] = None,
             "no session was saved." + _SPENT_TOKEN_SUFFIX,
             status=502,
         )
-    server_compute = "" if has_explicit_compute else _server_compute_url(response)
-    if not has_explicit_compute:
-        # The response wins for a non-shipped control plane too; otherwise those customers
-        # can redeem a token but never learn the compute endpoint the cloud assigned them.
-        resolved_compute = server_compute or fallback_compute
-    compute_source = (
-        "explicit" if has_explicit_compute else "server" if server_compute
-        else "fallback" if fallback_compute else None
-    )
     try:
         cloud_session.save_bootstrap(
-            response,
-            control_url=resolved_control,
-            compute_url=resolved_compute or None,
-            compute_url_source=compute_source,
+            response, control_url=resolved_control, compute_url=resolved_compute or None
         )
     except cloud_session.CloudSessionError as exc:
         # Also post-redemption. The pre-flight proved this path writable moments ago, so

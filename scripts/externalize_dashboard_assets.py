@@ -46,7 +46,6 @@ STYLE_RULE = re.compile(r'\[data-csp-style=["\'](s\d+)["\']\]\{')
 HANDLER_REF = re.compile(r'data-on([a-z]+)=["\'](h\d+)["\']')
 HANDLER_DEF = re.compile(r'^\s*(h\d+):function\(event\)\{', re.MULTILINE)
 DELEGATED_EVENTS = re.compile(r"for\(const type of \[([^]]+)\]\)")
-ASSET_END_TAG = re.compile(r"</(script|style)\b([^>]*)>", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -120,17 +119,8 @@ class _InlineAssetParser(HTMLParser):
 
 
 def _parse_page(html: str) -> _InlineAssetParser:
-    # ``HTMLParser`` does not recognize attributes on an end tag, although an HTML5
-    # browser ignores them and still closes raw-text ``script``/``style`` elements.
-    # Blank the invalid suffix before parsing while preserving every byte offset and
-    # newline; extracted content and replacements continue to slice the original source.
-    def normalize_end_tag(match: re.Match[str]) -> str:
-        suffix = match.group(2)
-        blanked = "".join(char if char in "\r\n" else " " for char in suffix)
-        return match.group(0)[: 2 + len(match.group(1))] + blanked + ">"
-
     parser = _InlineAssetParser(html)
-    parser.feed(ASSET_END_TAG.sub(normalize_end_tag, html))
+    parser.feed(html)
     parser.close()
     parser.finish_unclosed()
     return parser
