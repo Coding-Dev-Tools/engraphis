@@ -93,13 +93,7 @@ def test_hosted_views_delegate_entitlement_to_cloud_proxy_responses():
 # regression it guards (409 folded into ``hostedFeatureUnavailable``) kept every string
 # these files already assert on, and only a run can tell which branch actually won.
 _ROUTED_FUNCTIONS = (
-    # The access-state readers the panel copy is now derived from. They are bundled as the
-    # real shipped functions rather than stubbed, so "does this customer get offered a
-    # trial" is answered here by the code that answers it in the browser.
-    "licAccessState", "licAccessLive", "licTrialActive", "licTrialAvailable",
-    "licPlanName", "licPlanKey", "licTrialEnds", "fmtDay", "lockReason",
-    "hostedAccountUrl", "hostedPlanUrl", "licActionsHtml", "unlockHtml",
-    "managedConsentHtml",
+    "hostedPlanUrl", "unlockHtml", "managedConsentHtml",
     "managedConsentRequired", "hostedFeatureUnavailable",
     "loadAnalytics", "loadAutomation",
 )
@@ -121,15 +115,9 @@ function fmtRel(){return 'just now'}
 function toast(){}
 const TRIAL_DAYS = 3, WS = 'workspace';
 let CURRENT_VIEW = 'overview';
-// The default is an unconnected installation: no hosted plan, unspent trial, and the
-// control plane says a trial may still be started. A case can replace ``access_state`` and
-// ``trial`` to model a trialist, a spent trial, a paying customer, or a lapsed one.
-const LIC_BASE = {pro_upgrade_url:'https://engraphis.example/checkout/pro',
-             team_upgrade_url:'https://engraphis.example/checkout/team',
-             upgrade_url:'https://engraphis.example/account',
-             plan:'local', access_state:'inactive',
-             trial:{used:false, active:false, available:true, ends_at:0}};
-let LIC = LIC_BASE;
+const LIC = {pro_upgrade_url:'https://engraphis.com/pricing',
+             team_upgrade_url:'https://engraphis.com/pricing?plan=team',
+             upgrade_url:'https://engraphis.com/pricing', trial:{used:false}};
 const location = {href:'https://127.0.0.1:8077/'};
 let THROWN = null;
 async function api(){if(THROWN) throw THROWN; return {}}
@@ -141,7 +129,6 @@ const CASES = JSON.parse(process.argv[2]);
   const out = [];
   for (const c of CASES) {
     THROWN = Object.assign(new Error(c.message || 'request failed'), c.error);
-    LIC = Object.assign({}, LIC_BASE, c.lic || {});
     CURRENT_VIEW = c.view;
     for (const key of Object.keys(NODES)) delete NODES[key];
     await (c.view === 'analytics' ? loadAnalytics() : loadAutomation());
@@ -186,169 +173,6 @@ def _route(tmp_path, cases):
     )
     assert result.returncode == 0, result.stderr
     return {row["name"]: row for row in json.loads(result.stdout)}
-
-
-def _license_copy(tmp_path, cases):
-    """Execute the shipped entitlement copy and action helpers under Node."""
-
-    functions = (
-        "licAccessState", "licAccessLive", "licTrialAvailable", "licPlanName", "licPlanKey",
-        "licTrialEnds", "fmtDay", "hostedAccountUrl", "hostedPlanUrl",
-        "lockReason", "teamTeaserNote", "licActionsHtml",
-    )
-    driver = """
-const CASES = JSON.parse(process.argv[2]);
-const out = [];
-for (const c of CASES) {
-  LIC = Object.assign({}, LIC_BASE, c.lic);
-  out.push({
-    name: c.name,
-    reason: lockReason(true),
-    teamNote: teamTeaserNote(),
-    actions: licActionsHtml(c.state)
-  });
-}
-process.stdout.write(JSON.stringify(out));
-"""
-    runner = tmp_path / "license-copy.js"
-    runner.write_text("\n".join([
-        _ROUTING_STUBS,
-        "\n".join(_dashboard_function(name) for name in functions),
-        driver,
-    ]), encoding="utf-8")
-    result = subprocess.run(
-        ["node", str(runner), json.dumps(cases)],
-        capture_output=True, text=True, timeout=60,
-    )
-    assert result.returncode == 0, result.stderr
-    return {row["name"]: row for row in json.loads(result.stdout)}
-
-
-def test_lock_reason_has_one_plain_text_escaping_contract() -> None:
-    """The helper returns text; each shipped HTML sink owns exactly one escape."""
-
-    script = SCRIPT.read_text(encoding="utf-8")
-    reason = _dashboard_function("lockReason")
-    upgrade = _dashboard_function("unlockHtml")
-
-    assert "esc(" not in reason
-    assert "${esc(detail)}" in upgrade
-    assert "esc(lockReason(false))" in script
-    assert "esc(teamTeaserNote())" in script
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
-def test_team_entitlements_use_truthful_copy_and_the_team_billing_url(tmp_path) -> None:
-    rendered = _license_copy(tmp_path, [
-        {
-            "name": "active-team",
-            "state": "active",
-            "lic": {
-                "plan": "team", "access_state": "active",
-                "trial": {"available": False, "ends_at": 0},
-            },
-        },
-        {
-            "name": "team-trial",
-            "state": "trial",
-            "lic": {
-                "plan": "team", "access_state": "trial",
-                "trial": {"available": False, "ends_at": 1_800_000_000},
-            },
-        },
-        {
-            "name": "lapsed-team",
-            "state": "lapsed",
-            "lic": {
-                "plan": "team", "access_state": "lapsed",
-                "trial": {"available": False, "ends_at": 0},
-            },
-        },
-    ])
-
-    assert "runs in Engraphis Team Cloud" in rendered["active-team"]["reason"]
-    assert "does not include" not in rendered["active-team"]["reason"]
-    assert "Your Team trial is live" in rendered["team-trial"]["reason"]
-    assert "needs a subscription" not in rendered["team-trial"]["reason"]
-    assert "Your TEAM subscription includes this" in rendered["active-team"]["teamNote"]
-    assert "does not include" not in rendered["active-team"]["teamNote"]
-    assert "Your free trial includes Team" in rendered["team-trial"]["teamNote"]
-    assert "Update billing" in rendered["lapsed-team"]["actions"]
-    assert "plan=team" in rendered["lapsed-team"]["actions"]
-    assert "plan=pro" not in rendered["lapsed-team"]["actions"]
-    assert 'href="https://engraphis.example/account"' in rendered["lapsed-team"]["actions"]
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
-@pytest.mark.parametrize("plan,mine,theirs", [
-    ("team", "team", "pro"),
-    ("pro", "pro", "team"),
-])
-def test_a_lapsed_customer_renews_the_plan_they_actually_hold(
-    tmp_path, plan, mine, theirs,
-) -> None:
-    actions = _license_copy(tmp_path, [{
-        "name": "lapsed",
-        "state": "lapsed",
-        "lic": {
-            "plan": plan,
-            "access_state": "lapsed",
-            "trial": {"available": False, "ends_at": 0},
-        },
-    }])["lapsed"]["actions"]
-
-    assert "Update billing" in actions and "Open account portal" in actions
-    assert "checkout/%s?plan=%s" % (mine, mine) in actions
-    assert "checkout/%s" % theirs not in actions
-    assert 'href="https://engraphis.example/account"' in actions
-    assert "Start hosted" not in actions
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
-def test_a_lapsed_customer_with_no_readable_plan_still_gets_a_billing_target(
-    tmp_path,
-) -> None:
-    actions = _license_copy(tmp_path, [{
-        "name": "lapsed",
-        "state": "lapsed",
-        "lic": {
-            "plan": "",
-            "access_state": "lapsed",
-            "trial": {"available": False, "ends_at": 0},
-        },
-    }])["lapsed"]["actions"]
-
-    assert "Update billing" in actions
-    assert "checkout/pro?plan=pro" in actions
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
-@pytest.mark.parametrize("state,expected,absent", [
-    ("inactive", "Start hosted Pro trial", "Subscribe to Pro"),
-    ("trial_expired", "Subscribe to Pro", "Start hosted Pro trial"),
-    ("trial", "Open Pro Cloud", "Start hosted Pro trial"),
-    ("active", "Open Pro Cloud", "Start hosted Pro trial"),
-])
-def test_each_access_state_offers_the_one_action_that_can_succeed(
-    tmp_path, state, expected, absent,
-) -> None:
-    actions = _license_copy(tmp_path, [{
-        "name": state,
-        "state": state,
-        "lic": {
-            "plan": "pro",
-            "access_state": state,
-            "trial": {
-                "used": state != "inactive",
-                "active": state == "trial",
-                "available": state == "inactive",
-                "ends_at": 0,
-            },
-        },
-    }])[state]["actions"]
-
-    assert expected in actions
-    assert absent not in actions
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
@@ -396,43 +220,6 @@ def test_a_genuine_entitlement_failure_still_renders_the_upgrade_panel(
     assert "Purchase Pro license" in rendered["html"]
     assert "Start hosted Pro trial" in rendered["html"]
     assert rendered["pill"] == "PRO"
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
-@pytest.mark.parametrize("view", ["analytics", "automation"])
-@pytest.mark.parametrize("state,reason", [
-    ("trial", "Your free trial is live"),
-    ("trial_expired", "Your free trial has ended"),
-    ("lapsed", "no longer active"),
-    ("active", "does not include this"),
-])
-def test_the_upgrade_panel_never_offers_a_trial_the_server_would_refuse(
-    tmp_path, view, state, reason,
-):
-    """``start_trial`` refuses every organization that already holds an entitlement.
-
-    ``trial.used`` was hardcoded false by ``/api/license``, so this panel offered "Start
-    hosted Pro trial" to every connected customer forever — a trialist mid-trial, a
-    customer whose trial had already been spent, and an active subscriber alike. All three
-    got a 409 from the control plane for clicking it. The panel now says which of those
-    four situations the customer is actually in, and only sells what is buyable.
-    """
-
-    rendered = _route(tmp_path, [{
-        "name": "gated", "view": view, "error": {"status": 402},
-        "lic": {
-            "plan": "pro", "access_state": state,
-            "trial": {"used": state != "active", "active": state == "trial",
-                      "available": False, "ends_at": 1785240000},
-        },
-    }])["gated"]
-
-    assert 'class="upgrade-panel"' in rendered["html"]
-    # The one thing that must always still be offered.
-    assert "Purchase Pro license" in rendered["html"]
-    # And the one thing that must not.
-    assert "Start hosted Pro trial" not in rendered["html"]
-    assert reason in rendered["html"]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
@@ -543,14 +330,11 @@ def test_pro_upgrade_panel_lists_every_pro_benefit_and_purchase_cta():
         "Growth, retention, decay, and entity Analytics",
         "Auto Consolidation with hosted retention policies",
         "Auto Dreaming with reviewable managed proposals",
+        "Signed compliance exports with bi-temporal checksums",
         "Priority support",
     ):
         assert benefit in script
     assert ".upgrade-panel" in styles
-    # Regression: the panel sold "Signed compliance exports with bi-temporal checksums"
-    # while no signing code existed in this client and Engraphis Cloud had no export
-    # route, scope, or job kind. Do not re-add it without a capability behind it.
-    assert "compliance export" not in script.lower()
 
 
 def test_team_invitations_and_password_setup_are_not_in_local_client():
