@@ -83,6 +83,17 @@ _TRUNCATED_REPLY = (
     "your account portal, and generate a new one if this device is not listed there."
 )
 
+#: Appended to every failure that can only happen once the control plane has answered
+#: successfully.  ``urllib`` raises ``HTTPError`` for every status >= 400, and ``_NoRedirect``
+#: turns a 3xx into one too, so any fault past ``opener.open()`` follows a 2xx -- and a
+#: successful connect consumes the single-use token as it is written.  Telling the customer
+#: to "try again" there would send them into a guaranteed 401 with no session; the only
+#: action that can work is a fresh token from the portal.
+_SPENT_TOKEN_SUFFIX = (
+    " This connect token has now been used -- generate a new one in your Engraphis account "
+    "portal and try again, and contact support if it repeats."
+)
+
 #: The portal always mints tokens with this prefix.  Checking it locally turns a
 #: mistyped or truncated paste into an instant, free error instead of a round trip that
 #: consumes rate budget and returns the same opaque 401 as a genuinely dead token.
@@ -518,19 +529,28 @@ def post_connect(control_url: str, token: str, *, installation_client_id: str,
         # instead of being told to check the portal. ``LineTooLong``/``BadStatusLine`` from
         # reading the status line and headers land here for the same reason.
         raise DeviceConnectError(_TRUNCATED_REPLY, status=502) from exc
+    # Everything below here runs only after a 2xx, so the token is already spent -- see
+    # ``_SPENT_TOKEN_SUFFIX``.  A bare "invalid response" would leave the customer retrying
+    # a consumed token forever.
     if len(raw) > _MAX_RESPONSE_BYTES:
         raise DeviceConnectError(
-            "Engraphis Cloud returned an oversized connect response.", status=502
+            "Engraphis Cloud returned an oversized connect response, so no session was "
+            "saved." + _SPENT_TOKEN_SUFFIX,
+            status=502,
         )
     try:
         parsed = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise DeviceConnectError(
-            "Engraphis Cloud returned an invalid connect response.", status=502
+            "Engraphis Cloud returned an invalid connect response, so no session was "
+            "saved." + _SPENT_TOKEN_SUFFIX,
+            status=502,
         ) from exc
     if not isinstance(parsed, dict):
         raise DeviceConnectError(
-            "Engraphis Cloud returned an invalid connect response.", status=502
+            "Engraphis Cloud returned an invalid connect response, so no session was "
+            "saved." + _SPENT_TOKEN_SUFFIX,
+            status=502,
         )
     return parsed
 
@@ -655,9 +675,8 @@ def connect(token: object, *, control_url: Optional[str] = None,
     )
     if not str(response.get("refresh_credential") or "").strip():
         raise DeviceConnectError(
-            "Engraphis Cloud accepted the token but returned no session credential. "
-            "That token has already been consumed; generate a new one in your account "
-            "portal, then try again. Contact support if it repeats.",
+            "Engraphis Cloud accepted the token but returned no session credential, so "
+            "no session was saved." + _SPENT_TOKEN_SUFFIX,
             status=502,
         )
     server_compute = "" if has_explicit_compute else _server_compute_url(response)
@@ -677,7 +696,17 @@ def connect(token: object, *, control_url: Optional[str] = None,
             compute_url_source=compute_source,
         )
     except cloud_session.CloudSessionError as exc:
-        raise DeviceConnectError(str(exc), status=getattr(exc, "status", 503)) from exc
+        # Also post-redemption. The pre-flight proved this path writable moments ago, so
+        # arriving here is a race -- typically the refresh lock disappearing or turning
+        # unsafe, which ``cloud_session`` wraps in a ``CloudSessionError``, which is exactly
+        # why it does not reach the ``OSError`` clause below that carries the spent-token
+        # warning. Forwarding the bare lock message left the customer retrying a consumed
+        # token. ``str(exc)`` is this package's own fixed copy, never provider text.
+        raise DeviceConnectError(
+            "Engraphis Cloud accepted the token, but the session could not be saved: "
+            "%s%s" % (exc, _SPENT_TOKEN_SUFFIX),
+            status=getattr(exc, "status", 503),
+        ) from exc
     except OSError as exc:
         # The pre-flight cleared this exact path moments ago, so arriving here means the
         # state directory changed underneath the exchange. ``UnsafeStateFile`` is an
