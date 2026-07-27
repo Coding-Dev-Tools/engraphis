@@ -176,16 +176,18 @@ function fmtDay(epoch){const n=Number(epoch)||0;if(!(n>0))return '';try{const d=
 
 /* ── shared hosted upgrade / trial CTA ── */
 function hostedPlanUrl(plan,trial){const raw=(LIC&&(plan==='team'?LIC.team_upgrade_url:LIC.pro_upgrade_url))||(LIC&&LIC.upgrade_url);const safe=safeUrl(raw);if(!safe||safe==='#')return '#';try{const url=new URL(safe,location.href);if(plan==='pro'||plan==='team')url.searchParams.set('plan',plan);if(trial)url.searchParams.set('trial',plan);return url.href}catch(e){return safe}}
-/* Why is this feature locked? One sentence per access state, so the panel never claims a
-   trial the customer cannot start nor blames billing for a trial that simply ran out. */
-function lockReason(team){const st=licAccessState(),ends=licTrialEnds();
- if(st==='trial')return `Your free trial is live${ends?` until ${esc(ends)}`:''}. ${team?'Team':'Pro'} needs a subscription of its own.`;
- if(st==='trial_expired')return `Your free trial has ended${ends?` (${esc(ends)})`:''}, so hosted features are locked. The trial cannot be started again.`;
- if(st==='lapsed')return `Your ${esc(licPlanName())} subscription is no longer active, so hosted features are locked until billing is up to date.`;
- if(st==='active')return `Your ${esc(licPlanName())} subscription does not include this.`;
+/* Why is this feature locked? This helper returns plain text; every HTML sink escapes it.
+   One sentence per access state keeps the panel from claiming a trial the customer cannot
+   start or blaming billing for a trial that simply ran out. */
+function lockReason(team){const st=licAccessState(),ends=licTrialEnds(),plan=licPlanName();
+ if(team&&plan==='TEAM'&&(st==='active'||st==='trial'))return `Team administration runs in Engraphis Team Cloud, not this local dashboard.${st==='trial'&&ends?` Your Team trial is live until ${ends}.`:''}`;
+ if(st==='trial')return `Your free trial is live${ends?` until ${ends}`:''}. ${team?'Team':'Pro'} needs a subscription of its own.`;
+ if(st==='trial_expired')return `Your free trial has ended${ends?` (${ends})`:''}, so hosted features are locked. The trial cannot be started again.`;
+ if(st==='lapsed')return `Your ${plan} subscription is no longer active, so hosted features are locked until billing is up to date.`;
+ if(st==='active')return `Your ${plan} subscription does not include this.`;
  if(licTrialAvailable())return `The email-confirmed, no-card trial lasts exactly ${TRIAL_DAYS} active days.`;
  return 'Your free trial has already been used.'}
-function unlockHtml(feature,plan){const url=hostedPlanUrl(plan),trialUrl=hostedPlanUrl(plan,true),team=plan==='team';const offerTrial=licTrialAvailable();const trial=team?'Start hosted Team trial':'Start hosted Pro trial';const purchase=team?'Purchase Team license':'Purchase Pro license';const price=team?'$20 per seat/month or $200 per seat/year':'$10/month or $100/year';const detail=lockReason(team);const benefits=team?['Everything in Pro','Hosted organizations, invitations, and named seats','Roles, scoped credentials, and Team audit history']:['Hosted Cloud Sync across your installations','Growth, retention, decay, and entity Analytics','Auto Consolidation with hosted retention policies','Auto Dreaming with reviewable managed proposals','Priority support'];return `<section class="upgrade-panel" aria-label="Engraphis ${team?'Team':'Pro'} upgrade"><div class="upgrade-panel-kicker">ENGRAPHIS ${team?'TEAM':'PRO'}</div><h2>Unlock ${esc(feature)} and more</h2><p class="upgrade-panel-lede">Make the local memory engine work across your installations—and keep improving without manual upkeep.</p><div class="upgrade-panel-price">${price}</div><div class="upgrade-panel-benefits"><div class="upgrade-panel-benefits-title">Your license unlocks</div><ul>${benefits.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div><p class="upgrade-panel-trial">${detail}</p><div class="upgrade-panel-actions">${offerTrial?`<a class="btn btn-primary" href="${esc(trialUrl)}" target="_blank" rel="noopener">${trial}</a>`:''}<a class="btn btn-ghost" href="${esc(url)}" target="_blank" rel="noopener">${purchase}</a></div></section>`}
+function unlockHtml(feature,plan){const url=hostedPlanUrl(plan),trialUrl=hostedPlanUrl(plan,true),team=plan==='team';const offerTrial=licTrialAvailable();const trial=team?'Start hosted Team trial':'Start hosted Pro trial';const purchase=team?'Purchase Team license':'Purchase Pro license';const price=team?'$20 per seat/month or $200 per seat/year':'$10/month or $100/year';const detail=lockReason(team);const benefits=team?['Everything in Pro','Hosted organizations, invitations, and named seats','Roles, scoped credentials, and Team audit history']:['Hosted Cloud Sync across your installations','Growth, retention, decay, and entity Analytics','Auto Consolidation with hosted retention policies','Auto Dreaming with reviewable managed proposals','Priority support'];return `<section class="upgrade-panel" aria-label="Engraphis ${team?'Team':'Pro'} upgrade"><div class="upgrade-panel-kicker">ENGRAPHIS ${team?'TEAM':'PRO'}</div><h2>Unlock ${esc(feature)} and more</h2><p class="upgrade-panel-lede">Make the local memory engine work across your installations—and keep improving without manual upkeep.</p><div class="upgrade-panel-price">${price}</div><div class="upgrade-panel-benefits"><div class="upgrade-panel-benefits-title">Your license unlocks</div><ul>${benefits.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div><p class="upgrade-panel-trial">${esc(detail)}</p><div class="upgrade-panel-actions">${offerTrial?`<a class="btn btn-primary" href="${esc(trialUrl)}" target="_blank" rel="noopener">${trial}</a>`:''}<a class="btn btn-ghost" href="${esc(url)}" target="_blank" rel="noopener">${purchase}</a></div></section>`}
 function startTrialPlan(plan){const url=hostedPlanUrl(plan,true);if(url==='#'){toast('Hosted signup URL is not configured','err');return}const link=document.createElement('a');link.href=url;link.target='_blank';link.rel='noopener';link.click()}
 function startTrial(){return startTrialPlan('pro')}
 function startTeamTrial(){return startTrialPlan('team')}
@@ -470,9 +472,10 @@ function licStateBanner(state,plan,ends,status){
 function licActionsHtml(state){
  if(licTrialAvailable())return `<div data-csp-style="s123"><button class="btn btn-primary btn-sm" data-onclick="h84">Start hosted Pro trial</button><button class="btn btn-ghost btn-sm" data-onclick="h87">Start hosted Team trial</button></div>`;
  const buy=state==='trial_expired',bill=state==='lapsed';
+ const billingPlan=bill&&licPlanName()==='TEAM'?'team':'pro';
  const primary=bill?'Update billing':buy?'Subscribe to Pro':'Open Pro Cloud';
  const secondary=bill?'Open account portal':buy?'Subscribe to Team':'Open Team Cloud';
- return `<div data-csp-style="s123"><a class="btn btn-primary btn-sm" href="${esc(hostedPlanUrl('pro'))}" target="_blank" rel="noopener">${primary}</a><a class="btn btn-ghost btn-sm" href="${esc(hostedPlanUrl('team'))}" target="_blank" rel="noopener">${secondary}</a></div>`}
+ return `<div data-csp-style="s123"><a class="btn btn-primary btn-sm" href="${esc(hostedPlanUrl(billingPlan))}" target="_blank" rel="noopener">${primary}</a><a class="btn btn-ghost btn-sm" href="${esc(hostedPlanUrl('team'))}" target="_blank" rel="noopener">${secondary}</a></div>`}
 function renderLicense(d){
  const el=document.getElementById('lic-body');if(!el)return;
  const state=licAccessState(),raw=String(d.plan||'local').toLowerCase();

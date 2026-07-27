@@ -69,7 +69,9 @@ SERVER_TRIAL_FIELDS = ("status", "is_trial", "trial_consumed", "trial_ends_at")
 #: serializes them (``engraphis-cloud`` ``EntitlementDTO``; Pydantic emits a trailing ``Z``
 #: for UTC, which this client's Python 3.9 floor cannot hand straight to
 #: ``datetime.fromisoformat``).
-TRIAL_ENDS_AT = "2026-07-28T12:00:00Z"
+# Far enough ahead that tests for a live server disclosure do not depend on wall-clock
+# time. Expiry itself is covered with an explicitly frozen boundary below.
+TRIAL_ENDS_AT = "2099-07-28T12:00:00Z"
 
 
 def _epoch(iso: str) -> float:
@@ -1607,6 +1609,33 @@ def test_a_live_trial_is_reported_as_a_trial(monkeypatch) -> None:
     assert set(payload["features"]) >= {"analytics", "automation"}
 
 
+def test_an_offline_cached_trial_expires_at_its_known_boundary(monkeypatch) -> None:
+    """A stale positive access flag cannot extend a trial while the client is offline."""
+
+    boundary = 1_800_000_000.0
+    entitlement = {
+        "plan": "pro",
+        "features": ["analytics", "automation"],
+        "source": "session",
+        "cloud_access_active": True,
+        "checked_at": boundary - 60,
+        "status": "trialing",
+        "is_trial": True,
+        "trial_consumed": True,
+        "trial_ends_at": boundary,
+    }
+    monkeypatch.setattr(v2_api, "_plan_entitlement", lambda: dict(entitlement))
+    monkeypatch.setattr(v2_api.time, "time", lambda: boundary + 1)
+
+    payload = v2_api.get_license()
+
+    assert payload["access_state"] == "trial_expired"
+    assert payload["cloud_access_active"] is False
+    assert payload["features"] == []
+    assert payload["trial"]["active"] is False
+    assert payload["trial"]["ends_at"] == boundary
+
+
 def test_a_spent_trial_is_told_apart_from_a_lapsed_subscription(monkeypatch) -> None:
     """Both read ``cloud_access_active=false``; only ``is_trial`` separates the copy."""
 
@@ -1790,9 +1819,9 @@ def test_the_trial_disclosure_survives_a_restart(monkeypatch, tmp_path) -> None:
 
 
 @pytest.mark.parametrize("value", [
-    "2026-07-28T12:00:00Z",
-    "2026-07-28T12:00:00z",
-    "2026-07-28T12:00:00+00:00",
+    "2099-07-28T12:00:00Z",
+    "2099-07-28T12:00:00z",
+    "2099-07-28T12:00:00+00:00",
 ])
 def test_the_servers_utc_timestamp_is_read_on_the_python_39_floor(value) -> None:
     """``datetime.fromisoformat`` on 3.9 rejects the ``Z`` Pydantic emits for UTC."""
@@ -1801,7 +1830,8 @@ def test_the_servers_utc_timestamp_is_read_on_the_python_39_floor(value) -> None
 
 
 @pytest.mark.parametrize("value", [
-    None, "", "  ", "not-a-date", 0, -1, True, [], {}, "2026-13-45T99:99:99Z",
+    None, "", "  ", "not-a-date", 0, -1, True, [], {},
+    float("inf"), float("-inf"), float("nan"), "2026-13-45T99:99:99Z",
 ])
 def test_an_unreadable_trial_boundary_is_unknown_rather_than_raising(value) -> None:
     """This runs on the ``/api/bootstrap`` boot path; nothing here may raise."""

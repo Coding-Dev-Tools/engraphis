@@ -63,6 +63,12 @@ CONNECT_PATH = "/v1/devices/connect"
 #: human's prompt, once, and a spurious timeout costs the customer a fresh token.
 DEFAULT_TIMEOUT_SECONDS = 15.0
 
+#: A device connection is one interactive request.  Letting a caller supply an arbitrary
+#: finite float is not portable: values that fit Python's ``float`` can still overflow the
+#: platform socket timeout.  Two minutes leaves room for a slow network without turning a
+#: mistyped CLI value into an unbounded wait or a raw ``OverflowError`` from ``urllib``.
+_MAX_TIMEOUT_SECONDS = 120.0
+
 #: The control plane answers with a small fixed record; anything larger is not ours.
 _MAX_RESPONSE_BYTES = 64 * 1024
 
@@ -312,6 +318,12 @@ def _validated_timeout(value: object) -> float:
             "The connect timeout must be a positive, finite number of seconds.",
             status=400,
         )
+    if timeout > _MAX_TIMEOUT_SECONDS:
+        raise DeviceConnectError(
+            "The connect timeout must not exceed %d seconds."
+            % _MAX_TIMEOUT_SECONDS,
+            status=400,
+        )
     return timeout
 
 
@@ -477,12 +489,12 @@ def post_connect(control_url: str, token: str, *, installation_client_id: str,
         # when the cloud is flaky. Same shape as cloud_session._post_refresh.
         try:
             exc.read(_MAX_RESPONSE_BYTES + 1)
-        except (OSError, ValueError):
+        except (OSError, ValueError, http.client.HTTPException):
             pass
         finally:
             try:
                 exc.close()
-            except (OSError, ValueError):
+            except (OSError, ValueError, http.client.HTTPException):
                 pass
         raise _connect_http_error(status)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -644,7 +656,8 @@ def connect(token: object, *, control_url: Optional[str] = None,
     if not str(response.get("refresh_credential") or "").strip():
         raise DeviceConnectError(
             "Engraphis Cloud accepted the token but returned no session credential. "
-            "Try again, and contact support if it repeats.",
+            "That token has already been consumed; generate a new one in your account "
+            "portal, then try again. Contact support if it repeats.",
             status=502,
         )
     server_compute = "" if has_explicit_compute else _server_compute_url(response)

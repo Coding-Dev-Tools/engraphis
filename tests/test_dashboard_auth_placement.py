@@ -98,7 +98,7 @@ _ROUTED_FUNCTIONS = (
     # trial" is answered here by the code that answers it in the browser.
     "licAccessState", "licAccessLive", "licTrialActive", "licTrialAvailable",
     "licPlanName", "licTrialEnds", "fmtDay", "lockReason",
-    "hostedPlanUrl", "unlockHtml", "managedConsentHtml",
+    "hostedPlanUrl", "licActionsHtml", "unlockHtml", "managedConsentHtml",
     "managedConsentRequired", "hostedFeatureUnavailable",
     "loadAnalytics", "loadAutomation",
 )
@@ -185,6 +185,91 @@ def _route(tmp_path, cases):
     )
     assert result.returncode == 0, result.stderr
     return {row["name"]: row for row in json.loads(result.stdout)}
+
+
+def _license_copy(tmp_path, cases):
+    """Execute the shipped entitlement copy and action helpers under Node."""
+
+    functions = (
+        "licAccessState", "licTrialAvailable", "licPlanName", "licTrialEnds", "fmtDay",
+        "hostedPlanUrl", "lockReason", "licActionsHtml",
+    )
+    driver = """
+const CASES = JSON.parse(process.argv[2]);
+const out = [];
+for (const c of CASES) {
+  LIC = Object.assign({}, LIC_BASE, c.lic);
+  out.push({
+    name: c.name,
+    reason: lockReason(true),
+    actions: licActionsHtml(c.state)
+  });
+}
+process.stdout.write(JSON.stringify(out));
+"""
+    runner = tmp_path / "license-copy.js"
+    runner.write_text("\n".join([
+        _ROUTING_STUBS,
+        "\n".join(_dashboard_function(name) for name in functions),
+        driver,
+    ]), encoding="utf-8")
+    result = subprocess.run(
+        ["node", str(runner), json.dumps(cases)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return {row["name"]: row for row in json.loads(result.stdout)}
+
+
+def test_lock_reason_has_one_plain_text_escaping_contract() -> None:
+    """The helper returns text; each shipped HTML sink owns exactly one escape."""
+
+    script = SCRIPT.read_text(encoding="utf-8")
+    reason = _dashboard_function("lockReason")
+    upgrade = _dashboard_function("unlockHtml")
+
+    assert "esc(" not in reason
+    assert "${esc(detail)}" in upgrade
+    assert "esc(lockReason(false))" in script
+    assert "esc(lockReason(true))" in script
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
+def test_team_entitlements_use_truthful_copy_and_the_team_billing_url(tmp_path) -> None:
+    rendered = _license_copy(tmp_path, [
+        {
+            "name": "active-team",
+            "state": "active",
+            "lic": {
+                "plan": "team", "access_state": "active",
+                "trial": {"available": False, "ends_at": 0},
+            },
+        },
+        {
+            "name": "team-trial",
+            "state": "trial",
+            "lic": {
+                "plan": "team", "access_state": "trial",
+                "trial": {"available": False, "ends_at": 1_800_000_000},
+            },
+        },
+        {
+            "name": "lapsed-team",
+            "state": "lapsed",
+            "lic": {
+                "plan": "team", "access_state": "lapsed",
+                "trial": {"available": False, "ends_at": 0},
+            },
+        },
+    ])
+
+    assert "runs in Engraphis Team Cloud" in rendered["active-team"]["reason"]
+    assert "does not include" not in rendered["active-team"]["reason"]
+    assert "Your Team trial is live" in rendered["team-trial"]["reason"]
+    assert "needs a subscription" not in rendered["team-trial"]["reason"]
+    assert "Update billing" in rendered["lapsed-team"]["actions"]
+    assert "plan=team" in rendered["lapsed-team"]["actions"]
+    assert "plan=pro" not in rendered["lapsed-team"]["actions"]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")

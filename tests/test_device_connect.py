@@ -334,9 +334,13 @@ def test_a_success_without_a_refresh_credential_writes_nothing(monkeypatch, tmp_
     body.pop("refresh_credential")
     _install_opener(monkeypatch, _Opener(body=body))
 
-    with pytest.raises(device_connect.DeviceConnectError):
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
         device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
 
+    assert caught.value.status == 502
+    message = str(caught.value).lower()
+    assert "already been consumed" in message
+    assert "generate a new one" in message
     assert not (tmp_path / "cloud_session.json").exists()
 
 
@@ -373,6 +377,44 @@ class _TruncatedBody:
         # What ``HTTPResponse._read_chunked`` raises for a truncated body.  It subclasses
         # ``HTTPException``/``ValueError`` -- neither ``OSError`` nor ``URLError``.
         raise http.client.IncompleteRead(b'{"organization_id":"org_al')
+
+
+class _TruncatedHttpErrorBody:
+    """An HTTP-error body whose drain or close breaks after the server replied."""
+
+    def __init__(self, phase: str) -> None:
+        self.phase = phase
+        self.closed = False
+
+    def read(self, size: int = -1) -> bytes:
+        if self.phase == "read":
+            raise http.client.IncompleteRead(b'{"detail":"truncated"')
+        return b"{}"
+
+    def close(self) -> None:
+        self.closed = True
+        if self.phase == "close":
+            raise http.client.LineTooLong("truncated error response")
+
+
+@pytest.mark.parametrize("phase", ["read", "close"])
+def test_a_truncated_http_error_body_keeps_its_fixed_status_error(monkeypatch, phase):
+    """Drain faults happen inside the HTTPError handler, not its sibling clauses."""
+
+    body = _TruncatedHttpErrorBody(phase)
+    error = _http_error(401)
+    # Use a concrete closing hook so the test verifies our handler executes it even when
+    # the preceding error-body drain failed; urllib's internal wrapper owns its own file.
+    error.fp = body
+    error.close = body.close
+    _install_opener(monkeypatch, _Opener(error=error))
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    assert caught.value.status == 401
+    assert "generate a new one" in str(caught.value).lower()
+    assert body.closed is True
 
 
 @pytest.mark.parametrize("failure", [
@@ -852,8 +894,8 @@ def test_the_manifest_outranks_the_compute_constant(monkeypatch):
     assert device_connect.default_compute_url(CONTROL_URL) == ""
 
 
-@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "0", "-5"])
-def test_a_non_finite_timeout_is_refused_before_any_request(monkeypatch, bad):
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "0", "-5", "10000000000"])
+def test_an_unusable_timeout_is_refused_before_any_request(monkeypatch, bad):
     """``argparse``'s ``type=float`` accepts ``nan``/``inf``; the socket layer does not.
 
     Those reach ``urllib``'s deadline arithmetic and raise ``ValueError``/``OverflowError``
@@ -873,6 +915,12 @@ def test_a_non_finite_timeout_is_refused_before_any_request(monkeypatch, bad):
 
     assert caught.value.status == 400
     assert "timeout" in str(caught.value)
+
+
+def test_the_largest_supported_timeout_is_accepted() -> None:
+    assert device_connect._validated_timeout(device_connect._MAX_TIMEOUT_SECONDS) == (
+        device_connect._MAX_TIMEOUT_SECONDS
+    )
 
 
 def test_the_cli_reports_a_bad_timeout_instead_of_a_traceback(monkeypatch, capsys):

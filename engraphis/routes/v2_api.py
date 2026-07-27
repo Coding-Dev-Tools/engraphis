@@ -11,6 +11,7 @@ import datetime as _datetime
 import json
 import hmac
 import logging
+import math
 import os
 import threading
 import time
@@ -1951,7 +1952,8 @@ def _epoch_seconds(value: object) -> float:
     if isinstance(value, bool):
         return 0.0
     if isinstance(value, (int, float)):
-        return float(value) if value > 0 else 0.0
+        number = float(value)
+        return number if number > 0 and math.isfinite(number) else 0.0
     if not isinstance(value, str) or not value.strip():
         return 0.0
     text = value.strip()
@@ -1964,9 +1966,10 @@ def _epoch_seconds(value: object) -> float:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=_datetime.timezone.utc)
     try:
-        return float(parsed.timestamp())
+        number = float(parsed.timestamp())
     except (OverflowError, OSError, ValueError):
         return 0.0
+    return number if number > 0 and math.isfinite(number) else 0.0
 
 
 def _trial_facts(source: object) -> dict:
@@ -2529,17 +2532,21 @@ def hosted_plan_summary() -> dict:
                            "source": "override", "cloud_access_active": plan != "local",
                            "checked_at": 0.0}
             entitlement.update(_unknown_trial_facts())
+    access_state = _access_state(entitlement)
+    access_live = access_state in ("active", "trial")
     return {
         "plan": entitlement["plan"],
-        "features": list(entitlement["features"]),
+        # A cached trial can cross its known boundary while this installation is offline.
+        # Keep the durable server answer intact, but never present its stale grants as live.
+        "features": list(entitlement["features"]) if access_live else [],
         "plan_source": entitlement["source"],
-        "cloud_access_active": entitlement["cloud_access_active"],
+        "cloud_access_active": access_live,
         "plan_checked_at": entitlement["checked_at"],
         "entitlement_status": entitlement["status"],
         "is_trial": entitlement["is_trial"],
         "trial_consumed": entitlement["trial_consumed"],
         "trial_ends_at": entitlement["trial_ends_at"],
-        "access_state": _access_state(entitlement),
+        "access_state": access_state,
     }
 
 
@@ -2567,6 +2574,9 @@ def _access_state(entitlement: dict) -> str:
     if entitlement.get("plan") not in ("pro", "team"):
         return "inactive"
     is_trial = bool(entitlement.get("is_trial"))
+    trial_ends_at = _epoch_seconds(entitlement.get("trial_ends_at")) if is_trial else 0.0
+    if trial_ends_at and trial_ends_at <= time.time():
+        return "trial_expired"
     if entitlement.get("cloud_access_active"):
         return "trial" if is_trial else "active"
     return "trial_expired" if is_trial else "lapsed"
