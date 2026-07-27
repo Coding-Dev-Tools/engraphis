@@ -941,8 +941,13 @@ def test_a_transport_failure_is_not_mistaken_for_a_billing_denial(monkeypatch) -
     assert _settled_license(monkeypatch)["cloud_access_active"] is True
 
     def _offline(*_args, **_kwargs):
+        # ``CloudSessionError`` takes only ``status``; ``transient`` belongs to
+        # ``CloudFeatureError``. Passing it here raised TypeError instead, which the
+        # caller's broad ``except Exception`` swallowed with no ``status`` attribute -- so
+        # this test used to pass by never exercising a 503 at all, and would not have
+        # caught a regression that let a genuine outage clear a paying customer's access.
         raise cloud_session.CloudSessionError(
-            "Engraphis Cloud is temporarily unreachable.", status=503, transient=True
+            "Engraphis Cloud is temporarily unreachable.", status=503
         )
 
     monkeypatch.setattr(cloud_session, "access_for_workspace", _offline)
