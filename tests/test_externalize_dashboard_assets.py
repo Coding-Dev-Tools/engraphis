@@ -35,7 +35,7 @@ def test_migrate_uses_parsed_asset_boundaries(tmp_path, monkeypatch):
         "<body><button onclick=\"return false\">Go</button>"
         "<SCRIPT>console.log('ready');"
         "script.src='/static/vendor/force-graph.min.js';"
-        "script.src='/static/engraphis-graph.js'"
+        "script.src='/v2-assets/engraphis-graph.js'"
         "</SCRIPT data-error=\"yes\"></body></html>",
         encoding="utf-8",
     )
@@ -75,7 +75,7 @@ def test_check_rejects_unclosed_inline_asset_at_eof(tmp_path, monkeypatch, tag):
 
 _LOADERS = (
     "script.src='/static/vendor/force-graph.min.js';"
-    "script.src='/static/engraphis-graph.js';"
+    "script.src='/v2-assets/engraphis-graph.js';"
 )
 
 

@@ -23,7 +23,8 @@ JS = STATIC / "dashboard.js"
 #: same strict CSP, so they are held to the same no-inline-style/no-inline-handler contract.
 #: Vendored bundles under ``static/vendor`` are excluded: they are third-party artefacts we
 #: do not rewrite, and pinning them is the job of the commercial-manifest check.
-EXTRA_SCRIPTS = (STATIC / "engraphis-graph.js",)
+V2_ASSETS = ROOT / "engraphis" / "dashboard_assets"
+EXTRA_SCRIPTS = (V2_ASSETS / "engraphis-graph.js",)
 
 #: Scripts that must never be referenced from a ``<script src>`` in ``index.html``.
 #: ``force-graph.min.js`` applies inline styles at runtime; under the production CSP
@@ -31,12 +32,12 @@ EXTRA_SCRIPTS = (STATIC / "engraphis-graph.js",)
 #: *every* dashboard page rather than only when the graph is opened floods the console and
 #: fails unrelated e2e assertions on a clean console.  ``dashboard.js`` fetches both on demand
 #: instead (``loadForceGraph`` / ``loadGraphEngine``).
-DEFERRED_SCRIPTS = ("/static/vendor/force-graph.min.js", "/static/engraphis-graph.js")
+DEFERRED_SCRIPTS = ("/static/vendor/force-graph.min.js", "/v2-assets/engraphis-graph.js")
 
 #: ``script.src = "/static/…"`` inside a first-party script — the lazy loaders.  Deferring a
 #: script moves it out of the parsed ``<script src>`` set, so without this the "referenced
 #: scripts exist" rule would quietly stop covering the assets whose breakage is hardest to notice.
-LAZY_SCRIPT_SRC = re.compile(r'\.src\s*=\s*["\'](/static/[^"\']+)["\']')
+LAZY_SCRIPT_SRC = re.compile(r'\.src\s*=\s*["\'](/(?:static|v2-assets)/[^"\']+)["\']')
 
 STYLE_ATTR = re.compile(r"\sstyle=(?:\"([^\"]*)\"|'([^']*)')")
 EVENT_ATTR = re.compile(r"\s(on[a-z]+)=(?:\"([^\"]*)\"|'([^']*)')")
@@ -273,14 +274,19 @@ def check() -> None:
         for reference in LAZY_SCRIPT_SRC.findall(source)
     ]
 
-    # Every /static asset the page can ask for must exist, or the dashboard 404s at load time
+    def _script_path(reference: str) -> Path:
+        if reference.startswith("/v2-assets/"):
+            return V2_ASSETS / reference.removeprefix("/v2-assets/")
+        return STATIC / reference.removeprefix("/static/")
+
+    # Every first-party asset the page can ask for must exist, or the dashboard 404s at load time
     # and the strict CSP turns a typo into a silently broken view.  Lazily loaded scripts count:
     # their only reference is a JavaScript string literal, so nothing else catches a rename.
     absent = sorted(
         {
             reference
             for reference in [*eager_scripts, *lazy_scripts]
-            if not (ROOT / "engraphis" / reference.lstrip("/")).is_file()
+            if not _script_path(reference).is_file()
         }
     )
     if absent:
