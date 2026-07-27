@@ -274,8 +274,21 @@ def preflight_save() -> Path:
     os.close(descriptor)
     try:
         os.unlink(probe)
-    except OSError:  # pragma: no cover - the probe was just created in this directory
-        pass
+    except OSError as exc:
+        # Not cosmetic, and not "the probe was just created so of course it can be
+        # removed": creating a file and removing one are separate rights.  A directory ACL
+        # that grants add-file but denies delete lets ``mkstemp`` succeed and ``unlink``
+        # fail, and ``atomic_private_text`` finishes with ``os.replace`` over the session
+        # leaf -- which needs exactly the delete/replace right that just failed.  Swallowing
+        # this let the preflight pass on a directory the real save cannot use, redeeming the
+        # single-use token before failing, and left the probe behind on every attempt.  That
+        # is precisely the drift the preflight exists to prevent.
+        raise CloudSessionError(
+            "The Engraphis state directory %s does not allow files to be replaced, so the "
+            "cloud session cannot be saved there. Check its permissions; a leftover %s may "
+            "need removing." % (path.parent, Path(probe).name),
+            status=409,
+        ) from exc
     return path
 
 
@@ -489,11 +502,12 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
         },
         method="POST",
     )
+    # Split for the same reason as ``device_connect.post_connect``, and with sharper
+    # consequences here.  Once ``open`` returns, a success status line has been parsed, so
+    # the control plane processed the refresh and the single-use credential it was given is
+    # spent -- but the rotated replacement only reaches disk after the body parses, below.
     try:
-        with build_pinned_https_opener(_NoRedirect()).open(
-            request, timeout=10.0
-        ) as response:
-            raw = response.read(_MAX_RESPONSE_BYTES + 1)
+        response = build_pinned_https_opener(_NoRedirect()).open(request, timeout=10.0)
     except urllib.error.HTTPError as exc:
         code = exc.code
         # Draining and closing the error body can itself time out or reset.  A sibling
@@ -518,23 +532,63 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise CloudSessionError("Engraphis Cloud is temporarily unreachable.") from exc
     except http.client.HTTPException as exc:
-        # A reply that begins and then stops mid-body makes ``HTTPResponse.read`` raise
-        # ``IncompleteRead``; ``LineTooLong``/``BadStatusLine`` come from a mangled status
-        # line or headers.  None of them are ``OSError``, so without this clause they
-        # escaped as a traceback out of every paid feature's token refresh.
+        # ``LineTooLong``/``BadStatusLine`` from a mangled status line or headers. None of
+        # them are ``OSError``, so without this clause they escaped as a traceback out of
+        # every paid feature's token refresh.
         #
         # Deliberately *after* the transport clause: ``RemoteDisconnected`` is both a
-        # ``ConnectionResetError`` and a ``BadStatusLine``, and it keeps the transport
-        # copy it already had.
+        # ``ConnectionResetError`` and a ``BadStatusLine``, and it keeps the transport copy
+        # it already had.  Nothing was parsed here, so the credential is untouched and the
+        # retryable outage status is correct.
         raise CloudSessionError("Engraphis Cloud is temporarily unreachable.") from exc
+
+    try:
+        with response:
+            raw = response.read(_MAX_RESPONSE_BYTES + 1)
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        # Post-response, and therefore NOT a transient outage. The server answered, so the
+        # credential just submitted is spent, but the rotation it returned never reached
+        # ``_save`` -- the stale value is still on disk. ``_public_session_error`` maps 503
+        # to ``transient=True``, which ``CloudFeatureClient.run_job`` acts on by retrying;
+        # that retry would resubmit the spent credential, and this module already documents
+        # (see ``_note_denied``) that the control plane treats replay by revoking the whole
+        # credential family. 409 is the existing "saved session is unusable; connect this
+        # installation again" bucket, which is the honest answer here.
+        #
+        # This deliberately prefers a false "reconnect" over a replay: if the truncation
+        # happened before the server committed the rotation the old credential was still
+        # good and the reconnect was unnecessary, but the opposite mistake revokes every
+        # credential in the family and forces the same reconnect anyway, from a worse state.
+        raise CloudSessionError(
+            "Engraphis Cloud answered this session refresh but the reply was incomplete, "
+            "so the rotated credential could not be saved. Connect this installation "
+            "again.",
+            status=409,
+        ) from exc
+
+    # These are post-response too, so they carry the same replay hazard as the truncated
+    # body above and take the same non-transient status: the server consumed the credential
+    # it was given, and a body this client cannot parse means the rotation never landed.
     if len(raw) > _MAX_RESPONSE_BYTES:
-        raise CloudSessionError("Engraphis Cloud returned an oversized session response.")
+        raise CloudSessionError(
+            "Engraphis Cloud returned an oversized session response, so the rotated "
+            "credential could not be saved. Connect this installation again.",
+            status=409,
+        )
     try:
         body = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, RecursionError) as exc:
-        raise CloudSessionError("Engraphis Cloud returned an invalid session response.") from exc
+        raise CloudSessionError(
+            "Engraphis Cloud returned an invalid session response, so the rotated "
+            "credential could not be saved. Connect this installation again.",
+            status=409,
+        ) from exc
     if not isinstance(body, dict):
-        raise CloudSessionError("Engraphis Cloud returned an invalid session response.")
+        raise CloudSessionError(
+            "Engraphis Cloud returned an invalid session response, so the rotated "
+            "credential could not be saved. Connect this installation again.",
+            status=409,
+        )
     return body
 
 
@@ -612,7 +666,13 @@ def access_for_workspace(
         ).strip()
         rotated = str(body.get("refresh_credential") or "").strip()
         if not access or not organization_id or not rotated:
-            raise CloudSessionError("Engraphis Cloud returned incomplete session credentials.")
+            # Also post-response: the submitted credential is spent and no rotation was
+            # saved, so this must not be reported as a retryable outage either.
+            raise CloudSessionError(
+                "Engraphis Cloud returned incomplete session credentials, so the rotated "
+                "credential could not be saved. Connect this installation again.",
+                status=409,
+            )
         response_subject = _validated_token_subject(
             body.get("token_subject") or token_subject
         )
