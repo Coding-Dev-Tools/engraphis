@@ -339,7 +339,7 @@ def test_a_success_without_a_refresh_credential_writes_nothing(monkeypatch, tmp_
 
     assert caught.value.status == 502
     message = str(caught.value).lower()
-    assert "already been consumed" in message
+    assert "has now been used" in message
     assert "generate a new one" in message
     assert not (tmp_path / "cloud_session.json").exists()
 

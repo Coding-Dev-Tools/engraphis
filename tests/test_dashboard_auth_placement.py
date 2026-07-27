@@ -97,8 +97,9 @@ _ROUTED_FUNCTIONS = (
     # real shipped functions rather than stubbed, so "does this customer get offered a
     # trial" is answered here by the code that answers it in the browser.
     "licAccessState", "licAccessLive", "licTrialActive", "licTrialAvailable",
-    "licPlanName", "licTrialEnds", "fmtDay", "lockReason",
-    "hostedPlanUrl", "licActionsHtml", "unlockHtml", "managedConsentHtml",
+    "licPlanName", "licPlanKey", "licTrialEnds", "fmtDay", "lockReason",
+    "hostedAccountUrl", "hostedPlanUrl", "licActionsHtml", "unlockHtml",
+    "managedConsentHtml",
     "managedConsentRequired", "hostedFeatureUnavailable",
     "loadAnalytics", "loadAutomation",
 )
@@ -123,9 +124,9 @@ let CURRENT_VIEW = 'overview';
 // The default is an unconnected installation: no hosted plan, unspent trial, and the
 // control plane says a trial may still be started. A case can replace ``access_state`` and
 // ``trial`` to model a trialist, a spent trial, a paying customer, or a lapsed one.
-const LIC_BASE = {pro_upgrade_url:'https://engraphis.com/pricing',
-             team_upgrade_url:'https://engraphis.com/pricing?plan=team',
-             upgrade_url:'https://engraphis.com/pricing',
+const LIC_BASE = {pro_upgrade_url:'https://engraphis.example/checkout/pro',
+             team_upgrade_url:'https://engraphis.example/checkout/team',
+             upgrade_url:'https://engraphis.example/account',
              plan:'local', access_state:'inactive',
              trial:{used:false, active:false, available:true, ends_at:0}};
 let LIC = LIC_BASE;
@@ -191,8 +192,9 @@ def _license_copy(tmp_path, cases):
     """Execute the shipped entitlement copy and action helpers under Node."""
 
     functions = (
-        "licAccessState", "licTrialAvailable", "licPlanName", "licTrialEnds", "fmtDay",
-        "hostedPlanUrl", "lockReason", "licActionsHtml",
+        "licAccessState", "licTrialAvailable", "licPlanName", "licPlanKey",
+        "licTrialEnds", "fmtDay", "hostedAccountUrl", "hostedPlanUrl",
+        "lockReason", "licActionsHtml",
     )
     driver = """
 const CASES = JSON.parse(process.argv[2]);
@@ -270,6 +272,79 @@ def test_team_entitlements_use_truthful_copy_and_the_team_billing_url(tmp_path) 
     assert "Update billing" in rendered["lapsed-team"]["actions"]
     assert "plan=team" in rendered["lapsed-team"]["actions"]
     assert "plan=pro" not in rendered["lapsed-team"]["actions"]
+    assert 'href="https://engraphis.example/account"' in rendered["lapsed-team"]["actions"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
+@pytest.mark.parametrize("plan,mine,theirs", [
+    ("team", "team", "pro"),
+    ("pro", "pro", "team"),
+])
+def test_a_lapsed_customer_renews_the_plan_they_actually_hold(
+    tmp_path, plan, mine, theirs,
+) -> None:
+    actions = _license_copy(tmp_path, [{
+        "name": "lapsed",
+        "state": "lapsed",
+        "lic": {
+            "plan": plan,
+            "access_state": "lapsed",
+            "trial": {"available": False, "ends_at": 0},
+        },
+    }])["lapsed"]["actions"]
+
+    assert "Update billing" in actions and "Open account portal" in actions
+    assert "checkout/%s?plan=%s" % (mine, mine) in actions
+    assert "checkout/%s" % theirs not in actions
+    assert 'href="https://engraphis.example/account"' in actions
+    assert "Start hosted" not in actions
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
+def test_a_lapsed_customer_with_no_readable_plan_still_gets_a_billing_target(
+    tmp_path,
+) -> None:
+    actions = _license_copy(tmp_path, [{
+        "name": "lapsed",
+        "state": "lapsed",
+        "lic": {
+            "plan": "",
+            "access_state": "lapsed",
+            "trial": {"available": False, "ends_at": 0},
+        },
+    }])["lapsed"]["actions"]
+
+    assert "Update billing" in actions
+    assert "checkout/pro?plan=pro" in actions
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
+@pytest.mark.parametrize("state,expected,absent", [
+    ("inactive", "Start hosted Pro trial", "Subscribe to Pro"),
+    ("trial_expired", "Subscribe to Pro", "Start hosted Pro trial"),
+    ("trial", "Open Pro Cloud", "Start hosted Pro trial"),
+    ("active", "Open Pro Cloud", "Start hosted Pro trial"),
+])
+def test_each_access_state_offers_the_one_action_that_can_succeed(
+    tmp_path, state, expected, absent,
+) -> None:
+    actions = _license_copy(tmp_path, [{
+        "name": state,
+        "state": state,
+        "lic": {
+            "plan": "pro",
+            "access_state": state,
+            "trial": {
+                "used": state != "inactive",
+                "active": state == "trial",
+                "available": state == "inactive",
+                "ends_at": 0,
+            },
+        },
+    }])[state]["actions"]
+
+    assert expected in actions
+    assert absent not in actions
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")

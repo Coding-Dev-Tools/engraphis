@@ -16,6 +16,8 @@ undelivered_license_keys.tsv
 # lives next to the DB or in ~/.engraphis/). Regenerable local state, not content.
 automation.json
 autosync.json
+# Dashboard update-check cache; machine-local, regenerable runtime state.
+.engraphis_update_check.json
 .venv/
 venv/
 dist/

@@ -1952,7 +1952,12 @@ def _epoch_seconds(value: object) -> float:
     if isinstance(value, bool):
         return 0.0
     if isinstance(value, (int, float)):
-        number = float(value)
+        try:
+            number = float(value)
+        except (OverflowError, ValueError):
+            # JSON integers are arbitrary precision. An unrepresentable instant is not a
+            # boundary and must not break /api/license or the dashboard bootstrap path.
+            return 0.0
         return number if number > 0 and math.isfinite(number) else 0.0
     if not isinstance(value, str) or not value.strip():
         return 0.0

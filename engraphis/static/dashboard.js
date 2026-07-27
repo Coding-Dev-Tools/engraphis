@@ -173,11 +173,17 @@ function licTrialActive(){return licAccessState()==='trial'}
    entitlement, so this is false for every connected customer — trialling, lapsed, or
    paying — and the CTA that could only ever return 409 is not drawn. */
 function licTrialAvailable(){return !!(LIC&&LIC.trial&&LIC.trial.available)}
-function licPlanName(){const raw=String((LIC&&LIC.plan)||'local').toLowerCase();return raw==='pro'||raw==='team'?raw.toUpperCase():'LOCAL'}
+function licPlanName(){return licPlanKey()?licPlanKey().toUpperCase():'LOCAL'}
+/* The plan the customer actually holds, as the wire spells it: '' when they hold none.
+   Renewal and billing actions must follow this, not a hardcoded default. */
+function licPlanKey(){const raw=String((LIC&&LIC.plan)||'local').toLowerCase();return raw==='pro'||raw==='team'?raw:''}
 function licTrialEnds(){return fmtDay(LIC&&LIC.trial&&LIC.trial.ends_at)}
 function fmtDay(epoch){const n=Number(epoch)||0;if(!(n>0))return '';try{const d=new Date(n*1000);return Number.isFinite(d.getTime())?d.toISOString().slice(0,10):''}catch(e){return ''}}
 
 /* ── shared hosted upgrade / trial CTA ── */
+/* The plan-neutral hosted entry point. An account portal is not a checkout, so it must
+   not carry the ?plan= parameter that would reframe it as one. */
+function hostedAccountUrl(){return safeUrl(LIC&&LIC.upgrade_url)}
 function hostedPlanUrl(plan,trial){const raw=(LIC&&(plan==='team'?LIC.team_upgrade_url:LIC.pro_upgrade_url))||(LIC&&LIC.upgrade_url);const safe=safeUrl(raw);if(!safe||safe==='#')return '#';try{const url=new URL(safe,location.href);if(plan==='pro'||plan==='team')url.searchParams.set('plan',plan);if(trial)url.searchParams.set('trial',plan);return url.href}catch(e){return safe}}
 /* Why is this feature locked? This helper returns plain text; every HTML sink escapes it.
    One sentence per access state keeps the panel from claiming a trial the customer cannot
@@ -474,11 +480,12 @@ function licStateBanner(state,plan,ends,status){
  return ''}
 function licActionsHtml(state){
  if(licTrialAvailable())return `<div data-csp-style="s123"><button class="btn btn-primary btn-sm" data-onclick="h84">Start hosted Pro trial</button><button class="btn btn-ghost btn-sm" data-onclick="h87">Start hosted Team trial</button></div>`;
- const buy=state==='trial_expired',bill=state==='lapsed';
- const billingPlan=bill&&licPlanName()==='TEAM'?'team':'pro';
- const primary=bill?'Update billing':buy?'Subscribe to Pro':'Open Pro Cloud';
- const secondary=bill?'Open account portal':buy?'Subscribe to Team':'Open Team Cloud';
- return `<div data-csp-style="s123"><a class="btn btn-primary btn-sm" href="${esc(hostedPlanUrl(billingPlan))}" target="_blank" rel="noopener">${primary}</a><a class="btn btn-ghost btn-sm" href="${esc(hostedPlanUrl('team'))}" target="_blank" rel="noopener">${secondary}</a></div>`}
+ /* A lapsed customer is renewing the subscription they already hold, not shopping. */
+ if(state==='lapsed')return `<div data-csp-style="s123"><a class="btn btn-primary btn-sm" href="${esc(hostedPlanUrl(licPlanKey()||'pro'))}" target="_blank" rel="noopener">Update billing</a><a class="btn btn-ghost btn-sm" href="${esc(hostedAccountUrl())}" target="_blank" rel="noopener">Open account portal</a></div>`;
+ const buy=state==='trial_expired';
+ const primary=buy?'Subscribe to Pro':'Open Pro Cloud';
+ const secondary=buy?'Subscribe to Team':'Open Team Cloud';
+ return `<div data-csp-style="s123"><a class="btn btn-primary btn-sm" href="${esc(hostedPlanUrl('pro'))}" target="_blank" rel="noopener">${primary}</a><a class="btn btn-ghost btn-sm" href="${esc(hostedPlanUrl('team'))}" target="_blank" rel="noopener">${secondary}</a></div>`}
 function renderLicense(d){
  const el=document.getElementById('lic-body');if(!el)return;
  const state=licAccessState(),raw=String(d.plan||'local').toLowerCase();

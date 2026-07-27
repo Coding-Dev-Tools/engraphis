@@ -1831,7 +1831,8 @@ def test_the_servers_utc_timestamp_is_read_on_the_python_39_floor(value) -> None
 
 @pytest.mark.parametrize("value", [
     None, "", "  ", "not-a-date", 0, -1, True, [], {},
-    float("inf"), float("-inf"), float("nan"), "2026-13-45T99:99:99Z",
+    float("inf"), float("-inf"), float("nan"), 10**400,
+    "2026-13-45T99:99:99Z",
 ])
 def test_an_unreadable_trial_boundary_is_unknown_rather_than_raising(value) -> None:
     """This runs on the ``/api/bootstrap`` boot path; nothing here may raise."""
