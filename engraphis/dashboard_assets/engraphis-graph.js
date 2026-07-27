@@ -312,6 +312,9 @@
       path: null, asOf: null, ghost: true, sizeBy: 'degree', bridges: false, suggestions: false, collapse: 'auto'
     };
     let raw = { nodes: [], links: [], suggestions: [] }, adj = {}, hilite = null, hoverSet = null, maxDeg = 1;
+    // Match the classic renderer's ranked label cap. Computing the selected IDs once per
+    // render also keeps per-frame canvas work bounded on dense graphs.
+    let labelIds = new Set();
     let zoom = 1, collapsed = false;
     /* Recomputed from the *rendered* data on every render, exactly as the classic path
        recomputes GPERF — filters and focus can take a huge store down to a small view. */
@@ -632,7 +635,7 @@
         ctx.strokeStyle = state.styleName === 'cyber' ? '#ffffff' : 'rgba(255,255,255,.9)';
         ctx.beginPath(); ctx.arc(node.x, node.y, r + 1.4 / scale, 0, 6.2832); ctx.stroke();
       }
-      const showLabel = (state.settings.labels && node.degree >= Math.max(1, 12 - state.settings.labelDensity / 6)) || node.id === hilite || neighbor;
+      const showLabel = (state.settings.labels && labelIds.has(node.id)) || node.id === hilite || neighbor;
       if (showLabel && scale > 0.35) {
         // The dashboard setting is a screen-space font size.  As on the classic renderer,
         // compensate only for graph zoom; an extra artistic divisor makes a configured 12px
@@ -751,6 +754,14 @@
         n.color = nodeColor(n);
         n.stroke = contrastOn(n.color);
       });
+      const labelCap = Math.max(1, Math.round(Number(state.settings.labelDensity) || 40));
+      labelIds = new Set(data.nodes
+        .filter(n => !n.cluster && !n.ghost)
+        .sort((a, b) => (b.degree || 0) - (a.degree || 0)
+          || (b.betweenness || 0) - (a.betweenness || 0)
+          || String(a.id).localeCompare(String(b.id)))
+        .slice(0, labelCap)
+        .map(n => n.id));
       applyChrome();
       if (!reused) { fg.graphData(data); seeded = data; }
       applyForces();
