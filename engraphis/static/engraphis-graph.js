@@ -683,7 +683,7 @@
         if (!Number.isFinite(target.x) || !Number.isFinite(target.y)) return;
         if (link.ghost) return;
         ctx.font = ((state.settings.font || 12) * 0.82) / scale + 'px system-ui, sans-serif';
-        ctx.fillStyle = 'rgba(232,236,245,.62)';
+        ctx.fillStyle = state.themeColors.relation_label || '#7e8795';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(String(link.label), (source.x + target.x) / 2, (source.y + target.y) / 2);
