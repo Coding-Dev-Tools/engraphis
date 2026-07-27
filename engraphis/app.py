@@ -24,7 +24,7 @@ from engraphis.engines.embedder import warmup as _warmup_embedder
 from engraphis.logging_setup import configure_logging
 from engraphis.netutil import client_ip
 from engraphis.routes.memory import router as memory_router
-from engraphis.routes.vault import router as vault_router
+from engraphis.routes.vault import VAULT_UPLOAD_REQUEST_BYTES, router as vault_router
 from engraphis.stores import get_conn, init_db
 
 logger = logging.getLogger("engraphis")
@@ -35,6 +35,100 @@ _STATIC_DIR = Path(__file__).resolve().parent / "static"
 # Readiness cache: only a *successful* embedder init is cached, so a transient
 # failure is re-checked on the next probe instead of wedging the pod NotReady.
 _embedder_ok: bool = False
+_UPLOAD_LIMIT_PATHS = frozenset({
+    "/api/workspaces/import-files",
+    "/memory/vaults/upload-folder",
+    "/memory/vaults/upload-folder-smart",
+})
+
+
+class _RequestBodyTooLarge(Exception):
+    """Internal signal used by the streaming ASGI request limiter."""
+
+
+class _VaultUploadLimitMiddleware:
+    """Reject oversized file imports before multipart parsing/spooling.
+
+    ``Content-Length`` provides an immediate fast-fail. The receive wrapper is still
+    required because clients can omit or lie about that header, including HTTP/1.1
+    chunked uploads. A fronting proxy should configure an equal or lower request-body
+    ceiling; this in-process guard remains the last line of defense for direct access.
+    """
+
+    def __init__(self, app, max_bytes: int):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if (
+            scope["type"] != "http"
+            or scope["method"] != "POST"
+            or scope["path"].rstrip("/") not in _UPLOAD_LIMIT_PATHS
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        raw_lengths = [
+            value for name, value in scope.get("headers", [])
+            if name.lower() == b"content-length"
+        ]
+        if len(raw_lengths) > 1:
+            await JSONResponse(
+                {"error": "invalid content-length"},
+                status_code=400,
+            )(scope, receive, send)
+            return
+        if raw_lengths:
+            try:
+                declared_length = int(raw_lengths[0])
+            except (TypeError, ValueError):
+                declared_length = -1
+            if declared_length < 0:
+                await JSONResponse(
+                    {"error": "invalid content-length"},
+                    status_code=400,
+                )(scope, receive, send)
+                return
+            if declared_length > self.max_bytes:
+                await self._too_large(scope, receive, send)
+                return
+
+        received = 0
+        limit_exceeded = False
+
+        async def limited_receive():
+            nonlocal limit_exceeded, received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    limit_exceeded = True
+                    raise _RequestBodyTooLarge
+            return message
+
+        async def guarded_send(message):
+            # FastAPI converts arbitrary body-parser exceptions into a generic 400.
+            # Suppress that replacement response once our receive wrapper has observed
+            # the real cause; the middleware emits the canonical 413 below.
+            if limit_exceeded:
+                return
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, guarded_send)
+        except _RequestBodyTooLarge:
+            pass
+        if limit_exceeded:
+            await self._too_large(scope, receive, send)
+
+    async def _too_large(self, scope, receive, send):
+        await JSONResponse(
+            {
+                "error": "request body too large",
+                "max_bytes": self.max_bytes,
+            },
+            status_code=413,
+        )(scope, receive, send)
 
 
 def _embedder_ready() -> bool:
@@ -114,6 +208,10 @@ def create_app() -> FastAPI:
         allow_credentials=not _wildcard,
         allow_methods=["*"],
         allow_headers=["*"],
+    )
+    app.add_middleware(
+        _VaultUploadLimitMiddleware,
+        max_bytes=VAULT_UPLOAD_REQUEST_BYTES,
     )
 
     # Optional bearer-token auth. Active only when ENGRAPHIS_API_TOKEN is set.

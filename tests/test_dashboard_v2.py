@@ -54,6 +54,13 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert bootstrap.json()["stats"]["memories"] >= 1
 
 
+def test_dashboard_serves_the_graph_engine_from_its_v2_asset_surface(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        asset = client.get("/v2-assets/engraphis-graph.js")
+        assert asset.status_code == 200
+        assert "window.EngraphisGraph =" in asset.text
+
+
 def test_team_account_routes_are_not_in_public_runtime(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         assert client.post("/api/auth/setup", json={}).status_code == 404

@@ -445,8 +445,8 @@ async def entity_memories(entity_name: str, namespace: Optional[str] = None, lim
     for r in conn.execute(ev_sql + " ORDER BY timestamp DESC LIMIT 100", ev_params):
         try:
             _add(r["namespace"], _json.loads(r["payload"] or "{}").get("document_id"))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Entity event payload parse skipped (%s)", type(exc).__name__)
 
     # 2) broad: memories whose content mentions the entity
     m_sql = "SELECT namespace, document_id FROM memories WHERE content LIKE ? ESCAPE '\\'"
@@ -619,7 +619,10 @@ async def list_thoughts(namespace: Optional[str] = None, limit: int = 50):
     thoughts = []
     for r in rows:
         d = dict(r)
-        d["source_memory_ids"] = json.loads(d.get("source_memory_ids") or "[]")
+        try:
+            d["source_memory_ids"] = json.loads(d.get("source_memory_ids") or "[]")
+        except Exception:
+            d["source_memory_ids"] = []
         try:
             d["parsed"] = json.loads(d["content"])
         except Exception:
@@ -640,9 +643,6 @@ async def get_config():
         "embed_model": settings.embed_model,
         "loop_interval": settings.loop_interval,
         "decay_halflife_days": settings.decay_halflife_days,
-        "host": settings.host,
-        "port": settings.port,
-        "base_url": settings.base_url,
     })
 
 
