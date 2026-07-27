@@ -483,7 +483,7 @@
         fg.d3Force('y', d3.forceY(0).strength(centering));
         if (mode === 'radial' && d3.forceRadial) fg.d3Force('radial', d3.forceRadial(n => Math.max(0, 5 - Math.min(5, n.degree || 0)) * Math.max(8, s.link * 0.72)).strength(0.32));
       }
-      if (d3.forceCollide) fg.d3Force('collide', d3.forceCollide(n => n.radius + 1.5).iterations(2));
+      if (d3.forceCollide) fg.d3Force('collide', d3.forceCollide(n => n.radius + 1.5).iterations(large ? 1 : 2));
     }
 
     function styleBackground(ctx, scale) {
@@ -601,7 +601,7 @@
         ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, 6.2832); ctx.fill();
       } else if (state.styleName === 'cyber') {
         ctx.save();
-        if (rich) { ctx.shadowColor = col; ctx.shadowBlur = dim ? 2 : r * 2.6; }
+        if (rich && !large) { ctx.shadowColor = col; ctx.shadowBlur = dim ? 2 : r * 2.6; }
         ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, 6.2832); ctx.fillStyle = col; ctx.fill();
         ctx.restore();
         ctx.beginPath(); ctx.arc(node.x, node.y, Math.max(0.4, r * 0.42), 0, 6.2832); ctx.fillStyle = '#eafcff'; ctx.fill();

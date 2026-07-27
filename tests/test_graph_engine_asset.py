@@ -691,6 +691,60 @@ def test_galaxy_stops_animating_once_the_graph_is_large() -> None:
 
 
 @requires_node
+def test_large_graphs_reduce_collision_work_and_skip_cyber_shadows() -> None:
+    """The next engine keeps the classic path's two largest per-node costs bounded.
+
+    Collision relaxation is needed twice per tick for a small layout but only once once the
+    classic ``GPERF.large`` threshold is crossed.  Cyber's rich-node blur is similarly useful
+    at ordinary scale and prohibitively expensive when hundreds of nodes paint each frame.
+    Exercise the actual force and canvas accessors rather than matching their source text.
+    """
+    report = _run_engine(
+        """
+        const collide = () => {
+          let iterations = null;
+          return {
+            iterations(value) {
+              if (arguments.length) { iterations = value; return this; }
+              return iterations;
+            },
+          };
+        };
+        globalThis.d3 = {
+          forceX: () => ({ strength() { return this; } }),
+          forceY: () => ({ strength() { return this; } }),
+          forceCollide: collide,
+        };
+        const shadows = () => {
+          const writes = [];
+          const ctx = {
+            save() {}, restore() {}, beginPath() {}, arc() {}, fill() {}, stroke() {},
+            set shadowColor(value) { writes.push(['color', value]); },
+            set shadowBlur(value) { writes.push(['blur', value]); },
+          };
+          store.nodeCanvasObject(
+            { id: 'rich', x: 0, y: 0, radius: 5, color: '#22e0ff', degree: 3 }, ctx, 1
+          );
+          return writes;
+        };
+        const api = G.create(el, {});
+        api.setStyle('cyber');
+        api.setData(chain(40));
+        const smallIterations = store.d3Force[1].iterations();
+        const smallShadows = shadows();
+        api.setData(chain(601));
+        const largeIterations = store.d3Force[1].iterations();
+        const largeShadows = shadows();
+        emit({ smallIterations, largeIterations, smallShadows, largeShadows });
+        """
+    )
+    assert report["smallIterations"] == 2
+    assert report["largeIterations"] == 1
+    assert report["smallShadows"] == [["color", "#22e0ff"], ["blur", 13]]
+    assert report["largeShadows"] == []
+
+
+@requires_node
 def test_type_colours_follow_the_active_theme_not_a_hard_coded_dark_palette() -> None:
     """``applyTheme()`` recolours the canvas, but the engine had no theme to recolour to.
 
