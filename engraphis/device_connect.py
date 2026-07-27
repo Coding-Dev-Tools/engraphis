@@ -35,6 +35,7 @@ import socket
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 from typing import Optional, Tuple
 
 from engraphis import cloud_session
@@ -181,7 +182,21 @@ def _state_dir() -> Path:
 
 
 def _identity_path() -> Path:
-    return _state_dir() / _IDENTITY_FILENAME
+    try:
+        return _state_dir() / _IDENTITY_FILENAME
+    except RuntimeError as exc:
+        # ``Path.home()`` raises ``RuntimeError("Could not determine home directory")`` on a
+        # service account or container with no resolvable home.  This module promises every
+        # failure is a ``DeviceConnectError``, and the CLI catches only that, so the bare
+        # ``RuntimeError`` reached the terminal as a traceback -- from a command whose whole
+        # selling point is being non-interactive and scriptable.  ``ENGRAPHIS_STATE_DIR`` is
+        # the documented answer, so the copy names it.
+        raise DeviceConnectError(
+            "Engraphis could not determine a home directory for its state files. Set "
+            "ENGRAPHIS_STATE_DIR to a writable directory and run `engraphis connect "
+            "--token ...` again.",
+            status=400,
+        ) from exc
 
 
 def _new_client_id(prefix: str) -> str:
@@ -195,6 +210,12 @@ def _new_client_id(prefix: str) -> str:
 def _read_identity() -> dict:
     try:
         raw = read_private_text(_identity_path(), max_bytes=8 * 1024, allow_missing=True)
+    except DeviceConnectError:
+        # Already actionable copy (an unresolvable home directory). Must come first:
+        # ``DeviceConnectError`` is a ``RuntimeError``, so the broad clause below would
+        # otherwise swallow it and let the *next*, unguarded ``_identity_path()`` call
+        # raise the raw error instead.
+        raise
     except UnsafeStateFile as exc:
         raise DeviceConnectError(
             "The saved client identity has unsafe filesystem permissions. Remove %s and "
@@ -278,6 +299,39 @@ def default_control_url() -> str:
         return ""
 
 
+def _canonical_endpoint(value: object) -> str:
+    """Canonical ``scheme://host:port/path`` for comparing two endpoint URLs.
+
+    ``validate_cloud_base_url`` returns ``urlunsplit((scheme, parts.netloc, ...))``: it
+    lower-cases the *scheme* but passes the netloc through verbatim, and it never removes a
+    redundant default port.  So ``HTTPS://API.ENGRAPHIS.COM`` normalises to
+    ``https://API.ENGRAPHIS.COM``, and ``https://api.engraphis.com:443`` keeps its ``:443``
+    -- both are the shipped control plane, and both compared unequal to it as raw strings.
+    The consequence was silent and expensive: :func:`default_compute_url` returned ``""``,
+    so a customer who typed the production URL with a different case or an explicit port
+    connected successfully and then had every hosted feature switched off, because
+    ``cloud_session.configured()`` needs a compute endpoint.
+
+    Returns ``""`` for anything unparseable, which never equals another canonical form.
+    """
+
+    try:
+        parts = urlsplit(str(value or "").strip())
+    except ValueError:
+        return ""
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    if not scheme or not host:
+        return ""
+    try:
+        port = parts.port
+    except ValueError:
+        return ""
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return "%s://%s:%d%s" % (scheme, host, port, parts.path.rstrip("/"))
+
+
 def default_compute_url(control_url: str) -> str:
     """Resolve the compute plane, guessing only for the shipped control plane.
 
@@ -302,7 +356,7 @@ def default_compute_url(control_url: str) -> str:
         shipped_compute = str(data.get("compute_plane") or "").strip()
     except Exception:  # pragma: no cover - manifest ships with the package
         return ""
-    if shipped and control_url.rstrip("/") == shipped.rstrip("/"):
+    if shipped and _canonical_endpoint(control_url) == _canonical_endpoint(shipped):
         return shipped_compute or DEFAULT_COMPUTE_URL
     return ""
 
@@ -512,26 +566,37 @@ def post_connect(control_url: str, token: str, *, installation_client_id: str,
             except _DRAIN_FAILURES:
                 pass
         raise _connect_http_error(status)
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except urllib.error.URLError as exc:
         # ``exc`` may quote an internal host or a proxy URL; never reflect it.
         #
-        # Deliberately ahead of the ``HTTPException`` clause: ``RemoteDisconnected`` is
-        # both a ``ConnectionResetError`` and a ``BadStatusLine``, and it means the peer
-        # closed without answering at all. Nothing was consumed, so "try again" is the
-        # correct advice for it and it must not inherit the token-may-be-spent copy.
+        # ``URLError`` is the honest "nothing was consumed" case, and the only one.
+        # ``AbstractHTTPHandler.do_open`` wraps failures from establishing the connection
+        # and from ``h.request(...)`` -- DNS, connection refused, TLS, a write that never
+        # completed -- in ``URLError``, but lets anything raised by ``h.getresponse()``
+        # propagate unwrapped. So reaching *this* clause means the request never finished
+        # going out, and "try again" with the same token is correct.
         raise DeviceConnectError(
             "Engraphis Cloud is temporarily unreachable. Check your network and try "
             "again.",
             status=503,
         ) from exc
-    except http.client.HTTPException as exc:
-        # A truncated chunked body makes ``HTTPResponse.read`` raise ``IncompleteRead``,
-        # whose only base is ``HTTPException``: it is neither an ``OSError``, a
-        # ``ValueError``, nor a ``URLError`` -- so it escaped both clauses above. That
-        # happened at the worst moment: the control plane had already answered, so the
-        # single-use token was very likely spent, and the customer saw a stack trace
-        # instead of being told to check the portal. ``LineTooLong``/``BadStatusLine`` from
-        # reading the status line and headers land here for the same reason.
+    except (TimeoutError, OSError, http.client.HTTPException) as exc:
+        # Everything else in this phase comes out of ``h.getresponse()``, which runs only
+        # after the request has been written in full. The control plane may therefore have
+        # received and processed it -- and a processed connect spends the token -- so this
+        # is ambiguous, not a clean miss.
+        #
+        # This clause used to claim the opposite for ``RemoteDisconnected`` ("the peer
+        # closed without answering at all. Nothing was consumed"). That was an overclaim:
+        # ``RemoteDisconnected`` is raised when ``getresponse()`` reads zero bytes for the
+        # status line, which is *after* the POST went out. Telling that customer to retry
+        # sent them into a 401 that reads as "the token I just generated is invalid".
+        # ``_TRUNCATED_REPLY`` is the right copy under ambiguity: it asks them to check the
+        # portal first rather than asserting either outcome.
+        #
+        # ``LineTooLong``/``BadStatusLine`` from a mangled status line, and ``IncompleteRead``
+        # from a truncated body, land here for the same reason -- none of them are a
+        # ``URLError``, so before this clause existed they escaped as a raw traceback.
         raise DeviceConnectError(_TRUNCATED_REPLY, status=502) from exc
 
     # Past this line the control plane has answered with a success status, so the token is
