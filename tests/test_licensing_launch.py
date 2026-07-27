@@ -159,7 +159,7 @@ def test_malformed_refresh_json_is_a_structured_error(monkeypatch) -> None:
     [
         urllib.error.URLError(ConnectionRefusedError("connection refused")),
         urllib.error.URLError(socket.gaierror("name resolution failed")),
-        TimeoutError("timed out"),
+        urllib.error.URLError(TimeoutError("timed out before send")),
     ],
 )
 def test_transport_failures_report_a_retryable_outage(monkeypatch, error) -> None:
@@ -169,6 +169,23 @@ def test_transport_failures_report_a_retryable_outage(monkeypatch, error) -> Non
 
     with pytest.raises(CloudSessionError, match="temporarily unreachable"):
         cloud_session._post_refresh("https://control.example.test", "r", "ws", "member")
+
+
+@pytest.mark.parametrize("error", [
+    TimeoutError("timed out waiting for status"),
+    http.client.RemoteDisconnected("closed waiting for status"),
+])
+def test_post_send_refresh_transport_failures_require_reconnect(monkeypatch, error) -> None:
+    """Unwrapped getresponse failures are ambiguous after the refresh POST was written."""
+
+    monkeypatch.setattr(
+        cloud_session, "build_pinned_https_opener", _opener_raising(error)
+    )
+
+    with pytest.raises(CloudSessionError, match="Connect this installation again") as caught:
+        cloud_session._post_refresh("https://control.example.test", "r", "ws", "member")
+
+    assert caught.value.status == 409
 
 
 @pytest.mark.parametrize("error", [

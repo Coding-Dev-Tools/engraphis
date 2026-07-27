@@ -570,7 +570,20 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
             except _DRAIN_FAILURES:
                 pass
         raise _refresh_http_error(code)
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    # urllib wraps failures before or while sending the request in URLError.  That is the one
+    # distinguishable pre-send path, so the credential was not spent and retry remains safe.
+    except urllib.error.URLError as exc:
+        raise CloudSessionError("Engraphis Cloud is temporarily unreachable.") from exc
+    except (TimeoutError, http.client.RemoteDisconnected) as exc:
+        # These escape directly from getresponse() after urllib wrote the POST.  The control
+        # plane may have spent the single-use credential even though no status line arrived;
+        # retrying the unchanged on-disk value risks revoking its entire credential family.
+        raise CloudSessionError(
+            "Engraphis Cloud did not complete this refresh response, so the rotated "
+            "credential could not be saved. Connect this installation again.",
+            status=409,
+        ) from exc
+    except OSError as exc:
         raise CloudSessionError("Engraphis Cloud is temporarily unreachable.") from exc
     except (http.client.BadStatusLine, http.client.LineTooLong) as exc:
         # ``getresponse()`` raises these only after urllib has sent the POST.  The control
