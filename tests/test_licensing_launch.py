@@ -158,7 +158,6 @@ def test_malformed_refresh_json_is_a_structured_error(monkeypatch) -> None:
     [
         urllib.error.URLError(ConnectionRefusedError("connection refused")),
         urllib.error.URLError(socket.gaierror("name resolution failed")),
-        TimeoutError("timed out"),
     ],
 )
 def test_transport_failures_report_a_retryable_outage(monkeypatch, error) -> None:
@@ -168,6 +167,21 @@ def test_transport_failures_report_a_retryable_outage(monkeypatch, error) -> Non
 
     with pytest.raises(CloudSessionError, match="temporarily unreachable"):
         cloud_session._post_refresh("https://control.example.test", "r", "ws", "member")
+
+
+def test_ambiguous_refresh_timeout_requires_a_non_retryable_reconnect(monkeypatch) -> None:
+    """A timeout after urllib wrote the POST may leave the single-use credential spent."""
+
+    monkeypatch.setattr(
+        cloud_session,
+        "build_pinned_https_opener",
+        _opener_raising(TimeoutError("timed out")),
+    )
+
+    with pytest.raises(CloudSessionError, match="rotated credential could not be saved") as caught:
+        cloud_session._post_refresh("https://control.example.test", "r", "ws", "member")
+
+    assert caught.value.status == 409
 
 
 # ── (a)/(6) billing and authorization copy must be actionable ─────────────────
