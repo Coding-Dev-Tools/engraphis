@@ -15,6 +15,15 @@ def test_inline_asset_parser_handles_case_and_malformed_closing_tag():
     assert [asset.content for asset in scripts] == ["alert(1)"]
 
 
+def test_inline_asset_parser_resumes_after_malformed_closing_tag():
+    styles, scripts = assets._inline_assets(
+        "<SCRIPT>first()</SCRIPT data-error=\"yes\"><script>second()</script>"
+    )
+
+    assert styles == []
+    assert [asset.content for asset in scripts] == ["first()", "second()"]
+
+
 def test_migrate_uses_parsed_asset_boundaries(tmp_path, monkeypatch):
     index = tmp_path / "index.html"
     css = tmp_path / "dashboard.css"

@@ -172,5 +172,6 @@ def _parse_json(raw: str) -> dict[str, Any]:
         text = json_match.group(0)
     try:
         return json.loads(text)
-    except Exception:
+    except Exception as exc:
+        logger.debug("JSON parse fallback to raw (%s)", type(exc).__name__)
         return {"raw": raw}

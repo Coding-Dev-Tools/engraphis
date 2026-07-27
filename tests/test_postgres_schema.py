@@ -2,6 +2,8 @@ import json
 import sys
 import types
 
+import pytest
+
 from engraphis.backends import postgres_schema
 from engraphis.core.interfaces import SchemaSnapshot, SearchFilter
 from engraphis.service import MemoryService
@@ -85,7 +87,7 @@ def test_postgres_connect_and_statement_timeouts_are_bounded(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_POSTGRES_STATEMENT_TIMEOUT_MS", "45000")
 
     snapshot = postgres_schema.PostgresSchemaIntrospector().inspect(
-        "postgresql://local/appdb"
+        "postgresql://localhost/appdb"
     )
 
     assert snapshot.metadata["database"] == "appdb"
@@ -93,6 +95,143 @@ def test_postgres_connect_and_statement_timeouts_are_bounded(monkeypatch):
     timeout_call = connection.cursor_obj.calls[0]
     assert "set_config('statement_timeout'" in timeout_call[0]
     assert timeout_call[1] == ("45000",)
+
+
+def test_postgres_connect_pins_validated_address_without_losing_tls_host(monkeypatch):
+    captured = {}
+    resolutions = 0
+
+    def resolve(*args, **kwargs):
+        nonlocal resolutions
+        resolutions += 1
+        if resolutions > 1:
+            return [
+                (
+                    postgres_schema.socket.AF_INET,
+                    postgres_schema.socket.SOCK_STREAM,
+                    postgres_schema.socket.IPPROTO_TCP,
+                    "",
+                    ("10.0.0.8", 5432),
+                )
+            ]
+        return [
+            (
+                postgres_schema.socket.AF_INET,
+                postgres_schema.socket.SOCK_STREAM,
+                postgres_schema.socket.IPPROTO_TCP,
+                "",
+                ("93.184.216.34", 5432),
+            )
+        ]
+
+    def connect(dsn, **kwargs):
+        captured["dsn"] = dsn
+        captured.update(kwargs)
+        return _Connection()
+
+    monkeypatch.setattr(postgres_schema.socket, "getaddrinfo", resolve)
+    monkeypatch.setitem(sys.modules, "psycopg", types.SimpleNamespace(connect=connect))
+
+    dsn = (
+        "postgresql://db.example/appdb"
+        "?host=10.0.0.8&hostaddr=10.0.0.8"
+    )
+    postgres_schema._connect(dsn)
+
+    assert resolutions == 1
+    assert captured["dsn"] == dsn
+    assert captured["host"] == "db.example"
+    assert captured["hostaddr"] == "93.184.216.34"
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "10.0.0.8",
+        "100.64.0.1",
+        "127.0.0.2",
+        "169.254.1.1",
+        "192.0.2.1",
+        "224.0.0.1",
+        "::",
+        "fe80::1",
+        "ff02::1",
+    ],
+)
+def test_postgres_connect_rejects_non_global_addresses(monkeypatch, address):
+    family = (
+        postgres_schema.socket.AF_INET6
+        if ":" in address
+        else postgres_schema.socket.AF_INET
+    )
+    monkeypatch.setattr(
+        postgres_schema.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (
+                family,
+                postgres_schema.socket.SOCK_STREAM,
+                postgres_schema.socket.IPPROTO_TCP,
+                "",
+                (address, 5432),
+            )
+        ],
+    )
+
+    with pytest.raises(
+        postgres_schema.PostgresIntrospectionError,
+        match="global unicast",
+    ):
+        postgres_schema._connect("postgresql://db.example/appdb")
+
+
+def test_postgres_connect_rejects_mixed_global_and_private_dns(monkeypatch):
+    monkeypatch.setattr(
+        postgres_schema.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (
+                postgres_schema.socket.AF_INET,
+                postgres_schema.socket.SOCK_STREAM,
+                postgres_schema.socket.IPPROTO_TCP,
+                "",
+                ("93.184.216.34", 5432),
+            ),
+            (
+                postgres_schema.socket.AF_INET,
+                postgres_schema.socket.SOCK_STREAM,
+                postgres_schema.socket.IPPROTO_TCP,
+                "",
+                ("10.0.0.8", 5432),
+            ),
+        ],
+    )
+
+    with pytest.raises(
+        postgres_schema.PostgresIntrospectionError,
+        match="global unicast",
+    ):
+        postgres_schema._connect("postgresql://db.example/appdb")
+
+
+def test_postgres_connect_keeps_explicit_dsn_and_loopback_exceptions(monkeypatch):
+    calls = []
+
+    def connect(dsn, **kwargs):
+        calls.append((dsn, kwargs))
+        return _Connection()
+
+    explicit = "postgresql://db.internal/appdb"
+    monkeypatch.setenv("ENGRAPHIS_POSTGRES_DSN", explicit)
+    monkeypatch.setitem(sys.modules, "psycopg", types.SimpleNamespace(connect=connect))
+
+    postgres_schema._connect(explicit)
+    monkeypatch.delenv("ENGRAPHIS_POSTGRES_DSN")
+    postgres_schema._connect("postgresql://localhost/appdb")
+
+    assert calls[0][1] == {"connect_timeout": 10}
+    assert calls[1][1]["host"] == "localhost"
+    assert calls[1][1]["hostaddr"] == "127.0.0.1"
 
 
 def test_postgres_introspection_is_filtered_bounded_and_cross_schema_safe(monkeypatch):
