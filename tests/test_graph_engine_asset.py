@@ -269,6 +269,15 @@ def test_lazy_graph_engine_load_cannot_raise_an_unhandled_rejection() -> None:
     assert "reject(new Error('Graph engine asset loaded without registering EngraphisGraph'))" in loader
 
 
+def test_force_graph_loader_rejects_a_success_without_the_vendor_global() -> None:
+    """A truncated 200 must not enter the render loop without ``ForceGraph``."""
+    source = DASHBOARD.read_text(encoding="utf-8")
+    loader = source[source.index("function loadForceGraph()"):]
+    loader = loader[: loader.index("\nlet GRAPH_ENGINE_LOADING")]
+    assert "typeof ForceGraph==='undefined'" in loader
+    assert "reject(new Error('Force graph asset loaded without registering ForceGraph'))" in loader
+
+
 @requires_node
 def test_graph_asset_defines_its_global_without_touching_its_dependencies() -> None:
     """Nothing may run at parse time except pure setup.
@@ -866,7 +875,7 @@ const themeSrc = between('const ETYPE_TOKEN=', 'const GRAPH_PALETTES=')
 const THEME_VARS = {
   '--entity-concept': '#112233', '--entity-mention': '#223344', '--entity-hashtag': '#334455',
   '--entity-email': '#445566', '--entity-organization': '#556677', '--entity-location': '#667788',
-  '--color-accent': '#778899',
+  '--color-accent': '#778899', '--color-text-dim': '#123456',
 };
 globalThis.getComputedStyle = () => ({ getPropertyValue: name => THEME_VARS[name] || '' });
 
@@ -961,9 +970,11 @@ def test_dashboard_hands_the_engine_the_active_themes_entity_colours() -> None:
     # Resolved from the stubbed --entity-* custom properties, not from any JS constant.
     assert report["themeColors"]["person_or_concept"] == "#112233"
     assert report["themeColors"]["organization"] == "#556677"
+    assert report["themeColors"]["relation_label"] == "#123456"
     # Every type the legend can show must be covered, or the canvas falls back per type.
     assert set(report["themeColors"]) == {
         "person_or_concept", "mention", "hashtag", "email", "organization", "location",
+        "relation_label",
     }
 
 
@@ -1060,14 +1071,17 @@ def test_relation_labels_are_painted_when_the_labels_box_is_ticked() -> None:
         layOut();
         const unticked = paintLinks(4);
         api.setSettings({ labels: true });
+        api.setThemeColors({ relation_label: '#123456' });
         const ticked = paintLinks(4);
+        const labelColor = linkCtx.fillStyle;
         // Relation labels are the noisiest layer: they stay off until the user zooms in.
         const zoomedOut = paintLinks(1);
-        emit({ unticked, ticked, zoomedOut });
+        emit({ unticked, ticked, zoomedOut, labelColor });
         """
     )
     assert report["unticked"] == []
     assert report["ticked"] == ["mentions"], "the Labels checkbox never paints relation names"
+    assert report["labelColor"] == "#123456", "relation labels ignore the active theme"
     assert report["zoomedOut"] == []
 
 
