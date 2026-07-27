@@ -5,6 +5,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-26
+
+Public 1.1.0 hosted-connect and graph-experience release.
+
 ### Added
 
 - **`engraphis connect --token engr_ct_…`** — the missing client half of device connect.

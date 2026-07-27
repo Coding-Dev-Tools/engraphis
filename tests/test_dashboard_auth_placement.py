@@ -549,7 +549,6 @@ def test_pro_upgrade_panel_lists_every_pro_benefit_and_purchase_cta():
         "Growth, retention, decay, and entity Analytics",
         "Auto Consolidation with hosted retention policies",
         "Auto Dreaming with reviewable managed proposals",
-        "Signed compliance exports with bi-temporal checksums",
         "Priority support",
     ):
         assert benefit in script

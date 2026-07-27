@@ -1289,11 +1289,12 @@ def analytics(workspace: Optional[str] = None):
 
 @router.get("/analytics/export")
 def analytics_export(workspace: Optional[str] = None):
-    """Self-contained HTML analytics report (inline CSS, zero CDN) — a shareable,
-    archivable artifact. Same Pro gate as the analytics view it renders."""
+    """Not implemented here; use the same analytics data as JSON instead."""
     raise HTTPException(status_code=501, detail={
-        "error": "Download analytics reports from the Engraphis Cloud dashboard.",
-        "managed_cloud": True,
+        "error": "This build does not generate analytics report files. Use GET /analytics "
+                 "for the same data as JSON.",
+        "implemented": False,
+        "alternative": "/analytics",
     })
 
 
@@ -1316,19 +1317,20 @@ def ready():
                         status_code=200 if is_ready else 503)
 
 
-# ── compliance export (Pro) ───────────────────────────────────────────────────
+# ── workspace export (local, free) ────────────────────────────────────────────
 @router.get("/export")
 def export(workspace: Optional[str] = None, signed: bool = False):
-    """Full bi-temporal workspace dump (memories + sessions + audit). Pro-gated.
+    """Full bi-temporal workspace dump (memories + sessions + audit).
 
-    ``signed=true`` wraps the dump in a SHA-256 compliance manifest (see
-    :func:`_sign_export`) — a tamper-evident, self-verifying audit bundle."""
+    This is the free local data-portability path. ``signed=true`` was never
+    implemented, so it must not claim availability in Engraphis Cloud either.
+    """
     if signed:
         raise HTTPException(status_code=501, detail={
-            "error": "Signed compliance exports are available in Engraphis Cloud.",
-            "cloud_only": True,
-            "feature": "export",
-            "upgrade_url": licensing.upgrade_url(),
+            "error": "Signed compliance exports are not implemented. Omit signed=true for "
+                     "the unsigned workspace export, which contains the same data.",
+            "implemented": False,
+            "alternative": "/export",
         })
     ws = workspace or _default_ws()
     return _run(service().export_workspace, workspace=ws, recovery=True)
@@ -1737,7 +1739,7 @@ def code_export(workspace: str, repo: str):
 # server grants under ``automation``. They are expanded here so the dashboard can never
 # draw a lock on a capability the customer's plan already includes.
 _AUTOMATION_FEATURES = ("automation", "consolidation", "dreaming")
-_PRO_FEATURES = ("analytics", "export", "sync") + _AUTOMATION_FEATURES
+_PRO_FEATURES = ("analytics", "sync") + _AUTOMATION_FEATURES
 _PLAN_FEATURES = {
     "free": (),
     "local": (),
@@ -1753,7 +1755,6 @@ _FEATURE_LABELS = {
     "automation": "Automation",
     "consolidation": "Auto Consolidation",
     "dreaming": "Auto Dreaming",
-    "export": "Compliance export",
     "sync": "Cloud Sync",
     "team": "Team administration",
 }
