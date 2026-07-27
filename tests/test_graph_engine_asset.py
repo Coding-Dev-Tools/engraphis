@@ -1305,6 +1305,115 @@ def test_curves_arrows_and_relation_labels_are_dropped_on_a_dense_graph() -> Non
     assert report["denseHighlighted"] == ["mentions"]
 
 
+#: A ``d3`` stand-in for the force constructors ``applyForces()`` reaches for.  The asset reads
+#: ``d3`` as a free variable, so assigning it on ``globalThis`` is what the browser's global
+#: script tag does; without it ``applyForces()`` returns before it ever configures collision.
+D3_STUB = """
+let collide = null;
+globalThis.d3 = {
+  forceX: () => ({ strength: () => ({}) }),
+  forceY: () => ({ strength: () => ({}) }),
+  forceRadial: () => ({ strength: () => ({}) }),
+  forceCollide: radius => ({ radius, iterations(n) { collide = { radius, iterations: n }; return this; } }),
+};
+"""
+
+
+@requires_node
+def test_collision_runs_one_pass_on_a_large_graph_like_the_classic_renderer() -> None:
+    """``forceCollide().iterations(2)`` is a second full quadtree traversal per node per tick.
+
+    ``graphApplyForces()`` on the classic path spends it only when it is affordable
+    (``.iterations(GPERF.large?1:2)``).  The opt-in engine computes the same ``large`` signal for
+    its cooldown and alpha-decay constants but was pinning two iterations regardless, so the one
+    case where the extra pass hurts most — the initial layout and every reheat of a big store —
+    was the case that paid for it twice over.
+    """
+    report = _run_engine(
+        D3_STUB
+        + """
+        const api = G.create(el, { reducedMotion: () => true });
+
+        api.setData(chain(40));
+        const small = collide.iterations;
+
+        // 601 entities / 600 relations — one past the classic renderer's 600-node cutoff.
+        api.setData(chain(600));
+        const big = collide.iterations;
+
+        // A slider move re-runs applyForces() on the running simulation; it must not undo this.
+        api.setSettings({ repel: 90 });
+        const afterSlider = collide.iterations;
+        emit({ small, big, afterSlider, radiusIsAFunction: typeof collide.radius === 'function' });
+        """
+    )
+    assert report["small"] == 2
+    assert report["big"] == 1, "a large graph still runs two collision passes per tick"
+    assert report["afterSlider"] == 1, "a slider move restored the expensive collision pass"
+    # Guards the whole call rather than the argument in isolation: a per-node radius, not a
+    # constant, is what makes collision agree with the sizes the renderer actually painted.
+    assert report["radiusIsAFunction"] is True
+
+
+#: Counts the two per-node glow primitives independently.  ``createRadialGradient`` is the halo
+#: and the solar sphere shading; ``shadowBlur`` is the cyber bloom.  Both are per node, per frame.
+GLOW_CANVAS_STUB = """
+let gradients = 0, blurs = 0, fills = 0;
+const ctx = {
+  globalAlpha: 1, globalCompositeOperation: '', strokeStyle: '', lineWidth: 1, font: '',
+  textBaseline: '', shadowColor: '',
+  set shadowBlur(v) { if (v) blurs += 1; },
+  get shadowBlur() { return 0; },
+  set fillStyle(v) {}, get fillStyle() { return ''; },
+  save() {}, restore() {}, beginPath() {}, arc() {}, ellipse() {}, stroke() {},
+  setLineDash() {}, fillText() {},
+  fill() { fills += 1; },
+  createRadialGradient() { gradients += 1; return { addColorStop() {} }; },
+};
+const paintNodes = () => {
+  gradients = 0; blurs = 0; fills = 0;
+  const draw = store.nodeCanvasObject;
+  store.graphData.nodes.forEach((n, i) => { n.x = i * 10; n.y = i; draw(n, ctx, 4); });
+  return { gradients, blurs, fills };
+};
+"""
+
+
+@requires_node
+@pytest.mark.parametrize("style", ["cyber", "galaxy", "solar"])
+def test_per_node_glow_is_dropped_on_a_large_graph(style: str) -> None:
+    """Every ``rich`` node was getting a bloom or a gradient on every frame, at any size.
+
+    The classic renderer gates all three of them on ``!GPERF.large`` — the galaxy halo, the solar
+    corona *and* its sphere shading, and the cyber ``shadowBlur``.  A shadow blur is a full
+    convolution of the drawn shape and a radial gradient is a fresh object per node; at the
+    >600-node cutoff that is hundreds of them rebuilt per tick, on top of the layout, which is
+    what made a dense workspace crawl even after the other large-graph optimisations kicked in.
+
+    ``fills`` is the control: the nodes are still being drawn, so a zero glow count means the
+    effect was skipped, not that the paint never ran.
+    """
+    report = _run_engine(
+        GLOW_CANVAS_STUB
+        + f"""
+        const api = G.create(el, {{ reducedMotion: () => true }});
+        api.setStyle("{style}");
+
+        api.setData(chain(40));
+        const small = paintNodes();
+
+        api.setData(chain(600));
+        const big = paintNodes();
+        emit({{ small, big }});
+        """
+    )
+    small, big = report["small"], report["big"]
+    assert small["fills"] > 0 and big["fills"] > 0, "canvas stub never reached the node painter"
+    assert small["gradients"] + small["blurs"] > 0, "the small graph lost its glow entirely"
+    assert big["gradients"] == 0, f"{style} still builds a radial gradient per node when large"
+    assert big["blurs"] == 0, f"{style} still shadow-blurs every node when large"
+
+
 def _community_palettes(source: str) -> dict:
     """Parse a ``COMMUNITY_PALS`` literal out of either renderer."""
     # Anchor on the declaration: both files also name the table in prose comments.

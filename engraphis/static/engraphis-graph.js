@@ -483,6 +483,10 @@
         fg.d3Force('y', d3.forceY(0).strength(centering));
         if (mode === 'radial' && d3.forceRadial) fg.d3Force('radial', d3.forceRadial(n => Math.max(0, 5 - Math.min(5, n.degree || 0)) * Math.max(8, s.link * 0.72)).strength(0.32));
       }
+      /* One collision pass on a large graph, two otherwise — the classic path's
+         `.iterations(GPERF.large?1:2)`. The second pass costs another full quadtree traversal
+         per node on every tick, and a large store pays that on the initial layout and on every
+         reheat, which is exactly where it is least affordable. */
       if (d3.forceCollide) fg.d3Force('collide', d3.forceCollide(n => n.radius + 1.5).iterations(large ? 1 : 2));
     }
 
@@ -563,8 +567,13 @@
         ctx.beginPath(); ctx.arc(node.x, node.y, r + 3 / scale, 0, 6.2832); ctx.stroke();
         ctx.restore();
       }
+      /* Every per-node glow below is gated on `!large`, matching the classic path's
+         `if(rich&&!GPERF.large)` / `if(!GPERF.large)` pairs. A radial gradient or a shadow blur
+         is per-node, per-frame canvas work: at the >600-node cutoff that is hundreds of
+         gradients rebuilt on every tick of the layout, which is what makes a big store crawl.
+         The flat fill in the `else` is the classic fallback, not a missing branch. */
       if (state.styleName === 'galaxy') {
-        if (rich) {
+        if (rich && !large) {
           ctx.save();
           ctx.globalCompositeOperation = 'lighter';
           const R = r * (node.id === hilite ? 4.4 : 3.0);
@@ -583,7 +592,7 @@
       } else if (state.styleName === 'solar') {
         const sun = node.rank === 0;
         if (sun) r *= 1.7;
-        if (rich) {
+        if (rich && !large) {
           ctx.save();
           ctx.globalCompositeOperation = 'lighter';
           const cc = sun ? '#ffcf6b' : col, R2 = r * (sun ? 3.4 : 2.1);
@@ -594,10 +603,14 @@
           ctx.beginPath(); ctx.arc(node.x, node.y, R2, 0, 6.2832); ctx.fill();
           ctx.restore();
         }
-        const sg = ctx.createRadialGradient(node.x - r * 0.4, node.y - r * 0.4, Math.max(0.1, r * 0.12), node.x, node.y, r);
-        sg.addColorStop(0, lighten(sun ? '#ffe4ad' : col, 0.5));
-        sg.addColorStop(1, sun ? '#e08a25' : col);
-        ctx.fillStyle = sg;
+        if (large) {
+          ctx.fillStyle = col;
+        } else {
+          const sg = ctx.createRadialGradient(node.x - r * 0.4, node.y - r * 0.4, Math.max(0.1, r * 0.12), node.x, node.y, r);
+          sg.addColorStop(0, lighten(sun ? '#ffe4ad' : col, 0.5));
+          sg.addColorStop(1, sun ? '#e08a25' : col);
+          ctx.fillStyle = sg;
+        }
         ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, 6.2832); ctx.fill();
       } else if (state.styleName === 'cyber') {
         ctx.save();
