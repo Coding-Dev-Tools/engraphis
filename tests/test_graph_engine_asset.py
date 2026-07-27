@@ -1085,6 +1085,13 @@ def test_relation_labels_are_painted_when_the_labels_box_is_ticked() -> None:
     assert report["zoomedOut"] == []
 
 
+def test_entity_labels_preserve_the_configured_screen_font_size() -> None:
+    """The canvas transform already applies zoom; the label size compensates exactly once."""
+    source = GRAPH_ENGINE.read_text(encoding="utf-8")
+    assert "const size = state.settings.font / scale;" in source
+    assert "state.settings.font / scale / 3.4" not in source
+
+
 @requires_node
 def test_focusing_an_entity_the_canvas_is_not_showing_does_not_report_success() -> None:
     """``zoomToNode`` is the dashboard's visibility oracle, and it was answering from memory.

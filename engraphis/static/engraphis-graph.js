@@ -629,7 +629,10 @@
       }
       const showLabel = (state.settings.labels && node.degree >= Math.max(1, 12 - state.settings.labelDensity / 6)) || node.id === hilite || neighbor;
       if (showLabel && scale > 0.35) {
-        const size = Math.max(2, state.settings.font / scale / 3.4);
+        // Canvas coordinates are scaled by force-graph, so divide once to keep the configured
+        // font size stable in screen pixels. The former extra /3.4 made the default 12px label
+        // render at roughly 3.5px and effectively unreadable.
+        const size = state.settings.font / scale;
         ctx.font = '500 ' + size + 'px system-ui, sans-serif';
         ctx.textBaseline = 'middle';
         ctx.fillStyle = 'rgba(0,0,0,.5)';
