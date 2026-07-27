@@ -639,7 +639,9 @@
         ctx.textBaseline = 'middle';
         ctx.fillStyle = 'rgba(0,0,0,.5)';
         ctx.fillText(nodeName(node), node.x + r + 1.6 + 0.3, node.y + 0.3);
-        ctx.fillStyle = node.id === hilite ? '#ffffff' : 'rgba(232,236,245,.86)';
+        // Node names sit directly on the canvas, so Classic's light and sepia themes need
+        // the dashboard-resolved text colour just like relation and collapsed-cluster labels.
+        ctx.fillStyle = state.themeColors.label || (node.id === hilite ? '#ffffff' : 'rgba(232,236,245,.86)');
         ctx.fillText(nodeName(node), node.x + r + 1.6, node.y);
       }
       ctx.globalAlpha = 1;
@@ -924,6 +926,9 @@
     api.freeze = on => {
       state.settings.frozen = on;
       if (on) { fg.d3Force('charge').strength(0); fg.d3AlphaDecay(1); return; }
+      // Dragging pins a node with fx/fy. Unfreezing is a request to resume the layout, not
+      // merely the unpinned subset, so release those anchors before the simulation reheats.
+      raw.nodes.forEach(n => { n.fx = undefined; n.fy = undefined; });
       applyForces();
       if (reduced()) return;
       fg.d3AlphaDecay(alphaDecay());

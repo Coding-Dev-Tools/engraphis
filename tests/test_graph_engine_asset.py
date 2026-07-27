@@ -1054,6 +1054,53 @@ def test_collapsed_cluster_labels_use_the_active_theme_text_colour() -> None:
 
 
 @requires_node
+def test_node_labels_use_the_active_theme_text_colour() -> None:
+    """Classic labels paint onto the canvas, so near-white is unreadable on light themes."""
+
+    report = _run_engine(
+        LAY_OUT
+        + """
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData(chain(2));
+        const data = layOut();
+        api.setStyle('classic');
+        api.setThemeColors({ label: '#123456' });
+        api.setHighlight('n0');
+        const styles = [];
+        const ctx = {
+          set fillStyle(value) { styles.push(value); }, get fillStyle() { return ''; },
+          font: '', textBaseline: '', lineWidth: 0, strokeStyle: '', globalAlpha: 1,
+          beginPath() {}, arc() {}, fill() {}, stroke() {}, fillText() {}, save() {}, restore() {},
+        };
+        store.nodeCanvasObject(data.nodes[0], ctx, 1);
+        emit({ styles });
+        """
+    )
+    assert "#123456" in report["styles"], "node labels ignored the active theme text colour"
+
+
+@requires_node
+def test_unfreezing_releases_nodes_pinned_by_dragging() -> None:
+    """Freeze off must resume the whole layout, including nodes a prior drag pinned."""
+
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => false });
+        api.setData(chain(2));
+        const node = store.graphData.nodes[0];
+        node.x = 17; node.y = 23;
+        store.onNodeDragEnd(node);
+        const pinned = { fx: node.fx, fy: node.fy };
+        api.freeze(true);
+        api.freeze(false);
+        emit({ pinned, released: { fx: node.fx, fy: node.fy } });
+        """
+    )
+    assert report["pinned"] == {"fx": 17, "fy": 23}
+    assert report["released"] == {}, "unfreezing left a dragged node immovable"
+
+
+@requires_node
 def test_focusing_an_entity_the_canvas_is_not_showing_does_not_report_success() -> None:
     """``zoomToNode`` is the dashboard's visibility oracle, and it was answering from memory.
 
