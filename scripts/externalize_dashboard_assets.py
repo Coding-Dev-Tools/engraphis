@@ -19,6 +19,25 @@ INDEX = STATIC / "index.html"
 CSS = STATIC / "dashboard.css"
 JS = STATIC / "dashboard.js"
 
+#: First-party scripts the dashboard page loads besides ``dashboard.js``.  They run under the
+#: same strict CSP, so they are held to the same no-inline-style/no-inline-handler contract.
+#: Vendored bundles under ``static/vendor`` are excluded: they are third-party artefacts we
+#: do not rewrite, and pinning them is the job of the commercial-manifest check.
+EXTRA_SCRIPTS = (STATIC / "engraphis-graph.js",)
+
+#: Scripts that must never be referenced from a ``<script src>`` in ``index.html``.
+#: ``force-graph.min.js`` applies inline styles at runtime; under the production CSP
+#: (``style-src 'self'``) the browser blocks and reports every one of them.  Loading it on
+#: *every* dashboard page rather than only when the graph is opened floods the console and
+#: fails unrelated e2e assertions on a clean console.  ``dashboard.js`` fetches both on demand
+#: instead (``loadForceGraph`` / ``loadGraphEngine``).
+DEFERRED_SCRIPTS = ("/static/vendor/force-graph.min.js", "/static/engraphis-graph.js")
+
+#: ``script.src = "/static/…"`` inside a first-party script — the lazy loaders.  Deferring a
+#: script moves it out of the parsed ``<script src>`` set, so without this the "referenced
+#: scripts exist" rule would quietly stop covering the assets whose breakage is hardest to notice.
+LAZY_SCRIPT_SRC = re.compile(r'\.src\s*=\s*["\'](/static/[^"\']+)["\']')
+
 STYLE_ATTR = re.compile(r"\sstyle=(?:\"([^\"]*)\"|'([^']*)')")
 EVENT_ATTR = re.compile(r"\s(on[a-z]+)=(?:\"([^\"]*)\"|'([^']*)')")
 STYLE_REF = re.compile(r'data-csp-style=["\'](s\d+)["\']')
@@ -53,6 +72,8 @@ class _InlineAssetParser(HTMLParser):
         self._open: dict[str, tuple[int, int]] = {}
         self.styles: list[_InlineAsset] = []
         self.scripts: list[_InlineAsset] = []
+        #: ``src`` of every ``<script src>`` the page loads eagerly, in document order.
+        self.script_srcs: list[str] = []
 
     def _offset(self) -> int:
         line, column = self.getpos()
@@ -61,8 +82,14 @@ class _InlineAssetParser(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
         if tag not in {"style", "script"}:
             return
-        if tag == "script" and any(name.lower() == "src" for name, _value in attrs):
-            return
+        if tag == "script":
+            # ``HTMLParser`` lower-cases tag and attribute names exactly like a browser, so
+            # ``<SCRIPT SRC=…>`` — which browsers load eagerly — is recorded here rather than
+            # slipping past a case-sensitive tag regex and out of both script rules below.
+            sources = [value for name, value in attrs if name.lower() == "src"]
+            if sources:
+                self.script_srcs.extend(value for value in sources if value)
+                return
         start = self._offset()
         self._open[tag] = (start, start + len(self.get_starttag_text()))
 
@@ -90,12 +117,28 @@ class _InlineAssetParser(HTMLParser):
         self._open.clear()
 
 
-def _inline_assets(html: str) -> tuple[list[_InlineAsset], list[_InlineAsset]]:
+def _parse_page(html: str) -> _InlineAssetParser:
     parser = _InlineAssetParser(html)
     parser.feed(html)
     parser.close()
     parser.finish_unclosed()
+    return parser
+
+
+def _inline_assets(html: str) -> tuple[list[_InlineAsset], list[_InlineAsset]]:
+    parser = _parse_page(html)
     return parser.styles, parser.scripts
+
+
+def _eager_scripts(html: str) -> list[str]:
+    """``src`` of every locally served script the page loads on view.
+
+    Parsed, never pattern-matched: a case-sensitive tag regex misses ``<SCRIPT SRC=…>``,
+    which browsers load exactly like the lowercase spelling.  That gap would let a
+    CSP-hostile bundle back onto every page view *and* drop it from the existence check —
+    a gate that cannot fail.
+    """
+    return [src for src in _parse_page(html).script_srcs if src.startswith("/static/")]
 
 
 def _replace_assets(html: str, replacements: list[tuple[_InlineAsset, str]]) -> str:
@@ -208,24 +251,65 @@ def check() -> None:
         failures.append("inline event attribute")
     if not CSS.is_file() or not JS.is_file():
         failures.append("missing external asset")
-    if STYLE_ATTR.search(js):
-        failures.append("inline style attribute in generated dashboard markup")
-    if EVENT_ATTR.search(js):
-        failures.append("inline event attribute in generated dashboard markup")
-    if re.search(r"\.(?:style|cssText)\b|(?:get|set)Attribute\([\"']style[\"']", js):
-        failures.append("runtime inline-style mutation")
-    if re.search(r"\[on[a-z]+|(?:get|set)Attribute\([\"']on[a-z]+[\"']", js):
-        failures.append("legacy inline-handler selector")
+    extra = {path.name: path.read_text(encoding="utf-8") for path in EXTRA_SCRIPTS if path.is_file()}
+    missing_scripts = sorted(path.name for path in EXTRA_SCRIPTS if not path.is_file())
+    if missing_scripts:
+        failures.append("missing first-party script: " + ", ".join(missing_scripts))
+
+    eager_scripts = _eager_scripts(html)
+    lazy_scripts = [
+        reference
+        for source in [js, *extra.values()]
+        for reference in LAZY_SCRIPT_SRC.findall(source)
+    ]
+
+    # Every /static asset the page can ask for must exist, or the dashboard 404s at load time
+    # and the strict CSP turns a typo into a silently broken view.  Lazily loaded scripts count:
+    # their only reference is a JavaScript string literal, so nothing else catches a rename.
+    absent = sorted(
+        {
+            reference
+            for reference in [*eager_scripts, *lazy_scripts]
+            if not (ROOT / "engraphis" / reference.lstrip("/")).is_file()
+        }
+    )
+    if absent:
+        failures.append("referenced script is missing: " + ", ".join(absent))
+
+    # Matched against parsed ``<script src>`` values, not raw text, so index.html may still
+    # explain in a comment *why* these are absent.
+    eager = sorted(set(eager_scripts) & set(DEFERRED_SCRIPTS))
+    if eager:
+        failures.append("index.html must not eagerly load: " + ", ".join(eager))
+
+    # The other half of the contract: deferring a script must not orphan it.  Without a loader
+    # the graph view has no way to reach force-graph, and ``?graph-engine=next`` degrades to
+    # the classic renderer with nothing on the page saying so.
+    orphaned = sorted(set(DEFERRED_SCRIPTS) - set(lazy_scripts))
+    if orphaned:
+        failures.append("deferred script has no lazy loader: " + ", ".join(orphaned))
+
+    for name, source in [("dashboard.js", js), *extra.items()]:
+        if STYLE_ATTR.search(source):
+            failures.append(f"inline style attribute in {name}")
+        if EVENT_ATTR.search(source):
+            failures.append(f"inline event attribute in {name}")
+        if re.search(r"\.(?:style|cssText)\b|(?:get|set)Attribute\([\"']style[\"']", source):
+            failures.append(f"runtime inline-style mutation in {name}")
+        if re.search(r"\[on[a-z]+|(?:get|set)Attribute\([\"']on[a-z]+[\"']", source):
+            failures.append(f"legacy inline-handler selector in {name}")
     if "${" in css or "'+" in css or "+'" in css:
         failures.append("unresolved JavaScript interpolation in CSS")
 
-    style_refs = set(STYLE_REF.findall(html + "\n" + js))
+    style_refs = set(STYLE_REF.findall("\n".join([html, js, *extra.values()])))
     style_rules = set(STYLE_RULE.findall(css))
     missing_styles = sorted(style_refs - style_rules)
     if missing_styles:
         failures.append("missing CSP style rules: " + ", ".join(missing_styles))
 
-    handler_refs = HANDLER_REF.findall(html + "\n" + js)
+    # Handler *definitions* only ever live in the generated dashboard.js registry, but any
+    # first-party script may reference one, so references are collected across all of them.
+    handler_refs = HANDLER_REF.findall("\n".join([html, js, *extra.values()]))
     handler_ids = {handler_id for _event, handler_id in handler_refs}
     handler_defs = set(HANDLER_DEF.findall(js))
     missing_handlers = sorted(handler_ids - handler_defs)

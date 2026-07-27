@@ -323,6 +323,12 @@
 <script src="/static/vendor/marked.min.js"></script>
 <script src="/static/vendor/purify.min.js"></script>
 <script src="/static/vendor/d3.min.js"></script>
+<!-- force-graph.min.js and engraphis-graph.js are deliberately NOT loaded here.
+     force-graph applies inline styles at runtime, which the production CSP
+     (`style-src 'self'`) blocks and reports once per attempt — on every page, not just the
+     graph view. dashboard.js fetches both on demand from graphRender(); see loadForceGraph()
+     and loadGraphEngine(). scripts/externalize_dashboard_assets.py enforces both halves:
+     they stay out of this file, and the lazy references still have to resolve. -->
 <script src="/static/dashboard.js"></script>
 </body>
 </html>

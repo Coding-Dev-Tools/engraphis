@@ -1,0 +1,1402 @@
+"""Contract checks for the opt-in browser graph engine (``?graph-engine=next``).
+
+These tests intentionally stay dependency-light: the dashboard's offline CI floor does
+not need a browser or a JavaScript package manager just to validate a shipped static
+asset.  Where Node is available the asset is *executed* rather than pattern-matched, so
+the checks assert behaviour (escaping, bridge detection, stack safety, load-order
+independence) instead of the presence of source substrings.
+
+The properties guarded here are the ones whose failure is silent in a browser:
+
+* the asset must define its global without touching ``ForceGraph``/``document``, so a
+  blocked or missing vendor bundle degrades instead of white-screening the dashboard;
+* every label crossing into force-graph must be escaped, because force-graph's tooltip
+  is an ``innerHTML`` sink and entity labels come from ingested memories;
+* the client-side graph analysis must not recurse per node or run unbounded work;
+* the per-style pane backgrounds must stay in CSS, since the production CSP sets
+  ``style-src-attr 'none'``.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+STATIC = ROOT / "engraphis" / "static"
+ASSET = STATIC / "engraphis-graph.js"
+INDEX = STATIC / "index.html"
+CSS = STATIC / "dashboard.css"
+DASHBOARD = STATIC / "dashboard.js"
+VENDOR = STATIC / "vendor" / "force-graph.min.js"
+
+NODE = shutil.which("node")
+requires_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
+
+#: Evaluates the asset with nothing but a bare ``window`` object in scope.  Any top-level
+#: use of a browser or vendor global would raise here, which is the point.
+PRELUDE = """
+const fs = require('fs');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const window = {};
+new Function('window', source)(window);
+const G = window.EngraphisGraph;
+const I = G._internals;
+const emit = value => console.log(JSON.stringify(value));
+"""
+
+
+#: Same, plus a recording stand-in for force-graph so ``create()`` can be *driven*.  Every
+#: accessor is a chainable setter that returns the stored value when called with no arguments —
+#: force-graph's own kapsule semantics — so the paint configuration the engine installs can be
+#: read back and invoked instead of pattern-matched.  ``calls`` counts the invalidations the
+#: engine requests, which is the only observable form a "redraw now" takes.  ``invocations``
+#: counts the *argument-less* calls, which under kapsule semantics are the commands rather than
+#: the setters — ``d3ReheatSimulation()`` is one, and it has no other observable effect here.
+ENGINE_PRELUDE = """
+const fs = require('fs');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const window = {};
+globalThis.requestAnimationFrame = () => {};
+const store = {}, calls = {}, invocations = {};
+const fg = new Proxy({}, {
+  get: (_target, prop) => (...args) => {
+    if (!args.length) { invocations[prop] = (invocations[prop] || 0) + 1; return store[prop]; }
+    calls[prop] = (calls[prop] || 0) + 1;
+    store[prop] = args.length === 1 ? args[0] : args;
+    return fg;
+  },
+});
+globalThis.ForceGraph = () => () => fg;
+const el = {
+  attrs: {}, innerHTML: '', clientWidth: 800, clientHeight: 600,
+  getAttribute(name) { return this.attrs[name] === undefined ? null : this.attrs[name]; },
+  setAttribute(name, value) { this.attrs[name] = value; },
+  removeAttribute(name) { delete this.attrs[name]; },
+  classList: { toggle() {}, remove() {} },
+};
+const chain = count => {
+  const nodes = [], links = [];
+  for (let i = 0; i <= count; i++) nodes.push({ id: 'n' + i });
+  for (let i = 0; i < count; i++) {
+    links.push({ source: 'n' + i, target: 'n' + (i + 1), layer: 'semantic' });
+  }
+  return { nodes, links };
+};
+new Function('window', source)(window);
+const G = window.EngraphisGraph;
+const I = G._internals;
+const emit = value => console.log(JSON.stringify(value));
+"""
+
+
+def _run_node(script: str, prelude: str = PRELUDE) -> object:
+    result = subprocess.run(
+        [NODE, "-e", prelude + script, str(ASSET)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def _run_engine(script: str) -> object:
+    return _run_node(script, prelude=ENGINE_PRELUDE)
+
+
+# ── load order and failure isolation ────────────────────────────────────────────────
+
+
+def test_graph_assets_are_never_loaded_on_a_plain_page_view() -> None:
+    """Neither graph script may sit in index.html.
+
+    force-graph applies inline styles at runtime, so under the production CSP
+    (``style-src 'self'``) every page load that fetched it reported a violation per attempt —
+    including the pages that never open the graph.
+    """
+    html = INDEX.read_text(encoding="utf-8")
+    eager = re.findall(r'<script[^>]+src=["\'](/static/[^"\']+)["\']', html)
+    assert "/static/vendor/d3.min.js" in eager
+    assert "/static/dashboard.js" in eager
+    assert "/static/vendor/force-graph.min.js" not in eager
+    assert "/static/engraphis-graph.js" not in eager
+
+
+def test_opt_in_graph_asset_is_lazily_loaded_after_its_dependencies() -> None:
+    """The load order the removed script tags used to guarantee now lives in graphRender().
+
+    ``graphRender`` returns early until ForceGraph is defined, so by the time the engine
+    branch runs its dependency is already in scope.
+    """
+    source = DASHBOARD.read_text(encoding="utf-8")
+    assert "script.src='/static/vendor/force-graph.min.js'" in source
+    assert "script.src='/static/engraphis-graph.js'" in source
+    render = source[source.index("function graphRender("):]
+    render = render[: render.index("\nfunction ")]
+    force_graph_gate = render.index("typeof ForceGraph==='undefined'")
+    engine_gate = render.index("if(enginePending)")
+    classic = render.index("graphRenderEngine(data,fit,reheat)")
+    assert force_graph_gate < engine_gate < classic
+
+
+#: Executes dashboard.js's real graph-render *routing* decision against a stub DOM.
+#: ``graphEngineEnabled``, ``graphEngineFallback``, ``loadForceGraph``, ``loadGraphEngine`` and
+#: the routing half of ``graphRender`` are verbatim source slices — nothing is re-implemented.
+#: Only the classic renderer body below the routing decision is swapped for a ``CLASSIC()``
+#: marker, so the test can see which renderer a deep link actually reaches.
+ROUTING_HARNESS = """
+const fs = require('fs');
+const src = fs.readFileSync(process.argv.slice(1).find(a => a.endsWith('dashboard.js')), 'utf8');
+const scenario = process.argv[process.argv.length - 1];
+const between = (from, to) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)));
+const flags = between('let GRAPH_ENGINE_FAILED=false;', 'function graphEngineEmptyMessage');
+const loaders = between('let FORCE_GRAPH_LOADING=null;', 'function graphRender(');
+const DECISION = 'if(graphEngineEnabled()&&graphRenderEngine(data,fit,reheat))return;';
+const start = src.indexOf('function graphRender(');
+const routing = src.slice(start, src.indexOf(DECISION, start) + DECISION.length) +
+  '\\n CLASSIC();\\n}';
+
+const log = { appended: [], warned: [], engine: 0, classic: 0 };
+let pending = null;
+const element = { clientWidth: 800, clientHeight: 600, classList: { toggle() {} },
+                  setAttribute() {}, set textContent(v) {} };
+globalThis.document = {
+  getElementById: () => element,
+  querySelectorAll: () => [],
+  createElement: () => (pending = {}),
+  head: { appendChild: s => log.appended.push(s.src) },
+};
+globalThis.window = { location: { search: '?graph-engine=next' }, GSET: { mode: 'compact' },
+                      console: globalThis.console };
+globalThis.console = { warn: (...a) => log.warned.push(String(a[0])) };
+globalThis.showAs = () => {};
+globalThis.graphSetLayoutStatus = () => {};
+globalThis.graphData = () => ({ nodes: [], links: [] });
+/* Mirrors graphRenderEngine's real first line — `if(!element||typeof EngraphisGraph===
+   'undefined')return false` — because that bail is exactly what a naive lazy-load would turn
+   into a silent Classic fallback. Asserted against the real source below. */
+globalThis.graphRenderEngine = () => {
+  if (typeof EngraphisGraph === 'undefined') return false;
+  log.engine += 1;
+  return true;
+};
+globalThis.CLASSIC = () => { log.classic += 1; };
+globalThis.GRAPH_PRESETS = { compact: {} };
+globalThis.GRAPH_ENGINE = globalThis.GACTIVE_DATA = globalThis.GCOMPONENT_LAYOUT = null;
+globalThis.GHILITE = globalThis.GHOVERSET = null;
+/* The vendor bundle is already in scope: this exercises the engine gate, not the vendor gate. */
+globalThis.ForceGraph = function () {};
+
+new Function(flags + loaders + routing + '\\nreturn {graphRender};')().graphRender();
+const settled = { engine: log.engine, classic: log.classic };
+if (scenario === 'loads') { globalThis.EngraphisGraph = { create() {} }; pending.onload(); }
+else { pending.onerror(); }
+setTimeout(() => process.stdout.write(JSON.stringify({
+  beforeSettle: settled, engine: log.engine, classic: log.classic,
+  appended: log.appended, warned: log.warned,
+})), 0);
+"""
+
+
+def _run_routing(scenario: str) -> dict:
+    result = subprocess.run(
+        [NODE, "-e", ROUTING_HARNESS, str(DASHBOARD), scenario],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+@requires_node
+def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> None:
+    """``?graph-engine=next`` must not degrade just because its asset is not loaded yet.
+
+    ``graphRenderEngine`` bails when ``EngraphisGraph`` is undefined, and that bail cannot tell
+    "not fetched yet" from "unavailable".  Deferring the script would turn every deep link into
+    that bail — the user asks for the new engine and silently gets Classic.  So graphRender
+    fetches the asset and waits, then renders.
+    """
+    # Keep the harness's stub honest: it only proves anything while the real function really
+    # does bail on an undefined global.
+    source = DASHBOARD.read_text(encoding="utf-8")
+    engine_path = source[source.index("function graphRenderEngine"):]
+    assert "typeof EngraphisGraph==='undefined')return false" in engine_path[:400]
+
+    report = _run_routing("loads")
+
+    assert report["appended"] == ["/static/engraphis-graph.js"]
+    # It waits rather than rendering something wrong in the meantime.
+    assert report["beforeSettle"] == {"engine": 0, "classic": 0}
+    # And it lands on the next engine, never touching the classic renderer.
+    assert report["engine"] == 1
+    assert report["classic"] == 0
+    assert report["warned"] == []
+
+
+@requires_node
+def test_graph_engine_deep_link_degrades_loudly_when_the_asset_cannot_load() -> None:
+    """A genuine load failure is the only thing that reaches Classic, and it says so."""
+    report = _run_routing("fails")
+
+    assert report["engine"] == 0
+    assert report["classic"] == 1
+    assert report["warned"] == [
+        "graph-engine=next failed; falling back to the classic renderer"
+    ]
+
+
+def test_lazy_graph_engine_load_cannot_raise_an_unhandled_rejection() -> None:
+    """An unhandled rejection prints a console error — the exact thing this fix removes.
+
+    ``graphRender`` can start the engine fetch on a pass that returns at the ForceGraph gate,
+    before it attaches its own handler, so the memoized promise carries its own.
+    """
+    source = DASHBOARD.read_text(encoding="utf-8")
+    loader = source[source.index("function loadGraphEngine()"):]
+    loader = loader[: loader.index("\nfunction ")]
+    assert "GRAPH_ENGINE_LOADING.catch(()=>{})" in loader
+    # A 200 that never registers the global is a corrupt asset, not a success.
+    assert "reject(new Error('Graph engine asset loaded without registering EngraphisGraph'))" in loader
+
+
+@requires_node
+def test_graph_asset_defines_its_global_without_touching_its_dependencies() -> None:
+    """Nothing may run at parse time except pure setup.
+
+    ``PRELUDE`` supplies no ``ForceGraph``, no ``document`` and no ``requestAnimationFrame``.
+    If the asset reached for any of them at the top level this would throw, and in a browser
+    the same reach would abort the script and take ``window.EngraphisGraph`` with it.
+    """
+    report = _run_node(
+        """
+        emit({
+          create: typeof G.create,
+          presets: Object.keys(G.PRESETS).sort(),
+          styles: Object.keys(G.STYLE_LAYERS).sort(),
+        });
+        """
+    )
+    assert report["create"] == "function"
+    assert "communities" in report["presets"]
+    assert report["styles"] == ["classic", "cyber", "galaxy", "solar"]
+
+
+@requires_node
+def test_create_fails_loudly_when_force_graph_is_unavailable() -> None:
+    """A blocked vendor bundle must raise, not half-initialise a dead canvas."""
+    report = _run_node(
+        """
+        let message = null;
+        try { G.create({ getAttribute() { return null; } }, {}); }
+        catch (error) { message = error.message; }
+        emit({ message });
+        """
+    )
+    assert report["message"] == "force-graph not loaded"
+
+
+def test_dashboard_falls_back_to_the_classic_renderer_when_the_engine_throws() -> None:
+    source = DASHBOARD.read_text(encoding="utf-8")
+    # The opt-in flag must be latched off after a failure, and the render path must catch.
+    assert "GRAPH_ENGINE_FAILED" in source
+    assert "if(GRAPH_ENGINE_FAILED)return false" in source
+    assert "graphEngineFallback(error)" in source
+    engine_path = source[source.index("function graphRenderEngine"):]
+    engine_path = engine_path[: engine_path.index("\nfunction ")]
+    assert "try{" in engine_path and "}catch(error){" in engine_path
+
+
+# ── XSS: untrusted entity labels reaching force-graph ───────────────────────────────
+
+
+def test_force_graph_tooltip_is_still_an_inner_html_sink() -> None:
+    """Guards the *reason* the engine sets its own label accessors.
+
+    force-graph defaults ``nodeLabel``/``linkLabel`` to the accessor ``"name"`` and renders a
+    string label through ``innerHTML``.  Node names here are entity labels extracted from
+    ingested memories, i.e. untrusted.  If a vendor bump ever changes this, revisit whether
+    the explicit escaped accessors below are still the right shape.
+    """
+    vendor = VENDOR.read_text(encoding="utf-8", errors="ignore")
+    assert 'nodeLabel:{default:"name"' in vendor
+    assert 'linkLabel:{default:"name"' in vendor
+
+
+def test_engine_never_relies_on_the_default_label_accessor() -> None:
+    source = ASSET.read_text(encoding="utf-8")
+    assert ".nodeLabel(node => esc(nodeName(node)))" in source
+    assert ".linkLabel(" in source
+    assert "eval(" not in source
+    # The engine paints to canvas; the only markup sink it may use is clearing its own
+    # container on teardown.  Anything else would be a route for an unescaped entity label.
+    writes = re.findall(r"\w+\.(?:inner|outer)HTML\s*=\s*[^;]+", source)
+    assert writes == ["el.innerHTML = ''"], writes
+    assert not re.search(r"insertAdjacentHTML|document\.write|createContextualFragment", source)
+
+
+@requires_node
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "<img src=x onerror=alert(1)>",
+        "<script>alert(1)</script>",
+        "\" onmouseover=\"alert(1)",
+        "<svg/onload=alert(1)>",
+    ],
+)
+def test_entity_labels_are_escaped_before_they_can_reach_a_dom_sink(payload: str) -> None:
+    report = _run_node(
+        "emit({ escaped: I.esc(%s), named: I.nodeName({ label: %s }) });"
+        % (json.dumps(payload), json.dumps(payload))
+    )
+    escaped = report["escaped"]
+    assert "<" not in escaped and ">" not in escaped
+    assert '"' not in escaped and "'" not in escaped
+    assert "&lt;" in escaped or "&quot;" in escaped
+    # nodeName is the raw value; escaping is the accessor's job, so this documents the split.
+    assert report["named"] == payload
+
+
+# ── payload compatibility with the shipped /graph endpoint ──────────────────────────
+
+
+@requires_node
+def test_engine_accepts_both_the_api_and_renderer_link_shapes() -> None:
+    report = _run_node(
+        """
+        const api = { from: 'a', to: 'b' };
+        const renderer = { source: { id: 'c' }, target: 'd' };
+        emit({
+          apiSource: I.linkEndpoint(api, 'source'),
+          apiTarget: I.linkEndpoint(api, 'target'),
+          rendererSource: I.linkEndpoint(renderer, 'source'),
+          rendererTarget: I.linkEndpoint(renderer, 'target'),
+          label: I.nodeName({ label: 'Ada' }),
+          name: I.nodeName({ name: 'Grace' }),
+          fallback: I.nodeName({ id: 'ent_1' }),
+        });
+        """
+    )
+    assert report["apiSource"] == "a" and report["apiTarget"] == "b"
+    assert report["rendererSource"] == "c" and report["rendererTarget"] == "d"
+    assert report["label"] == "Ada"
+    assert report["name"] == "Grace"
+    assert report["fallback"] == "ent_1"
+
+
+@requires_node
+def test_valid_time_accepts_seconds_milliseconds_and_iso_strings() -> None:
+    report = _run_node(
+        """
+        emit({
+          seconds: I.asOfValue(1700000000),
+          millis: I.asOfValue(1700000000000),
+          iso: I.asOfValue('2023-11-14T22:13:20Z'),
+          blank: I.asOfValue(''),
+          junk: I.asOfValue('not a date'),
+        });
+        """
+    )
+    assert report["seconds"] == report["millis"] == 1700000000000
+    assert report["iso"] == 1700000000000
+    assert report["blank"] is None and report["junk"] is None
+
+
+# ── client-side analysis: correctness and cost ──────────────────────────────────────
+
+
+@requires_node
+def test_bridge_detection_matches_a_known_graph() -> None:
+    """A triangle has no bridges; the tail hanging off it is all bridges."""
+    report = _run_node(
+        """
+        const nodes = ['a', 'b', 'c', 'd', 'e'].map(id => ({ id }));
+        const links = [['a','b'], ['b','c'], ['c','a'], ['c','d'], ['d','e']]
+          .map(([source, target]) => ({ source, target }));
+        const adj = I.communities(nodes, links);
+        I.findBridges(nodes, links, adj);
+        emit({
+          bridges: links.filter(l => l.bridge).map(l => l.source + '-' + l.target),
+          communities: new Set(nodes.map(n => n.community)).size,
+        });
+        """
+    )
+    assert report["bridges"] == ["c-d", "d-e"]
+    assert report["communities"] == 1
+
+
+@requires_node
+def test_parallel_edges_are_not_reported_as_bridges() -> None:
+    report = _run_node(
+        """
+        const nodes = [{ id: 'a' }, { id: 'b' }];
+        const links = [{ source: 'a', target: 'b' }, { source: 'a', target: 'b' }];
+        const adj = I.communities(nodes, links);
+        I.findBridges(nodes, links, adj);
+        emit({ bridges: links.filter(l => l.bridge).length });
+        """
+    )
+    assert report["bridges"] == 0
+
+
+@requires_node
+def test_disconnected_entities_are_labelled_as_separate_communities() -> None:
+    report = _run_node(
+        """
+        const nodes = ['a', 'b', 'c', 'd'].map(id => ({ id }));
+        const links = [{ source: 'a', target: 'b' }, { source: 'c', target: 'd' }];
+        const adj = I.communities(nodes, links);
+        emit({ groups: new Set(nodes.map(n => n.community)).size });
+        """
+    )
+    assert report["groups"] == 2
+
+
+@requires_node
+def test_graph_analysis_is_stack_safe_and_bounded_on_a_large_store() -> None:
+    """A long chain of entities is the worst case for both analyses.
+
+    A recursive Tarjan overflows the call stack here, and exact Brandes betweenness is
+    O(V*E) — minutes of blocked main thread.  Both are guarded, so this must finish well
+    inside the bound even on a slow machine.
+    """
+    report = _run_node(
+        """
+        const N = 40000;
+        const nodes = [], links = [];
+        for (let i = 0; i < N; i++) {
+          nodes.push({ id: 'n' + i });
+          if (i) links.push({ source: 'n' + (i - 1), target: 'n' + i });
+        }
+        const adj = I.communities(nodes, links);
+        const started = Date.now();
+        I.findBridges(nodes, links, adj);
+        I.betweenness(nodes, adj);
+        const scores = nodes.map(n => n.betweenness);
+        emit({
+          ms: Date.now() - started,
+          allBridges: links.every(l => l.bridge),
+          finite: scores.every(Number.isFinite),
+          peak: Math.max.apply(null, scores.slice(0, 1000).concat(scores.slice(-1000))),
+        });
+        """
+    )
+    assert report["allBridges"] is True
+    assert report["finite"] is True
+    # Ends of a chain are never on a shortest path between others.
+    assert report["peak"] < 0.5
+    assert report["ms"] < 30000, f"graph analysis took {report['ms']}ms on 40k entities"
+
+
+@requires_node
+def test_influence_relations_do_not_merge_two_topics_into_one_community() -> None:
+    """Community Islands must not fuse two topics over a single cross-topic relation.
+
+    ``influences`` edges routinely span otherwise separate bodies of work.  The classic
+    renderer keeps them drawn and traversable but builds its clustering adjacency without
+    them (``GCOMM_ADJ``); adding every link to one adjacency gives both topics the same
+    colour and the same force centre.
+    """
+    report = _run_node(
+        """
+        const nodes = ['a', 'b', 'c', 'd'].map(id => ({ id }));
+        const links = [
+          { source: 'a', target: 'b', label: 'mentions' },
+          { source: 'c', target: 'd', label: 'mentions' },
+          { source: 'b', target: 'c', label: 'influences' },
+        ];
+        const adj = I.communities(nodes, links);
+        I.findBridges(nodes, links, adj);
+        emit({
+          groups: new Set(nodes.map(n => n.community)).size,
+          merged: nodes[1].community === nodes[2].community,
+          neighbours: (adj.b || []).slice().sort(),
+          bridges: links.filter(l => l.bridge).length,
+        });
+        """
+    )
+    assert report["groups"] == 2
+    assert report["merged"] is False
+    # The relation itself stays in the traversal adjacency: hover neighbourhood, focus depth
+    # and bridge detection all still see it.  Only the clustering ignores it.
+    assert report["neighbours"] == ["a", "c"]
+    assert report["bridges"] == 3
+
+
+@requires_node
+def test_community_ids_are_ranked_by_size_so_the_legend_describes_the_right_nodes() -> None:
+    """Legend labels and canvas swatches must agree about which cluster is "Cluster 1".
+
+    ``graphRenderLegend()`` sorts communities by size and calls the largest "Cluster 1", but
+    node colour indexes the palette by the community *id* (``commPal()[community % n]``).
+    Assigning ids in raw payload order therefore made the legend describe one component with
+    another's colour whenever a smaller component appeared first — which the payload order
+    alone decides.  The classic ``graphComputeCommunities()`` sorts before assigning; so must
+    this.
+    """
+    report = _run_node(
+        """
+        // Payload order is deliberately worst-case: the singleton comes first, the largest
+        // component last, so raw iteration order and size order disagree completely.
+        const nodes = ['solo', 'm1', 'm2', 'a', 'b', 'c'].map(id => ({ id }));
+        const links = [
+          { source: 'm1', target: 'm2' },
+          { source: 'a', target: 'b' },
+          { source: 'b', target: 'c' },
+        ];
+        I.communities(nodes, links);
+        const byId = {};
+        nodes.forEach(n => { byId[n.id] = n.community; });
+        emit({ byId, distinct: new Set(nodes.map(n => n.community)).size });
+        """
+    )
+    assert report["distinct"] == 3
+    # Largest component (3 nodes) owns palette slot 0, i.e. the legend's "Cluster 1".
+    assert report["byId"]["a"] == 0
+    assert report["byId"]["b"] == 0
+    assert report["byId"]["c"] == 0
+    # Then the 2-node component, then the singleton — strictly by size, not by payload order.
+    assert report["byId"]["m1"] == 1
+    assert report["byId"]["m2"] == 1
+    assert report["byId"]["solo"] == 2
+
+
+@requires_node
+def test_max_helper_survives_arrays_past_the_spread_limit() -> None:
+    """``Math.max(...array)`` throws RangeError long before a store is unrenderable."""
+    report = _run_node("emit({ max: I.maxOf(new Array(400000).fill(7), 1) });")
+    assert report["max"] == 7
+
+
+@requires_node
+def test_colour_helpers_handle_the_shorthand_hex_the_palettes_may_carry() -> None:
+    report = _run_node(
+        """
+        emit({
+          short: I.hexRgb('#abc'),
+          long: I.hexRgb('#8c83e8'),
+          empty: I.hexRgb(''),
+          light: I.contrastOn('#ffffff'),
+          dark: I.contrastOn('#000000'),
+        });
+        """
+    )
+    assert report["short"] == [170, 187, 204]
+    assert report["long"] == [140, 131, 232]
+    assert report["empty"] == [140, 131, 232]
+    assert report["light"] == "#111827"
+    assert report["dark"] == "#f8fafc"
+
+
+# ── render configuration: what the engine actually installs on force-graph ──────────
+
+
+@requires_node
+def test_flow_particles_are_capped_on_a_large_relation_set() -> None:
+    """Three animated particles per relation does not survive a real ``/graph`` response.
+
+    force-graph advances every particle on every frame, so a few thousand relations is tens
+    of thousands of animated objects and an unusable canvas.  The classic renderer refuses to
+    draw them past 800 links; the opt-in engine must use the same cutoff rather than trusting
+    that no store is big.
+    """
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        const particlesFor = link => store.linkDirectionalParticles(link || { layer: 'semantic' });
+        api.setStyle('cyber');
+        api.setSettings({ flow: true });
+        api.setData(chain(40));
+        const small = particlesFor();
+        api.setData(chain(800));
+        const atLimit = particlesFor();
+        api.setData(chain(801));
+        const overLimit = particlesFor();
+        api.setData(chain(4000));
+        emit({ small, atLimit, overLimit, realistic: particlesFor() * 4000 });
+        """
+    )
+    assert report["small"] == 3
+    assert report["atLimit"] == 3
+    assert report["overLimit"] == 0
+    # The number this guards: 4k relations x 3 particles was 12,000 animated objects a frame.
+    assert report["realistic"] == 0
+
+
+#: A canvas 2D stand-in that counts the fills the galaxy starfield performs.  The engine wraps
+#: ``onRenderFramePre`` in a try/catch, so a stub too thin to survive the real paint would read
+#: as "no stars drawn"; the small-graph leg of the test below is what proves it is thick enough.
+CANVAS_STUB = """
+let fills = 0;
+const ctx = {
+  globalAlpha: 1, globalCompositeOperation: '', fillStyle: '', strokeStyle: '', lineWidth: 1,
+  save() {}, restore() {}, beginPath() {}, arc() {}, ellipse() {}, stroke() {},
+  fill() { fills += 1; },
+  createRadialGradient() { return { addColorStop() {} }; },
+};
+"""
+
+
+@requires_node
+def test_galaxy_stops_animating_once_the_graph_is_large() -> None:
+    """A settled graph must fall off the CPU, and galaxy was the one style that never did.
+
+    The starfield lives in ``onRenderFramePre``, which force-graph's change detection cannot
+    see, so the engine holds ``autoPauseRedraw(false)`` for it — repainting every node and link
+    every frame, forever, even after particles and the simulation have stopped.  The classic
+    path simply drops the starfield past ``GPERF.large`` (``if(GPERF.large)return``); with the
+    stars gone there is nothing left that needs a frame the vendor would not schedule itself.
+    """
+    report = _run_engine(
+        CANVAS_STUB
+        + """
+        const api = G.create(el, {});
+        api.setStyle('galaxy');
+
+        api.setData(chain(40));
+        const smallAutoPause = store.autoPauseRedraw;
+        fills = 0; store.onRenderFramePre(ctx, 1);
+        const smallStars = fills;
+
+        // 3001 entities / 3000 relations — past the classic renderer's 600-node signal.
+        api.setData(chain(3000));
+        const bigAutoPause = store.autoPauseRedraw;
+        fills = 0; store.onRenderFramePre(ctx, 1);
+        const bigStars = fills;
+
+        // Style is what costs the frames, not size alone: cyber never asked for them.
+        api.setStyle('cyber');
+        api.setData(chain(40));
+        emit({ smallAutoPause, bigAutoPause, smallStars, bigStars,
+               cyberAutoPause: store.autoPauseRedraw });
+        """
+    )
+    # Small galaxy graph: the animation is affordable, so the engine keeps driving frames.
+    assert report["smallAutoPause"] is False
+    assert report["smallStars"] > 0, "canvas stub never reached the starfield"
+    # Large galaxy graph: no starfield, and the redraw loop is handed back to force-graph.
+    assert report["bigStars"] == 0
+    assert report["bigAutoPause"] is True, "a large galaxy graph repaints every frame forever"
+    assert report["cyberAutoPause"] is True
+
+
+@requires_node
+def test_large_graphs_reduce_collision_work_and_skip_cyber_shadows() -> None:
+    """The next engine keeps the classic path's two largest per-node costs bounded.
+
+    Collision relaxation is needed twice per tick for a small layout but only once once the
+    classic ``GPERF.large`` threshold is crossed.  Cyber's rich-node blur is similarly useful
+    at ordinary scale and prohibitively expensive when hundreds of nodes paint each frame.
+    Exercise the actual force and canvas accessors rather than matching their source text.
+    """
+    report = _run_engine(
+        """
+        const collide = () => {
+          let iterations = null;
+          return {
+            iterations(value) {
+              if (arguments.length) { iterations = value; return this; }
+              return iterations;
+            },
+          };
+        };
+        globalThis.d3 = {
+          forceX: () => ({ strength() { return this; } }),
+          forceY: () => ({ strength() { return this; } }),
+          forceCollide: collide,
+        };
+        const shadows = () => {
+          const writes = [];
+          const ctx = {
+            save() {}, restore() {}, beginPath() {}, arc() {}, fill() {}, stroke() {},
+            set shadowColor(value) { writes.push(['color', value]); },
+            set shadowBlur(value) { writes.push(['blur', value]); },
+          };
+          store.nodeCanvasObject(
+            { id: 'rich', x: 0, y: 0, radius: 5, color: '#22e0ff', degree: 3 }, ctx, 1
+          );
+          return writes;
+        };
+        const api = G.create(el, {});
+        api.setStyle('cyber');
+        api.setData(chain(40));
+        const smallIterations = store.d3Force[1].iterations();
+        const smallShadows = shadows();
+        api.setData(chain(601));
+        const largeIterations = store.d3Force[1].iterations();
+        const largeShadows = shadows();
+        emit({ smallIterations, largeIterations, smallShadows, largeShadows });
+        """
+    )
+    assert report["smallIterations"] == 2
+    assert report["largeIterations"] == 1
+    assert report["smallShadows"] == [["color", "#22e0ff"], ["blur", 13]]
+    assert report["largeShadows"] == []
+
+
+@requires_node
+def test_type_colours_follow_the_active_theme_not_a_hard_coded_dark_palette() -> None:
+    """``applyTheme()`` recolours the canvas, but the engine had no theme to recolour to.
+
+    The legend and controls read the ``--entity-*`` custom properties, so switching to Light,
+    Midnight, Solarized or Sepia moved them while the canvas kept the dark-theme constants —
+    an inconsistent palette and, on the light themes, poor contrast.  The engine cannot read
+    CSS variables from a canvas, so the dashboard supplies the resolved values.
+    """
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        // setData first: the force-graph stand-in only starts answering graphData() once the
+        // engine has pushed data into it, where the real vendor seeds an empty graph.
+        // Linked, because the default scope hides degree-zero entities.
+        api.setData({
+          nodes: [{ id: 'a', etype: 'person_or_concept' }, { id: 'b', etype: 'person_or_concept' }],
+          links: [{ source: 'a', target: 'b', layer: 'entity' }],
+        });
+        api.setColorBy('type');
+        api.setStyle('classic');
+        // `store` holds the values handed to force-graph, so this is the node object the
+        // engine actually painted from — recoloured in place by refreshColors()/render().
+        const colour = () => store.graphData.nodes[0].color;
+
+        const fallback = colour();
+        api.setThemeColors({ person_or_concept: '#112233' });
+        const themed = colour();
+
+        // A style palette still outranks the theme, exactly as classic graphTypeColor() does.
+        api.setStyle('cyber');
+        const styled = colour();
+
+        // ...and an explicit user override still outranks both.
+        api.setStyle('classic');
+        api.setTypeColor('person_or_concept', '#abcdef');
+        const overridden = colour();
+
+        // A theme with no entry for the type must not strand the previous theme's colour.
+        api.setThemeColors({});
+        emit({ fallback, themed, styled, overridden, cleared: colour() });
+        """
+    )
+    assert report["fallback"] == "#8c83e8"
+    assert report["themed"] == "#112233", "the engine ignores the active theme"
+    assert report["styled"] == "#ff3ea5"
+    assert report["overridden"] == "#abcdef"
+    # The override survives; only the theme tier was replaced.
+    assert report["cleared"] == "#abcdef"
+
+
+@requires_node
+def test_hovering_a_node_asks_for_a_redraw() -> None:
+    """A highlight nobody repaints is invisible.
+
+    ``onNodeHover`` mutates closure state the paint callbacks read.  With reduced motion on,
+    flow disabled, or a settled simulation, force-graph's ``autoPauseRedraw`` loop has nothing
+    left to animate and will not repaint just because the callback fired.
+    """
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData({ nodes: [{ id: 'a' }, { id: 'b' }], links: [{ source: 'a', target: 'b' }] });
+        const settled = calls.nodeCanvasObject;
+        store.onNodeHover({ id: 'a' });
+        const hovered = calls.nodeCanvasObject;
+        store.onNodeHover(null);
+        emit({
+          settled, hovered, cleared: calls.nodeCanvasObject,
+          particles: store.linkDirectionalParticles({ layer: 'semantic' }),
+        });
+        """
+    )
+    # Reduced motion: nothing is in flight, so an unrequested redraw would never arrive.
+    assert report["particles"] == 0
+    assert report["hovered"] > report["settled"]
+    assert report["cleared"] > report["hovered"]
+
+
+@requires_node
+def test_unlinked_entities_are_shown_only_when_the_engine_is_told_to() -> None:
+    """The lever the dashboard has to pull for its "Show unlinked nodes" checkbox."""
+    report = _run_engine(
+        """
+        const seen = [];
+        const api = G.create(el, { onStats: stats => seen.push(stats.nodes) });
+        api.setData({
+          nodes: [{ id: 'a' }, { id: 'b' }, { id: 'lonely' }],
+          links: [{ source: 'a', target: 'b' }],
+        });
+        const hidden = seen[seen.length - 1];
+        api.setScope({ showUnlinked: true, minDegree: 0 });
+        emit({ hidden, shown: seen[seen.length - 1] });
+        """
+    )
+    assert report["hidden"] == 2
+    assert report["shown"] == 3
+
+
+#: Executes the *real* ``graphRenderEngine`` source against stubs.  Only its collaborators are
+#: faked; the function itself is a verbatim slice, so what it forwards to the engine — and when
+#: it parks a freshly created renderer — is observed rather than asserted about the source text.
+RENDER_HARNESS = """
+const fs = require('fs');
+const src = fs.readFileSync(process.argv.slice(1).find(a => a.endsWith('dashboard.js')), 'utf8');
+const scenario = JSON.parse(process.argv[process.argv.length - 1]);
+const start = src.indexOf('function graphRenderEngine(');
+const slice = src.slice(start, src.indexOf('/* Nav away from the graph view', start));
+
+/* The theme-colour lookup is sliced verbatim too, not stubbed: the property under test is
+   that the dashboard resolves the *active* CSS custom properties and hands them over, so
+   faking the resolver would assert nothing. Only `getComputedStyle` below is synthetic. */
+const between = (from, to) => src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)));
+const themeSrc = between('const ETYPE_TOKEN=', 'const GRAPH_PALETTES=')
+  + between('function cssvar(', 'function graphValidColor(')
+  + between('function graphThemeTypeColors(', 'function graphContrastColor(');
+
+/* A stand-in for a non-dark theme: every --entity-* token differs from the engine's
+   hard-coded THEME_ETYPE constants, so a renderer that ignored these would be visible. */
+const THEME_VARS = {
+  '--entity-concept': '#112233', '--entity-mention': '#223344', '--entity-hashtag': '#334455',
+  '--entity-email': '#445566', '--entity-organization': '#556677', '--entity-location': '#667788',
+  '--color-accent': '#778899',
+};
+globalThis.getComputedStyle = () => ({ getPropertyValue: name => THEME_VARS[name] || '' });
+
+const log = { created: 0, paused: 0, seeded: 0, scope: null, themeColors: null, error: null };
+const checkbox = { checked: scenario.showUnlinked };
+const element = { classList: { toggle() {} }, setAttribute() {}, set textContent(value) {} };
+globalThis.document = {
+  getElementById: id => (id === 'graph-show-iso' ? checkbox : element),
+  querySelectorAll: () => [],
+  body: {},
+};
+const engine = {
+  setSettings() {}, setStyle() {}, setColorBy() {}, setPalette() {}, setTypeColors() {},
+  setLayers() {}, setScope(patch) { log.scope = patch; },
+  setThemeColors(map) { log.themeColors = map; },
+  setData(data) { log.seeded = data.nodes.length; },
+};
+const api = {
+  apply(fn) { fn(engine); }, communityMap: () => ({}),
+  freeze() {}, destroy() {}, resume() {}, pause() { log.paused += 1; },
+};
+globalThis.EngraphisGraph = { create() { log.created += 1; return api; } };
+globalThis.window = { GSET: { mode: 'compact', frozen: false } };
+globalThis.GRAPH = { nodes: [] };
+globalThis.GRAPH_ENGINE = null;
+globalThis.GACTIVE_DATA = null;
+globalThis.GCOLOR_OVERRIDES = {};
+/* The state the nav-away pause recorded while GRAPH_ENGINE was still null. */
+globalThis.GRAPH_ENGINE_PARKED = scenario.parked;
+globalThis.showAs = () => {};
+globalThis.prefersReducedMotion = () => false;
+for (const name of ['graphSetLayoutStatus', 'graphSyncReadouts', 'graphUpdateEditedBadge',
+                    'graphUpdateHud', 'graphRenderLegend', 'graphSetHighlight',
+                    'graphSetSimulationStatus', 'syncGraphExplorerSelection', 'graphNodeClick',
+                    'graphEngineEmptyMessage']) globalThis[name] = () => {};
+globalThis.graphEngineFallback = error => {
+  log.error = String((error && error.message) || error);
+};
+
+const graphRenderEngine = new Function(themeSrc + slice + '\\nreturn graphRenderEngine;')();
+const rendered = graphRenderEngine({
+  nodes: [{ id: 'a' }, { id: 'b' }, { id: 'lonely' }],
+  links: [{ source: 'a', target: 'b' }],
+}, true, true);
+console.log(JSON.stringify(Object.assign({ rendered }, log)));
+"""
+
+
+def _run_render(*, show_unlinked: bool = False, parked: bool = False) -> dict:
+    source = DASHBOARD.read_text(encoding="utf-8")
+    # The harness slices real source; keep its landmarks honest.
+    assert "function graphRenderEngine(" in source
+    assert "/* Nav away from the graph view" in source
+    scenario = json.dumps({"showUnlinked": show_unlinked, "parked": parked})
+    result = subprocess.run(
+        [NODE, "-e", RENDER_HARNESS, str(DASHBOARD), scenario],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert report["error"] is None, report["error"]
+    assert report["rendered"] is True
+    return report
+
+
+@requires_node
+@pytest.mark.parametrize("checked", [False, True])
+def test_dashboard_tells_the_engine_whether_to_show_unlinked_entities(checked: bool) -> None:
+    """"Show unlinked nodes" is filtered twice, and only one half was wired up.
+
+    ``graphData()`` starts supplying degree-zero entities when the box is ticked, but the
+    engine re-filters on its own ``showUnlinked``/``minDegree`` state — which stays at the
+    defaults that drop exactly those entities — unless the dashboard says otherwise.
+    """
+    report = _run_render(show_unlinked=checked)
+
+    assert report["scope"] is not None, "the engine never learns the checkbox state"
+    assert report["scope"]["showUnlinked"] is checked
+    # minDegree matters just as much: showUnlinked alone still loses to `degree >= 1`.
+    assert report["scope"]["minDegree"] == (0 if checked else 1)
+
+
+@requires_node
+def test_dashboard_hands_the_engine_the_active_themes_entity_colours() -> None:
+    """The other half of the theme fix: the engine can only use what it is given."""
+    report = _run_render()
+
+    assert report["themeColors"] is not None, "the engine never learns the active theme"
+    # Resolved from the stubbed --entity-* custom properties, not from any JS constant.
+    assert report["themeColors"]["person_or_concept"] == "#112233"
+    assert report["themeColors"]["organization"] == "#556677"
+    # Every type the legend can show must be covered, or the canvas falls back per type.
+    assert set(report["themeColors"]) == {
+        "person_or_concept", "mention", "hashtag", "email", "organization", "location",
+    }
+
+
+def test_a_theme_switch_repaints_the_opt_in_canvas() -> None:
+    """``applyTheme()`` is the only place a theme change is observable.
+
+    It already calls ``graphRecolor()``; that path has to reach the engine, or the canvas keeps
+    the previous theme until the next full graph render.
+    """
+    source = DASHBOARD.read_text(encoding="utf-8")
+    assert "if(typeof graphRecolor==='function')graphRecolor()" in source
+    recolor = source[source.index("function graphRecolor()"):]
+    recolor = recolor[: recolor.index("\nfunction graphFit")]
+    assert "engine.setThemeColors(graphThemeTypeColors())" in recolor
+
+
+@requires_node
+def test_a_renderer_created_after_leaving_the_graph_view_is_born_paused() -> None:
+    """The rAF leak this PR already fixed once, reached by a different route.
+
+    ``/graph`` and both lazy scripts resolve asynchronously.  Leaving Graph before they do runs
+    the pause while ``GRAPH_ENGINE`` is still null, so the pending callback would create and
+    start a renderer against a hidden pane that nothing ever pauses again.
+    """
+    parked = _run_render(parked=True)
+    assert parked["created"] == 1
+    assert parked["paused"] == 1, "a renderer created off-view keeps repainting forever"
+
+    # On the view, the same path must not park a renderer the user is looking at.
+    live = _run_render(parked=False)
+    assert live["created"] == 1
+    assert live["paused"] == 0
+
+
+def test_leaving_the_graph_view_records_the_pause_as_well_as_applying_it() -> None:
+    source = DASHBOARD.read_text(encoding="utf-8")
+    assert "if(v==='graph')graphEngineResume();else graphEnginePause()" in source
+    pause = source[source.index("function graphEnginePause()"):]
+    pause = pause[: pause.index("\nfunction graphInvalidateData")]
+    assert "GRAPH_ENGINE_PARKED=true" in pause
+    assert "GRAPH_ENGINE_PARKED=false" in pause
+
+
+#: Force-graph resolves each link's ``source``/``target`` from an id to the node object once it
+#: owns the data, and the paint callbacks read ``.x``/``.y`` off those objects.  The recording
+#: stand-in stores the arrays untouched, so a test that wants to *drive* a link painter has to
+#: do that resolution — and give the nodes coordinates — itself.
+LAY_OUT = """
+const layOut = () => {
+  const data = store.graphData;
+  const byId = new Map(data.nodes.map(n => [n.id, n]));
+  data.nodes.forEach((n, i) => { n.x = i * 10; n.y = i; });
+  data.links.forEach(l => {
+    const s = byId.get(l.source && l.source.id !== undefined ? l.source.id : l.source);
+    const t = byId.get(l.target && l.target.id !== undefined ? l.target.id : l.target);
+    if (s) l.source = s;
+    if (t) l.target = t;
+  });
+  return data;
+};
+let painted = [];
+const linkCtx = {
+  font: '', fillStyle: '', textAlign: '', textBaseline: '',
+  fillText(text) { painted.push(String(text)); },
+};
+const paintLinks = (scale, links) => {
+  painted = [];
+  const mode = store.linkCanvasObjectMode ? store.linkCanvasObjectMode() : undefined;
+  const draw = store.linkCanvasObject;
+  if (mode === 'after' && draw) (links || store.graphData.links).forEach(l => draw(l, linkCtx, scale));
+  return painted.slice();
+};
+"""
+
+
+@requires_node
+def test_relation_labels_are_painted_when_the_labels_box_is_ticked() -> None:
+    """**Labels** turns on two label layers on the classic path; the engine only had one.
+
+    ``graphToggleLabels`` forwards the checkbox straight to ``setSettings({labels})``, and the
+    classic renderer answers it with *both* entity names and a ``linkCanvasObject`` that paints
+    each ``link.label``.  The opt-in engine configured no link painter at all, so relation names
+    silently disappeared under ``?graph-engine=next`` and could only be read by hovering one
+    edge at a time.
+    """
+    report = _run_engine(
+        LAY_OUT
+        + """
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData({
+          nodes: [{ id: 'a' }, { id: 'b' }],
+          links: [{ source: 'a', target: 'b', layer: 'entity', label: 'mentions' }],
+        });
+        layOut();
+        const unticked = paintLinks(4);
+        api.setSettings({ labels: true });
+        const ticked = paintLinks(4);
+        // Relation labels are the noisiest layer: they stay off until the user zooms in.
+        const zoomedOut = paintLinks(1);
+        emit({ unticked, ticked, zoomedOut });
+        """
+    )
+    assert report["unticked"] == []
+    assert report["ticked"] == ["mentions"], "the Labels checkbox never paints relation names"
+    assert report["zoomedOut"] == []
+
+
+@requires_node
+def test_focusing_an_entity_the_canvas_is_not_showing_does_not_report_success() -> None:
+    """``zoomToNode`` is the dashboard's visibility oracle, and it was answering from memory.
+
+    ``graphFocus`` treats ``false`` as "offer the recovery path" — tick *Show unlinked*, retry,
+    and otherwise say *Entity not in view*.  The engine answered from ``raw.nodes``, which keeps
+    the coordinates force-graph left on a node from an earlier render, so a node hidden by the
+    auto-collapsed view (only ``cluster-*`` bubbles are drawn below zoom 0.55) or by a scope
+    filter still reported success — the camera moved to nothing and the user got no explanation.
+    """
+    report = _run_engine(
+        """
+        const collapses = [];
+        const api = G.create(el, {
+          reducedMotion: () => true, onCollapseChange: value => collapses.push(value),
+        });
+        api.setData({
+          nodes: [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'lonely' }],
+          links: [{ source: 'a', target: 'b' }, { source: 'b', target: 'c' }],
+        });
+        const shownIds = () => (store.graphData.nodes || []).map(n => n.id);
+        // Everything visible once, so every entity carries real coordinates from here on.
+        api.setScope({ showUnlinked: true, minDegree: 0 });
+        store.graphData.nodes.forEach((n, i) => { n.x = i * 10; n.y = i; });
+
+        // 1. Hidden by the scope filter, but still remembered with valid coordinates.
+        api.setScope({ showUnlinked: false, minDegree: 1 });
+        const filtered = { found: api.zoomToNode('lonely'), shown: shownIds() };
+
+        // 2. Hidden by the collapsed view, which paints cluster bubbles instead of entities.
+        api.setCollapse(true);
+        const whileCollapsed = shownIds();
+        const focused = api.zoomToNode('c');
+        emit({
+          filtered, whileCollapsed, focused, collapses,
+          afterFocus: shownIds(), collapsed: api.state().collapsed,
+        });
+        """
+    )
+    # A filtered-out entity is not in view, so the dashboard must be told to recover.
+    assert report["filtered"]["found"] is False, "a filtered-out entity reported as visible"
+    assert "lonely" not in report["filtered"]["shown"]
+    # A collapsed view really is showing only bubbles...
+    assert report["whileCollapsed"] == ["cluster-0"]
+    # ...so focusing a named entity has to expand it rather than claim it is already on screen.
+    assert report["focused"] is True
+    assert report["collapsed"] is False
+    assert "c" in report["afterFocus"], "the entity is still not on the canvas"
+    assert report["collapses"][-1] is False, "the dashboard was never told the view expanded"
+
+
+@requires_node
+def test_appearance_only_changes_do_not_restart_the_layout() -> None:
+    """Style, Color by, Labels and Flow repaint the graph; they must not re-run it.
+
+    ``visible()`` allocates fresh arrays on every call, and force-graph treats any ``graphData``
+    call as a data update: it re-copies the nodes and d3 resets the simulation alpha to 1.  So
+    every appearance-only setter threw the settled layout away and made the whole graph move.
+    The classic renderer guards the same seed with ``if(dataChanged)FG.graphData(data)``.
+    """
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => true });
+        const nodes = [{ id: 'lonely', etype: 'organization' }], links = [];
+        for (let i = 0; i < 12; i++) nodes.push({ id: 'n' + i, etype: 'person_or_concept' });
+        for (let i = 0; i < 11; i++) links.push({ source: 'n' + i, target: 'n' + (i + 1) });
+        api.setData({ nodes, links });
+        const seeded = calls.graphData;
+        const before = store.graphData.nodes[0].color;
+        const repaintsBefore = calls.nodeCanvasObject;
+
+        api.setStyle('galaxy');
+        api.setColorBy('type');
+        api.setSettings({ labels: true });
+        api.setSettings({ flow: false });
+        const paintOnly = calls.graphData;
+        const recoloured = store.graphData.nodes[0].color;
+        const repaintsAfter = calls.nodeCanvasObject;
+
+        // A genuine change to the visible set still has to reach force-graph.
+        api.setScope({ showUnlinked: true, minDegree: 0 });
+        emit({
+          seeded, paintOnly, afterScope: calls.graphData, before, recoloured,
+          repaintsBefore, repaintsAfter, shown: store.graphData.nodes.length,
+        });
+        """
+    )
+    assert report["paintOnly"] == report["seeded"], "an appearance change restarted the layout"
+    assert report["afterScope"] > report["seeded"], "a real view change never reached the canvas"
+    assert report["shown"] == 13
+    # Skipping the reseed must not mean skipping the paint.
+    assert report["recoloured"] != report["before"]
+    assert report["repaintsAfter"] > report["repaintsBefore"]
+
+
+@requires_node
+def test_simulation_time_is_bounded_on_a_large_graph() -> None:
+    """force-graph's default cooldown is 15 seconds; nothing here was overriding it.
+
+    The classic path caps a large graph at 1.1s / 80 ticks precisely because running the layout
+    — and therefore repainting every node and link — for the full default window is what makes a
+    big store feel broken on load and after every reheat.
+    """
+    report = _run_engine(
+        """
+        const api = G.create(el, {});
+        api.setData(chain(40));
+        const small = {
+          time: store.cooldownTime, ticks: store.cooldownTicks, warmup: store.warmupTicks,
+          alpha: store.d3AlphaDecay, velocity: store.d3VelocityDecay,
+        };
+        // 3001 entities / 3000 relations — past the classic renderer's 600-node signal.
+        api.setData(chain(3000));
+        const big = {
+          time: store.cooldownTime, ticks: store.cooldownTicks, warmup: store.warmupTicks,
+          alpha: store.d3AlphaDecay, velocity: store.d3VelocityDecay,
+        };
+        const still = G.create(el, { reducedMotion: () => true });
+        still.setData(chain(40));
+        emit({
+          small, big,
+          reduced: { time: store.cooldownTime, ticks: store.cooldownTicks },
+        });
+        """
+    )
+    assert report["small"]["time"] == 2200
+    assert report["small"]["ticks"] == 160
+    # The number this guards: the vendor default left a 3k-relation store simulating for 15s.
+    assert report["big"]["time"] == 1100
+    assert report["big"]["ticks"] == 80
+    assert report["big"]["warmup"] == 18
+    # A large graph also settles harder, exactly as GPERF.large does on the classic path.
+    assert report["big"]["alpha"] > report["small"]["alpha"]
+    assert report["big"]["velocity"] > report["small"]["velocity"]
+    # Reduced motion asks for a static layout, not a shorter animation.
+    assert report["reduced"]["time"] == 0
+    assert report["reduced"]["ticks"] == 1
+
+
+@requires_node
+def test_physics_sliders_reheat_the_simulation_the_way_the_classic_renderer_does() -> None:
+    """Installing a new force on a settled graph moves nothing without a reheat.
+
+    ``graphSet`` (dashboard.js) routes Repel/Link/Gravity/Size/Font/Link-width/Label-density
+    through ``setSettings`` under ``?graph-engine=next``.  The classic branch of that same
+    function treats ``repel|link|gravity|size`` as *layout* changes: it re-applies the forces
+    and then reheats unless the user asked for reduced motion.  The engine's ``applyForces()``
+    only swaps the charge/link/forceX-forceY/collide values into the running simulation — and a
+    settled graph sits at alpha~0 — so without the reheat those four sliders are inert until
+    the user finds the Reheat button.  The paint-only settings must *not* reheat: restarting
+    the layout because a label got bigger throws away the arrangement the user is reading.
+    """
+    report = _run_engine(
+        """
+        const reheats = () => invocations.d3ReheatSimulation || 0;
+        const bump = (api, patch) => { const before = reheats(); api.setSettings(patch); return reheats() - before; };
+
+        const api = G.create(el, {});
+        api.setData(chain(40));
+        const layout = {
+          repel: bump(api, { repel: 260 }),
+          link: bump(api, { link: 90 }),
+          gravity: bump(api, { gravity: 12 }),
+          size: bump(api, { size: 5 }),
+          mode: bump(api, { mode: 'radial' }),
+        };
+        const paint = {
+          font: bump(api, { font: 11 }),
+          linkw: bump(api, { linkw: 2.4 }),
+          labelDensity: bump(api, { labelDensity: 40 }),
+          labels: bump(api, { labels: true }),
+          flow: bump(api, { flow: false }),
+        };
+
+        // The classic path's `if(layout&&!prefersReducedMotion())` exemption.
+        const still = G.create(el, { reducedMotion: () => true });
+        still.setData(chain(40));
+        const reducedMotion = bump(still, { repel: 260 });
+        emit({ layout, paint, reducedMotion });
+        """
+    )
+    # The four sliders the classic renderer calls a layout change, plus the preset itself.
+    assert report["layout"] == {
+        "repel": 1, "link": 1, "gravity": 1, "size": 1, "mode": 1
+    }, "a physics slider installed new forces on a settled graph and nothing moved"
+    # Appearance-only settings keep the arrangement the user is looking at.
+    assert report["paint"] == {
+        "font": 0, "linkw": 0, "labelDensity": 0, "labels": 0, "flow": 0
+    }, "an appearance change restarted the layout"
+    assert report["reducedMotion"] == 0, "reduced motion still got an animated relayout"
+
+
+@requires_node
+def test_curves_arrows_and_relation_labels_are_dropped_on_a_dense_graph() -> None:
+    """Three per-edge costs the classic path turns off past ``GPERF.dense`` (links > 1500).
+
+    A curved link is a quadratic bezier instead of a straight line, an arrowhead is a filled
+    triangle, and a relation label is a text layout — each per relation, each every frame.  At
+    this density they are unreadable anyway, so the classic renderer pays for none of them.
+    """
+    report = _run_engine(
+        LAY_OUT
+        + """
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setSettings({ labels: true });
+
+        api.setData(chain(1500));
+        const atLimit = {
+          curve: store.linkCurvature, arrow: store.linkDirectionalArrowLength,
+        };
+
+        api.setData(chain(1501));
+        const overLimit = {
+          curve: store.linkCurvature, arrow: store.linkDirectionalArrowLength,
+        };
+        // One laid-out relation is enough to drive the label painter at this size.
+        const data = layOut();
+        data.links[0].label = 'mentions';
+        const denseUnhighlighted = paintLinks(4, [data.links[0]]);
+        store.onNodeHover(data.nodes[0]);
+        const denseHighlighted = paintLinks(4, [data.links[0]]);
+        emit({ atLimit, overLimit, denseUnhighlighted, denseHighlighted });
+        """
+    )
+    # 1500 links is the classic threshold itself, so nothing is dropped yet.
+    assert report["atLimit"]["curve"] == 0.12
+    assert report["atLimit"]["arrow"] == 2.5
+    assert report["overLimit"]["curve"] == 0
+    assert report["overLimit"]["arrow"] == 0
+    # Relation labels come back for the one neighbourhood the user is actually pointing at.
+    assert report["denseUnhighlighted"] == []
+    assert report["denseHighlighted"] == ["mentions"]
+
+
+def _community_palettes(source: str) -> dict:
+    """Parse a ``COMMUNITY_PALS`` literal out of either renderer."""
+    # Anchor on the declaration: both files also name the table in prose comments.
+    match = re.search(r"COMMUNITY_PALS\s*=\s*\{", source)
+    assert match is not None, "COMMUNITY_PALS is not declared here"
+    block = source[match.end():source.index("};", match.end())]
+    return {
+        name: re.findall(r"#[0-9a-fA-F]{3,8}", body)
+        for name, body in re.findall(r"(\w+)\s*:\s*\[([^\]]*)\]", block)
+    }
+
+
+def test_community_colours_match_the_dashboard_and_the_legend_swatches() -> None:
+    """The cluster legend is painted from CSS, so palette *order* is a contract, not a taste.
+
+    ``graphRenderLegend`` sorts communities by size and gives the largest a
+    ``.graph-cluster-0`` swatch, while the canvas colours that same community with palette slot
+    0.  The swatch colours live in ``dashboard.css`` and encode the Cyber palette — the default
+    style — so a renderer whose slot 0 is a different colour makes the legend describe cluster 1
+    with cluster 2's colour, on the default style, for every workspace.
+    """
+    engine = _community_palettes(ASSET.read_text(encoding="utf-8"))
+    classic = _community_palettes(DASHBOARD.read_text(encoding="utf-8"))
+    assert engine, "COMMUNITY_PALS could not be parsed out of the engine"
+    assert engine == classic, "the opt-in renderer paints communities a different colour"
+
+    swatches = dict(
+        re.findall(r"\.graph-cluster-(\d+)\{background:(#[0-9a-fA-F]{3,8})\}",
+                   CSS.read_text(encoding="utf-8"))
+    )
+    assert swatches, "the cluster legend swatches are missing from the stylesheet"
+    for index, colour in sorted(swatches.items()):
+        assert engine["cyber"][int(index)].lower() == colour.lower(), (
+            f"legend swatch {index} does not match the canvas colour for that cluster"
+        )
+
+
+# ── CSP, styling and lifecycle ──────────────────────────────────────────────────────
+
+
+def test_pane_backgrounds_are_owned_by_css_not_by_the_asset() -> None:
+    """``style-src-attr 'none'`` forbids writing these onto the element."""
+    css = CSS.read_text(encoding="utf-8")
+    source = ASSET.read_text(encoding="utf-8")
+    for style in ("galaxy", "solar", "cyber"):
+        assert f'#graph-net[data-graph-style="{style}"]' in css
+    assert "data-graph-style" in source
+    # The gradients must exist in exactly one place, or the two copies drift.
+    assert "radial-gradient" not in source
+    assert "linear-gradient" not in source
+
+
+def test_hover_cursor_class_the_asset_toggles_exists_in_css() -> None:
+    css = CSS.read_text(encoding="utf-8")
+    source = ASSET.read_text(encoding="utf-8")
+    assert "engraphis-graph-node-hover" in source
+    assert ".engraphis-graph-node-hover" in css
+
+
+def test_csp_gate_covers_the_graph_asset() -> None:
+    from scripts.externalize_dashboard_assets import EXTRA_SCRIPTS, check
+
+    assert ASSET in EXTRA_SCRIPTS, "the graph engine must be inside the CSP drift gate"
+    check()
+
+
+def test_engine_exposes_a_teardown_and_the_dashboard_drives_it() -> None:
+    source = ASSET.read_text(encoding="utf-8")
+    dashboard = DASHBOARD.read_text(encoding="utf-8")
+    for member in ("api.destroy", "api.pause", "api.resume", "api.resize"):
+        assert member in source
+    # force-graph keeps a rAF alive while resumed; leaving the view must park it.
+    assert "if(v==='graph')graphEngineResume();else graphEnginePause()" in dashboard
+    assert "GRAPH_ENGINE.destroy()" in dashboard
+
+
+def test_reduced_motion_is_honoured_by_the_opt_in_renderer() -> None:
+    source = ASSET.read_text(encoding="utf-8")
+    dashboard = DASHBOARD.read_text(encoding="utf-8")
+    assert "prefers-reduced-motion: reduce" in source
+    assert "opts.reducedMotion" in source
+    assert "reducedMotion:prefersReducedMotion" in dashboard
+
+
+def test_graph_engine_is_syntactically_valid_when_node_is_installed() -> None:
+    if NODE is None:
+        pytest.skip("node is not installed")
+    result = subprocess.run(
+        [NODE, "--check", str(ASSET)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
