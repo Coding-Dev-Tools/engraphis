@@ -287,12 +287,13 @@ def test_refresh_authorization_error_preserves_status(monkeypatch, status) -> No
     http.client.LineTooLong("header line"),
     http.client.BadStatusLine("garbage"),
 ])
-def test_a_mangled_refresh_status_line_is_a_retryable_error(monkeypatch, failure) -> None:
-    """Raised while reading the status line, so nothing was parsed and nothing consumed.
+def test_a_mangled_refresh_status_line_requires_reconnect(monkeypatch, failure) -> None:
+    """The request was sent, so an unparsable reply may hide a spent credential.
 
-    These are ``HTTPException`` and not ``OSError``, so before the ``HTTPException`` clause
-    existed they escaped ``_post_refresh`` as a traceback out of every paid feature's token
-    refresh. A retryable outage is the right classification: the credential is untouched.
+    These ``HTTPException`` variants escape from ``getresponse()`` after urllib has sent the
+    refresh POST.  A control plane or proxy may have consumed the one-time credential before
+    the malformed reply prevented its rotation from reaching disk; classifying that as 503
+    would retry the stale credential and can revoke its entire family.
     """
 
     class _Opener:
@@ -307,8 +308,8 @@ def test_a_mangled_refresh_status_line_is_a_retryable_error(monkeypatch, failure
             "https://control.example.test", "refresh", "ws", "member"
         )
 
-    assert caught.value.status == 503
-    assert "temporarily unreachable" in str(caught.value)
+    assert caught.value.status == 409
+    assert "Connect this installation again" in str(caught.value)
 
 
 @pytest.mark.parametrize("failure", [
