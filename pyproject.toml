@@ -186,6 +186,7 @@ include = ["engraphis*", "scripts*"]
 # runtime artifacts such as static/__pycache__/*.pyc after a local compile check.
 # vendor/**/* covers nested vendor assets too (vendor/* alone doesn't cross "/").
 "engraphis.static" = ["*.html", "*.css", "*.js", "*.png", "*.ico", "vendor/*", "vendor/**/*"]
+"engraphis.dashboard_assets" = ["*.js"]
 "engraphis" = ["commercial_manifest.json"]
 
 [tool.setuptools.exclude-package-data]

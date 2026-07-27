@@ -29,7 +29,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "engraphis" / "static"
-ASSET = STATIC / "engraphis-graph.js"
+ASSET = ROOT / "engraphis" / "dashboard_assets" / "engraphis-graph.js"
+LEGACY_ADAPTER = STATIC / "engraphis-graph.js"
 INDEX = STATIC / "index.html"
 CSS = STATIC / "dashboard.css"
 DASHBOARD = STATIC / "dashboard.js"
@@ -129,6 +130,14 @@ def test_graph_assets_are_never_loaded_on_a_plain_page_view() -> None:
     assert "/static/engraphis-graph.js" not in eager
 
 
+def test_v1_graph_asset_is_only_a_compatibility_adapter() -> None:
+    """New renderer code stays on the v2 dashboard surface, not the legacy server."""
+    adapter = LEGACY_ADAPTER.read_text(encoding="utf-8")
+    assert "canonicalAsset: '/v2-assets/engraphis-graph.js'" in adapter
+    assert "window.EngraphisGraph =" not in adapter
+    assert "window.EngraphisGraph =" in ASSET.read_text(encoding="utf-8")
+
+
 def test_opt_in_graph_asset_is_lazily_loaded_after_its_dependencies() -> None:
     """The load order the removed script tags used to guarantee now lives in graphRender().
 
@@ -137,13 +146,19 @@ def test_opt_in_graph_asset_is_lazily_loaded_after_its_dependencies() -> None:
     """
     source = DASHBOARD.read_text(encoding="utf-8")
     assert "script.src='/static/vendor/force-graph.min.js'" in source
-    assert "script.src='/static/engraphis-graph.js'" in source
+    assert "script.src='/v2-assets/engraphis-graph.js'" in source
     render = source[source.index("function graphRender("):]
     render = render[: render.index("\nfunction ")]
     force_graph_gate = render.index("typeof ForceGraph==='undefined'")
     engine_gate = render.index("if(enginePending)")
     classic = render.index("graphRenderEngine(data,fit,reheat)")
     assert force_graph_gate < engine_gate < classic
+
+
+def test_engine_node_labels_honor_the_configured_font_at_normal_zoom() -> None:
+    source = ASSET.read_text(encoding="utf-8")
+    assert "state.settings.font / scale / 3.4" not in source
+    assert "state.settings.font / scale" in source
 
 
 #: Executes dashboard.js's real graph-render *routing* decision against a stub DOM.
@@ -234,7 +249,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
 
     report = _run_routing("loads")
 
-    assert report["appended"] == ["/static/engraphis-graph.js"]
+    assert report["appended"] == ["/v2-assets/engraphis-graph.js"]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     # And it lands on the next engine, never touching the classic renderer.
