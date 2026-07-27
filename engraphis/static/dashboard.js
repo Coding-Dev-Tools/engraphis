@@ -105,6 +105,9 @@ function selectView(v){
  /* Plan pills live in the topbar; clear them on navigation so only the active
     view's loader can repopulate one. */
  ['an-lock','au-lock'].forEach(id=>{const p=document.getElementById(id);if(p){p.textContent='';p.className='pill pill-muted topbar-lock'}});
+ /* The graph canvas is the only view that owns an animation loop. Park it while it is not
+    on screen so navigating away does not leave a hidden canvas repainting forever. */
+ if(v==='graph')graphEngineResume();else graphEnginePause();
  closeMobileNav();
  (LOADERS[v]||function(){})();
  heading.tabIndex=-1;
@@ -474,7 +477,7 @@ function renderSync(d){const el=document.getElementById('sync-body');if(!el)retu
 async function syncNow(){const b=document.getElementById('sync-btn')||document.getElementById('sync-retry-btn');const original=b&&b.textContent;const s=document.getElementById('sync-status');if(b){b.disabled=true;b.textContent='Syncing…'}if(s)s.textContent='Contacting the cloud…';try{const d=await api('/sync/run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const su=d.summary||{};toast('Synced — pushed '+(su.exported||0)+', '+(su.added||0)+' new from other devices','ok');await loadSyncStatus()}catch(e){if(e.status===401||e.status===402||e.status===403){const el=document.getElementById('sync-body');if(el)el.innerHTML=syncRecoveryHtml();toast(e.status===402?'Cloud Sync requires an active Pro or Team entitlement — open Engraphis Cloud to upgrade or renew.':'Cloud Sync authorization is no longer active — reconnect in Engraphis Cloud.','err');return}toast('Sync failed: '+e.message,'err');if(b){b.disabled=false;b.textContent=original||'Sync now'}if(s)s.textContent='Sync failed — try again.'}}
 
 /* ─── knowledge graph (force-graph + d3-force: compact defaults and selectable layouts) ─── */
-let GRAPH=null, FG=null, GRESIZE=false, GRESIZEFRAME=0, GADJ={}, GCOMM_ADJ={}, GCOMPONENTS={}, GCOMPONENT_LAYOUT=null, GHILITE=null, GHOVERSET=null, GLABELRANK={}, GLABELBOXES=[], GDATA_CACHE=null, GACTIVE_DATA=null, GREDRAWFRAME=0, GPERF={large:false,dense:false};
+let GRAPH=null, FG=null, GRAPH_ENGINE=null, GRESIZE=false, GRESIZEFRAME=0, GADJ={}, GCOMM_ADJ={}, GCOMPONENTS={}, GCOMPONENT_LAYOUT=null, GHILITE=null, GHOVERSET=null, GLABELRANK={}, GLABELBOXES=[], GDATA_CACHE=null, GACTIVE_DATA=null, GREDRAWFRAME=0, GPERF={large:false,dense:false};
 const GRAPH_PRESETS={
  original:{label:'Original force',repel:120,link:30,gravity:14,font:13,size:3,linkw:1,labelDensity:40,curve:0,particles:0},
  compact:{label:'Compact clusters',repel:42,link:20,gravity:26,font:12,size:3,linkw:.7,labelDensity:30,curve:.08,particles:0},
@@ -507,6 +510,10 @@ function graphLoadColorPreferences(){
 }
 function graphSaveColorPreferences(){try{localStorage.setItem(GRAPH_COLOR_KEY,JSON.stringify({palette:GCOLOR_PALETTE,colors:GCOLOR_OVERRIDES}))}catch(e){}}
 function graphTypeColor(type){if(GCOLOR_OVERRIDES[type])return GCOLOR_OVERRIDES[type];if(typeof GSTYLE!=='undefined'&&GSTYLE&&GSTYLE!=='classic'&&STYLE_PAL[GSTYLE]&&STYLE_PAL[GSTYLE][type])return STYLE_PAL[GSTYLE][type];return cssvar(ETYPE_TOKEN[type]||'--entity-concept',cssvar('--color-accent','#8c83e8'))}
+/* The engine renders to a canvas, so it cannot read `--entity-*` itself the way the legend and
+   the controls do. Resolve the active theme's values here and hand them over; without this the
+   opt-in canvas keeps dark-theme node colours after a switch to Light/Solarized/Sepia. */
+function graphThemeTypeColors(){const colors={},fallback=cssvar('--color-accent','#8c83e8');Object.keys(ETYPE_TOKEN).forEach(type=>{colors[type]=cssvar(ETYPE_TOKEN[type],fallback)});colors.relation_label=cssvar('--color-text-dim','#7e8795');colors.label=cssvar('--color-text','#e7e9ee');return colors}
 function graphContrastColor(color){if(!graphValidColor(color))return cssvar('--color-canvas','#0e1014');const n=parseInt(color.slice(1),16),lum=.2126*(n>>16)+.7152*((n>>8)&255)+.0722*(n&255);return lum>150?'#111827':'#f8fafc'}
 const ETYPE_COLOR=new Proxy({},{get:(_,type)=>graphTypeColor(type)});
 graphLoadColorPreferences();
@@ -528,6 +535,7 @@ function graphSetTypeColor(type,color,persist){
  if(!type||!graphValidColor(color))return;
  GCOLOR_OVERRIDES[type]=color.toLowerCase();GCOLOR_PALETTE='custom';
  const picker=document.getElementById('graph-palette');if(picker)picker.value='custom';
+ if(GRAPH_ENGINE){GRAPH_ENGINE.setTypeColor(type,color);if(persist)graphSaveColorPreferences();return}
  graphRefreshNodeColors();
  if(persist)graphSaveColorPreferences();
 }
@@ -553,7 +561,102 @@ function graphUpdateHud(data){
  if(count&&data)count.textContent=data.nodes.length.toLocaleString()+' entities · '+data.links.length.toLocaleString()+' relations';
  if(badge)badge.textContent=GPERF.large?'Large graph mode':'Adaptive rendering';
 }
-function graphInvalidateData(){GDATA_CACHE=null;GACTIVE_DATA=null;GCOMPONENT_LAYOUT=null;GHILITE=null;GHOVERSET=null}
+/* ── opt-in next-generation renderer (`?graph-engine=next`) ──────────────────────────────
+   The classic renderer stays the default and the rollback path. Everything below is written
+   so that any failure in the opt-in engine degrades to classic rather than taking the graph
+   view down: one throw sets GRAPH_ENGINE_FAILED and the flag is never honoured again for the
+   life of the page. */
+let GRAPH_ENGINE_FAILED=false;
+function graphEngineEnabled(){
+ if(GRAPH_ENGINE_FAILED)return false;
+ try{return new URLSearchParams(window.location.search).get('graph-engine')==='next'}catch(e){return false}
+}
+function graphEngineFallback(error){
+ GRAPH_ENGINE_FAILED=true;
+ try{if(GRAPH_ENGINE)GRAPH_ENGINE.destroy()}catch(e){}
+ GRAPH_ENGINE=null;
+ /* The classic renderer skips seeding when GACTIVE_DATA still points at the current data,
+    so a failure *after* a successful engine render would hand it an empty canvas. Clearing
+    the marker makes the very next graphRender() a full classic build. */
+ GACTIVE_DATA=null;GCOMPONENT_LAYOUT=null;GHILITE=null;GHOVERSET=null;
+ if(window.console&&console.warn)console.warn('graph-engine=next failed; falling back to the classic renderer',error);
+}
+function graphEngineEmptyMessage(){
+ const total=(GRAPH&&GRAPH.nodes&&GRAPH.nodes.length)||0;
+ return total?('No connected entities — tick "Show unlinked" to see all '+total+'.'):'No entities in this workspace yet.';
+}
+function graphRenderEngine(data,fit,reheat){
+ const element=document.getElementById('graph-net'),empty=document.getElementById('graph-empty');
+ if(!element||typeof EngraphisGraph==='undefined')return false;
+ try{
+  if(!data.nodes.length){
+   if(GRAPH_ENGINE)GRAPH_ENGINE.setData({nodes:[],links:[]});
+   showAs(empty,true,'flex');
+   if(empty)empty.textContent=graphEngineEmptyMessage();
+   GACTIVE_DATA=null;graphSetLayoutStatus('No entities',false);return true;
+  }
+  showAs(empty,false);GPERF={large:data.nodes.length>600||data.links.length>2400,dense:data.links.length>1500};
+  const created=!GRAPH_ENGINE;
+  if(created){
+   GRAPH_ENGINE=EngraphisGraph.create(element,{
+    reducedMotion:prefersReducedMotion,
+    onNodeClick:node=>{syncGraphExplorerSelection(node.id);graphNodeClick(node.label||node.name||node.id)},
+    onBackgroundClick:()=>graphSetHighlight(null),
+    onStats:stats=>{const count=document.getElementById('graph-hud-count');if(count)count.textContent=stats.nodes.toLocaleString()+' entities · '+stats.links.toLocaleString()+' relations'}
+   });
+  }
+  /* Re-seeding identical data would re-copy every node and throw its x/y away, restarting
+     the layout on each slider or preset change. The classic path guards the same way. */
+  const dataChanged=created||GACTIVE_DATA!==data;
+  const layers={};document.querySelectorAll('#graph-layer-filters input').forEach(input=>{layers[input.value]=input.checked});
+  /* "Show unlinked nodes" is applied twice: graphData() decides what is handed over, and the
+     engine re-filters by degree on its own state. Leaving the engine on its defaults
+     (showUnlinked:false, minDegree:1) drops every degree-zero entity graphData() just supplied,
+     so the checkbox appeared to do nothing under ?graph-engine=next. */
+  const isolated=document.getElementById('graph-show-iso'),showUnlinked=!!(isolated&&isolated.checked);
+  GRAPH_ENGINE.apply(engine=>{
+   engine.setSettings({...window.GSET});
+   engine.setStyle(typeof GSTYLE!=='undefined'?GSTYLE:'cyber');
+   engine.setColorBy(typeof GCOLORBY!=='undefined'?GCOLORBY:'community');
+   engine.setThemeColors(graphThemeTypeColors());
+   engine.setPalette(typeof GCOLOR_PALETTE!=='undefined'?GCOLOR_PALETTE:'theme');
+   engine.setTypeColors(GCOLOR_OVERRIDES||{});
+   engine.setLayers(layers);
+   engine.setScope({showUnlinked,minDegree:showUnlinked?0:1});
+   if(dataChanged)engine.setData(data);
+  },fit,reheat&&!prefersReducedMotion());
+  /* Mirror the engine's clustering back onto the dashboard's own node objects, or the
+     cluster legend (which reads GACTIVE_DATA) reports one community for the whole store. */
+  const communityMap=GRAPH_ENGINE.communityMap();
+  data.nodes.forEach(node=>{node.community=communityMap[node.id]||0});
+  GACTIVE_DATA=data;graphSyncReadouts();graphUpdateEditedBadge();graphUpdateHud(data);graphRenderLegend(GRAPH);
+  if(dataChanged)graphSetHighlight(null);
+  if(window.GSET.frozen)GRAPH_ENGINE.freeze(true);
+  /* The renderer can be born after the user has already left the view: /graph and both lazy
+     scripts resolve asynchronously, and the pause on nav-away ran while GRAPH_ENGINE was still
+     null. Re-apply the parked state here so a renderer created against a hidden pane never
+     starts a rAF that nothing will stop. */
+  if(GRAPH_ENGINE_PARKED)GRAPH_ENGINE.pause();
+  graphSetSimulationStatus(prefersReducedMotion()?'Static layout':'Adaptive layout',false);
+  return true;
+ }catch(error){
+  graphEngineFallback(error);
+  return false;
+ }
+}
+/* Nav away from the graph view: park the engine's animation frame. Without this the opt-in
+   renderer keeps repainting a hidden canvas for the rest of the session.
+   The intent is *recorded* as well as applied, because pausing an engine that does not exist
+   yet is a no-op: leaving Graph before /graph (or either lazy script) resolves would otherwise
+   let the pending callback create and start a renderer against a hidden pane with no later
+   pause to stop it. graphRenderEngine() re-applies GRAPH_ENGINE_PARKED for that case. */
+let GRAPH_ENGINE_PARKED=false;
+function graphEnginePause(){GRAPH_ENGINE_PARKED=true;try{if(GRAPH_ENGINE)GRAPH_ENGINE.pause()}catch(e){}}
+function graphEngineResume(){GRAPH_ENGINE_PARKED=false;try{if(GRAPH_ENGINE)GRAPH_ENGINE.resume()}catch(e){}}
+function graphInvalidateData(){
+ if(GRAPH_ENGINE){try{GRAPH_ENGINE.destroy()}catch(e){}GRAPH_ENGINE=null}
+ GDATA_CACHE=null;GACTIVE_DATA=null;GCOMPONENT_LAYOUT=null;GHILITE=null;GHOVERSET=null
+}
 async function loadLegacyGraph(){
  graphInjectCss();graphInvalidateData();GRAPH=null;
  const empty=document.getElementById('graph-empty'),net=document.getElementById('graph-net'),nodesBox=document.getElementById('graph-entity-list'),edgesBox=document.getElementById('graph-relation-list');
@@ -563,8 +666,8 @@ async function loadLegacyGraph(){
  if(!GRESIZE){
   GRESIZE=true;
   window.addEventListener('resize',()=>{
-   if(!FG||GRESIZEFRAME)return;
-   GRESIZEFRAME=requestAnimationFrame(()=>{GRESIZEFRAME=0;const element=document.getElementById('graph-net');if(FG&&element)FG.width(element.clientWidth).height(element.clientHeight)});
+   if((!FG&&!GRAPH_ENGINE)||GRESIZEFRAME)return;
+   GRESIZEFRAME=requestAnimationFrame(()=>{GRESIZEFRAME=0;const element=document.getElementById('graph-net');if(GRAPH_ENGINE)GRAPH_ENGINE.resize();else if(FG&&element)FG.width(element.clientWidth).height(element.clientHeight)});
   });
  }
  const layerInputs=Array.from(document.querySelectorAll('#graph-layer-filters input')),selectedLayers=layerInputs.filter(input=>input.checked).map(input=>input.value),layerFilter=selectedLayers.length===layerInputs.length?'':'&layers='+encodeURIComponent(selectedLayers.join(',')),includeCode=document.getElementById('graph-include-code').checked,repo=(document.getElementById('graph-repo-filter').value||'').trim();
@@ -711,6 +814,7 @@ function graphSetStyle(name){
  if(['classic','galaxy','solar','cyber'].indexOf(name)<0)name='cyber';
  GSTYLE=name;try{localStorage.setItem('engraphis-graph-style',name)}catch(e){}
  graphApplyStyleChrome();
+ if(GRAPH_ENGINE){GRAPH_ENGINE.setStyle(name);return}
  if(GRAPH&&FG){graphRefreshNodeColors();graphRenderLegend();graphRender(false,false);}
 }
 /* ─── colorful graphs even when every node is one entity type: color by community or connections ─── */
@@ -766,6 +870,7 @@ function graphSetColorBy(mode){
  if(['type','community','connections'].indexOf(mode)<0)mode='community';
  GCOLORBY=mode;try{localStorage.setItem('engraphis-graph-colorby',mode)}catch(e){}
  var sel=document.getElementById('graph-colorby');if(sel&&sel.value!==mode)sel.value=mode;
+ if(GRAPH_ENGINE){GRAPH_ENGINE.setColorBy(mode);graphRenderLegend();return}
  if(GRAPH&&FG&&GACTIVE_DATA){graphComputeCommunities(GACTIVE_DATA.nodes);GMAXDEG=GACTIVE_DATA.nodes.reduce(function(m,n){return Math.max(m,n.degree||0);},1);graphRefreshNodeColors();graphRenderLegend();}
 }
 function graphApplyForces(){
@@ -790,6 +895,9 @@ function graphApplyForces(){
 function graphSetHighlight(id){
  GHILITE=id||null;
  GHOVERSET=id?new Set([id,...(GADJ[id]||[])]):null;
+ /* graphRedraw() is a no-op without the classic FG instance, so the opt-in engine needs
+    telling directly — otherwise hovering the entity list highlights nothing on canvas. */
+ if(GRAPH_ENGINE){try{GRAPH_ENGINE.setHighlight(GHILITE)}catch(e){}return}
  graphRedraw();
 }
 function graphRefreshNodeMetrics(){
@@ -800,6 +908,12 @@ function graphRedraw(){
  if(!FG||GREDRAWFRAME)return;
  GREDRAWFRAME=requestAnimationFrame(()=>{GREDRAWFRAME=0;if(FG)FG.nodeCanvasObject(FG.nodeCanvasObject())});
 }
+/* ── on-demand graph assets ───────────────────────────────────────────────────────────────
+   Neither script is in index.html. force-graph.min.js applies inline styles at runtime, and
+   under the production CSP (`style-src 'self'`) every one of those is blocked and reported;
+   loading it on a page that never opens the graph turns a plain dashboard view into a wall of
+   console errors. Both loaders are memoized, so a re-entrant graphRender() reuses the in-flight
+   fetch rather than appending a second <script>. */
 let FORCE_GRAPH_LOADING=null;
 function loadForceGraph(){
  if(typeof ForceGraph!=='undefined')return Promise.resolve();
@@ -807,14 +921,38 @@ function loadForceGraph(){
  FORCE_GRAPH_LOADING=new Promise((resolve,reject)=>{
   const script=document.createElement('script');
   script.src='/static/vendor/force-graph.min.js';
-  script.onload=()=>resolve();
+  /* A successful fetch is not a usable renderer unless the vendor asset registered its
+     global. Treat a truncated/captive-portal 200 exactly like any other load failure. */
+  script.onload=()=>{typeof ForceGraph==='undefined'?reject(new Error('Force graph asset loaded without registering ForceGraph')):resolve()};
   script.onerror=()=>reject(new Error('Graph engine could not load'));
   document.head.appendChild(script);
  });
  return FORCE_GRAPH_LOADING;
 }
+let GRAPH_ENGINE_LOADING=null;
+function loadGraphEngine(){
+ if(typeof EngraphisGraph!=='undefined')return Promise.resolve();
+ if(GRAPH_ENGINE_LOADING)return GRAPH_ENGINE_LOADING;
+ GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
+  const script=document.createElement('script');
+  script.src='/v2-assets/engraphis-graph.js';
+  /* A 200 that never registers the global is a corrupt/truncated asset, not a success —
+     resolving there would hand graphRenderEngine() an undefined EngraphisGraph. */
+  script.onload=()=>{typeof EngraphisGraph==='undefined'?reject(new Error('Graph engine asset loaded without registering EngraphisGraph')):resolve()};
+  script.onerror=()=>reject(new Error('Graph engine could not load'));
+  document.head.appendChild(script);
+ });
+ /* Mark the memoized promise handled. graphRender() can start this fetch on a pass that
+    returns before attaching its own handler, and an unhandled rejection would print the exact
+    console error this lazy-loading exists to remove. Callers still receive the rejection. */
+ GRAPH_ENGINE_LOADING.catch(()=>{});
+ return GRAPH_ENGINE_LOADING;
+}
 function graphRender(fit=true,reheat=true){
  const empty=document.getElementById('graph-empty');
+ /* Kick the opt-in engine off alongside the vendor bundle instead of after it, so a
+    `?graph-engine=next` deep link costs one round trip rather than two. */
+ const enginePending=graphEngineEnabled()&&typeof EngraphisGraph==='undefined'?loadGraphEngine():null;
  if(typeof ForceGraph==='undefined'){
   showAs(empty,true,'flex');empty.textContent='Loading graph engine…';
   graphSetLayoutStatus('Loading engine',true);
@@ -824,7 +962,27 @@ function graphRender(fit=true,reheat=true){
   });
   return;
  }
- const element=document.getElementById('graph-net'),settings=window.GSET,mode=GRAPH_PRESETS[settings.mode]||GRAPH_PRESETS.compact,data=graphData(),dataChanged=GACTIVE_DATA!==data;
+ if(enginePending){
+  /* `?graph-engine=next` has to actually arrive on the next engine. Wait for the asset here
+     rather than falling through to graphRenderEngine(), whose `typeof EngraphisGraph` bail
+     cannot tell "not fetched yet" from "unavailable" and would quietly serve Classic to
+     someone who explicitly asked for next. Only a real load failure degrades, and it is
+     announced through graphEngineFallback() rather than silent. */
+  showAs(empty,true,'flex');empty.textContent='Loading graph engine…';
+  graphSetLayoutStatus('Loading engine',true);
+  enginePending.then(()=>graphRender(fit,reheat)).catch(error=>{
+   /* Latches GRAPH_ENGINE_FAILED, so the re-entry below takes the classic path and this
+      cannot loop. */
+   graphEngineFallback(error);
+   graphRender(fit,reheat);
+  });
+  return;
+ }
+ const element=document.getElementById('graph-net'),settings=window.GSET,mode=GRAPH_PRESETS[settings.mode]||GRAPH_PRESETS.compact,data=graphData();
+ if(graphEngineEnabled()&&graphRenderEngine(data,fit,reheat))return;
+ /* Read AFTER the opt-in attempt: a failing engine resets GACTIVE_DATA precisely so the
+    classic renderer below rebuilds from scratch instead of assuming the canvas is current. */
+ const dataChanged=GACTIVE_DATA!==data;
  GPERF={large:data.nodes.length>600||data.links.length>2400,dense:data.links.length>1500};
  graphSyncReadouts();graphUpdateEditedBadge();
  if(dataChanged){
@@ -924,6 +1082,7 @@ function graphSet(key,value){
  const rd=document.querySelector('[data-graph-val="'+key+'"]');
  if(rd)rd.textContent=key==='linkw'?Number(value).toFixed(1):(key==='size'?String(+Number(value).toFixed(1)):String(Math.round(value)));
  graphUpdateEditedBadge();
+ if(GRAPH_ENGINE){GRAPH_ENGINE.setSettings({[key]:Number(value)});return}
  if(!FG)return;
  const layout=key==='repel'||key==='link'||key==='gravity'||key==='size';
  if(key==='size')graphRefreshNodeMetrics();
@@ -953,7 +1112,7 @@ function graphApplyPreset(name){
  const help=document.getElementById('graph-preset-help'),largeNote=GPERF.large?' Expensive animation, curves, and arrows stay off for this large graph.':'';
  if(help)help.textContent=notes[window.GSET.mode]+largeNote;
  graphRefreshNodeMetrics();graphSyncReadouts();graphUpdateEditedBadge();
- if(FG)graphRender(true,true);
+ if(FG||GRAPH_ENGINE)graphRender(true,true);
 }
 function graphSyncReadouts(){
  ['repel','link','gravity','font','size','linkw','labelDensity'].forEach(k=>{const rd=document.querySelector('[data-graph-val="'+k+'"]');if(!rd)return;const v=window.GSET[k];rd.textContent=k==='linkw'?Number(v).toFixed(1):(k==='size'?String(+Number(v).toFixed(1)):String(Math.round(v)));const ctl=document.querySelector('[data-graph-setting="'+k+'"]');if(ctl)ctl.value=v*(Number(ctl.dataset.graphScale)||1);});
@@ -975,28 +1134,39 @@ function graphUpdateEditedBadge(){
  showAs(btn,edited);
 }
 function graphResetPreset(){graphApplyPreset(window.GSET.mode==='custom'?'compact':window.GSET.mode);toast('Preset restored','ok')}
-function graphToggleFlow(control){window.GSET.flow=control.checked;if(FG)graphRender(false,false)}
+function graphToggleFlow(control){window.GSET.flow=control.checked;if(GRAPH_ENGINE)GRAPH_ENGINE.setSettings({flow:control.checked});else if(FG)graphRender(false,false)}
 function graphToggleFreeze(control){
- window.GSET.frozen=control.checked;if(!FG)return;
+ window.GSET.frozen=control.checked;if(GRAPH_ENGINE){GRAPH_ENGINE.freeze(control.checked);return}if(!FG)return;
  const ns=(FG.graphData().nodes)||[];
  if(control.checked){ns.forEach(n=>{n.fx=n.x;n.fy=n.y});graphSetSimulationStatus('Layout frozen')}
  else{ns.forEach(n=>{n.fx=null;n.fy=null});if(!prefersReducedMotion())FG.d3ReheatSimulation()}
 }
-function graphToggleLabels(control){window.GSET.labels=control.checked;if(FG)graphRender(false,false)}
+function graphToggleLabels(control){window.GSET.labels=control.checked;if(GRAPH_ENGINE)GRAPH_ENGINE.setSettings({labels:control.checked});else if(FG)graphRender(false,false)}
 function graphRecolor(){
  renderGraphColorControls();
+ if(GRAPH_ENGINE){GRAPH_ENGINE.apply(engine=>{engine.setThemeColors(graphThemeTypeColors());engine.setPalette(typeof GCOLOR_PALETTE!=='undefined'?GCOLOR_PALETTE:'theme');engine.setTypeColors(GCOLOR_OVERRIDES||{})},false,false);return}
  if(!FG)return;
  window.GCOL=graphReadThemeColors();graphRefreshNodeColors();
  FG.linkColor(FG.linkColor());FG.linkWidth(FG.linkWidth());graphRedraw();
 }
-function graphFit(){if(FG)FG.zoomToFit(prefersReducedMotion()?0:500,72)}
+function graphFit(){if(GRAPH_ENGINE)GRAPH_ENGINE.fit();else if(FG)FG.zoomToFit(prefersReducedMotion()?0:500,72)}
 function graphReheat(){
+ if(GRAPH_ENGINE){if(prefersReducedMotion()){toast('Layout motion is off because reduced motion is enabled.','ok');return}GRAPH_ENGINE.reheat();return}
  if(!FG)return;
  if(prefersReducedMotion()){toast('Layout motion is off because reduced motion is enabled.','ok');return}
  graphSetSimulationStatus('Reheating layout',true);FG.d3ReheatSimulation();
 }
 function graphFocus(name){
  clearTimeout(window.__gfit);
+ if(GRAPH_ENGINE){
+  /* Keep the classic contract: highlight, sync the explorer, and if the entity is filtered
+     out, offer the same "show unlinked" recovery instead of silently doing nothing. */
+  if(GRAPH_ENGINE.zoomToNode(name)){graphSetHighlight(name);syncGraphExplorerSelection(name);return}
+  const isolated=document.getElementById('graph-show-iso');
+  if(isolated&&!isolated.checked){isolated.checked=true;graphRender(false,true);setTimeout(()=>graphFocus(name),prefersReducedMotion()?0:500)}
+  else toast('Entity not in view','err');
+  return;
+ }
  const node=FG&&(FG.graphData().nodes||[]).find(item=>item.id===name),duration=prefersReducedMotion()?0:550;
  if(node&&node.x!=null){graphSetHighlight(name);FG.centerAt(node.x,node.y,duration);FG.zoom(5,duration);syncGraphExplorerSelection(name)}
  else{const show=document.getElementById('graph-show-iso');if(show&&!show.checked){show.checked=true;graphRender(false,true);setTimeout(()=>graphFocus(name),duration?500:0)}else toast('Entity not in view','err')}
