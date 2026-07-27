@@ -444,6 +444,70 @@ def test_a_non_object_response_is_rejected(monkeypatch, payload):
         device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
 
 
+@pytest.mark.parametrize("payload", [
+    # ``id=`` is not cosmetic on the oversized case: pytest puts the parameter in the test
+    # id, and a 64 KiB id overflows the 32767-character limit on ``PYTEST_CURRENT_TEST``.
+    pytest.param(b"not json", id="unparseable"),
+    pytest.param(b'"a string"', id="json-string"),
+    pytest.param(b"[]", id="json-array"),
+    pytest.param(b"{" + b" " * (64 * 1024 + 8), id="oversized"),
+])
+def test_an_unusable_2xx_body_says_the_token_was_spent(monkeypatch, tmp_path, payload):
+    """Every branch past ``opener.open()`` follows a 2xx, which consumes the token.
+
+    ``urllib`` raises ``HTTPError`` for any status >= 400 and ``_NoRedirect`` turns a 3xx
+    into one too, so reaching the body checks at all means the control plane answered
+    successfully -- and the single-use token is gone. Reporting only "invalid connect
+    response" left the customer retrying a consumed token into a guaranteed 401.
+    """
+
+    class _Raw(_Opener):
+        def open(self, request, timeout):
+            return _Response(payload)
+
+    _install_opener(monkeypatch, _Raw())
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    message = str(caught.value)
+    assert caught.value.status == 502
+    assert "no session was saved" in message
+    assert "generate a new one" in message.lower()
+    assert TOKEN not in message
+    assert not (tmp_path / "cloud_session.json").exists()
+
+
+def test_a_lock_failure_racing_the_save_says_the_token_was_spent(monkeypatch):
+    """``_refresh_lock`` wraps a filesystem fault in ``CloudSessionError``.
+
+    That means it does *not* reach the ``OSError`` clause that carries the spent-token
+    warning, so the bare lock message was forwarded on its own and the customer was left
+    retrying a token the control plane had already consumed.
+    """
+
+    _install_opener(monkeypatch, _Opener(body=REGISTRATION))
+
+    def _locked(*args, **kwargs):
+        raise cloud_session.CloudSessionError(
+            "The cloud session refresh lock is unavailable or unsafe.", status=409
+        )
+
+    monkeypatch.setattr(cloud_session, "save_bootstrap", _locked)
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    message = str(caught.value)
+    assert caught.value.status == 409
+    # The underlying cause survives...
+    assert "refresh lock is unavailable or unsafe" in message
+    # ...and so does the fact that retrying this token cannot work.
+    assert "has now been used" in message
+    assert "generate a new one" in message.lower()
+    assert TOKEN not in message
+
+
 # ------------------------------------------- failures *after* the token has been spent
 #
 # Once ``opener.open`` has returned, the control plane has answered and the single-use
@@ -825,6 +889,41 @@ def test_the_json_summary_carries_no_secrets(monkeypatch, capsys):
     assert "access_token" not in summary
     assert summary["plan"] == "team"
     assert summary["control_url"] == CONTROL_URL
+
+
+@pytest.mark.parametrize("as_json", [True, False])
+def test_an_unusable_session_prints_no_success_output_at_all(monkeypatch, capsys, as_json):
+    """The usability check must run *before* success is announced, not after.
+
+    ``cloud_session.configured()`` reads the session back and can raise (an invalid
+    ``ENGRAPHIS_CLOUD_TOKEN_SUBJECT``, or the file changing under the read). While the
+    check ran last, a complete ``--json`` success object was already on stdout when the
+    command then wrote an error and exited 1 -- so a consumer parsing stdout accepted a
+    connect that had failed, and a human got two contradictory answers.
+    """
+
+    _install_opener(monkeypatch, _Opener(body=REGISTRATION))
+
+    def _unusable(*args, **kwargs):
+        raise cloud_session.CloudSessionError(
+            "The saved cloud session names an unknown token subject.", status=409
+        )
+
+    monkeypatch.setattr(cloud_session, "configured", _unusable)
+
+    argv = ["--token", TOKEN, "--control-url", CONTROL_URL, "--compute-url", COMPUTE_URL]
+    if as_json:
+        argv.append("--json")
+
+    assert connect_cli.main(argv) == 1
+
+    captured = capsys.readouterr()
+    # Nothing on stdout at all: no JSON object to mis-parse, no "Connected" to believe.
+    assert captured.out.strip() == ""
+    assert "not usable" in captured.err
+    assert "Connected this device" not in captured.out
+    assert TOKEN not in captured.out
+    assert TOKEN not in captured.err
 
 
 def test_summarize_drops_every_secret_field():

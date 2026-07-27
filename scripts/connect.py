@@ -129,13 +129,15 @@ def main(argv=None) -> int:
         print("%s: %s" % (ap.prog, exc), file=sys.stderr)
         return 1
 
-    if args.json:
-        print(json.dumps(summary, sort_keys=True, indent=2))
-    else:
-        _print_summary(summary)
-
-    # Prove the write actually produced a session the rest of the client will use,
-    # rather than reporting success on a file nothing can load.
+    # Prove the write actually produced a session the rest of the client will use, rather
+    # than reporting success on a file nothing can load.
+    #
+    # This runs *before* any success output is emitted, and that ordering is load-bearing.
+    # ``configured()`` reads the session back and can raise -- an invalid
+    # ``ENGRAPHIS_CLOUD_TOKEN_SUBJECT``, or the file changing under the read. Printing
+    # first meant a complete ``--json`` success object was already on stdout when the
+    # command then wrote an error and exited 1, so a consumer parsing stdout accepted a
+    # connect that had failed, and a human got two contradictory answers.
     try:
         usable = cloud_session.configured()
     except cloud_session.CloudSessionError as exc:
@@ -143,7 +145,10 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 1
 
-    if not args.json:
+    if args.json:
+        print(json.dumps(summary, sort_keys=True, indent=2))
+    else:
+        _print_summary(summary)
         print()
         if usable:
             print("Next steps:")
