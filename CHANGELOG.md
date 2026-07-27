@@ -5,6 +5,52 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- **`engraphis connect --token engr_ct_…`** — the missing client half of device connect.
+  `cloud_session.save_bootstrap()` is the only writer of `~/.engraphis/cloud_session.json`,
+  and it had no production caller: the docs told paying customers to prefer a file nothing
+  created, so a purchased installation could not be connected without hand-writing state.
+  The new command redeems the one-time connect token from the account portal against
+  `POST /v1/devices/connect`, saves the returned session with owner-only permissions, and
+  verifies `cloud_session.configured()` before reporting success. The token is sent in the
+  request body and nowhere else — never printed, logged, or written to disk — and every
+  refusal maps to fixed, actionable copy (an expired or already-used token is not confused
+  with a lapsed subscription). Session storage is pre-flighted before the exchange, so an
+  unwritable state directory or a `cloud_session.json` replaced by a link fails the command
+  *without* spending the single-use token — the customer fixes the path and retries with the
+  same token instead of returning to the portal for a new one. Faults that can only happen
+  *after* the exchange — a reply truncated mid-body (`http.client.IncompleteRead`), or an
+  endpoint that stops resolving before the session is written (`CloudUrlUnresolved`) — are
+  reported as errors that say the token was already used, rather than escaping as tracebacks
+  that leave the customer unable to tell whether to retry. Also installed as
+  `engraphis-connect`.
+- An `engraphis` front-door command that dispatches to the existing `engraphis-<verb>`
+  entry points, so the command the account portal displays is runnable as shown.
+- A stable per-installation identity at `~/.engraphis/client_identity.json` (random ULIDs,
+  not a hardware fingerprint) so reconnecting a machine updates its existing installation
+  instead of registering a new device every time.
+
+### Removed
+
+- **"Signed compliance export" is no longer advertised on any surface.** It was granted to
+  Pro and Team by the control plane's plan→feature table and promoted in the account portal,
+  the dashboard upgrade panel, this changelog, and the README pricing table — but it was
+  never implemented on either side: no signing code in this client, and no export route, no
+  `export:*` token scope, and no export job kind in Engraphis Cloud. The `export` key is
+  removed from the plan→feature tables in both repos and from the dashboard's entitlement
+  vocabulary.
+  - **No entitlement behaviour changes.** Those tables are read only to decide which lock
+    badges and plan bullets to draw; every paid operation was, and still is, authorized by
+    the cloud's token scopes and paid-entitlement dependencies.
+  - **Local workspace export is unaffected and always was free.** `GET /export` returns the
+    full bi-temporal dump (memories, sessions, audit) on every plan and is deliberately not
+    entitlement-gated so data portability survives recovery mode. It is now listed in the
+    README as the free capability it is.
+  - `GET /export?signed=true` and `GET /analytics/export` still answer `501`, but now say
+    the capability is not implemented and name the working alternative, instead of implying
+    it is available in Engraphis Cloud.
+
 ### Changed
 
 - Managed compute consent now travels with the cloud account: an installation connected to
@@ -797,7 +843,7 @@ and safe hosted deployment.
 - Sleep-time consolidation with compaction accounting
 - Personalized PageRank graph arm (HippoRAG-style)
 - Offline signed license keys (no phone-home)
-- Pro analytics dashboard and compliance export
+- Pro analytics dashboard
 - Code-symbol graph via tree-sitter or regex fallback
 - Docker + docker-compose deployment
 - 300+ tests, eval harness, ablation suite

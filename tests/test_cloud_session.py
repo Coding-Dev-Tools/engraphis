@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 from io import BytesIO
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -280,6 +281,154 @@ def test_refresh_authorization_error_preserves_status(monkeypatch, status) -> No
         )
 
     assert caught.value.status == status
+
+
+@pytest.mark.parametrize("failure", [
+    http.client.LineTooLong("header line"),
+    http.client.BadStatusLine("garbage"),
+])
+def test_a_mangled_refresh_status_line_requires_reconnect(monkeypatch, failure) -> None:
+    """The request was sent, so an unparsable reply may hide a spent credential.
+
+    These ``HTTPException`` variants escape from ``getresponse()`` after urllib has sent the
+    refresh POST.  A control plane or proxy may have consumed the one-time credential before
+    the malformed reply prevented its rotation from reaching disk; classifying that as 503
+    would retry the stale credential and can revoke its entire family.
+    """
+
+    class _Opener:
+        def open(self, request, timeout):
+            raise failure
+
+    monkeypatch.setattr(
+        cloud_session.urllib.request, "build_opener", lambda *handlers: _Opener()
+    )
+    with pytest.raises(cloud_session.CloudSessionError) as caught:
+        cloud_session._post_refresh(
+            "https://control.example.test", "refresh", "ws", "member"
+        )
+
+    assert caught.value.status == 409
+    assert "Connect this installation again" in str(caught.value)
+
+
+@pytest.mark.parametrize("failure", [
+    http.client.IncompleteRead(b'{"access_'),
+    TimeoutError("read timed out"),
+    ConnectionResetError("reset mid-body"),
+])
+def test_a_truncated_refresh_body_is_not_reported_as_a_retryable_outage(
+    monkeypatch, failure
+) -> None:
+    """A post-response failure must not invite a retry that replays a spent credential.
+
+    Once the status line parses, the control plane consumed the submitted credential, but
+    the rotation it returned only reaches disk after the body parses -- so the stale value
+    is still there. ``_public_session_error`` maps 503 to ``transient=True``, which
+    ``CloudFeatureClient.run_job`` acts on by retrying, and this module documents that the
+    control plane answers a replayed credential by revoking the whole family. 409 is the
+    existing non-transient "connect this installation again" bucket.
+    """
+
+    class _Truncated:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> bool:
+            return False
+
+        def read(self, size: int = -1) -> bytes:
+            raise failure
+
+    class _Opener:
+        def open(self, request, timeout):
+            return _Truncated()
+
+    monkeypatch.setattr(
+        cloud_session.urllib.request, "build_opener", lambda *handlers: _Opener()
+    )
+    with pytest.raises(cloud_session.CloudSessionError) as caught:
+        cloud_session._post_refresh(
+            "https://control.example.test", "refresh", "ws", "member"
+        )
+
+    assert caught.value.status == 409
+    assert "Connect this installation again" in str(caught.value)
+
+    # The status must survive translation to the public error as non-transient, or the
+    # retry this whole change exists to prevent happens anyway.
+    from engraphis.cloud_features import _public_session_error
+
+    _message, transient = _public_session_error(caught.value.status)
+    assert transient is False
+
+
+@pytest.mark.parametrize("payload", [
+    b"{not json",
+    b'"a string"',
+    b"[]",
+])
+def test_an_unparseable_refresh_body_is_also_non_transient(monkeypatch, payload) -> None:
+    """Same hazard as a truncated body: answered, credential spent, rotation not saved."""
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> bool:
+            return False
+
+        def read(self, size: int = -1) -> bytes:
+            return payload
+
+    class _Opener:
+        def open(self, request, timeout):
+            return _Response()
+
+    monkeypatch.setattr(
+        cloud_session.urllib.request, "build_opener", lambda *handlers: _Opener()
+    )
+    with pytest.raises(cloud_session.CloudSessionError) as caught:
+        cloud_session._post_refresh(
+            "https://control.example.test", "refresh", "ws", "member"
+        )
+
+    assert caught.value.status == 409
+    assert "invalid session response" in str(caught.value)
+
+
+def test_a_truncated_refresh_error_body_still_reports_the_status(monkeypatch) -> None:
+    """The drain runs inside the ``except HTTPError`` block, so it needs its own guard.
+
+    An exception raised there cannot reach the sibling ``except HTTPException`` clause of
+    the same ``try``, so an ``(OSError, ValueError)`` guard let ``IncompleteRead`` replace
+    the 401 copy with a traceback.
+    """
+
+    error = urllib.error.HTTPError(
+        "https://control.example.test/v1/tokens/refresh",
+        401, "denied", {}, BytesIO(b'{"detail":"private"}'),
+    )
+
+    def _boom(*args, **kwargs):
+        raise http.client.IncompleteRead(b'{"detail":"pri')
+
+    error.read = _boom
+    error.close = _boom
+
+    class _Opener:
+        def open(self, request, timeout):
+            raise error
+
+    monkeypatch.setattr(
+        cloud_session.urllib.request, "build_opener", lambda *handlers: _Opener()
+    )
+    with pytest.raises(cloud_session.CloudSessionError) as caught:
+        cloud_session._post_refresh(
+            "https://control.example.test", "refresh", "ws", "member"
+        )
+
+    assert caught.value.status == 401
 
 
 def test_refresh_network_error_is_service_unavailable(monkeypatch) -> None:

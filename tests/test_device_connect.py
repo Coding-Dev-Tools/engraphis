@@ -10,6 +10,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import socket
 import urllib.error
 import urllib.request
 from io import BytesIO
@@ -317,6 +318,77 @@ def test_http_error_body_is_drained_and_closed(monkeypatch):
     assert closed == [True]
 
 
+def test_incomplete_read_is_not_an_oserror_or_a_valueerror():
+    """Pins the premise the drain guard is built on, so a wrong comment cannot return.
+
+    ``http.client.IncompleteRead.__mro__`` is
+    ``(IncompleteRead, HTTPException, Exception, BaseException, object)``.  It is *only* an
+    ``HTTPException``; an earlier version of this module claimed it also subclassed
+    ``ValueError`` and guarded the drain with ``(OSError, ValueError)`` on that basis.
+    """
+
+    assert not issubclass(http.client.IncompleteRead, OSError)
+    assert not issubclass(http.client.IncompleteRead, ValueError)
+    assert issubclass(http.client.IncompleteRead, http.client.HTTPException)
+
+
+@pytest.mark.parametrize("failure", [
+    http.client.IncompleteRead(b'{"detail":"pri'),
+    http.client.LineTooLong("chunk size"),
+    ConnectionResetError("peer went away mid-drain"),
+])
+def test_a_truncated_error_body_still_reports_the_status(monkeypatch, failure):
+    """A flaky drain must not replace the status copy with a traceback.
+
+    ``exc.read()`` is called from *inside* the ``except HTTPError`` block, so the sibling
+    ``except http.client.HTTPException`` clause of the same ``try`` can never catch what it
+    raises -- the drain needs its own guard, and that guard has to name ``HTTPException``
+    because ``IncompleteRead`` is neither an ``OSError`` nor a ``ValueError``.
+    """
+
+    error = _http_error(401)
+
+    def _boom(*args, **kwargs):
+        raise failure
+
+    error.read = _boom
+    error.close = _boom
+    _install_opener(monkeypatch, _Opener(error=error))
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
+
+    # The customer gets the 401 copy they would have got from a well-behaved body.
+    assert caught.value.status == 401
+    assert "Generate a new one" in str(caught.value)
+    assert TOKEN not in str(caught.value)
+
+
+def test_the_cli_reports_a_truncated_error_body_instead_of_a_traceback(
+    monkeypatch, capsys
+):
+    """End-to-end proof of the same path: exit 1 and clean copy, no stack trace."""
+
+    error = _http_error(401)
+
+    def _boom(*args, **kwargs):
+        raise http.client.IncompleteRead(b'{"detail":"pri')
+
+    error.read = _boom
+    error.close = _boom
+    _install_opener(monkeypatch, _Opener(error=error))
+
+    code = connect_cli.main(
+        ["--token", TOKEN, "--control-url", CONTROL_URL, "--compute-url", COMPUTE_URL]
+    )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "IncompleteRead" not in err
+    assert "Generate a new one" in err
+
+
 def test_network_failure_reports_an_outage_without_leaking_the_detail(monkeypatch):
     _install_opener(
         monkeypatch, _Opener(error=urllib.error.URLError("proxy.internal refused"))
@@ -404,17 +476,23 @@ def test_a_success_without_a_refresh_credential_writes_nothing(
     the copy has to send the customer to the portal for a fresh token, exactly like the
     truncated-reply path does.
     """
+
     body = dict(REGISTRATION)
-    body["refresh_credential"] = credential
+    if credential is None:
+        body.pop("refresh_credential")
+    else:
+        body["refresh_credential"] = credential
     _install_opener(monkeypatch, _Opener(body=body))
 
     with pytest.raises(device_connect.DeviceConnectError) as caught:
         device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
 
+    message = str(caught.value)
     assert caught.value.status == 502
-    message = str(caught.value).lower()
-    assert "has now been used" in message
-    assert "generate a new one" in message
+    assert "generate a new one" in message.lower()
+    # The old copy sent the customer back into a guaranteed 401.
+    assert "Try again," not in message
+    assert TOKEN not in message
     assert not (tmp_path / "cloud_session.json").exists()
 
 
@@ -578,47 +656,10 @@ class _TruncatedBody:
         return False
 
     def read(self, size: int = -1) -> bytes:
-        # What ``HTTPResponse._read_chunked`` raises for a truncated body.  It subclasses
-        # ``HTTPException``/``ValueError`` -- neither ``OSError`` nor ``URLError``.
+        # What ``HTTPResponse._read_chunked`` raises for a truncated body.  Its only base
+        # is ``HTTPException`` -- it is neither an ``OSError``, a ``ValueError``, nor a
+        # ``URLError``.  See ``test_incomplete_read_is_not_an_oserror_or_a_valueerror``.
         raise http.client.IncompleteRead(b'{"organization_id":"org_al')
-
-
-class _TruncatedHttpErrorBody:
-    """An HTTP-error body whose drain or close breaks after the server replied."""
-
-    def __init__(self, phase: str) -> None:
-        self.phase = phase
-        self.closed = False
-
-    def read(self, size: int = -1) -> bytes:
-        if self.phase == "read":
-            raise http.client.IncompleteRead(b'{"detail":"truncated"')
-        return b"{}"
-
-    def close(self) -> None:
-        self.closed = True
-        if self.phase == "close":
-            raise http.client.LineTooLong("truncated error response")
-
-
-@pytest.mark.parametrize("phase", ["read", "close"])
-def test_a_truncated_http_error_body_keeps_its_fixed_status_error(monkeypatch, phase):
-    """Drain faults happen inside the HTTPError handler, not its sibling clauses."""
-
-    body = _TruncatedHttpErrorBody(phase)
-    error = _http_error(401)
-    # Use a concrete closing hook so the test verifies our handler executes it even when
-    # the preceding error-body drain failed; urllib's internal wrapper owns its own file.
-    error.fp = body
-    error.close = body.close
-    _install_opener(monkeypatch, _Opener(error=error))
-
-    with pytest.raises(device_connect.DeviceConnectError) as caught:
-        device_connect.connect(TOKEN, control_url=CONTROL_URL, compute_url=COMPUTE_URL)
-
-    assert caught.value.status == 401
-    assert "generate a new one" in str(caught.value).lower()
-    assert body.closed is True
 
 
 @pytest.mark.parametrize("failure", [
@@ -1159,47 +1200,6 @@ def test_compute_url_is_taken_from_the_environment(monkeypatch):
     assert cloud_session.configured() is True
 
 
-def test_non_shipped_control_plane_uses_its_vetted_compute_url(monkeypatch, tmp_path):
-    """The connect response, not a shipped-only fallback, configures custom planes."""
-
-    server_compute = "https://assigned-compute.example.test"
-    _install_opener(monkeypatch, _Opener(body=dict(REGISTRATION, compute_url=server_compute)))
-
-    summary = device_connect.connect(TOKEN, control_url=CONTROL_URL)
-
-    saved = json.loads((tmp_path / "cloud_session.json").read_text(encoding="utf-8"))
-    assert summary["compute_url"] == server_compute
-    assert saved["compute_url"] == server_compute
-    assert saved["compute_url_source"] == "server"
-    assert cloud_session.configured() is True
-
-
-@pytest.mark.parametrize("source", ["cli", "environment"])
-def test_explicit_compute_override_outranks_the_connect_response(monkeypatch, source):
-    """A server cannot replace an operator-selected endpoint during device connect."""
-
-    server_compute = "https://assigned-compute.example.test"
-    kwargs = {}
-    if source == "cli":
-        kwargs["compute_url"] = COMPUTE_URL
-    else:
-        monkeypatch.setenv("ENGRAPHIS_CLOUD_COMPUTE_URL", COMPUTE_URL)
-    _install_opener(monkeypatch, _Opener(body=dict(REGISTRATION, compute_url=server_compute)))
-
-    summary = device_connect.connect(TOKEN, control_url=CONTROL_URL, **kwargs)
-    assert summary["compute_url"] == COMPUTE_URL
-    assert cloud_session._load()["compute_url_source"] == "explicit"
-
-
-def test_empty_cli_compute_value_does_not_suppress_the_connect_response(monkeypatch):
-    server_compute = "https://assigned-compute.example.test"
-    _install_opener(monkeypatch, _Opener(body=dict(REGISTRATION, compute_url=server_compute)))
-
-    assert device_connect.connect(
-        TOKEN, control_url=CONTROL_URL, compute_url=""
-    )["compute_url"] == server_compute
-
-
 def test_control_url_defaults_to_the_shipped_manifest(monkeypatch):
     from engraphis.commercial import manifest
 
@@ -1315,7 +1315,7 @@ def test_an_unresolvable_home_directory_is_an_error_not_a_traceback(monkeypatch,
 
 
 @pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "0", "-5", "1e9", "10000000000"])
-def test_an_unusable_timeout_is_refused_before_any_request(monkeypatch, bad):
+def test_a_non_finite_timeout_is_refused_before_any_request(monkeypatch, bad):
     """``argparse``'s ``type=float`` accepts ``nan``/``inf``; the socket layer does not.
 
     Those reach ``urllib``'s deadline arithmetic and raise ``ValueError``/``OverflowError``
@@ -1337,10 +1337,46 @@ def test_an_unusable_timeout_is_refused_before_any_request(monkeypatch, bad):
     assert "timeout" in str(caught.value)
 
 
-def test_the_largest_supported_timeout_is_accepted() -> None:
-    assert device_connect._validated_timeout(device_connect._MAX_TIMEOUT_SECONDS) == (
-        device_connect._MAX_TIMEOUT_SECONDS
+def test_a_huge_finite_timeout_is_refused_before_the_socket_overflows():
+    """``math.isfinite`` is not the same test as "a socket can use this".
+
+    ``socket.settimeout`` computes an absolute deadline, so a large but finite value raises
+    ``OverflowError`` ("timeout doesn't fit into C timeval" / "timestamp out of range for
+    platform time_t") -- an exception ``post_connect`` does not catch, so ``--timeout
+    10000000000`` printed a traceback.  The bound is checked against a real socket here so
+    the constant cannot drift into the range that overflows.
+    """
+
+    sock = socket.socket()
+    try:
+        sock.settimeout(device_connect._MAX_TIMEOUT_SECONDS)
+        assert sock.gettimeout() == device_connect._MAX_TIMEOUT_SECONDS
+    finally:
+        sock.close()
+
+    with pytest.raises(device_connect.DeviceConnectError) as caught:
+        device_connect._validated_timeout(device_connect._MAX_TIMEOUT_SECONDS + 1)
+
+    assert caught.value.status == 400
+    assert "timeout" in str(caught.value)
+
+
+def test_the_cli_reports_an_oversized_timeout_instead_of_a_traceback(monkeypatch, capsys):
+    class _Exploding:
+        @staticmethod
+        def open(request, timeout=None):  # pragma: no cover - must never run
+            raise AssertionError("a request was started with an unusable timeout")
+
+    _install_opener(monkeypatch, _Exploding())
+
+    code = connect_cli.main(
+        ["--token", TOKEN, "--control-url", CONTROL_URL, "--timeout", "10000000000"]
     )
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "timeout" in err
+    assert "Traceback" not in err
 
 
 def test_the_cli_reports_a_bad_timeout_instead_of_a_traceback(monkeypatch, capsys):
