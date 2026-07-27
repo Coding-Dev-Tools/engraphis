@@ -553,7 +553,9 @@
         ctx.textBaseline = 'middle';
         ctx.fillText(String(node.members), node.x, node.y);
         ctx.font = '500 ' + Math.max(2.6, r * 0.4) + 'px system-ui, sans-serif';
-        ctx.fillStyle = 'rgba(232,236,245,.9)';
+        // Cluster names sit outside the coloured bubble.  They therefore need the active
+        // theme's text colour, not the dark-theme near-white that disappears on light canvas.
+        ctx.fillStyle = state.themeColors.label || '#e7e9ee';
         ctx.fillText(nodeName(node), node.x, node.y + r * 1.5 + r * 0.5);
         ctx.textAlign = 'left';
         ctx.globalAlpha = 1;

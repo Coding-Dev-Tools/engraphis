@@ -932,10 +932,11 @@ def test_dashboard_hands_the_engine_the_active_themes_entity_colours() -> None:
     assert report["themeColors"]["person_or_concept"] == "#112233"
     assert report["themeColors"]["organization"] == "#556677"
     assert report["themeColors"]["relation_label"] == "#123456"
+    assert report["themeColors"]["label"] == "#e7e9ee"
     # Every type the legend can show must be covered, or the canvas falls back per type.
     assert set(report["themeColors"]) == {
         "person_or_concept", "mention", "hashtag", "email", "organization", "location",
-        "relation_label",
+        "relation_label", "label",
     }
 
 
@@ -1044,6 +1045,12 @@ def test_relation_labels_are_painted_when_the_labels_box_is_ticked() -> None:
     assert report["ticked"] == ["mentions"], "the Labels checkbox never paints relation names"
     assert report["labelColor"] == "#123456", "relation labels ignore the active theme"
     assert report["zoomedOut"] == []
+
+
+def test_collapsed_cluster_labels_use_the_active_theme_text_colour() -> None:
+    source = ASSET.read_text(encoding="utf-8")
+    cluster_paint = source[source.index("if (node.cluster)"):source.index("if (state.bridges", source.index("if (node.cluster)"))]
+    assert "state.themeColors.label || '#e7e9ee'" in cluster_paint
 
 
 @requires_node
