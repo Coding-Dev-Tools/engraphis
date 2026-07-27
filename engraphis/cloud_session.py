@@ -6,6 +6,7 @@ never writes it to project configuration or logs.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import stat
@@ -464,6 +465,11 @@ def _refresh_http_error(status: int) -> CloudSessionError:
     return CloudSessionError("Engraphis Cloud could not refresh this session.")
 
 
+#: What a best-effort drain of an error body is allowed to fail with.  See the comment in
+#: :func:`_post_refresh`; ``engraphis.device_connect`` guards its drain with the same tuple.
+_DRAIN_FAILURES = (OSError, ValueError, http.client.HTTPException)
+
+
 def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
                   token_subject: str) -> dict:
     # An org-scoped entitlement read asks for an unbound token, so it passes no workspace.
@@ -494,17 +500,32 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
         # ``except`` clause of this ``try`` does NOT cover an exception raised inside this
         # handler, so an unguarded read escapes as an unhandled traceback whenever the
         # cloud is flaky -- exactly the launch-day condition this path exists for.
+        #
+        # ``HTTPException`` is named explicitly: a truncated chunked error body raises
+        # ``http.client.IncompleteRead``, whose MRO is ``(IncompleteRead, HTTPException,
+        # Exception, BaseException, object)`` -- neither an ``OSError`` nor a ``ValueError``,
+        # so the pair alone let it through.
         try:
             exc.read(_MAX_RESPONSE_BYTES + 1)
-        except (OSError, ValueError):
+        except _DRAIN_FAILURES:
             pass
         finally:
             try:
                 exc.close()
-            except (OSError, ValueError):
+            except _DRAIN_FAILURES:
                 pass
         raise _refresh_http_error(code)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise CloudSessionError("Engraphis Cloud is temporarily unreachable.") from exc
+    except http.client.HTTPException as exc:
+        # A reply that begins and then stops mid-body makes ``HTTPResponse.read`` raise
+        # ``IncompleteRead``; ``LineTooLong``/``BadStatusLine`` come from a mangled status
+        # line or headers.  None of them are ``OSError``, so without this clause they
+        # escaped as a traceback out of every paid feature's token refresh.
+        #
+        # Deliberately *after* the transport clause: ``RemoteDisconnected`` is both a
+        # ``ConnectionResetError`` and a ``BadStatusLine``, and it keeps the transport
+        # copy it already had.
         raise CloudSessionError("Engraphis Cloud is temporarily unreachable.") from exc
     if len(raw) > _MAX_RESPONSE_BYTES:
         raise CloudSessionError("Engraphis Cloud returned an oversized session response.")
