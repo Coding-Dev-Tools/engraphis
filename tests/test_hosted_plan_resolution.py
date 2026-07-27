@@ -41,7 +41,7 @@ import pytest
 # install. Skip rather than error at collection, matching the rest of the suite.
 pytest.importorskip("fastapi", reason="full-stack extra not installed")
 
-from engraphis import cloud_session  # noqa: E402
+from engraphis import cloud_session, hosted_client  # noqa: E402
 from engraphis.routes import v2_api  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +63,25 @@ SERVER_PLAN_FEATURES = {
 # "not a trial, none consumed" in silence -- which is precisely the state this suite exists
 # to keep it out of -- so the drift has to fail here instead.
 SERVER_TRIAL_FIELDS = ("status", "is_trial", "trial_consumed", "trial_ends_at")
+
+
+def test_license_route_emits_plan_neutral_account_url(monkeypatch) -> None:
+    """Billing/account actions must not silently inherit the Pro checkout."""
+
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_PLAN", "pro")
+    monkeypatch.setenv("ENGRAPHIS_UPGRADE_URL", "https://cloud.test/account")
+    monkeypatch.setenv("ENGRAPHIS_PRO_UPGRADE_URL", "https://cloud.test/checkout/pro")
+    monkeypatch.setenv("ENGRAPHIS_TEAM_UPGRADE_URL", "https://cloud.test/checkout/team")
+
+    payload = v2_api.get_license()
+
+    assert payload["account_url"] == "https://cloud.test/account"
+    assert payload["pro_upgrade_url"] == "https://cloud.test/checkout/pro"
+    assert payload["team_upgrade_url"] == "https://cloud.test/checkout/team"
+    assert payload["upgrade_url"] == "https://cloud.test/checkout/pro"
+
+    monkeypatch.delenv("ENGRAPHIS_UPGRADE_URL")
+    assert v2_api.get_license()["account_url"] == hosted_client.DEFAULT_CLOUD_URL
 
 
 #: A three-day trial that is still running, and one that is not, as the control plane

@@ -1,4 +1,8 @@
-/* Engraphis knowledge graph — the dashboard's opt-in force-graph engine.
+/* Engraphis knowledge graph — the unified v2 dashboard's opt-in force-graph engine.
+   `engraphis.dashboard_app` owns the production dashboard and mounts this shared static
+   package over the v2 route set. The legacy `engraphis.app` mounts the same assets only as
+   a compatibility surface; keeping one renderer avoids two diverging graph implementations.
+
    Restores the shipped behaviour: GRAPH_PRESETS, GSTYLE render modes (cyber/galaxy/solar/classic),
    STYLE_PAL / STYLE_LAYERS / STYLE_BG, COMMUNITY_PALS, GRAPH_HEAT, colour-by community/type/connections,
    GRAPH_PALETTES with per-entity-type overrides, d3 force wiring, directional particles, label ranking,

@@ -5,6 +5,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-26
+
+Public 1.1.0 hosted-connect and graph-experience release.
+
 ### Removed
 
 - **"Signed compliance export" is no longer advertised on any surface.** It was granted to
@@ -50,6 +54,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - A stable per-installation identity at `~/.engraphis/client_identity.json` (random ULIDs,
   not a hardware fingerprint) so reconnecting a machine updates its existing installation
   instead of registering a new device every time.
+- An opt-in canvas graph engine (`?graph-engine=next`) with the existing ForceGraph + D3
+  visual modes, deterministic communities, accessible classic fallback, lazy CSP-confined
+  assets, bounded simulations, and large/dense-graph rendering guards.
 
 ### Changed
 
@@ -60,6 +67,12 @@ All notable changes to Engraphis are documented here. Format loosely follows
   `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` remains as an explicit operator override (`=0` opts a
   connected installation back out, `=1` forces it on regardless of session state) and is no
   longer surfaced anywhere in the UI.
+- Hosted plan presentation now follows the control plane's active, trial, expired, and
+  lapsed states; renewal follows the plan actually held, account actions use the
+  plan-neutral portal, and a spent trial is never offered again.
+- Device-connect and refresh responses validate credential fields as strings, preserve
+  single-use-token semantics across truncated responses, and refuse unsafe session-storage
+  paths before redeeming a token.
 
 ## [1.0.1] - 2026-07-24
 

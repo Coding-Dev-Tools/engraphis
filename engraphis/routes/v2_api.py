@@ -2644,6 +2644,9 @@ def get_license():
         "grace_seconds": 86_400,
         "grace_scope": "existing authenticated local workspace writes only",
         "upgrade_url": licensing.upgrade_url(),
+        # Plan-neutral account and billing entry point. ``upgrade_url()`` defaults to the
+        # Pro checkout and is therefore not a safe substitute when the targets differ.
+        "account_url": licensing.account_url(),
         # Pro and Team bill through separate checkout targets. Emitting only the generic
         # URL sent every Team upgrade click to the Pro page.
         "pro_upgrade_url": licensing.upgrade_url("pro"),

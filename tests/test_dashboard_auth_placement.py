@@ -192,9 +192,9 @@ def _license_copy(tmp_path, cases):
     """Execute the shipped entitlement copy and action helpers under Node."""
 
     functions = (
-        "licAccessState", "licTrialAvailable", "licPlanName", "licPlanKey",
+        "licAccessState", "licAccessLive", "licTrialAvailable", "licPlanName", "licPlanKey",
         "licTrialEnds", "fmtDay", "hostedAccountUrl", "hostedPlanUrl",
-        "lockReason", "licActionsHtml",
+        "lockReason", "teamTeaserNote", "licActionsHtml",
     )
     driver = """
 const CASES = JSON.parse(process.argv[2]);
@@ -204,6 +204,7 @@ for (const c of CASES) {
   out.push({
     name: c.name,
     reason: lockReason(true),
+    teamNote: teamTeaserNote(),
     actions: licActionsHtml(c.state)
   });
 }
@@ -233,7 +234,7 @@ def test_lock_reason_has_one_plain_text_escaping_contract() -> None:
     assert "esc(" not in reason
     assert "${esc(detail)}" in upgrade
     assert "esc(lockReason(false))" in script
-    assert "esc(lockReason(true))" in script
+    assert "esc(teamTeaserNote())" in script
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
@@ -269,6 +270,9 @@ def test_team_entitlements_use_truthful_copy_and_the_team_billing_url(tmp_path) 
     assert "does not include" not in rendered["active-team"]["reason"]
     assert "Your Team trial is live" in rendered["team-trial"]["reason"]
     assert "needs a subscription" not in rendered["team-trial"]["reason"]
+    assert "Your TEAM subscription includes this" in rendered["active-team"]["teamNote"]
+    assert "does not include" not in rendered["active-team"]["teamNote"]
+    assert "Your free trial includes Team" in rendered["team-trial"]["teamNote"]
     assert "Update billing" in rendered["lapsed-team"]["actions"]
     assert "plan=team" in rendered["lapsed-team"]["actions"]
     assert "plan=pro" not in rendered["lapsed-team"]["actions"]

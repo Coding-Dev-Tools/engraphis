@@ -62,6 +62,37 @@ def test_refresh_rotates_saved_credential_and_binds_client_workspace(monkeypatch
     assert writes[0]["refresh_credential"] == "rotated-refresh"
 
 
+@pytest.mark.parametrize("field", ["access_token", "refresh_credential"])
+def test_refresh_rejects_non_string_credentials_without_saving(monkeypatch, field) -> None:
+    """Provider JSON types are validated, never coerced into a credential repr."""
+
+    saved = {
+        "control_url": "https://control.example.test",
+        "compute_url": "https://compute.example.test",
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+    }
+    writes = []
+    body = {
+        "access_token": "short-lived-access",
+        "organization_id": "org_1",
+        "refresh_credential": "rotated-refresh",
+        "token_subject": "member",
+    }
+    body[field] = ["not", "a", "credential"]
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(saved))
+    monkeypatch.setattr(cloud_session, "_save", writes.append)
+    monkeypatch.setattr(cloud_session, "validate_cloud_base_url", lambda value: value.rstrip("/"))
+    monkeypatch.setattr(cloud_session, "_post_refresh", lambda *_args: body)
+
+    with pytest.raises(cloud_session.CloudSessionError) as caught:
+        cloud_session.access_for_workspace("ws_client_1")
+
+    assert caught.value.status == 409
+    assert writes == []
+
+
 def test_refresh_updates_the_saved_compute_endpoint_from_a_valid_response(monkeypatch) -> None:
     """The cloud can move a connected installation to a new compute endpoint."""
 

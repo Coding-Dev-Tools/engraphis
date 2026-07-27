@@ -348,6 +348,12 @@ test('a paying Team customer sees TEAM with Team administration unlocked', async
     .toHaveCount(0);
   await expect(licensePanel.getByRole('button', { name: 'Start hosted Pro trial' }))
     .toHaveCount(0);
+
+  await openView(page, 'team');
+  const team = page.locator('#team-body');
+  await expect(team).toContainText('Your TEAM subscription includes this');
+  await expect(team).not.toContainText('does not include');
+  await expect(team.getByRole('link', { name: 'Start hosted Team trial' })).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
@@ -367,6 +373,10 @@ test('a paying Pro customer keeps only the Team upsell', async ({ page }) => {
   await expect(licensePanel).toContainText(`✓ ${knownFeatures.analytics}`);
   await expect(licensePanel).toContainText(`✓ ${knownFeatures.consolidation}`);
   await expect(licensePanel).toContainText(`○ ${knownFeatures.team}`);
+
+  await openView(page, 'team');
+  await expect(page.locator('#team-body'))
+    .toContainText('Your PRO subscription does not include this.');
   expect(errors).toEqual([]);
 });
 
