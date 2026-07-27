@@ -29,14 +29,9 @@ https://discord.com/invite/Wfr2ejBmY
 > Auto Dreaming, Auto Consolidation, and Team identity/seat management run only on the
 > official hosted service; their server implementations are not distributed here.
 
-## The WebUI — one command, local-first
+## Full Engraphis install: pip install "engraphis[all]"
 
-```bash
-pip install "engraphis[server]"
-engraphis-dashboard
-```
-
-Opens `http://127.0.0.1:8700` in your browser. No cloud, signup, or API key is required for
+Engraphis-Dashboard opens `http://127.0.0.1:8700` in your browser. No cloud, signup, or API key is required for
 local memory. Memory lives in a local SQLite file on your machine. The public dashboard is
 single-user; Team accounts, invitations, roles, seats, and organization audit live in Engraphis
 Cloud.
