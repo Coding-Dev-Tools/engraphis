@@ -595,6 +595,13 @@ def _refresh_http_error(status: int) -> CloudSessionError:
 #: :func:`_post_refresh`; ``engraphis.device_connect`` guards its drain with the same tuple.
 _DRAIN_FAILURES = (OSError, ValueError, http.client.HTTPException)
 
+#: Public copy for every ambiguous refresh response. Once the POST is written, replaying the
+#: single-use credential can revoke its family; reconnecting is the safe recovery.
+_INCOMPLETE_REFRESH_RESPONSE = (
+    "Engraphis Cloud answered this session refresh but the reply was incomplete, "
+    "so the rotated credential could not be saved. Connect this installation again."
+)
+
 
 def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
                   token_subject: str) -> dict:
@@ -642,18 +649,21 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
             except _DRAIN_FAILURES:
                 pass
         raise _refresh_http_error(code)
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except urllib.error.URLError as exc:
         raise CloudSessionError("Engraphis Cloud is temporarily unreachable.") from exc
-    except http.client.HTTPException as exc:
-        # ``LineTooLong``/``BadStatusLine`` from a mangled status line or headers. None of
-        # them are ``OSError``, so without this clause they escaped as a traceback out of
-        # every paid feature's token refresh.
+    except (TimeoutError, OSError, http.client.HTTPException) as exc:
+        # These failures arise while ``open`` is waiting for the response, after urllib has
+        # written the POST. The control plane may have spent the single-use credential even
+        # though no usable status line reached us.
         #
-        # Deliberately *after* the transport clause: ``RemoteDisconnected`` is both a
-        # ``ConnectionResetError`` and a ``BadStatusLine``, and it keeps the transport copy
-        # it already had.  Nothing was parsed here, so the credential is untouched and the
-        # retryable outage status is correct.
-        raise CloudSessionError("Engraphis Cloud is temporarily unreachable.") from exc
+        # Keep ``URLError`` separate above: urllib uses it for failures while establishing or
+        # sending the request, the only phase where retrying the same credential is safe.
+        # ``RemoteDisconnected`` has both OSError and BadStatusLine ancestry and therefore
+        # deliberately lands in this non-transient bucket.
+        raise CloudSessionError(
+            _INCOMPLETE_REFRESH_RESPONSE,
+            status=409,
+        ) from exc
 
     try:
         with response:
@@ -672,12 +682,7 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
         # happened before the server committed the rotation the old credential was still
         # good and the reconnect was unnecessary, but the opposite mistake revokes every
         # credential in the family and forces the same reconnect anyway, from a worse state.
-        raise CloudSessionError(
-            "Engraphis Cloud answered this session refresh but the reply was incomplete, "
-            "so the rotated credential could not be saved. Connect this installation "
-            "again.",
-            status=409,
-        ) from exc
+        raise CloudSessionError(_INCOMPLETE_REFRESH_RESPONSE, status=409) from exc
 
     # These are post-response too, so they carry the same replay hazard as the truncated
     # body above and take the same non-transient status: the server consumed the credential

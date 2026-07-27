@@ -1118,6 +1118,67 @@ def test_collapsed_cluster_labels_use_the_active_theme_text_colour() -> None:
 
 
 @requires_node
+def test_normal_and_highlighted_node_labels_use_the_active_theme_text_colour() -> None:
+    """Entity labels remain visible on the light canvas, including the highlighted node."""
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData({
+          nodes: [{ id: 'a', name: 'Alpha', degree: 20 }, { id: 'b', name: 'Beta' }],
+          links: [{ source: 'a', target: 'b' }],
+        });
+        const node = store.graphData.nodes[0];
+        node.x = 1; node.y = 2;
+        api.setSettings({ labels: true, labelDensity: 100 });
+        api.setThemeColors({ label: '#123456' });
+        const painted = [];
+        const ctx = new Proxy({
+          fillStyle: '',
+          fillText(text) { painted.push({ text: String(text), color: this.fillStyle }); },
+        }, {
+          get(target, name) {
+            if (name in target) return target[name];
+            return () => {};
+          },
+        });
+        store.nodeCanvasObject(node, ctx, 1);
+        const normal = painted[painted.length - 1];
+        api.setHighlight('a');
+        painted.length = 0;
+        store.nodeCanvasObject(node, ctx, 1);
+        emit({ normal, highlighted: painted[painted.length - 1] });
+        """
+    )
+    assert report["normal"]["color"] == "#123456"
+    assert report["highlighted"]["color"] == "#123456"
+
+
+@requires_node
+def test_unfreezing_releases_drag_pins_even_with_reduced_motion() -> None:
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData({
+          nodes: [{ id: 'a' }, { id: 'b' }],
+          links: [{ source: 'a', target: 'b' }],
+        });
+        const node = store.graphData.nodes[0];
+        node.x = 10; node.y = 20;
+        store.onNodeDragEnd(node);
+        const pinned = node.fx === 10 && node.fy === 20;
+        api.freeze(true);
+        api.freeze(false);
+        emit({
+          pinned,
+          released: node.fx === undefined && node.fy === undefined,
+          reheats: invocations.d3ReheatSimulation || 0,
+        });
+        """
+    )
+    assert report == {"pinned": True, "released": True, "reheats": 0}
+
+
+@requires_node
 def test_focusing_an_entity_the_canvas_is_not_showing_does_not_report_success() -> None:
     """``zoomToNode`` is the dashboard's visibility oracle, and it was answering from memory.
 

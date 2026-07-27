@@ -642,7 +642,9 @@
         ctx.textBaseline = 'middle';
         ctx.fillStyle = 'rgba(0,0,0,.5)';
         ctx.fillText(nodeName(node), node.x + r + 1.6 + 0.3, node.y + 0.3);
-        ctx.fillStyle = node.id === hilite ? '#ffffff' : 'rgba(232,236,245,.86)';
+        // The canvas sits on both light and dark themes. A hard-coded pale label disappears
+        // on the light canvas, including for a highlighted node.
+        ctx.fillStyle = state.themeColors.label || '#e7e9ee';
         ctx.fillText(nodeName(node), node.x + r + 1.6, node.y);
       }
       ctx.globalAlpha = 1;
@@ -928,6 +930,10 @@
       state.settings.frozen = on;
       if (on) { fg.d3Force('charge').strength(0); fg.d3AlphaDecay(1); return; }
       applyForces();
+      // Dragging pins nodes with fx/fy. "Unfreeze" must release those pins even when reduced
+      // motion suppresses the reheat below; otherwise the control claims movement is restored
+      // while every dragged node remains immobile.
+      raw.nodes.forEach(n => { n.fx = undefined; n.fy = undefined; });
       if (reduced()) return;
       fg.d3AlphaDecay(alphaDecay());
       if (fg.d3ReheatSimulation) fg.d3ReheatSimulation();
