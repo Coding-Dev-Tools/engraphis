@@ -6,6 +6,8 @@ never writes it to project configuration or logs.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import http.client
 import json
 import os
@@ -21,25 +23,69 @@ from typing import Optional, Tuple
 
 from engraphis.hosted_client import (
     CloudUrlUnresolved,
+    account_url,
     build_pinned_https_opener,
-    upgrade_url,
     validate_cloud_base_url,
 )
 from engraphis.private_state import (
     UnsafeStateFile,
     atomic_private_text,
+    ensure_private_dir,
     private_file_stat,
     read_private_text,
 )
 
 _MAX_RESPONSE_BYTES = 64 * 1024
 _REFRESH_THREAD_LOCK = threading.RLock()
+_UNUSABLE_REFRESHES: set[tuple[str, str]] = set()
 
 
 class CloudSessionError(RuntimeError):
-    def __init__(self, message: str, *, status: int = 503) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int = 503,
+        refresh_unusable: bool = False,
+    ) -> None:
         super().__init__(message)
         self.status = status
+        self.refresh_unusable = refresh_unusable
+
+
+def _refresh_digest(value: str) -> str:
+    """Return the non-secret identity used to retire a spent refresh credential."""
+
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
+def _refresh_identity(value: str) -> tuple[str, str]:
+    return str(_session_path()), _refresh_digest(value)
+
+
+def _refresh_is_unusable(saved: dict, value: str) -> bool:
+    if not value:
+        return False
+    persisted = str(saved.get("refresh_unusable_digest") or "")
+    return bool(
+        (persisted and hmac.compare_digest(persisted, _refresh_digest(value)))
+        or _refresh_identity(value) in _UNUSABLE_REFRESHES
+    )
+
+
+def _mark_refresh_unusable(saved: dict, value: str) -> None:
+    """Prevent replay after a response that may have spent the one-time credential."""
+
+    if value:
+        _UNUSABLE_REFRESHES.add(_refresh_identity(value))
+    updated = dict(saved)
+    updated.pop("refresh_credential", None)
+    updated["refresh_unusable"] = True
+    updated["refresh_unusable_at"] = time.time()
+    # Retire only the credential that may have been spent. Keeping the raw secret out of
+    # state lets an operator safely replace a failed environment bootstrap credential.
+    updated["refresh_unusable_digest"] = _refresh_digest(value)
+    _save(updated)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -102,7 +148,7 @@ def _refresh_lock():
     with _REFRESH_THREAD_LOCK:
         lock_path = _refresh_lock_path()
         try:
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            ensure_private_dir(lock_path.parent)
             expected = private_file_stat(lock_path, allow_missing=True)
             flags = _LOCK_OPEN_FLAGS
             if expected is None:
@@ -219,8 +265,10 @@ def _load() -> dict:
 
 def _save(value: dict) -> None:
     path = _session_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_private_text(path, json.dumps(value, sort_keys=True, separators=(",", ":")))
+    ensure_private_dir(path.parent)
+    atomic_private_text(
+        path, json.dumps(value, sort_keys=True, separators=(",", ":")), harden_parent=True,
+    )
 
 
 def preflight_save() -> Path:
@@ -243,7 +291,7 @@ def preflight_save() -> Path:
 
     path = _session_path()
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_dir(path.parent)
     except OSError as exc:
         raise CloudSessionError(
             "The Engraphis state directory %s could not be created." % path.parent,
@@ -317,6 +365,10 @@ def preflight_save() -> Path:
 
 #: Plans that carry no paid cloud access, used only to default an absent activity flag.
 _UNPAID_PLANS = ("free", "local")
+#: Statuses that contradict "still active". Used only to refuse the optimistic default
+#: for an *absent* ``cloud_access_active`` -- never as an allow-list, and never to
+#: override an explicit boolean the control plane did send.
+_TERMINAL_STATUSES = frozenset({"canceled", "cancelled", "expired", "revoked", "inactive"})
 #: Entitlement status vocabulary the control plane can persist or compute
 #: (``the hosted entitlement contract`` the hosted status contract, plus every provider status
 #: the hosted subscription endpoint accepts). Kept as a bound, not an allow-list: an
@@ -374,12 +426,18 @@ def _declared_entitlement(response: object) -> dict:
         return {}
     plan = plan.strip().lower()[:_MAX_PLAN_CHARS]
     active = response.get("cloud_access_active")
+    named = response.get("status")
+    named = named.strip().lower() if isinstance(named, str) else ""
     declared = {
         "plan": plan,
         # Absent is not "inactive".  Defaulting a paid plan to ``False`` would re-lock a
-        # paying customer against a server that reports the plan but not the flag.
+        # paying customer against a server that reports the plan but not the flag.  But
+        # the optimistic default must not survive a body that says, in the same breath,
+        # that the entitlement is over: ``{"plan": "team", "status": "revoked"}`` was
+        # being read as active team access.
         "cloud_access_active": (
-            bool(active) if isinstance(active, bool) else plan not in _UNPAID_PLANS
+            bool(active) if isinstance(active, bool)
+            else plan not in _UNPAID_PLANS and named not in _TERMINAL_STATUSES
         ),
         "entitlement_checked_at": time.time(),
     }
@@ -549,12 +607,14 @@ def _refresh_http_error(status: int) -> CloudSessionError:
 
     if status in {401, 403}:
         return CloudSessionError(
-            "The cloud session expired or was revoked; connect again.", status=status
+            "The cloud session expired or was revoked; connect again.",
+            status=status,
+            refresh_unusable=True,
         )
     if status == 402:
         return CloudSessionError(
             "This Engraphis Cloud subscription is not active. Update billing at %s to "
-            "restore Pro and Team features." % upgrade_url(),
+            "restore Pro and Team features." % account_url(),
             status=402,
         )
     if status == 404:
@@ -562,6 +622,7 @@ def _refresh_http_error(status: int) -> CloudSessionError:
             "This installation is no longer registered with Engraphis Cloud; "
             "connect again.",
             status=409,
+            refresh_unusable=True,
         )
     if status == 429:
         return CloudSessionError(
@@ -633,6 +694,7 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
             "Engraphis Cloud did not complete this refresh response, so the rotated "
             "credential could not be saved. Connect this installation again.",
             status=409,
+            refresh_unusable=True,
         ) from exc
     except (http.client.BadStatusLine, http.client.LineTooLong) as exc:
         # ``getresponse()`` raises these only after urllib has sent the POST.  The control
@@ -645,6 +707,7 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
             "Engraphis Cloud returned a malformed refresh response, so the rotated "
             "credential could not be saved. Connect this installation again.",
             status=409,
+            refresh_unusable=True,
         ) from exc
     except http.client.HTTPException as exc:
         # Other malformed HTTP replies have no useful protocol status, but unlike a malformed
@@ -673,6 +736,7 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
             "so the rotated credential could not be saved. Connect this installation "
             "again.",
             status=409,
+            refresh_unusable=True,
         ) from exc
 
     # These are post-response too, so they carry the same replay hazard as the truncated
@@ -683,6 +747,7 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
             "Engraphis Cloud returned an oversized session response, so the rotated "
             "credential could not be saved. Connect this installation again.",
             status=409,
+            refresh_unusable=True,
         )
     try:
         body = json.loads(raw.decode("utf-8"))
@@ -691,12 +756,14 @@ def _post_refresh(control_url: str, refresh: str, workspace_id: Optional[str],
             "Engraphis Cloud returned an invalid session response, so the rotated "
             "credential could not be saved. Connect this installation again.",
             status=409,
+            refresh_unusable=True,
         ) from exc
     if not isinstance(body, dict):
         raise CloudSessionError(
             "Engraphis Cloud returned an invalid session response, so the rotated "
             "credential could not be saved. Connect this installation again.",
             status=409,
+            refresh_unusable=True,
         )
     return body
 
@@ -715,6 +782,8 @@ def configured(*, require_compute: bool = True) -> bool:
     # every subsequent call would replay the now-invalid bootstrap credential.
     refresh = str(saved.get("refresh_credential") or "").strip()
     refresh = refresh or os.environ.get("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", "").strip()
+    if _refresh_is_unusable(saved, refresh):
+        refresh = ""
     control = os.environ.get("ENGRAPHIS_CLOUD_CONTROL_URL", "").strip()
     control = control or str(saved.get("control_url") or "").strip()
     compute = direct_compute or str(saved.get("compute_url") or "").strip()
@@ -758,6 +827,12 @@ def access_for_workspace(
         refresh = refresh or os.environ.get(
             "ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", ""
         ).strip()
+        if _refresh_is_unusable(saved, refresh):
+            raise CloudSessionError(
+                "The saved cloud refresh credential cannot be reused; connect this "
+                "installation again.",
+                status=409,
+            )
         control = os.environ.get("ENGRAPHIS_CLOUD_CONTROL_URL", "").strip()
         control = control or str(saved.get("control_url") or "").strip()
         compute = direct_compute or str(saved.get("compute_url") or "").strip()
@@ -768,7 +843,12 @@ def access_for_workspace(
         control = _reachable_cloud_base_url(control)
         compute = _reachable_cloud_base_url(compute) if compute else ""
         token_subject = _token_subject(saved)
-        body = _post_refresh(control, refresh, workspace_id, token_subject)
+        try:
+            body = _post_refresh(control, refresh, workspace_id, token_subject)
+        except CloudSessionError as exc:
+            if exc.refresh_unusable:
+                _mark_refresh_unusable(saved, refresh)
+            raise
         # Same untrusted-provider boundary as ``save_bootstrap``: a non-string credential
         # would otherwise be stored as its ``repr`` and submitted on the next refresh.
         access = text_field(body, "access_token")
@@ -779,10 +859,12 @@ def access_for_workspace(
         if not access or not organization_id or not rotated:
             # Also post-response: the submitted credential is spent and no rotation was
             # saved, so this must not be reported as a retryable outage either.
+            _mark_refresh_unusable(saved, refresh)
             raise CloudSessionError(
                 "Engraphis Cloud returned incomplete session credentials, so the rotated "
                 "credential could not be saved. Connect this installation again.",
                 status=409,
+                refresh_unusable=True,
             )
         response_subject = _validated_token_subject(
             body.get("token_subject") or token_subject
@@ -797,6 +879,9 @@ def access_for_workspace(
             "refresh_expires_at": text_field(body, "refresh_expires_at"),
             "token_subject": response_subject,
         })
+        updated.pop("refresh_unusable", None)
+        updated.pop("refresh_unusable_at", None)
+        updated.pop("refresh_unusable_digest", None)
         # The refresh response carries the same entitlement fields as registration, so the
         # plan re-confirms itself on every token rotation. An older cloud omits them and
         # the previously persisted answer (if any) is left untouched.

@@ -49,6 +49,16 @@ def test_persist_project_env_keeps_private_mode_and_cleans_temporary_files(tmp_p
     assert not list(tmp_path.glob("..env.tmp-*"))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission semantics")
+def test_persist_project_env_preserves_the_existing_project_directory_mode(tmp_path):
+    os.chmod(tmp_path, 0o755)
+
+    target = persist_project_env({"ENGRAPHIS_EXTRACTOR": "none"}, path=tmp_path / ".env")
+
+    assert tmp_path.stat().st_mode & 0o777 == 0o755
+    assert target.stat().st_mode & 0o777 == 0o600
+
+
 @pytest.mark.parametrize("values", [
     {"lowercase": "value"},
     {"ENGRAPHIS_EXTRACTOR": "bad\nvalue"},

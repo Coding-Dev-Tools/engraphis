@@ -36,8 +36,16 @@ local memory. Memory lives in a local SQLite file on your machine. The public da
 single-user; Team accounts, invitations, roles, seats, and organization audit live in Engraphis
 Cloud.
 
-**You'll see the complete local workspace plus hosted-service entry points** — a dark-themed
-(with multiple theme options in the left sidebar), sidebar-navigated dashboard with 14 tabs:
+**Ledger is the primary interface** — the complete final five-area design, backed by real v2
+data rather than the design reference’s sample store. It includes Today, cited/abstaining Ask,
+the governed Library, the advanced Graph & Relations view, Provenance (beliefs, timeline, audit,
+receipts, supersessions), and Manage (workspaces, consolidation, hosted services, plans, and
+settings). It stays local and CSP-safe and includes Slate, Midnight, Paper, and Matrix themes.
+
+The complete former operator interface is preserved as **Classic**. Switch between Ledger and
+Classic from **Manage → Settings → Interface** in Ledger or **Settings → Appearance & Engine** in Classic; both
+interfaces use the same workspaces, memories, receipts, and v2 engine. Classic contains the
+full tool suite:
 
 **New graphical interface!** Shape the Knowledge Graph with several **Styles, Colors,
 and Presets**. Switch among Cyberpunk, Galaxy, Solar system, and Classic looks; choose
@@ -241,9 +249,13 @@ docker compose up                     # → http://127.0.0.1:8700
 
 A fresh clone needs no `.env`: the default service runs `engraphis-dashboard --no-open`,
 stores the v2 database plus license state on a named volume mounted at `/data`, and accepts
-overrides from `.env` or the shell. The legacy v1 API is opt-in with
-`docker compose --profile api up engraphis-api` and uses a separate database so its
-incompatible schema cannot collide with the dashboard.
+overrides from `.env` or the shell. The legacy v1 API is opt-in, requires a strong
+`ENGRAPHIS_API_TOKEN`, and uses a separate database so its incompatible schema cannot collide
+with the dashboard:
+
+```bash
+ENGRAPHIS_API_TOKEN='generate-a-strong-unique-value' docker compose --profile api up engraphis-api
+```
 
 Compose publishes both services on host loopback only. Set a strong `ENGRAPHIS_API_TOKEN`
 before changing either port mapping to a non-loopback host address.
@@ -369,13 +381,14 @@ to the official hosted service; it does not unlock private server code inside th
 an email-confirmed Pro or Team trial — no card required. The trial term is **exactly 3 active
 days**.
 
-Separately, `workspace_write_grace` may preserve ordinary writes to an already provisioned
-**local** workspace for at most **24 hours** after an authoritative entitlement denial. This is
-an availability cushion, not a fourth trial day. It never extends trial or subscription expiry,
-never grants Cloud Sync, Analytics, Automation, Auto Dreaming, Auto Consolidation, Team access,
-new seats, or new credentials, and never resets an expiry clock. Hosted access may stop
-immediately. After grace, the client preserves recovery reads and data export while blocking
-ordinary mutations until entitlement is restored.
+Separately, the private control plane may apply `workspace_write_grace` to continuity operations
+for an already authorized hosted account for at most **24 hours** after an entitlement denial.
+This is an availability cushion, not a fourth trial day. It never extends trial or subscription expiry,
+never grants Cloud Sync, Analytics, Automation, Auto Dreaming, Auto Consolidation, Team
+access, new seats, or new credentials, and never resets an expiry clock. Hosted access may stop
+immediately. After grace, the private service can enter `recovery_read_only` so account recovery
+and export remain available while hosted mutations are blocked. These hosted states do not gate
+the Apache-licensed local dashboard, MCP tools, or local writes.
 
 Cloud Sync is opt-in and transported over HTTPS; Engraphis does not advertise end-to-end
 encryption. Paid entitlements require current hosted authorization, while the Free core remains
@@ -503,9 +516,10 @@ The public runtime and its hosted-service clients enforce:
   bearer protects a remotely exposed customer node. Local Team accounts, invitations, roles,
   seats, password handling, and organization administration are not shipped here.
 - **Hosted authorization boundary** — Cloud Sync, Analytics, Automation, Team identity, and
-  cost-bearing work require current authorization from the private service. A lapsed customer
-  installation has only the bounded local `workspace_write_grace` described above, followed by
-  `recovery_read_only`; neither state permits cloud access or account growth.
+  cost-bearing work require current authorization from the private service. Any bounded
+  `workspace_write_grace` and later `recovery_read_only` state is enforced by that private
+  service for hosted account continuity; neither state grants cloud access or account growth,
+  and neither restricts the free local core.
 - **SQLite transaction safety** — shared v2 connections serialize complete write transactions;
   a failed statement that opened a transaction rolls it back and releases its lock. Legacy
   decay is frequency-independent, and sync preserves future bi-temporal validity horizons.
@@ -590,9 +604,10 @@ Manual consolidation is free and remains local. Use the dashboard's **Consolidat
 `MemoryService.consolidate`, `POST /api/consolidate`, `engraphis_consolidate`, or
 `python -m scripts.consolidate`. Dry-run is the default.
 
-Pro and Team add **hosted** Auto Consolidation and Auto Dreaming. The public Automation tab is a
-policy/status client: it submits a bounded snapshot to private managed compute and displays
-reviewable jobs or proposals. The scheduling, analytics, dreaming, and
+Pro and Team add **hosted** Auto Consolidation and Auto Dreaming. On a connected workspace, the
+first Automation view automatically starts the recommended daily maintenance policy and uploads
+its bounded snapshot; there is no separate enable step. Customers can later pause or tune that
+policy. The public Automation tab displays reviewable jobs or proposals. The scheduling, analytics, dreaming, and
 consolidation automation algorithms run in Engraphis Cloud; this repository ships no premium
 background loop, cron wrapper, or worker.
 
@@ -667,13 +682,15 @@ engraphis/
 │   ├── service.py           # validated MemoryService facade
 │   ├── mcp_server.py        # MCP server — 29 tools
 │   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
+│   ├── dashboard_assets/    # primary Ledger interface + graph engine
+│   ├── classic_assets/      # selectable full operator dashboard backup
 │   ├── read_only_api.py     # token-protected recall/repository-graph HTTP surface
 │   ├── hosted_client.py     # hosted URLs, plan labels, and endpoint validation only
 │   ├── licensing.py         # compatibility facade for hosted presentation metadata
 │   ├── cloud_session.py     # rotating hosted customer-session client
 │   ├── cloud_features.py    # consented managed-feature protocol client
 │   ├── config.py / app.py   # env settings / REST server
-│   └── static/              # dashboard frontend
+│   └── static/              # compatibility dashboard asset paths
 ├── eval/                    # offline retrieval eval harness + datasets
 ├── tests/                   # pytest suite (300+ tests, offline numpy-only core)
 ├── scripts/                 # start_dashboard, inspector, cli, init, consolidate, sync

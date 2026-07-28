@@ -140,6 +140,83 @@ def test_environment_bootstrap_persists_and_reuses_rotated_credential(monkeypatc
     assert state["refresh_credential"] == "rotated-2"
 
 
+def test_a_possibly_spent_refresh_is_marked_unusable_and_never_replayed(
+    monkeypatch,
+) -> None:
+    """A truncated/revoked rotation must force reconnect on every later request."""
+
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", "env-bootstrap")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_CONTROL_URL", "https://control.example.test")
+    state = {}
+    requests = []
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(
+        cloud_session, "_save", lambda value: (state.clear(), state.update(value))
+    )
+    monkeypatch.setattr(
+        cloud_session, "validate_cloud_base_url", lambda value: value.rstrip("/")
+    )
+
+    def spent(*args):
+        requests.append(args[1])
+        raise cloud_session.CloudSessionError(
+            "Connect this installation again.",
+            status=409,
+            refresh_unusable=True,
+        )
+
+    monkeypatch.setattr(cloud_session, "_post_refresh", spent)
+    with pytest.raises(cloud_session.CloudSessionError) as first:
+        cloud_session.access_for_workspace("ws", require_compute=False)
+    with pytest.raises(cloud_session.CloudSessionError) as second:
+        cloud_session.access_for_workspace("ws", require_compute=False)
+
+    assert first.value.status == 409
+    assert second.value.status in {401, 409}
+    assert requests == ["env-bootstrap"]
+    assert state["refresh_unusable"] is True
+    assert state["refresh_unusable_digest"] == cloud_session._refresh_digest("env-bootstrap")
+    assert "refresh_credential" not in state
+
+
+def test_replaced_environment_bootstrap_is_not_blocked_by_a_spent_predecessor(
+    monkeypatch,
+) -> None:
+    """A persisted tombstone applies to its credential, not every future bootstrap."""
+
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", "replacement-bootstrap")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_CONTROL_URL", "https://control.example.test")
+    state = {
+        "refresh_unusable": True,
+        "refresh_unusable_at": 1.0,
+        "refresh_unusable_digest": cloud_session._refresh_digest("spent-bootstrap"),
+    }
+    requests = []
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(
+        cloud_session, "_save", lambda value: (state.clear(), state.update(value))
+    )
+    monkeypatch.setattr(
+        cloud_session, "validate_cloud_base_url", lambda value: value.rstrip("/")
+    )
+
+    def refresh(control_url, credential, workspace_id, token_subject):
+        requests.append(credential)
+        return {
+            "access_token": "replacement-access",
+            "organization_id": "org_1",
+            "refresh_credential": "rotated-replacement",
+            "token_subject": "member",
+        }
+
+    monkeypatch.setattr(cloud_session, "_post_refresh", refresh)
+    assert cloud_session.configured(require_compute=False) is True
+    assert cloud_session.access_for_workspace("ws", require_compute=False)[0] == "replacement-access"
+    assert requests == ["replacement-bootstrap"]
+    assert "refresh_unusable" not in state
+    assert "refresh_unusable_digest" not in state
+
+
 def test_concurrent_refreshes_spend_each_rotation_once(monkeypatch) -> None:
     monkeypatch.setenv("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", "bootstrap")
     monkeypatch.setenv("ENGRAPHIS_CLOUD_CONTROL_URL", "https://control.example.test")

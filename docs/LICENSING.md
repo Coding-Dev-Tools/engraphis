@@ -57,13 +57,14 @@ change the Apache license or prevent a fork from modifying code already released
 The server-issued Pro or Team trial lasts **exactly 3 active days**. Grace is a separately
 named operational state and never turns that into a four-day trial.
 
-`workspace_write_grace` can preserve an already provisioned installation after authoritative
-entitlement expiry or denial for **up to 24 hours**. The private control plane anchors and caps
-that window; restarting a public client or moving its clock cannot reset it.
+`workspace_write_grace` can preserve bounded continuity operations for an already authorized
+hosted account after entitlement expiry or denial for **up to 24 hours**. The private control
+plane anchors, enforces, and caps that window; restarting a public client or moving its clock
+cannot reset it.
 
-During this grace state, the already provisioned installation may continue ordinary local-core
-workspace writes. Paid or cost-bearing features and hosted agent writes still require live
-authorization and may stop immediately. Grace cannot:
+During this grace state, only the private service's explicitly allowed hosted-account continuity
+operations may continue. Paid or cost-bearing features and hosted agent writes still require
+live authorization and may stop immediately. Grace cannot:
 
 - extend the signed trial or paid entitlement expiry;
 - enable a new installation or activation;
@@ -71,9 +72,10 @@ authorization and may stop immediately. Grace cannot:
 - permit administrative growth; or
 - reset any expiry or grace clock.
 
-After grace, the installation enters `recovery_read_only`. Local reads, data export, and
-relicensing remain available while normal mutations are blocked. Existing customer data is
-therefore recoverable without granting continuing paid or Team capability.
+After grace, the private service can enter `recovery_read_only`. Hosted account recovery,
+data export, and relicensing remain available while normal hosted mutations are blocked. The
+Apache-licensed local dashboard, MCP server, local writes, and local exports remain free and are
+not controlled by either hosted lifecycle state.
 
 ## Forks, service access, and trademarks
 

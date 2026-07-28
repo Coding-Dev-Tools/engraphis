@@ -87,6 +87,7 @@ GRAPH_INDEX_JOB_HISTORY = 100
 # produce a multi-megabyte response or lock the inspector's DOM.
 GRAPH_ENTITY_RELATION_LIMIT = 200
 GRAPH_ENTITY_EVIDENCE_LIMIT = 100
+GRAPH_ENTITY_EVIDENCE_CANDIDATE_LIMIT = 400
 GRAPH_ENTITY_HISTORY_LIMIT = 50
 
 
@@ -114,6 +115,33 @@ def _graph_edge_visibility_sql(edge_alias: str, *, at: Optional[float] = None) -
         f"OR {anchor}<visibility_memory.valid_to) "
         "AND visibility_memory.expired_at IS NULL "
         "AND COALESCE(visibility_memory.scope, 'workspace')!='session'))"
+    )
+
+
+def _graph_edge_history_visibility_sql(edge_alias: str, *, at: float) -> str:
+    """Visibility predicate for a time-travel graph payload.
+
+    The ordinary graph reader asks whether evidence is public *at now*.  The Time
+    view instead deliberately includes a relation's public history so the browser
+    can distinguish live relations from superseded ghosts at the chosen anchor. Public
+    support must have begun by that anchor, but it need not still be live: an invalidated
+    public relation is intentionally retained as a ghost. Hard-expired evidence remains
+    hidden in either case.
+    """
+    anchor = repr(float(at))
+    return (
+        "(NOT EXISTS (SELECT 1 FROM edge_supports history_support "
+        f"WHERE history_support.edge_id={edge_alias}.id) OR EXISTS ("
+        "SELECT 1 FROM edge_supports history_support "
+        "JOIN memories history_memory ON history_memory.id=history_support.memory_id "
+        f"WHERE history_support.edge_id={edge_alias}.id "
+        "AND (history_support.valid_from IS NULL "
+        f"OR history_support.valid_from<={anchor}) "
+        "AND history_support.expired_at IS NULL "
+        "AND (history_memory.valid_from IS NULL "
+        f"OR history_memory.valid_from<={anchor}) "
+        "AND history_memory.expired_at IS NULL "
+        "AND COALESCE(history_memory.scope, 'workspace')!='session'))"
     )
 
 
@@ -3007,9 +3035,10 @@ class MemoryService:
 
     def update_memory(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
                       title: Optional[str] = None, mtype: Optional[str] = None,
+                      importance: Optional[float] = None,
                       actor: str = "user") -> dict:
-        """In-place edit of a memory's label fields (title, type). Content edits go through
-        ``correct`` so bi-temporal history is preserved; title/type are mutable labels."""
+        """In-place edit of a memory's metadata fields. Content edits go through
+        ``correct`` so bi-temporal history is preserved."""
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS, required=False) or "user"
         wid, rid = self._require_scope(workspace, repo)
@@ -3025,6 +3054,17 @@ class MemoryService:
             sets.append("mtype=?")
             params.append(mt)
             changes.append(f"type={mt}")
+        if importance is not None:
+            try:
+                importance = float(importance)
+            except (TypeError, ValueError):
+                raise ValidationError("importance must be a number")
+            if not math.isfinite(importance):
+                raise ValidationError("importance must be finite")
+            importance = max(0.0, min(1.0, importance))
+            sets.append("importance=?")
+            params.append(importance)
+            changes.append("importance")
         if not sets:
             raise ValidationError("nothing to update")
         params.append(mid)
@@ -4982,6 +5022,137 @@ class MemoryService:
             "as_of": as_of,
         }
 
+    def graph_entity_evidence(self, canonical_id: str, *, workspace: str,
+                              as_of: Optional[float] = None) -> dict:
+        """Return one graph entity's public supporting memories without rebuilding the graph.
+
+        The full entity inspector calculates canonical relations, history, and graph metrics,
+        which materializes the workspace-wide graph. A graph click only needs its evidence
+        cards, so this path stays indexed and bounded even for a large workspace.
+        """
+        clean_canonical_id = _clean_text(
+            canonical_id, field="canonical_id", max_chars=MAX_NAME_CHARS
+        )
+        ws = self._clean_ws(workspace)
+        wid = self._lookup_workspace(ws)
+        if wid is None:
+            raise ValidationError(f"no workspace '{ws}'")
+        self._assert_graph_index_ready(wid)
+        try:
+            anchor = float(as_of) if as_of is not None else time.time()
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValidationError("as_of must be a finite timestamp") from exc
+        if not math.isfinite(anchor):
+            raise ValidationError("as_of must be a finite timestamp")
+
+        target = self.store.conn.execute(
+            "SELECT id, canonical_id FROM entities WHERE workspace_id=? AND id=? LIMIT 1",
+            (wid, clean_canonical_id),
+        ).fetchone()
+        if target is None:
+            target = self.store.conn.execute(
+                "SELECT id, canonical_id FROM entities WHERE workspace_id=? "
+                "AND canonical_id=? LIMIT 1",
+                (wid, clean_canonical_id),
+            ).fetchone()
+        if target is None:
+            raise ValidationError(
+                f"no entity '{clean_canonical_id}' in workspace '{ws}'"
+            )
+        resolved_canonical_id = str(target["canonical_id"] or target["id"])
+        target_params = (wid, resolved_canonical_id, resolved_canonical_id)
+
+        support_conditions = (
+            "relation.workspace_id=? AND relation.{endpoint}=target.id "
+            "AND (relation.valid_from IS NULL OR relation.valid_from<=?) "
+            "AND (relation.valid_to IS NULL OR ?<relation.valid_to) "
+            "AND relation.expired_at IS NULL "
+            "AND (support.valid_from IS NULL OR support.valid_from<=?) "
+            "AND (support.valid_to IS NULL OR ?<support.valid_to) "
+            "AND support.expired_at IS NULL AND memory.workspace_id=? "
+            "AND (memory.valid_from IS NULL OR memory.valid_from<=?) "
+            "AND (memory.valid_to IS NULL OR ?<memory.valid_to) "
+            "AND memory.expired_at IS NULL "
+            "AND COALESCE(memory.scope, 'workspace')!='session'"
+        )
+        source_conditions = support_conditions.format(endpoint="src")
+        target_conditions = support_conditions.format(endpoint="dst")
+        branch_params = (wid, anchor, anchor, anchor, anchor, wid, anchor, anchor)
+        sql = """
+            WITH target AS (
+                SELECT id FROM entities WHERE workspace_id=? AND (id=? OR canonical_id=?)
+            ), raw_supports AS (
+                SELECT * FROM (
+                    SELECT support.memory_id, support.confidence
+                    FROM target
+                    JOIN edges relation ON relation.src=target.id
+                    JOIN edge_supports support ON support.edge_id=relation.id
+                    JOIN memories memory ON memory.id=support.memory_id
+                    WHERE {source_conditions}
+                    LIMIT ?
+                )
+                UNION ALL
+                SELECT * FROM (
+                    SELECT support.memory_id, support.confidence
+                    FROM target
+                    JOIN edges relation ON relation.dst=target.id
+                    JOIN edge_supports support ON support.edge_id=relation.id
+                    JOIN memories memory ON memory.id=support.memory_id
+                    WHERE {target_conditions}
+                    LIMIT ?
+                )
+            ), ranked AS (
+                SELECT memory_id, MAX(confidence) AS confidence
+                FROM raw_supports GROUP BY memory_id
+            )
+            SELECT memory.id, memory.title, memory.content, memory.mtype,
+                   memory.valid_from, memory.valid_to, memory.ingested_at,
+                   memory.expired_at, memory.provenance, ranked.confidence
+            FROM ranked JOIN memories memory ON memory.id=ranked.memory_id
+            WHERE memory.workspace_id=?
+            ORDER BY ranked.confidence DESC,
+                     COALESCE(memory.valid_from, memory.ingested_at, 0) DESC,
+                     memory.id
+            LIMIT ?
+        """.format(
+            source_conditions=source_conditions,
+            target_conditions=target_conditions,
+        )
+        rows = self.store.conn.execute(
+            sql,
+            (*target_params, *branch_params, GRAPH_ENTITY_EVIDENCE_CANDIDATE_LIMIT,
+             *branch_params, GRAPH_ENTITY_EVIDENCE_CANDIDATE_LIMIT, wid,
+             GRAPH_ENTITY_EVIDENCE_LIMIT + 1),
+        ).fetchall()
+        truncated = len(rows) > GRAPH_ENTITY_EVIDENCE_LIMIT
+        rows = rows[:GRAPH_ENTITY_EVIDENCE_LIMIT]
+        evidence = []
+        for row in rows:
+            try:
+                provenance = json.loads(row["provenance"] or "{}")
+            except (TypeError, ValueError, RecursionError):
+                provenance = {}
+            if not isinstance(provenance, dict):
+                provenance = {}
+            evidence.append({
+                "memory_id": row["id"], "title": row["title"] or "",
+                "excerpt": str(row["content"] or "")[:500],
+                "memory_type": row["mtype"], "source_kind": "graph_support",
+                "confidence": float(row["confidence"] or 0.0),
+                "valid_from": row["valid_from"], "valid_to": row["valid_to"],
+                "ingested_at": row["ingested_at"], "expired_at": row["expired_at"],
+                "provenance": provenance,
+            })
+        return {
+            "workspace": ws, "canonical_id": resolved_canonical_id,
+            "evidence": evidence,
+            # This count is intentionally response-local: exact global totals would require
+            # scanning every support of a hub node and defeat the click path's hard budget.
+            "totals": {"evidence": len(evidence)},
+            "truncation": {"evidence": truncated},
+            "as_of": as_of,
+        }
+
     def graph_path(self, source: str, target: str, *, workspace: str,
                    repo: Optional[str] = None, as_of: Optional[float] = None,
                    memory_types: Optional[list[str]] = None,
@@ -5024,7 +5195,9 @@ class MemoryService:
 
     def graph(self, *, workspace: str, limit: int = 2000,
               layers: Optional[list] = None, include_code: bool = False,
-              repo: Optional[str] = None, backfill: bool = True) -> dict:
+              repo: Optional[str] = None, backfill: bool = True,
+              full: bool = False, connected_only: bool = False,
+              as_of: Optional[float] = None) -> dict:
         """Entity-relation network for a workspace: nodes/edges plus type counts,
         top-connected entities, and connectivity stats — powers the Graph tab in
         both the v1-look dashboard and the Inspector UI (engraphis.graphdata
@@ -5038,17 +5211,91 @@ class MemoryService:
         if wid is None:
             return empty_graph(ws)
         self._assert_graph_index_ready(wid)
-        limit = max(1, min(5000, int(limit)))
+        # The dashboard's default overview remains compact. A user-requested full node
+        # graph may use the analytical-scene ceiling, but never silently exceeds it: the
+        # CTE below reports the visible total and we return an explicit capacity error when
+        # a workspace needs filtering rather than pretending a truncated graph is complete.
+        node_limit = MAX_GRAPH_ANALYSIS_ENTITIES if full else 5000
+        limit = max(1, min(node_limit, int(limit)))
         conn = self.store.conn
         restrict_sessions = True
+        temporal_anchor = None
+        if as_of is not None:
+            try:
+                temporal_anchor = float(as_of)
+            except (TypeError, ValueError) as exc:
+                raise ValidationError("as_of must be a timestamp") from exc
+            if not math.isfinite(temporal_anchor):
+                raise ValidationError("as_of must be a finite timestamp")
+        # Code symbols and their edges are an index of the checkout as it exists now;
+        # unlike memory and entity relations, they do not carry world-time validity.
+        # Do not blend that live overlay into an otherwise historical graph response.
+        include_live_code = include_code and temporal_anchor is None
 
         def visible_entities():
-            sql = (
-                "SELECT id, name, etype FROM entities entity WHERE workspace_id=? "
-                "AND " + _graph_entity_visibility_sql("entity")
-            )
-            params: list[Any] = [wid]
-            sql += " LIMIT ?"
+            """Return public graph entities without a correlated edge scan per node.
+
+            The older predicate called ``_graph_entity_visibility_sql`` directly
+            for every candidate entity.  On a mature local workspace that became
+            thousands of nested ``edges``/``edge_supports`` probes before the
+            renderer even received a response.  Aggregate an edge's visibility
+            once, then aggregate that result by endpoint: no-edge entities remain
+            visible, entities supported only by session memories remain hidden,
+            and mixed-history entities stay visible as before.
+            """
+            evidence_at = ""
+            if temporal_anchor is not None:
+                # Entity records are backfilled lazily, so their ``created_at`` is
+                # ingestion time rather than world time.  Anchor the evidence instead:
+                # a later public support must not reveal an entity that was private at
+                # the requested point in time.  Do not bound ``valid_to`` here; the
+                # Time view deliberately retains previously-public facts as ghosts.
+                anchor = repr(temporal_anchor)
+                evidence_at = (
+                    " AND (support.valid_from IS NULL "
+                    f"OR support.valid_from<={anchor}) "
+                    "AND (visibility_memory.valid_from IS NULL "
+                    f"OR visibility_memory.valid_from<={anchor})"
+                )
+            sql = f"""
+                WITH edge_visibility AS (
+                    SELECT relation.id, relation.src, relation.dst,
+                           MAX(CASE
+                               WHEN support.edge_id IS NULL THEN 1
+                               WHEN visibility_memory.id IS NOT NULL
+                                AND COALESCE(visibility_memory.scope, 'workspace') != 'session'
+                               {evidence_at}
+                               THEN 1 ELSE 0
+                           END) AS is_visible
+                    FROM edges relation
+                    LEFT JOIN edge_supports support ON support.edge_id=relation.id
+                    LEFT JOIN memories visibility_memory
+                      ON visibility_memory.id=support.memory_id
+                    WHERE relation.workspace_id=?
+                    GROUP BY relation.id
+                ), endpoint_visibility AS (
+                    SELECT src AS entity_id, is_visible FROM edge_visibility
+                    UNION ALL
+                    SELECT dst AS entity_id, is_visible FROM edge_visibility
+                ), entity_visibility AS (
+                    SELECT entity_id, MAX(is_visible) AS is_visible,
+                           COUNT(*) AS degree
+                    FROM endpoint_visibility
+                    GROUP BY entity_id
+                )
+                SELECT entity.id, entity.name, entity.etype, repo.name AS repo,
+                       entity.created_at AS valid_from,
+                       COUNT(*) OVER() AS visible_total
+                FROM entities entity
+                LEFT JOIN repos repo ON repo.id=entity.repo_id
+                LEFT JOIN entity_visibility visible ON visible.entity_id=entity.id
+                WHERE entity.workspace_id=?
+                  AND COALESCE(visible.is_visible, 1)=1
+            """
+            params: list[Any] = [wid, wid]
+            if connected_only:
+                sql += " AND COALESCE(visible.degree, 0)>0"
+            sql += " ORDER BY COALESCE(visible.degree, 0) DESC, entity.id LIMIT ?"
             params.append(limit)
             return conn.execute(sql, params).fetchall()
 
@@ -5060,6 +5307,13 @@ class MemoryService:
         if backfill and self._should_backfill_graph(wid, bool(ents)):
             self._lazy_backfill_graph(wid)
             ents = visible_entities()
+        visible_total = int(ents[0]["visible_total"]) if ents else 0
+        if full and visible_total > MAX_GRAPH_ANALYSIS_ENTITIES:
+            raise GraphSceneCapacityExceeded(
+                resource="visible entity nodes",
+                count=visible_total,
+                limit=MAX_GRAPH_ANALYSIS_ENTITIES,
+            )
         entity_rows = [dict(row) for row in ents]
         node_ids = {row["id"] for row in entity_rows}
         selected_graph_layers = None
@@ -5072,7 +5326,7 @@ class MemoryService:
         # Nodes are capped at ``limit``; edges need their own cap or a large workspace
         # graph / indexed repo lets the lowest-privilege caller pull an unbounded
         # payload. The SQL fetches are limited too, so server-side work stays bounded.
-        edge_cap = max(limit * 8, 2000)
+        edge_cap = min(MAX_GRAPH_ANALYSIS_EDGES, max(limit * 8, 2000))
         # A workspace can legitimately have an A-MEM graph before it has extracted
         # entities: direct memory links are first-class relationships, not merely an
         # implementation detail of the code overlay.  The old dashboard endpoint
@@ -5081,7 +5335,7 @@ class MemoryService:
         # here as a useful fallback for both Graph-tab clients.
         memory_link_fallback: list[dict] = []
         if not entity_rows and selected_graph_layers != []:
-            now = time.time()
+            now = temporal_anchor if temporal_anchor is not None else time.time()
             sql = (
                 "SELECT link.a, link.b, link.relation, "
                 "COALESCE(link.layer, 'semantic') AS layer, "
@@ -5136,32 +5390,66 @@ class MemoryService:
             entity_rows = list(fallback_nodes.values())
         visible_edge_ids = None
         if restrict_sessions:
-            visible_edge_ids = {
-                row["id"] for row in conn.execute(
-                    "SELECT relation.id FROM edges relation "
-                    "WHERE relation.workspace_id=? AND "
-                    + _graph_edge_visibility_sql("relation"),
-                    (wid,),
-                ).fetchall()
-            }
-        edgs = [
-            {
-                "src": edge.src, "dst": edge.dst, "relation": edge.relation,
-                "layer": edge.layer.value if edge.layer else "semantic",
-            }
-            for edge in self.store.edges_in_scope(
-                SearchFilter(
-                    workspace_id=wid, graph_layers=selected_graph_layers
-                ),
-                limit=edge_cap,
+            if temporal_anchor is None:
+                visible_edge_ids = {
+                    row["id"] for row in conn.execute(
+                        "SELECT relation.id FROM edges relation "
+                        "WHERE relation.workspace_id=? AND "
+                        + _graph_edge_visibility_sql("relation"),
+                        (wid,),
+                    ).fetchall()
+                }
+        if temporal_anchor is None:
+            edgs = [
+                {
+                    "src": edge.src, "dst": edge.dst, "relation": edge.relation,
+                    "layer": edge.layer.value if edge.layer else "semantic",
+                }
+                for edge in self.store.edges_in_scope(
+                    SearchFilter(
+                        workspace_id=wid, graph_layers=selected_graph_layers
+                    ),
+                    limit=edge_cap,
+                )
+                if edge.src in node_ids and edge.dst in node_ids
+                and (visible_edge_ids is None or edge.id in visible_edge_ids)
+                and (
+                    selected_layers is None
+                    or (edge.layer.value if edge.layer else "semantic") in selected_layers
+                )
+            ]
+        else:
+            history_sql = (
+                "SELECT relation.id, relation.src, relation.dst, relation.relation, "
+                "relation.layer, relation.valid_from, relation.valid_to "
+                "FROM edges relation WHERE relation.workspace_id=? "
+                "AND relation.expired_at IS NULL AND "
+                + _graph_edge_history_visibility_sql("relation", at=temporal_anchor)
             )
-            if edge.src in node_ids and edge.dst in node_ids
-            and (visible_edge_ids is None or edge.id in visible_edge_ids)
-            and (
-                selected_layers is None
-                or (edge.layer.value if edge.layer else "semantic") in selected_layers
+            history_params: list[Any] = [wid]
+            if selected_layers is not None:
+                if not selected_layers:
+                    history_sql += " AND 0"
+                else:
+                    marks = ",".join("?" for _ in selected_layers)
+                    history_sql += f" AND relation.layer IN ({marks})"
+                    history_params.extend(sorted(selected_layers))
+            anchor = repr(temporal_anchor)
+            live_at_anchor = (
+                "(relation.valid_from IS NULL OR relation.valid_from<=" + anchor + ") "
+                "AND (relation.valid_to IS NULL OR " + anchor + "<relation.valid_to)"
             )
-        ]
+            # The bounded Time payload must first preserve relations that were live at
+            # the selected anchor. Remaining capacity is then used for recent ghosts.
+            history_sql += (
+                " ORDER BY CASE WHEN " + live_at_anchor + " THEN 0 ELSE 1 END, "
+                "relation.valid_from DESC, relation.id LIMIT ?"
+            )
+            history_params.append(edge_cap)
+            edgs = [
+                dict(row) for row in conn.execute(history_sql, history_params).fetchall()
+                if row["src"] in node_ids and row["dst"] in node_ids
+            ]
         for link in memory_link_fallback:
             if len(edgs) >= edge_cap:
                 break
@@ -5172,7 +5460,7 @@ class MemoryService:
                 "reason": link.get("reason") or "",
             })
         repo_names: list[str] = []
-        if include_code:
+        if include_live_code:
             repo_rows = []
             if repo:
                 repo_name = _clean_name(repo, field="repo")
@@ -5306,8 +5594,13 @@ class MemoryService:
                             "reason": link.get("reason") or "",
                         })
         payload = build_graph_payload(ws, entity_rows, edgs)
-        payload["unified"] = bool(include_code)
+        payload["unified"] = bool(include_live_code)
         payload["repos"] = repo_names
+        payload["meta"] = {
+            "nodes_available": max(visible_total, len(entity_rows)),
+            "nodes_complete": len(entity_rows) >= visible_total,
+            "mode": "full" if full else "overview",
+        }
         return payload
 
     def _should_backfill_graph(self, wid: str, has_entities: bool) -> bool:

@@ -175,6 +175,33 @@ def test_notice_line(monkeypatch):
     assert u.notice_line({"enabled": True, "update_available": False}) is None
 
 
+def test_cli_notice_uses_the_non_blocking_snapshot_and_is_fail_silent(monkeypatch):
+    seen = []
+    monkeypatch.setenv("ENGRAPHIS_UPDATE_CHECK", "1")
+    monkeypatch.setattr(u, "snapshot", lambda: {
+        "enabled": True, "update_available": True, "latest": "1.4.0", "current": "1.0.0",
+        "url": "https://rel/1.4.0",
+    })
+    monkeypatch.setattr(u, "check", lambda **_kwargs: pytest.fail("CLI must not check inline"))
+    u.emit_cli_notice(seen.append)
+    assert seen and "1.4.0" in seen[0]
+
+    monkeypatch.setattr(u, "snapshot", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+    u.emit_cli_notice(seen.append)
+    assert len(seen) == 1
+
+
+def test_primary_ledger_renders_the_update_snapshot():
+    root = __import__("pathlib").Path(__file__).resolve().parents[1] / "engraphis" / "dashboard_assets"
+    html = (root / "index.html").read_text(encoding="utf-8")
+    script = (root / "ledger.js").read_text(encoding="utf-8")
+    css = (root / "ledger.css").read_text(encoding="utf-8")
+    assert 'id="update-banner"' in html
+    assert "renderUpdateBanner(bootstrap.update)" in script
+    assert "pip install -U engraphis" in script
+    assert ".update-banner" in css
+
+
 def test_api_update_endpoint(monkeypatch):
     pytest.importorskip("fastapi", reason="v2_api requires fastapi (extras)")
     from engraphis.routes import v2_api

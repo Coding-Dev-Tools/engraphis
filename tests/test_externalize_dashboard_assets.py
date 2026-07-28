@@ -185,6 +185,18 @@ def test_eager_scripts_are_parsed_in_any_tag_and_attribute_case():
     ]
 
 
+def test_eager_script_cache_keys_are_normalized_to_asset_paths():
+    found = assets._eager_scripts(
+        '<script src="/static/dashboard.js?v=20260728-node-materials-v2"></script>'
+        '<script src="/v2-assets/engraphis-graph.js?build=materials#ignored"></script>'
+    )
+
+    assert found == [
+        "/static/dashboard.js",
+        "/v2-assets/engraphis-graph.js",
+    ]
+
+
 def test_check_rejects_an_eagerly_loaded_script_in_any_tag_case(tmp_path, monkeypatch):
     """The uppercase spelling is loaded by browsers, so it must fail the same rule."""
     _gate(
