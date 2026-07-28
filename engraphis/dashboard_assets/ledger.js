@@ -41,6 +41,16 @@
   const all = selector => [...document.querySelectorAll(selector)];
   const text = value => value == null ? '' : String(value);
   const number = value => Number.isFinite(Number(value)) ? Number(value) : 0;
+  function provenanceTimestampMs(item) {
+    // Audit rows use seconds (`ts`), while receipts use milliseconds (`ts_ms`).
+    // Normalize before merging so both the newest-first order and 120-row cap are
+    // chronological across the two independently paginated feeds.
+    const raw = item && (item.ts_ms ?? item.ts ?? item.timestamp ?? item.created_at);
+    const numeric = Number(raw);
+    if (Number.isFinite(numeric)) return numeric < 1e12 ? numeric * 1000 : numeric;
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
   const truncate = (value, length = 260) => {
     const source = text(value).trim();
     return source.length > length ? `${source.slice(0, length - 1)}…` : source;
@@ -489,6 +499,14 @@
     state.graphData = null;
     state.graphDataIncludeCode = false;
     state.selectedMemory = '';
+    // Detail/editor handlers close over a memory record. Clear both before the
+    // workspace fetches begin so a stale form cannot write that record into the
+    // newly selected workspace.
+    state.editorMemory = null;
+    byId('memory-editor').hidden = true;
+    const memoryDetail = byId('memory-detail');
+    memoryDetail.replaceChildren();
+    memoryDetail.hidden = true;
     if (state.graphEngine) {
       state.graphEngine.destroy();
       state.graphEngine = null;
@@ -1646,7 +1664,7 @@
     const combined = [
       ...audit.map(item => ({ ...item, _kind: 'audit' })),
       ...receipts.map(item => ({ ...item, _kind: 'receipt' })),
-    ].sort((a, b) => number(a.ts_ms || a.ts || a.timestamp) - number(b.ts_ms || b.ts || b.timestamp)).reverse();
+    ].sort((a, b) => provenanceTimestampMs(b) - provenanceTimestampMs(a));
     if (!combined.length) {
       target.append(empty('No audit records or receipts yet.'));
       return;
@@ -1654,7 +1672,7 @@
     combined.slice(0, 120).forEach(item => {
       const card = node('article', 'audit-card');
       card.append(
-        node('span', '', relative(item.ts_ms || item.ts || item.timestamp || item.created_at)),
+        node('span', '', relative(provenanceTimestampMs(item))),
         node('strong', '', item.actor || item.source || 'local operator'),
         node('span', 'tag', item.operation || item.action || item.event || item._kind),
         node('span', '', item.scope || item.workspace || item.status || state.workspace),

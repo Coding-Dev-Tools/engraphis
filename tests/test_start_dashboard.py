@@ -1,6 +1,7 @@
 """Launcher configuration regressions."""
 
 import argparse
+import errno
 import io
 import json
 import logging
@@ -31,6 +32,38 @@ def test_port_rejects_invalid_values(value):
 def test_port_accepts_boundaries():
     assert start_dashboard._port("1") == 1
     assert start_dashboard._port("65535") == 65535
+
+
+def test_port_probe_matches_uvicorn_reuseaddr_without_accepting_busy_port(monkeypatch):
+    calls = []
+
+    class Probe:
+        def setsockopt(self, level, option, value):
+            calls.append(("setsockopt", level, option, value))
+
+        def bind(self, sockaddr):
+            calls.append(("bind", sockaddr))
+            raise OSError(errno.EADDRINUSE, "address already in use")
+
+        def close(self):
+            calls.append(("close",))
+
+    monkeypatch.setattr(
+        start_dashboard.socket, "getaddrinfo",
+        lambda *_args, **_kwargs: [(
+            start_dashboard.socket.AF_INET, start_dashboard.socket.SOCK_STREAM,
+            0, "", ("127.0.0.1", 8700),
+        )],
+    )
+    monkeypatch.setattr(start_dashboard.socket, "socket", lambda *_args: Probe())
+
+    assert start_dashboard._port_is_available("127.0.0.1", 8700) is False
+    assert calls == [
+        ("setsockopt", start_dashboard.socket.SOL_SOCKET,
+         start_dashboard.socket.SO_REUSEADDR, 1),
+        ("bind", ("127.0.0.1", 8700)),
+        ("close",),
+    ]
 
 
 def test_launcher_preserves_socket_peer_for_forwarded_header_validation(monkeypatch):

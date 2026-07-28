@@ -68,6 +68,12 @@ def _port_is_available(host: str, port: int) -> bool:
     for family, socktype, protocol, _canonname, sockaddr in addresses:
         probe = socket.socket(family, socktype, protocol)
         try:
+            # Match Uvicorn's bind_socket() configuration. Without this a recently
+            # closed dashboard can leave the probe unable to bind during TIME_WAIT even
+            # though the server itself will reuse the address successfully. This is
+            # deliberately SO_REUSEADDR only: the probe still rejects a genuinely
+            # unavailable address and never enables concurrent SO_REUSEPORT binding.
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             probe.bind(sockaddr)
         except OSError as exc:
             if exc.errno in _ADDRESS_IN_USE_ERRNOS:

@@ -42,6 +42,13 @@ function license() {
 
 async function mockApi(page, options = {}) {
   const requests = [];
+  const workspaceList = options.workspaces || [{ name: workspace, memories: memories.length }];
+  const memoriesFor = requestUrl => {
+    const selected = requestUrl.searchParams.get('workspace') || workspace;
+    return (options.memoriesByWorkspace && options.memoriesByWorkspace[selected]) || memories;
+  };
+  const audit = options.audit || [];
+  const receipts = options.receipts || [];
   const llmStatus = options.llmStatus || {
     configured: false,
     key_set: false,
@@ -70,7 +77,7 @@ async function mockApi(page, options = {}) {
     if (path === '/bootstrap') {
       return ok({
         license: license(),
-        workspaces: [{ name: workspace, memories: memories.length }],
+        workspaces: workspaceList,
         stats: {
           memories: memories.length,
           total_rows: memories.length,
@@ -89,7 +96,10 @@ async function mockApi(page, options = {}) {
         by_type: { semantic: 1, procedural: 1 },
       });
     }
-    if (path === '/memories') return ok({ workspace, memories });
+    if (path === '/memories') {
+      return ok({ workspace: requestUrl.searchParams.get('workspace') || workspace,
+        memories: memoriesFor(requestUrl) });
+    }
     if (path.startsWith('/memory/')) {
       const id = path.split('/').pop();
       return ok({ memory: memories.find(memory => memory.id === id) || null, chain: [] });
@@ -117,8 +127,8 @@ async function mockApi(page, options = {}) {
       });
     }
     if (path === '/proactive') return ok({ workspace, memories });
-    if (path === '/audit') return ok({ workspace, audit: [] });
-    if (path === '/receipts') return ok({ workspace, receipts: [] });
+    if (path === '/audit') return ok({ workspace, audit });
+    if (path === '/receipts') return ok({ workspace, receipts });
     if (path === '/graph') {
       if (typeof options.deferGraphRequest === 'function') {
         await options.deferGraphRequest(requestUrl);
@@ -264,6 +274,52 @@ test('memory listings open the editable Library detail from every dashboard view
   await page.getByRole('button', { name: 'Show history' }).click();
   await page.locator('#timeline-result [data-memory-id="mem_database"]').click();
   await expect(page.locator('#memory-detail h2')).toHaveText('Database choice');
+});
+
+test('switching workspaces clears a stale memory editor before it can write elsewhere', async ({ page }) => {
+  const otherWorkspace = 'ledger-other';
+  await mockApi(page, {
+    workspaces: [
+      { name: workspace, memories: memories.length },
+      { name: otherWorkspace, memories: 1 },
+    ],
+    memoriesByWorkspace: {
+      [workspace]: memories,
+      [otherWorkspace]: [{
+        id: 'mem_other', title: 'Other workspace memory', content: 'Separate evidence.',
+        memory_type: 'semantic', ingested_at: Date.now() / 1000,
+      }],
+    },
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Library memories and imports' }).click();
+  await page.locator('#library-list [data-memory-id="mem_database"]').click();
+  await expect(page.locator('#memory-detail h2')).toHaveText('Database choice');
+  await page.locator('#memory-detail').getByRole('button', { name: 'Edit' }).click();
+  await expect(page.locator('#memory-editor')).toBeVisible();
+
+  await page.getByLabel('Active workspace').selectOption(otherWorkspace);
+
+  await expect(page.locator('#memory-editor')).toBeHidden();
+  await expect(page.locator('#memory-detail')).toBeHidden();
+  await expect(page.locator('#library-list')).toContainText('Other workspace memory');
+  await expect(page.locator('#library-list')).not.toContainText('Database choice');
+});
+
+test('provenance merges audit seconds and receipt milliseconds chronologically', async ({ page }) => {
+  await mockApi(page, {
+    audit: [{ id: 'aud_older', ts: 1_700_000_100, action: 'older audit action' }],
+    receipts: [{ id: 'rcpt_newer', ts_ms: 1_700_000_200_000, operation: 'newer receipt operation' }],
+  });
+  await page.goto('/');
+
+  await page.getByRole('button', { name: 'Provenance why, timeline, receipts' }).click();
+  await page.getByRole('tab', { name: 'Audit & receipts' }).click();
+
+  const cards = page.locator('#audit-list .audit-card');
+  await expect(cards).toHaveCount(2);
+  await expect(cards.nth(0)).toContainText('newer receipt operation');
+  await expect(cards.nth(1)).toContainText('older audit action');
 });
 
 test('Ask keeps the raw retrieval preview alongside its single grounded answer', async ({ page }) => {
