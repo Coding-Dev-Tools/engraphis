@@ -1343,10 +1343,15 @@
 
   function graphAsOfTimestamp() {
     const value = byId('graph-as-of').value;
-    if (!value) return '';
+    if (!value) return null;
     // A date picker represents the complete selected day, not midnight at its start.
     const timestamp = Date.parse(`${value}T23:59:59.999Z`);
-    return Number.isFinite(timestamp) ? `&as_of=${encodeURIComponent(timestamp / 1000)}` : '';
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+
+  function graphAsOfQuery() {
+    const timestamp = graphAsOfTimestamp();
+    return timestamp === null ? '' : `&as_of=${encodeURIComponent(timestamp / 1000)}`;
   }
 
   async function loadGraph({ force = false } = {}) {
@@ -1380,7 +1385,7 @@
         const limit = fullGraph ? GRAPH_FULL_NODE_LIMIT : GRAPH_INITIAL_NODE_LIMIT;
         const complete = fullGraph ? '&full=true' : '';
         const includeCode = targetIncludeCode ? '&include_code=true' : '';
-        const asOf = graphAsOfTimestamp();
+        const asOf = graphAsOfQuery();
         const [payload] = await Promise.all([
           api(`/graph?${query(targetWorkspace)}&limit=${limit}${complete}${includeCode}${asOf}`, { signal: controller.signal }),
           ensureGraphAssets(),
@@ -1423,7 +1428,7 @@
           graph.setScope(graphScope());
           graph.setLayers(graphLayerState());
           graph.setRepoFilter(byId('graph-repo-filter').value);
-          graph.setAsOf(byId('graph-as-of').value || null);
+          graph.setAsOf(graphAsOfTimestamp());
           graph.setSizeBy(byId('graph-size').value);
           graph.setBridges(byId('graph-bridges').checked);
           graph.setCollapse(fullGraph ? false : (byId('graph-collapse').checked ? 'auto' : false));
@@ -2288,7 +2293,7 @@
     saveGraphPreferences();
   });
   byId('graph-as-of').addEventListener('change', event => {
-    if (state.graphEngine) state.graphEngine.setAsOf(event.target.value || null);
+    if (state.graphEngine) state.graphEngine.setAsOf(graphAsOfTimestamp());
     saveGraphPreferences();
     loadGraph({ force: true });
   });

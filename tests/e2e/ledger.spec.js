@@ -59,7 +59,8 @@ async function mockApi(page, options = {}) {
   };
   await page.route('**/api/**', async route => {
     const request = route.request();
-    const path = new URL(request.url()).pathname.replace(/^\/api/, '');
+    const requestUrl = new URL(request.url());
+    const path = requestUrl.pathname.replace(/^\/api/, '');
     requests.push(path);
     const ok = body => route.fulfill({
       status: 200,
@@ -116,12 +117,17 @@ async function mockApi(page, options = {}) {
     if (path === '/audit') return ok({ workspace, audit: [] });
     if (path === '/receipts') return ok({ workspace, receipts: [] });
     if (path === '/graph') {
+      const asOf = Number(requestUrl.searchParams.get('as_of'));
+      // Make the historical payload depend on the server's selected-day anchor. A client
+      // that filters at midnight would incorrectly discard these later-in-the-day records.
+      const validFrom = Number.isFinite(asOf) ? asOf - 1 : 100;
+      const validTo = Number.isFinite(asOf) ? asOf - 0.5 : 200;
       return ok({
         nodes: [
-          { id: 'postgres', label: 'Postgres', repo: 'data-stack', topic: 'storage', valid_from: 100 },
-          { id: 'engraphis', label: 'Engraphis', repo: 'agent-memory', topic: 'memory', valid_from: 100 },
+          { id: 'postgres', label: 'Postgres', repo: 'data-stack', topic: 'storage', valid_from: validFrom },
+          { id: 'engraphis', label: 'Engraphis', repo: 'agent-memory', topic: 'memory', valid_from: validFrom },
         ],
-        edges: [{ from: 'engraphis', to: 'postgres', valid_from: 100, valid_to: 200 }],
+        edges: [{ from: 'engraphis', to: 'postgres', valid_from: validFrom, valid_to: validTo }],
         layers: [
           { layer: 'temporal', count: 15 }, { layer: 'entity', count: 26 },
           { layer: 'causal', count: 22 }, { layer: 'semantic', count: 21 }, { layer: 'code', count: 0 },
