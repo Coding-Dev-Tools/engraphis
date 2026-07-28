@@ -101,8 +101,9 @@ cannot run the connect command.
 ## Trial and grace
 
 The no-card Team trial starts after email confirmation and lasts **exactly 3 active days**.
-`workspace_write_grace` is a distinct local availability state, capped at **24 hours**. It never
-extends the trial, hosted agent access, Team membership, seats, Cloud Sync, or managed compute.
+`workspace_write_grace` is a private-control-plane account-continuity state capped at **24
+hours**. It never extends the trial, hosted agent access, Team membership, seats, Cloud Sync, or
+managed compute, and it does not restrict the free local MCP server.
 
 ## Security notes
 

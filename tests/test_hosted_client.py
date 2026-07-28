@@ -12,6 +12,7 @@ from engraphis import hosted_client, licensing
 def test_hosted_lifecycle_constants_keep_trial_and_grace_separate():
     assert hosted_client.TRIAL_DAYS == 3
     assert hosted_client.TRIAL_SECONDS == 259_200
+    assert hosted_client.MAX_HOSTED_ACCOUNT_GRACE_SECONDS == 86_400
     assert hosted_client.MAX_LOCAL_WRITE_GRACE_SECONDS == 86_400
 
 
@@ -21,8 +22,18 @@ def test_upgrade_urls_are_hosted_metadata_only(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_TEAM_UPGRADE_URL", raising=False)
     monkeypatch.delenv("ENGRAPHIS_CLOUD_URL", raising=False)
 
-    assert hosted_client.upgrade_url("pro") == "https://api.engraphis.com/account"
-    assert hosted_client.upgrade_url("team") == "https://api.engraphis.com/account"
+    assert hosted_client.upgrade_url("pro") == (
+        "https://api.engraphis.com/account?plan=pro&interval=monthly#billing"
+    )
+    assert hosted_client.upgrade_url("pro", "annual") == (
+        "https://api.engraphis.com/account?plan=pro&interval=annual#billing"
+    )
+    assert hosted_client.upgrade_url("team") == (
+        "https://api.engraphis.com/account?plan=team&interval=monthly#billing"
+    )
+    assert hosted_client.upgrade_url("team", "annual") == (
+        "https://api.engraphis.com/account?plan=team&interval=annual#billing"
+    )
     assert hosted_client.required_plan("sync") == "pro"
     assert hosted_client.required_plan("team") == "team"
 

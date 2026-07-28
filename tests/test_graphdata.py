@@ -97,3 +97,28 @@ def test_build_graph_payload_top_connected_capped_at_twelve():
     assert degrees == sorted(degrees, reverse=True)
     # "top" names are the human-readable names, not the raw ids
     assert all(t["name"] == f"n{int(t['id'][1:])}" for t in g["top"])
+
+
+def test_build_graph_payload_preserves_filter_and_time_metadata():
+    graph = build_graph_payload(
+        "acme",
+        [{
+            "id": "e1", "name": "Graph explorer", "etype": "organization",
+            "repo": "engraphis", "topic": "visualisation", "valid_from": 100,
+        }, {
+            "id": "e2", "name": "Alice", "etype": "person_or_concept",
+        }],
+        [{
+            "id": "edge1", "src": "e1", "dst": "e2", "relation": "uses",
+            "valid_from": 100, "valid_to": 200,
+        }],
+    )
+
+    node = next(item for item in graph["nodes"] if item["id"] == "e1")
+    assert node["repo"] == "engraphis"
+    assert node["topic"] == "visualisation"
+    assert node["valid_from"] == 100
+    assert graph["edges"] == [{
+        "id": "edge1", "from": "e1", "to": "e2", "label": "uses",
+        "layer": "semantic", "valid_from": 100, "valid_to": 200,
+    }]

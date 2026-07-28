@@ -34,16 +34,18 @@ def test_manifest_keeps_trial_and_grace_as_separate_clocks():
     assert "max_grace_hours" not in trial
     assert lifecycle["max_grace_hours"] == 24
     assert lifecycle["grace_mode"] == "workspace_write_grace"
+    assert lifecycle["enforced_by"] == "private_control_plane"
     assert lifecycle["grace_allows"] == [
-        "authenticated_existing_user_local_core_workspace_writes"
+        "authenticated_existing_user_hosted_account_continuity"
     ]
     assert set(lifecycle["live_authorization_still_required_for"]) == {
         "paid_or_cost_bearing_features",
-        "mcp_or_agent_writes",
+        "hosted_mcp_or_agent_writes",
     }
     assert lifecycle["grace_blocks_account_growth"] is True
     assert lifecycle["trial_expiry_extended_by_grace"] is False
     assert lifecycle["recovery"]["mode"] == "recovery_read_only"
+    assert lifecycle["recovery"]["enforced_by"] == "private_control_plane"
     assert lifecycle["recovery"]["blocks_normal_mutations"] is True
     assert {
         "login",
@@ -88,7 +90,10 @@ def test_public_docs_state_the_license_and_lapse_boundaries():
     assert "up to 24 hours" in plain_licensing
     assert "workspace_write_grace" in readme and "workspace_write_grace" in licensing
     assert "recovery_read_only" in readme and "recovery_read_only" in licensing
-    assert "Local reads" in combined and "data export" in combined
+    assert "private control plane" in plain_readme.lower()
+    assert "local dashboard, MCP tools, or local writes" in readme
+    assert "not controlled by either hosted lifecycle state" in licensing
+    assert "data export" in combined
     assert "never extends trial or subscription expiry" in readme
     assert "enable a new installation or activation" in licensing
     assert "add hosted users, seats, invitations, devices, or credentials" in licensing

@@ -80,6 +80,34 @@ def _check_repository(manifest: dict, errors: list[str]) -> None:
         plan_data = manifest.get("plans", {}).get(plan, {})
         if plan_data.get("billing_unit") != expected_unit:
             _fail(errors, "%s billing unit must be %s" % (plan, expected_unit))
+
+    # GA pricing. These ran only inside _check_website(), which is reachable solely via
+    # --website-root and is never passed in CI -- so every published price was unguarded:
+    # the manifest could say $99,999 and both this check and the full test suite passed.
+    expected_prices = {"free": (0, 0), "pro": (10, 100), "team": (20, 200)}
+    for plan, (monthly, annual) in expected_prices.items():
+        plan_data = manifest.get("plans", {}).get(plan, {})
+        found = (plan_data.get("monthly_usd"), plan_data.get("annual_usd"))
+        if any(not isinstance(value, int) or isinstance(value, bool) for value in found):
+            _fail(errors, "%s prices must be whole USD integers" % plan)
+            continue
+        if found != (monthly, annual):
+            _fail(
+                errors,
+                "%s price drifted from GA truth: expected %s, found %s"
+                % (plan, (monthly, annual), found),
+            )
+        # A paid plan billed annually must stay a sane multiple of its monthly rate;
+        # a transposed or mistyped digit would otherwise ship as a real discount.
+        if monthly and not (10 * monthly <= annual <= 12 * monthly):
+            _fail(errors, "%s annual price is not a sane multiple of monthly" % plan)
+
+    expected_trial = {"days": 3, "card_required": False, "plans": ["pro", "team"]}
+    trial = manifest.get("trial", {})
+    for key, value in expected_trial.items():
+        if trial.get(key) != value:
+            _fail(errors, "trial.%s must be %r" % (key, value))
+
     expected_billing = {
         "authority": "stripe",
         "new_subscriptions": "stripe",

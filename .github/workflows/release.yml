@@ -59,7 +59,8 @@ jobs:
           python scripts/check_commercial_manifest.py
           python scripts/externalize_dashboard_assets.py
           ruff check .
-          python -m pytest tests/ -q
+          python -c "import fastapi, httpx, mcp, multipart, pydantic, uvicorn"
+          python -m pytest -o addopts="" tests/ -q -rs
           python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
           python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5
           python -m eval.ablation
@@ -104,7 +105,10 @@ jobs:
       - name: Unit, lint, and retrieval gates
         run: |
           ruff check .
-          python -m pytest tests/ -q
+          if [ "${{ matrix.python-version }}" != "3.9" ]; then
+            python -c "import fastapi, httpx, mcp, multipart, pydantic, uvicorn"
+          fi
+          python -m pytest -o addopts="" tests/ -q -rs
           python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
           python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5
           python -m eval.ablation

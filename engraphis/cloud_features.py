@@ -7,6 +7,7 @@ authoritative for entitlements and performs all paid computation.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -20,17 +21,82 @@ from urllib.parse import quote
 
 from engraphis.cloud_session import CloudSessionError, access_for_workspace
 from engraphis.cloud_session import configured as cloud_session_configured
-from engraphis.hosted_client import build_pinned_https_opener, upgrade_url
+from engraphis.hosted_client import account_url, build_pinned_https_opener
 
 SNAPSHOT_SCHEMA = "engraphis-managed-snapshot/v1"
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024
 MAX_MEMORIES = 100_000
 MAX_TEXT_CHARS = 100_000
+_AUTOMATION_BOOTSTRAP_SCHEMA = "engraphis-automation-bootstrap/v1"
 
 
 def _truthy(value: Optional[str]) -> bool:
     return value is not None and value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _automation_bootstrap_key(organization_id: str, workspace_id: str) -> str:
+    """Return a bounded, tenant-specific key without exposing identifiers in SQLite."""
+
+    identity = ("%s\0%s" % (organization_id, workspace_id)).encode("utf-8")
+    return "managed_automation_bootstrap:" + hashlib.sha256(identity).hexdigest()
+
+
+def automation_bootstrap_phase(
+    service: Any, organization_id: str, workspace_id: str
+) -> str:
+    """Read the durable phase of first-policy provisioning for one hosted workspace."""
+
+    key = _automation_bootstrap_key(organization_id, workspace_id)
+    row = service.store.conn.execute(
+        "SELECT value FROM sync_state WHERE key=?", (key,)
+    ).fetchone()
+    if row is None:
+        return ""
+    try:
+        value = json.loads(str(row["value"]))
+    except (TypeError, ValueError, RecursionError):
+        return ""
+    if not isinstance(value, dict) or value.get("schema") != _AUTOMATION_BOOTSTRAP_SCHEMA:
+        return ""
+    phase = str(value.get("phase") or "")
+    return phase if phase in {"snapshot_uploaded", "policy_saved"} else ""
+
+
+def save_automation_bootstrap_phase(
+    service: Any,
+    organization_id: str,
+    workspace_id: str,
+    phase: str,
+    *,
+    generation: Optional[int] = None,
+) -> None:
+    """Persist bootstrap progress so a policy-save retry never re-uploads memory."""
+
+    if phase not in {"snapshot_uploaded", "policy_saved"}:
+        raise ValueError("invalid automation bootstrap phase")
+    value = {
+        "schema": _AUTOMATION_BOOTSTRAP_SCHEMA,
+        "phase": phase,
+    }
+    if generation is not None:
+        value["generation"] = int(generation)
+    key = _automation_bootstrap_key(organization_id, workspace_id)
+    conn = service.store.conn
+    owns_transaction = not conn.transaction_owned_by_current_thread()
+    try:
+        conn.execute(
+            "INSERT INTO sync_state(key, value, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+            "updated_at=excluded.updated_at",
+            (key, json.dumps(value, sort_keys=True, separators=(",", ":")), time.time()),
+        )
+        if owns_transaction:
+            conn.commit()
+    except BaseException:
+        if owns_transaction and conn.transaction_owned_by_current_thread():
+            conn.rollback()
+        raise
 
 
 class CloudFeatureError(RuntimeError):
@@ -86,7 +152,10 @@ def _public_http_error(status: int) -> tuple[str, bool]:
         # billing page so a paying customer can fix it instead of reading a dead end.
         return (
             "This hosted feature needs an active Engraphis Cloud subscription. Check "
-            "billing or upgrade at %s." % upgrade_url(),
+            # Plan-neutral: upgrade_url() with no argument resolves plan="pro", which
+            # sends a lapsed Team subscriber to the Pro checkout for a product they
+            # already hold at a higher tier.
+            "billing or upgrade at %s." % account_url(),
             False,
         )
     if status == 404:
@@ -119,7 +188,10 @@ def _public_session_error(status: int) -> tuple[str, bool]:
     if status == 402:
         return (
             "This hosted feature needs an active Engraphis Cloud subscription. Check "
-            "billing or upgrade at %s." % upgrade_url(),
+            # Plan-neutral: upgrade_url() with no argument resolves plan="pro", which
+            # sends a lapsed Team subscriber to the Pro checkout for a product they
+            # already hold at a higher tier.
+            "billing or upgrade at %s." % account_url(),
             False,
         )
     if status == 403:
@@ -368,8 +440,20 @@ class CloudFeatureClient:
         except CloudSessionError as exc:
             status = exc.status if 400 <= exc.status <= 599 else 503
             message, transient = _public_session_error(status)
+            # A missing local session is the one 401 that can lead directly to the
+            # Cloud trial.  Keep it distinguishable from a revoked/expired session:
+            # its owner may already have an entitlement and must not be offered a
+            # second trial.  The UI still combines this code with the authoritative
+            # ``trial.available`` flag before drawing the signup surface.
+            try:
+                unconfigured = not cloud_session_configured(require_compute=True)
+            except Exception:  # noqa: BLE001 - preserve the original bounded error
+                unconfigured = False
             raise CloudFeatureError(
-                message, status=status, transient=transient
+                message,
+                status=status,
+                transient=transient,
+                code="cloud_unconfigured" if status == 401 and unconfigured else None,
             ) from exc
         except ValueError as exc:
             raise CloudFeatureError(
@@ -505,8 +589,17 @@ class CloudFeatureClient:
 def run_managed_job(service: Any, workspace: str, kind: str, *,
                     client: Optional[CloudFeatureClient] = None,
                     wait_seconds: float = 20.0) -> dict:
+    # Authorize before touching the store.  ``build_managed_snapshot`` takes an exclusive
+    # BEGIN IMMEDIATE write lock, *commits* a monotonic generation row, and serializes up
+    # to ``MAX_MEMORIES`` rows -- so a lapsed subscriber clicking a paid tab stalled every
+    # local writer and durably advanced state before being told 402.  The consent
+    # pre-check does not cover this: a lapsed account still has a saved cloud session.
+    # ``automation_set`` already gates in this order; match it.
+    resolved_id = service._lookup_workspace(service._clean_ws(workspace))
+    if not resolved_id:
+        raise CloudFeatureError("The selected workspace does not exist.", status=404)
+    cloud = client or CloudFeatureClient.from_environment(resolved_id)
     workspace_id, snapshot = build_managed_snapshot(service, workspace)
-    cloud = client or CloudFeatureClient.from_environment(workspace_id)
     receipt = cloud.upload_snapshot(workspace_id, snapshot)
     generation = int(receipt.get("generation", snapshot["generation"]))
     return cloud.run_job(workspace_id, kind, generation, wait_seconds=wait_seconds)
