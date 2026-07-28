@@ -195,10 +195,12 @@ def test_replaced_environment_bootstrap_is_not_blocked_by_a_spent_predecessor(
 
     monkeypatch.setenv("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", "replacement-bootstrap")
     monkeypatch.setenv("ENGRAPHIS_CLOUD_CONTROL_URL", "https://control.example.test")
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_TOKEN_SUBJECT", "device")
     state = {
         "refresh_unusable": True,
         "refresh_unusable_at": 1.0,
         "refresh_unusable_digest": cloud_session._refresh_digest("spent-bootstrap"),
+        "token_subject": "member",
     }
     requests = []
     monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
@@ -210,18 +212,19 @@ def test_replaced_environment_bootstrap_is_not_blocked_by_a_spent_predecessor(
     )
 
     def refresh(control_url, credential, workspace_id, token_subject):
-        requests.append(credential)
+        requests.append((credential, token_subject))
         return {
             "access_token": "replacement-access",
             "organization_id": "org_1",
             "refresh_credential": "rotated-replacement",
-            "token_subject": "member",
+            "token_subject": "device",
         }
 
     monkeypatch.setattr(cloud_session, "_post_refresh", refresh)
     assert cloud_session.configured(require_compute=False) is True
     assert cloud_session.access_for_workspace("ws", require_compute=False)[0] == "replacement-access"
-    assert requests == ["replacement-bootstrap"]
+    assert requests == [("replacement-bootstrap", "device")]
+    assert state["token_subject"] == "device"
     assert "refresh_unusable" not in state
     assert "refresh_unusable_digest" not in state
 
