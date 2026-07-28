@@ -1,7 +1,9 @@
 """Unified local dashboard tests for the public open-core boundary."""
 import ast
 import io
+import threading
 import urllib.error
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -48,10 +50,56 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         page = client.get("/")
         assert page.status_code == 200
+        assert "<title>Engraphis Ledger</title>" in page.text
         assert 'class="sidebar"' in page.text
+        for area in ("Today", "Ask", "Library", "Graph &amp; Relations", "Provenance", "Manage"):
+            assert f">{area}<" in page.text
+        assert 'value="matrix">Matrix' in page.text
+        assert 'class="dashboard-switcher" aria-label="Dashboard interface"' in page.text
+        assert 'id="sidebar-theme-select" aria-label="Dashboard theme"' in page.text
+        assert 'value="classic">Classic<' in page.text
+        assert 'href="/classic">Classic<' in page.text
+        assert 'Ledger (primary)' not in page.text
+        assert 'Classic (alternate)' not in page.text
+        assert '/v2-assets/vendor/d3.min.js' in page.text
+        assert '/v2-assets/vendor/force-graph.min.js' not in page.text
+        assert '/v2-assets/engraphis-graph.js' not in page.text
+        classic = client.get("/classic")
+        assert classic.status_code == 200
+        assert '/classic-assets/dashboard.css' in classic.text
+        assert 'class="dashboard-switcher" aria-label="Dashboard interface"' in classic.text
+        assert 'href="/"' in classic.text
+        assert 'href="/classic" aria-current="page">Classic (alternate)<' in classic.text
+        assert 'value="classic" selected>Classic dashboard (alternate)<' in classic.text
+        assert 'id="graph-show-all"' in classic.text
+        assert client.get("/v2-assets/ledger.css").status_code == 200
+        ledger_js = client.get("/v2-assets/ledger.js")
+        assert ledger_js.status_code == 200
+        assert "'/v2-assets/vendor/force-graph.min.js?v=20260727-final'" in ledger_js.text
+        assert "'/v2-assets/engraphis-graph.js?v=20260728-reference-materials'" in ledger_js.text
+        assert "/v2-assets/ledger.css?v=20260728-reference-materials" in page.text
+        assert "/v2-assets/ledger.js?v=20260728-reference-materials" in page.text
+        classic_js = client.get("/classic-assets/dashboard.js")
+        assert classic_js.status_code == 200
+        assert "/static/vendor/force-graph.min.js" in classic_js.text
+        assert "/v2-assets/engraphis-graph.js?v=20260728-reference-materials" in classic_js.text
+        assert "&full=true&limit=20000" in classic_js.text
         bootstrap = client.get("/api/bootstrap")
         assert bootstrap.status_code == 200
         assert bootstrap.json()["stats"]["memories"] >= 1
+
+
+def test_dashboard_assets_revalidate_instead_of_pinning_old_visuals(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        for path in (
+            "/v2-assets/engraphis-graph.js?v=20260728-reference-materials",
+            "/v2-assets/ledger.js?v=20260728-reference-materials",
+            "/v2-assets/ledger.css?v=20260728-reference-materials",
+            "/classic-assets/dashboard.js?v=20260728-reference-materials",
+        ):
+            response = client.get(path)
+            assert response.status_code == 200
+            assert response.headers["cache-control"] == "no-cache, must-revalidate"
 
 
 def test_dashboard_serves_the_graph_engine_from_its_v2_asset_surface(monkeypatch, tmp_path):
@@ -59,6 +107,162 @@ def test_dashboard_serves_the_graph_engine_from_its_v2_asset_surface(monkeypatch
         asset = client.get("/v2-assets/engraphis-graph.js")
         assert asset.status_code == 200
         assert "window.EngraphisGraph =" in asset.text
+        compat = client.get("/v2-assets/engraphis-graph-compat.js")
+        assert compat.status_code == 200
+        assert "window.EngraphisGraphCompat =" in compat.text
+        assert client.get("/v2-assets/vendor/d3.min.js").status_code == 200
+        assert client.get("/v2-assets/vendor/force-graph.min.js").status_code == 200
+
+
+def test_graph_load_is_bounded_single_flight_and_retryable(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        page = client.get("/")
+        script = client.get("/v2-assets/ledger.js")
+        assert 'id="graph-retry"' in page.text
+        assert 'id="graph-full"' in page.text
+        assert '>Show all nodes<' in page.text
+        assert 'id="graph-style" type="hidden" value="cyber"' in page.text
+        assert "const GRAPH_INITIAL_NODE_LIMIT = 320;" in script.text
+        assert "const GRAPH_FULL_NODE_LIMIT = 20_000;" in script.text
+        assert "const GRAPH_LOAD_TIMEOUT_MS = 12_000;" in script.text
+        assert "AbortController" in script.text
+        assert "state.graphLoadPromise" in script.text
+        assert "&full=true" in script.text
+        assert "style: 'cyber'" in script.text
+        assert "renderMode: targetMode" in script.text
+        assert "loadGraph({ force: true })" in script.text
+
+
+def test_graph_motion_saved_views_and_tuning_controls_are_wired(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        page = client.get("/")
+        script = client.get("/v2-assets/ledger.js")
+        for control in (
+            'id="graph-flow-speed"', 'data-graph-saved-view="operations"',
+            'data-graph-saved-view="schema"', 'data-graph-saved-view="people"',
+            'data-graph-saved-view="code"', 'id="graph-save-view"',
+            'id="graph-repel"', 'id="graph-depth"', 'id="graph-reset-tuning"',
+            'data-graph-layer="code"',
+        ):
+            assert control in page.text
+        for behavior in (
+            "function applyGraphView(id)", "function resetGraphTuning()",
+            "function saveCurrentGraphView()", "function graphTuningSettings()",
+            "&include_code=true", "graph.setLayers(graphLayerState())",
+            "setSettings({ flowSpeed: speed })",
+        ):
+            assert behavior in script.text
+
+
+def test_graph_palette_recolors_every_colour_mode(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        engine = client.get("/v2-assets/engraphis-graph.js")
+        ledger = client.get("/v2-assets/ledger.js")
+        assert engine.status_code == 200
+        assert "function selectedPalette()" in engine.text
+        assert "function commPal() { return selectedPalette()" in engine.text
+        assert "const colors = selectedPalette() || GRAPH_HEAT;" in engine.text
+        # Palettes still recolor every identity mode, but material families stay stable:
+        # semantic color belongs to the slim identity ring rather than rotating the whole
+        # Cyber film into arbitrary green/yellow alloys.
+        assert "function iridescentTint(c)" not in engine.text
+        assert "fixedPalette" in engine.text
+        assert "function identityRing(" in engine.text
+        assert "identity: rgbString(identity)" in engine.text
+        assert "function graphThemeColors()" in ledger.text
+        assert "graph.setThemeColors(graphThemeColors());" in ledger.text
+        assert "state.graphEngine.setThemeColors(graphThemeColors());" in ledger.text
+        assert "renderMode: opts.renderMode === 'full' ? 'full' : 'overview'" in engine.text
+        assert "function pinFullGraphLayout(data)" in engine.text
+
+
+def test_graph_facts_and_search_use_the_atomic_node_reveal(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        ledger = client.get("/v2-assets/ledger.js")
+        engine = client.get("/v2-assets/engraphis-graph.js")
+        assert "function revealGraphNode(id, label = 'Selected entity')" in ledger.text
+        assert "revealGraphNode(item.id, item.name)" in ledger.text
+        assert "api.reveal = id =>" in engine.text
+        assert "function centerRenderedNode(id)" in engine.text
+        assert "render(true, true);" not in engine.text[engine.text.index("api.focus = id =>"):engine.text.index("api.clearFocus")]
+
+
+def test_library_editor_stacks_directly_below_the_selected_memory_panel(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        page = client.get("/")
+        assert page.status_code == 200
+        assert '<div class="library-detail-stack">' in page.text
+        assert page.text.index('id="memory-detail"') < page.text.index('id="memory-editor"')
+        stylesheet = client.get("/v2-assets/ledger.css")
+        assert ".library-detail-stack { display: grid; gap: 12px; align-content: start; }" in stylesheet.text
+
+
+def test_workspace_switcher_uses_the_active_ledger_theme_for_native_dropdowns(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        stylesheet = client.get("/v2-assets/ledger.css")
+        assert stylesheet.status_code == 200
+        css = stylesheet.text
+        assert ".workspace-switcher select {" in css
+        assert "background: var(--c-inset);" in css
+        assert "color-scheme: dark;" in css
+        assert 'body[data-theme="paper"] .workspace-switcher select { color-scheme: light; }' in css
+        assert ".workspace-switcher select option { background: var(--c-inset); color: var(--c-fg); }" in css
+        assert ".workspace-switcher select option:checked { background: var(--c-acc); color: var(--c-bg); }" in css
+
+
+def test_sidebar_keeps_manage_and_compare_plans_in_separate_flex_rows(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        stylesheet = client.get("/v2-assets/ledger.css")
+        assert stylesheet.status_code == 200
+        css = stylesheet.text
+        sidebar = css[css.index(".sidebar {"):css.index(".brand-row {")]
+        assert "display: flex;" in sidebar
+        assert "flex-direction: column;" in sidebar
+        assert "grid-template-rows" not in sidebar
+        assert ".primary-nav { flex: 1 0 auto; }" in css
+        assert ".manage-nav { flex: 0 0 auto; }" in css
+        assert ".sidebar-promo {\n  flex: 0 0 auto;" in css
+
+
+def test_dashboard_grounded_answer_route_cites_or_abstains(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        grounded = client.post(
+            "/api/answer",
+            json={
+                "query": "Which database is the main database?",
+                "workspace": "demo",
+                "k": 8,
+                "max_citations": 5,
+            },
+        )
+        assert grounded.status_code == 200
+        body = grounded.json()
+        assert body["query"] == "Which database is the main database?"
+        assert body["grounded"] is True
+        assert body["abstained"] is False
+        assert body["citations"]
+        assert body["sources"] == body["citations"]
+        assert "[1]" in body["answer"]
+
+        abstained = client.post(
+            "/api/answer",
+            json={
+                "query": "How should I bake a sourdough loaf?",
+                "workspace": "demo",
+            },
+        )
+        assert abstained.status_code == 200
+        assert abstained.json()["grounded"] is False
+        assert abstained.json()["abstained"] is True
+
+
+def test_dashboard_grounded_answer_route_bounds_and_redacts(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        assert client.post("/api/answer", json={"query": "", "workspace": "demo"}).status_code == 422
+        assert client.post(
+            "/api/answer",
+            json={"query": "database", "workspace": "demo", "k": 51},
+        ).status_code == 422
 
 
 def test_team_account_routes_are_not_in_public_runtime(monkeypatch, tmp_path):
@@ -135,6 +339,7 @@ def test_unconnected_automation_returns_a_structured_auth_error(monkeypatch, tmp
         "error": "Connect this installation to Engraphis Cloud to use hosted features.",
         "managed_cloud": True,
         "transient": False,
+        "code": "cloud_unconfigured",
     }
 
 
@@ -168,6 +373,161 @@ def test_hosted_automation_accepts_the_cloud_policy_field(monkeypatch, tmp_path)
         assert response.status_code == 200
         assert response.json()["dream_enabled"] is True
         assert saved["dream_enabled"] is True
+
+
+def test_first_hosted_automation_view_bootstraps_the_recommended_policy(
+    monkeypatch, tmp_path
+):
+    """A connected Pro/Team workspace starts maintaining itself without a toggle."""
+
+    uploaded = []
+    saved = []
+
+    class _Cloud:
+        organization_id = "org_test"
+
+        def get_policy(self, workspace_id):
+            # Version zero is the private Cloud's documented no-policy sentinel.
+            return {"enabled": False, "cadence_minutes": 1440, "version": 0}
+
+        def upload_snapshot(self, workspace_id, snapshot):
+            uploaded.append((workspace_id, snapshot))
+            return {"generation": snapshot["generation"]}
+
+        def save_policy(self, workspace_id, policy):
+            saved.append((workspace_id, policy))
+            return {"version": 1}
+
+        def list_jobs(self, workspace_id, *, limit=10):
+            return {"jobs": []}
+
+    monkeypatch.setattr(
+        "engraphis.cloud_features.build_managed_snapshot",
+        lambda service, workspace: ("ws_cloud", {"generation": 7}),
+    )
+    monkeypatch.setattr(
+        "engraphis.cloud_features.CloudFeatureClient.from_environment",
+        lambda workspace_id=None: _Cloud(),
+    )
+    with _client(monkeypatch, tmp_path) as client:
+        response = client.get("/api/automation")
+
+    assert response.status_code == 200
+    assert response.json()["enabled"] is True
+    assert response.json()["dream"] is True
+    assert uploaded == [("ws_cloud", {"generation": 7})]
+    assert saved == [("ws_cloud", {
+        "enabled": True,
+        "cadence_minutes": 1440,
+        "dream_enabled": True,
+        "dream_min_new": 25,
+        "dream_idle_minutes": 15,
+        "infer": False,
+    })]
+
+
+def test_first_automation_policy_retry_does_not_upload_the_snapshot_twice(
+    monkeypatch, tmp_path
+):
+    """A failed policy write resumes after the already successful private upload."""
+
+    from engraphis.cloud_features import CloudFeatureError
+
+    uploaded = []
+    saved = []
+    builds = []
+
+    class _Cloud:
+        organization_id = "org_test"
+
+        def get_policy(self, workspace_id):
+            return {"enabled": False, "cadence_minutes": 1440, "version": 0}
+
+        def upload_snapshot(self, workspace_id, snapshot):
+            uploaded.append((workspace_id, snapshot))
+            return {"generation": snapshot["generation"]}
+
+        def save_policy(self, workspace_id, policy):
+            saved.append((workspace_id, policy))
+            if len(saved) == 1:
+                raise CloudFeatureError(
+                    "Engraphis Cloud is temporarily unavailable.",
+                    status=503,
+                    transient=True,
+                )
+            return {"version": 1}
+
+        def list_jobs(self, workspace_id, *, limit=10):
+            return {"jobs": []}
+
+    def _snapshot(service, workspace):
+        builds.append(workspace)
+        return "ws_cloud", {"generation": 7}
+
+    monkeypatch.setattr("engraphis.cloud_features.build_managed_snapshot", _snapshot)
+    monkeypatch.setattr(
+        "engraphis.cloud_features.CloudFeatureClient.from_environment",
+        lambda workspace_id=None: _Cloud(),
+    )
+    with _client(monkeypatch, tmp_path) as client:
+        first = client.get("/api/automation")
+        second = client.get("/api/automation")
+
+    assert first.status_code == 503
+    assert second.status_code == 200
+    assert len(builds) == 1
+    assert uploaded == [("ws_cloud", {"generation": 7})]
+    assert len(saved) == 2
+
+
+def test_concurrent_first_automation_views_upload_one_snapshot(monkeypatch, tmp_path):
+    """Parallel dashboard reads serialize the sensitive first-bootstrap upload."""
+
+    uploaded = []
+    saved = []
+    started = threading.Event()
+    release_upload = threading.Event()
+
+    class _Cloud:
+        organization_id = "org_concurrent"
+
+        def get_policy(self, workspace_id):
+            return {"enabled": False, "cadence_minutes": 1440, "version": 0}
+
+        def upload_snapshot(self, workspace_id, snapshot):
+            uploaded.append((workspace_id, snapshot))
+            started.set()
+            assert release_upload.wait(timeout=5)
+            return {"generation": snapshot["generation"]}
+
+        def save_policy(self, workspace_id, policy):
+            saved.append((workspace_id, policy))
+            return {"version": 1}
+
+        def list_jobs(self, workspace_id, *, limit=10):
+            return {"jobs": []}
+
+    monkeypatch.setattr(
+        "engraphis.cloud_features.build_managed_snapshot",
+        lambda service, workspace: ("ws_cloud", {"generation": 7}),
+    )
+    monkeypatch.setattr(
+        "engraphis.cloud_features.CloudFeatureClient.from_environment",
+        lambda workspace_id=None: _Cloud(),
+    )
+    with _client(monkeypatch, tmp_path):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(v2_api.automation_get)
+            assert started.wait(timeout=5)
+            second = pool.submit(v2_api.automation_get)
+            release_upload.set()
+            assert first.result(timeout=5)["enabled"] is True
+            follower = second.result(timeout=5)
+            assert follower["enabled"] is True
+            assert follower["version"] == 1
+
+    assert uploaded == [("ws_cloud", {"generation": 7})]
+    assert len(saved) == 1
 
 
 def test_reading_or_disabling_automation_never_uploads_memory_content(
@@ -280,7 +640,7 @@ def test_dashboard_automation_uses_active_workspace_and_discloses_upload_boundar
     # The upload boundary is still disclosed, but consent now travels with the cloud
     # account: the dashboard must not name the operator override anywhere.
     assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT" not in source
-    assert "managed compute is turned off for this installation" in source
+    assert "Hosted work is automatic with Pro." in source
 
 
 def test_portfolio_and_report_analytics_are_hosted_only(monkeypatch, tmp_path):
@@ -398,6 +758,22 @@ def test_managed_cloud_errors_forward_only_bounded_public_copy():
         "managed_cloud": True,
         "transient": False,
         "code": "consent_required",
+    }
+
+    with pytest.raises(HTTPException) as unconfigured:
+        v2_api._managed_call(
+            fail_with,
+            CloudFeatureError(
+                "Connect this installation to Engraphis Cloud to use hosted features.",
+                status=401, code="cloud_unconfigured",
+            ),
+        )
+    assert unconfigured.value.status_code == 401
+    assert unconfigured.value.detail == {
+        "error": "Connect this installation to Engraphis Cloud to use hosted features.",
+        "managed_cloud": True,
+        "transient": False,
+        "code": "cloud_unconfigured",
     }
 
 

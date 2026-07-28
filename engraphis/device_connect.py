@@ -41,8 +41,8 @@ from typing import Optional, Tuple
 from engraphis import cloud_session
 from engraphis.hosted_client import (
     CloudUrlUnresolved,
+    account_url,
     build_pinned_https_opener,
-    upgrade_url,
     validate_cloud_base_url,
 )
 from engraphis.private_state import (
@@ -455,7 +455,7 @@ def _connect_http_error(status: int) -> DeviceConnectError:
     if status == 402:
         return DeviceConnectError(
             "This Engraphis Cloud subscription is not active, so no new device can be "
-            "connected. Update billing at %s and try again." % upgrade_url(),
+            "connected. Update billing at %s and try again." % account_url(),
             status=402,
         )
     if status == 403:

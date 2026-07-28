@@ -1,0 +1,2342 @@
+(() => {
+  'use strict';
+
+  const apiRoot = `${location.origin}/api`;
+  const state = {
+    workspace: '',
+    workspaces: [],
+    stats: {},
+    memories: [],
+    selectedMemory: '',
+    editorMemory: null,
+    view: 'today',
+    provenanceTab: 'belief',
+    manageTab: 'workspaces',
+    refreshEpoch: 0,
+    graphWorkspace: '',
+    graphData: null,
+    graphDataMode: 'overview',
+    graphDataIncludeCode: false,
+    graphMeta: null,
+    graphMode: 'overview',
+    graphScopeBeforeFull: null,
+    graphEngine: null,
+    graphLoadPromise: null,
+    graphLoadWorkspace: '',
+    graphLoadMode: '',
+    graphLoadIncludeCode: false,
+    graphLoadController: null,
+    graphMetrics: {},
+    graphFrozen: false,
+    graphIncludeCode: false,
+    graphSavedView: 'schema',
+    consolidationReviewed: false,
+    hostedLoaded: new Set(),
+    license: null,
+  };
+
+  const byId = id => document.getElementById(id);
+  const all = selector => [...document.querySelectorAll(selector)];
+  const text = value => value == null ? '' : String(value);
+  const number = value => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const truncate = (value, length = 260) => {
+    const source = text(value).trim();
+    return source.length > length ? `${source.slice(0, length - 1)}…` : source;
+  };
+  const empty = (message, className = 'empty-state') => {
+    const node = document.createElement('p');
+    node.className = className;
+    node.textContent = message;
+    return node;
+  };
+  const node = (tag, className = '', content = '') => {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (content !== '') element.textContent = text(content);
+    return element;
+  };
+  const button = (label, className, action) => {
+    const control = node('button', className, label);
+    control.type = 'button';
+    control.addEventListener('click', action);
+    return control;
+  };
+  const option = (value, label, selected = false) => {
+    const item = node('option', '', label);
+    item.value = value;
+    item.selected = selected;
+    return item;
+  };
+  const query = (name = state.workspace) => `workspace=${encodeURIComponent(name || '')}`;
+  const GRAPH_INITIAL_NODE_LIMIT = 320;
+  const GRAPH_FULL_NODE_LIMIT = 20_000;
+  const GRAPH_LOAD_TIMEOUT_MS = 12_000;
+  const GRAPH_FULL_LOAD_TIMEOUT_MS = 30_000;
+  const GRAPH_PREFERENCES_KEY = 'engraphis-ledger-graph-preferences-v1';
+  const GRAPH_CUSTOM_VIEW_KEY = 'engraphis-ledger-graph-custom-view-v1';
+  const GRAPH_LAYERS = ['temporal', 'entity', 'causal', 'semantic', 'code'];
+  const GRAPH_DEFAULT_LAYERS = { temporal: true, entity: true, causal: true, semantic: true, code: false };
+  const GRAPH_TUNING = [
+    { id: 'graph-repel', key: 'repel', fallback: 48 },
+    { id: 'graph-link', key: 'link', fallback: 16 },
+    { id: 'graph-gravity', key: 'gravity', fallback: 48 },
+    { id: 'graph-node-size', key: 'size', fallback: 3 },
+    { id: 'graph-text-size', key: 'font', fallback: 12 },
+    { id: 'graph-line-width', key: 'linkw', fallback: 0.72, precision: 2 },
+    { id: 'graph-label-density', key: 'labelDensity', fallback: 24 },
+  ];
+  const GRAPH_PRESET_TUNING = {
+    original: { repel: 120, link: 30, gravity: 14, font: 13, size: 3, linkw: 1, labelDensity: 40 },
+    compact: { repel: 42, link: 20, gravity: 26, font: 12, size: 3, linkw: 0.7, labelDensity: 30 },
+    communities: { repel: 48, link: 16, gravity: 48, font: 12, size: 3, linkw: 0.72, labelDensity: 24 },
+    radial: { repel: 68, link: 26, gravity: 12, font: 13, size: 3, linkw: 0.75, labelDensity: 55 },
+    constellation: { repel: 34, link: 16, gravity: 38, font: 12, size: 3, linkw: 0.65, labelDensity: 35 },
+  };
+  const GRAPH_SAVED_VIEWS = {
+    operations: {
+      preset: 'compact', style: 'cyber', color: 'connections', palette: 'contrast',
+      layers: { temporal: false, entity: true, causal: true, semantic: false, code: false },
+      minDegree: 2, depth: 1, showUnlinked: false, includeCode: false,
+    },
+    schema: {
+      preset: 'communities', style: 'cyber', color: 'community', palette: 'theme',
+      layers: { ...GRAPH_DEFAULT_LAYERS }, minDegree: 1, depth: 2, showUnlinked: false, includeCode: false,
+    },
+    people: {
+      preset: 'radial', style: 'galaxy', color: 'community', palette: 'aurora',
+      layers: { temporal: false, entity: true, causal: false, semantic: true, code: false },
+      minDegree: 1, depth: 2, showUnlinked: false, includeCode: false,
+    },
+    code: {
+      preset: 'constellation', style: 'cyber', color: 'type', palette: 'ocean',
+      layers: { temporal: false, entity: true, causal: false, semantic: true, code: true },
+      minDegree: 1, depth: 2, showUnlinked: false, includeCode: true,
+    },
+  };
+  const GRAPH_PRESET_LABELS = {
+    original: 'Spacious',
+    compact: 'Compact',
+    communities: 'Islands',
+    radial: 'Radial',
+    constellation: 'Constellation',
+  };
+  const GRAPH_STYLE_NOTES = {
+    cyber: 'Iridescent PVD over graphite — cyan, violet, and magenta across each node.',
+    galaxy: 'Deep anodized alloy with a cool blue-violet directional sheen.',
+    solar: 'Brushed copper faces with amber bezels and warm radial grain.',
+    classic: 'Neutral satin gunmetal with a restrained cool steel edge.',
+  };
+  const GRAPH_CUSTOM_PALETTE = {
+    person_or_concept: '#8d82e3',
+    mention: '#5ba1a6',
+    hashtag: '#c9a15b',
+    email: '#8eb3e6',
+    organization: '#d48173',
+    location: '#7ebf8e',
+    memory: '#5ba1a6',
+    repo: '#c9a15b',
+    file: '#8eb3e6',
+  };
+  const relative = value => {
+    const raw = typeof value === 'number' && value < 1e12 ? value * 1000 : value;
+    const time = typeof raw === 'number' ? raw : Date.parse(raw);
+    if (!Number.isFinite(time)) return 'stored locally';
+    const seconds = Math.max(0, Math.round((Date.now() - time) / 1000));
+    if (seconds < 60) return 'just now';
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+    if (seconds < 604800) return `${Math.floor(seconds / 86400)}d ago`;
+    return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(time);
+  };
+  const errorMessage = (payload, status) => {
+    const detail = payload && (payload.detail || payload.error);
+    if (typeof detail === 'string') return detail;
+    if (detail && typeof detail.error === 'string') return detail.error;
+    return `Request failed (${status})`;
+  };
+
+  async function api(path, options = {}) {
+    const init = { ...options, headers: { ...(options.headers || {}) } };
+    init.headers['X-Engraphis-Browser-Session'] = '1';
+    if (init.body && !(init.body instanceof FormData) && typeof init.body !== 'string') {
+      init.headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(init.body);
+    }
+    const response = await fetch(`${apiRoot}${path}`, init);
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      const error = new Error(errorMessage(payload, response.status));
+      error.status = response.status;
+      throw error;
+    }
+    return payload;
+  }
+
+  async function authenticateBrowser() {
+    let token = '';
+    try {
+      const fragment = new URLSearchParams(location.hash.slice(1));
+      token = fragment.get('token') || '';
+      if (token) history.replaceState(null, '', `${location.pathname}${location.search}`);
+    } catch (_) {}
+    if (!token) token = window.prompt('Enter this deployment’s ENGRAPHIS_API_TOKEN:') || '';
+    if (!token) return false;
+    try {
+      await api('/auth/session', { method: 'POST', body: { token } });
+      token = '';
+      return true;
+    } catch (error) {
+      token = '';
+      showNotice(`Authentication failed: ${error.message}`);
+      return false;
+    }
+  }
+
+  let graphAssetsPromise = null;
+  function loadScript(src, globalName) {
+    if (window[globalName]) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = src;
+      script.onload = () => window[globalName]
+        ? resolve()
+        : reject(new Error(`${globalName} did not register`));
+      script.onerror = () => reject(new Error(`could not load ${src}`));
+      document.head.append(script);
+    });
+  }
+
+  function ensureGraphAssets() {
+    if (window.ForceGraph && window.EngraphisGraph) return Promise.resolve();
+    if (!graphAssetsPromise) {
+      graphAssetsPromise = loadScript(
+        '/v2-assets/vendor/d3.min.js?v=20260727-final',
+        'd3',
+      ).then(() => loadScript(
+        '/v2-assets/vendor/force-graph.min.js?v=20260727-final',
+        'ForceGraph',
+      )).then(() => loadScript(
+        '/v2-assets/engraphis-graph.js?v=20260728-reference-materials',
+        'EngraphisGraph',
+      ));
+      graphAssetsPromise.catch(() => {});
+    }
+    return graphAssetsPromise;
+  }
+
+  function showNotice(message) {
+    byId('notice-text').textContent = message;
+  }
+
+  function updateReleaseUrl(value) {
+    const fallback = 'https://github.com/Coding-Dev-Tools/engraphis/releases';
+    try {
+      const url = new URL(value || fallback, location.href);
+      return ['http:', 'https:'].includes(url.protocol) ? url.href : fallback;
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  // A compromised or misconfigured license server could otherwise push a crafted
+  // upgrade_url (e.g. `javascript:...`) that executes script when the plan link is
+  // clicked. Only http(s) survives; anything else — including a relative/empty value —
+  // returns '' so the caller falls back to an inert '#' href.
+  function safeUrl(value) {
+    if (!value || typeof value !== 'string') return '';
+    try {
+      const url = new URL(value, location.href);
+      return ['http:', 'https:'].includes(url.protocol) ? url.href : '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function renderUpdateBanner(update) {
+    const target = byId('update-banner');
+    if (!target) return;
+    target.replaceChildren();
+    if (!update || !update.enabled || !update.update_available || !update.latest) {
+      target.hidden = true;
+      return;
+    }
+    let dismissed = '';
+    try {
+      dismissed = localStorage.getItem('engraphis-update-dismissed') || '';
+    } catch (_) {}
+    if (dismissed === update.latest) {
+      target.hidden = true;
+      return;
+    }
+    const copy = node('div', 'update-copy');
+    copy.append(
+      node('strong', '', 'Update available'),
+      document.createTextNode(` — Engraphis ${text(update.latest)} is out (you have ${text(update.current || '?')}). Upgrade with `),
+      node('code', '', 'pip install -U engraphis'),
+      document.createTextNode('.'),
+    );
+    const actions = node('div', 'update-actions');
+    const release = node('a', 'text-button', 'View release →');
+    release.href = updateReleaseUrl(update.url);
+    release.target = '_blank';
+    release.rel = 'noopener';
+    const dismiss = button('Dismiss', 'update-dismiss', () => {
+      try {
+        localStorage.setItem('engraphis-update-dismissed', text(update.latest));
+      } catch (_) {}
+      target.hidden = true;
+      target.replaceChildren();
+    });
+    actions.append(release, dismiss);
+    target.append(copy, actions);
+    target.hidden = false;
+  }
+
+  function setConnection(message, healthy = true) {
+    byId('connection-status').textContent = message;
+    const dot = document.querySelector('.status-dot');
+    dot.classList.toggle('unhealthy', !healthy);
+  }
+
+  function memoryType(memory) {
+    return memory.memory_type || memory.mtype || 'semantic';
+  }
+
+  function memoryTime(memory) {
+    return memory.ingested_at || memory.valid_from || memory.last_access;
+  }
+
+  function memoryMeta(memory) {
+    const meta = node('div', 'memory-meta');
+    meta.append(
+      node('span', 'type-chip', memoryType(memory)),
+      node('span', '', memory.scope || 'workspace'),
+      node('span', '', relative(memoryTime(memory))),
+    );
+    if (memory.pinned) meta.append(node('span', '', 'pinned'));
+    return meta;
+  }
+
+  function renderMetricValues(stats) {
+    const values = [
+      stats.memories,
+      stats.total_rows,
+      stats.workspaces || state.workspaces.length,
+      stats.sessions,
+    ];
+    all('#metrics strong').forEach((element, index) => {
+      element.textContent = values[index] == null ? '—' : number(values[index]).toLocaleString();
+    });
+  }
+
+  function renderTypeBars(stats) {
+    const target = byId('type-bars');
+    target.replaceChildren();
+    const types = stats.by_type || {};
+    const entries = Object.entries(types).sort((a, b) => number(b[1]) - number(a[1]));
+    if (!entries.length) {
+      target.append(empty('No typed memories yet.'));
+      return;
+    }
+    const max = Math.max(1, ...entries.map(([, value]) => number(value)));
+    entries.forEach(([name, value]) => {
+      const row = node('div', 'type-bar');
+      row.append(node('span', '', name));
+      const bar = document.createElement('progress');
+      bar.max = max;
+      bar.value = number(value);
+      bar.setAttribute('aria-label', `${name}: ${number(value)}`);
+      row.append(bar, node('strong', '', number(value).toLocaleString()));
+      target.append(row);
+    });
+  }
+
+  function renderDecisions(memories) {
+    const target = byId('decision-list');
+    target.replaceChildren();
+    const candidates = memories.slice(0, 3);
+    if (!candidates.length) {
+      target.append(empty('No high-signal memories need review.'));
+      return;
+    }
+    candidates.forEach(memory => {
+      const card = node(memory.id ? 'button' : 'article', 'decision-card memory-link-card');
+      if (memory.id) {
+        card.type = 'button';
+        card.dataset.memoryId = memory.id;
+        card.addEventListener('click', () => openMemory(memory));
+      }
+      const header = node('div', 'decision-card-header');
+      header.append(
+        node('span', 'tag', memory.pinned ? 'Pinned' : memoryType(memory)),
+        node('h3', '', memory.title || memory.id || 'Untitled memory'),
+      );
+      card.append(header, node('p', '', truncate(memory.content || memory.summary, 360)));
+      target.append(card);
+    });
+  }
+
+  function auditItems(payload) {
+    if (Array.isArray(payload)) return payload;
+    return payload.audit || payload.entries || payload.records || payload.events || [];
+  }
+
+  function receiptItems(payload) {
+    if (Array.isArray(payload)) return payload;
+    return payload.receipts || payload.entries || payload.records || [];
+  }
+
+  function auditField(item, ...names) {
+    for (const name of names) {
+      if (item && item[name] != null && item[name] !== '') return item[name];
+    }
+    return '';
+  }
+
+  function renderActivity(items) {
+    const target = byId('activity-body');
+    target.replaceChildren();
+    if (!items.length) {
+      const row = node('tr');
+      const cell = node('td', '', 'No audit entries yet.');
+      cell.colSpan = 5;
+      row.append(cell);
+      target.append(row);
+      return;
+    }
+    items.slice(0, 8).forEach(item => {
+      const row = node('tr');
+      const timestamp = auditField(item, 'ts', 'timestamp', 'created_at', 'valid_from');
+      const values = [
+        relative(timestamp),
+        auditField(item, 'actor', 'source') || 'local operator',
+        auditField(item, 'action', 'operation', 'event') || 'recorded',
+        auditField(item, 'scope', 'workspace', 'target') || state.workspace,
+        truncate(auditField(item, 'hash', 'id', 'receipt_id'), 14) || '—',
+      ];
+      values.forEach(value => row.append(node('td', '', value)));
+      target.append(row);
+    });
+  }
+
+  function renderProactive(memories) {
+    const target = byId('proactive-list');
+    target.replaceChildren();
+    if (!memories.length) {
+      target.append(empty('No proactive context is available.'));
+      return;
+    }
+    memories.slice(0, 5).forEach(memory => {
+      const row = node('button', 'compact-row');
+      row.type = 'button';
+      if (memory.id) row.dataset.memoryId = memory.id;
+      row.append(
+        node('strong', '', memory.title || memory.id || 'Memory'),
+        node('span', '', truncate(memory.summary || memory.content, 140)),
+      );
+      row.addEventListener('click', () => openMemory(memory));
+      target.append(row);
+    });
+  }
+
+  async function loadStats(workspace, epoch) {
+    const stats = await api(`/stats?${query(workspace)}`);
+    if (epoch !== state.refreshEpoch) return;
+    state.stats = stats;
+    renderMetricValues(stats);
+    renderTypeBars(stats);
+  }
+
+  async function loadMemories(workspace, epoch) {
+    const payload = await api(`/memories?${query(workspace)}&limit=500`);
+    if (epoch !== state.refreshEpoch) return;
+    state.memories = payload.memories || [];
+    renderLibrary();
+  }
+
+  async function loadToday(workspace, epoch) {
+    const [proactiveResult, auditResult] = await Promise.allSettled([
+      api(`/proactive?${query(workspace)}&k=8`),
+      api(`/audit?${query(workspace)}&limit=12`),
+    ]);
+    if (epoch !== state.refreshEpoch) return;
+    const proactive = proactiveResult.status === 'fulfilled'
+      ? (proactiveResult.value.memories || proactiveResult.value.results || [])
+      : state.memories.slice(0, 5);
+    renderProactive(proactive);
+    renderDecisions(proactive.length ? proactive : state.memories);
+    renderActivity(auditResult.status === 'fulfilled' ? auditItems(auditResult.value) : []);
+  }
+
+  function renderWorkspaceNames() {
+    all('[data-workspace-name]').forEach(element => {
+      element.textContent = state.workspace || 'this workspace';
+    });
+  }
+
+  function workspaceName(item) {
+    return typeof item === 'string' ? item : item.name;
+  }
+
+  async function selectWorkspace(name) {
+    if (!name) return;
+    const epoch = ++state.refreshEpoch;
+    state.workspace = name;
+    state.graphWorkspace = '';
+    state.graphData = null;
+    state.graphDataIncludeCode = false;
+    state.selectedMemory = '';
+    if (state.graphEngine) {
+      state.graphEngine.destroy();
+      state.graphEngine = null;
+    }
+    byId('workspace-select').value = name;
+    renderWorkspaceNames();
+    try {
+      localStorage.setItem('engraphis-workspace', name);
+    } catch (_) {}
+    showNotice('');
+    try {
+      await Promise.all([
+        loadStats(name, epoch),
+        loadMemories(name, epoch),
+        loadToday(name, epoch),
+      ]);
+      if (epoch !== state.refreshEpoch) return;
+      renderWorkspaceList();
+      if (state.view === 'relations') await loadGraph();
+      if (state.view === 'provenance' && state.provenanceTab === 'audit') await loadAudit();
+      if (state.view === 'manage') await loadManageTab(state.manageTab);
+    } catch (error) {
+      if (epoch === state.refreshEpoch) showNotice(`Could not refresh ${name}: ${error.message}`);
+    }
+  }
+
+  function memoryCard(memory) {
+    const card = node('button', 'memory-card');
+    card.type = 'button';
+    card.setAttribute('role', 'option');
+    card.dataset.memoryId = memory.id;
+    card.setAttribute('aria-selected', String(state.selectedMemory === memory.id));
+    if (state.selectedMemory === memory.id) card.classList.add('selected');
+    card.append(
+      node('h2', '', memory.title || memory.id || 'Untitled memory'),
+      node('p', '', truncate(memory.content || memory.summary, 240)),
+      memoryMeta(memory),
+    );
+    card.addEventListener('click', () => openMemory(memory));
+    return card;
+  }
+
+  function filteredMemories() {
+    const filter = byId('library-filter').value.trim().toLowerCase();
+    const type = byId('library-type').value;
+    return state.memories.filter(memory => {
+      const matchesText = !filter || `${memory.title || ''} ${memory.content || ''} ${memory.summary || ''}`
+        .toLowerCase().includes(filter);
+      return matchesText && (!type || memoryType(memory) === type);
+    });
+  }
+
+  function renderLibrary() {
+    const target = byId('library-list');
+    target.replaceChildren();
+    const memories = filteredMemories();
+    byId('library-count').textContent = `${memories.length.toLocaleString()} ${memories.length === 1 ? 'memory' : 'memories'}`;
+    if (!memories.length) {
+      target.append(empty(state.memories.length ? 'No memories match these filters.' : 'No active memories in this workspace.'));
+      return;
+    }
+    memories.forEach(memory => target.append(memoryCard(memory)));
+  }
+
+  function definitionList(entries) {
+    const list = node('dl', 'definition-list');
+    entries.forEach(([term, value]) => {
+      const row = node('div');
+      row.append(node('dt', '', term), node('dd', '', value || '—'));
+      list.append(row);
+    });
+    return list;
+  }
+
+  async function selectMemory(id) {
+    state.selectedMemory = id;
+    renderLibrary();
+    const target = byId('memory-detail');
+    target.hidden = false;
+    byId('memory-editor').hidden = true;
+    target.replaceChildren(empty('Loading memory…'));
+    try {
+      const payload = await api(`/memory/${encodeURIComponent(id)}?${query()}`);
+      const memory = payload.memory || state.memories.find(item => item.id === id);
+      if (!memory || state.selectedMemory !== id) return;
+      state.editorMemory = memory;
+      target.replaceChildren();
+      target.append(
+        node('p', 'eyebrow', `${memoryType(memory)} · ${memory.scope || 'workspace'}`),
+        node('h2', '', memory.title || memory.id || 'Untitled memory'),
+        node('p', '', memory.content || memory.summary || 'No content.'),
+        memoryMeta(memory),
+        definitionList([
+          ['Memory id', memory.id],
+          ['Importance', memory.importance == null ? '—' : number(memory.importance).toFixed(2)],
+          ['Valid from', relative(memory.valid_from)],
+          ['Valid to', memory.valid_to ? relative(memory.valid_to) : 'current'],
+          ['Source', memory.provenance && (memory.provenance.source || memory.provenance.kind)],
+        ]),
+      );
+      const actions = node('div', 'detail-actions');
+      actions.append(
+        button('Edit', 'secondary-button', () => openEditor(memory)),
+        button(memory.pinned ? 'Unpin' : 'Pin', 'secondary-button', () => togglePin(memory)),
+        button('View timeline', 'secondary-button', () => openMemoryTimeline(memory)),
+        button('Forget', 'danger-button', () => forgetMemory(memory)),
+      );
+      target.append(actions);
+      const chain = payload.chain || [];
+      if (chain.length) {
+        target.append(node('h3', '', 'Supersession chain'));
+        const list = node('div', 'timeline-list');
+        chain.forEach(item => list.append(simpleMemoryCard(item, 'timeline-card')));
+        target.append(list);
+      }
+    } catch (error) {
+      if (state.selectedMemory === id) target.replaceChildren(empty(`Could not inspect memory: ${error.message}`));
+    }
+  }
+
+  function openMemory(memory) {
+    if (!memory || !memory.id) {
+      showNotice('This result no longer identifies a memory to inspect.');
+      return;
+    }
+    switchView('library');
+    selectMemory(memory.id);
+  }
+
+  function simpleMemoryCard(memory, className = 'memory-card') {
+    const interactive = Boolean(memory && memory.id);
+    const card = node(interactive ? 'button' : 'article', `${className}${interactive ? ' memory-link-card' : ''}`);
+    if (interactive) {
+      card.type = 'button';
+      card.dataset.memoryId = memory.id;
+      card.addEventListener('click', () => openMemory(memory));
+    }
+    card.append(
+      node('h3', '', memory.title || memory.id || 'Memory'),
+      node('p', '', truncate(memory.content || memory.summary, 500)),
+      memoryMeta(memory),
+    );
+    return card;
+  }
+
+  function openEditor(memory = null) {
+    state.editorMemory = memory;
+    byId('memory-detail').hidden = true;
+    const editor = byId('memory-editor');
+    editor.hidden = false;
+    byId('editor-title').textContent = memory ? 'Revise memory' : 'New memory';
+    byId('editor-memory-title').value = memory ? (memory.title || '') : '';
+    byId('editor-memory-type').value = memory ? memoryType(memory) : 'semantic';
+    byId('editor-memory-content').value = memory ? (memory.content || memory.summary || '') : '';
+    byId('editor-memory-importance').value = memory && memory.importance != null ? memory.importance : 0.5;
+    byId('editor-memory-title').focus();
+  }
+
+  function closeEditor() {
+    byId('memory-editor').hidden = true;
+    byId('memory-detail').hidden = false;
+    state.editorMemory = null;
+  }
+
+  async function saveMemory(event) {
+    event.preventDefault();
+    const current = state.editorMemory;
+    const title = byId('editor-memory-title').value.trim();
+    const memoryTypeValue = byId('editor-memory-type').value;
+    const content = byId('editor-memory-content').value.trim();
+    const importance = number(byId('editor-memory-importance').value);
+    if (!content) return;
+    try {
+      if (current) {
+        if (content !== (current.content || current.summary || '')) {
+          await api('/correct', {
+            method: 'POST',
+            body: { id: current.id, workspace: state.workspace, content, reason: 'revised in Ledger' },
+          });
+        } else if (title !== (current.title || '') || memoryTypeValue !== memoryType(current)) {
+          await api('/memory/update', {
+            method: 'POST',
+            body: { id: current.id, workspace: state.workspace, title, memory_type: memoryTypeValue },
+          });
+        }
+        showNotice('Memory revision recorded with temporal history preserved.');
+      } else {
+        await api('/remember', {
+          method: 'POST',
+          body: {
+            workspace: state.workspace,
+            content,
+            title,
+            mtype: memoryTypeValue,
+            scope: 'workspace',
+            importance,
+            source: 'human:ledger',
+            trusted: true,
+          },
+        });
+        showNotice('Memory saved locally.');
+      }
+      closeEditor();
+      await selectWorkspace(state.workspace);
+    } catch (error) {
+      showNotice(`Could not save memory: ${error.message}`);
+    }
+  }
+
+  async function togglePin(memory) {
+    try {
+      await api('/pin', {
+        method: 'POST',
+        body: { id: memory.id, workspace: state.workspace, pinned: !memory.pinned },
+      });
+      showNotice(memory.pinned ? 'Memory unpinned.' : 'Memory pinned against decay.');
+      await selectWorkspace(state.workspace);
+      selectMemory(memory.id);
+    } catch (error) {
+      showNotice(`Could not change pin: ${error.message}`);
+    }
+  }
+
+  async function forgetMemory(memory) {
+    if (!window.confirm(`Forget “${memory.title || memory.id}”? The record stays in temporal history but leaves live recall.`)) return;
+    try {
+      await api('/forget', {
+        method: 'POST',
+        body: { id: memory.id, workspace: state.workspace, reason: 'forgotten in Ledger' },
+      });
+      state.selectedMemory = '';
+      byId('memory-detail').replaceChildren(empty('Memory moved out of live recall. Its history is retained.'));
+      showNotice('Memory forgotten without hard deletion.');
+      await selectWorkspace(state.workspace);
+    } catch (error) {
+      showNotice(`Could not forget memory: ${error.message}`);
+    }
+  }
+
+  function openMemoryTimeline(memory) {
+    switchView('provenance');
+    switchProvenanceTab('timeline');
+    byId('timeline-input').value = memory.title || truncate(memory.content, 80);
+    byId('timeline-form').requestSubmit();
+  }
+
+  async function importFiles(files) {
+    if (!files.length) return;
+    const form = new FormData();
+    form.append('workspace', state.workspace);
+    form.append('memory_type', 'semantic');
+    form.append('derive_facts', 'false');
+    [...files].forEach(file => form.append('files', file));
+    try {
+      showNotice(`Importing ${files.length} ${files.length === 1 ? 'file' : 'files'} locally…`);
+      const result = await api('/workspaces/import-files', { method: 'POST', body: form });
+      showNotice(`Import complete${result.count != null ? ` · ${result.count} memories` : ''}.`);
+      await selectWorkspace(state.workspace);
+    } catch (error) {
+      showNotice(`Import failed: ${error.message}`);
+    } finally {
+      byId('import-files').value = '';
+    }
+  }
+
+  function renderAnswer(result) {
+    const target = byId('answer-panel');
+    target.replaceChildren();
+    const meta = node('div', 'answer-meta');
+    const grounded = Boolean(result.grounded);
+    meta.append(
+      node('span', `support-pill ${grounded ? 'grounded' : 'abstained'}`, grounded ? 'Grounded' : 'Abstained'),
+      node('span', 'support-pill', `Support ${number(result.support).toFixed(2)}`),
+      node('span', 'support-pill', `${(result.citations || []).length} citations`),
+    );
+    target.append(meta);
+    if (!grounded) {
+      target.append(
+        node('h2', '', 'Insufficient evidence'),
+        node('p', 'answer-copy', result.reason || 'The active workspace does not support a grounded answer.'),
+      );
+      return;
+    }
+    target.append(node('p', 'answer-copy', result.answer || 'The cited memories support this answer.'));
+    const citations = node('div', 'citation-list');
+    (result.citations || []).forEach(citation => {
+      const card = node(citation.id ? 'button' : 'article', 'citation-card memory-link-card');
+      if (citation.id) {
+        card.type = 'button';
+        card.dataset.memoryId = citation.id;
+        card.addEventListener('click', () => openMemory(citation));
+      }
+      card.append(
+        node('h3', '', `[${citation.n || citation.number || '•'}] ${citation.title || citation.id || 'Memory'}`),
+        node('p', '', citation.content || citation.summary || ''),
+        node('div', 'memory-meta', `support ${number(citation.support || citation.score).toFixed(2)} · ${citation.id || ''}`),
+      );
+      citations.append(card);
+    });
+    target.append(citations);
+  }
+
+  async function askMemory(event) {
+    event.preventDefault();
+    const input = byId('ask-input');
+    const question = input.value.trim();
+    if (!question || !state.workspace) return;
+    const k = number(byId('ask-k').value) || 5;
+    byId('answer-panel').replaceChildren(empty('Searching, checking support and building citations…'));
+    byId('retrieval-list').replaceChildren(empty('Retrieving candidate memories…'));
+    try {
+      const [answer, retrieval] = await Promise.all([
+        api('/answer', {
+          method: 'POST',
+          body: { query: question, workspace: state.workspace, k: Math.max(8, k), max_citations: k },
+        }),
+        api(`/recall?q=${encodeURIComponent(question)}&${query()}&k=${Math.max(8, k)}`),
+      ]);
+      renderAnswer(answer);
+      const target = byId('retrieval-list');
+      target.replaceChildren();
+      const memories = retrieval.memories || [];
+      if (!memories.length) target.append(empty('No raw candidates were returned.'));
+      else memories.forEach(memory => target.append(simpleMemoryCard(memory)));
+    } catch (error) {
+      byId('answer-panel').replaceChildren(empty(`Grounded Ask is unavailable: ${error.message}`));
+      byId('retrieval-list').replaceChildren(empty('Raw retrieval did not complete.'));
+    }
+  }
+
+  function graphNodes(payload) {
+    const source = payload.nodes || payload.entities || [];
+    return source.map(item => ({
+      id: item.id,
+      name: item.label || item.name || item.id,
+      label: item.label || item.name || item.id,
+      etype: item.etype || item.type || 'person_or_concept',
+      degree: number(item.degree),
+      community: Number.isFinite(Number(item.community)) ? Number(item.community) : undefined,
+      repo: item.repo || '',
+      topic: item.topic || '',
+      valid_from: item.valid_from,
+      valid_to: item.valid_to,
+    }));
+  }
+
+  function graphLinks(payload) {
+    const source = payload.edges || payload.links || [];
+    return source.map((item, index) => ({
+      id: item.id || `edge-${index}`,
+      source: item.from || (item.source && (item.source.id || item.source)),
+      target: item.to || (item.target && (item.target.id || item.target)),
+      label: item.label || item.relation || 'related',
+      layer: item.layer || 'semantic',
+      valid_from: item.valid_from,
+      valid_to: item.valid_to,
+    })).filter(item => item.source && item.target);
+  }
+
+  function revealGraphNode(id, label = 'Selected entity') {
+    const engine = state.graphEngine;
+    if (!engine) return;
+    let attempts = 0;
+    const reveal = () => {
+      if (state.graphEngine !== engine) return;
+      if (engine.reveal(id)) return;
+      attempts += 1;
+      if (attempts < 8) {
+        window.requestAnimationFrame(reveal);
+        return;
+      }
+      showNotice(`${label} is outside the current graph scope.`);
+    };
+    reveal();
+  }
+
+  function updateGraphFacts(data) {
+    const stats = byId('graph-stats');
+    stats.replaceChildren();
+    const degrees = data.nodes.map(item => number(item.degree)).sort((a, b) => a - b);
+    const values = [
+      ['Entities', data.nodes.length],
+      ['Relations', data.links.length],
+      ['Unlinked', data.nodes.filter(item => !number(item.degree)).length],
+      ['Median links', degrees.length ? degrees[Math.floor(degrees.length / 2)] : 0],
+    ];
+    values.forEach(([label, value]) => {
+      const item = node('div', 'stat-item');
+      item.append(node('span', '', label), node('strong', '', number(value).toLocaleString()));
+      stats.append(item);
+    });
+    const top = byId('graph-top');
+    top.replaceChildren();
+    [...data.nodes].sort((a, b) => number(b.degree) - number(a.degree)).slice(0, 7).forEach(item => {
+      const control = node('button', 'compact-row');
+      control.type = 'button';
+      control.append(node('strong', '', item.name), node('span', '', `${number(item.degree)} connections · ${item.etype}`));
+      control.addEventListener('click', () => revealGraphNode(item.id, item.name));
+      top.append(control);
+    });
+  }
+
+  function updateGraphModeControls() {
+    const full = state.graphMode === 'full';
+    const control = byId('graph-full');
+    control.textContent = full ? 'Show responsive overview' : 'Show all nodes';
+    control.setAttribute('aria-pressed', String(full));
+    control.title = full
+      ? 'Return to the fast 320-node overview'
+      : 'Load every node, including unconnected entities, for this graph view';
+    ['graph-min-degree', 'graph-tune-min-degree', 'graph-unlinked', 'graph-tune-unlinked', 'graph-collapse'].forEach(id => {
+      const scopeControl = byId(id);
+      scopeControl.disabled = full;
+      scopeControl.title = full
+        ? 'Full node graph always includes unlinked nodes and never collapses clusters.'
+        : '';
+    });
+    const preset = GRAPH_PRESET_LABELS[byId('graph-preset').value] || 'Islands';
+    byId('graph-mode').textContent = `${full ? 'Full node graph' : 'Responsive overview'} · ${preset}`;
+  }
+
+  function setChoicePressed(selector, dataKey, selected) {
+    all(selector).forEach(control => {
+      const active = control.dataset[dataKey] === selected;
+      control.classList.toggle('active', active);
+      control.setAttribute('aria-pressed', String(active));
+    });
+  }
+
+  function syncGraphChoices() {
+    const preset = byId('graph-preset').value;
+    const style = byId('graph-style').value;
+    const color = byId('graph-color').value;
+    const palette = byId('graph-palette').value;
+    setChoicePressed('[data-graph-preset-choice]', 'graphPresetChoice', preset);
+    setChoicePressed('[data-graph-style-choice]', 'graphStyleChoice', style);
+    setChoicePressed('[data-graph-color-choice]', 'graphColorChoice', color);
+    setChoicePressed('[data-graph-palette-choice]', 'graphPaletteChoice', palette);
+    byId('graph-style-note').textContent = GRAPH_STYLE_NOTES[style] || GRAPH_STYLE_NOTES.classic;
+    syncGraphSavedViews();
+  }
+
+  function setGraphSwitch(id, on) {
+    const control = byId(id);
+    control.classList.toggle('on', on);
+    control.setAttribute('aria-checked', String(on));
+  }
+
+  function graphValueInRange(id, value, fallback) {
+    const control = byId(id);
+    const raw = Number(value);
+    const safe = Number.isFinite(raw) ? raw : fallback;
+    const min = Number(control.min);
+    const max = Number(control.max);
+    return Math.min(Number.isFinite(max) ? max : safe, Math.max(Number.isFinite(min) ? min : safe, safe));
+  }
+
+  function graphPresetTuning(preset) {
+    const available = window.EngraphisGraph && window.EngraphisGraph.PRESETS;
+    const source = (available && available[preset]) || GRAPH_PRESET_TUNING[preset] || GRAPH_PRESET_TUNING.communities;
+    return GRAPH_TUNING.reduce((settings, item) => {
+      settings[item.key] = source && Number.isFinite(Number(source[item.key]))
+        ? Number(source[item.key]) : item.fallback;
+      return settings;
+    }, {});
+  }
+
+  function setGraphTuningControl(item, value) {
+    const control = byId(item.id);
+    const next = graphValueInRange(item.id, value, item.fallback);
+    control.value = String(next);
+    const rendered = item.precision ? next.toFixed(item.precision) : String(Math.round(next));
+    const output = byId(`${item.id}-output`);
+    output.value = rendered;
+    output.textContent = rendered;
+    return next;
+  }
+
+  function graphTuningSettings() {
+    return GRAPH_TUNING.reduce((settings, item) => {
+      settings[item.key] = number(byId(item.id).value);
+      return settings;
+    }, { flowSpeed: number(byId('graph-flow-speed').value) });
+  }
+
+  function syncGraphTuning(settings) {
+    GRAPH_TUNING.forEach(item => setGraphTuningControl(item, settings && settings[item.key]));
+    const flowSpeed = graphValueInRange('graph-flow-speed', settings && settings.flowSpeed, 45);
+    byId('graph-flow-speed').value = String(flowSpeed);
+    byId('graph-flow-speed-output').value = String(Math.round(flowSpeed));
+    byId('graph-flow-speed-output').textContent = String(Math.round(flowSpeed));
+  }
+
+  function graphScope() {
+    const full = state.graphMode === 'full';
+    return {
+      minDegree: full ? 0 : number(byId('graph-min-degree').value),
+      showUnlinked: full || byId('graph-unlinked').checked,
+      depth: number(byId('graph-depth').value),
+    };
+  }
+
+  function applyGraphScope() {
+    if (state.graphEngine) state.graphEngine.setScope(graphScope());
+  }
+
+  function setGraphMinDegree(value, apply = true) {
+    const next = graphValueInRange('graph-min-degree', value, 1);
+    byId('graph-min-degree').value = String(next);
+    byId('graph-min-degree-output').value = String(Math.round(next));
+    byId('graph-min-degree-output').textContent = String(Math.round(next));
+    byId('graph-tune-min-degree').value = String(next);
+    byId('graph-tune-min-degree-output').value = String(Math.round(next));
+    byId('graph-tune-min-degree-output').textContent = String(Math.round(next));
+    if (apply) applyGraphScope();
+  }
+
+  function setGraphDepth(value, apply = true) {
+    const next = graphValueInRange('graph-depth', value, 2);
+    byId('graph-depth').value = String(next);
+    byId('graph-depth-output').value = String(Math.round(next));
+    byId('graph-depth-output').textContent = String(Math.round(next));
+    if (apply) applyGraphScope();
+  }
+
+  function setGraphShowUnlinked(on, apply = true) {
+    const next = on === true;
+    byId('graph-unlinked').checked = next;
+    setGraphSwitch('graph-tune-unlinked', next);
+    if (apply) applyGraphScope();
+  }
+
+  function graphLayerState() {
+    return all('[data-graph-layer]').reduce((layers, control) => {
+      layers[control.dataset.graphLayer] = control.getAttribute('aria-pressed') === 'true';
+      return layers;
+    }, {});
+  }
+
+  function setGraphLayers(layers) {
+    const source = layers && typeof layers === 'object' ? layers : GRAPH_DEFAULT_LAYERS;
+    all('[data-graph-layer]').forEach(control => {
+      const active = source[control.dataset.graphLayer] !== false;
+      control.classList.toggle('active', active);
+      control.setAttribute('aria-pressed', String(active));
+    });
+  }
+
+  function updateGraphLayerCounts(data, supplied) {
+    const counts = GRAPH_LAYERS.reduce((result, layer) => { result[layer] = 0; return result; }, {});
+    if (Array.isArray(supplied)) supplied.forEach(item => {
+      if (item && GRAPH_LAYERS.includes(item.layer)) counts[item.layer] = number(item.count);
+    });
+    else (data.links || []).forEach(link => {
+      if (GRAPH_LAYERS.includes(link.layer)) counts[link.layer] += 1;
+    });
+    GRAPH_LAYERS.forEach(layer => { byId(`graph-layer-${layer}-count`).textContent = counts[layer].toLocaleString(); });
+  }
+
+  function syncGraphSavedViews() {
+    all('[data-graph-saved-view]').forEach(control => {
+      const active = control.dataset.graphSavedView === state.graphSavedView;
+      control.classList.toggle('active', active);
+      control.setAttribute('aria-pressed', String(active));
+    });
+  }
+
+  function clearGraphSavedView() {
+    if (!state.graphSavedView) return;
+    state.graphSavedView = '';
+    syncGraphSavedViews();
+  }
+
+  function graphPreference(name, fallback, allowed) {
+    try {
+      const saved = JSON.parse(localStorage.getItem(GRAPH_PREFERENCES_KEY) || '{}');
+      const value = saved && typeof saved === 'object' ? saved[name] : undefined;
+      return allowed && !allowed.includes(value) ? fallback : value === undefined ? fallback : value;
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  function graphPreferenceSnapshot() {
+    return {
+      preset: byId('graph-preset').value,
+      style: byId('graph-style').value,
+      color: byId('graph-color').value,
+      palette: byId('graph-palette').value,
+      flow: byId('graph-flow').getAttribute('aria-checked') === 'true',
+      labels: byId('graph-labels').getAttribute('aria-checked') === 'true',
+      frozen: state.graphFrozen,
+      tuning: graphTuningSettings(),
+      minDegree: number(byId('graph-min-degree').value),
+      depth: number(byId('graph-depth').value),
+      showUnlinked: byId('graph-unlinked').checked,
+      layers: graphLayerState(),
+      includeCode: state.graphIncludeCode,
+      savedView: state.graphSavedView,
+      bridges: byId('graph-bridges').checked,
+      collapse: byId('graph-collapse').checked,
+      asOf: byId('graph-as-of').value,
+      ghosts: byId('graph-ghosts').checked,
+      size: byId('graph-size').value,
+      repoFilter: byId('graph-repo-filter').value.slice(0, 200),
+    };
+  }
+
+  function saveGraphPreferences() {
+    try {
+      localStorage.setItem(GRAPH_PREFERENCES_KEY, JSON.stringify(graphPreferenceSnapshot()));
+    } catch (_) {}
+  }
+
+  function restoreGraphPreferences() {
+    const preset = graphPreference('preset', byId('graph-preset').value,
+      ['original', 'compact', 'communities', 'radial', 'constellation']);
+    const style = graphPreference('style', byId('graph-style').value,
+      ['classic', 'galaxy', 'solar', 'cyber']);
+    const color = graphPreference('color', byId('graph-color').value,
+      ['community', 'connections', 'type']);
+    const palette = graphPreference('palette', byId('graph-palette').value,
+      ['theme', 'aurora', 'ocean', 'ember', 'contrast', 'custom']);
+    byId('graph-preset').value = preset;
+    byId('graph-style').value = style;
+    byId('graph-color').value = color;
+    byId('graph-palette').value = palette;
+
+    const savedTuning = graphPreference('tuning', {});
+    syncGraphTuning({
+      ...graphPresetTuning(preset),
+      ...(savedTuning && typeof savedTuning === 'object' ? savedTuning : {}),
+    });
+
+    const savedMin = Number(graphPreference('minDegree', number(byId('graph-min-degree').value)));
+    const minDegree = Number.isFinite(savedMin) ? Math.max(0, Math.min(12, Math.round(savedMin))) : 1;
+    setGraphMinDegree(minDegree);
+    setGraphDepth(graphPreference('depth', 2));
+    const savedRepo = graphPreference('repoFilter', '');
+    byId('graph-repo-filter').value = typeof savedRepo === 'string' ? savedRepo.slice(0, 200) : '';
+    const savedAsOf = graphPreference('asOf', '');
+    byId('graph-as-of').value = typeof savedAsOf === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(savedAsOf)
+      ? savedAsOf : '';
+    setGraphShowUnlinked(graphPreference('showUnlinked', byId('graph-unlinked').checked) === true);
+    byId('graph-bridges').checked = graphPreference('bridges', byId('graph-bridges').checked) === true;
+    byId('graph-collapse').checked = graphPreference('collapse', byId('graph-collapse').checked) === true;
+    byId('graph-ghosts').checked = graphPreference('ghosts', byId('graph-ghosts').checked) !== false;
+    byId('graph-size').value = graphPreference('size', byId('graph-size').value,
+      ['degree', 'betweenness']);
+    state.graphFrozen = graphPreference('frozen', false) === true;
+    setGraphSwitch('graph-freeze', state.graphFrozen);
+    setGraphSwitch('graph-flow', graphPreference('flow', true) !== false);
+    setGraphSwitch('graph-labels', graphPreference('labels', false) === true);
+    const savedLayers = graphPreference('layers', GRAPH_DEFAULT_LAYERS);
+    setGraphLayers(GRAPH_LAYERS.reduce((layers, layer) => {
+      layers[layer] = !savedLayers || typeof savedLayers !== 'object' || savedLayers[layer] !== false;
+      return layers;
+    }, {}));
+    state.graphIncludeCode = graphPreference('includeCode', false) === true;
+    state.graphSavedView = graphPreference('savedView', 'schema', ['', ...Object.keys(GRAPH_SAVED_VIEWS)]);
+    syncGraphSavedViews();
+  }
+
+  function savedGraphView(id) {
+    if (id === 'custom') {
+      try {
+        const custom = JSON.parse(localStorage.getItem(GRAPH_CUSTOM_VIEW_KEY) || 'null');
+        return custom && typeof custom === 'object' ? custom : null;
+      } catch (_) {
+        return null;
+      }
+    }
+    return GRAPH_SAVED_VIEWS[id] || null;
+  }
+
+  function applyGraphView(id) {
+    const view = savedGraphView(id);
+    if (!view) {
+      showNotice(id === 'custom' ? 'No locally saved graph view yet.' : 'That saved graph view is unavailable.');
+      return;
+    }
+    const preset = Object.prototype.hasOwnProperty.call(GRAPH_PRESET_LABELS, view.preset)
+      ? view.preset : byId('graph-preset').value;
+    const style = ['classic', 'galaxy', 'solar', 'cyber'].includes(view.style) ? view.style : byId('graph-style').value;
+    const color = ['community', 'connections', 'type'].includes(view.color) ? view.color : byId('graph-color').value;
+    const palette = ['theme', 'aurora', 'ocean', 'ember', 'contrast', 'custom'].includes(view.palette)
+      ? view.palette : byId('graph-palette').value;
+    const previousIncludeCode = state.graphIncludeCode;
+    state.graphIncludeCode = view.includeCode === true;
+    byId('graph-preset').value = preset;
+    byId('graph-style').value = style;
+    byId('graph-color').value = color;
+    byId('graph-palette').value = palette;
+    syncGraphTuning({
+      ...graphPresetTuning(preset),
+      ...(view.tuning && typeof view.tuning === 'object' ? view.tuning : {}),
+    });
+    setGraphMinDegree(view.minDegree == null ? 1 : view.minDegree, false);
+    setGraphDepth(view.depth == null ? 2 : view.depth, false);
+    setGraphShowUnlinked(view.showUnlinked === true, false);
+    setGraphLayers(view.layers);
+    state.graphSavedView = id === 'custom' ? '' : id;
+    syncGraphChoices();
+    if (state.graphEngine) {
+      state.graphEngine.apply(graph => {
+        graph.setPreset(preset);
+        graph.setStyle(style);
+        graph.setColorBy(color);
+        applyGraphPalette(palette);
+        graph.setSettings({
+          ...graphTuningSettings(),
+          flow: byId('graph-flow').getAttribute('aria-checked') === 'true',
+          labels: byId('graph-labels').getAttribute('aria-checked') === 'true',
+          frozen: state.graphFrozen,
+        });
+        graph.setScope(graphScope());
+        graph.setLayers(graphLayerState());
+      }, false, !state.graphFrozen);
+      state.graphEngine.freeze(state.graphFrozen);
+    }
+    saveGraphPreferences();
+    if (previousIncludeCode !== state.graphIncludeCode) loadGraph({ force: true });
+    const label = all('[data-graph-saved-view]').find(control => control.dataset.graphSavedView === id);
+    showNotice(`${id === 'custom' ? 'Saved' : (label ? label.textContent : 'Saved')} graph view applied.`);
+  }
+
+  function saveCurrentGraphView() {
+    try {
+      localStorage.setItem(GRAPH_CUSTOM_VIEW_KEY, JSON.stringify(graphPreferenceSnapshot()));
+      byId('graph-saved-view-status').textContent = 'Current graph view saved locally.';
+      showNotice('Current graph view saved locally.');
+    } catch (_) {
+      showNotice('Could not save this graph view in local storage.');
+    }
+  }
+
+  function resetGraphTuning() {
+    const preset = byId('graph-preset').value;
+    const previousIncludeCode = state.graphIncludeCode;
+    state.graphIncludeCode = false;
+    syncGraphTuning({ ...graphPresetTuning(preset), flowSpeed: 45 });
+    setGraphMinDegree(1, false);
+    setGraphDepth(2, false);
+    setGraphShowUnlinked(false, false);
+    setGraphLayers(GRAPH_DEFAULT_LAYERS);
+    clearGraphSavedView();
+    if (state.graphEngine) {
+      state.graphEngine.apply(graph => {
+        graph.setPreset(preset);
+        graph.setSettings({ ...graphTuningSettings(), frozen: state.graphFrozen });
+        graph.setScope(graphScope());
+        graph.setLayers(graphLayerState());
+      }, false, !state.graphFrozen);
+      state.graphEngine.freeze(state.graphFrozen);
+    }
+    saveGraphPreferences();
+    if (previousIncludeCode) loadGraph({ force: true });
+    showNotice('Graph tuning reset to the selected layout defaults.');
+  }
+
+  function applyGraphPalette(name) {
+    const graph = state.graphEngine;
+    if (!graph) return;
+    graph.setPalette(name);
+    if (name === 'custom') graph.setTypeColors(GRAPH_CUSTOM_PALETTE);
+  }
+
+  function graphThemeColors() {
+    const css = getComputedStyle(document.body);
+    return {
+      accent: css.getPropertyValue('--c-acc').trim() || '#a39bf1',
+      surface: css.getPropertyValue('--c-surface').trim() || '#16191f',
+      canvas: css.getPropertyValue('--c-bg').trim() || '#0e1014',
+      label: css.getPropertyValue('--c-fg').trim() || '#e7e9ee',
+      relation_label: css.getPropertyValue('--c-dim').trim() || '#929baa',
+    };
+  }
+
+  function setGraphTab(tab) {
+    all('[data-graph-tab]').forEach(control => {
+      const active = control.dataset.graphTab === tab;
+      control.classList.toggle('active', active);
+      control.setAttribute('aria-selected', String(active));
+    });
+    all('[data-graph-tab-panel]').forEach(panel => {
+      panel.hidden = panel.dataset.graphTabPanel !== tab;
+    });
+  }
+
+  function downloadGraphFile(blob, name) {
+    const href = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = href;
+    link.download = name;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(href), 0);
+  }
+
+  function exportGraphJson() {
+    const graph = state.graphEngine && state.graphEngine.exportData
+      ? state.graphEngine.exportData()
+      : state.graphData || { nodes: [], links: [] };
+    const payload = {
+      workspace: state.workspace,
+      exported_at: new Date().toISOString(),
+      nodes: graph.nodes,
+      links: graph.links,
+    };
+    downloadGraphFile(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }), 'engraphis-graph.json');
+    showNotice('Graph data exported as JSON.');
+  }
+
+  function exportGraphPng() {
+    const canvas = byId('graph-canvas').querySelector('canvas');
+    if (!canvas || !canvas.toBlob) {
+      showNotice('The graph image is not ready yet. Export JSON data instead.');
+      return;
+    }
+    canvas.toBlob(blob => {
+      if (!blob) {
+        showNotice('Could not capture the graph image. Export JSON data instead.');
+        return;
+      }
+      downloadGraphFile(blob, 'engraphis-graph.png');
+      showNotice('Graph image exported as PNG.');
+    }, 'image/png');
+  }
+
+  function graphCountText(nodes, links) {
+    const available = number(state.graphMeta && state.graphMeta.nodes_available) || nodes;
+    const prefix = state.graphMode === 'full' && state.graphMeta && state.graphMeta.nodes_complete
+      ? 'Full graph'
+      : 'Overview';
+    const entityText = available > nodes
+      ? `${number(nodes).toLocaleString()} of ${available.toLocaleString()} entities`
+      : `${number(nodes).toLocaleString()} entities`;
+    return `${prefix} · ${entityText} · ${number(links).toLocaleString()} relations`;
+  }
+
+  function graphStatsChanged(stats) {
+    if (!stats) return;
+    const nodes = stats.nodes == null ? state.graphData.nodes.length : stats.nodes;
+    const links = stats.links == null ? state.graphData.links.length : stats.links;
+    byId('graph-count').textContent = graphCountText(nodes, links);
+  }
+
+  function graphMetricsChanged(metrics) {
+    state.graphMetrics = metrics || {};
+    byId('graph-bridge-count').textContent = metrics && metrics.bridges != null
+      ? `${metrics.bridges} bridge ${metrics.bridges === 1 ? 'edge' : 'edges'}`
+      : '';
+  }
+
+  function graphAsOfTimestamp() {
+    const value = byId('graph-as-of').value;
+    if (!value) return '';
+    // A date picker represents the complete selected day, not midnight at its start.
+    const timestamp = Date.parse(`${value}T23:59:59.999Z`);
+    return Number.isFinite(timestamp) ? `&as_of=${encodeURIComponent(timestamp / 1000)}` : '';
+  }
+
+  async function loadGraph({ force = false } = {}) {
+    if (!state.workspace) return;
+    if (!force && state.graphWorkspace === state.workspace
+      && state.graphDataMode === state.graphMode
+      && state.graphDataIncludeCode === state.graphIncludeCode && state.graphData) {
+      if (state.graphEngine) state.graphEngine.resize();
+      return;
+    }
+    const targetWorkspace = state.workspace;
+    const targetMode = state.graphMode;
+    const targetIncludeCode = state.graphIncludeCode;
+    const fullGraph = targetMode === 'full';
+    if (state.graphLoadPromise && state.graphLoadWorkspace === targetWorkspace
+      && state.graphLoadMode === targetMode && state.graphLoadIncludeCode === targetIncludeCode) {
+      return state.graphLoadPromise;
+    }
+    byId('graph-empty').hidden = false;
+    byId('graph-empty').textContent = fullGraph
+      ? 'Loading every available graph node…'
+      : 'Loading the responsive evidence graph…';
+    const task = (async () => {
+      const controller = new AbortController();
+      state.graphLoadController = controller;
+      const timeout = window.setTimeout(
+        () => controller.abort(),
+        fullGraph ? GRAPH_FULL_LOAD_TIMEOUT_MS : GRAPH_LOAD_TIMEOUT_MS,
+      );
+      try {
+        const limit = fullGraph ? GRAPH_FULL_NODE_LIMIT : GRAPH_INITIAL_NODE_LIMIT;
+        const complete = fullGraph ? '&full=true' : '';
+        const includeCode = targetIncludeCode ? '&include_code=true' : '';
+        const asOf = graphAsOfTimestamp();
+        const [payload] = await Promise.all([
+          api(`/graph?${query(targetWorkspace)}&limit=${limit}${complete}${includeCode}${asOf}`, { signal: controller.signal }),
+          ensureGraphAssets(),
+        ]);
+        if (state.workspace !== targetWorkspace || state.graphMode !== targetMode
+          || state.graphIncludeCode !== targetIncludeCode) return;
+        const data = { nodes: graphNodes(payload), links: graphLinks(payload), suggestions: payload.suggestions || [] };
+        state.graphData = data;
+        state.graphWorkspace = targetWorkspace;
+        state.graphDataMode = targetMode;
+        state.graphDataIncludeCode = targetIncludeCode;
+        state.graphMeta = payload.meta || {
+          nodes_available: data.nodes.length,
+          nodes_complete: fullGraph,
+        };
+        if (state.graphEngine) state.graphEngine.destroy();
+        if (typeof window.EngraphisGraph === 'undefined') throw new Error('graph engine asset is unavailable');
+        state.graphEngine = window.EngraphisGraph.create(byId('graph-canvas'), {
+          renderMode: targetMode,
+          onNodeClick: item => showNotice(`${item.name || item.label || item.id} · ${number(item.degree)} connections`),
+          onBackgroundClick: () => state.graphEngine && state.graphEngine.clearFocus(),
+          onStats: graphStatsChanged,
+          onMetrics: graphMetricsChanged,
+          onCollapseChange: collapsed => {
+            if (targetMode === 'overview') showNotice(collapsed ? 'Clusters collapsed for overview.' : '');
+          },
+        });
+        state.graphEngine.apply(graph => {
+          graph.setPreset(byId('graph-preset').value);
+          graph.setStyle(byId('graph-style').value);
+          graph.setColorBy(byId('graph-color').value);
+          graph.setThemeColors(graphThemeColors());
+          applyGraphPalette(byId('graph-palette').value);
+          graph.setSettings({
+            ...graphTuningSettings(),
+            flow: byId('graph-flow').getAttribute('aria-checked') === 'true',
+            labels: byId('graph-labels').getAttribute('aria-checked') === 'true',
+            frozen: state.graphFrozen,
+          });
+          graph.setScope(graphScope());
+          graph.setLayers(graphLayerState());
+          graph.setRepoFilter(byId('graph-repo-filter').value);
+          graph.setAsOf(byId('graph-as-of').value || null);
+          graph.setSizeBy(byId('graph-size').value);
+          graph.setBridges(byId('graph-bridges').checked);
+          graph.setCollapse(fullGraph ? false : (byId('graph-collapse').checked ? 'auto' : false));
+          graph.setGhosts(byId('graph-ghosts').checked);
+        }, false, false);
+        state.graphEngine.setData(data);
+        state.graphEngine.freeze(state.graphFrozen);
+        byId('graph-empty').hidden = Boolean(data.nodes.length);
+        if (!data.nodes.length) byId('graph-empty').textContent = 'No entities exist in this workspace yet.';
+        updateGraphModeControls();
+        updateGraphFacts(data);
+        updateGraphLayerCounts(data, payload.layers);
+      } catch (error) {
+        if (state.workspace !== targetWorkspace || state.graphMode !== targetMode) return;
+        byId('graph-empty').hidden = false;
+        byId('graph-empty').textContent = error && error.name === 'AbortError'
+          ? `${fullGraph ? 'Full graph' : 'Graph'} loading timed out. Choose Retry to try again.`
+          : `Graph unavailable: ${error.message}`;
+      } finally {
+        window.clearTimeout(timeout);
+        if (state.graphLoadController === controller) state.graphLoadController = null;
+      }
+    })();
+    state.graphLoadWorkspace = targetWorkspace;
+    state.graphLoadMode = targetMode;
+    state.graphLoadIncludeCode = targetIncludeCode;
+    state.graphLoadPromise = task;
+    try {
+      return await task;
+    } finally {
+      if (state.graphLoadPromise === task) {
+        state.graphLoadPromise = null;
+        state.graphLoadWorkspace = '';
+        state.graphLoadMode = '';
+        state.graphLoadIncludeCode = false;
+      }
+    }
+  }
+
+  function toggleGraphMode() {
+    const enteringFull = state.graphMode !== 'full';
+    if (enteringFull) {
+      state.graphScopeBeforeFull = {
+        minDegree: byId('graph-min-degree').value,
+        showUnlinked: byId('graph-unlinked').checked,
+        collapse: byId('graph-collapse').checked,
+      };
+      byId('graph-min-degree').value = '0';
+      byId('graph-min-degree-output').value = '0';
+      byId('graph-tune-min-degree').value = '0';
+      byId('graph-tune-min-degree-output').value = '0';
+      byId('graph-unlinked').checked = true;
+      setGraphSwitch('graph-tune-unlinked', true);
+      byId('graph-collapse').checked = false;
+    } else if (state.graphScopeBeforeFull) {
+      const prior = state.graphScopeBeforeFull;
+      byId('graph-min-degree').value = prior.minDegree;
+      byId('graph-min-degree-output').value = prior.minDegree;
+      byId('graph-tune-min-degree').value = prior.minDegree;
+      byId('graph-tune-min-degree-output').value = prior.minDegree;
+      byId('graph-unlinked').checked = prior.showUnlinked;
+      setGraphSwitch('graph-tune-unlinked', prior.showUnlinked);
+      byId('graph-collapse').checked = prior.collapse;
+      state.graphScopeBeforeFull = null;
+    }
+    state.graphMode = enteringFull ? 'full' : 'overview';
+    if (state.graphLoadController) state.graphLoadController.abort();
+    state.graphData = null;
+    state.graphWorkspace = '';
+    state.graphDataMode = state.graphMode;
+    state.graphDataIncludeCode = false;
+    state.graphMeta = null;
+    updateGraphModeControls();
+    loadGraph({ force: true });
+  }
+
+  function searchGraph(value) {
+    const target = byId('graph-search-results');
+    target.replaceChildren();
+    const needle = value.trim().toLowerCase();
+    if (!needle || !state.graphData) return;
+    state.graphData.nodes
+      .filter(item => item.name.toLowerCase().includes(needle))
+      .slice(0, 8)
+      .forEach(item => {
+        target.append(button(`${item.name} · ${item.degree}`, 'search-result', () => {
+          revealGraphNode(item.id, item.name);
+          target.replaceChildren();
+        }));
+      });
+  }
+
+  function renderMemoryCollection(target, memories, message) {
+    target.replaceChildren();
+    if (!memories.length) {
+      target.append(empty(message));
+      return;
+    }
+    memories.forEach(memory => target.append(simpleMemoryCard(memory)));
+  }
+
+  function switchProvenanceTab(tab) {
+    state.provenanceTab = tab;
+    all('[data-provenance-tab]').forEach(control => {
+      const active = control.dataset.provenanceTab === tab;
+      control.classList.toggle('active', active);
+      control.setAttribute('aria-selected', String(active));
+    });
+    all('[data-provenance-panel]').forEach(panel => panel.classList.toggle('active', panel.dataset.provenancePanel === tab));
+    if (tab === 'audit') loadAudit();
+  }
+
+  async function whySearch(event) {
+    event.preventDefault();
+    const question = byId('why-input').value.trim();
+    if (!question) return;
+    const target = byId('why-result');
+    target.replaceChildren(empty('Tracing the live belief and supersession chain…'));
+    try {
+      const payload = await api(`/why?q=${encodeURIComponent(question)}&${query()}&k=8`);
+      target.replaceChildren();
+      const live = payload.answer || [];
+      const superseded = payload.supersedes || [];
+      target.append(node('h2', '', 'Live support'));
+      if (!live.length) target.append(empty('No live supporting memory was found.'));
+      else live.forEach(memory => target.append(simpleMemoryCard(memory)));
+      target.append(node('h2', '', 'Superseded history'));
+      if (!superseded.length) target.append(empty('No superseded versions were found.'));
+      else superseded.forEach(memory => target.append(simpleMemoryCard(memory, 'timeline-card')));
+    } catch (error) {
+      target.replaceChildren(empty(`Could not trace belief: ${error.message}`));
+    }
+  }
+
+  async function timelineSearch(event, supersessionsOnly = false) {
+    event.preventDefault();
+    const input = byId(supersessionsOnly ? 'supersession-input' : 'timeline-input');
+    const target = byId(supersessionsOnly ? 'supersession-list' : 'timeline-result');
+    const question = input.value.trim();
+    if (!question) return;
+    target.replaceChildren(empty('Loading temporal history…'));
+    try {
+      const payload = await api(`/timeline?q=${encodeURIComponent(question)}&${query()}&limit=50`);
+      let history = payload.history || [];
+      if (supersessionsOnly) history = history.filter(item => item.valid_to || item.expired_at);
+      renderMemoryCollection(target, history, supersessionsOnly ? 'No closed versions were found for this topic.' : 'No temporal history was found.');
+    } catch (error) {
+      target.replaceChildren(empty(`Could not load history: ${error.message}`));
+    }
+  }
+
+  function renderAuditCards(audit, receipts) {
+    const target = byId('audit-list');
+    target.replaceChildren();
+    const combined = [
+      ...audit.map(item => ({ ...item, _kind: 'audit' })),
+      ...receipts.map(item => ({ ...item, _kind: 'receipt' })),
+    ].sort((a, b) => number(a.ts_ms || a.ts || a.timestamp) - number(b.ts_ms || b.ts || b.timestamp)).reverse();
+    if (!combined.length) {
+      target.append(empty('No audit records or receipts yet.'));
+      return;
+    }
+    combined.slice(0, 120).forEach(item => {
+      const card = node('article', 'audit-card');
+      card.append(
+        node('span', '', relative(item.ts_ms || item.ts || item.timestamp || item.created_at)),
+        node('strong', '', item.actor || item.source || 'local operator'),
+        node('span', 'tag', item.operation || item.action || item.event || item._kind),
+        node('span', '', item.scope || item.workspace || item.status || state.workspace),
+        node('code', '', truncate(item.hash || item.id || item.receipt_id, 24) || '—'),
+      );
+      target.append(card);
+    });
+  }
+
+  async function loadAudit() {
+    const target = byId('audit-list');
+    target.replaceChildren(empty('Loading audit records and receipts…'));
+    try {
+      const [audit, receipts] = await Promise.all([
+        api(`/audit?${query()}&limit=100`),
+        api(`/receipts?${query()}&limit=100`),
+      ]);
+      renderAuditCards(auditItems(audit), receiptItems(receipts));
+    } catch (error) {
+      target.replaceChildren(empty(`Could not load provenance records: ${error.message}`));
+    }
+  }
+
+  async function verifyReceipts() {
+    try {
+      const result = await api(`/receipts/verify?${query()}`);
+      const valid = result.valid != null ? result.valid : result.verified;
+      showNotice(valid === false ? 'Receipt verification found a broken chain.' : 'Receipt chain verified.');
+    } catch (error) {
+      showNotice(`Could not verify receipts: ${error.message}`);
+    }
+  }
+
+  async function exportReceipts() {
+    try {
+      const receipts = await api(`/receipts/export?${query()}`);
+      const blob = new Blob([JSON.stringify(receipts, null, 2)], { type: 'application/json' });
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(blob);
+      link.href = url;
+      link.download = `engraphis-receipts-${state.workspace || 'workspace'}.json`;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      showNotice('Privacy-safe receipts exported.');
+    } catch (error) {
+      showNotice(`Could not export receipts: ${error.message}`);
+    }
+  }
+
+  function switchManageTab(tab) {
+    state.manageTab = tab;
+    all('[data-manage-tab]').forEach(control => {
+      const active = control.dataset.manageTab === tab;
+      control.classList.toggle('active', active);
+      control.setAttribute('aria-selected', String(active));
+    });
+    all('[data-manage-panel]').forEach(panel => panel.classList.toggle('active', panel.dataset.managePanel === tab));
+    loadManageTab(tab);
+  }
+
+  async function loadManageTab(tab) {
+    if (tab === 'workspaces') renderWorkspaceList();
+    if (tab === 'settings') await loadSettings();
+    if (tab === 'plans') await loadPlans();
+    if (tab === 'analytics') await loadHosted('analytics');
+    if (tab === 'automation') await loadHosted('automation');
+    if (tab === 'team') await loadHosted('team');
+  }
+
+  function renderWorkspaceList() {
+    const target = byId('workspace-list');
+    target.replaceChildren();
+    if (!state.workspaces.length) {
+      target.append(empty('Create the first workspace to begin.'));
+      return;
+    }
+    state.workspaces.forEach(item => {
+      const name = workspaceName(item);
+      const card = node('article', `workspace-card${name === state.workspace ? ' active' : ''}`);
+      const copy = node('div');
+      copy.append(
+        node('h3', '', name),
+        node('p', '', item.description || `${number(item.memories).toLocaleString()} memories · ${item.visibility || 'local'}`),
+      );
+      const actions = node('div', 'workspace-card-actions');
+      if (name !== state.workspace) actions.append(button('Switch to', 'secondary-button', () => selectWorkspace(name)));
+      actions.append(
+        button('Rename', 'secondary-button', () => renameWorkspace(name)),
+        button('Copy', 'secondary-button', () => copyWorkspace(name)),
+      );
+      if (name !== state.workspace) actions.append(button('Delete', 'danger-button', () => deleteWorkspace(name)));
+      card.append(copy, actions);
+      target.append(card);
+    });
+  }
+
+  async function createWorkspace(event) {
+    event.preventDefault();
+    const name = byId('new-workspace-name').value.trim();
+    const description = byId('new-workspace-description').value.trim();
+    if (!name) return;
+    try {
+      await api('/workspaces/create', {
+        method: 'POST',
+        body: { workspace: name, description, visibility: 'personal', confirmed: false },
+      });
+      showNotice(`Workspace ${name} created.`);
+      byId('create-workspace-form').reset();
+      byId('create-workspace-form').hidden = true;
+      await refreshBootstrap(name);
+    } catch (error) {
+      showNotice(`Could not create workspace: ${error.message}`);
+    }
+  }
+
+  async function renameWorkspace(name) {
+    const next = window.prompt(`Rename ${name} to:`, name);
+    if (!next || next === name) return;
+    try {
+      await api('/workspaces/rename', { method: 'POST', body: { workspace: name, new_name: next } });
+      showNotice(`Workspace renamed to ${next}.`);
+      await refreshBootstrap(name === state.workspace ? next : state.workspace);
+    } catch (error) {
+      showNotice(`Could not rename workspace: ${error.message}`);
+    }
+  }
+
+  async function copyWorkspace(name) {
+    try {
+      const result = await api('/workspaces/copy', { method: 'POST', body: { workspace: name } });
+      showNotice(`Workspace copied${result.name ? ` to ${result.name}` : ''}.`);
+      await refreshBootstrap(state.workspace);
+    } catch (error) {
+      showNotice(`Could not copy workspace: ${error.message}`);
+    }
+  }
+
+  async function deleteWorkspace(name) {
+    if (!window.confirm(`Delete workspace “${name}”? Its memories are retired through the governed workspace operation.`)) return;
+    try {
+      await api('/workspaces/delete', { method: 'POST', body: { workspace: name } });
+      showNotice(`Workspace ${name} deleted.`);
+      await refreshBootstrap(state.workspace);
+    } catch (error) {
+      showNotice(`Could not delete workspace: ${error.message}`);
+    }
+  }
+
+  function renderObject(target, payload, title = 'Result') {
+    target.replaceChildren();
+    target.append(node('h3', '', title));
+    const entries = Object.entries(payload || {}).filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value)).slice(0, 12);
+    if (entries.length) target.append(definitionList(entries.map(([key, value]) => [key.replaceAll('_', ' '), text(value)])));
+    else target.append(node('p', '', 'The operation completed.'));
+  }
+
+  async function previewConsolidation(event) {
+    event.preventDefault();
+    const target = byId('consolidate-result');
+    target.replaceChildren(empty('Scanning local memory without writing changes…'));
+    try {
+      const result = await api('/consolidate', {
+        method: 'POST',
+        body: {
+          workspace: state.workspace,
+          dry_run: true,
+          infer: false,
+          structured: byId('consolidate-structured').checked,
+          supersede_sources: byId('consolidate-supersede').checked,
+        },
+      });
+      state.consolidationReviewed = true;
+      byId('consolidate-commit').disabled = false;
+      renderObject(target, result, 'Dry preview complete · nothing written');
+    } catch (error) {
+      state.consolidationReviewed = false;
+      byId('consolidate-commit').disabled = true;
+      target.replaceChildren(empty(`Preview failed: ${error.message}`));
+    }
+  }
+
+  async function commitConsolidation() {
+    if (!state.consolidationReviewed) return;
+    if (!window.confirm(`Commit the reviewed consolidation result for ${state.workspace}? Original records remain in temporal history.`)) return;
+    const target = byId('consolidate-result');
+    target.replaceChildren(empty('Committing the reviewed local consolidation…'));
+    try {
+      const result = await api('/consolidate', {
+        method: 'POST',
+        body: {
+          workspace: state.workspace,
+          dry_run: false,
+          infer: false,
+          structured: byId('consolidate-structured').checked,
+          supersede_sources: byId('consolidate-supersede').checked,
+        },
+      });
+      state.consolidationReviewed = false;
+      byId('consolidate-commit').disabled = true;
+      renderObject(target, result, 'Consolidation committed');
+      await selectWorkspace(state.workspace);
+    } catch (error) {
+      target.replaceChildren(empty(`Commit failed: ${error.message}`));
+    }
+  }
+
+  async function loadHosted(kind) {
+    const target = byId(`${kind}-result`);
+    if (state.hostedLoaded.has(`${kind}:${state.workspace}`)) return;
+    target.replaceChildren(empty(`Checking ${kind} availability…`));
+    try {
+      if (kind === 'team') {
+        const [auth, license] = await Promise.all([api('/auth/state'), api('/license')]);
+        state.license = license;
+        renderObject(target, {
+          local_mode: auth.mode || 'open',
+          hosted_team: Boolean(auth.hosted_team),
+          cloud_access: Boolean(license.cloud_access_active),
+          plan: license.plan || 'local',
+        }, 'Connection state');
+      } else {
+        const result = await api(`/${kind}?${query()}`);
+        renderObject(target, result, `${kind[0].toUpperCase()}${kind.slice(1)} status`);
+      }
+      state.hostedLoaded.add(`${kind}:${state.workspace}`);
+    } catch (error) {
+      target.replaceChildren(empty(`${kind[0].toUpperCase()}${kind.slice(1)} is not active: ${error.message}`));
+    }
+  }
+
+  function planPrices() {
+    const annual = byId('billing-select').value === 'annual';
+    return annual
+      ? { free: '$0', pro: '$100 / owner / year', team: '$200 / seat / year' }
+      : { free: '$0', pro: '$10 / owner / month', team: '$20 / seat / month' };
+  }
+
+  function renderPlans() {
+    const target = byId('plan-cards');
+    target.replaceChildren();
+    const prices = planPrices();
+    const plans = [
+      { id: 'free', name: 'Free', price: prices.free, note: 'The complete local memory engine and every core operation.', action: 'Current local plan' },
+      { id: 'pro', name: 'Pro', price: prices.pro, note: 'Cloud sync, managed automation and portfolio analytics.', action: 'Open Pro options' },
+      { id: 'team', name: 'Team', price: prices.team, note: 'Shared workspaces, member roles, seats and remote agents.', action: 'Open Team options' },
+    ];
+    plans.forEach(plan => {
+      const card = node('article', `plan-card${plan.id === 'pro' ? ' featured' : ''}`);
+      card.append(
+        node('p', 'eyebrow', plan.id === (state.license && state.license.plan) ? 'Current plan' : plan.id),
+        node('h2', '', plan.name),
+        node('div', 'price', plan.price),
+        node('p', '', plan.note),
+      );
+      if (plan.id === 'free') {
+        const status = node('span', 'secondary-button', plan.action);
+        card.append(status);
+      } else {
+        const interval = byId('billing-select').value === 'annual' ? 'annual' : 'monthly';
+        const exactKey = `${plan.id}_${interval}_upgrade_url`;
+        const fallbackKey = `${plan.id}_upgrade_url`;
+        const url = safeUrl(state.license
+          && (state.license[exactKey] || state.license[fallbackKey]
+            || state.license.upgrade_url));
+        const action = node('a', 'primary-button', plan.action);
+        action.href = url || '#';
+        if (url) {
+          action.target = '_blank';
+          action.rel = 'noopener';
+        } else {
+          action.addEventListener('click', event => {
+            event.preventDefault();
+            showNotice('Connect this installation to Engraphis Cloud to open hosted plan options.');
+          });
+        }
+        card.append(action);
+      }
+      target.append(card);
+    });
+  }
+
+  async function loadPlans() {
+    try {
+      state.license = state.license || await api('/license');
+    } catch (_) {
+      state.license = { plan: 'free' };
+    }
+    renderPlans();
+  }
+
+  function llmSnippet(provider, model, keySet) {
+    return [
+      `ENGRAPHIS_LLM_PROVIDER=${provider}`,
+      `ENGRAPHIS_LLM_MODEL=${model}`,
+      'ENGRAPHIS_LLM_API_KEY=<your-key>',
+      keySet ? 'ENGRAPHIS_EXTRACTOR=llm_structured' : '# set ENGRAPHIS_EXTRACTOR=llm_structured to use it',
+      'ENGRAPHIS_LLM_AUTO_EXTRACT=1',
+    ].join('\n');
+  }
+
+  function setLlmTestResult(message, tone = '') {
+    const target = byId('llm-test-result');
+    if (!target) return;
+    target.textContent = message;
+    target.dataset.tone = tone;
+  }
+
+  function updateLlmSnippet(status) {
+    const provider = byId('llm-provider').value;
+    const model = byId('llm-model').value;
+    byId('llm-env-snippet').value = llmSnippet(provider, model, Boolean(status.key_set));
+  }
+
+  function renderLlmSettings(status) {
+    const target = byId('llm-connection');
+    target.replaceChildren();
+    const defaults = status.default_models || {};
+    const provider = status.provider || 'openai';
+    const model = status.model || defaults[provider] || '';
+    const providers = [...new Set([...Object.keys(defaults), provider])];
+    const models = [...new Set([model, ...Object.values(defaults)].filter(Boolean))];
+    const configured = Boolean(status.configured);
+    const extractionEnabled = Boolean(status.extractor_enabled);
+    const stateLabel = status.working ? 'verified' : (configured ? 'configured' : 'not configured');
+
+    const overview = node('div', 'llm-status-line');
+    overview.append(
+      node('span', '', 'Provider · Model'),
+      node('span', `llm-status-badge ${configured ? 'ready' : 'muted'}`, stateLabel),
+    );
+
+    const pickerGrid = node('div', 'llm-picker-grid');
+    const providerLabel = node('label', '', 'Provider');
+    const providerSelect = node('select');
+    providerSelect.id = 'llm-provider';
+    providers.forEach(value => providerSelect.append(option(value, value, value === provider)));
+    providerLabel.htmlFor = providerSelect.id;
+    providerLabel.append(providerSelect);
+    const modelLabel = node('label', '', 'Model');
+    const modelSelect = node('select');
+    modelSelect.id = 'llm-model';
+    models.forEach(value => modelSelect.append(option(value, value, value === model)));
+    modelLabel.htmlFor = modelSelect.id;
+    modelLabel.append(modelSelect);
+    pickerGrid.append(providerLabel, modelLabel);
+
+    const keyState = node('p', 'llm-key-state', status.key_set ? 'API key set' : 'No API key set');
+    keyState.append(node('span', '', ` · extractor: ${status.extractor || 'none'}`));
+    const setupNote = node('p', 'llm-setup-note', 'Choose a provider and model for the copyable .env snippet. Update it locally, then restart Engraphis to apply the change.');
+    const snippetLabel = node('label', 'llm-snippet-label', 'Local .env setup');
+    const snippet = node('textarea', 'llm-env-snippet');
+    snippet.id = 'llm-env-snippet';
+    snippet.readOnly = true;
+    snippet.rows = 5;
+    snippet.value = llmSnippet(provider, model, Boolean(status.key_set));
+    snippetLabel.htmlFor = snippet.id;
+    snippetLabel.append(snippet);
+    const copy = button('Copy', 'secondary-button', copyLlmSnippet);
+    copy.classList.add('llm-copy-button');
+    const snippetWrap = node('div', 'llm-snippet-wrap');
+    snippetWrap.append(snippetLabel, copy);
+
+    const extraction = node('div', 'llm-status-line');
+    extraction.append(
+      node('span', '', 'LLM extraction'),
+      node('span', `llm-status-badge ${extractionEnabled ? 'ready' : 'muted'}`, extractionEnabled ? 'ON' : 'OFF'),
+    );
+    const extractionNote = node('p', 'llm-extraction-note', 'While ON, ingested memory content is sent to your configured provider for schema-validated extraction. OFF keeps ingestion on this machine.');
+    const extractionActions = node('div', 'llm-actions');
+    const turnOn = button('Turn on', 'primary-button', () => setLlmExtractor(true));
+    turnOn.disabled = extractionEnabled || !configured;
+    const turnOff = button('Turn off', 'secondary-button', () => setLlmExtractor(false));
+    turnOff.disabled = !extractionEnabled;
+    extractionActions.append(turnOn, turnOff);
+
+    const testActions = node('div', 'llm-actions');
+    testActions.append(button('Test connection', 'secondary-button', testLlm));
+    const testResult = node('p', 'llm-test-result');
+    testResult.id = 'llm-test-result';
+    testResult.setAttribute('role', 'status');
+    testResult.setAttribute('aria-live', 'polite');
+    testActions.append(testResult);
+
+    providerSelect.addEventListener('change', () => {
+      const defaultModel = defaults[providerSelect.value];
+      if (defaultModel && models.includes(defaultModel)) modelSelect.value = defaultModel;
+      updateLlmSnippet(status);
+    });
+    modelSelect.addEventListener('change', () => updateLlmSnippet(status));
+    target.append(overview, pickerGrid, keyState, setupNote, snippetWrap, extraction, extractionNote, extractionActions, testActions);
+  }
+
+  async function copyLlmSnippet() {
+    const snippet = byId('llm-env-snippet');
+    try {
+      await navigator.clipboard.writeText(snippet.value);
+      showNotice('Copied the local .env setup snippet.');
+    } catch (_) {
+      snippet.focus();
+      snippet.select();
+      if (document.execCommand('copy')) showNotice('Copied the local .env setup snippet.');
+      else showNotice('Select the snippet and copy it manually.');
+    }
+  }
+
+  async function loadSettings() {
+    try {
+      renderLlmSettings(await api('/llm/status'));
+    } catch (error) {
+      byId('llm-connection').replaceChildren(empty(`Model status unavailable: ${error.message}`));
+    }
+  }
+
+  async function setLlmExtractor(enabled) {
+    setLlmTestResult(enabled ? 'Verifying the configured provider…' : 'Turning extraction off…');
+    try {
+      const result = await api('/llm/extractor', { method: 'POST', body: { enabled } });
+      await loadSettings();
+      const state = result.extractor_enabled ? 'LLM extraction is on for new ingested memories.' : 'LLM extraction is off; ingestion stays local.';
+      setLlmTestResult(`${state}${result.persisted === false ? ' The restart setting could not be saved.' : ''}`, result.extractor_enabled ? 'ready' : 'muted');
+    } catch (error) {
+      setLlmTestResult(`Could not change extraction: ${error.message}`, 'error');
+    }
+  }
+
+  async function testLlm() {
+    setLlmTestResult('Testing the configured model…');
+    try {
+      const result = await api('/llm/test', { method: 'POST' });
+      await loadSettings();
+      if (result.ok) {
+        const suffix = result.auto_enabled ? ' Extraction is active for new ingested memories.' : '';
+        setLlmTestResult(`Connected — ${result.provider}/${result.model}.${suffix}`, 'ready');
+      } else {
+        setLlmTestResult(`Could not connect: ${result.error || 'Check the provider, model, API key, and network.'}`, 'error');
+      }
+    } catch (error) {
+      setLlmTestResult(`Model connection failed: ${error.message}`, 'error');
+    }
+  }
+
+  function switchView(view) {
+    state.view = view;
+    all('[data-view-panel]').forEach(panel => panel.classList.toggle('active', panel.dataset.viewPanel === view));
+    all('[data-view]').forEach(control => {
+      const active = control.dataset.view === view;
+      control.classList.toggle('active', active);
+      if (active) control.setAttribute('aria-current', 'page');
+      else control.removeAttribute('aria-current');
+    });
+    try {
+      localStorage.setItem('engraphis-ledger-view', view);
+    } catch (_) {}
+    if (view === 'relations') loadGraph();
+    if (view === 'provenance' && state.provenanceTab === 'audit') loadAudit();
+    if (view === 'manage') loadManageTab(state.manageTab);
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  }
+
+  function applyTheme(theme) {
+    const valid = ['slate', 'midnight', 'paper', 'matrix'];
+    const selected = valid.includes(theme) ? theme : 'slate';
+    document.body.dataset.theme = selected;
+    byId('theme-select').value = selected;
+    byId('sidebar-theme-select').value = selected;
+    try {
+      localStorage.setItem('engraphis-ledger-theme', selected);
+      localStorage.setItem('engraphis-theme', ({ slate: 'dark', paper: 'light', midnight: 'midnight', matrix: 'matrix' })[selected]);
+    } catch (_) {}
+    if (state.graphEngine) state.graphEngine.setThemeColors(graphThemeColors());
+  }
+
+  async function refreshBootstrap(preferred = '') {
+    const bootstrap = await api('/bootstrap');
+    renderUpdateBanner(bootstrap.update);
+    state.workspaces = bootstrap.workspaces || [];
+    state.license = bootstrap.license || state.license;
+    const select = byId('workspace-select');
+    select.replaceChildren();
+    state.workspaces.forEach(item => {
+      const name = workspaceName(item);
+      select.append(option(name, name));
+    });
+    if (!state.workspaces.length) {
+      select.append(option('', 'No workspace'));
+      select.disabled = true;
+      setConnection('Local engine connected · no workspace');
+      state.workspace = '';
+      renderWorkspaceNames();
+      renderWorkspaceList();
+      return;
+    }
+    select.disabled = false;
+    let saved = preferred;
+    try {
+      saved = preferred || localStorage.getItem('engraphis-workspace') || '';
+    } catch (_) {}
+    const names = state.workspaces.map(workspaceName);
+    const selected = names.includes(saved)
+      ? saved
+      : workspaceName([...state.workspaces].sort((a, b) => number(b.memories) - number(a.memories))[0]);
+    await selectWorkspace(selected);
+    setConnection('Local engine connected');
+  }
+
+  async function boot() {
+    byId('today-date').textContent = new Intl.DateTimeFormat(undefined, { dateStyle: 'long' }).format(new Date());
+    let theme = 'slate';
+    try {
+      theme = localStorage.getItem('engraphis-ledger-theme') || theme;
+    } catch (_) {}
+    applyTheme(theme);
+    try {
+      await refreshBootstrap();
+      let view = 'today';
+      try {
+        const saved = localStorage.getItem('engraphis-ledger-view');
+        if (['today', 'ask', 'library', 'relations', 'provenance', 'manage'].includes(saved)) view = saved;
+      } catch (_) {}
+      switchView(view);
+    } catch (error) {
+      if (error.status === 401 && await authenticateBrowser()) {
+        location.reload();
+        return;
+      }
+      setConnection('Local engine unavailable', false);
+      showNotice(`Ledger could not connect: ${error.message}`);
+    }
+  }
+
+  all('[data-view]').forEach(control => control.addEventListener('click', () => switchView(control.dataset.view)));
+  all('[data-go]').forEach(control => control.addEventListener('click', () => switchView(control.dataset.go)));
+  all('[data-manage]').forEach(control => control.addEventListener('click', () => {
+    switchView('manage');
+    switchManageTab(control.dataset.manage);
+  }));
+  all('[data-provenance]').forEach(control => control.addEventListener('click', () => {
+    switchView('provenance');
+    switchProvenanceTab(control.dataset.provenance);
+  }));
+  all('[data-provenance-tab]').forEach(control => control.addEventListener('click', () => switchProvenanceTab(control.dataset.provenanceTab)));
+  all('[data-manage-tab]').forEach(control => control.addEventListener('click', () => switchManageTab(control.dataset.manageTab)));
+
+  byId('workspace-select').addEventListener('change', event => selectWorkspace(event.target.value));
+  byId('ask-form').addEventListener('submit', askMemory);
+  byId('library-filter').addEventListener('input', renderLibrary);
+  byId('library-type').addEventListener('change', renderLibrary);
+  byId('new-memory-button').addEventListener('click', () => openEditor());
+  byId('editor-close').addEventListener('click', closeEditor);
+  byId('editor-cancel').addEventListener('click', closeEditor);
+  byId('memory-editor').addEventListener('submit', saveMemory);
+  byId('import-button').addEventListener('click', () => byId('import-files').click());
+  byId('import-files').addEventListener('change', event => importFiles(event.target.files));
+
+  all('[data-graph-tab]').forEach(control => control.addEventListener('click', () => setGraphTab(control.dataset.graphTab)));
+  byId('graph-fit').addEventListener('click', () => state.graphEngine && state.graphEngine.fit());
+  byId('graph-reheat').addEventListener('click', () => state.graphEngine && state.graphEngine.reheat());
+  byId('graph-clear-focus').addEventListener('click', () => {
+    if (state.graphEngine) state.graphEngine.clearFocus();
+  });
+  byId('graph-freeze').addEventListener('click', () => {
+    state.graphFrozen = !state.graphFrozen;
+    setGraphSwitch('graph-freeze', state.graphFrozen);
+    if (state.graphEngine) state.graphEngine.freeze(state.graphFrozen);
+    saveGraphPreferences();
+  });
+  byId('graph-flow').addEventListener('click', event => {
+    const on = event.currentTarget.getAttribute('aria-checked') !== 'true';
+    setGraphSwitch('graph-flow', on);
+    if (state.graphEngine) state.graphEngine.setSettings({ flow: on });
+    clearGraphSavedView();
+    saveGraphPreferences();
+  });
+  byId('graph-labels').addEventListener('click', event => {
+    const on = event.currentTarget.getAttribute('aria-checked') !== 'true';
+    setGraphSwitch('graph-labels', on);
+    if (state.graphEngine) state.graphEngine.setSettings({ labels: on });
+    clearGraphSavedView();
+    saveGraphPreferences();
+  });
+  byId('graph-flow-speed').addEventListener('input', event => {
+    const speed = graphValueInRange('graph-flow-speed', event.target.value, 45);
+    byId('graph-flow-speed').value = String(speed);
+    byId('graph-flow-speed-output').value = String(Math.round(speed));
+    byId('graph-flow-speed-output').textContent = String(Math.round(speed));
+    if (state.graphEngine) state.graphEngine.setSettings({ flowSpeed: speed });
+    clearGraphSavedView();
+    saveGraphPreferences();
+  });
+  byId('graph-search').addEventListener('input', event => searchGraph(event.target.value));
+  byId('graph-repo-filter').addEventListener('input', event => {
+    if (state.graphEngine) state.graphEngine.setRepoFilter(event.target.value);
+    clearGraphSavedView();
+    saveGraphPreferences();
+  });
+  all('[data-graph-preset-choice]').forEach(control => control.addEventListener('click', () => {
+    const preset = control.dataset.graphPresetChoice;
+    const resumeLayout = state.graphFrozen;
+    byId('graph-preset').value = preset;
+    if (state.graphEngine && resumeLayout) {
+      // Freeze is the safe default for arranging nodes by hand. Selecting a named layout is an
+      // explicit request to run physics, so make that transition visible and leave the switch
+      // truthful; the person can freeze the settled arrangement again when they are happy.
+      state.graphFrozen = false;
+      setGraphSwitch('graph-freeze', false);
+      state.graphEngine.freeze(false);
+    }
+    let settings = graphPresetTuning(preset);
+    if (state.graphEngine) settings = state.graphEngine.setPreset(preset);
+    syncGraphTuning(settings);
+    updateGraphModeControls();
+    clearGraphSavedView();
+    syncGraphChoices();
+    saveGraphPreferences();
+    if (resumeLayout) showNotice('Layout applied. Simulation resumed — freeze it to lock node positions.');
+  }));
+  all('[data-graph-style-choice]').forEach(control => control.addEventListener('click', () => {
+    byId('graph-style').value = control.dataset.graphStyleChoice;
+    if (state.graphEngine) state.graphEngine.setStyle(control.dataset.graphStyleChoice);
+    clearGraphSavedView();
+    syncGraphChoices();
+    saveGraphPreferences();
+  }));
+  all('[data-graph-color-choice]').forEach(control => control.addEventListener('click', () => {
+    byId('graph-color').value = control.dataset.graphColorChoice;
+    if (state.graphEngine) state.graphEngine.setColorBy(control.dataset.graphColorChoice);
+    clearGraphSavedView();
+    syncGraphChoices();
+    saveGraphPreferences();
+  }));
+  all('[data-graph-palette-choice]').forEach(control => control.addEventListener('click', () => {
+    const palette = control.dataset.graphPaletteChoice;
+    byId('graph-palette').value = palette;
+    applyGraphPalette(palette);
+    clearGraphSavedView();
+    syncGraphChoices();
+    saveGraphPreferences();
+    showNotice(`${control.textContent.trim()} palette applied to the graph.`);
+  }));
+  byId('graph-min-degree').addEventListener('input', event => {
+    setGraphMinDegree(event.target.value);
+    clearGraphSavedView();
+    saveGraphPreferences();
+  });
+  byId('graph-unlinked').addEventListener('change', event => {
+    setGraphShowUnlinked(event.target.checked);
+    clearGraphSavedView();
+    saveGraphPreferences();
+  });
+  byId('graph-tune-min-degree').addEventListener('input', event => {
+    setGraphMinDegree(event.target.value);
+    clearGraphSavedView();
+    saveGraphPreferences();
+  });
+  byId('graph-depth').addEventListener('input', event => {
+    setGraphDepth(event.target.value);
+    clearGraphSavedView();
+    saveGraphPreferences();
+  });
+  byId('graph-tune-unlinked').addEventListener('click', event => {
+    setGraphShowUnlinked(event.currentTarget.getAttribute('aria-checked') !== 'true');
+    clearGraphSavedView();
+    saveGraphPreferences();
+  });
+  GRAPH_TUNING.forEach(item => byId(item.id).addEventListener('input', event => {
+    const value = setGraphTuningControl(item, event.target.value);
+    if (state.graphEngine) state.graphEngine.setSettings({ [item.key]: value });
+    clearGraphSavedView();
+    saveGraphPreferences();
+  }));
+  all('[data-graph-layer]').forEach(control => control.addEventListener('click', () => {
+    const layers = graphLayerState();
+    const layer = control.dataset.graphLayer;
+    layers[layer] = !layers[layer];
+    const previousIncludeCode = state.graphIncludeCode;
+    state.graphIncludeCode = layers.code === true;
+    setGraphLayers(layers);
+    if (state.graphEngine) state.graphEngine.setLayers(layers);
+    clearGraphSavedView();
+    saveGraphPreferences();
+    if (previousIncludeCode !== state.graphIncludeCode) loadGraph({ force: true });
+  }));
+  all('[data-graph-saved-view]').forEach(control => control.addEventListener('click', () => applyGraphView(control.dataset.graphSavedView)));
+  byId('graph-save-view').addEventListener('click', saveCurrentGraphView);
+  byId('graph-reset-tuning').addEventListener('click', resetGraphTuning);
+  byId('graph-full').addEventListener('click', toggleGraphMode);
+  byId('graph-retry').addEventListener('click', () => loadGraph({ force: true }));
+  byId('graph-bridges').addEventListener('change', event => {
+    if (state.graphEngine) state.graphEngine.setBridges(event.target.checked);
+    saveGraphPreferences();
+  });
+  byId('graph-collapse').addEventListener('change', event => {
+    if (state.graphEngine) state.graphEngine.setCollapse(event.target.checked ? 'auto' : false);
+    saveGraphPreferences();
+  });
+  byId('graph-as-of').addEventListener('change', event => {
+    if (state.graphEngine) state.graphEngine.setAsOf(event.target.value || null);
+    saveGraphPreferences();
+    loadGraph({ force: true });
+  });
+  byId('graph-ghosts').addEventListener('change', event => {
+    if (state.graphEngine) state.graphEngine.setGhosts(event.target.checked);
+    saveGraphPreferences();
+  });
+  byId('graph-size').addEventListener('change', event => {
+    if (state.graphEngine) state.graphEngine.setSizeBy(event.target.value);
+    saveGraphPreferences();
+  });
+  byId('graph-export').addEventListener('click', () => {
+    const menu = byId('graph-export-menu');
+    const open = menu.hidden;
+    menu.hidden = !open;
+    byId('graph-export').setAttribute('aria-expanded', String(open));
+  });
+  byId('graph-export-png').addEventListener('click', () => {
+    byId('graph-export-menu').hidden = true;
+    byId('graph-export').setAttribute('aria-expanded', 'false');
+    exportGraphPng();
+  });
+  byId('graph-export-json').addEventListener('click', () => {
+    byId('graph-export-menu').hidden = true;
+    byId('graph-export').setAttribute('aria-expanded', 'false');
+    exportGraphJson();
+  });
+  restoreGraphPreferences();
+  syncGraphChoices();
+
+  byId('why-form').addEventListener('submit', whySearch);
+  byId('timeline-form').addEventListener('submit', event => timelineSearch(event, false));
+  byId('supersession-form').addEventListener('submit', event => timelineSearch(event, true));
+  byId('verify-receipts').addEventListener('click', verifyReceipts);
+  byId('export-receipts').addEventListener('click', exportReceipts);
+
+  byId('create-workspace-toggle').addEventListener('click', () => {
+    byId('create-workspace-form').hidden = !byId('create-workspace-form').hidden;
+    if (!byId('create-workspace-form').hidden) byId('new-workspace-name').focus();
+  });
+  byId('create-workspace-form').addEventListener('submit', createWorkspace);
+  byId('consolidate-form').addEventListener('submit', previewConsolidation);
+  byId('consolidate-commit').addEventListener('click', commitConsolidation);
+  byId('billing-select').addEventListener('change', renderPlans);
+  byId('dashboard-select').addEventListener('change', event => {
+    location.assign(event.target.value === 'classic' ? '/classic' : '/');
+  });
+  byId('theme-select').addEventListener('change', event => applyTheme(event.target.value));
+  byId('sidebar-theme-select').addEventListener('change', event => applyTheme(event.target.value));
+  boot();
+})();

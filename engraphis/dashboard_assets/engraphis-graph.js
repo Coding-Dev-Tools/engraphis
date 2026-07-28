@@ -69,6 +69,15 @@
   const LARGE_NODE_LIMIT = 600;
   const LARGE_LINK_LIMIT = 2400;
 
+  /* "Show all nodes" may return twenty thousand entities. A D3 simulation for even a
+     few thousand of them monopolises the main thread long enough to make the Ledger feel
+     hung, irrespective of its eventual tick/cooldown limit. Keep live centre gravity for
+     overview-sized full graphs only; anything beyond the same large-graph cut-off as the
+     classic renderer uses the centred deterministic layout below. That preserves every node,
+     makes the gravity control compact/expand the layout, and leaves the UI responsive. */
+  const FULL_FORCE_NODE_LIMIT = LARGE_NODE_LIMIT;
+  const FULL_FORCE_LINK_LIMIT = LARGE_LINK_LIMIT;
+
   /* The classic renderer's *dense* signal (`GPERF.dense`, `links>1500` in dashboard.js). Past
      it the classic path turns off the two per-edge costs that scale with the link count and
      buy nothing at that density: link curvature (a quadratic bezier per relation instead of a
@@ -125,8 +134,502 @@
     return [+m[0], +m[1], +m[2]];
   }
   function alpha(c, a) { const [r, g, b] = hexRgb(c); return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')'; }
-  function lighten(c, amt) { let [r, g, b] = hexRgb(c); r = Math.round(r + (255 - r) * amt); g = Math.round(g + (255 - g) * amt); b = Math.round(b + (255 - b) * amt); return 'rgb(' + r + ',' + g + ',' + b + ')'; }
+  function mixColours(a, b, amount) {
+    const [ar, ag, ab] = hexRgb(a), [br, bg, bb] = hexRgb(b), t = Math.max(0, Math.min(1, amount));
+    return 'rgb(' + Math.round(ar + (br - ar) * t) + ',' + Math.round(ag + (bg - ag) * t) + ',' + Math.round(ab + (bb - ab) * t) + ')';
+  }
   function contrastOn(c) { const [r, g, b] = hexRgb(c); return (0.2126 * r + 0.7152 * g + 0.0722 * b) > 150 ? '#111827' : '#f8fafc'; }
+
+  const MATERIAL_CACHE_CAPACITY = 192;
+  const MATERIAL_CACHE = new Map();
+  const MATERIAL_CACHE_METRICS = {
+    hits: 0, misses: 0, allocations: 0, evictions: 0, clears: 0
+  };
+  /* Full sprites are intentionally oversampled. A 24px master blurred the grain back into
+     the same soft radial blob when a hub was displayed at 35–55 screen pixels. */
+  const MATERIAL_RADIUS = { signature: 5, bezel: 12, full: 40 };
+  let materialCanvasFactory = null;
+  let materialCacheDpr = null;
+
+  function colourKey(c) { return hexRgb(c).join(','); }
+  function rgbString(c) { const [r, g, b] = hexRgb(c); return 'rgb(' + r + ',' + g + ',' + b + ')'; }
+
+  /* Screen-space detail is deliberately independent of the simulation's world-space radius.
+     A distant hub and a nearby leaf therefore spend the same work for the same visible size. */
+  function materialTier(screenRadius, forceLow) {
+    if (forceLow || !Number.isFinite(+screenRadius) || +screenRadius < 6) return 'signature';
+    return +screenRadius < 12 ? 'bezel' : 'full';
+  }
+
+  /* The preferred signature is (style, themeColors, paletteName, identity). The older
+     (style, identity, themeColors) ordering remains accepted for test and compatibility seams. */
+  function materialRecipe(styleName, themeOrIdentity, paletteOrTheme, maybeIdentity) {
+    let themeColors, paletteName, identity;
+    if (themeOrIdentity && typeof themeOrIdentity === 'object') {
+      themeColors = themeOrIdentity;
+      paletteName = typeof paletteOrTheme === 'string' ? paletteOrTheme : 'theme';
+      identity = maybeIdentity || themeColors.accent || '#8c83e8';
+    } else {
+      identity = themeOrIdentity || '#8c83e8';
+      themeColors = paletteOrTheme && typeof paletteOrTheme === 'object' ? paletteOrTheme : {};
+      paletteName = 'theme';
+    }
+    const style = ['cyber', 'galaxy', 'solar', 'classic'].indexOf(styleName) < 0 ? 'classic' : styleName;
+    const surface = themeColors.surface || themeColors.canvas || '#0e1014';
+    const substrate = mixColours(surface, '#02050a', style === 'classic' ? 0.68 : 0.78);
+    const base = {
+      styleName: style, paletteName, substrate, identity: rgbString(identity),
+      identityKey: colourKey(identity), substrateKey: colourKey(substrate)
+    };
+    if (style === 'cyber') {
+      const fixedPalette = {
+        cyan: '#21dff3', blue: '#367cff', violet: '#8d61ff',
+        magenta: '#ec4fc4', teal: '#4ce4cf'
+      };
+      return Object.assign(base, {
+        family: 'iridescent-pvd', fixedPalette, film: fixedPalette,
+        outer: mixColours(substrate, '#01040a', 0.82),
+        bezel: mixColours(substrate, '#101626', 0.46),
+        face: mixColours(substrate, '#182237', 0.48),
+        edge: '#677386', sheen: '#8d61ff'
+      });
+    }
+    if (style === 'galaxy') {
+      const fixedPalette = {
+        navy: '#111a3b', blue: '#3979e8', violet: '#8d68df', highlight: '#aab9ee'
+      };
+      return Object.assign(base, {
+        family: 'anodized-alloy', fixedPalette,
+        outer: mixColours(substrate, '#02040d', 0.76),
+        bezel: mixColours(substrate, '#151a34', 0.54),
+        face: mixColours(substrate, fixedPalette.navy, 0.68),
+        edge: '#7587bb', sheen: fixedPalette.blue
+      });
+    }
+    if (style === 'solar') {
+      const fixedPalette = {
+        ember: '#713018', copper: '#b85c2f', amber: '#f18a32',
+        gold: '#ffc46b', shadow: '#2b1008'
+      };
+      return Object.assign(base, {
+        family: 'brushed-copper', fixedPalette,
+        outer: mixColours(substrate, '#0a0402', 0.72),
+        bezel: mixColours(substrate, '#351609', 0.62),
+        face: mixColours(substrate, fixedPalette.copper, 0.48),
+        edge: fixedPalette.amber, sheen: fixedPalette.gold
+      });
+    }
+    const fixedPalette = {
+      charcoal: '#242d36', steel: '#778593', highlight: '#c0c9cf', coolEdge: '#8aa7bd'
+    };
+    return Object.assign(base, {
+      family: 'satin-gunmetal', fixedPalette,
+      outer: mixColours(substrate, '#05080b', 0.68),
+      bezel: mixColours(substrate, '#20272e', 0.52),
+      face: mixColours(substrate, fixedPalette.charcoal, 0.72),
+      edge: fixedPalette.coolEdge, sheen: fixedPalette.highlight
+    });
+  }
+
+  function fillCircle(ctx, x, y, r, fill) {
+    ctx.beginPath(); ctx.arc(x, y, Math.max(0.1, r), 0, 6.2832); ctx.fillStyle = fill; ctx.fill();
+  }
+  function strokeCircle(ctx, x, y, r, stroke, width) {
+    ctx.beginPath(); ctx.arc(x, y, Math.max(0.1, r), 0, 6.2832);
+    ctx.lineWidth = width; ctx.strokeStyle = stroke; ctx.stroke();
+  }
+  function gradient(ctx, kind, args, stops) {
+    const maker = ctx[kind];
+    if (typeof maker !== 'function') return stops[Math.floor(stops.length / 2)][1];
+    const result = maker.apply(ctx, args);
+    stops.forEach(stop => result.addColorStop(stop[0], stop[1]));
+    return result;
+  }
+  function identityRing(ctx, x, y, r, recipe, strength) {
+    strokeCircle(ctx, x, y, r * 0.955, alpha(recipe.identity, strength), Math.max(0.32, r * 0.045));
+  }
+  function materialHalo(ctx, x, y, r, tier, colour, opacity, shiftX, shiftY) {
+    if (tier === 'signature') return;
+    const reach = tier === 'full' ? 1.12 : 1.14;
+    const halo = gradient(ctx, 'createRadialGradient', [
+      x + r * (shiftX || 0), y + r * (shiftY || 0), r * 0.48,
+      x, y, r * reach
+    ], [
+      [0, alpha(colour, opacity)], [0.68, alpha(colour, opacity * 0.42)],
+      [1, alpha(colour, 0)]
+    ]);
+    fillCircle(ctx, x, y, r * reach, halo);
+  }
+
+  function directionalBrush(ctx, x, y, r, angle, dark, light, strength) {
+    if (typeof ctx.moveTo !== 'function' || typeof ctx.lineTo !== 'function') return;
+    const alongX = Math.cos(angle), alongY = Math.sin(angle);
+    const normalX = -alongY, normalY = alongX;
+    const bound = r * 0.76;
+    for (let i = -13; i <= 13; i++) {
+      const offset = i * r * 0.052;
+      const span = Math.sqrt(Math.max(0, bound * bound - offset * offset));
+      const cx = x + normalX * offset, cy = y + normalY * offset;
+      ctx.lineWidth = Math.max(0.18, r * (0.007 + Math.abs(i % 3) * 0.002));
+      ctx.strokeStyle = alpha(i % 4 === 0 ? dark : light,
+        strength * (0.48 + Math.abs(i % 5) * 0.13));
+      ctx.beginPath();
+      ctx.moveTo(cx - alongX * span, cy - alongY * span);
+      ctx.lineTo(cx + alongX * span, cy + alongY * span);
+      ctx.stroke();
+    }
+  }
+
+  function paintCyberMaterial(ctx, x, y, r, recipe, tier) {
+    const f = recipe.fixedPalette;
+    materialHalo(ctx, x, y, r, tier, f.cyan, 0.20, -0.15, 0.12);
+    materialHalo(ctx, x, y, r, tier, f.magenta, 0.17, 0.16, -0.14);
+    fillCircle(ctx, x, y, r, recipe.outer);
+    fillCircle(ctx, x, y, r * 0.94, recipe.bezel);
+    if (tier === 'signature') {
+      fillCircle(ctx, x, y, r * 0.79, mixColours(f.magenta, f.cyan, 0.58));
+      strokeCircle(ctx, x, y, r * 0.82, alpha(f.violet, 0.84), Math.max(0.35, r * 0.09));
+      identityRing(ctx, x, y, r, recipe, 0.88);
+      return;
+    }
+    const rimMaker = typeof ctx.createConicGradient === 'function' ? 'createConicGradient' : 'createLinearGradient';
+    const rimArgs = rimMaker === 'createConicGradient'
+      ? [-2.2, x, y] : [x - r * 0.8, y - r * 0.8, x + r * 0.8, y + r * 0.8];
+    const rim = gradient(ctx, rimMaker, rimArgs, [
+      [0, f.cyan], [0.20, f.blue], [0.40, f.violet], [0.61, f.magenta],
+      [0.80, f.teal], [1, f.cyan]
+    ]);
+    fillCircle(ctx, x, y, r * 0.89, rim);
+    /* The PVD spectrum owns the face, not just its rim: a fixed warm crown crosses a
+       graphite-violet mid-band into a visibly cyan lower face. */
+    const film = gradient(ctx, 'createLinearGradient',
+      [x - r * 0.16, y - r * 0.80, x + r * 0.22, y + r * 0.80], [
+        [0, mixColours(recipe.face, f.magenta, 0.82)],
+        [0.22, mixColours(recipe.face, f.violet, 0.78)],
+        [0.48, mixColours(recipe.face, f.blue, 0.58)],
+        [0.73, mixColours(recipe.face, f.cyan, 0.82)],
+        [1, mixColours(recipe.face, f.teal, 0.68)]
+      ]);
+    fillCircle(ctx, x, y, r * 0.81, film);
+    const spectralBand = gradient(ctx, 'createLinearGradient',
+      [x - r * 0.78, y + r * 0.48, x + r * 0.72, y - r * 0.56], [
+        [0, alpha(f.cyan, 0)], [0.31, alpha(f.cyan, 0.16)],
+        [0.48, alpha('#eef8ff', 0.28)], [0.58, alpha(f.magenta, 0.18)],
+        [1, alpha(f.magenta, 0)]
+      ]);
+    fillCircle(ctx, x, y, r * 0.80, spectralBand);
+    const shade = gradient(ctx, 'createRadialGradient',
+      [x - r * 0.27, y - r * 0.34, r * 0.04, x, y, r * 0.82], [
+        [0, alpha('#f3f7ff', 0.38)], [0.23, alpha('#aebcff', 0.08)],
+        [0.66, alpha('#02040a', 0.03)], [1, alpha('#010207', 0.42)]
+      ]);
+    fillCircle(ctx, x, y, r * 0.80, shade);
+    if (tier === 'full') {
+      for (let i = 0; i < 13; i++) {
+        ctx.lineWidth = Math.max(0.25, r * (0.009 + (i % 3) * 0.003));
+        ctx.strokeStyle = alpha(i % 3 === 0 ? f.cyan : (i % 3 === 1 ? f.violet : f.magenta),
+          0.075 + (i % 4) * 0.018);
+        ctx.beginPath(); ctx.arc(x, y, r * (0.16 + i * 0.048), -2.88, 0.72); ctx.stroke();
+      }
+    }
+    ctx.lineWidth = Math.max(0.36, r * 0.030);
+    ctx.strokeStyle = alpha('#f5fbff', 0.48);
+    ctx.beginPath(); ctx.arc(x, y, r * 0.73, -2.66, -1.14); ctx.stroke();
+    identityRing(ctx, x, y, r, recipe, 0.78);
+  }
+
+  function paintGalaxyMaterial(ctx, x, y, r, recipe, tier) {
+    const f = recipe.fixedPalette;
+    materialHalo(ctx, x, y, r, tier, mixColours(f.blue, f.violet, 0.48), 0.11, -0.10, -0.10);
+    fillCircle(ctx, x, y, r, recipe.outer);
+    fillCircle(ctx, x, y, r * 0.93, recipe.bezel);
+    if (tier === 'signature') {
+      fillCircle(ctx, x, y, r * 0.80, recipe.face);
+      strokeCircle(ctx, x, y, r * 0.84, alpha(f.violet, 0.82), Math.max(0.35, r * 0.08));
+      identityRing(ctx, x, y, r, recipe, 0.82);
+      return;
+    }
+    const face = gradient(ctx, 'createLinearGradient',
+      [x - r * 0.72, y - r * 0.72, x + r * 0.72, y + r * 0.72], [
+        [0, mixColours(recipe.face, f.highlight, 0.34)],
+        [0.26, mixColours(recipe.face, f.blue, 0.40)],
+        [0.52, mixColours(recipe.face, f.violet, 0.28)],
+        [0.76, recipe.face], [1, mixColours(recipe.face, f.navy, 0.72)]
+      ]);
+    fillCircle(ctx, x, y, r * 0.83, face);
+    const sheen = gradient(ctx, 'createLinearGradient',
+      [x - r * 0.76, y + r * 0.64, x + r * 0.68, y - r * 0.70], [
+        [0, alpha(f.navy, 0)], [0.34, alpha(f.blue, 0.07)],
+        [0.47, alpha(f.violet, 0.34)], [0.56, alpha(f.highlight, 0.24)],
+        [0.68, alpha(f.blue, 0.08)],
+        [1, alpha(f.navy, 0)]
+      ]);
+    fillCircle(ctx, x, y, r * 0.82, sheen);
+    if (tier === 'full') {
+      directionalBrush(ctx, x, y, r, -0.54, f.navy, f.highlight, 0.13);
+      for (let i = 0; i < 14; i++) {
+        ctx.lineWidth = Math.max(0.20, r * (0.008 + (i % 2) * 0.003));
+        ctx.strokeStyle = alpha(i % 2 ? f.blue : f.violet, 0.055 + (i % 4) * 0.018);
+        ctx.beginPath(); ctx.arc(x, y, r * (0.14 + i * 0.047), -2.94, 0.46); ctx.stroke();
+      }
+    }
+    ctx.lineWidth = Math.max(0.34, r * 0.026);
+    ctx.strokeStyle = alpha(f.highlight, 0.38);
+    ctx.beginPath(); ctx.arc(x, y, r * 0.75, -2.70, -1.18); ctx.stroke();
+    strokeCircle(ctx, x, y, r * 0.88, alpha(f.violet, 0.72), Math.max(0.38, r * 0.046));
+    identityRing(ctx, x, y, r, recipe, 0.76);
+  }
+
+  function paintSolarMaterial(ctx, x, y, r, recipe, tier) {
+    const f = recipe.fixedPalette;
+    materialHalo(ctx, x, y, r, tier, f.amber, 0.14, -0.08, -0.12);
+    fillCircle(ctx, x, y, r, recipe.outer);
+    fillCircle(ctx, x, y, r * 0.95, recipe.bezel);
+    if (tier === 'signature') {
+      fillCircle(ctx, x, y, r * 0.78, f.copper);
+      strokeCircle(ctx, x, y, r * 0.84, f.amber, Math.max(0.42, r * 0.10));
+      identityRing(ctx, x, y, r, recipe, 0.70);
+      return;
+    }
+    const copper = gradient(ctx, 'createRadialGradient',
+      [x - r * 0.20, y - r * 0.24, r * 0.025, x, y, r * 0.86], [
+        [0, f.gold], [0.15, f.amber], [0.38, '#c66a38'],
+        [0.68, f.copper], [0.86, f.ember], [1, f.shadow]
+      ]);
+    fillCircle(ctx, x, y, r * 0.82, copper);
+    const copperSheen = gradient(ctx, 'createLinearGradient',
+      [x - r * 0.74, y + r * 0.52, x + r * 0.70, y - r * 0.60], [
+        [0, alpha(f.shadow, 0)], [0.38, alpha(f.amber, 0.08)],
+        [0.50, alpha(f.gold, 0.34)], [0.62, alpha(f.ember, 0.10)],
+        [1, alpha(f.shadow, 0)]
+      ]);
+    fillCircle(ctx, x, y, r * 0.80, copperSheen);
+    strokeCircle(ctx, x, y, r * 0.90, f.gold, Math.max(0.42, r * 0.055));
+    strokeCircle(ctx, x, y, r * 0.85, alpha(f.ember, 0.94), Math.max(0.34, r * 0.036));
+    if (tier === 'full') {
+      /* Fixed phase and opacity sequences make the circular brush grain deterministic. */
+      for (let i = 0; i < 25; i++) {
+        const radius = r * (0.12 + i * 0.027);
+        ctx.lineWidth = Math.max(0.19, r * (0.008 + (i % 3) * 0.0025));
+        ctx.strokeStyle = alpha(i % 4 === 0 ? f.gold : f.shadow, 0.085 + (i % 5) * 0.018);
+        ctx.beginPath();
+        ctx.arc(x, y, radius, -3.02 + (i % 3) * 0.07, 2.94 - (i % 4) * 0.05);
+        ctx.stroke();
+      }
+    }
+    ctx.lineWidth = Math.max(0.38, r * 0.030);
+    ctx.strokeStyle = alpha('#fff0c0', 0.48);
+    ctx.beginPath(); ctx.arc(x, y, r * 0.73, -2.70, -1.14); ctx.stroke();
+    identityRing(ctx, x, y, r, recipe, 0.66);
+  }
+
+  function paintClassicMaterial(ctx, x, y, r, recipe, tier) {
+    const f = recipe.fixedPalette;
+    fillCircle(ctx, x, y, r, recipe.outer);
+    fillCircle(ctx, x, y, r * 0.94, recipe.bezel);
+    if (tier === 'signature') {
+      fillCircle(ctx, x, y, r * 0.79, recipe.face);
+      strokeCircle(ctx, x, y, r * 0.84, alpha(f.coolEdge, 0.76), Math.max(0.35, r * 0.08));
+      identityRing(ctx, x, y, r, recipe, 0.68);
+      return;
+    }
+    const steel = gradient(ctx, 'createLinearGradient',
+      [x - r * 0.72, y - r * 0.72, x + r * 0.72, y + r * 0.72], [
+        [0, mixColours(recipe.face, f.highlight, 0.48)],
+        [0.24, mixColours(recipe.face, f.steel, 0.38)],
+        [0.50, recipe.face], [0.76, mixColours(recipe.face, '#111820', 0.34)],
+        [1, mixColours(recipe.face, '#05080b', 0.66)]
+      ]);
+    fillCircle(ctx, x, y, r * 0.83, steel);
+    const satin = gradient(ctx, 'createRadialGradient',
+      [x - r * 0.26, y - r * 0.31, r * 0.04, x, y, r * 0.86], [
+        [0, alpha(f.highlight, 0.26)], [0.38, alpha(f.steel, 0.03)],
+        [0.74, alpha('#070a0d', 0.08)], [1, alpha('#020304', 0.42)]
+      ]);
+    fillCircle(ctx, x, y, r * 0.82, satin);
+    if (tier === 'full' && typeof ctx.moveTo === 'function' && typeof ctx.lineTo === 'function') {
+      directionalBrush(ctx, x, y, r, 0.04, '#020507', f.highlight, 0.16);
+    }
+    ctx.lineWidth = Math.max(0.34, r * 0.026);
+    ctx.strokeStyle = alpha('#edf5fb', 0.34);
+    ctx.beginPath(); ctx.arc(x, y, r * 0.74, -2.70, -1.16); ctx.stroke();
+    strokeCircle(ctx, x, y, r * 0.88, alpha(f.coolEdge, 0.62), Math.max(0.34, r * 0.040));
+    identityRing(ctx, x, y, r, recipe, 0.62);
+  }
+
+  function paintMaterialDirect(ctx, x, y, r, recipe, tier) {
+    const detail = tier || 'full';
+    if (recipe.family === 'iridescent-pvd') paintCyberMaterial(ctx, x, y, r, recipe, detail);
+    else if (recipe.family === 'anodized-alloy') paintGalaxyMaterial(ctx, x, y, r, recipe, detail);
+    else if (recipe.family === 'brushed-copper') paintSolarMaterial(ctx, x, y, r, recipe, detail);
+    else paintClassicMaterial(ctx, x, y, r, recipe, detail);
+  }
+
+  function clearMaterialCache(resetStats) {
+    MATERIAL_CACHE.clear();
+    materialCacheDpr = null;
+    MATERIAL_CACHE_METRICS.clears += 1;
+    if (resetStats) {
+      MATERIAL_CACHE_METRICS.hits = 0;
+      MATERIAL_CACHE_METRICS.misses = 0;
+      MATERIAL_CACHE_METRICS.allocations = 0;
+      MATERIAL_CACHE_METRICS.evictions = 0;
+      MATERIAL_CACHE_METRICS.clears = 0;
+    }
+  }
+  function materialCacheStats() {
+    return {
+      size: MATERIAL_CACHE.size, capacity: MATERIAL_CACHE_CAPACITY,
+      limit: MATERIAL_CACHE_CAPACITY, hits: MATERIAL_CACHE_METRICS.hits,
+      misses: MATERIAL_CACHE_METRICS.misses, allocations: MATERIAL_CACHE_METRICS.allocations,
+      evictions: MATERIAL_CACHE_METRICS.evictions, clears: MATERIAL_CACHE_METRICS.clears
+    };
+  }
+  function setMaterialCanvasFactory(factory) {
+    materialCanvasFactory = typeof factory === 'function' ? factory : null;
+    clearMaterialCache();
+  }
+  function makeMaterialCanvas(width, height) {
+    if (materialCanvasFactory) return materialCanvasFactory(width, height);
+    if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(width, height);
+    if (typeof document !== 'undefined' && document.createElement) {
+      const canvas = document.createElement('canvas');
+      canvas.width = width; canvas.height = height;
+      return canvas;
+    }
+    return null;
+  }
+  function normalDpr(value) {
+    const dpr = Number.isFinite(+value) ? +value : 1;
+    return Math.max(1, Math.min(3, Math.round(dpr * 2) / 2));
+  }
+  function currentDpr() {
+    return normalDpr(typeof window !== 'undefined' && window.devicePixelRatio ? window.devicePixelRatio : 1);
+  }
+  function materialCacheKey(recipe, tier, dpr) {
+    return [
+      recipe.styleName, recipe.substrateKey, recipe.identityKey,
+      tier, normalDpr(dpr)
+    ].join('|');
+  }
+  function createMaterialSprite(recipe, tier, dpr) {
+    const radius = MATERIAL_RADIUS[tier] || MATERIAL_RADIUS.full;
+    const padding = tier === 'full' ? 3 : 1.5;
+    const half = radius + padding;
+    const ratio = normalDpr(dpr);
+    const pixels = Math.max(2, Math.ceil(half * 2 * ratio));
+    const canvas = makeMaterialCanvas(pixels, pixels);
+    if (!canvas || typeof canvas.getContext !== 'function') return null;
+    const spriteCtx = canvas.getContext('2d');
+    if (!spriteCtx) return null;
+    if (typeof spriteCtx.scale === 'function') {
+      spriteCtx.scale(ratio, ratio);
+      paintMaterialDirect(spriteCtx, half, half, radius, recipe, tier);
+    } else {
+      paintMaterialDirect(spriteCtx, half * ratio, half * ratio, radius * ratio, recipe, tier);
+    }
+    MATERIAL_CACHE_METRICS.allocations += 1;
+    return { canvas, half, radius, width: pixels, height: pixels };
+  }
+  function materialSprite(recipe, tier, dpr) {
+    const ratio = normalDpr(dpr);
+    if (materialCacheDpr !== null && materialCacheDpr !== ratio) clearMaterialCache();
+    materialCacheDpr = ratio;
+    const key = materialCacheKey(recipe, tier, ratio);
+    if (MATERIAL_CACHE.has(key)) {
+      const value = MATERIAL_CACHE.get(key);
+      MATERIAL_CACHE.delete(key); MATERIAL_CACHE.set(key, value);
+      MATERIAL_CACHE_METRICS.hits += 1;
+      return value;
+    }
+    MATERIAL_CACHE_METRICS.misses += 1;
+    const value = createMaterialSprite(recipe, tier, ratio);
+    if (!value) return null;
+    MATERIAL_CACHE.set(key, value);
+    if (MATERIAL_CACHE.size > MATERIAL_CACHE_CAPACITY) {
+      MATERIAL_CACHE.delete(MATERIAL_CACHE.keys().next().value);
+      MATERIAL_CACHE_METRICS.evictions += 1;
+    }
+    return value;
+  }
+  function paintMaterialSurface(ctx, x, y, r, scale, recipe, forceLow) {
+    const tier = materialTier(r * Math.max(0.01, scale), forceLow);
+    const sprite = materialSprite(recipe, tier, currentDpr());
+    if (sprite && typeof ctx.drawImage === 'function') {
+      const half = r * sprite.half / sprite.radius;
+      ctx.drawImage(sprite.canvas, x - half, y - half, half * 2, half * 2);
+    } else {
+      paintMaterialDirect(ctx, x, y, r, recipe, tier);
+    }
+    return tier;
+  }
+
+  function sampleMaterialColour(styleName, position, identity, themeColors) {
+    const recipe = materialRecipe(styleName, themeColors || {}, 'theme', identity || '#8c83e8');
+    const p = position || 'center';
+    let colour;
+    if (recipe.family === 'iridescent-pvd') {
+      colour = p === 'top'
+        ? mixColours(recipe.face, recipe.fixedPalette.magenta, 0.64)
+        : p === 'bottom'
+          ? mixColours(recipe.face, recipe.fixedPalette.cyan, 0.65)
+          : mixColours(recipe.face, recipe.fixedPalette.violet, 0.54);
+    } else if (recipe.family === 'anodized-alloy') {
+      colour = p === 'top'
+        ? mixColours(recipe.face, recipe.fixedPalette.violet, 0.30)
+        : p === 'bottom'
+          ? mixColours(recipe.face, recipe.fixedPalette.navy, 0.44)
+          : mixColours(recipe.face, recipe.fixedPalette.blue, 0.22);
+    } else if (recipe.family === 'brushed-copper') {
+      colour = p === 'top' ? recipe.fixedPalette.amber
+        : p === 'bottom' ? recipe.fixedPalette.ember : recipe.fixedPalette.copper;
+    } else {
+      colour = p === 'top'
+        ? mixColours(recipe.face, recipe.fixedPalette.highlight, 0.26)
+        : p === 'bottom'
+          ? mixColours(recipe.face, '#11161b', 0.36)
+          : mixColours(recipe.face, recipe.fixedPalette.steel, 0.16);
+    }
+    const rgb = hexRgb(colour);
+    return [rgb[0], rgb[1], rgb[2], 255];
+  }
+
+  function renderMaterialSample(options, identity, themeColors, screenRadius, dpr, forceLow) {
+    let styleName, paletteName;
+    if (options && typeof options === 'object') {
+      styleName = options['style'] || 'cyber';
+      identity = options.identityColor || options.identity || '#8c83e8';
+      themeColors = options.themeColors || {};
+      paletteName = options.palette || 'theme';
+      screenRadius = options.screenRadius === undefined
+        ? (options.radius === undefined ? 16 : options.radius)
+        : options.screenRadius;
+      dpr = options.dpr === undefined ? 1 : options.dpr;
+      forceLow = !!options.forceLow;
+    } else {
+      styleName = options || 'cyber';
+      paletteName = 'theme';
+      identity = identity || '#8c83e8';
+      themeColors = themeColors || {};
+      screenRadius = screenRadius === undefined ? 16 : screenRadius;
+      dpr = dpr === undefined ? 1 : dpr;
+    }
+    const recipe = materialRecipe(styleName, themeColors, paletteName, identity);
+    const tier = materialTier(screenRadius, forceLow);
+    const sprite = materialSprite(recipe, tier, dpr);
+    let pixels = [];
+    if (sprite && sprite.canvas && typeof sprite.canvas.getContext === 'function') {
+      const sampleCtx = sprite.canvas.getContext('2d');
+      if (sampleCtx && typeof sampleCtx.getImageData === 'function') {
+        try { pixels = Array.from(sampleCtx.getImageData(0, 0, sprite.width, sprite.height).data); } catch (_err) { pixels = []; }
+      }
+    }
+    return {
+      canvas: sprite ? sprite.canvas : null,
+      width: sprite ? sprite.width : 0, height: sprite ? sprite.height : 0,
+      pixels, tier, recipe, cache: materialCacheStats()
+    };
+  }
 
   function makeStars() {
     const a = [], c = ['#dfe6ff', '#dfe6ff', '#c9b6ff', '#a7c6ff', '#ffd9ef'];
@@ -306,7 +809,8 @@
       styleName: 'cyber', colorBy: 'community', palette: 'theme', overrides: {}, themeColors: {},
       settings: Object.assign({}, PRESETS.communities, { mode: 'communities', labels: false, flow: true, frozen: false }),
       minDegree: 1, showUnlinked: false, focusId: null, depth: 2, layers: { temporal: true, entity: true, causal: true, semantic: true, code: false },
-      path: null, asOf: null, ghost: true, sizeBy: 'degree', bridges: false, suggestions: false, collapse: 'auto'
+      path: null, asOf: null, ghost: true, sizeBy: 'degree', bridges: false, suggestions: false,
+      collapse: 'auto', renderMode: opts.renderMode === 'full' ? 'full' : 'overview'
     };
     let raw = { nodes: [], links: [], suggestions: [] }, adj = {}, hilite = null, hoverSet = null, maxDeg = 1;
     // The classic renderer treats label density as a hard ranked cap, not merely a looser
@@ -315,7 +819,8 @@
     let zoom = 1, collapsed = false;
     /* Recomputed from the *rendered* data on every render, exactly as the classic path
        recomputes GPERF — filters and focus can take a huge store down to a small view. */
-    let large = false, dense = false;
+    let large = false, dense = false, materialLow = false;
+    let staticFullLayout = false, fullLayoutDirty = true;
     /* The node/link arrays last handed to force-graph. Seeding is not free: the vendor copies
        the data in and d3 resets the simulation alpha to 1, so a paint-only change would restart
        the whole layout. See `sameData`/`render`. */
@@ -375,10 +880,20 @@
       if (state.styleName !== 'classic' && STYLE_PAL[state.styleName] && STYLE_PAL[state.styleName][type]) return STYLE_PAL[state.styleName][type];
       return state.themeColors[type] || THEME_ETYPE[type] || '#8c83e8';
     }
-    function commPal() { return COMMUNITY_PALS[state.styleName] || COMMUNITY_PALS.classic; }
+    function selectedPalette() {
+      const palette = PALETTES[state.palette];
+      return palette ? Object.values(palette) : null;
+    }
+    /* A palette is a colour family, not merely an entity-type override. Previously the
+       default Community and Connections modes skipped `overrides`, so choosing Aurora,
+       Ocean, Ember, or High contrast changed no pixels unless the user also discovered the
+       separate Entity type selector. Use the selected family in every node-colour mode;
+       Theme retains the active style's deliberately tuned defaults. */
+    function commPal() { return selectedPalette() || COMMUNITY_PALS[state.styleName] || COMMUNITY_PALS.classic; }
     function heatColor(node) {
       const t = (node.rank || 0) / Math.max(1, raw.nodes.length - 1);
-      return GRAPH_HEAT[Math.min(GRAPH_HEAT.length - 1, Math.floor(t * GRAPH_HEAT.length))];
+      const colors = selectedPalette() || GRAPH_HEAT;
+      return colors[Math.min(colors.length - 1, Math.floor(t * colors.length))];
     }
     function nodeColor(node) {
       if (state.colorBy === 'community') { const p = commPal(); return p[(node.community || 0) % p.length]; }
@@ -427,7 +942,13 @@
     function visible() {
       const keepLayer = l => state.layers[l.layer] !== false;
       let nodes = raw.nodes.filter(n => (state.showUnlinked || n.degree > 0) && n.degree >= state.minDegree);
-      if (state.repo) nodes = nodes.filter(n => (n.repo || n.topic || '').toLowerCase().includes(state.repo) || nodeName(n).toLowerCase().includes(state.repo));
+      if (state.repo) {
+        nodes = nodes.filter(n => [n.repo, n.topic, nodeName(n)]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase()
+          .includes(state.repo));
+      }
       if (state.asOf !== null) {
         const live = nodes.filter(n => aliveAt(n, state.asOf));
         const ghosts = state.ghost ? nodes.filter(n => !aliveAt(n, state.asOf) && born(n) <= state.asOf).map(n => Object.assign(n, { ghost: true })) : [];
@@ -461,36 +982,110 @@
           if (ids.has(source) && ids.has(target)) links = links.concat([Object.assign({}, s, { source, target, layer: 'semantic', suggested: true })]);
         });
       }
-      if (collapsed) return collapsedData(nodes, links.filter(l => !l.suggested));
+      if (collapsed && state.renderMode !== 'full') return collapsedData(nodes, links.filter(l => !l.suggested));
       return { nodes, links };
     }
 
     function applyForces() {
+      /* Extremely large complete snapshots use the deterministic fallback, but a normal
+         full graph remains a live layout. The previous `renderMode === 'full'` guard removed
+         every force and pinned every node, which is why the gravity slider could read 98
+         while the canvas stayed on a wide ring. */
+      if (staticFullLayout) {
+        fg.d3Force('charge', null);
+        fg.d3Force('link', null);
+        fg.d3Force('x', null);
+        fg.d3Force('y', null);
+        fg.d3Force('radial', null);
+        fg.d3Force('collide', null);
+        return;
+      }
       const s = state.settings, mode = s.mode || 'compact';
-      fg.d3Force('charge').strength(-s.repel);
-      fg.d3Force('link').distance(s.link);
+      let charge = fg.d3Force('charge');
+      let link = fg.d3Force('link');
+      if (!charge && typeof d3 !== 'undefined' && d3.forceManyBody) {
+        charge = d3.forceManyBody();
+        fg.d3Force('charge', charge);
+      }
+      if (!link && typeof d3 !== 'undefined' && d3.forceLink) {
+        link = d3.forceLink().id(node => node.id);
+        fg.d3Force('link', link);
+      }
+      if (charge && charge.strength) charge.strength(-s.repel);
+      if (link && link.distance) link.distance(s.link);
       if (typeof d3 === 'undefined') return;
       fg.d3Force('radial', null);
-      if (mode === 'communities') {
-        const target = node => {
-          const c = node.community || 0;
-          const ring = 240 + (c % 3) * 90;
-          const a = (c * 2.399);
-          return { x: Math.cos(a) * ring, y: Math.sin(a) * ring * 0.62 };
-        };
-        fg.d3Force('x', d3.forceX(n => target(n).x).strength(s.gravity / 100));
-        fg.d3Force('y', d3.forceY(n => target(n).y).strength(s.gravity / 100));
-      } else {
-        const centering = mode === 'radial' ? Math.max(0.04, s.gravity / 300) : s.gravity / 100;
-        fg.d3Force('x', d3.forceX(0).strength(centering));
-        fg.d3Force('y', d3.forceY(0).strength(centering));
-        if (mode === 'radial' && d3.forceRadial) fg.d3Force('radial', d3.forceRadial(n => Math.max(0, 5 - Math.min(5, n.degree || 0)) * Math.max(8, s.link * 0.72)).strength(0.32));
-      }
+      /* Community detection still controls colour and link structure, but it must not give
+         each community a separate orbit target. The default used those scattered targets and
+         made a connected graph settle as a giant ring around empty space. Every standard
+         layout now shares the origin as its gravitational centre; repulsion and link distance
+         retain the useful local separation without sacrificing a coherent overview. */
+      const centering = mode === 'radial' ? Math.max(0.04, s.gravity / 300) : s.gravity / 100;
+      fg.d3Force('x', d3.forceX(0).strength(centering));
+      fg.d3Force('y', d3.forceY(0).strength(centering));
+      if (mode === 'radial' && d3.forceRadial) fg.d3Force('radial', d3.forceRadial(n => Math.max(0, 5 - Math.min(5, n.degree || 0)) * Math.max(8, s.link * 0.72)).strength(0.32));
       /* One collision pass on a large graph, two otherwise — the classic path's
          `.iterations(GPERF.large?1:2)`. The second pass costs another full quadtree traversal
          per node on every tick, and a large store pays that on the initial layout and on every
          reheat, which is exactly where it is least affordable. */
       if (d3.forceCollide) fg.d3Force('collide', d3.forceCollide(n => n.radius + 1.5).iterations(large ? 1 : 2));
+    }
+
+    function clearPinnedPositions(data) {
+      data.nodes.forEach(node => {
+        node.x = undefined;
+        node.y = undefined;
+        node.vx = undefined;
+        node.vy = undefined;
+        node.fx = undefined;
+        node.fy = undefined;
+      });
+    }
+
+    function pinFullGraphLayout(data) {
+      /* The rare fallback above the live-force ceiling is deterministic and bounded, but it
+         must still answer the tuning controls. A centred grid avoids the old empty-core ring;
+         higher gravity compacts it, while repel/link/node-size determine local spacing. */
+      const groups = new Map();
+      data.nodes.forEach(node => {
+        const key = `${node.community || 0}:${node.etype || 'entity'}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(node);
+      });
+      const ordered = [...groups.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
+      const s = state.settings;
+      const gravity = Math.max(0, Math.min(1, Number(s.gravity) / 100 || 0));
+      const repel = Math.max(0, Number(s.repel) || 0);
+      const link = Math.max(4, Number(s.link) || 4);
+      const nodeSize = Math.max(1, Number(s.size) || 3);
+      const compactness = 1.75 - gravity * 1.4;
+      const localGap = (4 + nodeSize * 1.6 + Math.sqrt(repel) * 0.8 + link * 0.16) * compactness;
+      const columns = Math.max(1, Math.ceil(Math.sqrt(ordered.length)));
+      const largestGroup = ordered.reduce((largest, [, nodes]) => Math.max(largest, nodes.length), 1);
+      const cell = Math.max(90, Math.sqrt(largestGroup) * localGap * 2.4 + link * 3) * compactness;
+      const golden = Math.PI * (3 - Math.sqrt(5));
+      ordered.forEach(([, nodes], groupIndex) => {
+        nodes.sort((a, b) => (b.degree || 0) - (a.degree || 0) || String(a.id).localeCompare(String(b.id)));
+        const column = groupIndex % columns;
+        const row = Math.floor(groupIndex / columns);
+        const centerX = (column - (columns - 1) / 2) * cell;
+        const centerY = (row - (Math.ceil(ordered.length / columns) - 1) / 2) * cell * 0.72;
+        const nodeColumns = Math.max(1, Math.ceil(Math.sqrt(nodes.length)));
+        const nodeRows = Math.ceil(nodes.length / nodeColumns);
+        nodes.forEach((node, index) => {
+          /* A spiral makes a large single community read as an empty-core ring. Pack the
+             deterministic fallback around its group centre instead, preserving every node
+             while keeping the complete graph visually centred and bounded. */
+          const x = centerX + ((index % nodeColumns) - (nodeColumns - 1) / 2) * localGap;
+          const y = centerY + (Math.floor(index / nodeColumns) - (nodeRows - 1) / 2) * localGap;
+          node.x = x;
+          node.y = y;
+          node.vx = 0;
+          node.vy = 0;
+          node.fx = x;
+          node.fy = y;
+        });
+      });
     }
 
     function styleBackground(ctx, scale) {
@@ -534,7 +1129,7 @@
       if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
       const focus = hoverSet && hoverSet.size > 1, neighbor = focus && hoverSet.has(node.id), dim = focus && !neighbor;
       let r = node.radius;
-      const col = node.color, rich = node.id === hilite || neighbor || node.hub || node.degree >= 3;
+      const col = node.color;
       ctx.globalAlpha = node.ghost ? 0.22 : (dim ? 0.12 : 1);
       if (node.ghost) {
         ctx.lineWidth = 1.1 / scale;
@@ -572,65 +1167,41 @@
         ctx.beginPath(); ctx.arc(node.x, node.y, r + 3 / scale, 0, 6.2832); ctx.stroke();
         ctx.restore();
       }
-      /* Every per-node glow below is gated on `!large`, matching the classic path's
-         `if(rich&&!GPERF.large)` / `if(!GPERF.large)` pairs. A radial gradient or a shadow blur
-         is per-node, per-frame canvas work: at the >600-node cutoff that is hundreds of
-         gradients rebuilt on every tick of the layout, which is what makes a big store crawl.
-         The flat fill in the `else` is the classic fallback, not a missing branch. */
+      /* Material gradients, grain, and halos live in the bounded sprite cache. The direct
+         fallback preserves them when detached canvases are unavailable, while a large graph
+         forces the gradient-free signature tier. */
+      let nodeMaterial;
       if (state.styleName === 'galaxy') {
-        if (rich && !large) {
-          ctx.save();
-          ctx.globalCompositeOperation = 'lighter';
-          const R = r * (node.id === hilite ? 4.4 : 3.0);
-          const g = ctx.createRadialGradient(node.x, node.y, 0, node.x, node.y, R);
-          g.addColorStop(0, alpha(col, dim ? 0.15 : 0.6));
-          g.addColorStop(0.42, alpha(col, dim ? 0.05 : 0.16));
-          g.addColorStop(1, alpha(col, 0));
-          ctx.fillStyle = g;
-          ctx.beginPath();
-          ctx.arc(node.x, node.y, R, 0, 6.2832);
-          ctx.fill();
-          ctx.restore();
-        }
-        ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, 6.2832); ctx.fillStyle = col; ctx.fill();
-        ctx.beginPath(); ctx.arc(node.x, node.y, Math.max(0.4, r * 0.4), 0, 6.2832); ctx.fillStyle = 'rgba(255,255,255,.9)'; ctx.fill();
+        nodeMaterial = materialRecipe('galaxy', state.themeColors, state.palette, col);
+        paintMaterialSurface(ctx, node.x, node.y, r, scale, nodeMaterial, materialLow);
       } else if (state.styleName === 'solar') {
         const sun = node.rank === 0;
         if (sun) r *= 1.7;
-        if (rich && !large) {
-          ctx.save();
-          ctx.globalCompositeOperation = 'lighter';
-          const cc = sun ? '#ffcf6b' : col, R2 = r * (sun ? 3.4 : 2.1);
-          const g2 = ctx.createRadialGradient(node.x, node.y, 0, node.x, node.y, R2);
-          g2.addColorStop(0, alpha(cc, dim ? 0.1 : (sun ? 0.6 : 0.3)));
-          g2.addColorStop(1, alpha(cc, 0));
-          ctx.fillStyle = g2;
-          ctx.beginPath(); ctx.arc(node.x, node.y, R2, 0, 6.2832); ctx.fill();
-          ctx.restore();
-        }
-        if (large) {
-          ctx.fillStyle = col;
-        } else {
-          const sg = ctx.createRadialGradient(node.x - r * 0.4, node.y - r * 0.4, Math.max(0.1, r * 0.12), node.x, node.y, r);
-          sg.addColorStop(0, lighten(sun ? '#ffe4ad' : col, 0.5));
-          sg.addColorStop(1, sun ? '#e08a25' : col);
-          ctx.fillStyle = sg;
-        }
-        ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, 6.2832); ctx.fill();
+        nodeMaterial = materialRecipe(
+          'solar', state.themeColors, state.palette,
+          sun ? mixColours(col, '#d38b43', 0.46) : col
+        );
+        paintMaterialSurface(ctx, node.x, node.y, r, scale, nodeMaterial, materialLow);
       } else if (state.styleName === 'cyber') {
-        ctx.save();
-        if (rich && !large) { ctx.shadowColor = col; ctx.shadowBlur = dim ? 2 : r * 2.6; }
-        ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, 6.2832); ctx.fillStyle = col; ctx.fill();
-        ctx.restore();
-        ctx.beginPath(); ctx.arc(node.x, node.y, Math.max(0.4, r * 0.42), 0, 6.2832); ctx.fillStyle = '#eafcff'; ctx.fill();
+        /* Cyberpunk owns a broad, fixed cyan→violet→magenta PVD face. Palette colour is kept
+           out of that film and appears only in the slim identity ring. */
+        nodeMaterial = materialRecipe('cyber', state.themeColors, state.palette, col);
+        paintMaterialSurface(ctx, node.x, node.y, r, scale, nodeMaterial, materialLow);
       } else {
-        ctx.beginPath(); ctx.arc(node.x, node.y, r, 0, 6.2832); ctx.fillStyle = col; ctx.fill();
+        nodeMaterial = materialRecipe('classic', state.themeColors, state.palette, col);
+        paintMaterialSurface(ctx, node.x, node.y, r, scale, nodeMaterial, materialLow);
         if (node.hub) { ctx.lineWidth = 0.8 / scale; ctx.strokeStyle = node.stroke; ctx.stroke(); }
       }
       if (node.id === hilite) {
-        ctx.lineWidth = 1.3 / scale;
-        ctx.strokeStyle = state.styleName === 'cyber' ? '#ffffff' : 'rgba(255,255,255,.9)';
-        ctx.beginPath(); ctx.arc(node.x, node.y, r + 1.4 / scale, 0, 6.2832); ctx.stroke();
+        /* Hover lifts exposure without changing the material or rotating its light. The two
+           unblurred rings remain crisp at every DPR and also serve explicit selection. */
+        fillCircle(ctx, node.x, node.y, r * 0.76, alpha('#ffffff', 0.065));
+        ctx.lineWidth = 1.15 / scale;
+        ctx.strokeStyle = alpha(nodeMaterial.sheen, 0.98);
+        ctx.beginPath(); ctx.arc(node.x, node.y, r + 1.35 / scale, 0, 6.2832); ctx.stroke();
+        ctx.lineWidth = 0.55 / scale;
+        ctx.strokeStyle = alpha(nodeMaterial.identity, 0.92);
+        ctx.beginPath(); ctx.arc(node.x, node.y, r + 2.45 / scale, 0, 6.2832); ctx.stroke();
       }
       const showLabel = (state.settings.labels && labelIds.has(node.id)) || node.id === hilite || neighbor;
       if (showLabel && scale > 0.35) {
@@ -740,7 +1311,11 @@
          collapsed view hands out freshly built cluster nodes on every call. */
       const reused = sameData(seeded, next);
       const data = reused ? seeded : next;
-      large = data.nodes.length > LARGE_NODE_LIMIT || data.links.length > LARGE_LINK_LIMIT;
+      const fullGraph = state.renderMode === 'full';
+      staticFullLayout = fullGraph
+        && (data.nodes.length > FULL_FORCE_NODE_LIMIT || data.links.length > FULL_FORCE_LINK_LIMIT);
+      materialLow = data.nodes.length > LARGE_NODE_LIMIT || data.links.length > LARGE_LINK_LIMIT;
+      large = fullGraph || data.nodes.length > LARGE_NODE_LIMIT || data.links.length > LARGE_LINK_LIMIT;
       dense = data.links.length > DENSE_LINK_LIMIT;
       const sizeMetric = n => state.sizeBy === 'betweenness' ? (n.betweenness || 0) : ((n.degree || 0) / Math.max(1, maxDeg));
       data.nodes.forEach(n => {
@@ -760,16 +1335,26 @@
         .slice(0, labelCap)
         .map(n => n.id));
       applyChrome();
-      if (!reused) { fg.graphData(data); seeded = data; }
+      if (!reused) {
+        if (staticFullLayout) {
+          pinFullGraphLayout(data);
+          fullLayoutDirty = false;
+        } else clearPinnedPositions(data);
+        fg.graphData(data);
+        seeded = data;
+      } else if (staticFullLayout && fullLayoutDirty) {
+        pinFullGraphLayout(data);
+        fullLayoutDirty = false;
+      }
       applyForces();
       fg.autoPauseRedraw(!needsContinuousFrames());
       /* Bound the simulation the way the classic path does. Without these force-graph keeps its
          15-second default window, so every load and every reheat of a large store runs the
          layout — and repaints every node and link — for more than ten seconds longer. */
-      if (fg.cooldownTime) fg.cooldownTime(motion ? (large ? 1100 : 2200) : 0);
-      if (fg.cooldownTicks) fg.cooldownTicks(motion ? (large ? 80 : 160) : 1);
-      if (fg.warmupTicks) fg.warmupTicks(motion ? (large ? 18 : 40) : 45);
-      if (fg.d3AlphaDecay) fg.d3AlphaDecay(alphaDecay());
+      if (fg.cooldownTime) fg.cooldownTime(motion && !staticFullLayout ? (large ? 1100 : 2200) : 0);
+      if (fg.cooldownTicks) fg.cooldownTicks(motion && !staticFullLayout ? (large ? 80 : 160) : 1);
+      if (fg.warmupTicks) fg.warmupTicks(motion && !staticFullLayout ? (large ? 18 : 40) : 0);
+      if (fg.d3AlphaDecay) fg.d3AlphaDecay(staticFullLayout ? 1 : alphaDecay());
       if (fg.d3VelocityDecay) fg.d3VelocityDecay(large ? 0.45 : 0.38);
       if (fg.linkCurvature) {
         fg.linkCurvature(dense ? 0 : ((PRESETS[state.settings.mode] || PRESETS.compact).curve || 0));
@@ -777,7 +1362,8 @@
       fg.linkDirectionalArrowLength(dense ? 0 : 2.5).linkDirectionalArrowRelPos(1);
       applyLinkLabels();
       if (fg.linkDirectionalParticles) {
-        const flowing = state.settings.flow !== false
+        const flowing = !fullGraph
+          && state.settings.flow !== false
           && motion
           && data.links.length <= PARTICLE_LINK_LIMIT;
         const particles = !flowing
@@ -788,8 +1374,8 @@
           .linkDirectionalParticleColor(l => alpha(layerColor(l.layer), 0.95))
           .linkDirectionalParticleSpeed(l => 0.002 + ((state.settings.flowSpeed || 45) / 100) * 0.008);
       }
-      if (reheat && motion && !state.settings.frozen && fg.d3ReheatSimulation) fg.d3ReheatSimulation();
-      if ((state.settings.frozen || !motion) && fg.d3AlphaDecay) { /* keep painting, stop layout */ fg.d3AlphaDecay(1); }
+      if (reheat && motion && !staticFullLayout && !state.settings.frozen && fg.d3ReheatSimulation) fg.d3ReheatSimulation();
+      if ((staticFullLayout || state.settings.frozen || !motion) && fg.d3AlphaDecay) { /* keep painting, stop layout */ fg.d3AlphaDecay(1); }
       /* Nothing was reseeded, so force-graph's own change detection saw no reason to repaint —
          but Style, Color by and Labels all just changed how the *same* data must be drawn. */
       if (reused) invalidate();
@@ -817,7 +1403,14 @@
         if (l.suggested) return alpha('#ffffff', active ? 0.34 : 0.1);
         if (l.ghost) return alpha(layerColor(l.layer), 0.12);
         if (state.bridges && l.bridge) return alpha('#ff5c7a', active ? 0.95 : 0.5);
-        const base = layerColor(l.layer);
+        /* The reference boards use one coherent lighting system per visual style. Relation
+           layers still affect behaviour and particles, but should not turn Galaxy green or
+           Solar pink simply because the source relation has that semantic layer. */
+        let base = layerColor(l.layer);
+        if (state.styleName === 'galaxy') base = l.layer === 'causal' ? '#c58bff' : '#91a8ff';
+        else if (state.styleName === 'solar') base = l.layer === 'causal' ? '#ffc06d' : '#ef913e';
+        else if (state.styleName === 'cyber') base = l.layer === 'causal' ? '#ec71d2' : '#6edce6';
+        else if (state.styleName === 'classic') base = l.layer === 'causal' ? '#b9c8da' : '#86c7d1';
         return active ? alpha(base, focus ? 0.85 : 0.4) : alpha(base, 0.06);
       })
       .linkLineDash(l => l.suggested ? [2, 2] : (l.ghost ? [1, 3] : null))
@@ -885,6 +1478,9 @@
       findBridges(raw.nodes, raw.links, adj);
       betweennessReady = false;
       if (state.bridges || state.sizeBy === 'betweenness') ensureBetweenness();
+      if ((state.bridges || state.sizeBy === 'betweenness') && opts.onMetrics) {
+        opts.onMetrics(api.metrics());
+      }
       render(true, true);
     };
     /* Which of these settings changes the *layout* rather than just the paint, matching the
@@ -897,6 +1493,7 @@
        render() applies the reduced-motion exemption (`if(layout&&!prefersReducedMotion())`). */
     const LAYOUT_KEYS = ['mode', 'repel', 'link', 'gravity', 'size'];
     api.setSettings = patch => {
+      if (LAYOUT_KEYS.some(k => patch && patch[k] !== undefined)) fullLayoutDirty = true;
       Object.assign(state.settings, patch);
       render(false, LAYOUT_KEYS.some(k => patch && patch[k] !== undefined));
     };
@@ -904,19 +1501,50 @@
       const p = PRESETS[name] || PRESETS.compact;
       state.settings.mode = PRESETS[name] ? name : 'compact';
       ['repel', 'link', 'gravity', 'font', 'size', 'linkw', 'labelDensity'].forEach(k => { if (p[k] !== undefined) state.settings[k] = p[k]; });
+      fullLayoutDirty = true;
       render(true, true);
       return { ...state.settings };
     };
-    api.setStyle = name => { state.styleName = ['classic', 'galaxy', 'solar', 'cyber'].indexOf(name) < 0 ? 'cyber' : name; render(false, false); };
-    api.setColorBy = name => { state.colorBy = name; refreshColors(); render(false, false); };
-    api.setPalette = name => { state.palette = name; state.overrides = PALETTES[name] ? { ...PALETTES[name] } : {}; refreshColors(); };
-    api.setTypeColor = (type, color) => { state.overrides[type] = color; state.palette = 'custom'; refreshColors(); };
+    api.setStyle = name => {
+      state.styleName = ['classic', 'galaxy', 'solar', 'cyber'].indexOf(name) < 0 ? 'cyber' : name;
+      clearMaterialCache();
+      render(false, false);
+    };
+    api.setRenderMode = mode => {
+      const next = mode === 'full' ? 'full' : 'overview';
+      if (state.renderMode === next) return;
+      state.renderMode = next;
+      if (next === 'full') {
+        state.collapse = false;
+        collapsed = false;
+      }
+      seeded = null;
+      fullLayoutDirty = true;
+      render(true, true);
+    };
+    api.setColorBy = name => { state.colorBy = name; clearMaterialCache(); refreshColors(); render(false, false); };
+    api.setPalette = name => {
+      state.palette = name;
+      state.overrides = PALETTES[name] ? { ...PALETTES[name] } : {};
+      clearMaterialCache();
+      refreshColors();
+    };
+    api.setTypeColor = (type, color) => {
+      state.overrides[type] = color;
+      state.palette = 'custom';
+      clearMaterialCache();
+      refreshColors();
+    };
     /* Rehydrating saved overrides is not a user edit, so it must not flip the palette
        selector to "custom" behind the user's back the way setTypeColor deliberately does. */
-    api.setTypeColors = map => { Object.assign(state.overrides, map || {}); refreshColors(); };
+    api.setTypeColors = map => { Object.assign(state.overrides, map || {}); clearMaterialCache(); refreshColors(); };
     /* The active theme's resolved `--entity-*` values. Replaced wholesale rather than merged:
        a theme switch must not leave the previous theme's colour for a type the new one omits. */
-    api.setThemeColors = map => { state.themeColors = map && typeof map === 'object' ? { ...map } : {}; refreshColors(); };
+    api.setThemeColors = map => {
+      state.themeColors = map && typeof map === 'object' ? { ...map } : {};
+      clearMaterialCache();
+      refreshColors();
+    };
     /* One render for a whole batch of setters — see `batch`. */
     api.apply = (fn, fit, reheat) => { batch(fn, fit, reheat); };
     api.setHighlight = id => {
@@ -926,25 +1554,83 @@
     };
     api.setScope = patch => { Object.assign(state, patch); render(false, true); };
     api.setLayers = layers => { state.layers = layers; render(false, false); };
-    api.focus = id => { state.focusId = id; render(true, true); };
-    api.clearFocus = () => { state.focusId = null; render(true, true); };
+    /* `focus` remains the explicit neighbourhood-isolation action. It must not schedule a
+       delayed zoom-to-fit: callers that also centre a node otherwise start two competing
+       camera animations, and the late fit wins by dragging the selected entity away. */
+    api.focus = id => {
+      if (destroyed || !raw.nodes.some(node => node.id === id)) return false;
+      state.focusId = id;
+      hilite = id;
+      hoverSet = new Set([id].concat(adj[id] || []));
+      clearTimeout(fitTimer);
+      fitTimer = 0;
+      render(false, true);
+      return true;
+    };
+    api.clearFocus = () => {
+      state.focusId = null;
+      hilite = null;
+      hoverSet = null;
+      render(true, true);
+    };
+    /* Export the graph the person is actually looking at, not the unfiltered response
+       retained for later scope changes. Strip force-graph's transient coordinates and turn
+       endpoint objects back into stable ids so the resulting JSON is portable. */
+    api.exportData = () => {
+      const data = visible();
+      return {
+        nodes: data.nodes.map(node => {
+          const { x, y, vx, vy, fx, fy, color, stroke, radius, ...stable } = node;
+          return stable;
+        }),
+        links: data.links.map(link => ({
+          ...link,
+          source: linkEndpoint(link, 'source'),
+          target: linkEndpoint(link, 'target'),
+        })),
+      };
+    };
     api.fit = () => { if (!destroyed) fg.zoomToFit(reduced() ? 0 : 500, 40); };
     api.reheat = () => {
-      if (destroyed || reduced()) return;
+      if (destroyed || reduced() || staticFullLayout) return;
       raw.nodes.forEach(n => { n.fx = undefined; n.fy = undefined; });
       if (fg.d3ReheatSimulation) { fg.d3AlphaDecay(alphaDecay()); fg.d3ReheatSimulation(); }
     };
     api.freeze = on => {
       state.settings.frozen = on;
-      if (on) { fg.d3Force('charge').strength(0); fg.d3AlphaDecay(1); return; }
+      if (on) {
+        const charge = fg.d3Force('charge');
+        if (charge && charge.strength) charge.strength(0);
+        fg.d3AlphaDecay(1);
+        return;
+      }
       // Dragging pins a node with fx/fy. Unfreezing is a request to resume the layout, not
       // merely the unpinned subset, so release those anchors before the simulation reheats.
+      if (staticFullLayout) return;
       raw.nodes.forEach(n => { n.fx = undefined; n.fy = undefined; });
       applyForces();
       if (reduced()) return;
       fg.d3AlphaDecay(alphaDecay());
       if (fg.d3ReheatSimulation) fg.d3ReheatSimulation();
     };
+    function renderedNode(id) {
+      return ((fg.graphData() || {}).nodes || []).find(node => node && node.id === id) || null;
+    }
+
+    function centerRenderedNode(id) {
+      const node = renderedNode(id);
+      if (!node || !Number.isFinite(node.x) || !Number.isFinite(node.y)) return false;
+      // A pending fit comes from an earlier layout action. Cancelling it makes one selection
+      // correspond to exactly one camera target instead of letting a delayed whole-graph fit
+      // override `centerAt` midway through its animation.
+      clearTimeout(fitTimer);
+      fitTimer = 0;
+      const duration = reduced() ? 0 : 500;
+      fg.centerAt(node.x, node.y, duration);
+      fg.zoom(3, duration);
+      return true;
+    }
+
     /* Returning `false` is not a failure: it is the signal the dashboard's graphFocus() uses to
        run its recovery path ("show unlinked", then retry, then say so). Reporting success for an
        entity that is not on the canvas is therefore worse than reporting failure — the user gets
@@ -955,22 +1641,42 @@
        an explicit request to see it — then confirm against the data force-graph is holding. */
     api.zoomToNode = id => {
       if (destroyed) return false;
-      const n = raw.nodes.find(x => x.id === id);
-      if (!n) return false;
+      if (!raw.nodes.some(node => node.id === id)) return false;
+      clearTimeout(fitTimer);
+      fitTimer = 0;
       if (collapsed) {
         collapsed = false;
         state.collapse = false;
-        render(false, true);
+        render(false, false);
         if (opts.onCollapseChange) opts.onCollapseChange(false);
       }
-      const shown = ((fg.graphData() || {}).nodes || []).some(node => node && node.id === id);
-      if (!shown || !Number.isFinite(n.x) || !Number.isFinite(n.y)) return false;
-      const duration = reduced() ? 0 : 500;
-      fg.centerAt(n.x, n.y, duration);
-      fg.zoom(3, duration);
-      return true;
+      return centerRenderedNode(id);
     };
-    api.state = () => ({ ...state, collapsed });
+    /* Graph facts and search results are reveal actions, not requests to restart or isolate the
+       layout. Keep the current graph stable, expand a collapsed view when needed, highlight the
+       exact rendered entity, and centre it without a competing fit animation. */
+    api.reveal = id => {
+      if (destroyed || !raw.nodes.some(node => node.id === id)) return false;
+      clearTimeout(fitTimer);
+      fitTimer = 0;
+      let changedView = false;
+      if (state.focusId !== null) {
+        state.focusId = null;
+        changedView = true;
+      }
+      if (collapsed) {
+        collapsed = false;
+        state.collapse = false;
+        changedView = true;
+        if (opts.onCollapseChange) opts.onCollapseChange(false);
+      }
+      if (changedView) render(false, false);
+      hilite = id;
+      hoverSet = new Set([id].concat(adj[id] || []));
+      invalidate();
+      return centerRenderedNode(id);
+    };
+    api.state = () => ({ ...state, collapsed, highlight: hilite });
     /* The engine clusters its own copies of the nodes, so a caller that renders a cluster
        legend from the source data would otherwise report a single community. */
     api.communityMap = () => {
@@ -983,12 +1689,21 @@
     api.setAsOf = date => { state.asOf = asOfValue(date); render(false, true); };
     api.setSizeBy = metric => {
       state.sizeBy = metric === 'betweenness' ? metric : 'degree';
-      if (state.sizeBy === 'betweenness') ensureBetweenness();
+      if (state.sizeBy === 'betweenness') {
+        ensureBetweenness();
+        if (opts.onMetrics) opts.onMetrics(api.metrics());
+      }
       render(false, false);
     };
-    api.setBridges = on => { state.bridges = on; if (on) ensureBetweenness(); render(false, false); };
-    /* Forces the lazy analysis; the dashboard does not display these yet, so nothing calls it
-       on the render path. Kept as the seam a "most load-bearing entity" panel would use. */
+    api.setBridges = on => {
+      state.bridges = on;
+      if (on) {
+        ensureBetweenness();
+        if (opts.onMetrics) opts.onMetrics(api.metrics());
+      }
+      render(false, false);
+    };
+    /* Forces the lazy analysis for an explicit analysis control or the Graph facts readout. */
     api.metrics = () => {
       ensureBetweenness();
       return {
@@ -999,8 +1714,8 @@
     };
     api.setSuggestions = on => { state.suggestions = on; render(false, true); };
     api.setCollapse = mode => {
-      state.collapse = mode;
-      const next = mode === true || (mode === 'auto' && zoom < 0.55);
+      state.collapse = state.renderMode === 'full' ? false : mode;
+      const next = state.renderMode !== 'full' && (mode === true || (mode === 'auto' && zoom < 0.55));
       collapsed = next;
       render(true, true);
     };
@@ -1064,7 +1779,9 @@
        Nothing in the dashboard uses these; treat them as the engine's unit-test seam. */
     _internals: {
       esc, hexRgb, alpha, contrastOn, communities, betweenness, findBridges, maxOf,
-      nodeName, linkEndpoint, asOfValue
+      nodeName, linkEndpoint, asOfValue, materialRecipe, materialTier,
+      paintMaterialDirect, renderMaterialSample, sampleMaterialColour,
+      materialCacheStats, clearMaterialCache, setMaterialCanvasFactory
     }
   };
 })();

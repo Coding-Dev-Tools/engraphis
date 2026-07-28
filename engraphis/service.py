@@ -117,6 +117,26 @@ def _graph_edge_visibility_sql(edge_alias: str, *, at: Optional[float] = None) -
     )
 
 
+def _graph_edge_history_visibility_sql(edge_alias: str) -> str:
+    """Visibility predicate for a time-travel graph payload.
+
+    The ordinary graph reader asks whether evidence is public *at now*.  The Time
+    view instead deliberately includes a relation's public history so the browser
+    can distinguish live relations from superseded ghosts at the chosen anchor.
+    Hard-expired evidence remains hidden in either case.
+    """
+    return (
+        "(NOT EXISTS (SELECT 1 FROM edge_supports history_support "
+        f"WHERE history_support.edge_id={edge_alias}.id) OR EXISTS ("
+        "SELECT 1 FROM edge_supports history_support "
+        "JOIN memories history_memory ON history_memory.id=history_support.memory_id "
+        f"WHERE history_support.edge_id={edge_alias}.id "
+        "AND history_support.expired_at IS NULL "
+        "AND history_memory.expired_at IS NULL "
+        "AND COALESCE(history_memory.scope, 'workspace')!='session'))"
+    )
+
+
 def _graph_entity_visibility_sql(entity_alias: str, *, at: Optional[float] = None) -> str:
     """Hide entities whose entire evidence-bearing history is session-private.
 
@@ -5024,7 +5044,8 @@ class MemoryService:
 
     def graph(self, *, workspace: str, limit: int = 2000,
               layers: Optional[list] = None, include_code: bool = False,
-              repo: Optional[str] = None, backfill: bool = True) -> dict:
+              repo: Optional[str] = None, backfill: bool = True,
+              full: bool = False, as_of: Optional[float] = None) -> dict:
         """Entity-relation network for a workspace: nodes/edges plus type counts,
         top-connected entities, and connectivity stats — powers the Graph tab in
         both the v1-look dashboard and the Inspector UI (engraphis.graphdata
@@ -5038,17 +5059,73 @@ class MemoryService:
         if wid is None:
             return empty_graph(ws)
         self._assert_graph_index_ready(wid)
-        limit = max(1, min(5000, int(limit)))
+        # The dashboard's default overview remains compact. A user-requested full node
+        # graph may use the analytical-scene ceiling, but never silently exceeds it: the
+        # CTE below reports the visible total and we return an explicit capacity error when
+        # a workspace needs filtering rather than pretending a truncated graph is complete.
+        node_limit = MAX_GRAPH_ANALYSIS_ENTITIES if full else 5000
+        limit = max(1, min(node_limit, int(limit)))
         conn = self.store.conn
         restrict_sessions = True
+        temporal_anchor = None
+        if as_of is not None:
+            try:
+                temporal_anchor = float(as_of)
+            except (TypeError, ValueError) as exc:
+                raise ValidationError("as_of must be a timestamp") from exc
+            if not math.isfinite(temporal_anchor):
+                raise ValidationError("as_of must be a finite timestamp")
 
         def visible_entities():
-            sql = (
-                "SELECT id, name, etype FROM entities entity WHERE workspace_id=? "
-                "AND " + _graph_entity_visibility_sql("entity")
-            )
-            params: list[Any] = [wid]
-            sql += " LIMIT ?"
+            """Return public graph entities without a correlated edge scan per node.
+
+            The older predicate called ``_graph_entity_visibility_sql`` directly
+            for every candidate entity.  On a mature local workspace that became
+            thousands of nested ``edges``/``edge_supports`` probes before the
+            renderer even received a response.  Aggregate an edge's visibility
+            once, then aggregate that result by endpoint: no-edge entities remain
+            visible, entities supported only by session memories remain hidden,
+            and mixed-history entities stay visible as before.
+            """
+            sql = """
+                WITH edge_visibility AS (
+                    SELECT relation.id, relation.src, relation.dst,
+                           MAX(CASE
+                               WHEN support.edge_id IS NULL THEN 1
+                               WHEN visibility_memory.id IS NOT NULL
+                                AND COALESCE(visibility_memory.scope, 'workspace') != 'session'
+                               THEN 1 ELSE 0
+                           END) AS is_visible
+                    FROM edges relation
+                    LEFT JOIN edge_supports support ON support.edge_id=relation.id
+                    LEFT JOIN memories visibility_memory
+                      ON visibility_memory.id=support.memory_id
+                    WHERE relation.workspace_id=?
+                    GROUP BY relation.id
+                ), endpoint_visibility AS (
+                    SELECT src AS entity_id, is_visible FROM edge_visibility
+                    UNION ALL
+                    SELECT dst AS entity_id, is_visible FROM edge_visibility
+                ), entity_visibility AS (
+                    SELECT entity_id, MAX(is_visible) AS is_visible,
+                           COUNT(*) AS degree
+                    FROM endpoint_visibility
+                    GROUP BY entity_id
+                )
+                SELECT entity.id, entity.name, entity.etype, repo.name AS repo,
+                       entity.created_at AS valid_from,
+                       COUNT(*) OVER() AS visible_total
+                FROM entities entity
+                LEFT JOIN repos repo ON repo.id=entity.repo_id
+                LEFT JOIN entity_visibility visible ON visible.entity_id=entity.id
+                WHERE entity.workspace_id=?
+                  AND COALESCE(visible.is_visible, 1)=1
+            """
+            params: list[Any] = [wid, wid]
+            if temporal_anchor is not None:
+                sql += " AND (entity.created_at IS NULL OR entity.created_at<=?)"
+                params.append(temporal_anchor)
+            sql += " ORDER BY COALESCE(visible.degree, 0) DESC, entity.id LIMIT ?"
             params.append(limit)
             return conn.execute(sql, params).fetchall()
 
@@ -5060,6 +5137,13 @@ class MemoryService:
         if backfill and self._should_backfill_graph(wid, bool(ents)):
             self._lazy_backfill_graph(wid)
             ents = visible_entities()
+        visible_total = int(ents[0]["visible_total"]) if ents else 0
+        if full and visible_total > MAX_GRAPH_ANALYSIS_ENTITIES:
+            raise GraphSceneCapacityExceeded(
+                resource="visible entity nodes",
+                count=visible_total,
+                limit=MAX_GRAPH_ANALYSIS_ENTITIES,
+            )
         entity_rows = [dict(row) for row in ents]
         node_ids = {row["id"] for row in entity_rows}
         selected_graph_layers = None
@@ -5072,7 +5156,7 @@ class MemoryService:
         # Nodes are capped at ``limit``; edges need their own cap or a large workspace
         # graph / indexed repo lets the lowest-privilege caller pull an unbounded
         # payload. The SQL fetches are limited too, so server-side work stays bounded.
-        edge_cap = max(limit * 8, 2000)
+        edge_cap = min(MAX_GRAPH_ANALYSIS_EDGES, max(limit * 8, 2000))
         # A workspace can legitimately have an A-MEM graph before it has extracted
         # entities: direct memory links are first-class relationships, not merely an
         # implementation detail of the code overlay.  The old dashboard endpoint
@@ -5136,32 +5220,56 @@ class MemoryService:
             entity_rows = list(fallback_nodes.values())
         visible_edge_ids = None
         if restrict_sessions:
-            visible_edge_ids = {
-                row["id"] for row in conn.execute(
-                    "SELECT relation.id FROM edges relation "
-                    "WHERE relation.workspace_id=? AND "
-                    + _graph_edge_visibility_sql("relation"),
-                    (wid,),
-                ).fetchall()
-            }
-        edgs = [
-            {
-                "src": edge.src, "dst": edge.dst, "relation": edge.relation,
-                "layer": edge.layer.value if edge.layer else "semantic",
-            }
-            for edge in self.store.edges_in_scope(
-                SearchFilter(
-                    workspace_id=wid, graph_layers=selected_graph_layers
-                ),
-                limit=edge_cap,
+            if temporal_anchor is None:
+                visible_edge_ids = {
+                    row["id"] for row in conn.execute(
+                        "SELECT relation.id FROM edges relation "
+                        "WHERE relation.workspace_id=? AND "
+                        + _graph_edge_visibility_sql("relation"),
+                        (wid,),
+                    ).fetchall()
+                }
+        if temporal_anchor is None:
+            edgs = [
+                {
+                    "src": edge.src, "dst": edge.dst, "relation": edge.relation,
+                    "layer": edge.layer.value if edge.layer else "semantic",
+                }
+                for edge in self.store.edges_in_scope(
+                    SearchFilter(
+                        workspace_id=wid, graph_layers=selected_graph_layers
+                    ),
+                    limit=edge_cap,
+                )
+                if edge.src in node_ids and edge.dst in node_ids
+                and (visible_edge_ids is None or edge.id in visible_edge_ids)
+                and (
+                    selected_layers is None
+                    or (edge.layer.value if edge.layer else "semantic") in selected_layers
+                )
+            ]
+        else:
+            history_sql = (
+                "SELECT relation.id, relation.src, relation.dst, relation.relation, "
+                "relation.layer, relation.valid_from, relation.valid_to "
+                "FROM edges relation WHERE relation.workspace_id=? "
+                "AND relation.expired_at IS NULL AND "
+                + _graph_edge_history_visibility_sql("relation")
             )
-            if edge.src in node_ids and edge.dst in node_ids
-            and (visible_edge_ids is None or edge.id in visible_edge_ids)
-            and (
-                selected_layers is None
-                or (edge.layer.value if edge.layer else "semantic") in selected_layers
-            )
-        ]
+            history_params: list[Any] = [wid]
+            if selected_layers is not None:
+                if not selected_layers:
+                    history_sql += " AND 0"
+                else:
+                    marks = ",".join("?" for _ in selected_layers)
+                    history_sql += f" AND relation.layer IN ({marks})"
+                    history_params.extend(sorted(selected_layers))
+            history_sql += " ORDER BY relation.valid_from, relation.id LIMIT ?"
+            history_params.append(edge_cap)
+            edgs = [
+                dict(row) for row in conn.execute(history_sql, history_params).fetchall()
+                if row["src"] in node_ids and row["dst"] in node_ids
+            ]
         for link in memory_link_fallback:
             if len(edgs) >= edge_cap:
                 break
@@ -5308,6 +5416,11 @@ class MemoryService:
         payload = build_graph_payload(ws, entity_rows, edgs)
         payload["unified"] = bool(include_code)
         payload["repos"] = repo_names
+        payload["meta"] = {
+            "nodes_available": max(visible_total, len(entity_rows)),
+            "nodes_complete": len(entity_rows) >= visible_total,
+            "mode": "full" if full else "overview",
+        }
         return payload
 
     def _should_backfill_graph(self, wid: str, has_entities: bool) -> bool:

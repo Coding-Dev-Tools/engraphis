@@ -34,7 +34,10 @@ LEGACY_ADAPTER = STATIC / "engraphis-graph.js"
 INDEX = STATIC / "index.html"
 CSS = STATIC / "dashboard.css"
 DASHBOARD = STATIC / "dashboard.js"
+CLASSIC_DASHBOARD = ROOT / "engraphis" / "classic_assets" / "dashboard.js"
 VENDOR = STATIC / "vendor" / "force-graph.min.js"
+PRIMARY_LEDGER = ROOT / "engraphis" / "dashboard_assets" / "ledger.js"
+PRIMARY_INDEX = ROOT / "engraphis" / "dashboard_assets" / "index.html"
 
 NODE = shutil.which("node")
 requires_node = pytest.mark.skipif(NODE is None, reason="node is not installed")
@@ -66,7 +69,15 @@ const window = {};
 globalThis.requestAnimationFrame = () => {};
 const store = {}, calls = {}, invocations = {};
 const fg = new Proxy({}, {
-  get: (_target, prop) => (...args) => {
+  get: (_target, prop) => prop === 'd3Force' ? (function(name, force) {
+    /* d3Force(name) is a getter and d3Force(name, force) is a setter. Modelling that
+       distinction keeps the behavioural force tests below honest. */
+    if (arguments.length === 1) return store.d3Forces && store.d3Forces[name];
+    calls.d3Force = (calls.d3Force || 0) + 1;
+    store.d3Forces = store.d3Forces || {};
+    store.d3Forces[name] = force;
+    return fg;
+  }) : (...args) => {
     if (!args.length) { invocations[prop] = (invocations[prop] || 0) + 1; return store[prop]; }
     calls[prop] = (calls[prop] || 0) + 1;
     store[prop] = args.length === 1 ? args[0] : args;
@@ -125,7 +136,7 @@ def test_graph_assets_are_never_loaded_on_a_plain_page_view() -> None:
     html = INDEX.read_text(encoding="utf-8")
     eager = re.findall(r'<script[^>]+src=["\'](/static/[^"\']+)["\']', html)
     assert "/static/vendor/d3.min.js" in eager
-    assert "/static/dashboard.js" in eager
+    assert "/static/dashboard.js?v=20260728-reference-materials" in eager
     assert "/static/vendor/force-graph.min.js" not in eager
     assert "/static/engraphis-graph.js" not in eager
 
@@ -146,7 +157,10 @@ def test_opt_in_graph_asset_is_lazily_loaded_after_its_dependencies() -> None:
     """
     source = DASHBOARD.read_text(encoding="utf-8")
     assert "script.src='/static/vendor/force-graph.min.js'" in source
-    assert "script.src='/v2-assets/engraphis-graph.js'" in source
+    assert (
+        "script.src='/v2-assets/engraphis-graph.js?v=20260728-reference-materials'"
+        in source
+    )
     render = source[source.index("function graphRender("):]
     render = render[: render.index("\nfunction ")]
     force_graph_gate = render.index("typeof ForceGraph==='undefined'")
@@ -249,7 +263,9 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
 
     report = _run_routing("loads")
 
-    assert report["appended"] == ["/v2-assets/engraphis-graph.js"]
+    assert report["appended"] == [
+        "/v2-assets/engraphis-graph.js?v=20260728-reference-materials"
+    ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     # And it lands on the next engine, never touching the classic renderer.
@@ -471,6 +487,51 @@ def test_parallel_edges_are_not_reported_as_bridges() -> None:
         """
     )
     assert report["bridges"] == 0
+
+
+@requires_node
+def test_explorer_exports_its_visible_data_and_reports_bridge_metrics() -> None:
+    """Filtering and analysis controls must affect the user-facing export/readout,
+    rather than only changing paint on an otherwise stale payload."""
+    report = _run_engine(
+        """
+        const reports = [];
+        const api = G.create(el, { reducedMotion: () => true, onMetrics: value => reports.push(value) });
+        api.setData({
+          nodes: [
+            { id: 'a', repo: 'engraphis' }, { id: 'b', repo: 'engraphis' },
+            { id: 'c', repo: 'elsewhere' },
+          ],
+          links: [
+            { source: 'a', target: 'b', valid_from: 100, valid_to: 200 },
+            { source: 'b', target: 'c', valid_from: 100 },
+          ],
+        });
+        api.setBridges(true);
+        api.setRepoFilter('engraphis');
+        const filtered = api.exportData();
+        api.focus('a');
+        api.clearFocus();
+        api.setRepoFilter('');
+        api.setAsOf(250);
+        api.setGhosts(false);
+        const withoutGhosts = api.exportData();
+        api.setGhosts(true);
+        const withGhosts = api.exportData();
+        emit({
+          bridges: reports[reports.length - 1].bridges,
+          filtered, state: api.state(), withoutGhosts, withGhosts,
+        });
+        """
+    )
+    assert report["bridges"] == 2
+    assert [node["id"] for node in report["filtered"]["nodes"]] == ["a", "b"]
+    assert [(link["source"], link["target"]) for link in report["filtered"]["links"]] == [
+        ("a", "b")
+    ]
+    assert report["state"]["focusId"] is None and report["state"]["highlight"] is None
+    assert len(report["withoutGhosts"]["links"]) == 1
+    assert len(report["withGhosts"]["links"]) == 2
 
 
 @requires_node
@@ -836,7 +897,8 @@ const themeSrc = between('const ETYPE_TOKEN=', 'const GRAPH_PALETTES=')
 const THEME_VARS = {
   '--entity-concept': '#112233', '--entity-mention': '#223344', '--entity-hashtag': '#334455',
   '--entity-email': '#445566', '--entity-organization': '#556677', '--entity-location': '#667788',
-  '--color-accent': '#778899', '--color-text-dim': '#123456',
+  '--color-accent': '#778899', '--color-panel': '#9a7654', '--color-canvas': '#345678',
+  '--color-text-dim': '#123456',
 };
 globalThis.getComputedStyle = () => ({ getPropertyValue: name => THEME_VARS[name] || '' });
 
@@ -931,12 +993,15 @@ def test_dashboard_hands_the_engine_the_active_themes_entity_colours() -> None:
     # Resolved from the stubbed --entity-* custom properties, not from any JS constant.
     assert report["themeColors"]["person_or_concept"] == "#112233"
     assert report["themeColors"]["organization"] == "#556677"
+    assert report["themeColors"]["accent"] == "#778899"
+    assert report["themeColors"]["surface"] == "#9a7654"
+    assert report["themeColors"]["canvas"] == "#345678"
     assert report["themeColors"]["relation_label"] == "#123456"
     assert report["themeColors"]["label"] == "#e7e9ee"
     # Every type the legend can show must be covered, or the canvas falls back per type.
     assert set(report["themeColors"]) == {
         "person_or_concept", "mention", "hashtag", "email", "organization", "location",
-        "relation_label", "label",
+        "accent", "surface", "canvas", "relation_label", "label",
     }
 
 
@@ -1056,6 +1121,7 @@ def test_node_labels_are_capped_at_the_configured_density() -> None:
         const ctx = {
           globalAlpha: 1, fillStyle: '', strokeStyle: '', lineWidth: 1, font: '', textBaseline: '',
           save() {}, restore() {}, beginPath() {}, arc() {}, stroke() {}, fill() {},
+          createLinearGradient() { return { addColorStop() {} }; },
           createRadialGradient() { return { addColorStop() {} }; },
           fillText(text) { labels.push(String(text)); },
         };
@@ -1097,6 +1163,8 @@ def test_node_labels_use_the_active_theme_text_colour() -> None:
           set fillStyle(value) { styles.push(value); }, get fillStyle() { return ''; },
           font: '', textBaseline: '', lineWidth: 0, strokeStyle: '', globalAlpha: 1,
           beginPath() {}, arc() {}, fill() {}, stroke() {}, fillText() {}, save() {}, restore() {},
+          createRadialGradient() { return { addColorStop() {} }; },
+          createLinearGradient() { return { addColorStop() {} }; },
         };
         store.nodeCanvasObject(data.nodes[0], ctx, 1);
         emit({ styles });
@@ -1124,6 +1192,43 @@ def test_unfreezing_releases_nodes_pinned_by_dragging() -> None:
     )
     assert report["pinned"] == {"fx": 17, "fy": 23}
     assert report["released"] == {}, "unfreezing left a dragged node immovable"
+
+
+def test_primary_graph_starts_unfrozen_so_the_force_controls_take_effect() -> None:
+    """A fresh graph must settle, rather than make every tuning control look inert."""
+
+    assert "graphFrozen: false" in PRIMARY_LEDGER.read_text(encoding="utf-8")
+    assert "graphPreference('frozen', false)" in PRIMARY_LEDGER.read_text(encoding="utf-8")
+    assert 'id="graph-freeze" class="graph-switch"' in PRIMARY_INDEX.read_text(encoding="utf-8")
+    freeze_control = PRIMARY_INDEX.read_text(encoding="utf-8").split('id="graph-freeze"', 1)[1]
+    assert 'aria-checked="false"' in freeze_control
+
+
+def test_primary_dashboard_has_no_visible_notice_popup() -> None:
+    """Action feedback must not cover the dashboard with a dismissible toast."""
+
+    markup = PRIMARY_INDEX.read_text(encoding="utf-8")
+    source = PRIMARY_LEDGER.read_text(encoding="utf-8")
+    styles = (ROOT / "engraphis" / "dashboard_assets" / "ledger.css").read_text(encoding="utf-8")
+    assert 'id="notice"' not in markup
+    assert ">Dismiss<" not in markup
+    assert 'id="notice-text" class="sr-only"' in markup
+    assert "byId('notice').hidden" not in source
+    assert "notice-close" not in source
+    assert ".notice {" not in styles
+
+
+def test_primary_layout_choices_resume_a_frozen_graph_including_full_mode() -> None:
+    """An explicit layout choice must visibly apply rather than merely change its selected chip."""
+
+    source = PRIMARY_LEDGER.read_text(encoding="utf-8")
+    handler = source.split("all('[data-graph-preset-choice]')", 1)[1].split(
+        "all('[data-graph-style-choice]')", 1
+    )[0]
+    assert "const resumeLayout = state.graphFrozen;" in handler
+    assert "state.graphFrozen = false;" in handler
+    assert "state.graphEngine.freeze(false);" in handler
+    assert "state.graphEngine.setPreset(preset);" in handler
 
 
 @requires_node
@@ -1158,9 +1263,15 @@ def test_focusing_an_entity_the_canvas_is_not_showing_does_not_report_success() 
         // 2. Hidden by the collapsed view, which paints cluster bubbles instead of entities.
         api.setCollapse(true);
         const whileCollapsed = shownIds();
+        const expanding = api.zoomToNode('c');
+        // The recording renderer has no simulation tick to assign fresh coordinates after
+        // expansion. The Ledger reveal helper retries on the next animation frame; model that
+        // settled frame here before asserting the second camera attempt.
+        const rendered = (store.graphData.nodes || []).find(n => n.id === 'c');
+        rendered.x = 20; rendered.y = 2;
         const focused = api.zoomToNode('c');
         emit({
-          filtered, whileCollapsed, focused, collapses,
+          filtered, whileCollapsed, expanding, focused, collapses,
           afterFocus: shownIds(), collapsed: api.state().collapsed,
         });
         """
@@ -1170,11 +1281,46 @@ def test_focusing_an_entity_the_canvas_is_not_showing_does_not_report_success() 
     assert "lonely" not in report["filtered"]["shown"]
     # A collapsed view really is showing only bubbles...
     assert report["whileCollapsed"] == ["cluster-0"]
-    # ...so focusing a named entity has to expand it rather than claim it is already on screen.
+    # ...so focusing a named entity has to expand it. A live force graph assigns fresh positions
+    # on its next frame, which Ledger's reveal helper retries before centering the node.
+    assert report["expanding"] is False
     assert report["focused"] is True
     assert report["collapsed"] is False
     assert "c" in report["afterFocus"], "the entity is still not on the canvas"
     assert report["collapses"][-1] is False, "the dashboard was never told the view expanded"
+
+
+@requires_node
+def test_revealing_a_graph_fact_centers_the_rendered_entity_without_a_fit_race() -> None:
+    """A Graph facts row must reveal one stable entity, not restart and fit a subgraph.
+
+    The camera must use the coordinates ForceGraph is currently painting. That avoids stale
+    raw-node coordinates and, by cancelling pending ``zoomToFit``, prevents the delayed global
+    fit that used to pull the selected entity off-screen after the row click.
+    """
+    report = _run_engine(
+        """
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData({
+          nodes: [{ id: 'a' }, { id: 'selected' }, { id: 'c' }],
+          links: [{ source: 'a', target: 'selected' }, { source: 'selected', target: 'c' }],
+        });
+        const seeded = calls.graphData;
+        // Deliberately differ from raw data: `reveal` must follow what the canvas renders.
+        store.graphData = { nodes: [{ id: 'selected', x: 37, y: -53 }], links: [] };
+        const revealed = api.reveal('selected');
+        emit({
+          revealed, seeded, after: calls.graphData,
+          centerAt: store.centerAt, zoom: store.zoom,
+          fits: calls.zoomToFit || 0,
+        });
+        """
+    )
+    assert report["revealed"] is True
+    assert report["after"] == report["seeded"], "revealing a fact reseeded the graph"
+    assert report["centerAt"] == [37, -53, 0]
+    assert report["zoom"] == [3, 0]
+    assert report["fits"] == 0, "a global fit competed with the selected-node camera move"
 
 
 @requires_node
@@ -1319,6 +1465,85 @@ def test_physics_sliders_reheat_the_simulation_the_way_the_classic_renderer_does
 
 
 @requires_node
+def test_full_graph_within_the_force_budget_keeps_centre_gravity_live() -> None:
+    """Full mode must not turn a normal large workspace into a pinned, inert ring.
+
+    The screenshot regression occurred at a few thousand relationships: the UI showed a
+    centre-gravity value, but the full-graph branch had removed every D3 force and fixed every
+    node's coordinates.  It is safe to run a bounded simulation at this size, so the same
+    centre force and reheat contract as Overview must remain observable in Full mode.
+    """
+    report = _run_engine(
+        """
+        const axes = { x: [], y: [] };
+        const bodyForce = () => ({ strength(value) { this.value = value; return this; } });
+        globalThis.d3 = {
+          forceManyBody: bodyForce,
+          forceLink: () => ({ id(value) { this.idValue = value; return this; }, distance(value) { this.value = value; return this; } }),
+          forceX: target => { const force = { target, strength(value) { this.value = value; return this; } }; axes.x.push(force); return force; },
+          forceY: target => { const force = { target, strength(value) { this.value = value; return this; } }; axes.y.push(force); return force; },
+          forceCollide: () => ({ iterations(value) { this.value = value; return this; } }),
+        };
+        const api = G.create(el, {});
+        api.setRenderMode('full');
+        // Keep this below the responsive full-graph ceiling. Larger full graphs deliberately
+        // take the deterministic, centred layout so a complete workspace cannot lock the UI.
+        api.setData(chain(400));
+        const before = invocations.d3ReheatSimulation || 0;
+        api.setSettings({ gravity: 98 });
+        const nodes = store.graphData.nodes;
+        emit({
+          mode: api.state().renderMode,
+          x: axes.x.at(-1), y: axes.y.at(-1),
+          reheat: (invocations.d3ReheatSimulation || 0) - before,
+          cooldown: store.cooldownTime,
+          pinned: nodes.filter(node => node.fx !== undefined || node.fy !== undefined).length,
+        });
+        """
+    )
+    assert report["mode"] == "full"
+    assert report["x"] == {"target": 0, "value": 0.98}
+    assert report["y"] == {"target": 0, "value": 0.98}
+    assert report["reheat"] == 1
+    assert report["cooldown"] == 1100
+    assert report["pinned"] == 0
+
+
+@requires_node
+def test_full_graph_beyond_responsive_force_budget_is_centred_and_responds_to_gravity() -> None:
+    """A complete graph past the responsive budget takes the centred static fallback.
+
+    Above the live-force ceiling the deterministic layout protects responsiveness.  Its
+    geometry is nevertheless a centred grid whose compactness follows the same gravity input,
+    so the user retains a meaningful correction even for a very large workspace.
+    """
+    report = _run_engine(
+        """
+        const span = nodes => Math.max(...nodes.map(node => node.x)) - Math.min(...nodes.map(node => node.x));
+        const api = G.create(el, {});
+        api.setRenderMode('full');
+        // `chain` supplies N+1 nodes, so this is one past the live-force ceiling.
+        api.setData(chain(600));
+        const before = span(store.graphData.nodes);
+        const reheatBefore = invocations.d3ReheatSimulation || 0;
+        api.setSettings({ gravity: 98 });
+        const nodes = store.graphData.nodes;
+        emit({
+          before, after: span(nodes),
+          reheat: (invocations.d3ReheatSimulation || 0) - reheatBefore,
+          pinned: nodes.filter(node => Number.isFinite(node.fx) && Number.isFinite(node.fy)).length,
+          total: nodes.length,
+          cooldown: store.cooldownTime,
+        });
+        """
+    )
+    assert report["after"] < report["before"] * 0.5
+    assert report["reheat"] == 0
+    assert report["pinned"] == report["total"] == 601
+    assert report["cooldown"] == 0
+
+
+@requires_node
 def test_curves_arrows_and_relation_labels_are_dropped_on_a_dense_graph() -> None:
     """Three per-edge costs the classic path turns off past ``GPERF.dense`` (links > 1500).
 
@@ -1375,6 +1600,39 @@ globalThis.d3 = {
 
 
 @requires_node
+def test_default_community_layout_uses_one_shared_gravity_center() -> None:
+    """The default must not put each detected community in a separate orbit.
+
+    The old community target function placed groups on a broad ring, leaving the centre empty
+    and stretching cross-community relations across the whole canvas.  Both dashboard renderers
+    now use the origin as their default force target; charge and links are sufficient to retain
+    readable local separation.
+    """
+
+    classic = DASHBOARD.read_text(encoding="utf-8")
+    classic_forces = classic[classic.index("function graphApplyForces()") : classic.index("function graphSetHighlight(")]
+    assert "if(mode==='communities')" not in classic_forces
+    assert "FG.d3Force('x',d3.forceX(0).strength(centering));" in classic_forces
+    assert "FG.d3Force('y',d3.forceY(0).strength(centering));" in classic_forces
+
+    report = _run_engine(
+        """
+        const targets = { x: [], y: [] };
+        globalThis.d3 = {
+          forceX: target => { targets.x.push(target); return { strength: () => ({}) }; },
+          forceY: target => { targets.y.push(target); return { strength: () => ({}) }; },
+          forceRadial: () => ({ strength: () => ({}) }),
+          forceCollide: () => ({ iterations: () => ({}) }),
+        };
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData(chain(8));
+        emit({ x: targets.x, y: targets.y });
+        """
+    )
+    assert report == {"x": [0], "y": [0]}
+
+
+@requires_node
 def test_collision_runs_one_pass_on_a_large_graph_like_the_classic_renderer() -> None:
     """``forceCollide().iterations(2)`` is a second full quadtree traversal per node per tick.
 
@@ -1410,8 +1668,8 @@ def test_collision_runs_one_pass_on_a_large_graph_like_the_classic_renderer() ->
     assert report["radiusIsAFunction"] is True
 
 
-#: Counts the two per-node glow primitives independently.  ``createRadialGradient`` is the halo
-#: and the solar sphere shading; ``shadowBlur`` is the cyber bloom.  Both are per node, per frame.
+#: Counts the gradient and blur primitives independently. They are per node, per frame, so the
+#: large-graph branch must never rebuild them hundreds of times during a layout tick.
 GLOW_CANVAS_STUB = """
 let gradients = 0, blurs = 0, fills = 0;
 const ctx = {
@@ -1424,6 +1682,7 @@ const ctx = {
   setLineDash() {}, fillText() {},
   fill() { fills += 1; },
   createRadialGradient() { gradients += 1; return { addColorStop() {} }; },
+  createLinearGradient() { gradients += 1; return { addColorStop() {} }; },
 };
 const paintNodes = () => {
   gradients = 0; blurs = 0; fills = 0;
@@ -1435,15 +1694,14 @@ const paintNodes = () => {
 
 
 @requires_node
-@pytest.mark.parametrize("style", ["cyber", "galaxy", "solar"])
+@pytest.mark.parametrize("style", ["galaxy", "solar"])
 def test_per_node_glow_is_dropped_on_a_large_graph(style: str) -> None:
     """Every ``rich`` node was getting a bloom or a gradient on every frame, at any size.
 
     The classic renderer gates all three of them on ``!GPERF.large`` — the galaxy halo, the solar
-    corona *and* its sphere shading, and the cyber ``shadowBlur``.  A shadow blur is a full
-    convolution of the drawn shape and a radial gradient is a fresh object per node; at the
-    >600-node cutoff that is hundreds of them rebuilt per tick, on top of the layout, which is
-    what made a dense workspace crawl even after the other large-graph optimisations kicked in.
+    corona and its sphere shading. A radial gradient is a fresh object per node; at the >600-node
+    cutoff that is hundreds rebuilt per tick, on top of the layout, which is what made a dense
+    workspace crawl even after the other large-graph optimisations kicked in.
 
     ``fills`` is the control: the nodes are still being drawn, so a zero glow count means the
     effect was skipped, not that the paint never ran.
@@ -1467,6 +1725,236 @@ def test_per_node_glow_is_dropped_on_a_large_graph(style: str) -> None:
     assert small["gradients"] + small["blurs"] > 0, "the small graph lost its glow entirely"
     assert big["gradients"] == 0, f"{style} still builds a radial gradient per node when large"
     assert big["blurs"] == 0, f"{style} still shadow-blurs every node when large"
+
+
+@requires_node
+def test_material_recipes_keep_four_fixed_families_and_only_react_at_the_edges() -> None:
+    """A graph palette is an identity accent, not a licence to repaint every alloy the same.
+
+    This replaces the old gradient-stop counts: those merely documented one shared thin-film
+    painter.  The pure recipe seam makes the intended material contract directly testable.
+    """
+    report = _run_node(
+        """
+        const slate = { accent: '#a39bf1', surface: '#16191f', canvas: '#0b0d13' };
+        const matrix = { accent: '#3ce072', surface: '#04140a', canvas: '#020703' };
+        const make = (theme, palette, identity) => Object.fromEntries(
+          ['cyber', 'galaxy', 'solar', 'classic'].map(style =>
+            [style, I.materialRecipe(style, theme, palette, identity)]));
+        emit({ slate: make(slate, 'ocean', '#37bde4'), matrix: make(matrix, 'ember', '#f59e55') });
+        """
+    )
+    slate, matrix = report["slate"], report["matrix"]
+    assert {recipe["family"] for recipe in slate.values()} == {
+        "iridescent-pvd", "anodized-alloy", "brushed-copper", "satin-gunmetal"
+    }
+    assert slate["cyber"]["film"] == slate["cyber"]["fixedPalette"]
+    assert len(slate["cyber"]["film"]) >= 4
+    # Fixed material signatures survive a theme/palette switch; only the substrate/identity
+    # inputs may react. Solar must never inherit Cyber's cyan/magenta spectrum.
+    for style in slate:
+        assert slate[style]["family"] == matrix[style]["family"]
+        assert slate[style]["fixedPalette"] == matrix[style]["fixedPalette"]
+        assert slate[style]["substrate"] != matrix[style]["substrate"]
+        assert slate[style]["identity"] != matrix[style]["identity"]
+    assert "#19d8ed" not in {value.lower() for value in slate["solar"]["fixedPalette"]}
+
+
+@requires_node
+def test_material_tiers_are_screen_space_not_graph_size_heuristics() -> None:
+    report = _run_node(
+        """
+        emit({
+          tiny: I.materialTier(4), bezel: I.materialTier(8), full: I.materialTier(16),
+          exactLow: I.materialTier(5.99), exactBezel: I.materialTier(6),
+          exactFull: I.materialTier(12), forced: I.materialTier(32, true),
+        });
+        """
+    )
+    assert report == {
+        "tiny": "signature", "bezel": "bezel", "full": "full",
+        "exactLow": "signature", "exactBezel": "bezel", "exactFull": "full",
+        "forced": "signature",
+    }
+
+
+@requires_node
+def test_material_colour_invariants_are_distinct_and_deterministic() -> None:
+    """Pin visual intent in RGB rather than vendor-specific gradient primitive counts."""
+    report = _run_node(
+        """
+        const theme = { accent: '#a39bf1', surface: '#16191f', canvas: '#0b0d13' };
+        const sample = style => ['top', 'center', 'bottom'].map(position =>
+          I.sampleMaterialColour(style, position, '#37bde4', theme));
+        emit({ once: Object.fromEntries(['cyber', 'galaxy', 'solar', 'classic'].map(s => [s, sample(s)])),
+          twice: Object.fromEntries(['cyber', 'galaxy', 'solar', 'classic'].map(s => [s, sample(s)])) });
+        """
+    )
+    assert report["once"] == report["twice"], "static materials must not rotate or flicker"
+    cyber_top, _, cyber_bottom = report["once"]["cyber"]
+    galaxy = report["once"]["galaxy"][1]
+    solar = report["once"]["solar"][1]
+    classic = report["once"]["classic"][1]
+    assert cyber_top[0] > cyber_bottom[0] and cyber_bottom[1] > cyber_top[1], (
+        "Cyber must retain the fixed warm/magenta-top, cyan-lower iridescent direction"
+    )
+    assert galaxy[2] > galaxy[0] and galaxy[2] > galaxy[1], "Galaxy must read blue/violet"
+    assert solar[0] > solar[1] > solar[2], "Solar must read as warm copper, never cyan"
+    assert max(classic[:3]) - min(classic[:3]) <= 55, "Classic must remain low-saturation steel"
+
+
+@requires_node
+def test_material_cache_is_bounded_and_warm_repaints_allocate_nothing() -> None:
+    report = _run_node(
+        """
+        const gradient = () => ({ addColorStop() {} });
+        const ctx = {
+          save() {}, restore() {}, beginPath() {}, closePath() {}, arc() {}, fill() {}, stroke() {},
+          clearRect() {}, fillRect() {}, translate() {}, rotate() {}, scale() {}, clip() {},
+          createLinearGradient: gradient, createRadialGradient: gradient, createConicGradient: gradient,
+          setLineDash() {}, drawImage() {}, globalAlpha: 1, globalCompositeOperation: 'source-over',
+          lineWidth: 1, fillStyle: '', strokeStyle: '', shadowBlur: 0, shadowColor: '',
+        };
+        I.setMaterialCanvasFactory(() => ({ width: 0, height: 0, getContext: () => ctx }));
+        I.clearMaterialCache(true);
+        const options = { style: 'cyber', radius: 16, dpr: 2,
+          identity: '#37bde4', themeColors: { accent: '#a39bf1', surface: '#16191f' } };
+        I.renderMaterialSample(options);
+        const cold = I.materialCacheStats();
+        I.renderMaterialSample(options);
+        const warm = I.materialCacheStats();
+        for (let n = 0; n < cold.limit + 3; n += 1) {
+          I.renderMaterialSample({ ...options, identity: '#' + n.toString(16).padStart(6, '0') });
+        }
+        const saturated = I.materialCacheStats();
+        I.setMaterialCanvasFactory(null);
+        emit({ cold, warm, saturated });
+        """
+    )
+    assert report["cold"]["allocations"] == 1
+    assert report["warm"]["allocations"] == report["cold"]["allocations"]
+    assert report["warm"]["hits"] > report["cold"]["hits"]
+    assert report["saturated"]["size"] <= report["saturated"]["limit"]
+    assert report["saturated"]["evictions"] > 0
+
+
+@requires_node
+def test_material_cache_is_invalidated_by_theme_palette_style_and_dpr_changes() -> None:
+    report = _run_engine(
+        """
+        const gradient = () => ({ addColorStop() {} });
+        const ctx = {
+          save() {}, restore() {}, beginPath() {}, closePath() {}, arc() {}, fill() {}, stroke() {},
+          clearRect() {}, fillRect() {}, translate() {}, rotate() {}, scale() {}, clip() {},
+          createLinearGradient: gradient, createRadialGradient: gradient, createConicGradient: gradient,
+          setLineDash() {}, drawImage() {}, globalAlpha: 1, globalCompositeOperation: 'source-over',
+          lineWidth: 1, fillStyle: '', strokeStyle: '', shadowBlur: 0, shadowColor: '',
+        };
+        I.setMaterialCanvasFactory(() => ({ width: 0, height: 0, getContext: () => ctx }));
+        I.clearMaterialCache(true);
+        const sample = dpr => I.renderMaterialSample({ style: 'cyber', radius: 16, dpr,
+          identity: '#37bde4', themeColors: { accent: '#a39bf1', surface: '#16191f' } });
+        sample(1); const populated = I.materialCacheStats();
+        const api = G.create(el, { reducedMotion: () => true });
+        api.setData(chain(2));
+        api.setThemeColors({ accent: '#3ce072', surface: '#04140a' });
+        const themed = I.materialCacheStats();
+        sample(1); api.setPalette('ember'); const paletted = I.materialCacheStats();
+        sample(1); api.setStyle('solar'); const styled = I.materialCacheStats();
+        sample(1); sample(2); const dprChanged = I.materialCacheStats();
+        I.setMaterialCanvasFactory(null);
+        emit({ populated, themed, paletted, styled, dprChanged });
+        """
+    )
+    assert report["populated"]["size"] > 0
+    for name in ("themed", "paletted", "styled"):
+        assert report[name]["size"] == 0, f"{name} material update retained stale sprites"
+    assert report["dprChanged"]["size"] == 1
+    assert report["dprChanged"]["clears"] >= 4
+
+
+@requires_node
+def test_material_fallback_without_conic_gradient_still_paints() -> None:
+    report = _run_node(
+        """
+        const gradient = () => ({ addColorStop() {} });
+        let fills = 0;
+        const ctx = {
+          save() {}, restore() {}, beginPath() {}, closePath() {}, arc() {}, stroke() {},
+          fill() { fills += 1; }, clearRect() {}, fillRect() {}, translate() {}, rotate() {}, clip() {},
+          createLinearGradient: gradient, createRadialGradient: gradient,
+          lineWidth: 1, fillStyle: '', strokeStyle: '', globalAlpha: 1, shadowBlur: 0, shadowColor: '',
+        };
+        const recipe = I.materialRecipe('cyber', { accent: '#a39bf1', surface: '#16191f' }, 'ocean', '#37bde4');
+        I.paintMaterialDirect(ctx, 20, 20, 16, recipe, 'full');
+        emit({ fills });
+        """
+    )
+    assert report["fills"] > 0
+
+
+@requires_node
+@pytest.mark.parametrize("style", ["cyber", "galaxy", "solar", "classic"])
+def test_all_metal_styles_keep_the_large_graph_canvas_path_cheap(style: str) -> None:
+    """Material richness must not turn into a per-node shader workload above the cutoff."""
+    report = _run_engine(
+        GLOW_CANVAS_STUB
+        + f"""
+        const api = G.create(el, {{ reducedMotion: () => true }});
+        api.setStyle('{style}');
+        api.setData(chain(600));
+        emit(paintNodes());
+        """
+    )
+    assert report["fills"] > 0
+    assert report["gradients"] == 0, f"{style} creates per-node gradients in a large graph"
+    assert report["blurs"] == 0, f"{style} creates per-node blur in a large graph"
+
+
+def test_legacy_classic_canvas_uses_the_same_nonwhite_material_profiles_as_ledger() -> None:
+    """Classic's no-flag renderer is distinct from Ledger's engine and must not drift.
+
+    The user can switch between Ledger and `/classic`, while Classic also retains a direct
+    force-graph path for installations that do not opt into the newer engine. Both copies need
+    the material profile rather than Classic silently returning to white-centred flat discs.
+    """
+    def material_block(path: Path) -> str:
+        source = path.read_text(encoding="utf-8")
+        start = source.index("function graphRgb(")
+        return source[start:source.index("function graphApplyStyleChrome()", start)]
+
+    static = material_block(DASHBOARD)
+    classic = material_block(CLASSIC_DASHBOARD)
+    assert static == classic, "the classic dashboard material painter drifted from its fallback"
+    assert "function graphMaterialProfile(style,col)" in classic
+    assert "function graphPaintMaterialSurface(" in classic
+    assert "function graphMaterialTier(" in classic
+    assert "function graphMaterialSprite(" in classic
+    assert "graphMaterialProfile('cyber',col)" in classic
+    assert "graphMaterialProfile('galaxy',col)" in classic
+    assert "graphMaterialProfile('solar'" in classic
+    assert "graphMaterialProfile('classic',col)" in classic
+    assert "GRAPH_MATERIAL_CACHE_LIMIT=192" in classic
+    assert "ctx.drawImage(sprite.canvas" in classic
+    assert "#eafcff" not in classic
+    assert "rgba(255,255,255" not in classic
+    assert "graphIridescent(" not in classic
+    for marker in (
+        "family:'iridescent-pvd'",
+        "family:'anodized-alloy'",
+        "family:'brushed-copper'",
+        "family:'satin-gunmetal'",
+    ):
+        assert marker in classic
+        assert marker.replace(":'", ": '") in ASSET.read_text(encoding="utf-8")
+    # The fallback selects the gradient-free signature recipe before building/painting a
+    # sprite, so hundreds of nodes keep their material identity without per-node shaders.
+    paint = classic[
+        classic.index("function graphPaintMaterialSurface("):
+        classic.index("function graphStyleBackground(")
+    ]
+    assert "graphMaterialTier(r*Math.max(.01,scale),large)" in paint
+    assert classic.count("if(tier==='signature')") >= 4
 
 
 def _community_palettes(source: str) -> dict:

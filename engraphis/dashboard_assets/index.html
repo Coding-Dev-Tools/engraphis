@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="description" content="Engraphis Ledger — local-first, grounded memory operations.">
+  <title>Engraphis Ledger</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="/v2-assets/favicon-32.png">
+  <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260728-reference-materials">
+</head>
+<body data-theme="slate">
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Ledger navigation">
+      <div class="brand-row">
+        <a class="brand" href="/" aria-label="Engraphis Ledger home">Engraphis</a>
+        <button class="plan-badge" type="button" data-manage="plans">Free · local</button>
+      </div>
+
+      <label class="workspace-switcher">
+        <span>Workspace · switch</span>
+        <select id="workspace-select" aria-label="Active workspace" disabled>
+          <option>Connecting…</option>
+        </select>
+      </label>
+
+      <div class="dashboard-switcher" aria-label="Dashboard interface">
+        <span>Dashboard</span>
+        <a class="dashboard-link active" href="/" aria-current="page">Ledger</a>
+        <a class="dashboard-link" href="/classic">Classic</a>
+      </div>
+
+      <label class="theme-switcher">
+        <span>Theme</span>
+        <select id="sidebar-theme-select" aria-label="Dashboard theme">
+          <option value="slate">Slate (dark)</option>
+          <option value="midnight">Midnight</option>
+          <option value="paper">Paper (light)</option>
+          <option value="matrix">Matrix</option>
+        </select>
+      </label>
+
+      <nav class="primary-nav" aria-label="Primary">
+        <button class="nav-item active" type="button" data-view="today" aria-current="page">
+          <span>Today</span><small>changes and decisions</small>
+        </button>
+        <button class="nav-item" type="button" data-view="ask">
+          <span>Ask</span><small>grounded answers</small>
+        </button>
+        <button class="nav-item" type="button" data-view="library">
+          <span>Library</span><small>memories and imports</small>
+        </button>
+        <button class="nav-item" type="button" data-view="relations">
+          <span>Graph &amp; Relations</span><small>entities and evidence</small>
+        </button>
+        <button class="nav-item" type="button" data-view="provenance">
+          <span>Provenance</span><small>why, timeline, receipts</small>
+        </button>
+      </nav>
+
+      <div class="manage-nav">
+        <button class="nav-item" type="button" data-view="manage">
+          <span>Manage</span><small>workspaces, consolidate, settings</small>
+        </button>
+      </div>
+
+      <div class="sidebar-promo">
+        <button class="outline-button" type="button" data-manage="plans">
+          <span>Compare plans</span>
+          <small>Automation, analytics and team sharing</small>
+        </button>
+        <div class="engine-status">
+          <span><i class="status-dot" aria-hidden="true"></i><span id="connection-status">Connecting…</span></span>
+          <span>Engine v2 · bi-temporal</span>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <p id="notice-text" class="sr-only" role="status" aria-live="polite"></p>
+      <section id="update-banner" class="update-banner" role="status" aria-live="polite" hidden></section>
+
+      <section class="view active" data-view-panel="today" aria-labelledby="today-title">
+        <div class="today-layout">
+          <div class="view-column">
+            <header class="view-header">
+              <p class="eyebrow">Today · <span id="today-date"></span></p>
+              <h1 id="today-title">What changed in <span data-workspace-name>this workspace</span></h1>
+              <p>Everything below comes from this workspace’s memory records and audit trail.</p>
+            </header>
+
+            <div class="metrics" id="metrics" aria-live="polite">
+              <div class="metric"><strong>—</strong><span>Memories</span></div>
+              <div class="metric"><strong>—</strong><span>Live rows</span></div>
+              <div class="metric"><strong>—</strong><span>Workspaces</span></div>
+              <div class="metric"><strong>—</strong><span>Sessions</span></div>
+            </div>
+
+            <section class="content-section">
+              <div class="section-heading">
+                <div><h2>Needs a decision</h2><p>High-signal records surfaced from local memory.</p></div>
+                <button class="text-button" type="button" data-go="ask">Ask about them</button>
+              </div>
+              <div id="decision-list" class="decision-list">
+                <p class="empty-state">Reviewing active memory…</p>
+              </div>
+            </section>
+
+            <section class="content-section activity-section">
+              <div class="section-heading">
+                <div><h2>Recent activity</h2><p>Privacy-safe operations from the audit log.</p></div>
+                <button class="text-button" type="button" data-provenance="audit">All receipts</button>
+              </div>
+              <div class="table-scroll">
+                <table class="activity-table">
+                  <thead><tr><th>When</th><th>Actor</th><th>Action</th><th>Scope</th><th>Receipt</th></tr></thead>
+                  <tbody id="activity-body"><tr><td colspan="5">Loading activity…</td></tr></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+
+          <aside class="today-rail" aria-label="Workspace summary">
+            <section class="rail-section">
+              <p class="eyebrow">Live context</p>
+              <h2>Strongest memories</h2>
+              <div id="proactive-list" class="compact-list"><p class="empty-state">Loading context…</p></div>
+            </section>
+            <section class="rail-section">
+              <p class="eyebrow">Memory composition</p>
+              <div id="type-bars" class="type-bars"><p class="empty-state">Loading types…</p></div>
+            </section>
+            <section class="rail-section rail-action">
+              <p class="eyebrow">Local-first</p>
+              <h2>Ask before assuming</h2>
+              <p>Grounded Ask cites the records it uses and abstains when support is too weak.</p>
+              <button class="primary-button" type="button" data-go="ask">Ask your memory</button>
+            </section>
+          </aside>
+        </div>
+      </section>
+
+      <section class="view" data-view-panel="ask" aria-labelledby="ask-title">
+        <div class="page-wrap narrow-wrap">
+          <header class="view-header">
+            <p class="eyebrow">Ask · grounded retrieval</p>
+            <h1 id="ask-title">Answer from what the store can support</h1>
+            <p>Every claim links to a memory. If the evidence is weak, Engraphis says so.</p>
+          </header>
+
+          <form id="ask-form" class="question-card">
+            <label for="ask-input">Question</label>
+            <textarea id="ask-input" rows="3" maxlength="10000" placeholder="What do we know about the current database choice?" required></textarea>
+            <div class="form-actions">
+              <label class="compact-field">Citations
+                <select id="ask-k"><option>3</option><option selected>5</option><option>8</option><option>12</option></select>
+              </label>
+              <button class="primary-button" type="submit">Grounded answer</button>
+            </div>
+          </form>
+
+          <section id="answer-panel" class="answer-panel" aria-live="polite">
+            <p class="empty-state">Ask a question to begin.</p>
+          </section>
+
+          <details class="retrieval-details">
+            <summary>Inspect retrieval</summary>
+            <div id="retrieval-list" class="memory-list">
+              <p class="empty-state">Raw retrieval appears after an answer.</p>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <section class="view" data-view-panel="library" aria-labelledby="library-title">
+        <div class="page-wrap">
+          <header class="view-header library-header">
+            <div>
+              <p class="eyebrow">Library · active memory</p>
+              <h1 id="library-title">Browse, add and govern memories</h1>
+              <p>Live records stay editable without erasing their temporal history.</p>
+            </div>
+            <div class="header-actions">
+              <button id="new-memory-button" class="primary-button" type="button">New memory</button>
+              <button id="import-button" class="secondary-button" type="button">Import files</button>
+              <input id="import-files" type="file" accept=".md,.txt,.json,.csv,.py,.js,.ts" multiple hidden>
+            </div>
+          </header>
+
+          <div class="library-toolbar">
+            <label class="search-field">Search
+              <input id="library-filter" type="search" autocomplete="off" placeholder="Filter title or content">
+            </label>
+            <label>Type
+              <select id="library-type"><option value="">All types</option><option>working</option><option>episodic</option><option>semantic</option><option>procedural</option></select>
+            </label>
+            <span id="library-count" class="count-label">0 memories</span>
+          </div>
+
+          <div class="library-layout">
+            <div id="library-list" class="library-list" role="listbox" aria-label="Memories">
+              <p class="empty-state">Loading memories…</p>
+            </div>
+
+            <div class="library-detail-stack">
+              <section id="memory-detail" class="detail-panel" aria-labelledby="memory-detail-title">
+                <p class="eyebrow">Selected memory</p>
+                <h2 id="memory-detail-title">Choose a memory</h2>
+                <p class="empty-state">Select a memory from the library to inspect its content, scope, provenance and history.</p>
+              </section>
+
+              <form id="memory-editor" class="detail-panel editor-panel" hidden>
+                <div class="section-heading">
+                  <div><p class="eyebrow">Write</p><h2 id="editor-title">New memory</h2></div>
+                  <button id="editor-close" class="text-button" type="button">Close</button>
+                </div>
+                <label>Title<input id="editor-memory-title" maxlength="500" placeholder="Concise title"></label>
+                <label>Type<select id="editor-memory-type"><option>working</option><option>episodic</option><option selected>semantic</option><option>procedural</option></select></label>
+                <label>Content<textarea id="editor-memory-content" rows="12" maxlength="10000" required placeholder="A discrete, durable fact or procedure…"></textarea></label>
+                <label>Importance<input id="editor-memory-importance" type="range" min="0" max="1" step="0.05" value="0.5"></label>
+                <div class="form-actions">
+                  <button id="editor-cancel" class="secondary-button" type="button">Cancel</button>
+                  <button class="primary-button" type="submit">Save memory</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="view relations-view" data-view-panel="relations" aria-labelledby="relations-title">
+        <div class="relations-layout">
+          <div class="graph-stage">
+            <header class="graph-header">
+              <div>
+                <p class="eyebrow">Graph &amp; Relations · evidence graph</p>
+                <h1 id="relations-title">How this workspace connects</h1>
+              </div>
+            </header>
+            <div id="graph-canvas" class="graph-canvas" role="img" aria-label="Interactive knowledge graph"></div>
+            <div id="graph-empty" class="graph-empty">Open Graph &amp; Relations to load the graph.</div>
+            <div class="graph-hud">
+              <span id="graph-count">0 entities · 0 relations</span>
+              <span id="graph-mode">Community islands</span>
+            </div>
+          </div>
+
+          <aside class="graph-rail" aria-label="Graph controls">
+            <div class="graph-tabs" role="tablist" aria-label="Graph control views">
+              <button class="graph-tab active" id="graph-explore-tab" type="button" role="tab" aria-selected="true" aria-controls="graph-explore" data-graph-tab="explore">Explore</button>
+              <button class="graph-tab" id="graph-analyse-tab" type="button" role="tab" aria-selected="false" aria-controls="graph-analyse" data-graph-tab="analyse">Analyse</button>
+              <button class="graph-tab" id="graph-time-tab" type="button" role="tab" aria-selected="false" aria-controls="graph-time" data-graph-tab="time">Time</button>
+            </div>
+
+            <section class="graph-control-panel" id="graph-explore" role="tabpanel" aria-labelledby="graph-explore-tab" data-graph-tab-panel="explore">
+              <input id="graph-preset" type="hidden" value="communities">
+              <input id="graph-style" type="hidden" value="cyber">
+              <input id="graph-color" type="hidden" value="community">
+              <input id="graph-palette" type="hidden" value="theme">
+
+              <label class="sr-only" for="graph-search">Find an entity</label>
+              <input id="graph-search" class="graph-drawer-input" type="search" autocomplete="off" placeholder="Find an entity…">
+              <div id="graph-search-results" class="search-results"></div>
+              <label class="sr-only" for="graph-repo-filter">Filter to a repository or topic</label>
+              <input id="graph-repo-filter" class="graph-drawer-input" type="search" autocomplete="off" placeholder="Filter to a repository or topic…">
+
+              <div class="graph-toolbar" aria-label="Graph actions">
+                <button id="graph-fit" class="graph-action" type="button">Fit to view</button>
+                <button id="graph-reheat" class="graph-action" type="button">Reheat layout</button>
+                <button id="graph-clear-focus" class="graph-action" type="button">Clear focus</button>
+                <button id="graph-retry" class="graph-action" type="button">Reload data</button>
+                <button id="graph-full" class="graph-action" type="button" aria-pressed="false" title="Load every node, including unconnected entities, for this graph view">Show all nodes</button>
+                <div class="graph-export-wrap">
+                  <button id="graph-export" class="graph-action graph-export" type="button" aria-expanded="false" aria-controls="graph-export-menu">Export PNG or JSON</button>
+                  <div id="graph-export-menu" class="graph-export-menu" hidden>
+                    <button id="graph-export-png" type="button">PNG image</button>
+                    <button id="graph-export-json" type="button">JSON data</button>
+                  </div>
+                </div>
+              </div>
+
+              <section class="graph-drawer-section" aria-labelledby="graph-rendering-title">
+                <h2 id="graph-rendering-title">Rendering</h2>
+                <div class="graph-choice-grid graph-rendering-grid" role="group" aria-label="Rendering style">
+                  <button class="graph-choice graph-style-choice active" type="button" data-graph-style-choice="cyber" aria-pressed="true"><span class="render-preview cyber"><i></i><i></i><i></i></span><span>Cyber</span></button>
+                  <button class="graph-choice graph-style-choice" type="button" data-graph-style-choice="galaxy" aria-pressed="false"><span class="render-preview galaxy"><i></i><i></i><i></i></span><span>Galaxy</span></button>
+                  <button class="graph-choice graph-style-choice" type="button" data-graph-style-choice="solar" aria-pressed="false"><span class="render-preview solar"><i></i><i></i><i></i></span><span>Solar</span></button>
+                  <button class="graph-choice graph-style-choice" type="button" data-graph-style-choice="classic" aria-pressed="false"><span class="render-preview classic"><i></i><i></i><i></i></span><span>Classic</span></button>
+                </div>
+                <p id="graph-style-note" class="graph-note">Iridescent PVD over graphite — cyan, violet, and magenta across each node.</p>
+              </section>
+
+              <section class="graph-drawer-section" aria-labelledby="graph-layout-title">
+                <h2 id="graph-layout-title">Layout</h2>
+                <div class="graph-choice-grid graph-layout-grid" role="group" aria-label="Graph layout">
+                  <button class="graph-choice graph-layout-choice" type="button" data-graph-preset-choice="compact" aria-pressed="false"><span class="layout-preview compact"><i></i><i></i><i></i><i></i></span><span>Compact</span></button>
+                  <button class="graph-choice graph-layout-choice active" type="button" data-graph-preset-choice="communities" aria-pressed="true"><span class="layout-preview islands"><i></i><i></i><i></i><i></i></span><span>Islands</span></button>
+                  <button class="graph-choice graph-layout-choice" type="button" data-graph-preset-choice="original" aria-pressed="false"><span class="layout-preview spacious"><i></i><i></i><i></i><i></i></span><span>Spacious</span></button>
+                  <button class="graph-choice graph-layout-choice" type="button" data-graph-preset-choice="radial" aria-pressed="false"><span class="layout-preview radial"><i></i><i></i><i></i><i></i></span><span>Radial</span></button>
+                  <button class="graph-choice graph-layout-choice" type="button" data-graph-preset-choice="constellation" aria-pressed="false"><span class="layout-preview constellation"><i></i><i></i><i></i><i></i></span><span>Constellation</span></button>
+                </div>
+              </section>
+
+              <section class="graph-drawer-section" aria-labelledby="graph-colour-title">
+                <h2 id="graph-colour-title">Colour</h2>
+                <div class="graph-segmented" role="group" aria-label="Colour graph by">
+                  <button class="graph-segment active" type="button" data-graph-color-choice="community" aria-pressed="true">Cluster</button>
+                  <button class="graph-segment" type="button" data-graph-color-choice="connections" aria-pressed="false">Links</button>
+                  <button class="graph-segment" type="button" data-graph-color-choice="type" aria-pressed="false">Type</button>
+                </div>
+                <div class="graph-palette-grid" role="group" aria-label="Colour palette">
+                  <button class="graph-palette-chip active" type="button" data-graph-palette-choice="theme" aria-pressed="true"><span class="palette-preview theme"><i></i><i></i><i></i><i></i></span>theme</button>
+                  <button class="graph-palette-chip" type="button" data-graph-palette-choice="aurora" aria-pressed="false"><span class="palette-preview aurora"><i></i><i></i><i></i><i></i></span>aurora</button>
+                  <button class="graph-palette-chip" type="button" data-graph-palette-choice="ocean" aria-pressed="false"><span class="palette-preview ocean"><i></i><i></i><i></i><i></i></span>ocean</button>
+                  <button class="graph-palette-chip" type="button" data-graph-palette-choice="ember" aria-pressed="false"><span class="palette-preview ember"><i></i><i></i><i></i><i></i></span>ember</button>
+                  <button class="graph-palette-chip" type="button" data-graph-palette-choice="contrast" aria-pressed="false"><span class="palette-preview contrast"><i></i><i></i><i></i><i></i></span>contrast</button>
+                  <button class="graph-palette-chip" type="button" data-graph-palette-choice="custom" aria-pressed="false"><span class="palette-preview custom"><i></i><i></i><i></i><i></i></span>custom</button>
+                </div>
+              </section>
+
+              <section class="graph-drawer-section graph-motion" aria-labelledby="graph-motion-title">
+                <h2 id="graph-motion-title">Motion</h2>
+                <div class="graph-motion-row"><button id="graph-flow" class="graph-switch on" type="button" role="switch" aria-label="Relation flow" aria-checked="true"><span></span></button><span>Relation flow</span><small>particles</small></div>
+                <div class="graph-motion-row"><button id="graph-labels" class="graph-switch" type="button" role="switch" aria-label="Entity labels" aria-checked="false"><span></span></button><span>Entity labels</span><small>names</small></div>
+                <div class="graph-motion-row"><button id="graph-freeze" class="graph-switch" type="button" role="switch" aria-label="Freeze simulation" aria-checked="false"><span></span></button><span>Freeze simulation</span><small>pause physics</small></div>
+                <label class="graph-motion-speed" for="graph-flow-speed"><span>Flow speed</span><input id="graph-flow-speed" type="range" min="0" max="100" value="45"><output id="graph-flow-speed-output" class="sr-only">45</output></label>
+              </section>
+
+              <section class="graph-drawer-section graph-saved-views" aria-labelledby="graph-saved-views-title">
+                <h2 id="graph-saved-views-title">Saved views</h2>
+                <div class="graph-saved-grid" role="group" aria-label="Saved graph views">
+                  <button class="graph-saved-view" type="button" data-graph-saved-view="operations" aria-pressed="false">Operations</button>
+                  <button class="graph-saved-view active" type="button" data-graph-saved-view="schema" aria-pressed="true">Schema drift</button>
+                  <button class="graph-saved-view" type="button" data-graph-saved-view="people" aria-pressed="false">People</button>
+                  <button class="graph-saved-view" type="button" data-graph-saved-view="code" aria-pressed="false">Code ↔ memory</button>
+                  <button id="graph-save-view" class="graph-saved-view graph-save-view" type="button">Save current</button>
+                </div>
+                <p id="graph-saved-view-status" class="sr-only" aria-live="polite"></p>
+              </section>
+
+              <details class="graph-drawer-section graph-tuning" open>
+                <summary>Tune the simulation — forces, size, scope</summary>
+                <div class="graph-tuning-grid">
+                  <label for="graph-repel"><span>Repel force</span><input id="graph-repel" type="range" min="0" max="120" value="48"><output id="graph-repel-output">48</output></label>
+                  <label for="graph-link"><span>Link distance</span><input id="graph-link" type="range" min="4" max="80" value="16"><output id="graph-link-output">16</output></label>
+                  <label for="graph-gravity"><span>Centre gravity</span><input id="graph-gravity" type="range" min="0" max="100" value="48"><output id="graph-gravity-output">48</output></label>
+                  <label for="graph-node-size"><span>Node size</span><input id="graph-node-size" type="range" min="1" max="12" value="3"><output id="graph-node-size-output">3</output></label>
+                  <label for="graph-text-size"><span>Text size</span><input id="graph-text-size" type="range" min="6" max="24" value="12"><output id="graph-text-size-output">12</output></label>
+                  <label for="graph-line-width"><span>Line width</span><input id="graph-line-width" type="range" min="0.1" max="2" step="0.01" value="0.72"><output id="graph-line-width-output">0.72</output></label>
+                  <label for="graph-label-density"><span>Label density</span><input id="graph-label-density" type="range" min="1" max="100" value="24"><output id="graph-label-density-output">24</output></label>
+                  <label for="graph-tune-min-degree"><span>Min relations</span><input id="graph-tune-min-degree" type="range" min="0" max="12" value="1"><output id="graph-tune-min-degree-output">1</output></label>
+                  <label for="graph-depth"><span>Neighbourhood</span><input id="graph-depth" type="range" min="1" max="4" value="2"><output id="graph-depth-output">2</output></label>
+                </div>
+                <div class="graph-tune-switch"><button id="graph-tune-unlinked" class="graph-switch" type="button" role="switch" aria-label="Show unlinked entities" aria-checked="false"><span></span></button><span>Show unlinked entities</span></div>
+                <div class="graph-layer-grid" role="group" aria-label="Graph relation layers">
+                  <button class="graph-layer-chip active" type="button" data-graph-layer="temporal" aria-pressed="true"><i></i>Temporal <small id="graph-layer-temporal-count">0</small></button>
+                  <button class="graph-layer-chip active" type="button" data-graph-layer="entity" aria-pressed="true"><i></i>Entity <small id="graph-layer-entity-count">0</small></button>
+                  <button class="graph-layer-chip active" type="button" data-graph-layer="causal" aria-pressed="true"><i></i>Causal <small id="graph-layer-causal-count">0</small></button>
+                  <button class="graph-layer-chip active" type="button" data-graph-layer="semantic" aria-pressed="true"><i></i>Semantic <small id="graph-layer-semantic-count">0</small></button>
+                  <button class="graph-layer-chip" type="button" data-graph-layer="code" aria-pressed="false"><i></i>Code overlay <small id="graph-layer-code-count">0</small></button>
+                </div>
+                <button id="graph-reset-tuning" class="graph-action" type="button">Reset to preset defaults</button>
+              </details>
+            </section>
+
+            <section class="graph-control-panel" id="graph-analyse" role="tabpanel" aria-labelledby="graph-analyse-tab" data-graph-tab-panel="analyse" hidden>
+              <section class="control-group">
+                <h2>Scope</h2>
+                <label>Minimum links<input id="graph-min-degree" type="range" min="0" max="12" value="1"><output id="graph-min-degree-output">1</output></label>
+                <label>Size by<select id="graph-size"><option value="degree">Connections</option><option value="betweenness">Bridge importance</option></select></label>
+                <label class="check-row"><input id="graph-unlinked" type="checkbox"> Show unlinked</label>
+                <label class="check-row"><input id="graph-bridges" type="checkbox"> Highlight bridges</label>
+                <label class="check-row"><input id="graph-collapse" type="checkbox" checked> Auto-collapse clusters</label>
+              </section>
+              <section class="control-group">
+                <div class="section-heading"><h2>Graph facts</h2><span id="graph-bridge-count"></span></div>
+                <div id="graph-stats" class="stat-grid"></div>
+                <div id="graph-top" class="compact-list"></div>
+              </section>
+            </section>
+
+            <section class="graph-control-panel" id="graph-time" role="tabpanel" aria-labelledby="graph-time-tab" data-graph-tab-panel="time" hidden>
+              <section class="control-group">
+                <h2>Time</h2>
+                <label>As of date<input id="graph-as-of" type="date"></label>
+                <label class="check-row"><input id="graph-ghosts" type="checkbox" checked> Show superseded ghosts</label>
+                <p class="graph-note">Inspect the relationship graph as it was known at a specific point in time.</p>
+              </section>
+            </section>
+          </aside>
+        </div>
+      </section>
+
+      <section class="view" data-view-panel="provenance" aria-labelledby="provenance-title">
+        <div class="page-wrap">
+          <header class="view-header">
+            <p class="eyebrow">Provenance · temporal truth</p>
+            <h1 id="provenance-title">Why the store believes what it believes</h1>
+            <p>Inspect support, supersessions and privacy-safe receipts without flattening history.</p>
+          </header>
+
+          <div class="tab-list" role="tablist" aria-label="Provenance views">
+            <button class="tab active" type="button" role="tab" data-provenance-tab="belief" aria-selected="true">What we believe</button>
+            <button class="tab" type="button" role="tab" data-provenance-tab="timeline" aria-selected="false">Timeline</button>
+            <button class="tab" type="button" role="tab" data-provenance-tab="audit" aria-selected="false">Audit &amp; receipts</button>
+            <button class="tab" type="button" role="tab" data-provenance-tab="supersessions" aria-selected="false">Supersessions</button>
+          </div>
+
+          <section class="tab-panel active" data-provenance-panel="belief">
+            <form id="why-form" class="inline-form">
+              <label>Claim or topic<input id="why-input" required placeholder="Why do we believe…?"></label>
+              <button class="primary-button" type="submit">Trace belief</button>
+            </form>
+            <div id="why-result" class="memory-list"><p class="empty-state">Search for a claim to inspect its live support and what it replaced.</p></div>
+          </section>
+
+          <section class="tab-panel" data-provenance-panel="timeline">
+            <form id="timeline-form" class="inline-form">
+              <label>Topic<input id="timeline-input" required placeholder="Database choice"></label>
+              <button class="primary-button" type="submit">Show history</button>
+            </form>
+            <div id="timeline-result" class="timeline-list"><p class="empty-state">Search a topic to travel through its valid-time history.</p></div>
+          </section>
+
+          <section class="tab-panel" data-provenance-panel="audit">
+            <div class="section-heading">
+              <div><h2>Recorded operations</h2><p>Actor, action, scope and verification state.</p></div>
+              <div class="header-actions">
+                <button id="verify-receipts" class="secondary-button" type="button">Verify chain</button>
+                <button id="export-receipts" class="secondary-button" type="button">Export receipts</button>
+              </div>
+            </div>
+            <div id="audit-list" class="audit-list"><p class="empty-state">Loading audit records…</p></div>
+          </section>
+
+          <section class="tab-panel" data-provenance-panel="supersessions">
+            <form id="supersession-form" class="inline-form">
+              <label>Topic<input id="supersession-input" required placeholder="What changed?"></label>
+              <button class="primary-button" type="submit">Find supersessions</button>
+            </form>
+            <div id="supersession-list" class="timeline-list"><p class="empty-state">Search a topic to compare closed and current records.</p></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view" data-view-panel="manage" aria-labelledby="manage-title">
+        <div class="page-wrap">
+          <header class="view-header">
+            <p class="eyebrow">Manage · local operations</p>
+            <h1 id="manage-title">Operate the engine deliberately</h1>
+            <p>Workspace, consolidation, hosted services and interface preferences in one place.</p>
+          </header>
+
+          <div class="tab-list manage-tabs" role="tablist" aria-label="Manage views">
+            <button class="tab active" type="button" role="tab" data-manage-tab="workspaces" aria-selected="true">Workspaces</button>
+            <button class="tab" type="button" role="tab" data-manage-tab="consolidate" aria-selected="false">Consolidate</button>
+            <button class="tab" type="button" role="tab" data-manage-tab="analytics" aria-selected="false">Analytics</button>
+            <button class="tab" type="button" role="tab" data-manage-tab="automation" aria-selected="false">Automation</button>
+            <button class="tab" type="button" role="tab" data-manage-tab="team" aria-selected="false">Team</button>
+            <button class="tab" type="button" role="tab" data-manage-tab="plans" aria-selected="false">Plans &amp; billing</button>
+            <button class="tab" type="button" role="tab" data-manage-tab="settings" aria-selected="false">Settings</button>
+          </div>
+
+          <section class="tab-panel active" data-manage-panel="workspaces">
+            <div class="section-heading">
+              <div><h2>Workspaces</h2><p>Each workspace is an independent visibility boundary.</p></div>
+              <button id="create-workspace-toggle" class="primary-button" type="button">New workspace</button>
+            </div>
+            <form id="create-workspace-form" class="inline-form" hidden>
+              <label>Name<input id="new-workspace-name" required maxlength="200" placeholder="research"></label>
+              <label>Description<input id="new-workspace-description" maxlength="500" placeholder="What belongs here"></label>
+              <button class="primary-button" type="submit">Create</button>
+            </form>
+            <div id="workspace-list" class="workspace-list"><p class="empty-state">Loading workspaces…</p></div>
+          </section>
+
+          <section class="tab-panel" data-manage-panel="consolidate">
+            <div class="split-callout">
+              <div>
+                <p class="eyebrow">Sleep-time maintenance</p>
+                <h2>Review before memory evolves</h2>
+                <p>A dry run finds recurring episodes and decayed transients. Nothing is committed until you explicitly apply it.</p>
+              </div>
+              <form id="consolidate-form" class="control-card">
+                <label class="check-row"><input id="consolidate-structured" type="checkbox"> Structured relationship analysis</label>
+                <label class="check-row"><input id="consolidate-supersede" type="checkbox"> Close superseded source validity on commit</label>
+                <button class="primary-button" type="submit">Run dry preview</button>
+                <button id="consolidate-commit" class="danger-button" type="button" disabled>Commit reviewed result</button>
+              </form>
+            </div>
+            <div id="consolidate-result" class="result-card"><p class="empty-state">No preview has been run.</p></div>
+          </section>
+
+          <section class="tab-panel" data-manage-panel="analytics">
+            <div class="hosted-hero">
+              <p class="eyebrow">Pro · hosted compute</p>
+              <h2>Portfolio analytics without moving secret memory</h2>
+              <p>Aggregate health, growth and reinforcement trends are computed through the connected Engraphis Cloud account.</p>
+              <div id="analytics-result" class="stat-grid"><p class="empty-state">Open this tab to check availability.</p></div>
+              <button class="primary-button" type="button" data-manage="plans">Compare Pro</button>
+            </div>
+          </section>
+
+          <section class="tab-panel" data-manage-panel="automation">
+            <div class="hosted-hero">
+              <p class="eyebrow">Pro · managed maintenance</p>
+              <h2>Schedule consolidation with an explicit upload boundary</h2>
+              <p>Hosted automation receives a bounded workspace snapshot. Secret and session-scoped memory stays local.</p>
+              <div id="automation-result" class="result-card"><p class="empty-state">Open this tab to check availability.</p></div>
+              <button class="primary-button" type="button" data-manage="plans">Compare Pro</button>
+            </div>
+          </section>
+
+          <section class="tab-panel" data-manage-panel="team">
+            <div class="hosted-hero">
+              <p class="eyebrow">Team · hosted control plane</p>
+              <h2>Shared workspaces, member roles and named seats</h2>
+              <p>The local dashboard stays single-user. Team authorization and remote-agent access live in the hosted service.</p>
+              <div id="team-result" class="result-card"><p class="empty-state">Checking local connection state…</p></div>
+              <button class="primary-button" type="button" data-manage="plans">Compare Team</button>
+            </div>
+          </section>
+
+          <section class="tab-panel" data-manage-panel="plans">
+            <div class="section-heading">
+              <div><h2>Plans &amp; billing</h2><p>Free is local forever. Pay only for hosted services.</p></div>
+              <label class="billing-toggle">Billing<select id="billing-select"><option value="monthly">Monthly</option><option value="annual">Annual · two months free</option></select></label>
+            </div>
+            <div id="plan-cards" class="plan-cards"></div>
+            <div class="comparison-table-wrap">
+              <table class="comparison-table">
+                <thead><tr><th>Capability</th><th>Free</th><th>Pro</th><th>Team</th></tr></thead>
+                <tbody>
+                  <tr><td>Local memory engine</td><td>Included</td><td>Included</td><td>Included</td></tr>
+                  <tr><td>Grounded recall</td><td>Included</td><td>Included</td><td>Included</td></tr>
+                  <tr><td>Bi-temporal provenance</td><td>Included</td><td>Included</td><td>Included</td></tr>
+                  <tr><td>Relations graph</td><td>Included</td><td>Included</td><td>Included</td></tr>
+                  <tr><td>Manual consolidation</td><td>Included</td><td>Included</td><td>Included</td></tr>
+                  <tr><td>Cloud sync</td><td>—</td><td>Included</td><td>Included</td></tr>
+                  <tr><td>Managed automation</td><td>—</td><td>Included</td><td>Included</td></tr>
+                  <tr><td>Portfolio analytics</td><td>—</td><td>Included</td><td>Included</td></tr>
+                  <tr><td>Shared workspaces</td><td>—</td><td>—</td><td>Included</td></tr>
+                  <tr><td>Members and roles</td><td>—</td><td>—</td><td>Included</td></tr>
+                  <tr><td>Remote agent access</td><td>—</td><td>—</td><td>Included</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="tab-panel" data-manage-panel="settings">
+            <div class="settings-grid">
+              <section class="setting-card">
+                <p class="eyebrow">Interface</p>
+                <h2>Dashboard</h2>
+                <p>Both interfaces read the same store. The choice changes presentation only.</p>
+                <label>Interface<select id="dashboard-select"><option value="ledger">Ledger</option><option value="classic">Classic</option></select></label>
+              </section>
+              <section class="setting-card">
+                <p class="eyebrow">Appearance</p>
+                <h2>Theme</h2>
+                <p>The preference stays on this device and is shared with Classic.</p>
+                <label>Theme<select id="theme-select"><option value="slate">Slate (dark)</option><option value="midnight">Midnight</option><option value="paper">Paper (light)</option><option value="matrix">Matrix</option></select></label>
+              </section>
+              <section class="setting-card llm-setting-card">
+                <div>
+                  <p class="eyebrow">Optional synthesis</p>
+                  <h2>Connect an LLM</h2>
+                  <p>Use a provider only when you want schema-validated extraction. Recall and storage remain local by default.</p>
+                </div>
+                <div id="llm-connection" class="llm-connection"><p class="empty-state">Checking local configuration…</p></div>
+              </section>
+              <section class="setting-card">
+                <p class="eyebrow">Engine</p>
+                <h2>Local runtime</h2>
+                <dl class="definition-list"><div><dt>API</dt><dd>127.0.0.1:8700</dd></div><div><dt>Engine</dt><dd>v2 · bi-temporal</dd></div><div><dt>Storage</dt><dd>local SQLite</dd></div></dl>
+                <a class="secondary-button" href="/classic">Open Classic tools</a>
+              </section>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/v2-assets/vendor/d3.min.js?v=20260727-final"></script>
+  <script src="/v2-assets/ledger.js?v=20260728-reference-materials"></script>
+</body>
+</html>

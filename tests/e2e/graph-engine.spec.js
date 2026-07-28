@@ -114,7 +114,7 @@ async function openDashboard(page, { query = '' } = {}) {
     return json({});
   });
 
-  await page.goto(`/${query}`);
+  await page.goto(`/classic${query}`);
   await page.waitForFunction(() => typeof window.selectView === 'function');
   const violations = () => page.evaluate(() => window.__cspViolations.slice());
   return { requested, consoleErrors, pageErrors, cspViolations, violations };
@@ -182,6 +182,180 @@ test('the opt-in engine renders a real canvas and registers only under its flag'
   expect(session.pageErrors).toEqual([]);
 });
 
+test('the live graph paints materially different hub faces for every style', async ({ page }) => {
+  const session = await openDashboard(page, { query: '?graph-engine=next' });
+  await openGraphView(page);
+  await page.waitForFunction(() => {
+    const nodes = window.__fg && window.__fg.graphData().nodes;
+    return nodes && nodes.length && nodes.every(node => Number.isFinite(node.x) && Number.isFinite(node.y));
+  });
+
+  const sampleFace = async style => {
+    await page.evaluate(value => graphSetStyle(value), style);
+    await page.waitForTimeout(100);
+    return page.evaluate(() => {
+      const canvas = document.querySelector('#graph-net canvas');
+      const pixels = canvas.getContext('2d').getImageData(
+        0, 0, canvas.width, canvas.height,
+      ).data;
+      const sums = [0, 0, 0];
+      let count = 0;
+      let luminanceSum = 0;
+      let luminanceSquared = 0;
+      const step = Math.max(1, Math.round(window.devicePixelRatio || 1));
+      for (let y = 0; y < canvas.height; y += step) {
+        for (let x = 0; x < canvas.width; x += step) {
+          const offset = (y * canvas.width + x) * 4;
+          // Opaque pixels are overwhelmingly material faces/rims. Translucent relation
+          // lines and style backgrounds cannot satisfy this gate by themselves.
+          if (pixels[offset + 3] < 200) continue;
+          const rgb = [pixels[offset], pixels[offset + 1], pixels[offset + 2]];
+          rgb.forEach((value, channel) => { sums[channel] += value; });
+          const luminance = rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+          luminanceSum += luminance;
+          luminanceSquared += luminance * luminance;
+          count += 1;
+        }
+      }
+      const mean = sums.map(value => Math.round(value / count));
+      const luminanceMean = luminanceSum / count;
+      return {
+        count,
+        mean,
+        textureVariance: Math.round(luminanceSquared / count - luminanceMean * luminanceMean),
+      };
+    });
+  };
+
+  const faces = {};
+  for (const style of ['cyber', 'galaxy', 'solar', 'classic']) {
+    faces[style] = await sampleFace(style);
+  }
+  expect(faces).toMatchObject({
+    cyber: { count: expect.any(Number) },
+    galaxy: { count: expect.any(Number) },
+    solar: { count: expect.any(Number) },
+    classic: { count: expect.any(Number) },
+  });
+  expect(Math.min(...Object.values(faces).map(face => face.count))).toBeGreaterThan(20);
+  expect(new Set(Object.values(faces).map(face => face.mean.join(','))).size).toBe(4);
+  expect(faces.galaxy.mean[2]).toBeGreaterThan(faces.galaxy.mean[0]);
+  expect(faces.solar.mean[0]).toBeGreaterThan(faces.solar.mean[1]);
+  expect(faces.solar.mean[1]).toBeGreaterThan(faces.solar.mean[2]);
+  expect(Math.max(...faces.classic.mean) - Math.min(...faces.classic.mean)).toBeLessThan(55);
+  expect(Math.min(...Object.values(faces).map(face => face.textureVariance))).toBeGreaterThan(8);
+  expect(session.pageErrors).toEqual([]);
+});
+
+test('the browser material gallery preserves distinct node families at both DPRs', async ({ page }) => {
+  /* This deliberately samples the cached detached canvases instead of screenshotting the live
+     force graph: layout coordinates and antialiasing are not a material contract. The engine
+     still does the real browser canvas work here, so this catches an OffscreenCanvas/gradient
+     fallback that a Node recording context cannot see. */
+  const session = await openDashboard(page, { query: '?graph-engine=next' });
+  await openGraphView(page);
+  const gallery = await page.evaluate(() => {
+    const I = window.EngraphisGraph._internals;
+    const themeColors = { accent: '#a39bf1', surface: '#16191f', canvas: '#0b0d13' };
+    const identity = '#37bde4';
+    const point = (sample, vertical) => {
+      const ctx = sample.canvas.getContext('2d');
+      const x = Math.floor(sample.width / 2);
+      const y = Math.max(0, Math.min(sample.height - 1, Math.floor(sample.height * vertical)));
+      return Array.from(ctx.getImageData(x, y, 1, 1).data);
+    };
+    const render = (style, radius, dpr) => {
+      const sample = I.renderMaterialSample({ style, radius, dpr, identity, themeColors });
+      return {
+        tier: sample.tier, width: sample.width, height: sample.height,
+        top: point(sample, 0.30), center: point(sample, 0.50), bottom: point(sample, 0.70),
+      };
+    };
+    return Object.fromEntries(['cyber', 'galaxy', 'solar', 'classic'].map(style => [style, {
+      dpr1: [4, 8, 16, 32].map(radius => render(style, radius, 1)),
+      dpr2: render(style, 16, 2),
+    }]));
+  });
+
+  for (const material of Object.values(gallery)) {
+    expect(material.dpr1.map(sample => sample.tier)).toEqual(['signature', 'bezel', 'full', 'full']);
+    expect(material.dpr2.width).toBeGreaterThan(material.dpr1[2].width);
+    expect(material.dpr2.height).toBeGreaterThan(material.dpr1[2].height);
+  }
+  const cyber = gallery.cyber.dpr1[2];
+  expect(cyber.top[0]).toBeGreaterThan(cyber.bottom[0]);
+  expect(cyber.bottom[1]).toBeGreaterThan(cyber.top[1]);
+  const galaxy = gallery.galaxy.dpr1[2].center;
+  expect(galaxy[2]).toBeGreaterThan(galaxy[0]);
+  expect(galaxy[2]).toBeGreaterThan(galaxy[1]);
+  const solar = gallery.solar.dpr1[2].center;
+  expect(solar[0]).toBeGreaterThan(solar[1]);
+  expect(solar[1]).toBeGreaterThan(solar[2]);
+  const classic = gallery.classic.dpr1[2].center;
+  expect(Math.max(...classic.slice(0, 3)) - Math.min(...classic.slice(0, 3))).toBeLessThanOrEqual(55);
+  expect(session.pageErrors).toEqual([]);
+});
+
+test('the deterministic graph material gallery matches its visual golden', async ({ page }, testInfo) => {
+  // Canvas output is Chromium-controlled and deterministic across the supported CI platforms.
+  // Keep the project name in the path, but do not fork one baseline per operating system.
+  testInfo.snapshotSuffix = '';
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const session = await openDashboard(page, { query: '?graph-engine=next' });
+  await openGraphView(page);
+  const violationsBeforeGallery = await session.violations();
+  await page.evaluate(() => {
+    const I = window.EngraphisGraph._internals;
+    const styles = ['cyber', 'galaxy', 'solar', 'classic'];
+    const radii = [4, 8, 16, 32];
+    const ratios = [1, 2];
+    const cellWidth = 104;
+    const cellHeight = 88;
+    const canvas = document.createElement('canvas');
+    canvas.id = 'material-golden-gallery';
+    canvas.width = cellWidth * radii.length * ratios.length;
+    canvas.height = cellHeight * styles.length;
+    canvas.setAttribute('aria-label', 'Deterministic graph material gallery');
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#07090e';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const themeColors = { accent: '#a39bf1', surface: '#16191f', canvas: '#0b0d13' };
+    const identityColor = '#37bde4';
+    styles.forEach((style, row) => {
+      ratios.forEach((dpr, panel) => {
+        radii.forEach((screenRadius, column) => {
+          const x = (panel * radii.length + column) * cellWidth;
+          const y = row * cellHeight;
+          ctx.fillStyle = (row + column + panel) % 2 ? '#0a0d14' : '#0d1018';
+          ctx.fillRect(x + 1, y + 1, cellWidth - 2, cellHeight - 2);
+          ctx.strokeStyle = panel ? '#2c3444' : '#202735';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(x + 0.5, y + 0.5, cellWidth - 1, cellHeight - 1);
+          const sample = I.renderMaterialSample({
+            style, screenRadius, dpr, identityColor, themeColors,
+          });
+          const target = Math.max(10, screenRadius * 2.38);
+          ctx.drawImage(
+            sample.canvas,
+            x + (cellWidth - target) / 2,
+            y + (cellHeight - target) / 2,
+            target,
+            target,
+          );
+        });
+      });
+    });
+    document.body.append(canvas);
+  });
+
+  await expect(page.locator('#material-golden-gallery')).toHaveScreenshot(
+    'graph-material-gallery.png',
+    { animations: 'disabled', maxDiffPixelRatio: 0.01 },
+  );
+  expect(await session.violations()).toEqual(violationsBeforeGallery);
+  expect(session.pageErrors).toEqual([]);
+});
+
 test('a physics slider moves the layout under the opt-in engine', async ({ page }) => {
   // The regression this pins: setSettings() narrowed its reheat to `mode`, so Repel/Link/
   // Gravity/Size wrote a new force into a simulation already sitting at alpha~0.  Nothing
@@ -218,7 +392,7 @@ test('the opt-in engine adds no CSP violation the classic renderer does not alre
   await page.waitForTimeout(2_000);
   const underNext = await session.violations();
 
-  await page.goto('/');
+  await page.goto('/classic');
   await page.waitForFunction(() => typeof window.selectView === 'function');
   await openGraphView(page);
   await page.waitForTimeout(2_000);
@@ -240,5 +414,25 @@ test('the graph view without the flag stays on the classic renderer', async ({ p
   expect(fetched(session.requested, 'force-graph.min.js').length).toBe(1);
   expect(fetched(session.requested, 'engraphis-graph.js')).toEqual([]);
   expect(await page.evaluate(() => typeof window.EngraphisGraph)).toBe('undefined');
+  expect(session.pageErrors).toEqual([]);
+});
+
+test('Show all nodes fetches the complete graph and includes unlinked entities', async ({ page }) => {
+  const session = await openDashboard(page);
+  await openGraphView(page);
+
+  const fullGraphRequest = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname === '/api/graph' && url.searchParams.get('full') === 'true';
+  });
+  await page.locator('#graph-show-all').click();
+  await fullGraphRequest;
+
+  await expect(page.locator('#graph-show-all')).toHaveText('Show responsive overview');
+  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-show-iso')).toBeDisabled();
+  await expect(page.locator('#graph-hud-count')).toContainText('8 entities');
+  expect(fetched(session.requested, 'engraphis-graph.js').length).toBe(1);
+  expect(await page.evaluate(() => Boolean(GRAPH_ENGINE))).toBe(true);
   expect(session.pageErrors).toEqual([]);
 });

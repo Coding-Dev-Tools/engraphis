@@ -325,3 +325,26 @@ def emit_startup_notice(emit: Optional[Callable[[str], None]] = None,
                 pass
 
     threading.Thread(target=_run, name="engraphis-update-notice", daemon=True).start()
+
+
+def emit_cli_notice(emit: Optional[Callable[[str], None]] = None,
+                    timeout: float = DEFAULT_TIMEOUT) -> None:
+    """Print an update notice for a short-lived terminal command.
+
+    Unlike the server startup helper, this checks on the calling thread so a CLI process
+    cannot exit before its daemon refresh thread has a chance to print the notice. The
+    cache keeps normal invocations cheap, and every failure remains fail-silent.
+    """
+    if not enabled():
+        return
+    printer = emit if emit is not None else (
+        lambda line: print("[engraphis] %s" % line, file=sys.stderr))
+    try:
+        line = notice_line(check(timeout=timeout))
+    except Exception:  # noqa: BLE001 - a convenience feature must never break the CLI
+        return
+    if line:
+        try:
+            printer(line)
+        except Exception:  # noqa: BLE001
+            pass

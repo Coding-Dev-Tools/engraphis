@@ -37,6 +37,7 @@ def test_launcher_preserves_socket_peer_for_forwarded_header_validation(monkeypa
     uvicorn = pytest.importorskip("uvicorn")
 
     captured = {}
+    monkeypatch.setattr(start_dashboard, "_port_is_available", lambda *_args: True)
     monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: captured.update(kwargs))
     fake = types.ModuleType("engraphis.dashboard_app")
     fake.app = object()
@@ -60,6 +61,7 @@ def test_json_launcher_preserves_redacted_uvicorn_access_formatter(monkeypatch):
 
     monkeypatch.setenv("ENGRAPHIS_JSON_LOGS", "1")
     captured = {}
+    monkeypatch.setattr(start_dashboard, "_port_is_available", lambda *_args: True)
     monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: captured.update(kwargs))
     fake = types.ModuleType("engraphis.dashboard_app")
     fake.app = object()
@@ -82,3 +84,28 @@ def test_json_launcher_preserves_redacted_uvicorn_access_formatter(monkeypatch):
     assert event["event"].count("[redacted]") == 2
     assert "invite-secret" not in stream.getvalue()
     assert "provider-secret" not in stream.getvalue()
+
+
+def test_launcher_reuses_an_existing_dashboard_before_loading_the_model(monkeypatch, capsys):
+    opened = []
+    monkeypatch.setattr(start_dashboard, "_port_is_available", lambda *_args: False)
+    monkeypatch.setattr(start_dashboard, "_is_engraphis_dashboard", lambda _url: True)
+    monkeypatch.setattr(start_dashboard.webbrowser, "open", opened.append)
+
+    start_dashboard.main(["--port", "8719"])
+
+    assert opened == ["http://127.0.0.1:8719"]
+    assert "already running at http://127.0.0.1:8719" in capsys.readouterr().out
+
+
+def test_launcher_reports_a_non_engraphis_port_conflict(monkeypatch, capsys):
+    monkeypatch.setattr(start_dashboard, "_port_is_available", lambda *_args: False)
+    monkeypatch.setattr(start_dashboard, "_is_engraphis_dashboard", lambda _url: False)
+
+    with pytest.raises(SystemExit) as exc:
+        start_dashboard.main(["--no-open", "--port", "8719"])
+
+    assert exc.value.code == 1
+    error = capsys.readouterr().err
+    assert "http://127.0.0.1:8719 is already in use" in error
+    assert "--port" in error

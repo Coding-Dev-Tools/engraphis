@@ -39,6 +39,23 @@ router = APIRouter(prefix="/api", tags=["dashboard"])
 logger = logging.getLogger("engraphis.api")
 
 _service: Optional[MemoryService] = None
+_AUTOMATION_BOOTSTRAP_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_AUTOMATION_BOOTSTRAP_LOCKS_GUARD = threading.Lock()
+
+
+def _automation_bootstrap_lock(organization_id: str, workspace_id: str) -> threading.Lock:
+    """Return the process-local serialization lock for one hosted workspace bootstrap.
+
+    The first Automation view sends a bounded but sensitive snapshot to the private service.
+    Dashboard tabs often issue concurrent GETs, so durable phase tracking alone cannot prevent
+    two requests from both observing an empty phase before either has recorded its upload.
+    The local dashboard runs one process; this keyed lock covers that race without broadening a
+    workspace lock or changing the private service protocol.
+    """
+
+    key = (str(organization_id), str(workspace_id))
+    with _AUTOMATION_BOOTSTRAP_LOCKS_GUARD:
+        return _AUTOMATION_BOOTSTRAP_LOCKS.setdefault(key, threading.Lock())
 
 
 def _invalid_request() -> HTTPException:
@@ -190,7 +207,7 @@ def _managed_call(fn, *args, **kwargs):
                        type(exc).__name__, exc.status, exc.transient)
         detail = {"error": _managed_error_message(exc), "managed_cloud": True,
                   "transient": exc.transient}
-        if exc.code == "consent_required":
+        if exc.code in {"consent_required", "cloud_unconfigured"}:
             detail["code"] = exc.code
         raise HTTPException(
             status_code=exc.status or 503,
@@ -928,6 +945,38 @@ def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
             "memories": [_mem(m) for m in out.get("memories", [])]}
 
 
+class _AnswerReq(BaseModel):
+    query: str = Field(min_length=1, max_length=10_000)
+    workspace: Optional[str] = None
+    repo: Optional[str] = None
+    k: int = Field(default=8, ge=1, le=50)
+    max_citations: int = Field(default=5, ge=1, le=50)
+    min_support: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+
+
+@router.post("/answer")
+def answer(req: _AnswerReq):
+    """Return a strictly grounded answer with citations, or explicitly abstain.
+
+    Ledger uses this route instead of presenting nearest-neighbour search results as an
+    answer. The service owns support scoring, workspace isolation, reinforcement and the
+    privacy-safe operation receipt; this adapter only applies the dashboard's bounded
+    request model and stable error boundary.
+    """
+    ws = req.workspace or _default_ws()
+    out = _run(
+        service().grounded_recall,
+        req.query,
+        workspace=ws,
+        repo=req.repo,
+        k=req.k,
+        max_citations=req.max_citations,
+        min_support=req.min_support,
+    )
+    out["sources"] = list(out.get("citations") or [])
+    return out
+
+
 @router.get("/memories")
 def memories(workspace: Optional[str] = None, q: Optional[str] = None, limit: int = 200):
     """List memories directly from the store (no embedding) so browsing works even
@@ -1353,8 +1402,13 @@ class _AutomationReq(BaseModel):
 
 @router.get("/automation")
 def automation_get(workspace: Optional[str] = None):
-    """Read the cloud-authoritative managed-maintenance policy."""
-    from engraphis.cloud_features import CloudFeatureClient
+    """Read or provision the cloud-authoritative managed-maintenance policy."""
+    from engraphis.cloud_features import (
+        CloudFeatureClient,
+        automation_bootstrap_phase,
+        build_managed_snapshot,
+        save_automation_bootstrap_phase,
+    )
 
     ws = _require_ws(workspace)
     workspace_id = service()._lookup_workspace(ws)
@@ -1365,6 +1419,60 @@ def automation_get(workspace: Optional[str] = None):
         })
     cloud = _managed_call(CloudFeatureClient.from_environment, workspace_id)
     policy = _managed_call(cloud.get_policy, workspace_id)
+    # Version zero is the Cloud's explicit "no policy has ever been saved" sentinel.  Start
+    # new Pro/Team workspaces on the recommended maintenance cadence immediately: the account
+    # connection already authorizes managed compute, and a customer should not need to discover
+    # an extra enable switch.  A persisted disabled policy has version >= 1, so an intentional
+    # pause is never overwritten.
+    try:
+        unconfigured = int(policy.get("version", -1)) == 0
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        unconfigured = False
+    if unconfigured:
+        bootstrap_workspace_id = workspace_id
+        default_policy = {
+            "enabled": True,
+            "cadence_minutes": 1440,
+            "dream_enabled": True,
+            "dream_min_new": 25,
+            "dream_idle_minutes": 15,
+            "infer": False,
+        }
+        # Snapshot upload and policy persistence are separate private-service calls. Record
+        # the completed upload locally before saving the policy so a transient failure of
+        # that second call resumes at the policy step instead of uploading memory again
+        # and consuming another generation on every dashboard refresh.
+        with _automation_bootstrap_lock(cloud.organization_id, bootstrap_workspace_id):
+            phase = automation_bootstrap_phase(
+                service(), cloud.organization_id, bootstrap_workspace_id
+            )
+            if phase == "policy_saved":
+                # The initial GET observed version zero before the other tab completed its
+                # bootstrap. The durable phase is authoritative: do not upload or resave.
+                # ``version`` must not remain the Cloud's stale zero sentinel, or the follower
+                # would render an enabled schedule as unconfigured until its next refresh.
+                policy = {**default_policy, "version": 1}
+            else:
+                if phase != "snapshot_uploaded":
+                    workspace_id, snapshot = _managed_call(build_managed_snapshot, service(), ws)
+                    receipt = _managed_call(cloud.upload_snapshot, workspace_id, snapshot)
+                    generation = (
+                        receipt.get("generation", snapshot["generation"])
+                        if isinstance(receipt, dict)
+                        else snapshot["generation"]
+                    )
+                    save_automation_bootstrap_phase(
+                        service(),
+                        cloud.organization_id,
+                        bootstrap_workspace_id,
+                        "snapshot_uploaded",
+                        generation=int(generation),
+                    )
+                saved = _managed_call(cloud.save_policy, workspace_id, default_policy)
+                save_automation_bootstrap_phase(
+                    service(), cloud.organization_id, bootstrap_workspace_id, "policy_saved"
+                )
+                policy = {**default_policy, **(saved if isinstance(saved, dict) else {})}
     recent = _managed_call(cloud.list_jobs, workspace_id, limit=10)
     recent_jobs = recent.get("jobs") if isinstance(recent, dict) else []
     if not isinstance(recent_jobs, list):
@@ -1461,7 +1569,8 @@ def maintenance_run(req: _MaintenanceReq, workspace: Optional[str] = None):
 @router.get("/graph")
 def graph(workspace: Optional[str] = None, limit: int = 2000,
           layers: Optional[str] = None, include_code: bool = False,
-          repo: Optional[str] = None):
+          repo: Optional[str] = None, full: bool = False,
+          as_of: Optional[float] = None):
     """Entity-relation network for a workspace — vis-network-ready nodes/edges
     plus type counts, top-connected, and connectivity stats.
 
@@ -1478,7 +1587,8 @@ def graph(workspace: Optional[str] = None, limit: int = 2000,
     ]
     return _run(
         service().graph, workspace=ws, limit=limit, layers=selected,
-        include_code=include_code, repo=repo, backfill=False,
+        include_code=include_code, repo=repo, backfill=False, full=full,
+        as_of=as_of,
     )
 
 
@@ -1813,6 +1923,10 @@ _ENTITLEMENT_TIMEOUT_SECONDS = 8.0
 _ENTITLEMENT_MAX_RESPONSE_BYTES = 64 * 1024
 _ENTITLEMENT_REFRESH_LOCK = threading.Lock()
 _entitlement_refreshing = False
+_ENTITLEMENT_RETRY_BASE_SECONDS = 30.0
+_ENTITLEMENT_RETRY_MAX_SECONDS = 15 * 60.0
+_entitlement_retry_after = 0.0
+_entitlement_refresh_failures = 0
 #: Same opt-out vocabulary as ``ENGRAPHIS_UPDATE_CHECK`` (see engraphis/update_check.py).
 _FALSY_SETTINGS = {"0", "false", "no", "off", "disable", "disabled"}
 
@@ -2115,10 +2229,14 @@ def _read_entitlement_cache() -> dict:
     if not current or organization_id != current:
         return {}
     plan = _normalized_plan(stored_plan)
+    # Mirror _session_entitlement: an inactive entitlement publishes no features. Today
+    # hosted_plan_summary re-zeroes them downstream, but any future consumer reading
+    # _plan_entitlement() directly would otherwise render paid rows on a lapsed account.
+    active = bool(value.get("cloud_access_active"))
     resolved = {
         "plan": plan,
-        "features": _normalized_features(value.get("features"), plan),
-        "cloud_access_active": bool(value.get("cloud_access_active")),
+        "features": _normalized_features(value.get("features"), plan) if active else [],
+        "cloud_access_active": active,
         "organization_id": organization_id,
         "fetched_at": fetched_at,
     }
@@ -2201,6 +2319,20 @@ def _deny_entitlement_cache() -> None:
         logger.debug("entitlement cache denial skipped")
 
 
+def _record_authoritative_denial() -> None:
+    """Settle both persisted entitlement sources after a 401/402/403 cloud answer."""
+
+    try:
+        from engraphis.cloud_session import record_billing_denial
+
+        record_billing_denial()
+    except Exception:  # noqa: BLE001 - a denial we cannot persist is still a denial
+        pass
+    # An older control plane or direct-token deployment may have no entitlement fields in
+    # the session record, so the compatibility cache must settle independently.
+    _deny_entitlement_cache()
+
+
 def _fetch_authoritative_entitlement() -> Optional[dict]:
     """Re-read the plan from the control plane. Returns ``None`` when nothing was cached.
 
@@ -2246,18 +2378,12 @@ def _fetch_authoritative_entitlement() -> Optional[dict]:
         # other failure left ``cloud_access_active`` true and kept paid features on the
         # dashboard indefinitely while every hosted call was denied. Persist the denial so
         # the two license surfaces cannot disagree; everything else is still "not now".
-        if getattr(exc, "status", None) == 402:
-            try:
-                from engraphis.cloud_session import record_billing_denial
-
-                record_billing_denial()
-            except Exception:  # noqa: BLE001 - a denial we cannot persist is still a denial
-                pass
-            # Settle both layers. Against an older control plane the session carries no
-            # entitlement fields at all, so the session write above leaves it planless and
-            # the resolver falls through to the compatibility cache -- which would keep
-            # advertising the paid plan on its own.
-            _deny_entitlement_cache()
+        # 401/403 are the control plane's "this session was revoked or deauthorized"
+        # (cloud_session._refresh_http_error says exactly that). Falling through left
+        # ``cloud_access_active`` true and every paid feature ticked on the dashboard
+        # forever, which is the same defect 402 was fixed for.
+        if getattr(exc, "status", None) in (401, 402, 403):
+            _record_authoritative_denial()
         return None
     if not access_token or not organization_id:
         return None
@@ -2280,6 +2406,7 @@ def _fetch_authoritative_entitlement() -> Optional[dict]:
         ) as response:
             raw = response.read(_ENTITLEMENT_MAX_RESPONSE_BYTES + 1)
     except urllib.error.HTTPError as exc:
+        status = exc.code
         # Draining and closing the error body can itself time out or reset, and a sibling
         # ``except`` clause of this ``try`` does not cover an exception raised inside this
         # handler. Leaving it unguarded is how a flaky cloud becomes an unhandled
@@ -2293,6 +2420,8 @@ def _fetch_authoritative_entitlement() -> Optional[dict]:
                 exc.close()
             except (OSError, ValueError):
                 pass
+        if status in (401, 402, 403):
+            _record_authoritative_denial()
         return None
     except Exception:  # noqa: BLE001 - transport, TLS, and URL failures are all "not now"
         return None
@@ -2348,7 +2477,9 @@ def _refresh_entitlement_in_background(known: dict) -> None:
     ``known`` is the answer currently being served (session record, else cached
     entitlement); its age decides whether to re-confirm. At most one refresh is in flight
     per process, and no thread is started at all unless a control-plane endpoint is actually
-    configured, so an unconnected (or offline) process does no background work whatsoever.
+    configured, so an unconnected process does no background work whatsoever. Failed
+    refreshes use bounded exponential backoff, preventing a dashboard read loop from
+    amplifying a control-plane outage or repeatedly presenting one rotating credential.
     """
 
     global _entitlement_refreshing
@@ -2361,20 +2492,39 @@ def _refresh_entitlement_in_background(known: dict) -> None:
     if not _cloud_control_url():
         return
     with _ENTITLEMENT_REFRESH_LOCK:
-        if _entitlement_refreshing:
+        if _entitlement_refreshing or time.monotonic() < _entitlement_retry_after:
             return
         _entitlement_refreshing = True
 
     def _run() -> None:
         global _entitlement_refreshing
+        global _entitlement_refresh_failures
+        global _entitlement_retry_after
+        refreshed = False
+        before = float(known.get("fetched_at") or 0.0)
         try:
             fetched = _fetch_authoritative_entitlement()
             if fetched is not None:
                 _write_entitlement_cache(fetched)
+                refreshed = True
+            else:
+                current = _session_entitlement() or _read_entitlement_cache()
+                refreshed = float(current.get("fetched_at") or 0.0) > before
         except Exception:  # noqa: BLE001 - a daemon thread must never surface anything
             pass
         finally:
             with _ENTITLEMENT_REFRESH_LOCK:
+                if refreshed:
+                    _entitlement_refresh_failures = 0
+                    _entitlement_retry_after = 0.0
+                else:
+                    _entitlement_refresh_failures += 1
+                    delay = min(
+                        _ENTITLEMENT_RETRY_BASE_SECONDS
+                        * (2 ** min(_entitlement_refresh_failures - 1, 10)),
+                        _ENTITLEMENT_RETRY_MAX_SECONDS,
+                    )
+                    _entitlement_retry_after = time.monotonic() + delay
                 _entitlement_refreshing = False
 
     try:
@@ -2633,14 +2783,18 @@ def get_license():
             "trial_days": licensing.TRIAL_DAYS,
         },
         "cloud_managed": True,
-        "trial_seconds": 259_200,
-        "grace_seconds": 86_400,
-        "grace_scope": "existing authenticated local workspace writes only",
+        "trial_seconds": licensing.TRIAL_SECONDS,
+        "grace_seconds": licensing.MAX_HOSTED_ACCOUNT_GRACE_SECONDS,
+        "grace_scope": "private hosted account continuity only; free local core unaffected",
         "upgrade_url": licensing.upgrade_url(),
         # Pro and Team bill through separate checkout targets. Emitting only the generic
         # URL sent every Team upgrade click to the Pro page.
-        "pro_upgrade_url": licensing.upgrade_url("pro"),
-        "team_upgrade_url": licensing.upgrade_url("team"),
+        "pro_upgrade_url": licensing.upgrade_url("pro", "monthly"),
+        "team_upgrade_url": licensing.upgrade_url("team", "monthly"),
+        "pro_monthly_upgrade_url": licensing.upgrade_url("pro", "monthly"),
+        "pro_annual_upgrade_url": licensing.upgrade_url("pro", "annual"),
+        "team_monthly_upgrade_url": licensing.upgrade_url("team", "monthly"),
+        "team_annual_upgrade_url": licensing.upgrade_url("team", "annual"),
         # The plan-neutral account entry point, for the actions that are not a purchase —
         # "Open account portal" on a lapsed subscription above all. ``upgrade_url()``
         # cannot serve that: with no argument it resolves ``plan="pro"`` and prefers
@@ -2654,8 +2808,8 @@ def _hosted_license_detail() -> dict:
     return {
         "error": "Start or manage Pro and Team in the Engraphis Cloud account portal.",
         "cloud_only": True,
-        "trial_seconds": 259_200,
-        "grace_seconds": 86_400,
+        "trial_seconds": licensing.TRIAL_SECONDS,
+        "grace_seconds": licensing.MAX_HOSTED_ACCOUNT_GRACE_SECONDS,
         "grace_extends_cloud_access": False,
         "upgrade_url": licensing.upgrade_url(),
     }

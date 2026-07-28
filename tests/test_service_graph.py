@@ -73,6 +73,49 @@ def test_graph_returns_seeded_nodes_and_edges():
     assert g["stats"] == {"entities": 2, "edges": 1, "connected": 2, "isolated": 0}
 
 
+def test_graph_aggregates_session_visibility_once_before_selecting_entities():
+    svc = MemoryService.create(":memory:")
+    _seed_entities(
+        svc, "acme",
+        [("Alice", "person_or_concept"), ("Acme Corp", "organization")],
+        [("Alice", "Acme Corp", "works_at")],
+    )
+    statements = []
+    svc.store.conn.set_trace_callback(statements.append)
+    try:
+        graph = svc.graph(workspace="acme", backfill=False)
+    finally:
+        svc.store.conn.set_trace_callback(None)
+
+    assert graph["edges"]
+    assert any("WITH edge_visibility AS" in statement for statement in statements)
+
+
+def test_graph_full_mode_reports_the_available_node_count_without_truncation():
+    svc = MemoryService.create(":memory:")
+    _seed_entities(
+        svc, "acme",
+        [(f"Entity {index}", "person_or_concept") for index in range(5)],
+        [],
+    )
+
+    overview = svc.graph(workspace="acme", limit=2, backfill=False)
+    complete = svc.graph(workspace="acme", limit=20_000, full=True, backfill=False)
+
+    assert len(overview["nodes"]) == 2
+    assert overview["meta"] == {
+        "nodes_available": 5,
+        "nodes_complete": False,
+        "mode": "overview",
+    }
+    assert len(complete["nodes"]) == 5
+    assert complete["meta"] == {
+        "nodes_available": 5,
+        "nodes_complete": True,
+        "mode": "full",
+    }
+
+
 def test_graph_on_nonexistent_workspace_is_empty_not_an_error():
     svc = MemoryService.create(":memory:")
     g = svc.graph(workspace="never-created")
@@ -455,6 +498,30 @@ def test_graph_hides_edges_before_their_validity_window():
     svc.store.conn.commit()
 
     assert svc.graph(workspace="acme")["edges"] == []
+
+
+def test_graph_as_of_includes_public_relation_history_for_time_view():
+    """The Time tab needs a bounded historical payload so its ghost switch can
+    distinguish a relation that was superseded from one that never existed."""
+    svc = MemoryService.create(":memory:")
+    _seed_entities(
+        svc, "acme",
+        [("Alice", "person"), ("Acme Corp", "organization")],
+        [("Alice", "Acme Corp", "works_at")],
+    )
+    svc.store.conn.execute(
+        "UPDATE edges SET valid_from=?, valid_to=? WHERE id='edge0'", (100.0, 200.0))
+    svc.store.conn.commit()
+
+    # The ordinary graph remains a current snapshot and does not surface a closed edge.
+    assert svc.graph(workspace="acme", backfill=False)["edges"] == []
+
+    historical = svc.graph(workspace="acme", as_of=150.0, backfill=False)
+    assert historical["edges"] == [{
+        "id": "edge0", "from": "ent0", "to": "ent1", "label": "works_at",
+        "layer": "entity", "valid_from": 100.0, "valid_to": 200.0,
+    }]
+    assert all(node["valid_from"] == 0 for node in historical["nodes"])
 
 
 def test_forgetting_one_support_keeps_a_multi_source_edge_live():

@@ -1,6 +1,7 @@
 # Default `docker compose up` runs the TEAM-capable dashboard (multi-user auth, roles,
 # seats, license revocation, Pro sync) — the thing teams actually deploy. The raw
-# single-user v1 API server is available under the "api" profile:
+# single-user v1 API server is available under the "api" profile after setting a strong
+# ENGRAPHIS_API_TOKEN in .env or the shell:
 #     docker compose --profile api up engraphis-api
 #
 # NOTE: the `env_file:` object form below (`- path: .env` + `required: false`, which makes
@@ -53,6 +54,10 @@ services:
         required: false
     environment:
       ENGRAPHIS_HOST: 0.0.0.0
+      # This process binds all container interfaces. Even though the published host port is
+      # loopback-only, require an explicit bearer so a changed port mapping cannot silently
+      # expose the legacy v1 API. Compose fails before creating the container if it is absent.
+      ENGRAPHIS_API_TOKEN: ${ENGRAPHIS_API_TOKEN:?Set ENGRAPHIS_API_TOKEN before starting the api profile}
       # The v1 server uses a DIFFERENT, incompatible memory schema from the v2 dashboard,
       # so it MUST NOT share the dashboard's engraphis.db (doing so corrupts both). Give it
       # its own file on the shared volume.
