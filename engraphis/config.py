@@ -458,8 +458,8 @@ def _configured_db_path(root: Path = _PROJECT_ROOT) -> str:
     return str(target)
 
 
-#: Vendor-hosted managed sync service. The account dashboard remains at
-#: ``team.engraphis.com``; sync traffic goes to its separate relay endpoint.
+#: Vendor-hosted managed sync service. The authenticated account portal is at
+#: ``https://api.engraphis.com/account``; sync traffic goes to this separate relay endpoint.
 DEFAULT_RELAY_URL = "https://relay.engraphis.com"
 
 SERVICE_MODES = ("customer",)

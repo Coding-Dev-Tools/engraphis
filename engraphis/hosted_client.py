@@ -111,11 +111,32 @@ def _safe_target(value: str) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
+    # urlsplit normalizes some ASCII controls while parsing.  Returning the original
+    # operator string after that would still put those controls in dashboard metadata
+    # and customer-facing hrefs, so reject them before parsing instead of relying on a
+    # browser-side sanitizer to repair server output.
+    if any(ord(char) < 32 or ord(char) == 127 for char in text):
+        return ""
     try:
         parts = urlsplit(text)
     except ValueError:
         return ""
-    if not parts.hostname:
+    if (
+        not parts.hostname
+        # Upgrade/account destinations are rendered as links, not credential-bearing
+        # transport endpoints.  Userinfo in an operator override would make browsers
+        # send that credential to the destination on click (and can expose it in the
+        # address bar or browser history), so it is never a safe hosted destination.
+        or parts.username is not None
+        or parts.password is not None
+    ):
+        return ""
+    try:
+        # Accessing ``port`` is validation: urlsplit accepts an invalid textual port
+        # until this property is read.  Do not hand a dead/malformed URL to the
+        # dashboard and call it a valid upgrade destination.
+        parts.port
+    except ValueError:
         return ""
     if parts.scheme == "https":
         return text
