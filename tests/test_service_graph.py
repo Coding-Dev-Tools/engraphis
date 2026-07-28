@@ -607,6 +607,65 @@ def test_graph_as_of_prioritizes_live_edges_before_the_history_cap():
     assert any(edge["id"] == "live_at_anchor" for edge in edges)
 
 
+def test_graph_as_of_hides_entities_until_their_public_support_begins():
+    """Historical entity visibility must not use public evidence from the future."""
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid, ids = _seed_entities(
+        svc, "acme",
+        [("Private Alice", "person"), ("Private Acme", "organization")], [],
+    )
+    session = svc.start_session("acme", repo="r", agent="codex", goal="private")
+    private_memory = svc.store.add_memory(MemoryRecord(
+        id="", content="Private Alice works at Private Acme.", workspace_id=wid,
+        session_id=session["session_id"], scope=Scope.SESSION, valid_from=100.0,
+    ))
+    public_memory = svc.store.add_memory(MemoryRecord(
+        id="", content="Private Alice works at Private Acme.", workspace_id=wid,
+        scope=Scope.WORKSPACE, valid_from=200.0,
+    ))
+    edge_id = svc.store.upsert_edge(Edge(
+        id="", src=ids["Private Alice"], dst=ids["Private Acme"],
+        relation="works_at", workspace_id=wid, valid_from=100.0,
+        provenance={"memory_id": private_memory},
+    ))
+    svc.store.add_edge_support(edge_id, {"memory_id": public_memory})
+    svc.store.conn.execute(
+        "UPDATE edge_supports SET valid_from=? WHERE edge_id=? AND memory_id=?",
+        (200.0, edge_id, public_memory),
+    )
+    svc.store.conn.commit()
+
+    assert svc.graph(workspace="acme", as_of=150.0, backfill=False)["nodes"] == []
+    assert {node["label"] for node in svc.graph(
+        workspace="acme", as_of=250.0, backfill=False,
+    )["nodes"]} == {"Private Alice", "Private Acme"}
+
+
+def test_graph_as_of_uses_supporting_fact_time_not_entity_backfill_time():
+    """Late graph extraction must not erase an already-valid historical entity."""
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid, ids = _seed_entities(
+        svc, "acme",
+        [("Historical Alice", "person"), ("Historical Acme", "organization")], [],
+    )
+    svc.store.conn.execute("UPDATE entities SET created_at=? WHERE workspace_id=?", (250.0, wid))
+    historical_memory = svc.store.add_memory(MemoryRecord(
+        id="", content="Historical Alice works at Historical Acme.", workspace_id=wid,
+        scope=Scope.WORKSPACE, valid_from=100.0,
+    ))
+    svc.store.upsert_edge(Edge(
+        id="", src=ids["Historical Alice"], dst=ids["Historical Acme"],
+        relation="works_at", workspace_id=wid, valid_from=100.0,
+        provenance={"memory_id": historical_memory},
+    ))
+
+    historical = svc.graph(workspace="acme", as_of=150.0, backfill=False)
+    assert {node["label"] for node in historical["nodes"]} == {
+        "Historical Alice", "Historical Acme",
+    }
+    assert {node["valid_from"] for node in historical["nodes"]} == {100.0}
+
+
 def test_forgetting_one_support_keeps_a_multi_source_edge_live():
     svc = MemoryService.create(":memory:")
     wid, ids = _seed_entities(
