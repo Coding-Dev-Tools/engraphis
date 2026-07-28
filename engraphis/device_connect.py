@@ -272,7 +272,7 @@ def client_identity() -> Tuple[str, str]:
             device = str(existing.get("device_client_id") or "").strip()
             if installation and device:
                 return installation, device
-            atomic_private_text(path, payload)
+            atomic_private_text(path, payload, harden_parent=True)
     except UnsafeStateFile as exc:
         raise DeviceConnectError(
             "The client identity file at %s could not be written safely." % path,

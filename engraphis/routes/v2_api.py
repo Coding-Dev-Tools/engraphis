@@ -2275,7 +2275,7 @@ def _write_entitlement_cache(entitlement: dict) -> None:
             "is_trial": bool(entitlement.get("is_trial")),
             "trial_consumed": bool(entitlement.get("trial_consumed")),
             "trial_ends_at": float(entitlement.get("trial_ends_at") or 0.0),
-        }, sort_keys=True, separators=(",", ":")))
+        }, sort_keys=True, separators=(",", ":")), harden_parent=True)
     except Exception:  # noqa: BLE001 - losing the cache write must not surface anywhere
         logger.debug("entitlement cache write skipped")
 

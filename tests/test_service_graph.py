@@ -477,6 +477,26 @@ def test_graph_memory_link_fallback_projects_bounded_content_excerpts():
     assert "right_memory.content as" not in projection
 
 
+def test_graph_memory_link_fallback_honors_the_requested_as_of_anchor():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    svc.engine.auto_evolve = False
+    first = svc.remember("Historical alpha", workspace="acme", scope="workspace")
+    second = svc.remember("Historical beta", workspace="acme", scope="workspace")
+    svc.link(first["id"], second["id"], workspace="acme", relation="causes")
+    svc.store.conn.execute(
+        "UPDATE memories SET valid_from=?, valid_to=? WHERE id IN (?, ?)",
+        (100.0, 200.0, first["id"], second["id"]),
+    )
+    svc.store.conn.commit()
+
+    assert svc.graph(workspace="acme", backfill=False)["edges"] == []
+    historical = svc.graph(workspace="acme", as_of=150.0, backfill=False)
+    assert historical["edges"] == [{
+        "from": first["id"], "to": second["id"],
+        "label": "causes", "layer": "causal",
+    }]
+
+
 def test_graph_lazy_backfill_is_idempotent():
     """Re-opening the Graph tab must not duplicate entities."""
     svc = MemoryService.create(":memory:", graph_extractor="regex")

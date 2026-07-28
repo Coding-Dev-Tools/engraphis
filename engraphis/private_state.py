@@ -152,14 +152,19 @@ def ensure_private_dir(directory: Path) -> None:
 
 
 def atomic_private_text(path: Path, value: str, *, mode: int = 0o600,
-                        expected_stat=_UNSET) -> None:
+                        expected_stat=_UNSET, harden_parent: bool = False) -> None:
     """Atomically replace a private leaf through an exclusive randomized temp file.
 
     A concurrent appearance or replacement is treated as a conflict instead of being
-    overwritten.  This is intentionally stricter than a generic atomic-write helper.
+    overwritten.  ``harden_parent`` is reserved for dedicated credential-state
+    directories: generic project files such as ``.env`` keep their existing directory
+    permissions while the replaced leaf remains private.
     """
     path = Path(path)
-    ensure_private_dir(path.parent)
+    if harden_parent:
+        ensure_private_dir(path.parent)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
     before = _checked_lstat(path, allow_missing=True)
     if expected_stat is not _UNSET:
         if expected_stat is None and before is not None:

@@ -303,7 +303,7 @@ def test_the_credential_state_directory_is_owner_only() -> None:
             ensure_private_dir(nested)
             assert nested.stat().st_mode & 0o777 == 0o700
             leaf = nested / "cloud_session.json"
-            atomic_private_text(leaf, "{}")
+            atomic_private_text(leaf, "{}", harden_parent=True)
             assert leaf.stat().st_mode & 0o777 == 0o600
     finally:
         os.umask(previous)

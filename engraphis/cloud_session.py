@@ -266,7 +266,9 @@ def _load() -> dict:
 def _save(value: dict) -> None:
     path = _session_path()
     ensure_private_dir(path.parent)
-    atomic_private_text(path, json.dumps(value, sort_keys=True, separators=(",", ":")))
+    atomic_private_text(
+        path, json.dumps(value, sort_keys=True, separators=(",", ":")), harden_parent=True,
+    )
 
 
 def preflight_save() -> Path:

@@ -5165,7 +5165,7 @@ class MemoryService:
         # here as a useful fallback for both Graph-tab clients.
         memory_link_fallback: list[dict] = []
         if not entity_rows and selected_graph_layers != []:
-            now = time.time()
+            now = temporal_anchor if temporal_anchor is not None else time.time()
             sql = (
                 "SELECT link.a, link.b, link.relation, "
                 "COALESCE(link.layer, 'semantic') AS layer, "
