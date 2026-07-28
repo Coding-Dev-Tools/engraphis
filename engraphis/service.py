@@ -5302,12 +5302,17 @@ class MemoryService:
                 )
             ]
         else:
+            anchor = repr(temporal_anchor)
             history_sql = (
                 "SELECT relation.id, relation.src, relation.dst, relation.relation, "
                 "relation.layer, relation.valid_from, relation.valid_to "
                 "FROM edges relation WHERE relation.workspace_id=? "
                 "AND relation.expired_at IS NULL AND "
                 + _graph_edge_history_visibility_sql("relation", at=temporal_anchor)
+                # History may include previously-public ghosts, but never a relation
+                # first born after the requested anchor. This predicate must run before
+                # the bounded query orders and caps its candidate rows.
+                + " AND (relation.valid_from IS NULL OR relation.valid_from<=" + anchor + ")"
             )
             history_params: list[Any] = [wid]
             if selected_layers is not None:
@@ -5317,7 +5322,6 @@ class MemoryService:
                     marks = ",".join("?" for _ in selected_layers)
                     history_sql += f" AND relation.layer IN ({marks})"
                     history_params.extend(sorted(selected_layers))
-            anchor = repr(temporal_anchor)
             live_at_anchor = (
                 "(relation.valid_from IS NULL OR relation.valid_from<=" + anchor + ") "
                 "AND (relation.valid_to IS NULL OR " + anchor + "<relation.valid_to)"

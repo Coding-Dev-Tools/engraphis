@@ -607,6 +607,33 @@ def test_graph_as_of_prioritizes_live_edges_before_the_history_cap():
     assert any(edge["id"] == "live_at_anchor" for edge in edges)
 
 
+def test_graph_as_of_excludes_future_supportless_edges_before_history_cap():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid, ids = _seed_entities(
+        svc, "acme",
+        [("Alice", "person"), ("Acme Corp", "organization")],
+        [("Alice", "Acme Corp", "works_at")],
+    )
+    conn = svc.store.conn
+    conn.execute("UPDATE edges SET valid_from=100, valid_to=125 WHERE id='edge0'")
+    conn.executemany(
+        "INSERT INTO edges(id, workspace_id, src, dst, relation, layer, valid_from) "
+        "VALUES (?, ?, ?, ?, ?, 'semantic', 200)",
+        [
+            (f"future_{index:04d}", wid, ids["Alice"], ids["Acme Corp"],
+             f"future_relation_{index:04d}")
+            for index in range(2_000)
+        ],
+    )
+    conn.commit()
+
+    # limit=250 keeps both endpoint nodes but sets the independent edge cap to 2,000.
+    # Without the as-of valid_from predicate, future support-less edges consume that cap
+    # before the renderer can discard them and the historical ghost is lost.
+    edges = svc.graph(workspace="acme", as_of=150.0, limit=250, backfill=False)["edges"]
+    assert [edge["id"] for edge in edges] == ["edge0"]
+
+
 def test_graph_as_of_hides_entities_until_their_public_support_begins():
     """Historical entity visibility must not use public evidence from the future."""
     svc = MemoryService.create(":memory:", graph_extractor="none")
