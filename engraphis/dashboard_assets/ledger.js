@@ -17,6 +17,7 @@
     graphData: null,
     graphDataMode: 'overview',
     graphDataIncludeCode: false,
+    graphDataAsOf: null,
     graphMeta: null,
     graphMode: 'overview',
     graphScopeBeforeFull: null,
@@ -25,6 +26,7 @@
     graphLoadWorkspace: '',
     graphLoadMode: '',
     graphLoadIncludeCode: false,
+    graphLoadAsOf: null,
     graphLoadController: null,
     graphMetrics: {},
     graphFrozen: false,
@@ -1370,8 +1372,7 @@
     return Number.isFinite(timestamp) ? timestamp : null;
   }
 
-  function graphAsOfQuery() {
-    const timestamp = graphAsOfTimestamp();
+  function graphAsOfQuery(timestamp = graphAsOfTimestamp()) {
     return timestamp === null ? '' : `&as_of=${encodeURIComponent(timestamp / 1000)}`;
   }
 
@@ -1379,18 +1380,22 @@
     if (!state.workspace) return;
     if (!force && state.graphWorkspace === state.workspace
       && state.graphDataMode === state.graphMode
-      && state.graphDataIncludeCode === state.graphIncludeCode && state.graphData) {
+      && state.graphDataIncludeCode === state.graphIncludeCode
+      && state.graphDataAsOf === graphAsOfTimestamp() && state.graphData) {
       if (state.graphEngine) state.graphEngine.resize();
       return;
     }
     const targetWorkspace = state.workspace;
     const targetMode = state.graphMode;
     const targetIncludeCode = state.graphIncludeCode;
+    const targetAsOf = graphAsOfTimestamp();
     const fullGraph = targetMode === 'full';
     if (state.graphLoadPromise && state.graphLoadWorkspace === targetWorkspace
-      && state.graphLoadMode === targetMode && state.graphLoadIncludeCode === targetIncludeCode) {
+      && state.graphLoadMode === targetMode && state.graphLoadIncludeCode === targetIncludeCode
+      && state.graphLoadAsOf === targetAsOf) {
       return state.graphLoadPromise;
     }
+    if (state.graphLoadPromise && state.graphLoadController) state.graphLoadController.abort();
     byId('graph-empty').hidden = false;
     byId('graph-empty').textContent = fullGraph
       ? 'Loading every available graph node…'
@@ -1406,18 +1411,20 @@
         const limit = fullGraph ? GRAPH_FULL_NODE_LIMIT : GRAPH_INITIAL_NODE_LIMIT;
         const complete = fullGraph ? '&full=true' : '';
         const includeCode = targetIncludeCode ? '&include_code=true' : '';
-        const asOf = graphAsOfQuery();
+        const asOf = graphAsOfQuery(targetAsOf);
         const [payload] = await Promise.all([
           api(`/graph?${query(targetWorkspace)}&limit=${limit}${complete}${includeCode}${asOf}`, { signal: controller.signal }),
           ensureGraphAssets(),
         ]);
         if (state.workspace !== targetWorkspace || state.graphMode !== targetMode
-          || state.graphIncludeCode !== targetIncludeCode) return;
+          || state.graphIncludeCode !== targetIncludeCode
+          || graphAsOfTimestamp() !== targetAsOf) return;
         const data = { nodes: graphNodes(payload), links: graphLinks(payload), suggestions: payload.suggestions || [] };
         state.graphData = data;
         state.graphWorkspace = targetWorkspace;
         state.graphDataMode = targetMode;
         state.graphDataIncludeCode = targetIncludeCode;
+        state.graphDataAsOf = targetAsOf;
         state.graphMeta = payload.meta || {
           nodes_available: data.nodes.length,
           nodes_complete: fullGraph,
@@ -1449,7 +1456,7 @@
           graph.setScope(graphScope());
           graph.setLayers(graphLayerState());
           graph.setRepoFilter(byId('graph-repo-filter').value);
-          graph.setAsOf(graphAsOfTimestamp());
+          graph.setAsOf(targetAsOf);
           graph.setSizeBy(byId('graph-size').value);
           graph.setBridges(byId('graph-bridges').checked);
           graph.setCollapse(fullGraph ? false : (byId('graph-collapse').checked ? 'auto' : false));
@@ -1463,7 +1470,9 @@
         updateGraphFacts(data);
         updateGraphLayerCounts(data, payload.layers);
       } catch (error) {
-        if (state.workspace !== targetWorkspace || state.graphMode !== targetMode) return;
+        if (state.workspace !== targetWorkspace || state.graphMode !== targetMode
+          || state.graphIncludeCode !== targetIncludeCode
+          || graphAsOfTimestamp() !== targetAsOf) return;
         byId('graph-empty').hidden = false;
         byId('graph-empty').textContent = error && error.name === 'AbortError'
           ? `${fullGraph ? 'Full graph' : 'Graph'} loading timed out. Choose Retry to try again.`
@@ -1476,6 +1485,7 @@
     state.graphLoadWorkspace = targetWorkspace;
     state.graphLoadMode = targetMode;
     state.graphLoadIncludeCode = targetIncludeCode;
+    state.graphLoadAsOf = targetAsOf;
     state.graphLoadPromise = task;
     try {
       return await task;
@@ -1485,6 +1495,7 @@
         state.graphLoadWorkspace = '';
         state.graphLoadMode = '';
         state.graphLoadIncludeCode = false;
+        state.graphLoadAsOf = null;
       }
     }
   }

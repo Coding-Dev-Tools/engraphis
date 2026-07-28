@@ -329,18 +329,17 @@ def emit_startup_notice(emit: Optional[Callable[[str], None]] = None,
 
 def emit_cli_notice(emit: Optional[Callable[[str], None]] = None,
                     timeout: float = DEFAULT_TIMEOUT) -> None:
-    """Print an update notice for a short-lived terminal command.
+    """Print a cached update notice without delaying local CLI commands.
 
-    Unlike the server startup helper, this checks on the calling thread so a CLI process
-    cannot exit before its daemon refresh thread has a chance to print the notice. The
-    cache keeps normal invocations cheap, and every failure remains fail-silent.
+    A missing or stale cache schedules a background refresh through ``snapshot``;
+    this caller never waits for network I/O.
     """
     if not enabled():
         return
     printer = emit if emit is not None else (
         lambda line: print("[engraphis] %s" % line, file=sys.stderr))
     try:
-        line = notice_line(check(timeout=timeout))
+        line = notice_line(snapshot())
     except Exception:  # noqa: BLE001 - a convenience feature must never break the CLI
         return
     if line:

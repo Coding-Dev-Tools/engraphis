@@ -175,17 +175,20 @@ def test_notice_line(monkeypatch):
     assert u.notice_line({"enabled": True, "update_available": False}) is None
 
 
-def test_cli_notice_checks_synchronously_and_is_fail_silent(monkeypatch):
+def test_cli_notice_uses_the_non_blocking_snapshot_and_is_fail_silent(monkeypatch):
     seen = []
     monkeypatch.setenv("ENGRAPHIS_UPDATE_CHECK", "1")
-    monkeypatch.setattr(u, "check", lambda **_kwargs: {
+    monkeypatch.setattr(u, "snapshot", lambda: {
         "enabled": True, "update_available": True, "latest": "1.4.0", "current": "1.0.0",
         "url": "https://rel/1.4.0",
     })
+    monkeypatch.setattr(
+        u, "check", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not block")),
+    )
     u.emit_cli_notice(seen.append)
     assert seen and "1.4.0" in seen[0]
 
-    monkeypatch.setattr(u, "check", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(u, "snapshot", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
     u.emit_cli_notice(seen.append)
     assert len(seen) == 1
 

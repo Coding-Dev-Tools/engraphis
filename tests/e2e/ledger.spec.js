@@ -117,6 +117,9 @@ async function mockApi(page, options = {}) {
     if (path === '/audit') return ok({ workspace, audit: [] });
     if (path === '/receipts') return ok({ workspace, receipts: [] });
     if (path === '/graph') {
+      if (typeof options.deferGraphRequest === 'function') {
+        await options.deferGraphRequest(requestUrl);
+      }
       const asOf = Number(requestUrl.searchParams.get('as_of'));
       // Make the historical payload depend on the server's selected-day anchor. A client
       // that filters at midnight would incorrectly discard these later-in-the-day records.
@@ -375,6 +378,34 @@ test('Graph & Relations uses the visual explorer controls and applies their stat
   await expect(page.locator('#graph-flow-speed')).toHaveValue('45');
   await expect(page.getByRole('switch', { name: 'Relation flow' })).toHaveAttribute('aria-checked', 'false');
   await expect(page.getByRole('switch', { name: 'Freeze simulation' })).toHaveAttribute('aria-checked', 'true');
+});
+
+test('changing the time anchor replaces a pending graph request', async ({ page }) => {
+  let releaseInitial;
+  const initialRelease = new Promise(resolve => { releaseInitial = resolve; });
+  let initialStarted;
+  const waitForInitial = new Promise(resolve => { initialStarted = resolve; });
+  await mockApi(page, {
+    deferGraphRequest: async url => {
+      if (!url.searchParams.has('as_of')) {
+        initialStarted();
+        await initialRelease;
+      }
+    },
+  });
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Graph & Relations' }).click();
+  await waitForInitial;
+
+  await page.getByRole('tab', { name: 'Time' }).click();
+  const anchored = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname === '/api/graph' && url.searchParams.has('as_of');
+  }, { timeout: 5_000 });
+  await page.getByLabel('As of date').fill('2021-01-01');
+  await anchored;
+  releaseInitial();
+  await expect(page.locator('#graph-count')).toContainText('1 relations');
 });
 
 test('a custom graph view restores every saved control and server filter', async ({ page }) => {

@@ -117,21 +117,28 @@ def _graph_edge_visibility_sql(edge_alias: str, *, at: Optional[float] = None) -
     )
 
 
-def _graph_edge_history_visibility_sql(edge_alias: str) -> str:
+def _graph_edge_history_visibility_sql(edge_alias: str, *, at: float) -> str:
     """Visibility predicate for a time-travel graph payload.
 
-    The ordinary graph reader asks whether evidence is public *at now*.  The Time
-    view instead deliberately includes a relation's public history so the browser
-    can distinguish live relations from superseded ghosts at the chosen anchor.
-    Hard-expired evidence remains hidden in either case.
+    The ordinary graph reader asks whether evidence is public *at now*. The Time
+    view instead includes a relation's public history so the browser can distinguish
+    live relations from superseded ghosts at the chosen anchor. Public support must
+    have begun by that anchor, but it need not still be live: an invalidated public
+    relation is intentionally retained as a ghost. Hard-expired evidence remains
+    hidden in either case.
     """
+    anchor = repr(float(at))
     return (
         "(NOT EXISTS (SELECT 1 FROM edge_supports history_support "
         f"WHERE history_support.edge_id={edge_alias}.id) OR EXISTS ("
         "SELECT 1 FROM edge_supports history_support "
         "JOIN memories history_memory ON history_memory.id=history_support.memory_id "
         f"WHERE history_support.edge_id={edge_alias}.id "
+        "AND (history_support.valid_from IS NULL "
+        f"OR history_support.valid_from<={anchor}) "
         "AND history_support.expired_at IS NULL "
+        "AND (history_memory.valid_from IS NULL "
+        f"OR history_memory.valid_from<={anchor}) "
         "AND history_memory.expired_at IS NULL "
         "AND COALESCE(history_memory.scope, 'workspace')!='session'))"
     )
@@ -5254,7 +5261,7 @@ class MemoryService:
                 "relation.layer, relation.valid_from, relation.valid_to "
                 "FROM edges relation WHERE relation.workspace_id=? "
                 "AND relation.expired_at IS NULL AND "
-                + _graph_edge_history_visibility_sql("relation")
+                + _graph_edge_history_visibility_sql("relation", at=temporal_anchor)
             )
             history_params: list[Any] = [wid]
             if selected_layers is not None:
@@ -5264,7 +5271,17 @@ class MemoryService:
                     marks = ",".join("?" for _ in selected_layers)
                     history_sql += f" AND relation.layer IN ({marks})"
                     history_params.extend(sorted(selected_layers))
-            history_sql += " ORDER BY relation.valid_from, relation.id LIMIT ?"
+            anchor = repr(temporal_anchor)
+            live_at_anchor = (
+                "(relation.valid_from IS NULL OR relation.valid_from<=" + anchor + ") "
+                "AND (relation.valid_to IS NULL OR " + anchor + "<relation.valid_to)"
+            )
+            # The bounded Time payload must first preserve relations that were live at
+            # the selected anchor. Remaining capacity is then used for recent ghosts.
+            history_sql += (
+                " ORDER BY CASE WHEN " + live_at_anchor + " THEN 0 ELSE 1 END, "
+                "relation.valid_from DESC, relation.id LIMIT ?"
+            )
             history_params.append(edge_cap)
             edgs = [
                 dict(row) for row in conn.execute(history_sql, history_params).fetchall()

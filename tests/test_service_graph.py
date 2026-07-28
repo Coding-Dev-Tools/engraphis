@@ -544,6 +544,69 @@ def test_graph_as_of_includes_public_relation_history_for_time_view():
     assert all(node["valid_from"] == 0 for node in historical["nodes"])
 
 
+def test_graph_as_of_hides_relations_before_their_public_support_started():
+    """A relation with only session support at the anchor must remain private.
+
+    It becomes visible once workspace evidence begins, while the same temporal path
+    still includes formerly public invalidated relations as ghosts.
+    """
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid, ids = _seed_entities(
+        svc, "acme",
+        [("Alice", "person"), ("Acme Corp", "organization")],
+        [("Alice", "Acme Corp", "works_at")],
+    )
+    conn = svc.store.conn
+    conn.execute("UPDATE edges SET valid_from=100 WHERE id='edge0'")
+    conn.executemany(
+        "INSERT INTO memories(id, workspace_id, scope, content, valid_from, ingested_at) "
+        "VALUES (?,?,?,?,?,?)",
+        [
+            ("mem_private", wid, "session", "private evidence", 100.0, 100.0),
+            ("mem_public", wid, "workspace", "public evidence", 200.0, 200.0),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO edge_supports(edge_id, memory_id, source_kind, confidence, valid_from, ingested_at) "
+        "VALUES ('edge0', ?, 'structured', 1.0, ?, ?)",
+        [("mem_private", 100.0, 100.0), ("mem_public", 200.0, 200.0)],
+    )
+    conn.commit()
+
+    assert svc.graph(workspace="acme", as_of=150.0, backfill=False)["edges"] == []
+    visible = svc.graph(workspace="acme", as_of=250.0, backfill=False)["edges"]
+    assert [(edge["from"], edge["to"], edge["label"])
+            for edge in visible] == [(ids["Alice"], ids["Acme Corp"], "works_at")]
+
+
+def test_graph_as_of_prioritizes_live_edges_before_the_history_cap():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid, ids = _seed_entities(
+        svc, "acme",
+        [("Alice", "person"), ("Acme Corp", "organization")],
+        [("Alice", "Acme Corp", "works_at")],
+    )
+    conn = svc.store.conn
+    conn.execute("UPDATE edges SET valid_from=100 WHERE id='edge0'")
+    conn.execute(
+        "INSERT INTO edges(id, workspace_id, src, dst, relation, layer, valid_from) "
+        "VALUES ('live_at_anchor', ?, ?, ?, 'works_at', 'semantic', 100)",
+        (wid, ids["Alice"], ids["Acme Corp"]),
+    )
+    conn.executemany(
+        "INSERT INTO edges(id, workspace_id, src, dst, relation, layer, valid_from, valid_to) "
+        "VALUES (?, ?, ?, ?, 'old_relation', 'semantic', 1, 2)",
+        [
+            (f"old_{index:04d}", wid, ids["Alice"], ids["Acme Corp"])
+            for index in range(2_000)
+        ],
+    )
+    conn.commit()
+
+    edges = svc.graph(workspace="acme", as_of=150.0, backfill=False)["edges"]
+    assert any(edge["id"] == "live_at_anchor" for edge in edges)
+
+
 def test_forgetting_one_support_keeps_a_multi_source_edge_live():
     svc = MemoryService.create(":memory:")
     wid, ids = _seed_entities(
