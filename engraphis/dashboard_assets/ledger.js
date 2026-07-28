@@ -1174,11 +1174,26 @@
     const palette = ['theme', 'aurora', 'ocean', 'ember', 'contrast', 'custom'].includes(view.palette)
       ? view.palette : byId('graph-palette').value;
     const previousIncludeCode = state.graphIncludeCode;
-    state.graphIncludeCode = view.includeCode === true;
+    const previousAsOf = byId('graph-as-of').value;
+    const asOf = typeof view.asOf === 'string' ? view.asOf : previousAsOf;
+    const repoFilter = typeof view.repoFilter === 'string'
+      ? view.repoFilter.slice(0, 200) : byId('graph-repo-filter').value;
+    state.graphIncludeCode = typeof view.includeCode === 'boolean'
+      ? view.includeCode : state.graphIncludeCode;
+    state.graphFrozen = typeof view.frozen === 'boolean' ? view.frozen : state.graphFrozen;
     byId('graph-preset').value = preset;
     byId('graph-style').value = style;
     byId('graph-color').value = color;
     byId('graph-palette').value = palette;
+    byId('graph-as-of').value = asOf;
+    byId('graph-repo-filter').value = repoFilter;
+    if (typeof view.ghosts === 'boolean') byId('graph-ghosts').checked = view.ghosts;
+    if (['degree', 'betweenness'].includes(view.size)) byId('graph-size').value = view.size;
+    if (typeof view.bridges === 'boolean') byId('graph-bridges').checked = view.bridges;
+    if (typeof view.collapse === 'boolean') byId('graph-collapse').checked = view.collapse;
+    if (typeof view.flow === 'boolean') setGraphSwitch('graph-flow', view.flow);
+    if (typeof view.labels === 'boolean') setGraphSwitch('graph-labels', view.labels);
+    setGraphSwitch('graph-freeze', state.graphFrozen);
     syncGraphTuning({
       ...graphPresetTuning(preset),
       ...(view.tuning && typeof view.tuning === 'object' ? view.tuning : {}),
@@ -1203,11 +1218,17 @@
         });
         graph.setScope(graphScope());
         graph.setLayers(graphLayerState());
+        graph.setRepoFilter(repoFilter);
+        graph.setAsOf(graphAsOfTimestamp());
+        graph.setSizeBy(byId('graph-size').value);
+        graph.setBridges(byId('graph-bridges').checked);
+        graph.setCollapse(byId('graph-collapse').checked ? 'auto' : false);
+        graph.setGhosts(byId('graph-ghosts').checked);
       }, false, !state.graphFrozen);
       state.graphEngine.freeze(state.graphFrozen);
     }
     saveGraphPreferences();
-    if (previousIncludeCode !== state.graphIncludeCode) loadGraph({ force: true });
+    if (previousIncludeCode !== state.graphIncludeCode || previousAsOf !== asOf) loadGraph({ force: true });
     const label = all('[data-graph-saved-view]').find(control => control.dataset.graphSavedView === id);
     showNotice(`${id === 'custom' ? 'Saved' : (label ? label.textContent : 'Saved')} graph view applied.`);
   }

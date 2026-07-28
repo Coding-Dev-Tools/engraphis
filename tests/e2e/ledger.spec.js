@@ -377,6 +377,57 @@ test('Graph & Relations uses the visual explorer controls and applies their stat
   await expect(page.getByRole('switch', { name: 'Freeze simulation' })).toHaveAttribute('aria-checked', 'true');
 });
 
+test('a custom graph view restores every saved control and server filter', async ({ page }) => {
+  await page.route('**/', async route => {
+    const response = await route.fetch();
+    const html = await response.text();
+    await route.fulfill({
+      response,
+      body: html.replace(
+        'data-graph-saved-view="operations" aria-pressed="false">Operations',
+        'data-graph-saved-view="custom" aria-pressed="false">Saved custom',
+      ),
+    });
+  });
+  await page.addInitScript(() => {
+    localStorage.setItem('engraphis-ledger-graph-custom-view-v1', JSON.stringify({
+      preset: 'radial', style: 'galaxy', color: 'type', palette: 'ocean',
+      flow: false, labels: true, frozen: true,
+      tuning: { repel: 80, link: 26, gravity: 12, size: 4, font: 13, linkw: 0.75, labelDensity: 55, flowSpeed: 67 },
+      minDegree: 1, depth: 1, showUnlinked: true,
+      layers: { temporal: false, entity: true, causal: false, semantic: true, code: true },
+      includeCode: true, bridges: true, collapse: true,
+      asOf: '2021-01-01', ghosts: false, size: 'betweenness', repoFilter: 'agent-memory',
+    }));
+  });
+  await mockApi(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Graph & Relations' }).click();
+
+  const restored = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname === '/api/graph' && url.searchParams.has('as_of')
+      && url.searchParams.get('include_code') === 'true';
+  });
+  await page.getByRole('button', { name: 'Saved custom' }).click();
+  await restored;
+
+  await expect(page.getByRole('button', { name: 'Galaxy' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'Radial' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: 'Type' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-flow-speed')).toHaveValue('67');
+  await expect(page.locator('#graph-repel')).toHaveValue('80');
+  await expect(page.getByRole('switch', { name: 'Relation flow' })).toHaveAttribute('aria-checked', 'false');
+  await expect(page.getByRole('switch', { name: 'Entity labels' })).toHaveAttribute('aria-checked', 'true');
+  await expect(page.getByRole('switch', { name: 'Freeze simulation' })).toHaveAttribute('aria-checked', 'true');
+  await expect(page.getByLabel('Size by')).toHaveValue('betweenness');
+  await expect(page.getByLabel('Highlight bridges')).toBeChecked();
+  await expect(page.getByLabel('Auto-collapse clusters')).toBeChecked();
+  await expect(page.getByLabel('As of date')).toHaveValue('2021-01-01');
+  await expect(page.getByLabel('Show superseded ghosts')).not.toBeChecked();
+  await expect(page.getByPlaceholder('Filter to a repository or topic…')).toHaveValue('agent-memory');
+});
+
 test('themes persist and both visible interface selectors round-trip', async ({ page }) => {
   const errors = browserErrors(page);
   const isAxeStyleProbe = message => (
