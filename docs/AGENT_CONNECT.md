@@ -25,9 +25,9 @@ organization:
 
 1. The organization owner starts Team or purchases a subscription in Engraphis Cloud.
 2. The owner invites named members and assigns roles in the hosted dashboard.
-3. A member accepts the invitation and generates a one-time **connect token** (`engr_ct_…`).
-   The account portal shows the exact command to run.
-4. The member runs that command on the machine being connected (see below).
+3. An organization owner or admin generates a one-time **connect token** (`engr_ct_…`) for
+   their own connected machine. The account portal shows the exact command to run.
+4. That owner or admin runs the command on the machine being connected (see below).
 5. The hosted service rechecks organization membership, role, scopes, entitlement version, and
    workspace binding on every request.
 

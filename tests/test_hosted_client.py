@@ -38,6 +38,23 @@ def test_upgrade_urls_are_hosted_metadata_only(monkeypatch):
     assert hosted_client.required_plan("team") == "team"
 
 
+@pytest.mark.parametrize("value", [
+    "https://operator:secret@billing.example.test/account",
+    "https://billing.example.test:not-a-port/account",
+    "https://billing.example.test/\naccount",
+])
+def test_hosted_checkout_overrides_reject_userinfo_and_invalid_ports(monkeypatch, value):
+    """Never render a plan CTA that embeds credentials or cannot be opened safely."""
+
+    monkeypatch.setenv("ENGRAPHIS_PRO_UPGRADE_URL", value)
+    monkeypatch.setenv("ENGRAPHIS_UPGRADE_URL", value)
+
+    assert hosted_client.upgrade_url("pro") == (
+        "https://api.engraphis.com/account?plan=pro&interval=monthly#billing"
+    )
+    assert hosted_client.account_url() == "https://api.engraphis.com/account"
+
+
 def test_cloud_url_validation_requires_safe_remote_https(monkeypatch):
     monkeypatch.setattr(
         hosted_client.socket,
