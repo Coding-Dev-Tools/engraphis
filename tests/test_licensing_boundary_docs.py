@@ -65,6 +65,8 @@ def test_manifest_uses_stripe_as_the_only_launch_billing_authority():
     assert billing["legacy_providers"] == []
     assert billing["checkout_mode"] == "authenticated_server_session"
     assert billing["provider_price_ids_public"] is False
+    assert manifest["account_portal"] == "https://api.engraphis.com/account"
+    assert "managed_dashboard" not in manifest
     assert set(targets) == {
         ("pro", "monthly"),
         ("pro", "annual"),
