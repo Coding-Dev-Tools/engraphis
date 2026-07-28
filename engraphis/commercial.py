@@ -21,12 +21,17 @@ def manifest() -> dict:
 
 def expected_checkout_targets() -> dict:
     """Return public onboarding targets without exposing provider-side price identifiers."""
+    # Read defensively: the release check calls this *after* collecting its own structural
+    # errors, so a missing plan/products block must not raise a KeyError here and abort
+    # before those errors are printed. Missing entries simply do not appear.
+    plans = manifest().get("plans", {})
     expected = {}
     for plan_name in ("pro", "team"):
-        for interval, product in manifest()["plans"][plan_name]["products"].items():
+        products = plans.get(plan_name, {}).get("products", {})
+        for interval, product in products.items():
             expected[(plan_name, interval)] = {
-                "provider": product["provider"],
-                "checkout_url": product["checkout_url"],
+                "provider": product.get("provider"),
+                "checkout_url": product.get("checkout_url"),
                 "plan": plan_name,
                 "interval": interval,
             }

@@ -129,15 +129,42 @@ def read_private_text(path: Path, *, max_bytes: int,
         raise _unsafe(path, "file is not valid UTF-8") from None
 
 
+def ensure_private_dir(directory: Path) -> None:
+    """Create *directory* (and parents) as an owner-only directory.
+
+    A bare ``mkdir(parents=True, exist_ok=True)`` yields 0755 under the default umask,
+    so the directory holding this installation's cloud credentials was world-listable:
+    the leaf files are 0600, but any local user could enumerate names, sizes and mtimes
+    and learn that the host is cloud-connected and when its refresh credential last
+    rotated. It also meant any future file added to that directory without going through
+    these helpers would inherit 0644. Mirrors the pattern already used in config.py.
+
+    An operator-owned pre-existing volume that refuses ``chmod`` is not fatal: the 0600
+    leaf still holds, and failing the write would be worse than the metadata exposure.
+    """
+
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+
+
 def atomic_private_text(path: Path, value: str, *, mode: int = 0o600,
-                        expected_stat=_UNSET) -> None:
+                        expected_stat=_UNSET, harden_parent: bool = False) -> None:
     """Atomically replace a private leaf through an exclusive randomized temp file.
 
     A concurrent appearance or replacement is treated as a conflict instead of being
-    overwritten.  This is intentionally stricter than a generic atomic-write helper.
+    overwritten.  ``harden_parent`` is reserved for dedicated credential-state
+    directories: generic project files such as ``.env`` keep their existing directory
+    permissions while the replaced leaf remains private.
     """
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    if harden_parent:
+        ensure_private_dir(path.parent)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
     before = _checked_lstat(path, allow_missing=True)
     if expected_stat is not _UNSET:
         if expected_stat is None and before is not None:
@@ -184,7 +211,7 @@ def publish_private_text_if_absent(path: Path, value: str, *, mode: int = 0o600)
     the leaf.  Callers must validate/read the winner with :func:`read_private_text`.
     """
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(path.parent)
     _checked_lstat(path, allow_missing=True)
     fd, name = tempfile.mkstemp(prefix=".%s." % path.name, dir=str(path.parent))
     temporary = Path(name)

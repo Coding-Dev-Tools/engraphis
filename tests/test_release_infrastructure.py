@@ -42,6 +42,16 @@ def test_published_image_and_railway_template_fail_safe_to_customer_mode():
         assert removed not in template["variables"]
 
 
+def test_compose_api_profile_requires_a_token_for_its_non_loopback_bind():
+    compose = _text("docker-compose.yml")
+    api_profile = compose.split("  engraphis-api:\n", 1)[1].split("\nvolumes:", 1)[0]
+    readme = _text("README.md")
+
+    assert "ENGRAPHIS_HOST: 0.0.0.0" in api_profile
+    assert "ENGRAPHIS_API_TOKEN: ${ENGRAPHIS_API_TOKEN:?" in api_profile
+    assert "ENGRAPHIS_API_TOKEN='generate-a-strong-unique-value'" in readme
+
+
 def test_ci_and_release_audit_production_image_dependencies():
     ci = _text(".github/workflows/ci.yml")
     release = _text(".github/workflows/release.yml")
@@ -61,6 +71,18 @@ def test_ci_and_release_audit_production_image_dependencies():
     assert "Require release tag commit to be on protected main" in release
     for version in ('"3.9"', '"3.10"', '"3.11"', '"3.12"'):
         assert version in release
+
+
+def test_ci_and_release_never_hide_skips_or_lose_the_full_stack_silently():
+    """The configured ``-q`` plus a workflow ``-q`` used to hide counts and skips."""
+
+    for path in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+        workflow = _text(path)
+        assert "python -m pytest tests/ -q" not in workflow
+        assert 'python -m pytest -o addopts="" tests/ -q -rs' in workflow
+    required = 'import fastapi, httpx, mcp, multipart, pydantic, uvicorn'
+    assert required in _text(".github/workflows/ci.yml")
+    assert required in _text(".github/workflows/release.yml")
 
 
 def test_release_builds_one_portable_open_core_wheel():
@@ -214,6 +236,11 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         ROOT / name for name in (
             ".env.example", "AGENTS.md", "CHANGELOG.md", "NOTICE", "README.md",
             "SECURITY.md", "engraphis/config.py", "engraphis/routes/v2_api.py",
+            "engraphis/dashboard_assets/index.html",
+            "engraphis/dashboard_assets/ledger.css",
+            "engraphis/dashboard_assets/ledger.js",
+            "engraphis/classic_assets/index.html",
+            "engraphis/classic_assets/dashboard.js",
             "engraphis/static/dashboard.js", "engraphis/static/index.html",
         )
     ]

@@ -158,7 +158,7 @@ def _sync_read_only_path() -> Path:
 
 def _atomic_private_text(path: Path, value: str) -> None:
     """Atomically write one owner-only state value next to the sync credential."""
-    atomic_private_text(path, value + "\n")
+    atomic_private_text(path, value + "\n", harden_parent=True)
 
 
 def save_sync_token(token: str, *, relay_origin: Optional[str] = None) -> None:

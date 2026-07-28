@@ -3,7 +3,60 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
-## [Unreleased]
+## [1.1.2] - 2026-07-27
+
+### Added
+
+- **The complete Ledger design is now the primary local WebUI**, ported from the final
+  five-area design package without its sample store or unsafe design runtime. Today, grounded
+  Ask, Library, the advanced Graph & Relations view, Provenance, and Manage all use live v2 data.
+  Manage includes workspaces, reviewed local consolidation, hosted Analytics/Automation/Team
+  status, the full plan comparison, settings, and persisted Slate, Midnight, Paper, and Matrix
+  themes.
+- Ledger now exposes the production grounded-answer route (`POST /api/answer`), returning a
+  cited answer or an explicit abstention. Graph & Relations ships the supplied graph capabilities:
+  five layouts, four render styles, palettes, degree/betweenness sizing, bridge detection,
+  valid-time filtering, superseded ghosts, focus, and automatic cluster collapse.
+- The complete former dashboard remains available at `/classic`. Both interfaces expose a
+  visible dashboard selector and share the same workspaces, memories, receipts, and engine.
+
+### Changed
+
+- Ledger defers both the CSP-sensitive renderer and graph payload until Graph & Relations is opened,
+  ignores stale workspace responses, renders memory text through DOM text nodes, and provides
+  responsive, reduced-motion-aware keyboard focus styling. Classic loads its lazy graph vendor
+  dependency from its own packaged backup tree.
+- Graph nodes now use oversampled, cached screen-space material rendering with face-level
+  texture: full-face iridescent PVD for Cyber, directional blue-violet anodizing for Galaxy,
+  concentric brushed copper for Solar, and horizontal satin gunmetal grain for Classic, with
+  deterministic low-detail fallbacks for large graphs.
+- Dashboard asset URLs now carry the node-material revision and local static responses
+  revalidate, preventing an already-open browser from pinning the pre-material renderer.
+- Pro and Team purchase actions now preserve both the selected plan and billing interval, while
+  existing or lapsed subscribers are sent to the plan-neutral account portal for billing recovery.
+  Public documentation now distinguishes hosted-account grace and recovery behavior from the
+  always-local, Apache-licensed dashboard and MCP write paths.
+
+### Fixed
+
+- Token-protected dashboards can now establish a short-lived signed, HttpOnly browser session
+  without storing the API token in browser storage. Remote peers remain denied when no token is
+  configured, and non-loopback v1 server startup is refused unless authentication is enabled.
+- Hosted entitlement refreshes use bounded exponential backoff, terminal denials settle every
+  local entitlement view, inactive sessions expose no paid feature flags, and ambiguous
+  single-use refresh responses permanently retire the possibly spent credential instead of
+  replaying it.
+- Recommended Automation bootstrap is resumable across partial upload/policy-save failures and
+  authorizes paid work before generating or locking a local snapshot.
+- Release checks now enforce commercial prices and trial terms, expose skipped tests instead of
+  hiding them behind duplicate quiet flags, and verify the full-stack dependency imports used by
+  the HTTP authorization boundary.
+
+### Security
+
+- Credential state directories are owner-only, product token forms are redacted consistently
+  from logs, checkout overrides fail closed to validated HTTPS or loopback HTTP destinations, and
+  unsafe control characters can no longer reform blocked browser URL schemes.
 
 ## [1.1.0] - 2026-07-26
 

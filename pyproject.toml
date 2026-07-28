@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "engraphis"
-version = "1.1.0"
+version = "1.1.2"
 description = "Local-first AI memory engine for agents — Ebbinghaus decay, interaction-aware recall, bi-temporal facts, hybrid retrieval, and an MCP server. You bring the LLM."
 readme = "README.md"
 license = "Apache-2.0"
@@ -191,7 +191,8 @@ include = ["engraphis*", "scripts*"]
 # runtime artifacts such as static/__pycache__/*.pyc after a local compile check.
 # vendor/**/* covers nested vendor assets too (vendor/* alone doesn't cross "/").
 "engraphis.static" = ["*.html", "*.css", "*.js", "*.png", "*.ico", "vendor/*", "vendor/**/*"]
-"engraphis.dashboard_assets" = ["*.js"]
+"engraphis.classic_assets" = ["*.html", "*.css", "*.js", "*.png", "*.ico", "vendor/*", "vendor/**/*"]
+"engraphis.dashboard_assets" = ["*.html", "*.css", "*.js", "*.png", "*.ico", "vendor/*", "vendor/**/*"]
 "engraphis" = ["commercial_manifest.json"]
 
 [tool.setuptools.exclude-package-data]

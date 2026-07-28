@@ -805,6 +805,28 @@ def _seed_service() -> tuple[MemoryService, str, str, str]:
     return service, alpha, beta, gamma
 
 
+def test_graph_entity_evidence_avoids_rebuilding_the_workspace_graph(monkeypatch):
+    service, alpha, _beta, _gamma = _seed_service()
+
+    def fail_if_called(**_kwargs):
+        raise AssertionError("node evidence must not materialize the full graph")
+
+    monkeypatch.setattr(service, "_graph_scene_rows", fail_if_called)
+    detail = service.graph_entity_evidence(alpha, workspace="acme")
+
+    assert detail["canonical_id"] == alpha
+    assert [(item["excerpt"], item["confidence"]) for item in detail["evidence"]] == [
+        ("Alpha uses Beta.", 0.8),
+    ]
+
+    service.store.conn.execute("UPDATE memories SET valid_from=1")
+    service.store.conn.execute("UPDATE edges SET valid_from=100 WHERE id='edge_ab'")
+    service.store.conn.execute("UPDATE edge_supports SET valid_from=100 WHERE edge_id='edge_ab'")
+    service.store.conn.commit()
+    assert service.graph_entity_evidence(alpha, workspace="acme", as_of=99)["evidence"] == []
+    assert service.graph_entity_evidence(alpha, workspace="acme", as_of=101)["evidence"]
+
+
 def test_graph_explorer_endpoints_and_legacy_graph_gets_are_read_only():
     service, alpha, _beta, gamma = _seed_service()
     app = FastAPI()
@@ -837,6 +859,13 @@ def test_graph_explorer_endpoints_and_legacy_graph_gets_are_read_only():
     assert detail.status_code == 200
     assert detail.json()["canonical_id"] == alpha
     assert detail.json()["evidence"]
+
+    node_evidence = client.get(
+        f"/api/graph/entities/{alpha}/memories", params={"workspace": "acme"}
+    )
+    assert node_evidence.status_code == 200
+    assert node_evidence.json()["canonical_id"] == alpha
+    assert node_evidence.json()["evidence"][0]["excerpt"] == "Alpha uses Beta."
 
     path = client.get("/api/graph/path", params={
         "workspace": "acme", "source": alpha, "target": gamma,

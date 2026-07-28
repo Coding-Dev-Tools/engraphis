@@ -256,6 +256,8 @@ def test_expired_or_consumed_token_is_actionable_and_writes_nothing(
 def test_lapsed_subscription_is_distinguishable_from_a_dead_token(monkeypatch, capsys):
     """402 must not be flattened into "your token is bad" -- the fix is billing."""
 
+    monkeypatch.setenv("ENGRAPHIS_PRO_UPGRADE_URL", "https://pay.example/pro")
+    monkeypatch.setenv("ENGRAPHIS_UPGRADE_URL", "https://pay.example/account")
     _install_opener(monkeypatch, _Opener(error=_http_error(402)))
 
     exit_code = connect_cli.main([
@@ -266,6 +268,8 @@ def test_lapsed_subscription_is_distinguishable_from_a_dead_token(monkeypatch, c
     message = capsys.readouterr().err
     assert "subscription is not active" in message
     assert "billing" in message
+    assert "https://pay.example/account" in message
+    assert "https://pay.example/pro" not in message
     assert "expired" not in message
 
     with pytest.raises(device_connect.DeviceConnectError) as caught:

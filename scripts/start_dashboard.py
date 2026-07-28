@@ -12,13 +12,19 @@ The WebUI serves the dashboard single-page app at ``/`` over the v2 engine's
 from __future__ import annotations
 
 import argparse
+import errno
+import json
 import os
+import socket
 import sqlite3
 import sys
+import urllib.error
+import urllib.request
 import webbrowser
 
 
 _DEFAULT_EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+_ADDRESS_IN_USE_ERRNOS = {errno.EADDRINUSE, 10048}  # 10048 is Windows WSAEADDRINUSE.
 
 
 def _embed_model_from_environment() -> str:
@@ -45,6 +51,73 @@ def _port(value: str) -> int:
     if not 1 <= port <= 65535:
         raise argparse.ArgumentTypeError("port must be from 1 to 65535")
     return port
+
+
+def _port_is_available(host: str, port: int) -> bool:
+    """Return whether Uvicorn can plausibly bind *host*:*port* right now.
+
+    This intentionally runs before importing ``dashboard_app``.  That import constructs
+    the memory service and may load the sentence-transformer model, so discovering an
+    already-running dashboard afterwards wastes startup time and looks like a crash.
+    The probe cannot eliminate a bind race, but the final error handler repeats it so
+    even that race gets an actionable message rather than a generic initialization error.
+    """
+    addresses = socket.getaddrinfo(
+        host, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE,
+    )
+    for family, socktype, protocol, _canonname, sockaddr in addresses:
+        probe = socket.socket(family, socktype, protocol)
+        try:
+            # Match Uvicorn's bind_socket() configuration.  Without this a recently
+            # closed dashboard can leave the probe unable to bind during TIME_WAIT even
+            # though the server itself will reuse the address successfully.  This is
+            # deliberately SO_REUSEADDR only: the probe still rejects a genuinely
+            # unavailable address and never enables concurrent SO_REUSEPORT binding.
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind(sockaddr)
+        except OSError as exc:
+            if exc.errno in _ADDRESS_IN_USE_ERRNOS:
+                return False
+            raise
+        finally:
+            probe.close()
+    return True
+
+
+def _is_engraphis_dashboard(url: str) -> bool:
+    """Check the loopback dashboard health route without trusting arbitrary content."""
+    request = urllib.request.Request(
+        url.rstrip("/") + "/api/health", headers={"Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=0.75) as response:  # noqa: S310 -- local URL
+            raw = response.read(16 * 1024)
+    except (OSError, TimeoutError, urllib.error.HTTPError, ValueError):
+        return False
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return False
+    return isinstance(payload, dict) and payload.get("status") in {"ok", "healthy"}
+
+
+def _reuse_or_report_occupied_port(
+    parser: argparse.ArgumentParser, url: str, *, no_open: bool,
+) -> bool:
+    """Reuse an existing local dashboard or explain the port conflict and exit."""
+    if _is_engraphis_dashboard(url):
+        print(f"Engraphis WebUI is already running at {url}.")
+        if not no_open:
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+        return True
+    parser.exit(
+        1,
+        "Error: Cannot start Engraphis WebUI because %s is already in use. "
+        "Close the process using that address or choose another port with --port.\n" % url,
+    )
 
 
 def _startup_error(exc: BaseException, db: str) -> str:
@@ -86,17 +159,24 @@ def main(argv=None) -> None:
         _run_shortcut_install(silent=args.install_shortcuts_silent, icon=args.icon)
         return
 
-    os.environ["ENGRAPHIS_EMBED_MODEL"] = _embed_model_from_environment()
-    os.environ["ENGRAPHIS_HOST"] = args.host
-    os.environ["ENGRAPHIS_PORT"] = str(args.port)
-
-    # netutil (stdlib-only, config-free) keeps this import safe BEFORE the env writes
-    # above are re-read by engraphis.config inside uvicorn's import of the app. It maps
+    # netutil (stdlib-only, config-free) keeps this preflight ahead of every dashboard
+    # import. It maps
     # a wildcard bind (0.0.0.0/::) to loopback and brackets IPv6 for the printed URL.
     db = os.environ.get("ENGRAPHIS_DB_PATH", "the default user-data location")
     try:
         from engraphis.netutil import display_base_url
         url = display_base_url(args.host, args.port)
+        if not _port_is_available(args.host, args.port):
+            if _reuse_or_report_occupied_port(parser=ap, url=url, no_open=args.no_open):
+                return
+    except (OSError, ValueError) as exc:
+        ap.exit(1, "Error: Could not check dashboard address %s: %s\n" % (args.host, exc))
+
+    os.environ["ENGRAPHIS_EMBED_MODEL"] = _embed_model_from_environment()
+    os.environ["ENGRAPHIS_HOST"] = args.host
+    os.environ["ENGRAPHIS_PORT"] = str(args.port)
+
+    try:
         # Imported AFTER the env writes above: this snapshot and uvicorn's in-process
         # import of the app see the same values, so the banner reports the RESOLVED DB
         # path (installed builds use a per-user data dir, not "./engraphis.db").
@@ -138,6 +218,16 @@ def main(argv=None) -> None:
             run_options["log_config"] = None
         uvicorn.run(dashboard_app, **run_options)
     except (Exception, SystemExit) as exc:  # noqa: BLE001
+        # Uvicorn turns a late bind failure into ``SystemExit(1)`` after it has logged the
+        # socket error. Re-probe here so a rare check-to-bind race is still explained.
+        try:
+            occupied = not _port_is_available(args.host, args.port)
+        except OSError:
+            occupied = False
+        if occupied and _reuse_or_report_occupied_port(
+            parser=ap, url=url, no_open=args.no_open,
+        ):
+            return
         ap.exit(1, "Error: %s\n" % _startup_error(exc, db))
 
 

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -140,7 +141,7 @@ def _eager_scripts(html: str) -> list[str]:
     a gate that cannot fail.
     """
     return [
-        src
+        urlsplit(src).path
         for src in _parse_page(html).script_srcs
         if src.startswith(("/static/", "/v2-assets/"))
     ]
@@ -263,7 +264,7 @@ def check() -> None:
 
     eager_scripts = _eager_scripts(html)
     lazy_scripts = [
-        reference
+        urlsplit(reference).path
         for source in [js, *extra.values()]
         for reference in LAZY_SCRIPT_SRC.findall(source)
     ]

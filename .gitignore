@@ -35,6 +35,10 @@ models_cache/
 .secrets/
 internal/
 
+# Local review/snapshot staging. These archives can recursively capture ignored runtime
+# state (including engraphis.db), so they must never enter a source or release archive.
+/_to_delete/
+
 # Local internal design-review tooling output (candid self-assessment, not for the repo).
 .commandcode/
 

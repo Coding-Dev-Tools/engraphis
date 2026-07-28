@@ -42,6 +42,20 @@ def build_graph_payload(workspace: str, entity_rows: Sequence[Mapping[str, Any]]
     """
     label_of = {r["id"]: (r["name"] or r["id"]) for r in entity_rows}
     etype_of = {r["id"]: (r["etype"] or DEFAULT_ETYPE) for r in entity_rows}
+    # The Explorer's repository/topic and time filters need this provenance carried
+    # through the shared payload. Keep each value deliberately optional: memory-link
+    # fallback rows and older callers still only provide id/name/etype.
+    graph_meta: dict[str, dict[str, Any]] = {}
+    for row in entity_rows:
+        meta: dict[str, Any] = {}
+        for key in ("repo", "topic", "valid_from", "valid_to"):
+            try:
+                value = row[key]
+            except (KeyError, IndexError):
+                continue
+            if value not in (None, ""):
+                meta[key] = value
+        graph_meta[row["id"]] = meta
     deg: dict = {}
     layers: dict = {}
     edges = []
@@ -58,13 +72,25 @@ def build_graph_payload(workspace: str, entity_rows: Sequence[Mapping[str, Any]]
         item = {"from": src, "to": dst, "label": rel or "", "layer": layer}
         if reason:
             item["reason"] = reason
+        for key in ("id", "valid_from", "valid_to"):
+            value = e.get(key) if hasattr(e, "get") else None
+            if value not in (None, ""):
+                item[key] = value
         edges.append(item)
 
     # every node referenced by an edge must exist so the network renders cleanly, even
     # in the (should-never-happen) case an edge outlives its entity row
     ids_ = set(label_of) | set(deg)
-    nodes = [{"id": i, "label": label_of.get(i, i), "etype": etype_of.get(i, DEFAULT_ETYPE),
-              "degree": deg.get(i, 0)} for i in ids_]
+    nodes = [
+        {
+            "id": i,
+            "label": label_of.get(i, i),
+            "etype": etype_of.get(i, DEFAULT_ETYPE),
+            "degree": deg.get(i, 0),
+            **graph_meta.get(i, {}),
+        }
+        for i in ids_
+    ]
 
     types: dict = {}
     for n in nodes:

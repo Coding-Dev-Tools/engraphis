@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/x-icon" href="/classic-assets/engraphis.ico">
+<link rel="icon" type="image/png" sizes="32x32" href="/classic-assets/favicon-32.png">
+<title>Engraphis</title>
+<link rel="stylesheet" href="/classic-assets/dashboard.css?v=20260728-reference-materials">
+</head>
+<body>
+<div class="app">
+<!-- SIDEBAR -->
+<aside class="sidebar" id="app-sidebar" aria-label="Workspace and navigation">
+<div class="brand">
+<svg class="brand-mark" viewBox="0 0 24 24" fill="none"><path d="M12 2L3 7v10l9 5 9-5V7l-9-5z" stroke="var(--accent)" stroke-width="1.5" stroke-linejoin="round"/><path d="M12 12L3 7m9 5l9-5m-9 5v10" stroke="var(--accent-dim)" stroke-width="1.2" stroke-linejoin="round"/><circle cx="12" cy="12" r="2" fill="var(--accent)"/></svg>
+<div data-csp-style="s1"><div class="brand-name">Engraphis</div><div class="brand-sub">Memory Engine</div></div>
+<button type="button" id="lic-badge" class="pill pill-muted" data-onclick="h1" title="Hosted plans — open settings" aria-label="Open hosted plan settings" data-csp-style="s2">•••</button>
+<div class="theme-wrap" data-csp-style="s3"><button type="button" id="theme-btn" class="theme-btn" data-onclick="h2" title="Change theme" aria-label="Change theme" aria-controls="theme-menu" aria-expanded="false" data-csp-style="s4">◑</button><div id="theme-menu" class="theme-menu" aria-label="Theme choices"></div></div>
+</div>
+<button type="button" class="vault-switcher" id="vault-switcher" data-onclick="h3" aria-label="Choose active workspace">
+<span class="vault-dot" id="vault-dot" data-csp-style="s5"></span>
+<span class="vault-switcher-meta"><span class="vault-switcher-label">Active workspace</span><span class="vault-switcher-name" id="ws-name">…</span></span>
+<svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+</button>
+<div class="dashboard-switcher" aria-label="Dashboard interface">
+<span class="dashboard-switcher-label">Dashboard</span>
+<a class="dashboard-link" href="/">Ledger (primary)</a>
+<a class="dashboard-link active" href="/classic" aria-current="page">Classic (alternate)</a>
+</div>
+<nav class="nav" id="nav" role="navigation" aria-label="Main navigation">
+<div class="nav-section">Memory operations</div>
+<button type="button" class="nav-item active" data-view="overview"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><rect x="1" y="1" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="1" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="1" y="9" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="9" y="9" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.3"/></svg>Overview</button>
+<button type="button" class="nav-item" data-view="recall"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Recall</button>
+<button type="button" class="nav-item" data-view="memories"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M2 4c0-1 .5-1.5 1.5-1.5h3L8 4h4.5c1 0 1.5.5 1.5 1.5v6c0 1-.5 1.5-1.5 1.5h-9C2.5 13 2 12.5 2 11.5V4z" stroke="currentColor" stroke-width="1.3"/></svg>Memories<span class="nav-badge" id="nav-mem-count"></span></button>
+<button type="button" class="nav-item" data-view="proactive"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M8 1l2 5 5 .5-4 3.5 1.5 5L8 12l-4.5 3 1.5-5-4-3.5 5-.5z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg>Proactive</button>
+<button type="button" class="nav-item" data-view="workspaces"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M2 4c0-1 .5-1.5 1.5-1.5h3L8 4h4.5c1 0 1.5.5 1.5 1.5v6c0 1-.5 1.5-1.5 1.5h-9C2.5 13 2 12.5 2 11.5V4z" stroke="currentColor" stroke-width="1.3"/><path d="M2 8h12" stroke="currentColor" stroke-width="1.1"/></svg>Workspaces</button>
+<div class="nav-section">Bi-temporal history</div>
+<button type="button" class="nav-item" data-view="why"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.3"/><path d="M6 6.5a2 2 0 113 1.7c-.6.4-1 .7-1 1.3M8 12h.01" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Why</button>
+<button type="button" class="nav-item" data-view="timeline"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="11" rx="1" stroke="currentColor" stroke-width="1.3"/><path d="M2 6h12M5 1v3M11 1v3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Timeline</button>
+<button type="button" class="nav-item" data-view="audit"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M3 2h7l3 3v9H3z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M5 7h6M5 10h6" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>Audit</button>
+<div class="nav-section">Relations</div>
+<button type="button" class="nav-item" data-view="graph"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="3" cy="3" r="2" stroke="currentColor" stroke-width="1.3"/><circle cx="13" cy="3" r="2" stroke="currentColor" stroke-width="1.3"/><circle cx="8" cy="13" r="2" stroke="currentColor" stroke-width="1.3"/><path d="M4.5 4.5L7 11M11.5 4.5L9 11M5 3h6" stroke="currentColor" stroke-width="1.1"/></svg>Graph</button>
+<button type="button" class="nav-item" data-view="analytics"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M2 14V2M2 14h12M5 11V7M8.5 11V4M12 11V9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Analytics<span class="nav-badge" id="nav-analytics-lock"></span></button>
+<div class="nav-section">Engine</div>
+<button type="button" class="nav-item" data-view="consolidate"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><path d="M2 5h12M4 8h8M6 11h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Consolidate</button>
+<button type="button" class="nav-item" data-view="automation"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="3" stroke="currentColor" stroke-width="1.3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.4 1.4M11.6 11.6L13 13M13 3l-1.4 1.4M4.4 11.6L3 13" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/></svg>Automation<span class="nav-badge" id="nav-automation-lock"></span></button>
+<button type="button" class="nav-item" data-view="team"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="6" cy="6" r="2.3" stroke="currentColor" stroke-width="1.3"/><path d="M2 13c0-2.2 1.8-3.5 4-3.5s4 1.3 4 3.5" stroke="currentColor" stroke-width="1.3"/><path d="M11 5.5a2 2 0 010 4M12 13c0-1.6-.7-2.7-1.8-3.2" stroke="currentColor" stroke-width="1.2"/></svg>Team Cloud<span class="nav-badge" id="nav-team-lock"></span></button>
+<button type="button" class="nav-item" data-view="settings"><svg class="nav-icon" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M3 13l1.5-1.5M11.5 4.5L13 3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>Settings</button>
+</nav>
+<div class="sidebar-footer" role="status" aria-live="polite"><div data-csp-style="s6"><span class="pulse-dot" id="health-dot" aria-hidden="true"></span><span id="health-text">Connecting…</span></div><span data-csp-style="s7" id="engine-badge">v2</span></div>
+</aside>
+<button type="button" class="sidebar-backdrop" id="sidebar-backdrop" data-onclick="h4" aria-label="Close navigation"></button>
+<!-- MAIN -->
+<main class="main" id="main-content" aria-labelledby="topbar-title">
+<header class="topbar">
+<button type="button" class="mobile-nav-toggle" id="mobile-nav-toggle" data-onclick="h5" aria-controls="app-sidebar" aria-expanded="false" aria-label="Open navigation"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+<div class="topbar-route">
+<div class="topbar-kicker"><span>Memory operations</span><span class="topbar-kicker-separator" aria-hidden="true">/</span><span id="route-section">Operate</span><span class="topbar-kicker-separator" aria-hidden="true">/</span><span id="topbar-workspace">…</span></div>
+<div class="topbar-heading"><h1 class="topbar-title" id="topbar-title">Overview</h1><span id="an-lock" class="pill pill-muted topbar-lock"></span><span id="au-lock" class="pill pill-muted topbar-lock"></span><div class="topbar-sub" id="topbar-sub" role="status" aria-live="polite"></div></div>
+</div>
+<div class="topbar-spacer"></div>
+</header>
+<div class="content">
+<div id="sem-banner" class="status-region system-banner" role="status" aria-live="polite" data-csp-style="s8"></div>
+<div id="update-banner" class="update-banner" role="status" aria-live="polite" hidden></div>
+
+<div class="view active" id="view-overview">
+<div class="stat-grid" id="stat-grid"></div>
+<div class="overview-ledger-grid">
+<div class="card"><div class="card-head">Memory types</div><div id="ov-types"></div></div>
+<div class="card"><div class="card-head">Analytics <span id="ov-lock" class="pill pill-muted" data-csp-style="s9"></span></div><div id="ov-analytics"><div class="empty" data-csp-style="s10">Loading…</div></div></div>
+</div>
+</div>
+
+<div class="view" id="view-recall">
+<div class="workbench-command"><input class="input" id="recall-q" placeholder="Ask a question or search…" data-onkeydown="h7"><select class="select command-count" id="recall-k" aria-label="Number of recall results"><option>5</option><option selected>8</option><option>15</option></select><button class="btn btn-primary" data-onclick="h8">Recall</button></div>
+<p class="field-hint" data-csp-style="s11"><strong>Score</strong> ranks relevance to this query. <strong>Retention</strong> estimates how strongly the memory persists over time.</p>
+<div id="recall-results" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Enter a query to recall memories.</div></div>
+</div>
+
+<div class="view" id="view-memories">
+<div class="workbench-command"><input class="input" id="mem-q" placeholder="Filter by keyword…" data-onkeydown="h9"><button class="btn btn-ghost" data-onclick="h10">Search</button></div>
+<p class="field-hint" id="memory-reorder-help">Open a focused memory with Enter. Reorder it with Alt + Up or Alt + Down.</p>
+<div id="mem-cards" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Loading memories…</div></div>
+</div>
+
+<div class="view" id="view-mem-editor">
+<div class="editor-wrap" data-csp-style="s13">
+<div class="editor-toolbar">
+<button class="btn btn-ghost btn-sm" data-onclick="h11">&larr; Memories</button>
+<input class="input" id="ed-title" placeholder="Untitled" aria-label="Memory title" data-csp-style="s14">
+<select class="select" id="ed-type" aria-label="Memory type" data-csp-style="s15"><option value="working">working</option><option value="episodic">episodic</option><option value="semantic">semantic</option><option value="procedural">procedural</option></select>
+<button class="btn btn-ghost btn-sm" id="ed-pin-btn" data-onclick="h12" disabled>Pin</button>
+<button class="btn btn-primary btn-sm" id="ed-save-btn" data-onclick="h13" disabled>Save</button>
+<span class="editor-save-state" id="ed-save-state" role="status" aria-live="polite">Saved</span>
+<button class="btn btn-danger btn-sm" id="ed-forget-btn" data-onclick="h14" disabled>Forget</button>
+</div>
+<div class="editor-body">
+<textarea class="editor-edit" id="ed-content" aria-label="Memory Markdown content" spellcheck="false" data-oninput="h15" placeholder="Write in Markdown…"></textarea>
+<div class="editor-preview md-reader" id="ed-preview"></div>
+</div>
+</div>
+<div id="ed-meta" data-csp-style="s16"></div>
+<div id="ed-history"></div>
+</div>
+
+<div class="view" id="view-proactive">
+<div id="proactive-body" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Loading relevant memories…</div></div>
+</div>
+
+<div class="view" id="view-why">
+<div class="workbench-command"><input class="input" id="why-q" placeholder="e.g. what database do we use?" data-onkeydown="h16"><button class="btn btn-primary" data-onclick="h17">Explain</button></div>
+<div id="why-body" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Ask a question to see the current answer and its history.</div></div>
+</div>
+
+<div class="view" id="view-timeline">
+<div class="workbench-command"><input class="input" id="tl-q" placeholder="e.g. deploy schedule" data-onkeydown="h18"><button class="btn btn-primary" data-onclick="h19">Trace</button></div>
+<div id="tl-body" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Enter a topic to trace its history.</div></div>
+</div>
+
+<div class="view" id="view-audit">
+<div class="workbench-command"><button class="btn btn-ghost btn-sm" data-onclick="h20">Full audit</button><button class="btn btn-ghost btn-sm" data-onclick="h21">Privacy-safe receipts</button><button class="btn btn-ghost btn-sm" data-onclick="h22">Export receipts</button></div>
+<div id="audit-body" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Loading governance history…</div></div>
+</div>
+
+<div class="view" id="view-graph">
+<div class="graph-layout">
+<div class="graph-main">
+<div class="graph-network">
+<div id="graph-net" role="region" aria-label="Interactive knowledge graph. Use arrow keys to move between entities and Enter to open the selected entity." tabindex="0" data-onkeydown="h23" data-csp-style="s17"></div>
+<div class="graph-hud" aria-hidden="true"><div class="graph-hud-copy"><span class="graph-hud-kicker" id="graph-hud-mode">Knowledge map</span><strong class="graph-hud-count" id="graph-hud-count">Loading entities…</strong></div><span class="graph-layout-status busy" id="graph-layout-status">Preparing layout</span></div>
+<div id="graph-empty" class="empty status-region" role="status" aria-live="polite" data-csp-style="s18">Loading graph…</div>
+</div>
+</div>
+<div class="graph-controls-column">
+<div class="gx-rail">
+<div class="gx-bar">
+<span class="gx-h" data-csp-style="s19">Show</span>
+<div id="graph-layer-filters" data-csp-style="s20">
+<label class="gx-chip"><input type="checkbox" value="temporal" checked data-onchange="h24"><span class="gx-dot" data-csp-style="s21"></span>Temporal</label>
+<label class="gx-chip"><input type="checkbox" value="entity" checked data-onchange="h24"><span class="gx-dot" data-csp-style="s22"></span>Entity</label>
+<label class="gx-chip"><input type="checkbox" value="causal" checked data-onchange="h24"><span class="gx-dot" data-csp-style="s23"></span>Causal</label>
+<label class="gx-chip"><input type="checkbox" value="semantic" checked data-onchange="h24"><span class="gx-dot" data-csp-style="s24"></span>Semantic</label>
+</div>
+<label class="gx-chip"><input type="checkbox" id="graph-include-code" data-onchange="h24">Overlay code</label>
+<div data-csp-style="s25">
+<input class="input" id="graph-search" placeholder="Find entity…" data-onkeydown="h25" data-csp-style="s26">
+<button class="gx-io" title="Fit to view" data-onclick="h26">⤢</button>
+<button class="gx-io" title="Re-run layout" data-onclick="h27">↻</button>
+<button class="gx-io" title="Reload data" data-onclick="h28">⟳</button>
+</div>
+</div>
+<div class="gx-body">
+<label class="gx-chip" data-csp-style="s197" title="Show entities that have no relations (unlinked nodes). Hidden by default to keep the graph readable."><input type="checkbox" id="graph-show-iso" data-onchange="h49"><span class="gx-dot" data-csp-style="s198"></span>Show unlinked nodes</label>
+<div class="gx-h">Layout</div>
+<div class="gx-cards">
+<button class="gx-card" data-preset-card="compact" data-onclick="h29"><canvas class="gx-thumb" data-preset="compact" width="76" height="48"></canvas><span>Compact</span></button>
+<button class="gx-card" data-preset-card="original" data-onclick="h30"><canvas class="gx-thumb" data-preset="original" width="76" height="48"></canvas><span>Spacious</span></button>
+<button class="gx-card" data-preset-card="communities" data-onclick="h31"><canvas class="gx-thumb" data-preset="communities" width="76" height="48"></canvas><span>Islands</span></button>
+<button class="gx-card" data-preset-card="radial" data-onclick="h32"><canvas class="gx-thumb" data-preset="radial" width="76" height="48"></canvas><span>Radial</span></button>
+</div>
+<div class="gx-h">Forces<button class="btn btn-ghost btn-sm" id="graph-reset-preset" data-csp-style="s27" data-onclick="h33">↺ Reset</button></div>
+<div class="gslider"><label>Repel force</label><input type="range" min="10" max="500" value="42" data-graph-setting="repel" data-oninput="h34"><span class="gslider-val" data-graph-val="repel" data-csp-style="s28">42</span></div>
+<div class="gslider"><label>Link distance</label><input type="range" min="8" max="150" value="20" data-graph-setting="link" data-oninput="h35"><span class="gslider-val" data-graph-val="link" data-csp-style="s28">20</span></div>
+<div class="gslider"><label>Center gravity</label><input type="range" min="0" max="40" value="26" data-graph-setting="gravity" data-oninput="h36"><span class="gslider-val" data-graph-val="gravity" data-csp-style="s28">26</span></div>
+<div class="gx-h">Appearance</div>
+<div class="gslider"><label>Node size</label><input type="range" min="1.2" max="8" step="0.2" value="3" data-graph-setting="size" data-oninput="h37"><span class="gslider-val" data-graph-val="size" data-csp-style="s28">3</span></div>
+<div class="gslider"><label>Text size</label><input type="range" min="6" max="28" value="12" data-graph-setting="font" data-oninput="h38"><span class="gslider-val" data-graph-val="font" data-csp-style="s28">12</span></div>
+<div class="gslider"><label>Line width</label><input type="range" min="2" max="45" value="7" data-graph-setting="linkw" data-graph-scale="10" data-oninput="h39"><span class="gslider-val" data-graph-val="linkw" data-csp-style="s28">0.7</span></div>
+<div class="gslider" title="Controls how many node labels appear at a given zoom level — lower it to declutter a large graph when zoomed in"><label>Label density</label><input type="range" min="5" max="200" value="30" step="5" data-graph-setting="labelDensity" data-oninput="h40"><span class="gslider-val" data-graph-val="labelDensity" data-csp-style="s28">30</span></div>
+<div class="gx-h">Color by</div>
+<div class="gx-seg" data-csp-style="s29">
+<button data-colorby="community" data-onclick="h41">Cluster</button>
+<button data-colorby="connections" data-onclick="h42">Links</button>
+<button data-colorby="type" data-onclick="h43">Type</button>
+</div>
+<div class="gx-h">Style</div>
+<div class="gx-seg" data-csp-style="s30">
+<button data-style-seg="cyber" data-onclick="h44">Cyber</button>
+<button data-style-seg="galaxy" data-onclick="h45">Galaxy</button>
+<button data-style-seg="solar" data-onclick="h46">Solar</button>
+<button data-style-seg="classic" data-onclick="h47">Classic</button>
+</div>
+<div class="gx-h">Display</div>
+<div data-csp-style="s31">
+<label class="gx-chip" data-csp-style="s32"><input type="checkbox" id="graph-labels" data-onchange="h48">Labels</label><label class="gx-chip" data-csp-style="s32"><input type="checkbox" id="graph-flow" checked data-onchange="h50">Flow</label>
+<label class="gx-chip" data-csp-style="s32"><input type="checkbox" id="graph-freeze" data-onchange="h51">Freeze</label>
+</div>
+<input class="input" id="graph-repo-filter" placeholder="Optional repo filter" data-onkeydown="h52" data-csp-style="s33">
+<div class="gx-h">Legend<span class="count" id="graph-legend-count" data-csp-style="s34"></span></div>
+<div id="graph-legend" class="graph-legend-grid"></div>
+<div class="gx-h">Stats</div>
+<div id="graph-stats" class="graph-stats-grid"></div>
+<div class="gx-h">Top connected<span class="count" id="graph-top-count" data-csp-style="s34"></span></div>
+<div id="graph-top"></div>
+</div>
+</div>
+<div data-csp-style="s8" aria-hidden="true">
+<select id="graph-preset" data-onchange="h53"><option value="compact">Compact</option><option value="original">Original</option><option value="communities">Communities</option><option value="radial">Radial</option><option value="constellation">Constellation</option><option value="custom">Custom</option></select>
+<select id="graph-style" data-onchange="h54"><option value="cyber">Cyberpunk</option><option value="galaxy">Galaxy</option><option value="solar">Solar</option><option value="classic">Classic</option></select>
+<select id="graph-colorby" data-onchange="h55"><option value="community">Community</option><option value="type">Type</option><option value="connections">Connections</option></select>
+<select id="graph-palette" data-onchange="h56"><option value="theme">Theme colors</option><option value="aurora">Aurora</option><option value="ocean">Ocean</option><option value="ember">Ember</option><option value="contrast">High contrast</option><option value="custom" disabled>Custom colors</option></select>
+<div id="graph-color-controls"></div>
+<div id="graph-preset-help"></div>
+<span id="graph-performance-badge"></span>
+</div>
+</div>
+</div>
+<section class="graph-explorer" aria-labelledby="graph-explorer-title">
+<div class="graph-explorer-head"><div><h2 id="graph-explorer-title">Semantic graph explorer</h2><p class="field-hint">Keyboard-accessible entities and relationships synchronized with the visual graph.</p></div><input class="input" id="graph-explorer-search" aria-label="Filter graph entities and relations" placeholder="Filter entities or relations…" data-oninput="h57"></div>
+<div class="graph-explorer-grid"><div><h3 class="card-head">Entities <span class="count" id="graph-explorer-node-count"></span></h3><div id="graph-entity-list" class="graph-explorer-list" role="group" aria-label="Graph entities"></div></div><div><h3 class="card-head">Relations <span class="count" id="graph-explorer-edge-count"></span></h3><div id="graph-relation-list" class="graph-explorer-list" role="group" aria-label="Graph relations"></div></div></div>
+</section>
+</div>
+
+<div class="view" id="view-analytics">
+<div id="an-actions" class="workbench-command" data-csp-style="s8">
+<button class="btn btn-ghost btn-sm" data-onclick="h58">Refresh</button>
+</div>
+<div id="analytics-body" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Connecting to hosted Analytics…</div></div>
+</div>
+
+<div class="view" id="view-consolidate">
+<div class="workbench-command"><button class="btn btn-ghost" data-onclick="h61">Preview dry run · no changes</button><button class="btn btn-primary" data-onclick="h62">Commit consolidation</button></div>
+<div id="consolidate-body" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Start with a dry run to preview changes. A dry run never modifies memories.</div></div>
+</div>
+
+<div class="view" id="view-automation">
+<div id="automation-body" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Loading hosted Auto Consolidation and Auto Dreaming policy…</div></div>
+</div>
+
+<div class="view" id="view-workspaces">
+<div class="view-head workbench-command workspace-actions"><button class="btn btn-primary btn-sm" id="ws-new-btn" data-onclick="h63">New folder</button></div>
+<div class="card workspace-source-card" id="import-card">
+<div class="card-head">Import files &amp; folders</div>
+<div class="dropzone" id="import-dropzone" data-ondragover="h64" data-ondragleave="h65" data-ondrop="h66">
+<svg class="dropzone-icon" viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0l-4-4m4 4l4-4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+<div>Drag documents, code, PDFs, images, or audio/video here — local extraction stores them in <span id="import-ws-name">the active folder</span></div>
+<div class="dropzone-actions"><button class="btn btn-ghost btn-sm" data-onclick="h67">Choose files…</button><button class="btn btn-ghost btn-sm" data-onclick="h68">Choose folder…</button></div>
+</div>
+<input type="file" id="import-file-input" multiple data-csp-style="s8" data-onchange="h69">
+<input type="file" id="import-dir-input" webkitdirectory directory multiple data-csp-style="s8" data-onchange="h69">
+<div class="import-path-row">
+<span class="import-path-label">or import from a path on this machine:</span>
+<input class="input import-path-input" id="import-path" placeholder="/home/you/notes" data-onkeydown="h70">
+<input class="input import-pattern-input" id="import-pattern" placeholder="*" value="*">
+<button class="btn btn-ghost btn-sm" data-onclick="h71">Import folder</button>
+</div>
+<label class="import-derive-row"><input type="checkbox" id="import-derive"> Derive discrete facts with the configured extractor (explicit opt-in; may send content to its provider)</label>
+<div id="import-status" class="status-region import-status" role="status" aria-live="polite"></div>
+</div>
+<div class="card workspace-source-card" id="code-import-card">
+<div class="card-head">Repository &amp; database graph</div>
+<div class="code-import-grid">
+<input class="input" id="code-repo" placeholder="Repository name">
+<input class="input" id="code-root" placeholder="/path/to/repository">
+<button class="btn btn-primary btn-sm" data-onclick="h72">Index repo</button>
+</div>
+<div class="code-import-grid code-import-grid-secondary">
+<input class="input" type="password" id="postgres-dsn" placeholder="PostgreSQL DSN (never stored)">
+<input class="input" id="postgres-repo" placeholder="Optional repository scope">
+<button class="btn btn-ghost btn-sm" data-onclick="h73">Import schema</button>
+</div>
+<div id="code-import-status" class="status-region import-status" role="status" aria-live="polite"></div>
+</div>
+<div id="ws-cards" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Loading workspaces…</div></div>
+</div>
+
+<div class="view" id="view-team">
+<div id="team-body" class="status-region" role="status" aria-live="polite"><div class="empty" data-csp-style="s12">Loading hosted Team options…</div></div>
+</div>
+
+<div class="view" id="view-settings">
+<div class="settings-grid">
+<div class="settings-column">
+<div class="card settings-account-card">
+<div class="settings-account-grid">
+<section class="settings-account-panel settings-license-panel" aria-labelledby="settings-license-heading">
+<div class="card-head" id="settings-license-heading">License &amp; Plan</div>
+<div id="lic-body" class="lic-body">Loading…</div>
+</section>
+<section class="settings-account-panel settings-engine-panel" aria-labelledby="settings-engine-heading">
+<div class="card-head" id="settings-engine-heading">Appearance &amp; Engine</div>
+<div class="cfg-row"><span>Theme</span><select class="select" id="theme-select" data-onchange="h74"><option value="dark">Dark</option><option value="light">Light</option><option value="midnight">Midnight</option><option value="solarized">Solarized</option><option value="sepia">Sepia</option><option value="matrix">Matrix</option></select></div>
+<div class="cfg-row"><span>Dashboard</span><select class="select" id="dashboard-select" data-onchange="h146" aria-label="Dashboard interface"><option value="primary">Ledger dashboard (primary)</option><option value="classic" selected>Classic dashboard (alternate)</option></select></div>
+<div class="cfg-row"><span>Engine</span><span class="pill pill-accent" data-csp-style="s9">v2 (bi-temporal)</span></div>
+<div class="cfg-row"><span>Store</span><span id="cfg-store"></span></div>
+</section>
+</div>
+</div>
+<div class="card"><div class="card-head">Cloud sync</div><div id="sync-body" class="lic-body">Loading…</div></div>
+<div class="card"><div class="card-head">Hosted Team &amp; agent access</div><div id="tokens-body" class="lic-body">Loading…</div></div>
+</div>
+<div class="settings-column">
+<div class="card"><div class="card-head">Connect an LLM</div><div id="llm-body" class="lic-body">Loading…</div></div>
+</div>
+</div>
+
+</div>
+</div>
+</main>
+</div>
+
+<!-- ENTITY MEMORIES POPUP (Knowledge Graph tab: click a node) -->
+<div class="mm-overlay" id="mm-overlay" data-onclick="h75" aria-hidden="true">
+<div class="mm-box" role="dialog" aria-modal="true" aria-labelledby="mm-title" aria-describedby="mm-meta">
+<div class="mm-head"><div class="mm-title" id="mm-title"></div><button class="btn btn-ghost btn-sm" data-onclick="h76" aria-label="Close">&#10005;</button></div>
+<div class="mm-meta" id="mm-meta"></div>
+<div class="mm-body md-reader status-region" id="mm-body" role="status" aria-live="polite"></div>
+<div class="mm-actions" id="mm-actions"></div>
+</div>
+</div>
+
+<!-- ACCESSIBLE ACTION DIALOG (replaces native prompt/confirm interactions) -->
+<div class="mm-overlay" id="action-overlay" aria-hidden="true">
+<div class="mm-box" role="dialog" aria-modal="true" aria-labelledby="action-title" aria-describedby="action-message">
+<div class="mm-head"><div class="mm-title" id="action-title">Confirm action</div><button class="btn btn-ghost btn-sm" id="action-close" aria-label="Close">&#10005;</button></div>
+<div class="mm-body">
+<div class="field-hint" id="action-message"></div>
+<div id="action-fields"></div>
+<div class="field-hint action-error" id="action-error" role="alert" aria-live="assertive"></div>
+</div>
+<div class="mm-actions"><button class="btn btn-ghost" id="action-cancel">Cancel</button><button class="btn btn-primary" id="action-submit">Continue</button></div>
+</div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+<!-- Vendored locally (no CDN) so the dashboard renders fully offline / air-gapped —
+     the local-first guarantee the Inspector used to hold, now the dashboard's. -->
+<script src="/classic-assets/vendor/marked.min.js"></script>
+<script src="/classic-assets/vendor/purify.min.js"></script>
+<script src="/classic-assets/vendor/d3.min.js"></script>
+<!-- force-graph.min.js and engraphis-graph.js are deliberately NOT loaded here.
+     force-graph applies inline styles at runtime, which the production CSP
+     (`style-src 'self'`) blocks and reports once per attempt — on every page, not just the
+     graph view. dashboard.js fetches both on demand from graphRender(); see loadForceGraph()
+     and loadGraphEngine(). scripts/externalize_dashboard_assets.py enforces both halves:
+     they stay out of this file, and the lazy references still have to resolve. -->
+<script src="/classic-assets/dashboard.js?v=20260728-reference-materials"></script>
+</body>
+</html>

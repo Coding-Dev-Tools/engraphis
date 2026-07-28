@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import os
 
 
@@ -13,6 +14,19 @@ def _port(value: str) -> int:
     if not 1 <= port <= 65535:
         raise argparse.ArgumentTypeError("port must be from 1 to 65535")
     return port
+
+
+def _loopback(host: str) -> bool:
+    # Mirrors scripts/graph_server._loopback. An empty host binds ALL interfaces, so it
+    # is emphatically not loopback; an unparseable hostname fails closed (token required).
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def main(argv=None) -> None:
@@ -27,6 +41,11 @@ def main(argv=None) -> None:
     )
     ap.add_argument("--reload", action="store_true", help="Reload when source files change.")
     args = ap.parse_args(argv)
+    # Fail at startup rather than silently publishing the memory API. The middleware in
+    # engraphis.app also refuses non-loopback peers without a token, but a container that
+    # binds all interfaces should be told at boot, not once a request is refused.
+    if not _loopback(args.host) and not os.environ.get("ENGRAPHIS_API_TOKEN", "").strip():
+        ap.error("non-loopback serving requires ENGRAPHIS_API_TOKEN")
     os.environ["ENGRAPHIS_HOST"] = args.host
     os.environ["ENGRAPHIS_PORT"] = str(args.port)
 

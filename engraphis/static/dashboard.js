@@ -16,16 +16,21 @@ function esc(s){if(s===undefined||s===null)return '';return (''+s).replace(/&/g,
 /* Scheme-sanitize URLs interpolated into href attributes. esc() entity-encodes but
    does not block javascript:/data:/vbscript: URIs; a compromised or misconfigured
    license server could otherwise push a crafted upgrade_url that executes script
-   when clicked. Non-http(s) URLs collapse to '#' so the link stays inert. */
-function safeUrl(u){if(!u||typeof u!=='string')return '#';const s=u.trim();if(/^#/i.test(s))return s;const m=s.match(/^([a-z][a-z0-9+.-]*):/i);if(!m)return s;if(/^(https?|mailto|ftps?)$/i.test(m[1]))return s;return '#'}
+   when clicked. Non-http(s) URLs collapse to '#' so the link stays inert.
+   Control characters are stripped before the scheme test: the WHATWG URL parser
+   removes tab/newline/C0 before resolving a scheme, so a split scheme would re-form
+   as javascript: after a naive scheme match had already failed. A scheme-less string
+   that still contains ':' therefore fails closed rather than passing through. */
+function safeUrl(u){if(!u||typeof u!=='string')return '#';const s=u.replace(/[\u0000-\u001F\u007F]/g,'').trim();if(/^#/.test(s))return s;const m=s.match(/^([a-z][a-z0-9+.-]*):/i);if(!m)return /:/.test(s)?'#':s;if(/^(https?|mailto|ftps?)$/i.test(m[1]))return s;return '#'}
 function showAs(el,visible,mode){if(!el)return;el.classList.toggle('is-hidden',!visible);for(const name of ['is-flex','is-block','is-inline-flex'])el.classList.remove(name);if(visible&&mode)el.classList.add('is-'+mode)}
 function setTone(el,tone){if(!el)return;for(const name of ['tone-red','tone-green','tone-muted'])el.classList.remove(name);if(tone)el.classList.add('tone-'+tone)}
 function renderMd(md){try{return DOMPurify.sanitize(marked.parse(md||''))}catch(e){return esc(md)}}
 let TOAST_TIMER=null;
 function toast(m,t){const e=document.getElementById('toast');const kind=t||'ok';e.textContent=m;e.className='toast toast-'+kind+' show';e.setAttribute('role',kind==='err'?'alert':'status');e.setAttribute('aria-live',kind==='err'?'assertive':'polite');clearTimeout(TOAST_TIMER);TOAST_TIMER=setTimeout(()=>e.classList.remove('show'),3200)}
 function fmtRel(ts){if(!ts)return '';if(typeof ts==='string'){const parsed=Date.parse(ts);if(!Number.isFinite(parsed))return '';ts=parsed/1000}const s=Math.max(0,Date.now()/1000-ts);if(s<60)return 'just now';if(s<3600)return Math.floor(s/60)+'m ago';if(s<86400)return Math.floor(s/3600)+'h ago';if(s<2592000)return Math.floor(s/86400)+'d ago';return new Date(ts*1000).toISOString().slice(0,10)}
-async function api(p,o){o=o||{};const r=await fetch(p.startsWith('http')?p:API+p,o);const txt=await r.text();let d=null;try{d=txt?JSON.parse(txt):null}catch(e){}
+async function api(p,o){o=o||{};o={...o,headers:{...(o.headers||{}),'X-Engraphis-Browser-Session':'1'}};const r=await fetch(p.startsWith('http')?p:API+p,o);const txt=await r.text();let d=null;try{d=txt?JSON.parse(txt):null}catch(e){}
  if(!r.ok){let msg=(d&&d.detail&&(d.detail.error||d.detail))||(d&&d.error)||(''+r.status);if(typeof msg!=='string')msg=JSON.stringify(msg);const err=new Error(msg);err.status=r.status;err.detail=d&&d.detail;throw err}return d}
+async function authenticateBrowser(){let token='';try{const fragment=new URLSearchParams(location.hash.slice(1));token=fragment.get('token')||'';if(token)history.replaceState(null,'',location.pathname+location.search)}catch(e){}if(!token)token=window.prompt('Enter this deployment’s ENGRAPHIS_API_TOKEN:')||'';if(!token)return false;try{await api('/auth/session',{method:'POST',body:JSON.stringify({token}),headers:{'Content-Type':'application/json'}});token='';return true}catch(e){token='';toast('Authentication failed: '+e.message,'err');return false}}
 let ACTION_RESOLVE=null,ACTION_SPEC=null;
 function actionDialog(spec){if(ACTION_RESOLVE)closeActionDialog(null);ACTION_SPEC=spec||{};document.getElementById('action-title').textContent=ACTION_SPEC.title||'Confirm action';document.getElementById('action-message').textContent=ACTION_SPEC.message||'';document.getElementById('action-error').textContent='';const fields=document.getElementById('action-fields');fields.replaceChildren();(ACTION_SPEC.fields||[]).forEach((f,i)=>{const wrap=document.createElement('div');wrap.className='field';const label=document.createElement('label');label.className='field-lbl';label.htmlFor='action-field-'+i;label.textContent=f.label||'Value';const input=f.options?document.createElement('select'):document.createElement(f.multiline?'textarea':'input');input.className=f.options?'select':'input';input.id='action-field-'+i;input.dataset.name=f.name||('field'+i);if(f.type==='password'){input.type='password';input.autocomplete='off'}else if(input.tagName==='INPUT'){input.type=f.type||'text'}if(f.placeholder)input.placeholder=f.placeholder;if(f.value!=null)input.value=f.value;if(f.required)input.required=true;(f.options||[]).forEach(opt=>{const option=document.createElement('option');option.value=opt.value==null?opt:opt.value;option.textContent=opt.label==null?opt:opt.label;input.appendChild(option)});wrap.append(label,input);fields.appendChild(wrap)});const submit=document.getElementById('action-submit');submit.textContent=ACTION_SPEC.submit||'Continue';submit.className='btn '+(ACTION_SPEC.danger?'btn-danger':'btn-primary');document.getElementById('action-overlay').classList.add('show');return new Promise(resolve=>{ACTION_RESOLVE=resolve})}
 function closeActionDialog(value){const resolve=ACTION_RESOLVE;ACTION_RESOLVE=null;ACTION_SPEC=null;document.getElementById('action-overlay').classList.remove('show');if(resolve)resolve(value)}
@@ -81,8 +86,8 @@ UI_OBSERVER.observe(document.body,{subtree:true,childList:true,attributes:true,a
 document.addEventListener('keydown',e=>{trapDialog(e);const t=e.target;if(t.matches('.mem-card')){if(e.altKey&&(e.key==='ArrowUp'||e.key==='ArrowDown')){e.preventDefault();memKeyboardMove(t.dataset.id,e.key==='ArrowUp'?-1:1);return}if(e.key==='Enter'||e.key===' '){e.preventDefault();openMem(t.dataset.id);return}}if((e.key==='Enter'||e.key===' ')&&t.matches('[role=button],.nav-item')){if(e.key===' '||t.matches('.nav-item'))e.preventDefault();t.click()}});
 
 /* theme */
-const THEMES=[['dark','Dark','#15181e','#8c83e8'],['light','Light','#fbfbfc','#5547b8'],['midnight','Midnight','#111b2d','#79a6ef'],['solarized','Solarized','#073642','#58a7d8'],['sepia','Sepia','#f8f2e4','#925420']];
-const THEME_GLYPH={dark:'◑',light:'☀',midnight:'☾',solarized:'◐',sepia:'❂'};
+const THEMES=[['dark','Dark','#15181e','#8c83e8'],['light','Light','#fbfbfc','#5547b8'],['midnight','Midnight','#111b2d','#79a6ef'],['solarized','Solarized','#073642','#58a7d8'],['sepia','Sepia','#f8f2e4','#925420'],['matrix','Matrix','#000403','#3ce072']];
+const THEME_GLYPH={dark:'◑',light:'☀',midnight:'☾',solarized:'◐',sepia:'❂',matrix:'▦'};
 function applyTheme(t){if(!THEME_GLYPH[t])t='dark';document.body.setAttribute('data-theme',t);window.__theme=t;try{localStorage.setItem('engraphis-theme',t)}catch(e){}const b=document.getElementById('theme-btn');if(b){b.textContent=THEME_GLYPH[t];b.setAttribute('aria-label','Change theme. Current theme: '+t)}const sel=document.getElementById('theme-select');if(sel&&sel.value!==t)sel.value=t;renderThemeMenu();if(typeof graphRecolor==='function')graphRecolor()}
 function renderThemeMenu(){const m=document.getElementById('theme-menu');if(!m)return;m.innerHTML=THEMES.map(x=>{const on=(x[0]===window.__theme);return `<button type="button" class="theme-opt${on?' sel':''}" data-theme-value="${x[0]}" data-onclick="h83" aria-pressed="${on}"><span class="theme-sw theme-sw-${x[0]}"><i></i></span><span class="theme-opt-name">${x[1]}</span>${on?'<span class="theme-chk" aria-hidden="true">✓</span>':''}</button>`}).join('')}
 function toggleThemeMenu(e){if(e)e.stopPropagation();const m=document.getElementById('theme-menu'),b=document.getElementById('theme-btn');if(!m)return;const show=!m.classList.contains('is-open');m.classList.toggle('is-open',show);if(b)b.setAttribute('aria-expanded',String(show));if(show){renderThemeMenu();setTimeout(()=>{const first=m.querySelector('button');if(first)first.focus();document.addEventListener('click',closeThemeMenu)},0)}}
@@ -90,6 +95,8 @@ function closeThemeMenu(){const m=document.getElementById('theme-menu'),b=docume
 function pickTheme(t){applyTheme(t);closeThemeMenu()}
 function toggleTheme(){const ids=THEMES.map(x=>x[0]);const i=ids.indexOf(window.__theme);pickTheme(ids[(i+1)%ids.length])}
 function initTheme(){let saved=null;try{saved=localStorage.getItem('engraphis-theme')}catch(e){}applyTheme(saved||window.__theme||'dark')}
+function selectDashboard(value){window.location.assign(value==='classic'?'/classic':'/')}
+function initDashboard(){const select=document.getElementById('dashboard-select');if(select)select.value=location.pathname==='/classic'?'classic':'primary'}
 
 /* nav */
 function selectView(v){
@@ -186,7 +193,7 @@ function fmtDay(epoch){const n=Number(epoch)||0;if(!(n>0))return '';try{const d=
    separately it is the Pro checkout under a neutral name. LIC.account_url resolves the
    generic value directly; the fallback only matters against a build that predates it. */
 function hostedAccountUrl(){return safeUrl((LIC&&LIC.account_url)||(LIC&&LIC.upgrade_url))}
-function hostedPlanUrl(plan,trial){const raw=(LIC&&(plan==='team'?LIC.team_upgrade_url:LIC.pro_upgrade_url))||(LIC&&LIC.upgrade_url);const safe=safeUrl(raw);if(!safe||safe==='#')return '#';try{const url=new URL(safe,location.href);if(plan==='pro'||plan==='team')url.searchParams.set('plan',plan);if(trial)url.searchParams.set('trial',plan);return url.href}catch(e){return safe}}
+function hostedPlanUrl(plan,trial,interval){const cadence=interval==='annual'?'annual':'monthly',key=plan+'_'+cadence+'_upgrade_url',raw=(LIC&&(LIC[key]||(plan==='team'?LIC.team_upgrade_url:LIC.pro_upgrade_url)))||(LIC&&LIC.upgrade_url);const safe=safeUrl(raw);if(!safe||safe==='#')return '#';try{const url=new URL(safe,location.href);if(plan==='pro'||plan==='team')url.searchParams.set('plan',plan);url.searchParams.set('interval',cadence);if(!url.hash)url.hash='billing';if(trial)url.searchParams.set('trial',plan);return url.href}catch(e){return safe}}
 /* Why is this feature locked? One sentence per access state, so the panel never claims a
    trial the customer cannot start nor blames billing for a trial that simply ran out.
    This is DENIAL copy: every caller reaches it because a hosted request was refused. The
@@ -209,7 +216,7 @@ function teamTeaserNote(){const ends=licTrialEnds();
  if(licPlanKey()!=='team'||!licAccessLive())return lockReason(true);
  if(licAccessState()==='trial')return `Your free trial includes Team${ends?` until ${esc(ends)}`:''}. Organizations, roles, and seats are managed in Engraphis Cloud.`;
  return 'Your TEAM subscription includes this. Organizations, roles, and seats are managed in Engraphis Cloud.'}
-function unlockHtml(feature,plan){const url=hostedPlanUrl(plan),trialUrl=hostedPlanUrl(plan,true),team=plan==='team';const offerTrial=licTrialAvailable();const trial=team?'Start hosted Team trial':'Start hosted Pro trial';const purchase=team?'Purchase Team license':'Purchase Pro license';const price=team?'$20 per seat/month or $200 per seat/year':'$10/month or $100/year';const detail=lockReason(team);const benefits=team?['Everything in Pro','Hosted organizations, invitations, and named seats','Roles, scoped credentials, and Team audit history']:['Hosted Cloud Sync across your installations','Growth, retention, decay, and entity Analytics','Auto Consolidation with hosted retention policies','Auto Dreaming with reviewable managed proposals','Priority support'];return `<section class="upgrade-panel" aria-label="Engraphis ${team?'Team':'Pro'} upgrade"><div class="upgrade-panel-kicker">ENGRAPHIS ${team?'TEAM':'PRO'}</div><h2>Unlock ${esc(feature)} and more</h2><p class="upgrade-panel-lede">Make the local memory engine work across your installations—and keep improving without manual upkeep.</p><div class="upgrade-panel-price">${price}</div><div class="upgrade-panel-benefits"><div class="upgrade-panel-benefits-title">Your license unlocks</div><ul>${benefits.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div><p class="upgrade-panel-trial">${detail}</p><div class="upgrade-panel-actions">${offerTrial?`<a class="btn btn-primary" href="${esc(trialUrl)}" target="_blank" rel="noopener">${trial}</a>`:''}<a class="btn btn-ghost" href="${esc(url)}" target="_blank" rel="noopener">${purchase}</a></div></section>`}
+function unlockHtml(feature,plan){const url=hostedPlanUrl(plan,false,'monthly'),annualUrl=hostedPlanUrl(plan,false,'annual'),trialUrl=hostedPlanUrl(plan,true,'monthly'),team=plan==='team';const offerTrial=licTrialAvailable();const trial=team?'Start hosted Team trial':'Start hosted Pro trial';const purchase=team?'Purchase Team license':'Purchase Pro license';const price=team?'$20 per seat/month or $200 per seat/year':'$10/month or $100/year';const detail=lockReason(team);const benefits=team?['Everything in Pro','Hosted organizations, invitations, and named seats','Roles, scoped credentials, and Team audit history']:['Hosted Cloud Sync across your installations','Growth, retention, decay, and entity Analytics','Auto Consolidation with hosted retention policies','Auto Dreaming with reviewable managed proposals','Priority support'];return `<section class="upgrade-panel" aria-label="Engraphis ${team?'Team':'Pro'} upgrade"><div class="upgrade-panel-kicker">ENGRAPHIS ${team?'TEAM':'PRO'}</div><h2>Unlock ${esc(feature)} and more</h2><p class="upgrade-panel-lede">Make the local memory engine work across your installations—and keep improving without manual upkeep.</p><div class="upgrade-panel-price">${price}</div><div class="upgrade-panel-benefits"><div class="upgrade-panel-benefits-title">Your license unlocks</div><ul>${benefits.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div><p class="upgrade-panel-trial">${detail}</p><div class="upgrade-panel-actions">${offerTrial?`<a class="btn btn-primary" href="${esc(trialUrl)}" target="_blank" rel="noopener">${trial}</a>`:''}<a class="btn btn-ghost" href="${esc(url)}" target="_blank" rel="noopener">${purchase}</a><a class="btn btn-ghost" href="${esc(annualUrl)}" target="_blank" rel="noopener">Annual option</a></div></section>`}
 function startTrialPlan(plan){const url=hostedPlanUrl(plan,true);if(url==='#'){toast('Hosted signup URL is not configured','err');return}const link=document.createElement('a');link.href=url;link.target='_blank';link.rel='noopener';link.click()}
 function startTrial(){return startTrialPlan('pro')}
 function startTeamTrial(){return startTrialPlan('team')}
@@ -235,8 +242,15 @@ function updateFeatureLocks(){
 function barRow(label,val,peak,color){const tone=color==='var(--green)'?' analytics-bar-green':(color==='var(--blue)'?' analytics-bar-blue':(color==='var(--cyan)'?' analytics-bar-cyan':(color==='var(--accent-dim)'?' analytics-bar-dim':'')));return `<div data-csp-style="s79"><div data-csp-style="s80" title="${esc(label)}">${esc(label)}</div><progress class="analytics-bar${tone}" max="${Math.max(Number(peak)||1,1)}" value="${Math.max(Number(val)||0,0)}" aria-label="${esc(label)}: ${Number(val)||0}"></progress><div data-csp-style="s83">${val}</div></div>`}
 function statMini(v,l,color){const tone=color==='var(--red)'?' tone-red':(color==='var(--amber)'?' tone-amber':(color==='var(--green)'?' tone-green':''));return `<div class="stat" data-csp-style="s67"><div class="stat-val${tone}">${v}</div><div class="stat-lbl">${esc(l)}</div></div>`}
 function renderAnalytics(a,isPortfolio){const t=a.totals||{},f=a.decay_forecast||{};const weeks=a.growth_weekly||[];const gp=Math.max(...weeks,1);const gitems=weeks.map((n,i)=>{const back=weeks.length-1-i;return barRow(back===0?'now':back+'w ago',n,gp,'var(--accent-dim)')}).join('')||'<div class="empty" data-csp-style="s85">No data</div>';const hist=a.retention_histogram||{};const hc=hist.counts||[],hb=hist.buckets||[];const hp=Math.max(...hc,1);const hitems=hb.map((b,i)=>barRow(b,hc[i]||0,hp,'var(--green)')).join('');const mix=a.resolver_mix||{};const mk=Object.keys(mix);const mp=Math.max(...Object.values(mix),1);const mitems=mk.length?mk.map(k=>barRow(k,mix[k],mp,'var(--blue)')).join(''):'<div class="empty" data-csp-style="s85">No resolver events yet.</div>';const bt=a.by_type||{};const btk=Object.keys(bt);const bp=Math.max(...Object.values(bt),1);const btitems=btk.length?btk.map(k=>barRow(k,bt[k],bp,'var(--accent)')).join(''):'<div class="empty" data-csp-style="s85">No memories yet.</div>';const ents=a.top_entities||[];const ep=Math.max(...ents.map(e=>e.n),1);const eitems=ents.length?ents.map(e=>barRow(e.name+(isPortfolio&&e.workspace?' · '+e.workspace:''),e.n,ep,'var(--cyan)')).join(''):'<div class="empty" data-csp-style="s85">No entities yet — they appear as the graph grows.</div>';const avg=Math.round((t.avg_retention||0)*100);let wsTable='';if(isPortfolio&&a.workspaces){wsTable=`<div class="card" data-csp-style="s52"><div class="card-head">Per-workspace breakdown</div><table class="tbl"><thead><tr><th>Workspace</th><th>Live</th><th>Pinned</th><th>Avg ret.</th><th>Fading 7d</th></tr></thead><tbody>${a.workspaces.map(w=>`<tr><td>${esc(w.workspace)}</td><td>${w.live}</td><td>${w.pinned}</td><td>${Math.round((w.avg_retention||0)*100)}%</td><td>${w.at_risk_7d}</td></tr>`).join('')}</tbody></table></div>`}return `<div class="stat-grid">${statMini(t.live!=null?t.live:'—','Live memories')}${statMini(avg+'%','Avg retention',avg<40?'var(--red)':(avg<70?'var(--amber)':'var(--green)'))}${statMini(f.at_risk_7d!=null?f.at_risk_7d:'—','Fading ≤ 7 days',f.at_risk_7d>0?'var(--amber)':'')}${statMini(f.at_risk_30d!=null?f.at_risk_30d:'—','Fading ≤ 30 days')}${statMini(t.pinned!=null?t.pinned:'—','Pinned (protected)')}${isPortfolio?statMini(t.workspaces||0,'Workspaces'):statMini(t.superseded!=null?t.superseded:'—','Superseded (history)')}</div><div class="cols-2" data-csp-style="s52"><div class="card"><div class="card-head">Memories written per week</div>${gitems}</div><div class="card"><div class="card-head">Retention distribution</div>${hitems}</div></div><div class="cols-2" data-csp-style="s52"><div class="card"><div class="card-head">By type</div>${btitems}</div><div class="card"><div class="card-head">Write-path resolver activity</div>${mitems}</div></div><div class="card" data-csp-style="s52"><div class="card-head">Most connected entities</div>${eitems}</div>${wsTable}`}
-function managedConsentHtml(feature){return `<div class="empty" data-csp-style="s87"><div>${esc(feature)} runs in Engraphis Cloud, and managed compute is turned off for this installation.</div><div class="field-hint">Connect this installation to Engraphis Cloud to enable it. Secret and session-scoped memories are never uploaded.</div></div>`}
+/* A consent-required response is a valuable moment to show the job Pro can do, not a
+   dead end about configuration. A customer with live access must never be offered their
+   own plan again: hosted features are on by default once their account is available. */
+function managedConsentHtml(feature){const automation=/automation/i.test(feature),live=licAccessLive(),trial=licTrialAvailable(),copy=automation?{eyebrow:'MEMORY MAINTENANCE',title:'Let your memory improve after you log off.',lede:'Turn repetitive cleanup into a steady, reviewable habit. Pro watches the rhythm of your workspace and brings the useful changes back for approval.',cards:[['CONSOLIDATE','Distill recurring work into durable knowledge on a cadence you control.'],['DREAM','Surface useful links after accumulation and idle time, before fresh context gets buried.'],['REVIEW','Every managed result is a proposal. Nothing silently rewrites your local memory.']]}:{eyebrow:'MEMORY INTELLIGENCE',title:'See the memory your team is about to lose.',lede:'Pro turns your local memory into an operating signal—so you can see what is growing, what is fading, and what is quietly shaping recall.',cards:[['GROWTH','Separate knowledge that compounds from activity that only accumulates.'],['RETENTION','Catch fading context before an important answer disappears from reach.'],['ENTITY SIGNAL','See the people, projects, and ideas organizing your workspace.']]};const accountUrl=hostedAccountUrl(),trialUrl=hostedPlanUrl('pro',true),purchaseUrl=hostedPlanUrl('pro'),actions=live?`<a class="btn btn-primary" href="${esc(accountUrl)}" target="_blank" rel="noopener">Open Engraphis Cloud</a>`:`${trial?`<a class="btn btn-primary" href="${esc(trialUrl)}" target="_blank" rel="noopener">Start ${TRIAL_DAYS}-day Pro trial</a>`:''}<a class="btn btn-ghost" href="${esc(purchaseUrl)}" target="_blank" rel="noopener">Purchase Pro license</a>`,next=live?'Included in your Pro plan. Hosted insights and maintenance are on by default—nothing else to configure.':trial?`Start with ${TRIAL_DAYS} days of Pro. Hosted insights and maintenance come on automatically—no settings, toggles, or worker setup.`:'Purchase Pro and hosted insights and maintenance come on automatically—no settings, toggles, or worker setup.';return `<section class="hosted-opportunity" aria-label="${esc(feature)} in Engraphis Pro"><div class="hosted-opportunity-copy"><div class="hosted-opportunity-kicker">ENGRAPHIS PRO <span>/${copy.eyebrow}</span></div><h2>${copy.title}</h2><p class="hosted-opportunity-lede">${copy.lede}</p><p class="hosted-opportunity-next">${next}</p><div class="hosted-opportunity-actions">${actions}</div></div><div class="hosted-opportunity-preview" aria-label="What hosted ${esc(feature)} unlocks"><div class="hosted-opportunity-preview-label">WHAT PRO IS WATCHING</div>${copy.cards.map(card=>`<div class="hosted-opportunity-card"><span>${card[0]}</span><p>${card[1]}</p></div>`).join('')}</div><div class="hosted-opportunity-privacy"><strong>Your memory stays yours.</strong> Hosted work is automatic with Pro. Secret and session-scoped memories stay local.</div></section>`}
 function managedConsentRequired(error){return error&&error.status===409&&error.detail&&error.detail.code==='consent_required'}
+/* Only an unconfigured local installation may turn a 401 into trial signup. A revoked
+   or expired Cloud session is also a 401, but ``trial.available`` is false there and it
+   must remain a reconnect error instead of offering a trial the control plane rejects. */
+function cloudTrialSignupRequired(error){return !!(error&&error.status===401&&error.detail&&error.detail.code==='cloud_unconfigured'&&licTrialAvailable())}
 /* Entitlement failure — and only that. 402 subscription not active and 501 feature not
    offered here: each means the customer's plan does not include what they just opened,
    so each may draw the purchase panel.
@@ -254,12 +268,12 @@ function managedConsentRequired(error){return error&&error.status===409&&error.d
    the plain-error branch unreachable on the analytics and automation views, which is the
    regression this comment previously described but the code did not implement. */
 function hostedFeatureUnavailable(error){return !!error&&(error.status===402||error.status===501)}
-async function loadAnalytics(){const el=document.getElementById('analytics-body'),lock=document.getElementById('an-lock'),acts=document.getElementById('an-actions');el.innerHTML='<div class="spinner" data-csp-style="s86"></div>';try{const a=await api('/analytics?workspace='+encodeURIComponent(WS||''));setPlanPill(lock,licTrialActive()?'TRIAL':'CLOUD','pill pill-accent');showAs(acts,true,'flex');el.innerHTML=renderAnalytics(a,false)}catch(e){if(managedConsentRequired(e)){setPlanPill(lock,'CLOUD','pill pill-accent');showAs(acts,false);el.innerHTML=managedConsentHtml('Analytics')}else if(hostedFeatureUnavailable(e)){setPlanPill(lock,'PRO','pill pill-muted');showAs(acts,false);el.innerHTML=unlockHtml('Analytics','pro')}else{el.innerHTML='<div class="empty" data-csp-style="s87">'+esc(e.message)+'</div>'}}}
+async function loadAnalytics(){const el=document.getElementById('analytics-body'),lock=document.getElementById('an-lock'),acts=document.getElementById('an-actions');el.innerHTML='<div class="spinner" data-csp-style="s86"></div>';try{const a=await api('/analytics?workspace='+encodeURIComponent(WS||''));setPlanPill(lock,licTrialActive()?'TRIAL':'CLOUD','pill pill-accent');showAs(acts,true,'flex');el.innerHTML=renderAnalytics(a,false)}catch(e){if(managedConsentRequired(e)||cloudTrialSignupRequired(e)){setPlanPill(lock,'CLOUD','pill pill-accent');showAs(acts,false);el.innerHTML=managedConsentHtml('Analytics')}else if(hostedFeatureUnavailable(e)){setPlanPill(lock,'PRO','pill pill-muted');showAs(acts,false);el.innerHTML=unlockHtml('Analytics','pro')}else{el.innerHTML='<div class="empty" data-csp-style="s87">'+esc(e.message)+'</div>'}}}
 
 /* ── hosted automation policy (Pro / Team) ── */
-async function loadAutomation(){const el=document.getElementById('automation-body'),lock=document.getElementById('au-lock'),ws='?workspace='+encodeURIComponent(WS||'');el.innerHTML='<div class="spinner" data-csp-style="s86"></div>';try{const p=await api('/automation'+ws);setPlanPill(lock,licTrialActive()?'TRIAL':'CLOUD','pill pill-accent');const last=p.last_run?fmtRel(p.last_run):'never',dream=p.dream_enabled!=null?p.dream_enabled:p.dream;el.innerHTML=`<div class="cols-2"><div class="card"><div class="card-head">Hosted maintenance policy</div><label data-csp-style="s88"><input type="checkbox" id="au-enabled" ${p.enabled?'checked':''}> Enable hosted automation</label><div class="field"><label class="field-lbl">Run every (hours)</label><input class="input" id="au-cadence" type="number" min="1" value="${p.cadence_hours||24}"></div><label data-csp-style="s88"><input type="checkbox" id="au-consolidate" ${p.consolidate?'checked':''}> Auto Consolidation</label><div class="field"><label class="field-lbl">Min cluster size</label><input class="input" id="au-mincluster" type="number" min="2" max="20" value="${p.min_cluster||3}"></div><div class="field"><label class="field-lbl">Archive proposal threshold</label><input class="input" id="au-archive" type="number" step="0.01" min="0" max="0.5" value="${p.archive_below!=null?p.archive_below:0.05}"><div class="field-hint">The cloud returns reviewable proposals. Pinned memories remain protected.</div></div><label data-csp-style="s88"><input type="checkbox" id="au-dream" ${dream?'checked':''}> Auto Dreaming after accumulation and idle time</label><div class="field"><label class="field-lbl">Min new memories</label><input class="input" id="au-dream-min" type="number" min="1" value="${p.dream_min_new||20}"></div><div class="field"><label class="field-lbl">Idle minutes</label><input class="input" id="au-dream-idle" type="number" min="0" value="${p.dream_idle_minutes!=null?p.dream_idle_minutes:15}"></div><button class="btn btn-primary btn-sm" data-onclick="h88">Save hosted policy</button></div><div class="card"><div class="card-head">Cloud worker status</div><div class="cfg-row" data-csp-style="s48"><span>Status</span><span class="pill ${p.enabled?'pill-green':'pill-muted'}" data-csp-style="s9">${p.enabled?'ENABLED':'OFF'}</span></div><div class="cfg-row" data-csp-style="s48"><span>Last run</span><span data-csp-style="s50">${esc(last)}</span></div><div data-csp-style="s89"><button class="btn btn-primary btn-sm" data-onclick="h90">Request proposal</button></div><div id="au-result" data-csp-style="s90"></div><div class="field-hint" data-csp-style="s91">Requesting managed work uploads the selected workspace’s normal and sensitive memory content, excluding secret and session-scoped rows, capped at 16 MiB, over HTTPS without end-to-end encryption. Results are proposals and never automatically write the local database.</div></div></div>`}catch(e){if(managedConsentRequired(e)){setPlanPill(lock,'CLOUD','pill pill-accent');el.innerHTML=managedConsentHtml('Hosted Automation')}else if(hostedFeatureUnavailable(e)){setPlanPill(lock,'PRO','pill pill-muted');el.innerHTML=unlockHtml('Automation, Auto Consolidation, and Auto Dreaming','pro')}else{el.innerHTML='<div class="empty" data-csp-style="s87">'+esc(e.message)+'</div>'}}}
-async function saveAutomation(){const body={enabled:document.getElementById('au-enabled').checked,cadence_hours:Number(document.getElementById('au-cadence').value)||24,consolidate:document.getElementById('au-consolidate').checked,min_cluster:Number(document.getElementById('au-mincluster').value)||3,archive_below:Number(document.getElementById('au-archive').value)||0.05,dream_enabled:document.getElementById('au-dream').checked,dream_min_new:Number(document.getElementById('au-dream-min').value)||20,dream_idle_minutes:Number(document.getElementById('au-dream-idle').value)};try{await api('/automation?workspace='+encodeURIComponent(WS||''),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});toast('Hosted policy saved','ok');loadAutomation()}catch(e){if(managedConsentRequired(e)){const result=document.getElementById('au-result');if(result)result.innerHTML=managedConsentHtml('Hosted Automation');toast('Connect this installation to Engraphis Cloud to use managed compute','err');return}toast((e.status===402||e.status===501)?'Hosted Automation requires Pro or Team':e.message,'err')}}
-async function runMaintenance(){const el=document.getElementById('au-result');if(el)el.innerHTML='<div class="spinner" data-csp-style="s93"></div>';try{const d=await api('/maintenance/run?workspace='+encodeURIComponent(WS||''),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dry_run:true})});if(el)el.innerHTML=`<span class="pill pill-green" data-csp-style="s9">PROPOSAL</span> Hosted work was submitted for review.<pre data-csp-style="s94">${esc(JSON.stringify(d,null,2))}</pre>`;toast('Managed proposal requested','ok')}catch(e){if(el)el.innerHTML=managedConsentRequired(e)?managedConsentHtml('Hosted Automation'):'<div class="empty" data-csp-style="s85">'+esc(e.message)+'</div>';toast(managedConsentRequired(e)?'Connect this installation to Engraphis Cloud to use managed compute':((e.status===402||e.status===501)?'Hosted Automation requires Pro or Team':e.message),'err')}}
+async function loadAutomation(){const el=document.getElementById('automation-body'),lock=document.getElementById('au-lock'),ws='?workspace='+encodeURIComponent(WS||'');el.innerHTML='<div class="spinner" data-csp-style="s86"></div>';try{const p=await api('/automation'+ws);setPlanPill(lock,licTrialActive()?'TRIAL':'CLOUD','pill pill-accent');const last=p.last_run?fmtRel(p.last_run):'never',dream=p.dream_enabled!=null?p.dream_enabled:p.dream;el.innerHTML=`<div class="cols-2"><div class="card"><div class="card-head">Hosted maintenance policy</div><label data-csp-style="s88"><input type="checkbox" id="au-enabled" ${p.enabled?'checked':''}> Enable hosted automation</label><div class="field"><label class="field-lbl">Run every (hours)</label><input class="input" id="au-cadence" type="number" min="1" value="${p.cadence_hours||24}"></div><label data-csp-style="s88"><input type="checkbox" id="au-consolidate" ${p.consolidate?'checked':''}> Auto Consolidation</label><div class="field"><label class="field-lbl">Min cluster size</label><input class="input" id="au-mincluster" type="number" min="2" max="20" value="${p.min_cluster||3}"></div><div class="field"><label class="field-lbl">Archive proposal threshold</label><input class="input" id="au-archive" type="number" step="0.01" min="0" max="0.5" value="${p.archive_below!=null?p.archive_below:0.05}"><div class="field-hint">The cloud returns reviewable proposals. Pinned memories remain protected.</div></div><label data-csp-style="s88"><input type="checkbox" id="au-dream" ${dream?'checked':''}> Auto Dreaming after accumulation and idle time</label><div class="field"><label class="field-lbl">Min new memories</label><input class="input" id="au-dream-min" type="number" min="1" value="${p.dream_min_new||20}"></div><div class="field"><label class="field-lbl">Idle minutes</label><input class="input" id="au-dream-idle" type="number" min="0" value="${p.dream_idle_minutes!=null?p.dream_idle_minutes:15}"></div><button class="btn btn-primary btn-sm" data-onclick="h88">Save hosted policy</button></div><div class="card"><div class="card-head">Cloud worker status</div><div class="cfg-row" data-csp-style="s48"><span>Status</span><span class="pill ${p.enabled?'pill-green':'pill-muted'}" data-csp-style="s9">${p.enabled?'ENABLED':'OFF'}</span></div><div class="cfg-row" data-csp-style="s48"><span>Last run</span><span data-csp-style="s50">${esc(last)}</span></div><div data-csp-style="s89"><button class="btn btn-primary btn-sm" data-onclick="h90">Request proposal</button></div><div id="au-result" data-csp-style="s90"></div><div class="field-hint" data-csp-style="s91">Requesting managed work uploads the selected workspace’s normal and sensitive memory content, excluding secret and session-scoped rows, capped at 16 MiB, over HTTPS without end-to-end encryption. Results are proposals and never automatically write the local database.</div></div></div>`}catch(e){if(managedConsentRequired(e)||cloudTrialSignupRequired(e)){setPlanPill(lock,'CLOUD','pill pill-accent');el.innerHTML=managedConsentHtml('Hosted Automation')}else if(hostedFeatureUnavailable(e)){setPlanPill(lock,'PRO','pill pill-muted');el.innerHTML=unlockHtml('Automation, Auto Consolidation, and Auto Dreaming','pro')}else{el.innerHTML='<div class="empty" data-csp-style="s87">'+esc(e.message)+'</div>'}}}
+async function saveAutomation(){const body={enabled:document.getElementById('au-enabled').checked,cadence_hours:Number(document.getElementById('au-cadence').value)||24,consolidate:document.getElementById('au-consolidate').checked,min_cluster:Number(document.getElementById('au-mincluster').value)||3,archive_below:Number(document.getElementById('au-archive').value)||0.05,dream_enabled:document.getElementById('au-dream').checked,dream_min_new:Number(document.getElementById('au-dream-min').value)||20,dream_idle_minutes:Number(document.getElementById('au-dream-idle').value)};try{await api('/automation?workspace='+encodeURIComponent(WS||''),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});toast('Hosted policy saved','ok');loadAutomation()}catch(e){if(managedConsentRequired(e)){const result=document.getElementById('au-result');if(result)result.innerHTML=managedConsentHtml('Hosted Automation');toast('Hosted Automation starts automatically with Pro','err');return}toast((e.status===402||e.status===501)?'Hosted Automation requires Pro or Team':e.message,'err')}}
+async function runMaintenance(){const el=document.getElementById('au-result');if(el)el.innerHTML='<div class="spinner" data-csp-style="s93"></div>';try{const d=await api('/maintenance/run?workspace='+encodeURIComponent(WS||''),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dry_run:true})});if(el)el.innerHTML=`<span class="pill pill-green" data-csp-style="s9">PROPOSAL</span> Hosted work was submitted for review.<pre data-csp-style="s94">${esc(JSON.stringify(d,null,2))}</pre>`;toast('Managed proposal requested','ok')}catch(e){if(el)el.innerHTML=managedConsentRequired(e)?managedConsentHtml('Hosted Automation'):'<div class="empty" data-csp-style="s85">'+esc(e.message)+'</div>';toast(managedConsentRequired(e)?'Hosted Automation starts automatically with Pro':((e.status===402||e.status===501)?'Hosted Automation requires Pro or Team':e.message),'err')}}
 
 const runMaintenanceBase=runMaintenance;
 let MAINTENANCE_PENDING=false;
@@ -493,13 +507,12 @@ function licStateBanner(state,plan,ends,status){
  return ''}
 function licActionsHtml(state){
  if(licTrialAvailable())return `<div data-csp-style="s123"><button class="btn btn-primary btn-sm" data-onclick="h84">Start hosted Pro trial</button><button class="btn btn-ghost btn-sm" data-onclick="h87">Start hosted Team trial</button></div>`;
- /* A lapsed customer is renewing the subscription they already hold, not shopping. Both
-    buttons used to be fixed to pro/team regardless of plan, so "Update billing" walked a
-    lapsed Team customer into the Pro checkout (?plan=pro) — the wrong product offered to
-    fix a billing problem — and "Open account portal" sent a lapsed Pro customer to the
-    Team one. */
- if(state==='lapsed')return `<div data-csp-style="s123"><a class="btn btn-primary btn-sm" href="${esc(hostedPlanUrl(licPlanKey()||'pro'))}" target="_blank" rel="noopener">Update billing</a><a class="btn btn-ghost btn-sm" href="${esc(hostedAccountUrl())}" target="_blank" rel="noopener">Open account portal</a></div>`;
+ /* A lapsed customer is fixing an existing subscription, not shopping. Both actions go
+    to the plan-neutral account portal so a payment-method problem is never reframed as a
+    new Pro or Team purchase. */
+ if(state==='lapsed')return `<div data-csp-style="s123"><a class="btn btn-primary btn-sm" href="${esc(hostedAccountUrl())}" target="_blank" rel="noopener">Update billing</a><a class="btn btn-ghost btn-sm" href="${esc(hostedAccountUrl())}" target="_blank" rel="noopener">Open account portal</a></div>`;
  const buy=state==='trial_expired';
+ if(state==='active'){const label=licPlanKey()==='team'?'Open Team Cloud':'Open Pro Cloud';return `<div data-csp-style="s123"><a class="btn btn-primary btn-sm" href="${esc(hostedAccountUrl())}" target="_blank" rel="noopener">${label}</a></div>`}
  const primary=buy?'Subscribe to Pro':'Open Pro Cloud';
  const secondary=buy?'Subscribe to Team':'Open Team Cloud';
  return `<div data-csp-style="s123"><a class="btn btn-primary btn-sm" href="${esc(hostedPlanUrl('pro'))}" target="_blank" rel="noopener">${primary}</a><a class="btn btn-ghost btn-sm" href="${esc(hostedPlanUrl('team'))}" target="_blank" rel="noopener">${secondary}</a></div>`}
@@ -522,14 +535,14 @@ function renderLicense(d){
     it. Emitted by /api/license since the plan resolver landed, and never shown until now —
     so "the dashboard says PRO" and "the cloud says PRO" could not be told apart. */
  if(d.plan_source)h+=`<div class="cfg-row"><span>Plan source</span><span>${esc(LIC_SOURCE_LABEL[d.plan_source]||d.plan_source)}${d.plan_checked_at?' · confirmed '+esc(fmtRel(d.plan_checked_at)):''}</span></div>`;
- h+=`<div class="field-hint" data-csp-style="s97">The local core remains free. Pro and Team capabilities execute in Engraphis Cloud. The email-confirmed, no-card trial lasts exactly ${TRIAL_DAYS} active days; local-only write grace is separate, capped at 24 hours, and never extends cloud access.</div>`;
+ h+=`<div class="field-hint" data-csp-style="s97">The local core remains free. Pro and Team capabilities execute in Engraphis Cloud. The email-confirmed, no-card trial lasts exactly ${TRIAL_DAYS} active days; private-service account grace is separate, capped at 24 hours, and never extends cloud access or restricts local MCP and dashboard use.</div>`;
  h+=licActionsHtml(state);
  el.innerHTML=h;
 }
 async function exportWorkspace(){try{const d=await api('/export?workspace='+encodeURIComponent(WS||''));const blob=new Blob([JSON.stringify(d,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='engraphis-export-'+Date.now()+'.json';a.click();URL.revokeObjectURL(a.href);toast('Exported','ok')}catch(e){toast(e.message,'err')}}
 
 /* Hosted Team is a service CTA; local identity and seat administration are not shipped. */
-async function loadTeam(){const el=document.getElementById('team-body');let url=hostedPlanUrl('team');try{const st=await api('/auth/state');if(url==='#'&&st&&st.cloud_url)url=safeUrl(st.cloud_url)}catch(e){}let trialUrl=url;if(url!=='#')try{const parsed=new URL(url,location.href);parsed.searchParams.set('trial','team');trialUrl=parsed.href}catch(e){}el.innerHTML=`<div class="card teaser"><div class="card-head">Engraphis Team Cloud <span class="pill pill-accent" data-csp-style="s9">HOSTED</span></div><div data-csp-style="s149">Organizations, invitations, roles, named seats, scoped device credentials, and team audit run on the private hosted service. This local dashboard is intentionally single-user.</div><div class="field-hint" data-csp-style="s97">${esc(teamTeaserNote())} A separate local-only write grace is capped at 24 hours and never extends Team or other cloud access.</div><div data-csp-style="s150">${licTrialAvailable()?`<a class="btn btn-primary btn-sm" href="${esc(trialUrl)}" target="_blank" rel="noopener">Start hosted Team trial</a>`:''}<a class="btn btn-ghost btn-sm" href="${esc(url)}" target="_blank" rel="noopener">Open Team Cloud</a></div></div>`}
+async function loadTeam(){const el=document.getElementById('team-body');let url=licPlanKey()==='team'&&licAccessLive()?hostedAccountUrl():hostedPlanUrl('team');try{const st=await api('/auth/state');if(url==='#'&&st&&st.cloud_url)url=safeUrl(st.cloud_url)}catch(e){}const trialUrl=hostedPlanUrl('team',true);el.innerHTML=`<div class="card teaser"><div class="card-head">Engraphis Team Cloud <span class="pill pill-accent" data-csp-style="s9">HOSTED</span></div><div data-csp-style="s149">Organizations, invitations, roles, named seats, scoped device credentials, and team audit run on the private hosted service. This local dashboard is intentionally single-user.</div><div class="field-hint" data-csp-style="s97">${esc(teamTeaserNote())} Private-service account grace is capped at 24 hours, never extends Team access, and never restricts the free local core.</div><div data-csp-style="s150">${licTrialAvailable()?`<a class="btn btn-primary btn-sm" href="${esc(trialUrl)}" target="_blank" rel="noopener">Start hosted Team trial</a>`:''}<a class="btn btn-ghost btn-sm" href="${esc(url)}" target="_blank" rel="noopener">Open Team Cloud</a></div></div>`}
 /* health + settings */
 function connectionContext(){const host=(location.hostname||'').toLowerCase();return host==='localhost'||host==='127.0.0.1'||host==='::1'||host.endsWith('.localhost')?'Local engine':'Remote customer node'}
 async function checkHealth(){const label=connectionContext();try{await api('/health');const d=document.getElementById('health-dot'),t=document.getElementById('health-text');if(d){d.classList.add('health-ok');d.classList.remove('health-error')}if(t)t.textContent=label+' connected'}catch(e){const d=document.getElementById('health-dot'),t=document.getElementById('health-text');if(d){d.classList.add('health-error');d.classList.remove('health-ok')}if(t)t.textContent=label+' unavailable'}}
@@ -542,7 +555,7 @@ function copyLlmSnippet(){const ta=document.getElementById('llm-snippet');if(!ta
 async function setLlmExtractor(on){try{const d=await api('/llm/extractor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:!!on})});const ok=!!d.extractor_enabled;toast(ok?'LLM extraction turned on — new memories will be sent to your provider':'LLM extraction turned off — memories stay on this machine'+(d.persisted===false?' (could not save for restart)':''),ok?'ok':'muted');loadLlmStatus()}catch(e){toast(e.message,'err')}}
 async function testLlm(){const r=document.getElementById('llm-test-result');if(r){r.textContent='Testing…';setTone(r,'muted')}try{const d=await api('/llm/test',{method:'POST'});if(r){if(d.ok){const transient=d.auto_enabled&&d.persisted===false;r.textContent=(transient?'⚠ ':'✓ ')+'Connected — '+esc(d.provider)+'/'+esc(d.model)+(transient?' Extraction is active for this process, but the setting could not be saved for restart. Set ENGRAPHIS_EXTRACTOR=llm_structured and ENGRAPHIS_LLM_AUTO_EXTRACT=1 in the deployment environment.':'');setTone(r,transient?'red':'green')}else{r.textContent='✗ '+(d.error||'failed');setTone(r,'red')}}}catch(e){if(r){r.textContent='✗ '+esc(e.message);setTone(r,'red')}}}
 
-async function loadHostedAgentAccess(){const el=document.getElementById('tokens-body');if(!el)return;let url=hostedPlanUrl('team');try{const st=await api('/auth/state');if(url==='#'&&st&&st.cloud_url)url=safeUrl(st.cloud_url)}catch(e){}el.innerHTML=`<div class="field-hint">Per-member agent accounts, roles, named seats, and rotating device credentials are managed in Team Cloud, not by this local dashboard.</div><div data-csp-style="s167"><a class="btn btn-primary btn-sm" href="${esc(url)}" target="_blank" rel="noopener">Open Team Cloud</a><a class="btn btn-ghost btn-sm" href="https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/AGENT_CONNECT.md" target="_blank" rel="noopener">Agent Connect guide</a></div>`}
+async function loadHostedAgentAccess(){const el=document.getElementById('tokens-body');if(!el)return;let url=licPlanKey()==='team'&&licAccessLive()?hostedAccountUrl():hostedPlanUrl('team');try{const st=await api('/auth/state');if(url==='#'&&st&&st.cloud_url)url=safeUrl(st.cloud_url)}catch(e){}el.innerHTML=`<div class="field-hint">Per-member agent accounts, roles, named seats, and rotating device credentials are managed in Team Cloud, not by this local dashboard.</div><div data-csp-style="s167"><a class="btn btn-primary btn-sm" href="${esc(url)}" target="_blank" rel="noopener">Open Team Cloud</a><a class="btn btn-ghost btn-sm" href="https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/AGENT_CONNECT.md" target="_blank" rel="noopener">Agent Connect guide</a></div>`}
 /* Route by cause, exactly like loadAnalytics/loadAutomation. Rendering the purchase panel for
    every failure told a paying customer to buy the plan they already own whenever the network
    blipped or the cloud answered 5xx. Only 401/402/501 are billing answers. */
@@ -553,7 +566,7 @@ function renderSync(d){const el=document.getElementById('sync-body');if(!el)retu
 async function syncNow(){const b=document.getElementById('sync-btn')||document.getElementById('sync-retry-btn');const original=b&&b.textContent;const s=document.getElementById('sync-status');if(b){b.disabled=true;b.textContent='Syncing…'}if(s)s.textContent='Contacting the cloud…';try{const d=await api('/sync/run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const su=d.summary||{};toast('Synced — pushed '+(su.exported||0)+', '+(su.added||0)+' new from other devices','ok');await loadSyncStatus()}catch(e){if(e.status===401||e.status===402||e.status===403){const el=document.getElementById('sync-body');if(el)el.innerHTML=syncRecoveryHtml();toast(e.status===402?'Cloud Sync requires an active Pro or Team entitlement — open Engraphis Cloud to upgrade or renew.':'Cloud Sync authorization is no longer active — reconnect in Engraphis Cloud.','err');return}toast('Sync failed: '+e.message,'err');if(b){b.disabled=false;b.textContent=original||'Sync now'}if(s)s.textContent='Sync failed — try again.'}}
 
 /* ─── knowledge graph (force-graph + d3-force: compact defaults and selectable layouts) ─── */
-let GRAPH=null, FG=null, GRAPH_ENGINE=null, GRESIZE=false, GRESIZEFRAME=0, GADJ={}, GCOMM_ADJ={}, GCOMPONENTS={}, GCOMPONENT_LAYOUT=null, GHILITE=null, GHOVERSET=null, GLABELRANK={}, GLABELBOXES=[], GDATA_CACHE=null, GACTIVE_DATA=null, GREDRAWFRAME=0, GPERF={large:false,dense:false};
+let GRAPH=null, FG=null, GRAPH_ENGINE=null, GRESIZE=false, GRESIZEFRAME=0, GADJ={}, GCOMM_ADJ={}, GCOMPONENTS={}, GCOMPONENT_LAYOUT=null, GHILITE=null, GHOVERSET=null, GLABELRANK={}, GLABELBOXES=[], GDATA_CACHE=null, GACTIVE_DATA=null, GREDRAWFRAME=0, GPERF={large:false,dense:false}, GRAPH_FULL=false, GRAPH_SCOPE_BEFORE_FULL=null;
 const GRAPH_PRESETS={
  original:{label:'Original force',repel:120,link:30,gravity:14,font:13,size:3,linkw:1,labelDensity:40,curve:0,particles:0},
  compact:{label:'Compact clusters',repel:42,link:20,gravity:26,font:12,size:3,linkw:.7,labelDensity:30,curve:.08,particles:0},
@@ -589,7 +602,7 @@ function graphTypeColor(type){if(GCOLOR_OVERRIDES[type])return GCOLOR_OVERRIDES[
 /* The engine renders to a canvas, so it cannot read `--entity-*` itself the way the legend and
    the controls do. Resolve the active theme's values here and hand them over; without this the
    opt-in canvas keeps dark-theme node colours after a switch to Light/Solarized/Sepia. */
-function graphThemeTypeColors(){const colors={},fallback=cssvar('--color-accent','#8c83e8');Object.keys(ETYPE_TOKEN).forEach(type=>{colors[type]=cssvar(ETYPE_TOKEN[type],fallback)});colors.relation_label=cssvar('--color-text-dim','#7e8795');colors.label=cssvar('--color-text','#e7e9ee');return colors}
+function graphThemeTypeColors(){const colors={},fallback=cssvar('--color-accent','#8c83e8');Object.keys(ETYPE_TOKEN).forEach(type=>{colors[type]=cssvar(ETYPE_TOKEN[type],fallback)});colors.accent=fallback;colors.surface=cssvar('--color-panel','#15181e');colors.canvas=cssvar('--color-canvas','#0e1014');colors.relation_label=cssvar('--color-text-dim','#7e8795');colors.label=cssvar('--color-text','#e7e9ee');return colors}
 function graphContrastColor(color){if(!graphValidColor(color))return cssvar('--color-canvas','#0e1014');const n=parseInt(color.slice(1),16),lum=.2126*(n>>16)+.7152*((n>>8)&255)+.0722*(n&255);return lum>150?'#111827':'#f8fafc'}
 const ETYPE_COLOR=new Proxy({},{get:(_,type)=>graphTypeColor(type)});
 graphLoadColorPreferences();
@@ -610,6 +623,7 @@ function renderGraphColorControls(){
 function graphSetTypeColor(type,color,persist){
  if(!type||!graphValidColor(color))return;
  GCOLOR_OVERRIDES[type]=color.toLowerCase();GCOLOR_PALETTE='custom';
+ graphClearMaterialCache();
  const picker=document.getElementById('graph-palette');if(picker)picker.value='custom';
  if(GRAPH_ENGINE){GRAPH_ENGINE.setTypeColor(type,color);if(persist)graphSaveColorPreferences();return}
  graphRefreshNodeColors();
@@ -663,6 +677,7 @@ function graphEngineEmptyMessage(){
 }
 function graphRenderEngine(data,fit,reheat){
  const element=document.getElementById('graph-net'),empty=document.getElementById('graph-empty');
+ const fullGraph=typeof GRAPH_FULL!=='undefined'&&GRAPH_FULL;
  if(!element||typeof EngraphisGraph==='undefined')return false;
  try{
   if(!data.nodes.length){
@@ -689,9 +704,10 @@ function graphRenderEngine(data,fit,reheat){
      engine re-filters by degree on its own state. Leaving the engine on its defaults
      (showUnlinked:false, minDegree:1) drops every degree-zero entity graphData() just supplied,
      so the checkbox appeared to do nothing under ?graph-engine=next. */
-  const isolated=document.getElementById('graph-show-iso'),showUnlinked=!!(isolated&&isolated.checked);
+  const isolated=document.getElementById('graph-show-iso'),showUnlinked=fullGraph||!!(isolated&&isolated.checked);
   GRAPH_ENGINE.apply(engine=>{
-   engine.setSettings({...window.GSET});
+    engine.setSettings({...window.GSET});
+   if(typeof engine.setRenderMode==='function')engine.setRenderMode(fullGraph?'full':'overview');
    engine.setStyle(typeof GSTYLE!=='undefined'?GSTYLE:'cyber');
    engine.setColorBy(typeof GCOLORBY!=='undefined'?GCOLORBY:'community');
    engine.setThemeColors(graphThemeTypeColors());
@@ -746,9 +762,9 @@ async function loadLegacyGraph(){
    GRESIZEFRAME=requestAnimationFrame(()=>{GRESIZEFRAME=0;const element=document.getElementById('graph-net');if(GRAPH_ENGINE)GRAPH_ENGINE.resize();else if(FG&&element)FG.width(element.clientWidth).height(element.clientHeight)});
   });
  }
- const layerInputs=Array.from(document.querySelectorAll('#graph-layer-filters input')),selectedLayers=layerInputs.filter(input=>input.checked).map(input=>input.value),layerFilter=selectedLayers.length===layerInputs.length?'':'&layers='+encodeURIComponent(selectedLayers.join(',')),includeCode=document.getElementById('graph-include-code').checked,repo=(document.getElementById('graph-repo-filter').value||'').trim();
+ const layerInputs=Array.from(document.querySelectorAll('#graph-layer-filters input')),selectedLayers=layerInputs.filter(input=>input.checked).map(input=>input.value),layerFilter=selectedLayers.length===layerInputs.length?'':'&layers='+encodeURIComponent(selectedLayers.join(',')),includeCode=document.getElementById('graph-include-code').checked,repo=(document.getElementById('graph-repo-filter').value||'').trim(),fullGraph=GRAPH_FULL?'&full=true&limit=20000':'';
  try{
-   GRAPH=await api('/graph?workspace='+encodeURIComponent(WS||'')+layerFilter+'&include_code='+(includeCode?'true':'false')+(repo?'&repo='+encodeURIComponent(repo):''));
+   GRAPH=await api('/graph?workspace='+encodeURIComponent(WS||'')+layerFilter+'&include_code='+(includeCode?'true':'false')+fullGraph+(repo?'&repo='+encodeURIComponent(repo):''));
   renderGraphSide();graphRender();
  }catch(error){
   showAs(empty,true,'flex');empty.textContent='Graph failed: '+error.message;graphSetLayoutStatus('Load failed',false);
@@ -761,6 +777,17 @@ async function loadLegacyGraph(){
    if(edgesBox)edgesBox.innerHTML='<div class="empty" data-csp-style="s67">Relations are unavailable until graph data loads.</div>';
   }
  }
+}
+function graphUpdateAllNodesControl(){
+ const full=GRAPH_FULL,button=document.getElementById('graph-show-all'),isolated=document.getElementById('graph-show-iso');
+ if(button){button.textContent=full?'Show responsive overview':'Show all nodes';button.setAttribute('aria-pressed',String(full));button.title=full?'Return to the responsive graph overview':'Load every node, including unconnected entities, for this graph view'}
+ if(isolated){isolated.disabled=full;isolated.title=full?'All nodes are already visible.':'Show entities that have no relations (unlinked nodes). Hidden by default to keep the graph readable.'}
+}
+function graphToggleAllNodes(){
+ const isolated=document.getElementById('graph-show-iso');
+ if(!GRAPH_FULL){GRAPH_SCOPE_BEFORE_FULL={showUnlinked:!!(isolated&&isolated.checked)};GRAPH_FULL=true;if(isolated)isolated.checked=true}
+ else{GRAPH_FULL=false;if(isolated&&GRAPH_SCOPE_BEFORE_FULL)isolated.checked=GRAPH_SCOPE_BEFORE_FULL.showUnlinked;GRAPH_SCOPE_BEFORE_FULL=null}
+ graphUpdateAllNodesControl();loadLegacyGraph();
 }
 function graphData(){
  const _si=document.getElementById('graph-show-iso');const hideIso=!(_si&&_si.checked);
@@ -851,7 +878,90 @@ var STYLE_BG={
 var GSTYLE='cyber';try{var _gs=localStorage.getItem('engraphis-graph-style');if(_gs)GSTYLE=_gs;}catch(e){}
 function graphMakeStars(){var a=[],c=['#dfe6ff','#dfe6ff','#c9b6ff','#a7c6ff','#ffd9ef'];for(var i=0;i<110;i++){a.push({x:(Math.random()-.5)*1200,y:(Math.random()-.5)*1200,r:Math.random()*1.1+.25,a:Math.random()*.7+.25,tw:Math.random()*1.6+.4,ph:Math.random()*6.28,c:c[i%c.length]});}return a;}
 var GSTARS=graphMakeStars();
-function graphLighten(c,amt){var r,g,b;if(c[0]==='#'){var n=parseInt(c.slice(1),16);r=n>>16&255;g=n>>8&255;b=n&255;}else{var m=c.match(/\d+/g);r=+m[0];g=+m[1];b=+m[2];}r=Math.round(r+(255-r)*amt);g=Math.round(g+(255-g)*amt);b=Math.round(b+(255-b)*amt);return 'rgb('+r+','+g+','+b+')';}
+function graphRgb(c){if(!c)return[140,131,232];if(c[0]==='#'){var h=c.length===4?c[1]+c[1]+c[2]+c[2]+c[3]+c[3]:c.slice(1,7),n=parseInt(h,16);if(Number.isFinite(n))return[n>>16&255,n>>8&255,n&255]}var m=c.match(/\d+/g);return m&&m.length>=3?[+m[0],+m[1],+m[2]]:[140,131,232]}
+function graphMix(a,b,amount){var A=graphRgb(a),B=graphRgb(b),t=Math.max(0,Math.min(1,amount));return'rgb('+Math.round(A[0]+(B[0]-A[0])*t)+','+Math.round(A[1]+(B[1]-A[1])*t)+','+Math.round(A[2]+(B[2]-A[2])*t)+')'}
+const GRAPH_MATERIAL_CACHE_LIMIT=192,GRAPH_MATERIAL_CACHE=new Map();
+const GRAPH_MATERIAL_RADIUS={signature:5,bezel:12,full:40};
+let GRAPH_MATERIAL_DPR=null;
+function graphMaterialTier(screenRadius,forceLow){if(forceLow||!Number.isFinite(+screenRadius)||+screenRadius<6)return'signature';return+screenRadius<12?'bezel':'full'}
+function graphMaterialProfile(style,col){
+ var theme=window.GCOL||graphReadThemeColors(),surface=theme.panel||theme.surface||theme.canvas||'#0e1014';
+ style=['cyber','galaxy','solar','classic'].includes(style)?style:'classic';
+ var substrate=graphMix(surface,'#02050a',style==='classic'?.68:.78),identity='rgb('+graphRgb(col).join(',')+')',base={styleName:style,substrate:substrate,identity:identity,identityKey:graphRgb(col).join(','),substrateKey:graphRgb(substrate).join(',')};
+ if(style==='cyber'){var cyber={cyan:'#21dff3',blue:'#367cff',violet:'#8d61ff',magenta:'#ec4fc4',teal:'#4ce4cf'};return Object.assign(base,{family:'iridescent-pvd',fixedPalette:cyber,film:cyber,outer:graphMix(substrate,'#01040a',.82),bezel:graphMix(substrate,'#101626',.46),face:graphMix(substrate,'#182237',.48),edge:'#677386',sheen:'#8d61ff'})}
+ if(style==='galaxy'){var galaxy={navy:'#111a3b',blue:'#3979e8',violet:'#8d68df',highlight:'#aab9ee'};return Object.assign(base,{family:'anodized-alloy',fixedPalette:galaxy,outer:graphMix(substrate,'#02040d',.76),bezel:graphMix(substrate,'#151a34',.54),face:graphMix(substrate,galaxy.navy,.68),edge:'#7587bb',sheen:galaxy.blue})}
+ if(style==='solar'){var solar={ember:'#713018',copper:'#b85c2f',amber:'#f18a32',gold:'#ffc46b',shadow:'#2b1008'};return Object.assign(base,{family:'brushed-copper',fixedPalette:solar,outer:graphMix(substrate,'#0a0402',.72),bezel:graphMix(substrate,'#351609',.62),face:graphMix(substrate,solar.copper,.48),edge:solar.amber,sheen:solar.gold})}
+ var classic={charcoal:'#242d36',steel:'#778593',highlight:'#c0c9cf',coolEdge:'#8aa7bd'};return Object.assign(base,{family:'satin-gunmetal',fixedPalette:classic,outer:graphMix(substrate,'#05080b',.68),bezel:graphMix(substrate,'#20272e',.52),face:graphMix(substrate,classic.charcoal,.72),edge:classic.coolEdge,sheen:classic.highlight})
+}
+function graphMaterialFill(ctx,x,y,r,fill){ctx.beginPath();ctx.arc(x,y,Math.max(.1,r),0,6.2832);ctx.fillStyle=fill;ctx.fill()}
+function graphMaterialStroke(ctx,x,y,r,stroke,width){ctx.beginPath();ctx.arc(x,y,Math.max(.1,r),0,6.2832);ctx.lineWidth=width;ctx.strokeStyle=stroke;ctx.stroke()}
+function graphMaterialGradient(ctx,kind,args,stops){var maker=ctx[kind];if(typeof maker!=='function')return stops[Math.floor(stops.length/2)][1];var result=maker.apply(ctx,args);stops.forEach(stop=>result.addColorStop(stop[0],stop[1]));return result}
+function graphMaterialIdentity(ctx,x,y,r,profile,strength){graphMaterialStroke(ctx,x,y,r*.955,graphAlpha(profile.identity,strength),Math.max(.32,r*.045))}
+function graphMaterialHalo(ctx,x,y,r,tier,color,opacity,shiftX,shiftY){
+ if(tier==='signature')return;
+ var reach=tier==='full'?1.12:1.14,halo=graphMaterialGradient(ctx,'createRadialGradient',[x+r*(shiftX||0),y+r*(shiftY||0),r*.48,x,y,r*reach],[[0,graphAlpha(color,opacity)],[.68,graphAlpha(color,opacity*.42)],[1,graphAlpha(color,0)]]);
+ graphMaterialFill(ctx,x,y,r*reach,halo);
+}
+function graphDirectionalBrush(ctx,x,y,r,angle,dark,light,strength){
+ if(typeof ctx.moveTo!=='function'||typeof ctx.lineTo!=='function')return;
+ var alongX=Math.cos(angle),alongY=Math.sin(angle),normalX=-alongY,normalY=alongX,bound=r*.76;
+ for(var i=-13;i<=13;i++){var offset=i*r*.052,span=Math.sqrt(Math.max(0,bound*bound-offset*offset)),cx=x+normalX*offset,cy=y+normalY*offset;ctx.lineWidth=Math.max(.18,r*(.007+Math.abs(i%3)*.002));ctx.strokeStyle=graphAlpha(i%4===0?dark:light,strength*(.48+Math.abs(i%5)*.13));ctx.beginPath();ctx.moveTo(cx-alongX*span,cy-alongY*span);ctx.lineTo(cx+alongX*span,cy+alongY*span);ctx.stroke()}
+}
+function graphPaintCyberMaterial(ctx,x,y,r,p,tier){
+ var f=p.fixedPalette;graphMaterialHalo(ctx,x,y,r,tier,f.cyan,.20,-.15,.12);graphMaterialHalo(ctx,x,y,r,tier,f.magenta,.17,.16,-.14);graphMaterialFill(ctx,x,y,r,p.outer);graphMaterialFill(ctx,x,y,r*.94,p.bezel);
+ if(tier==='signature'){graphMaterialFill(ctx,x,y,r*.79,graphMix(f.magenta,f.cyan,.58));graphMaterialStroke(ctx,x,y,r*.82,graphAlpha(f.violet,.84),Math.max(.35,r*.09));graphMaterialIdentity(ctx,x,y,r,p,.88);return}
+ var rimKind=typeof ctx.createConicGradient==='function'?'createConicGradient':'createLinearGradient',rimArgs=rimKind==='createConicGradient'?[-2.2,x,y]:[x-r*.8,y-r*.8,x+r*.8,y+r*.8];
+ var rim=graphMaterialGradient(ctx,rimKind,rimArgs,[[0,f.cyan],[.20,f.blue],[.40,f.violet],[.61,f.magenta],[.80,f.teal],[1,f.cyan]]);graphMaterialFill(ctx,x,y,r*.89,rim);
+ var film=graphMaterialGradient(ctx,'createLinearGradient',[x-r*.16,y-r*.80,x+r*.22,y+r*.80],[[0,graphMix(p.face,f.magenta,.82)],[.22,graphMix(p.face,f.violet,.78)],[.48,graphMix(p.face,f.blue,.58)],[.73,graphMix(p.face,f.cyan,.82)],[1,graphMix(p.face,f.teal,.68)]]);graphMaterialFill(ctx,x,y,r*.81,film);
+ var band=graphMaterialGradient(ctx,'createLinearGradient',[x-r*.78,y+r*.48,x+r*.72,y-r*.56],[[0,graphAlpha(f.cyan,0)],[.31,graphAlpha(f.cyan,.16)],[.48,graphAlpha('#eef8ff',.28)],[.58,graphAlpha(f.magenta,.18)],[1,graphAlpha(f.magenta,0)]]);graphMaterialFill(ctx,x,y,r*.80,band);
+ var shade=graphMaterialGradient(ctx,'createRadialGradient',[x-r*.27,y-r*.34,r*.04,x,y,r*.82],[[0,graphAlpha('#f3f7ff',.38)],[.23,graphAlpha('#aebcff',.08)],[.66,graphAlpha('#02040a',.03)],[1,graphAlpha('#010207',.42)]]);graphMaterialFill(ctx,x,y,r*.80,shade);
+ if(tier==='full'){for(var i=0;i<13;i++){ctx.lineWidth=Math.max(.25,r*(.009+(i%3)*.003));ctx.strokeStyle=graphAlpha(i%3===0?f.cyan:(i%3===1?f.violet:f.magenta),.075+(i%4)*.018);ctx.beginPath();ctx.arc(x,y,r*(.16+i*.048),-2.88,.72);ctx.stroke()}}
+ ctx.lineWidth=Math.max(.36,r*.030);ctx.strokeStyle=graphAlpha('#f5fbff',.48);ctx.beginPath();ctx.arc(x,y,r*.73,-2.66,-1.14);ctx.stroke();
+ graphMaterialIdentity(ctx,x,y,r,p,.78);
+}
+function graphPaintGalaxyMaterial(ctx,x,y,r,p,tier){
+ var f=p.fixedPalette;graphMaterialHalo(ctx,x,y,r,tier,graphMix(f.blue,f.violet,.48),.11,-.10,-.10);graphMaterialFill(ctx,x,y,r,p.outer);graphMaterialFill(ctx,x,y,r*.93,p.bezel);
+ if(tier==='signature'){graphMaterialFill(ctx,x,y,r*.80,p.face);graphMaterialStroke(ctx,x,y,r*.84,graphAlpha(f.violet,.82),Math.max(.35,r*.08));graphMaterialIdentity(ctx,x,y,r,p,.82);return}
+ var face=graphMaterialGradient(ctx,'createLinearGradient',[x-r*.72,y-r*.72,x+r*.72,y+r*.72],[[0,graphMix(p.face,f.highlight,.34)],[.26,graphMix(p.face,f.blue,.40)],[.52,graphMix(p.face,f.violet,.28)],[.76,p.face],[1,graphMix(p.face,f.navy,.72)]]);graphMaterialFill(ctx,x,y,r*.83,face);
+ var sheen=graphMaterialGradient(ctx,'createLinearGradient',[x-r*.76,y+r*.64,x+r*.68,y-r*.70],[[0,graphAlpha(f.navy,0)],[.34,graphAlpha(f.blue,.07)],[.47,graphAlpha(f.violet,.34)],[.56,graphAlpha(f.highlight,.24)],[.68,graphAlpha(f.blue,.08)],[1,graphAlpha(f.navy,0)]]);graphMaterialFill(ctx,x,y,r*.82,sheen);
+ if(tier==='full'){graphDirectionalBrush(ctx,x,y,r,-.54,f.navy,f.highlight,.13);for(var i=0;i<14;i++){ctx.lineWidth=Math.max(.20,r*(.008+(i%2)*.003));ctx.strokeStyle=graphAlpha(i%2?f.blue:f.violet,.055+(i%4)*.018);ctx.beginPath();ctx.arc(x,y,r*(.14+i*.047),-2.94,.46);ctx.stroke()}}
+ ctx.lineWidth=Math.max(.34,r*.026);ctx.strokeStyle=graphAlpha(f.highlight,.38);ctx.beginPath();ctx.arc(x,y,r*.75,-2.70,-1.18);ctx.stroke();
+ graphMaterialStroke(ctx,x,y,r*.88,graphAlpha(f.violet,.72),Math.max(.38,r*.046));graphMaterialIdentity(ctx,x,y,r,p,.76);
+}
+function graphPaintSolarMaterial(ctx,x,y,r,p,tier){
+ var f=p.fixedPalette;graphMaterialHalo(ctx,x,y,r,tier,f.amber,.14,-.08,-.12);graphMaterialFill(ctx,x,y,r,p.outer);graphMaterialFill(ctx,x,y,r*.95,p.bezel);
+ if(tier==='signature'){graphMaterialFill(ctx,x,y,r*.78,f.copper);graphMaterialStroke(ctx,x,y,r*.84,f.amber,Math.max(.42,r*.10));graphMaterialIdentity(ctx,x,y,r,p,.70);return}
+ var copper=graphMaterialGradient(ctx,'createRadialGradient',[x-r*.20,y-r*.24,r*.025,x,y,r*.86],[[0,f.gold],[.15,f.amber],[.38,'#c66a38'],[.68,f.copper],[.86,f.ember],[1,f.shadow]]);graphMaterialFill(ctx,x,y,r*.82,copper);
+ var copperSheen=graphMaterialGradient(ctx,'createLinearGradient',[x-r*.74,y+r*.52,x+r*.70,y-r*.60],[[0,graphAlpha(f.shadow,0)],[.38,graphAlpha(f.amber,.08)],[.50,graphAlpha(f.gold,.34)],[.62,graphAlpha(f.ember,.10)],[1,graphAlpha(f.shadow,0)]]);graphMaterialFill(ctx,x,y,r*.80,copperSheen);
+ graphMaterialStroke(ctx,x,y,r*.90,f.gold,Math.max(.42,r*.055));graphMaterialStroke(ctx,x,y,r*.85,graphAlpha(f.ember,.94),Math.max(.34,r*.036));
+ if(tier==='full'){for(var i=0;i<25;i++){var rr=r*(.12+i*.027);ctx.lineWidth=Math.max(.19,r*(.008+(i%3)*.0025));ctx.strokeStyle=graphAlpha(i%4===0?f.gold:f.shadow,.085+(i%5)*.018);ctx.beginPath();ctx.arc(x,y,rr,-3.02+(i%3)*.07,2.94-(i%4)*.05);ctx.stroke()}}
+ ctx.lineWidth=Math.max(.38,r*.030);ctx.strokeStyle=graphAlpha('#fff0c0',.48);ctx.beginPath();ctx.arc(x,y,r*.73,-2.70,-1.14);ctx.stroke();
+ graphMaterialIdentity(ctx,x,y,r,p,.66);
+}
+function graphPaintClassicMaterial(ctx,x,y,r,p,tier){
+ var f=p.fixedPalette;graphMaterialFill(ctx,x,y,r,p.outer);graphMaterialFill(ctx,x,y,r*.94,p.bezel);
+ if(tier==='signature'){graphMaterialFill(ctx,x,y,r*.79,p.face);graphMaterialStroke(ctx,x,y,r*.84,graphAlpha(f.coolEdge,.76),Math.max(.35,r*.08));graphMaterialIdentity(ctx,x,y,r,p,.68);return}
+ var steel=graphMaterialGradient(ctx,'createLinearGradient',[x-r*.72,y-r*.72,x+r*.72,y+r*.72],[[0,graphMix(p.face,f.highlight,.48)],[.24,graphMix(p.face,f.steel,.38)],[.50,p.face],[.76,graphMix(p.face,'#111820',.34)],[1,graphMix(p.face,'#05080b',.66)]]);graphMaterialFill(ctx,x,y,r*.83,steel);
+ var satin=graphMaterialGradient(ctx,'createRadialGradient',[x-r*.26,y-r*.31,r*.04,x,y,r*.86],[[0,graphAlpha(f.highlight,.26)],[.38,graphAlpha(f.steel,.03)],[.74,graphAlpha('#070a0d',.08)],[1,graphAlpha('#020304',.42)]]);graphMaterialFill(ctx,x,y,r*.82,satin);
+ if(tier==='full')graphDirectionalBrush(ctx,x,y,r,.04,'#020507',f.highlight,.16);
+ ctx.lineWidth=Math.max(.34,r*.026);ctx.strokeStyle=graphAlpha('#edf5fb',.34);ctx.beginPath();ctx.arc(x,y,r*.74,-2.70,-1.16);ctx.stroke();
+ graphMaterialStroke(ctx,x,y,r*.88,graphAlpha(f.coolEdge,.62),Math.max(.34,r*.040));graphMaterialIdentity(ctx,x,y,r,p,.62);
+}
+function graphPaintMaterialDirect(ctx,x,y,r,p,tier){if(p.family==='iridescent-pvd')graphPaintCyberMaterial(ctx,x,y,r,p,tier);else if(p.family==='anodized-alloy')graphPaintGalaxyMaterial(ctx,x,y,r,p,tier);else if(p.family==='brushed-copper')graphPaintSolarMaterial(ctx,x,y,r,p,tier);else graphPaintClassicMaterial(ctx,x,y,r,p,tier)}
+function graphClearMaterialCache(){GRAPH_MATERIAL_CACHE.clear();GRAPH_MATERIAL_DPR=null}
+function graphMaterialDpr(){var d=window.devicePixelRatio||1;return Math.max(1,Math.min(3,Math.round(d*2)/2))}
+function graphMaterialSprite(p,tier){
+ var dpr=graphMaterialDpr();if(GRAPH_MATERIAL_DPR!==null&&GRAPH_MATERIAL_DPR!==dpr)graphClearMaterialCache();GRAPH_MATERIAL_DPR=dpr;
+ var key=[p.styleName,p.substrateKey,p.identityKey,tier,dpr].join('|');if(GRAPH_MATERIAL_CACHE.has(key)){var hit=GRAPH_MATERIAL_CACHE.get(key);GRAPH_MATERIAL_CACHE.delete(key);GRAPH_MATERIAL_CACHE.set(key,hit);return hit}
+ var radius=GRAPH_MATERIAL_RADIUS[tier]||24,padding=tier==='full'?3:1.5,half=radius+padding,pixels=Math.max(2,Math.ceil(half*2*dpr)),canvas=typeof OffscreenCanvas!=='undefined'?new OffscreenCanvas(pixels,pixels):document.createElement('canvas');canvas.width=pixels;canvas.height=pixels;
+ var spriteCtx=canvas.getContext('2d');if(!spriteCtx)return null;if(typeof spriteCtx.scale==='function'){spriteCtx.scale(dpr,dpr);graphPaintMaterialDirect(spriteCtx,half,half,radius,p,tier)}else graphPaintMaterialDirect(spriteCtx,half*dpr,half*dpr,radius*dpr,p,tier);
+ var value={canvas:canvas,half:half,radius:radius};GRAPH_MATERIAL_CACHE.set(key,value);if(GRAPH_MATERIAL_CACHE.size>GRAPH_MATERIAL_CACHE_LIMIT)GRAPH_MATERIAL_CACHE.delete(GRAPH_MATERIAL_CACHE.keys().next().value);return value;
+}
+function graphPaintMaterialSurface(ctx,x,y,r,scale,profile,large){
+ var tier=graphMaterialTier(r*Math.max(.01,scale),large),sprite=graphMaterialSprite(profile,tier);
+ if(sprite&&typeof ctx.drawImage==='function'){var half=r*sprite.half/sprite.radius;ctx.drawImage(sprite.canvas,x-half,y-half,half*2,half*2)}else graphPaintMaterialDirect(ctx,x,y,r,profile,tier);
+ return tier;
+}
 function graphStyleBackground(ctx,scale){
  if(GSTYLE==='galaxy'){
   if(GPERF.large)return;var t=performance.now()/1000,S=GSTARS;ctx.save();ctx.globalCompositeOperation='lighter';
@@ -864,32 +974,41 @@ function graphStyleBackground(ctx,scale){
 function graphStyleNode(node,ctx,scale){
  if(!Number.isFinite(node.x)||!Number.isFinite(node.y))return;
  var focus=GHOVERSET&&GHOVERSET.size>1,neighbor=focus&&GHOVERSET.has(node.id),dim=focus&&!neighbor;
- var r=node.radius,col=node.color,rich=node.id===GHILITE||neighbor||node.hub||node.degree>=3;
+ var r=node.radius,col=node.color,profile;
  ctx.globalAlpha=dim?.12:1;
  if(GSTYLE==='galaxy'){
-  if(rich&&!GPERF.large){ctx.save();ctx.globalCompositeOperation='lighter';var R=r*(node.id===GHILITE?4.4:3.0);var g=ctx.createRadialGradient(node.x,node.y,0,node.x,node.y,R);g.addColorStop(0,graphAlpha(col,dim?.15:.6));g.addColorStop(.42,graphAlpha(col,dim?.05:.16));g.addColorStop(1,graphAlpha(col,0));ctx.fillStyle=g;ctx.beginPath();ctx.arc(node.x,node.y,R,0,6.2832);ctx.fill();ctx.restore();}
-  ctx.beginPath();ctx.arc(node.x,node.y,r,0,6.2832);ctx.fillStyle=col;ctx.fill();
-  ctx.beginPath();ctx.arc(node.x,node.y,Math.max(.4,r*.4),0,6.2832);ctx.fillStyle='rgba(255,255,255,.9)';ctx.fill();
+  profile=graphMaterialProfile('galaxy',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
  }else if(GSTYLE==='solar'){
   var sun=node.rank===0;if(sun)r*=1.7;
-  if(rich&&!GPERF.large){ctx.save();ctx.globalCompositeOperation='lighter';var cc=sun?'#ffcf6b':col,R2=r*(sun?3.4:2.1);var g2=ctx.createRadialGradient(node.x,node.y,0,node.x,node.y,R2);g2.addColorStop(0,graphAlpha(cc,dim?.1:(sun?.6:.3)));g2.addColorStop(1,graphAlpha(cc,0));ctx.fillStyle=g2;ctx.beginPath();ctx.arc(node.x,node.y,R2,0,6.2832);ctx.fill();ctx.restore();}
-  if(!GPERF.large){var sg=ctx.createRadialGradient(node.x-r*.4,node.y-r*.4,Math.max(.1,r*.12),node.x,node.y,r);sg.addColorStop(0,graphLighten(sun?'#ffe4ad':col,.5));sg.addColorStop(1,sun?'#e08a25':col);ctx.fillStyle=sg;}else{ctx.fillStyle=col;}
-  ctx.beginPath();ctx.arc(node.x,node.y,r,0,6.2832);ctx.fill();
+  profile=graphMaterialProfile('solar',sun?graphMix(col,'#d38b43',.46):col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
+ }else if(GSTYLE==='cyber'){
+  profile=graphMaterialProfile('cyber',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
  }else{
-  ctx.save();if(rich&&!GPERF.large){ctx.shadowColor=col;ctx.shadowBlur=dim?2:r*2.6;}ctx.beginPath();ctx.arc(node.x,node.y,r,0,6.2832);ctx.fillStyle=col;ctx.fill();ctx.restore();
-  ctx.beginPath();ctx.arc(node.x,node.y,Math.max(.4,r*.42),0,6.2832);ctx.fillStyle='#eafcff';ctx.fill();
+  profile=graphMaterialProfile('classic',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
  }
- if(node.id===GHILITE){ctx.lineWidth=1.3/scale;ctx.strokeStyle=GSTYLE==='cyber'?'#ffffff':'rgba(255,255,255,.9)';ctx.beginPath();ctx.arc(node.x,node.y,r+1.4/scale,0,6.2832);ctx.stroke();}
+ if(node.id===GHILITE){
+  graphMaterialFill(ctx,node.x,node.y,r*.76,graphAlpha('#ffffff',.065));
+  ctx.lineWidth=1.15/scale;ctx.strokeStyle=graphAlpha(profile.sheen,.98);ctx.beginPath();ctx.arc(node.x,node.y,r+1.35/scale,0,6.2832);ctx.stroke();
+  ctx.lineWidth=.55/scale;ctx.strokeStyle=graphAlpha(profile.identity,.92);ctx.beginPath();ctx.arc(node.x,node.y,r+2.45/scale,0,6.2832);ctx.stroke();
+ }
  ctx.globalAlpha=1;
 }
 function graphApplyStyleChrome(){
  var net=document.querySelector('.graph-network');if(net){for(const name of ['classic','galaxy','solar','cyber'])net.classList.toggle('graph-style-'+name,GSTYLE===name)}
  var sel=document.getElementById('graph-style');if(sel&&sel.value!==GSTYLE)sel.value=GSTYLE;
 }
+function graphStyleLinkColor(link){
+ var layer=link&&link.layer;
+ if(GSTYLE==='galaxy')return layer==='causal'?'#c58bff':'#91a8ff';
+ if(GSTYLE==='solar')return layer==='causal'?'#ffc06d':'#ef913e';
+ if(GSTYLE==='cyber')return layer==='causal'?'#ec71d2':'#6edce6';
+ if(GSTYLE==='classic')return layer==='causal'?'#b9c8da':'#86c7d1';
+ return (window.GCOL.links[layer]||window.GCOL.links.semantic).base;
+}
 function graphSetStyle(name){
  if(['classic','galaxy','solar','cyber'].indexOf(name)<0)name='cyber';
  GSTYLE=name;try{localStorage.setItem('engraphis-graph-style',name)}catch(e){}
- graphApplyStyleChrome();
+ graphClearMaterialCache();graphApplyStyleChrome();
  if(GRAPH_ENGINE){GRAPH_ENGINE.setStyle(name);return}
  if(GRAPH&&FG){graphRefreshNodeColors();graphRenderLegend();graphRender(false,false);}
 }
@@ -945,6 +1064,7 @@ function graphRenderLegend(graph){
 function graphSetColorBy(mode){
  if(['type','community','connections'].indexOf(mode)<0)mode='community';
  GCOLORBY=mode;try{localStorage.setItem('engraphis-graph-colorby',mode)}catch(e){}
+ graphClearMaterialCache();
  var sel=document.getElementById('graph-colorby');if(sel&&sel.value!==mode)sel.value=mode;
  if(GRAPH_ENGINE){GRAPH_ENGINE.setColorBy(mode);graphRenderLegend();return}
  if(GRAPH&&FG&&GACTIVE_DATA){graphComputeCommunities(GACTIVE_DATA.nodes);GMAXDEG=GACTIVE_DATA.nodes.reduce(function(m,n){return Math.max(m,n.degree||0);},1);graphRefreshNodeColors();graphRenderLegend();}
@@ -956,16 +1076,14 @@ function graphApplyForces(){
  FG.d3Force('link').distance(settings.link);
  if(typeof d3==='undefined')return;
  FG.d3Force('radial',null);
- if(mode==='communities'){
-  const target=node=>GCOMPONENTS[node.id]||{x:0,y:0};
-  FG.d3Force('x',d3.forceX(node=>target(node).x).strength(settings.gravity/100));
-  FG.d3Force('y',d3.forceY(node=>target(node).y).strength(settings.gravity/100));
- }else{
+  /* Communities remain a colour/relationship grouping, not separate gravity wells. Giving
+     every cluster its own off-centre target was what made the default view form a hollow ring.
+     Pull every standard layout toward one shared origin; charge and link forces preserve the
+     readable local clusters inside that coherent overall shape. */
   const centering=mode==='radial'?Math.max(.04,settings.gravity/300):settings.gravity/100;
   FG.d3Force('x',d3.forceX(0).strength(centering));
   FG.d3Force('y',d3.forceY(0).strength(centering));
   if(mode==='radial'&&d3.forceRadial)FG.d3Force('radial',d3.forceRadial(node=>Math.max(0,5-Math.min(5,node.degree||0))*Math.max(8,settings.link*.72)).strength(.32));
- }
  FG.d3Force('collide',d3.forceCollide(node=>node.radius+1.5).iterations(GPERF.large?1:2));
 }
 function graphSetHighlight(id){
@@ -1011,7 +1129,7 @@ function loadGraphEngine(){
  if(GRAPH_ENGINE_LOADING)return GRAPH_ENGINE_LOADING;
  GRAPH_ENGINE_LOADING=new Promise((resolve,reject)=>{
   const script=document.createElement('script');
-  script.src='/v2-assets/engraphis-graph.js';
+  script.src='/v2-assets/engraphis-graph.js?v=20260728-reference-materials';
   /* A 200 that never registers the global is a corrupt/truncated asset, not a success —
      resolving there would hand graphRenderEngine() an undefined EngraphisGraph. */
   script.onload=()=>{typeof EngraphisGraph==='undefined'?reject(new Error('Graph engine asset loaded without registering EngraphisGraph')):resolve()};
@@ -1026,9 +1144,10 @@ function loadGraphEngine(){
 }
 function graphRender(fit=true,reheat=true){
  const empty=document.getElementById('graph-empty');
+ const graphFull=typeof GRAPH_FULL!=='undefined'&&GRAPH_FULL;
  /* Kick the opt-in engine off alongside the vendor bundle instead of after it, so a
     `?graph-engine=next` deep link costs one round trip rather than two. */
- const enginePending=graphEngineEnabled()&&typeof EngraphisGraph==='undefined'?loadGraphEngine():null;
+ const enginePending=!GRAPH_ENGINE_FAILED&&(graphEngineEnabled()||graphFull)&&typeof EngraphisGraph==='undefined'?loadGraphEngine():null;
  if(typeof ForceGraph==='undefined'){
   showAs(empty,true,'flex');empty.textContent='Loading graph engine…';
   graphSetLayoutStatus('Loading engine',true);
@@ -1056,6 +1175,7 @@ function graphRender(fit=true,reheat=true){
  }
  const element=document.getElementById('graph-net'),settings=window.GSET,mode=GRAPH_PRESETS[settings.mode]||GRAPH_PRESETS.compact,data=graphData();
  if(graphEngineEnabled()&&graphRenderEngine(data,fit,reheat))return;
+ if(graphFull&&graphRenderEngine(data,fit,reheat))return;
  /* Read AFTER the opt-in attempt: a failing engine resets GACTIVE_DATA precisely so the
     classic renderer below rebuilds from scratch instead of assuming the canvas is current. */
  const dataChanged=GACTIVE_DATA!==data;
@@ -1091,7 +1211,9 @@ function graphRender(fit=true,reheat=true){
  if(FG.d3AlphaDecay)FG.d3AlphaDecay(GPERF.large?.055:.035);
  if(FG.d3VelocityDecay)FG.d3VelocityDecay(GPERF.large?.45:.38);
  FG.nodeCanvasObject((node,ctx,scale)=>{
-  if(typeof GSTYLE!=='undefined'&&GSTYLE!=='classic'){graphStyleNode(node,ctx,scale);return;}
+  /* Classic is Gunmetal hardware too; it must not fall back to the obsolete flat-colour dot
+     painter merely because the user selected the Classic style. */
+  if(typeof GSTYLE!=='undefined'){graphStyleNode(node,ctx,scale);return;}
   const focus=GHOVERSET&&GHOVERSET.size>1,neighbor=focus&&GHOVERSET.has(node.id),dim=focus&&!neighbor,radius=node.radius,color=node.color;
   ctx.globalAlpha=dim?.08:1;
   if(!dim&&(node.id===GHILITE||node.hub)){
@@ -1105,10 +1227,10 @@ function graphRender(fit=true,reheat=true){
  });
  FG.nodePointerAreaPaint((node,color,ctx)=>{const radius=Math.max(3,node.radius)+3;ctx.beginPath();ctx.arc(node.x,node.y,radius,0,2*Math.PI);ctx.fillStyle=color;ctx.fill()});
  FG.linkColor(link=>{
-  const focus=GHOVERSET&&GHOVERSET.size>1,source=(link.source&&link.source.id)||link.source,target=(link.target&&link.target.id)||link.target,active=!focus||source===GHILITE||target===GHILITE;
-  const palette=window.GCOL.links[link.layer]||window.GCOL.links.semantic;
-  if(link.label==='influences')return active?graphAlpha(window.GCOL.layers[link.layer]||window.GCOL.layers.semantic,focus?.34:.18):palette.dim;
-  return active?(focus?palette.active:palette.base):palette.dim;
+ const focus=GHOVERSET&&GHOVERSET.size>1,source=(link.source&&link.source.id)||link.source,target=(link.target&&link.target.id)||link.target,active=!focus||source===GHILITE||target===GHILITE;
+  const base=graphStyleLinkColor(link);
+  if(link.label==='influences')return active?graphAlpha(base,focus?.34:.18):graphAlpha(base,.08);
+  return active?graphAlpha(base,focus?.85:.40):graphAlpha(base,.06);
  });
  FG.linkWidth(link=>{const width=window.GSET.linkw||1,focus=GHOVERSET&&GHOVERSET.size>1,bridge=link.label==='influences';if(!focus)return (bridge?.45:(GPERF.dense?.62:.82))*width;const source=(link.source&&link.source.id)||link.source,target=(link.target&&link.target.id)||link.target;return (source===GHILITE||target===GHILITE)?(bridge?1.0:1.8)*width:.25*width});
  if(FG.linkLineDash)FG.linkLineDash(GPERF.dense?null:(link=>link.layer==='temporal'?[4,3]:(link.layer==='causal'?[2,2]:null)));
@@ -1220,6 +1342,7 @@ function graphToggleFreeze(control){
 function graphToggleLabels(control){window.GSET.labels=control.checked;if(GRAPH_ENGINE)GRAPH_ENGINE.setSettings({labels:control.checked});else if(FG)graphRender(false,false)}
 function graphRecolor(){
  renderGraphColorControls();
+ graphClearMaterialCache();
  if(GRAPH_ENGINE){GRAPH_ENGINE.apply(engine=>{engine.setThemeColors(graphThemeTypeColors());engine.setPalette(typeof GCOLOR_PALETTE!=='undefined'?GCOLOR_PALETTE:'theme');engine.setTypeColors(GCOLOR_OVERRIDES||{})},false,false);return}
  if(!FG)return;
  window.GCOL=graphReadThemeColors();graphRefreshNodeColors();
@@ -1409,8 +1532,9 @@ function renderUpdateBanner(u){
  const btn=el.querySelector('.ub-dismiss');
  if(btn)btn.addEventListener('click',function(){try{localStorage.setItem('engraphis-update-dismissed',u.latest)}catch(e){}el.hidden=true;el.textContent=''});
 }
-async function boot(){try{const b=await api('/bootstrap');LIC=b.license;renderSemBanner(b.embedder);renderUpdateBanner(b.update);WORKSPACES=b.workspaces||[];if(!WS&&WORKSPACES.length){WORKSPACES.sort((a,b)=>(b.memories||0)-(a.memories||0));setWS(WORKSPACES[0].name)}updateLicBadge();updateFeatureLocks();loadOverview();checkHealth()}catch(e){const msg=e.status===401?'Local API token required. Configure this installation before opening the dashboard.':'Boot failed: '+e.message;document.getElementById('stat-grid').innerHTML='<div class="empty" data-csp-style="s10">'+esc(msg)+'</div>';document.getElementById('ov-types').innerHTML='<div class="empty" data-csp-style="s67">Dashboard data could not be loaded.</div>';document.getElementById('ov-analytics').innerHTML='<div class="empty" data-csp-style="s10">Dashboard data could not be loaded.</div>';toast(msg,'err')}}
+async function boot(){try{const b=await api('/bootstrap');LIC=b.license;renderSemBanner(b.embedder);renderUpdateBanner(b.update);WORKSPACES=b.workspaces||[];if(!WS&&WORKSPACES.length){WORKSPACES.sort((a,b)=>(b.memories||0)-(a.memories||0));setWS(WORKSPACES[0].name)}updateLicBadge();updateFeatureLocks();loadOverview();checkHealth()}catch(e){if(e.status===401&&await authenticateBrowser()){window.location.reload();return}const msg=e.status===401?'Local API token required.':'Boot failed: '+e.message;document.getElementById('stat-grid').innerHTML='<div class="empty" data-csp-style="s10">'+esc(msg)+'</div>';document.getElementById('ov-types').innerHTML='<div class="empty" data-csp-style="s67">Dashboard data could not be loaded.</div>';document.getElementById('ov-analytics').innerHTML='<div class="empty" data-csp-style="s10">Dashboard data could not be loaded.</div>';toast(msg,'err')}}
 initTheme();
+initDashboard();
 boot();
 setInterval(checkHealth,30000);
 document.addEventListener('keydown',event=>{
@@ -1501,6 +1625,7 @@ h74:function(event){pickTheme(this.value)},
 h75:function(event){if(event.target===this)closeEntityMems()},
 h76:function(event){closeEntityMems()},
 h83:function(event){pickTheme(this.dataset.themeValue)},
+h146:function(event){selectDashboard(this.value)},
 h84:function(event){startTrial()},
 h85:function(event){navTo('analytics')},
 h86:function(event){navTo('analytics')},
@@ -1527,6 +1652,7 @@ h130:function(event){copyLlmSnippet()},
 h131:function(event){testLlm()},
 h150:function(event){setLlmExtractor(true)},
 h151:function(event){setLlmExtractor(false)},
+h152:function(event){graphToggleAllNodes()},
 h136:function(event){syncNow()},
 h138:function(event){graphSetTypeColor(this.dataset.nodeType,this.value,false)},
 h139:function(event){graphSetTypeColor(this.dataset.nodeType,this.value,true)},
