@@ -3,6 +3,20 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [1.1.5] - 2026-07-28
+
+### Changed
+
+- Simplified the Ledger and Classic graph controls by removing the complete-graph action.
+- Replaced the README Knowledge Graph image with the corrected Ledger screenshot.
+
+### Fixed
+
+- Ledger now has one working `Show unlinked nodes` control that reloads the intended bounded
+  graph view.
+- Time-travel graph views prioritize support visible at the selected anchor, and graph drag
+  handling remains safe when browser animation-frame globals are unavailable.
+
 ## [1.1.2] - 2026-07-27
 
 ### Added
