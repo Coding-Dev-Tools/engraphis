@@ -866,7 +866,7 @@ def test_unlinked_entities_are_shown_only_when_the_engine_is_told_to() -> None:
           links: [{ source: 'a', target: 'b' }],
         });
         const hidden = seen[seen.length - 1];
-        api.setScope({ showUnlinked: true, minDegree: 0 });
+        api.setScope({ showUnlinked: true });
         emit({ hidden, shown: seen[seen.length - 1] });
         """
     )

@@ -566,6 +566,35 @@ input::placeholder, textarea::placeholder { color: var(--c-dim); opacity: 1; }
   pointer-events: none;
 }
 .graph-empty[hidden] { display: none; }
+.graph-connections-dialog {
+  width: min(760px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 32px));
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--c-line);
+  border-radius: 8px;
+  background: var(--c-surface);
+  color: var(--c-fg);
+  box-shadow: 0 24px 72px rgba(0, 0, 0, .42);
+}
+.graph-connections-dialog::backdrop { background: rgba(7, 11, 20, .72); }
+.graph-connections-panel { display: grid; gap: 14px; padding: 20px; }
+.graph-connections-header { display: flex; align-items: start; justify-content: space-between; gap: 18px; }
+.graph-connections-header h2, .graph-connection-memories h3 { margin: 4px 0 0; }
+.graph-connections-meta { margin: 0; color: var(--c-dim); font-size: 12px; }
+.graph-connections-list, .graph-connection-memory-list { display: grid; gap: 8px; max-height: min(280px, calc(100vh - 430px)); overflow-y: auto; padding-right: 3px; }
+.graph-connection-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid var(--c-line); border-radius: 6px; background: var(--c-inset); }
+.graph-connection-row h3 { margin: 0; font-size: 14px; }
+.graph-connection-row p { margin: 4px 0 0; color: var(--c-dim); font-size: 12px; }
+.graph-connection-actions { display: flex; flex-wrap: wrap; gap: 6px; justify-content: end; }
+.graph-memory-evidence { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--c-line); border-radius: 6px; background: var(--c-inset); }
+.graph-memory-evidence h4, .graph-memory-evidence p { margin: 0; }
+.graph-memory-evidence p { color: var(--c-dim); font-size: 12px; }
+.graph-memory-evidence .secondary-button { justify-self: start; }
+@media (max-width: 640px) {
+  .graph-connection-row { grid-template-columns: 1fr; }
+  .graph-connection-actions { justify-content: start; }
+}
 .graph-hud {
   position: absolute;
   z-index: 3;

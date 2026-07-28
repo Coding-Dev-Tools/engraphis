@@ -7,7 +7,7 @@
   <meta name="description" content="Engraphis Ledger — local-first, grounded memory operations.">
   <title>Engraphis Ledger</title>
   <link rel="icon" type="image/png" sizes="32x32" href="/v2-assets/favicon-32.png">
-  <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260728-reference-materials">
+  <link rel="stylesheet" href="/v2-assets/ledger.css?v=20260728-connected-memories">
 </head>
 <body data-theme="slate">
   <div class="app-shell">
@@ -268,8 +268,8 @@
                 <button id="graph-fit" class="graph-action" type="button">Fit to view</button>
                 <button id="graph-reheat" class="graph-action" type="button">Reheat layout</button>
                 <button id="graph-clear-focus" class="graph-action" type="button">Clear focus</button>
+                <button id="graph-show-unlinked" class="graph-action" type="button" aria-pressed="false" title="Show entities that have no relations in this graph view">Show unlinked nodes</button>
                 <button id="graph-retry" class="graph-action" type="button">Reload data</button>
-                <button id="graph-full" class="graph-action" type="button" aria-pressed="false" title="Load every node, including unconnected entities, for this graph view">Show all nodes</button>
                 <div class="graph-export-wrap">
                   <button id="graph-export" class="graph-action graph-export" type="button" aria-expanded="false" aria-controls="graph-export-menu">Export PNG or JSON</button>
                   <div id="graph-export-menu" class="graph-export-menu" hidden>
@@ -351,7 +351,6 @@
                   <label for="graph-tune-min-degree"><span>Min relations</span><input id="graph-tune-min-degree" type="range" min="0" max="12" value="1"><output id="graph-tune-min-degree-output">1</output></label>
                   <label for="graph-depth"><span>Neighbourhood</span><input id="graph-depth" type="range" min="1" max="4" value="2"><output id="graph-depth-output">2</output></label>
                 </div>
-                <div class="graph-tune-switch"><button id="graph-tune-unlinked" class="graph-switch" type="button" role="switch" aria-label="Show unlinked entities" aria-checked="false"><span></span></button><span>Show unlinked entities</span></div>
                 <div class="graph-layer-grid" role="group" aria-label="Graph relation layers">
                   <button class="graph-layer-chip active" type="button" data-graph-layer="temporal" aria-pressed="true"><i></i>Temporal <small id="graph-layer-temporal-count">0</small></button>
                   <button class="graph-layer-chip active" type="button" data-graph-layer="entity" aria-pressed="true"><i></i>Entity <small id="graph-layer-entity-count">0</small></button>
@@ -368,7 +367,6 @@
                 <h2>Scope</h2>
                 <label>Minimum links<input id="graph-min-degree" type="range" min="0" max="12" value="1"><output id="graph-min-degree-output">1</output></label>
                 <label>Size by<select id="graph-size"><option value="degree">Connections</option><option value="betweenness">Bridge importance</option></select></label>
-                <label class="check-row"><input id="graph-unlinked" type="checkbox"> Show unlinked</label>
                 <label class="check-row"><input id="graph-bridges" type="checkbox"> Highlight bridges</label>
                 <label class="check-row"><input id="graph-collapse" type="checkbox" checked> Auto-collapse clusters</label>
               </section>
@@ -583,6 +581,24 @@
   </div>
 
   <script src="/v2-assets/vendor/d3.min.js?v=20260727-final"></script>
-  <script src="/v2-assets/ledger.js?v=20260728-reference-materials"></script>
+  <dialog id="graph-connections-dialog" class="graph-connections-dialog" aria-labelledby="graph-connections-title">
+    <div class="graph-connections-panel">
+      <header class="graph-connections-header">
+        <div>
+          <p class="eyebrow">Graph connections</p>
+          <h2 id="graph-connections-title">Connected nodes</h2>
+        </div>
+        <button id="graph-connections-close" class="text-button" type="button">Close</button>
+      </header>
+      <p id="graph-connections-meta" class="graph-connections-meta" role="status" aria-live="polite"></p>
+      <div id="graph-connections-list" class="graph-connections-list" role="list" aria-label="Nodes directly connected to the selected graph node"></div>
+      <section class="graph-connection-memories" aria-labelledby="graph-connection-memory-title">
+        <div class="section-heading"><h3 id="graph-connection-memory-title">Memories</h3></div>
+        <div id="graph-connection-memory-list" class="graph-connection-memory-list" role="list" aria-live="polite"></div>
+      </section>
+    </div>
+  </dialog>
+
+  <script src="/v2-assets/ledger.js?v=20260728-connected-memories"></script>
 </body>
 </html>

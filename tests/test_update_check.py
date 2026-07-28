@@ -182,9 +182,7 @@ def test_cli_notice_uses_the_non_blocking_snapshot_and_is_fail_silent(monkeypatc
         "enabled": True, "update_available": True, "latest": "1.4.0", "current": "1.0.0",
         "url": "https://rel/1.4.0",
     })
-    monkeypatch.setattr(
-        u, "check", lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not block")),
-    )
+    monkeypatch.setattr(u, "check", lambda **_kwargs: pytest.fail("CLI must not check inline"))
     u.emit_cli_notice(seen.append)
     assert seen and "1.4.0" in seen[0]
 

@@ -1571,6 +1571,7 @@ def maintenance_run(req: _MaintenanceReq, workspace: Optional[str] = None):
 def graph(workspace: Optional[str] = None, limit: int = 2000,
           layers: Optional[str] = None, include_code: bool = False,
           repo: Optional[str] = None, full: bool = False,
+          connected_only: bool = False,
           as_of: Optional[float] = None):
     """Entity-relation network for a workspace — vis-network-ready nodes/edges
     plus type counts, top-connected, and connectivity stats.
@@ -1589,6 +1590,7 @@ def graph(workspace: Optional[str] = None, limit: int = 2000,
     return _run(
         service().graph, workspace=ws, limit=limit, layers=selected,
         include_code=include_code, repo=repo, backfill=False, full=full,
+        connected_only=connected_only,
         as_of=as_of,
     )
 
@@ -1685,6 +1687,16 @@ def graph_entity(canonical_id: str, workspace: Optional[str] = None,
         memory_types=_graph_csv(memory_types), as_of=as_of,
         time_from=time_from, time_to=time_to,
         include_weak_cooccurrence=include_weak_cooccurrence,
+    )
+
+
+@router.get("/graph/entities/{canonical_id}/memories")
+def graph_entity_memories(canonical_id: str, workspace: Optional[str] = None,
+                          as_of: Optional[float] = None):
+    """Bounded evidence cards for one graph node, without rebuilding the full inspector."""
+    ws = workspace or _require_ws()
+    return _run(
+        service().graph_entity_evidence, canonical_id, workspace=ws, as_of=as_of,
     )
 
 

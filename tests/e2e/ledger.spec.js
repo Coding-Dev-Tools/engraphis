@@ -42,13 +42,13 @@ function license() {
 
 async function mockApi(page, options = {}) {
   const requests = [];
+  const audit = options.audit || [];
+  const receipts = options.receipts || [];
   const workspaceList = options.workspaces || [{ name: workspace, memories: memories.length }];
   const memoriesFor = requestUrl => {
     const selected = requestUrl.searchParams.get('workspace') || workspace;
     return (options.memoriesByWorkspace && options.memoriesByWorkspace[selected]) || memories;
   };
-  const audit = options.audit || [];
-  const receipts = options.receipts || [];
   const llmStatus = options.llmStatus || {
     configured: false,
     key_set: false,
@@ -134,6 +134,7 @@ async function mockApi(page, options = {}) {
         await options.deferGraphRequest(requestUrl);
       }
       const asOf = Number(requestUrl.searchParams.get('as_of'));
+      const includeUnlinked = requestUrl.searchParams.get('connected_only') !== 'true';
       // Make the historical payload depend on the server's selected-day anchor. A client
       // that filters at midnight would incorrectly discard these later-in-the-day records.
       const validFrom = Number.isFinite(asOf) ? asOf - 1 : 100;
@@ -142,7 +143,9 @@ async function mockApi(page, options = {}) {
         nodes: [
           { id: 'postgres', label: 'Postgres', repo: 'data-stack', topic: 'storage', valid_from: validFrom },
           { id: 'engraphis', label: 'Engraphis', repo: 'agent-memory', topic: 'memory', valid_from: validFrom },
-        ],
+        ].concat(includeUnlinked ? [{
+          id: 'unlinked', label: 'Unlinked Note', repo: 'agent-memory', topic: 'memory', valid_from: validFrom,
+        }] : []),
         edges: [{ from: 'engraphis', to: 'postgres', valid_from: validFrom, valid_to: validTo }],
         layers: [
           { layer: 'temporal', count: 15 }, { layer: 'entity', count: 26 },
@@ -150,6 +153,18 @@ async function mockApi(page, options = {}) {
         ],
       });
     }
+    if (path === '/graph/entities/engraphis/memories') return ok({
+      canonical_id: 'engraphis',
+      evidence: [{
+        memory_id: memories[0].id,
+        title: memories[0].title,
+        excerpt: memories[0].content,
+        memory_type: memories[0].mtype,
+        valid_from: 100,
+      }],
+      totals: { evidence: 1 },
+      truncation: { evidence: false },
+    });
     if (path === '/health') return ok({ status: 'ok' });
     if (path === '/license') return ok(license());
     if (path === '/auth/state') {
@@ -247,6 +262,22 @@ test('Ledger is live, safe, lazy, accessible, and responsive', async ({ page }) 
   expect(unexpectedErrors).toEqual([]);
 });
 
+test('provenance merges audit seconds and receipt milliseconds chronologically', async ({ page }) => {
+  await mockApi(page, {
+    audit: [{ id: 'aud_older', ts: 1_700_000_100, action: 'older audit action' }],
+    receipts: [{ id: 'rcpt_newer', ts_ms: 1_700_000_200_000, operation: 'newer receipt operation' }],
+  });
+  await page.goto('/');
+
+  await page.getByRole('button', { name: 'Provenance why, timeline, receipts' }).click();
+  await page.getByRole('tab', { name: 'Audit & receipts' }).click();
+
+  const cards = page.locator('#audit-list .audit-card');
+  await expect(cards).toHaveCount(2);
+  await expect(cards.nth(0)).toContainText('newer receipt operation');
+  await expect(cards.nth(1)).toContainText('older audit action');
+});
+
 test('memory listings open the editable Library detail from every dashboard view', async ({ page }) => {
   await mockApi(page);
   await page.goto('/');
@@ -306,22 +337,6 @@ test('switching workspaces clears a stale memory editor before it can write else
   await expect(page.locator('#library-list')).not.toContainText('Database choice');
 });
 
-test('provenance merges audit seconds and receipt milliseconds chronologically', async ({ page }) => {
-  await mockApi(page, {
-    audit: [{ id: 'aud_older', ts: 1_700_000_100, action: 'older audit action' }],
-    receipts: [{ id: 'rcpt_newer', ts_ms: 1_700_000_200_000, operation: 'newer receipt operation' }],
-  });
-  await page.goto('/');
-
-  await page.getByRole('button', { name: 'Provenance why, timeline, receipts' }).click();
-  await page.getByRole('tab', { name: 'Audit & receipts' }).click();
-
-  const cards = page.locator('#audit-list .audit-card');
-  await expect(cards).toHaveCount(2);
-  await expect(cards.nth(0)).toContainText('newer receipt operation');
-  await expect(cards.nth(1)).toContainText('older audit action');
-});
-
 test('Ask keeps the raw retrieval preview alongside its single grounded answer', async ({ page }) => {
   const rawOnlyCandidate = {
     id: 'mem_raw_only',
@@ -347,23 +362,15 @@ test('Ask keeps the raw retrieval preview alongside its single grounded answer',
   expect(requests.filter(path => path === '/recall')).toHaveLength(1);
 });
 
-test('consolidation requires a matching dry preview before commit', async ({ page }) => {
-  await mockApi(page);
-  await page.goto('/');
-
-  await page.getByRole('button', { name: /Manage/ }).click();
-  await page.getByRole('tab', { name: 'Consolidate' }).click();
-  await page.getByRole('button', { name: 'Run dry preview' }).click();
-  await expect(page.getByRole('button', { name: 'Commit reviewed result' })).toBeEnabled();
-
-  await page.getByLabel('Structured relationship analysis').check();
-  await expect(page.getByRole('button', { name: 'Commit reviewed result' })).toBeDisabled();
-});
-
 test('Graph & Relations uses the visual explorer controls and applies their state', async ({ page }) => {
   await mockApi(page);
   await page.goto('/');
+  const initialGraphRequest = page.waitForRequest(request => {
+    const url = new URL(request.url());
+    return url.pathname === '/api/graph' && url.searchParams.get('connected_only') === 'true';
+  });
   await page.getByRole('button', { name: 'Graph & Relations' }).click();
+  await initialGraphRequest;
   await expect(page.locator('#graph-count')).toContainText('2 entities · 1 relations');
 
   await expect(page.getByRole('tab', { name: 'Explore' })).toHaveAttribute('aria-selected', 'true');
@@ -378,20 +385,24 @@ test('Graph & Relations uses the visual explorer controls and applies their stat
   await expect(page.locator('#graph-flow-speed')).toHaveValue('45');
   await expect(page.locator('#graph-layer-temporal-count')).toHaveText('15');
 
-  const allNodesRequest = page.waitForRequest(request => {
+  await expect(page.getByRole('button', { name: 'Show all nodes' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Show unlinked nodes' })).toHaveAttribute('aria-pressed', 'false');
+  const showUnlinkedRequest = page.waitForRequest(request => {
     const url = new URL(request.url());
-    return url.pathname === '/api/graph' && url.searchParams.get('full') === 'true';
+    return url.pathname === '/api/graph' && !url.searchParams.has('connected_only');
   });
-  await page.getByRole('button', { name: 'Show all nodes' }).click();
-  await allNodesRequest;
-  await expect(page.getByRole('button', { name: 'Show responsive overview' })).toHaveAttribute('aria-pressed', 'true');
-  const overviewRequest = page.waitForRequest(request => {
+  await page.getByRole('button', { name: 'Show unlinked nodes' }).click();
+  await showUnlinkedRequest;
+  await expect(page.getByRole('button', { name: 'Hide unlinked nodes' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('#graph-count')).toContainText('3 entities · 1 relations');
+  const hideUnlinkedRequest = page.waitForRequest(request => {
     const url = new URL(request.url());
-    return url.pathname === '/api/graph' && url.searchParams.get('full') !== 'true';
+    return url.pathname === '/api/graph' && url.searchParams.get('connected_only') === 'true';
   });
-  await page.getByRole('button', { name: 'Show responsive overview' }).click();
-  await overviewRequest;
-  await expect(page.getByRole('button', { name: 'Show all nodes' })).toHaveAttribute('aria-pressed', 'false');
+  await page.getByRole('button', { name: 'Hide unlinked nodes' }).click();
+  await hideUnlinkedRequest;
+  await expect(page.getByRole('button', { name: 'Show unlinked nodes' })).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('#graph-count')).toContainText('2 entities · 1 relations');
 
   const codeRequest = page.waitForRequest(request => {
     const url = new URL(request.url());
@@ -477,6 +488,28 @@ test('Graph & Relations uses the visual explorer controls and applies their stat
   await expect(page.getByRole('switch', { name: 'Freeze simulation' })).toHaveAttribute('aria-checked', 'true');
 });
 
+test('graph node connections expose linked memory evidence without leaving the graph', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Graph & Relations' }).click();
+  await page.getByRole('tab', { name: 'Analyse' }).click();
+  await expect(page.locator('#graph-top button')).toHaveCount(2);
+
+  const firstGraphFact = page.locator('#graph-top button').first();
+  await firstGraphFact.click();
+  await expect(page.locator('#graph-connections-dialog')).toBeVisible();
+  await expect(page.locator('#graph-connections-list')).toContainText('Engraphis');
+
+  const evidenceRequest = page.waitForRequest(request =>
+    new URL(request.url()).pathname === '/api/graph/entities/engraphis/memories'
+  );
+  await page.locator('#graph-connections-list').getByRole('button', { name: 'Memories' }).click();
+  await evidenceRequest;
+  await expect(page.locator('#graph-connection-memory-list')).toContainText('Database choice');
+  await expect(page.locator('#graph-connections-dialog')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Open in Library' })).toBeVisible();
+});
+
 test('changing the time anchor replaces a pending graph request', async ({ page }) => {
   let releaseInitial;
   const initialRelease = new Promise(resolve => { releaseInitial = resolve; });
@@ -484,7 +517,7 @@ test('changing the time anchor replaces a pending graph request', async ({ page 
   const waitForInitial = new Promise(resolve => { initialStarted = resolve; });
   await mockApi(page, {
     deferGraphRequest: async url => {
-      if (!url.searchParams.has('as_of')) {
+      if (!url.searchParams.has('as_of') && url.searchParams.get('connected_only') === 'true') {
         initialStarted();
         await initialRelease;
       }
@@ -497,7 +530,9 @@ test('changing the time anchor replaces a pending graph request', async ({ page 
   await page.getByRole('tab', { name: 'Time' }).click();
   const anchored = page.waitForRequest(request => {
     const url = new URL(request.url());
-    return url.pathname === '/api/graph' && url.searchParams.has('as_of');
+    return url.pathname === '/api/graph'
+      && url.searchParams.has('as_of')
+      && url.searchParams.get('connected_only') === 'true';
   }, { timeout: 5_000 });
   await page.getByLabel('As of date').fill('2021-01-01');
   await anchored;

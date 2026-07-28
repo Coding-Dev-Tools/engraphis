@@ -17,17 +17,21 @@
     graphData: null,
     graphDataMode: 'overview',
     graphDataIncludeCode: false,
+    graphDataShowUnlinked: false,
     graphDataAsOf: null,
     graphMeta: null,
     graphMode: 'overview',
-    graphScopeBeforeFull: null,
+    graphShowUnlinked: false,
     graphEngine: null,
     graphLoadPromise: null,
     graphLoadWorkspace: '',
     graphLoadMode: '',
     graphLoadIncludeCode: false,
+    graphLoadShowUnlinked: false,
     graphLoadAsOf: null,
     graphLoadController: null,
+    graphConnectionsRequest: 0,
+    graphConnectionsController: null,
     graphMetrics: {},
     graphFrozen: false,
     graphIncludeCode: false,
@@ -41,16 +45,6 @@
   const all = selector => [...document.querySelectorAll(selector)];
   const text = value => value == null ? '' : String(value);
   const number = value => Number.isFinite(Number(value)) ? Number(value) : 0;
-  function provenanceTimestampMs(item) {
-    // Audit rows use seconds (`ts`), while receipts use milliseconds (`ts_ms`).
-    // Normalize before merging so both the newest-first order and 120-row cap are
-    // chronological across the two independently paginated feeds.
-    const raw = item && (item.ts_ms ?? item.ts ?? item.timestamp ?? item.created_at);
-    const numeric = Number(raw);
-    if (Number.isFinite(numeric)) return numeric < 1e12 ? numeric * 1000 : numeric;
-    const parsed = Date.parse(raw);
-    return Number.isFinite(parsed) ? parsed : 0;
-  }
   const truncate = (value, length = 260) => {
     const source = text(value).trim();
     return source.length > length ? `${source.slice(0, length - 1)}…` : source;
@@ -84,6 +78,7 @@
   const GRAPH_FULL_NODE_LIMIT = 20_000;
   const GRAPH_LOAD_TIMEOUT_MS = 12_000;
   const GRAPH_FULL_LOAD_TIMEOUT_MS = 30_000;
+  const GRAPH_CONNECTION_MEMORIES_TIMEOUT_MS = 8_000;
   const GRAPH_PREFERENCES_KEY = 'engraphis-ledger-graph-preferences-v1';
   const GRAPH_CUSTOM_VIEW_KEY = 'engraphis-ledger-graph-custom-view-v1';
   const GRAPH_LAYERS = ['temporal', 'entity', 'causal', 'semantic', 'code'];
@@ -228,7 +223,7 @@
         '/v2-assets/vendor/force-graph.min.js?v=20260727-final',
         'ForceGraph',
       )).then(() => loadScript(
-        '/v2-assets/engraphis-graph.js?v=20260728-reference-materials',
+        '/v2-assets/engraphis-graph.js?v=20260728-connected-memories',
         'EngraphisGraph',
       ));
       graphAssetsPromise.catch(() => {});
@@ -398,6 +393,17 @@
     return payload.receipts || payload.entries || payload.records || [];
   }
 
+  function provenanceTimestampMs(item) {
+    // Audit rows use seconds (`ts`), while receipts use milliseconds (`ts_ms`).
+    // Normalize before merging so both the newest-first order and 120-row cap are
+    // chronological across the two independently paginated feeds.
+    const raw = item && (item.ts_ms ?? item.ts ?? item.timestamp ?? item.created_at);
+    const numeric = Number(raw);
+    if (Number.isFinite(numeric)) return numeric < 1e12 ? numeric * 1000 : numeric;
+    const parsed = Date.parse(raw);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
   function auditField(item, ...names) {
     for (const name of names) {
       if (item && item[name] != null && item[name] !== '') return item[name];
@@ -494,12 +500,14 @@
     if (!name) return;
     invalidateConsolidationReview();
     const epoch = ++state.refreshEpoch;
+    closeGraphConnections();
     state.workspace = name;
     state.graphWorkspace = '';
     state.graphData = null;
     state.graphDataIncludeCode = false;
+    state.graphDataShowUnlinked = false;
     state.selectedMemory = '';
-    // Detail/editor handlers close over a memory record. Clear both before the
+    // Detail/editor handlers close over a memory record.  Clear both before the
     // workspace fetches begin so a stale form cannot write that record into the
     // newly selected workspace.
     state.editorMemory = null;
@@ -688,8 +696,9 @@
             method: 'POST',
             body: { id: current.id, workspace: state.workspace, content, reason: 'revised in Ledger' },
           });
-          // A correction creates a replacement, so metadata edits belong on that
-          // replacement rather than the historical source record.
+          // A correction intentionally creates a replacement.  The core inherits the
+          // source importance; carry any label edits to that replacement rather than
+          // accidentally applying them to the historical source record.
           if (title !== (current.title || '') || memoryTypeValue !== memoryType(current)
             || importance !== currentImportance) {
             await api('/memory/update', {
@@ -871,6 +880,7 @@
       name: item.label || item.name || item.id,
       label: item.label || item.name || item.id,
       etype: item.etype || item.type || 'person_or_concept',
+      nodeKind: item.node_kind || item.kind || '',
       degree: number(item.degree),
       community: Number.isFinite(Number(item.community)) ? Number(item.community) : undefined,
       repo: item.repo || '',
@@ -910,6 +920,176 @@
     reveal();
   }
 
+  function cancelGraphConnectionMemoryLoad() {
+    state.graphConnectionsRequest += 1;
+    if (state.graphConnectionsController) state.graphConnectionsController.abort();
+    state.graphConnectionsController = null;
+  }
+
+  function closeGraphConnections() {
+    cancelGraphConnectionMemoryLoad();
+    const dialog = byId('graph-connections-dialog');
+    if (dialog.open) dialog.close();
+  }
+
+  function graphMemoryCard(evidence) {
+    return {
+      id: evidence.memory_id || evidence.id,
+      title: evidence.title || evidence.label || evidence.memory_id || evidence.id,
+      content: evidence.excerpt || evidence.content || evidence.summary || '',
+      mtype: evidence.memory_type || evidence.mtype,
+      valid_from: evidence.valid_from,
+      valid_to: evidence.valid_to,
+      ingested_at: evidence.ingested_at,
+      provenance: evidence.provenance,
+    };
+  }
+
+  function graphMemoryEvidenceCard(memory) {
+    const card = node('article', 'graph-memory-evidence');
+    card.append(
+      node('h4', '', memory.title || memory.id || 'Memory'),
+      node('p', '', truncate(memory.content || memory.summary, 500)),
+      memoryMeta(memory),
+    );
+    if (memory.id) {
+      card.append(button('Open in Library', 'secondary-button', () => {
+        closeGraphConnections();
+        openMemory(memory);
+      }));
+    }
+    return card;
+  }
+
+  function renderGraphConnectionMemories(memories, message) {
+    const target = byId('graph-connection-memory-list');
+  target.replaceChildren();
+  if (!memories.length) {
+    const placeholder = empty(message);
+    placeholder.setAttribute('role', 'listitem');
+    target.append(placeholder);
+    return;
+  }
+  memories.forEach(memory => {
+    const card = graphMemoryEvidenceCard(memory);
+    card.setAttribute('role', 'listitem');
+    target.append(card);
+  });
+  }
+
+  function isGraphMemoryNode(item) {
+    const kind = String(item.nodeKind || '').toLowerCase();
+    const type = String(item.etype || '').toLowerCase();
+    return kind === 'memory' || type === 'memory' || type.startsWith('memory_');
+  }
+
+  function graphConnectionEntries(item) {
+    const graph = state.graphEngine && state.graphEngine.exportData
+      ? state.graphEngine.exportData() : state.graphData;
+    if (!graph) return [];
+    const nodes = new Map(graph.nodes.map(candidate => [candidate.id, candidate]));
+    const connections = new Map();
+    graph.links.forEach(link => {
+      const source = link.source;
+      const target = link.target;
+      if (source !== item.id && target !== item.id) return;
+      const otherId = source === item.id ? target : source;
+      const other = nodes.get(otherId);
+      if (!other || other.id === item.id) return;
+      const entry = connections.get(other.id) || { item: other, relations: new Set() };
+      if (link.label) entry.relations.add(link.label);
+      connections.set(other.id, entry);
+    });
+    return [...connections.values()].sort((left, right) => {
+      const degree = number(right.item.degree) - number(left.item.degree);
+      return degree || left.item.name.localeCompare(right.item.name);
+    });
+  }
+
+  async function showGraphConnectionMemories(item) {
+    if (!item || !item.id || !state.workspace) return;
+    cancelGraphConnectionMemoryLoad();
+    const request = ++state.graphConnectionsRequest;
+    const workspace = state.workspace;
+    const title = item.name || item.label || item.id;
+    byId('graph-connection-memory-title').textContent = `Memories for ${title}`;
+    renderGraphConnectionMemories([], 'Loading memory evidence…');
+    if (isGraphMemoryNode(item)) {
+      const known = state.memories.find(memory => memory.id === item.id);
+      if (request !== state.graphConnectionsRequest || workspace !== state.workspace) return;
+      renderGraphConnectionMemories(
+        [known || graphMemoryCard(item)], 'No memory details are available for this node.',
+      );
+      return;
+    }
+    const controller = new AbortController();
+    state.graphConnectionsController = controller;
+    const timeout = window.setTimeout(() => controller.abort(), GRAPH_CONNECTION_MEMORIES_TIMEOUT_MS);
+    try {
+      const detail = await api(
+        `/graph/entities/${encodeURIComponent(item.id)}/memories?${query(workspace)}${graphAsOfQuery()}`,
+        { signal: controller.signal },
+      );
+      if (request !== state.graphConnectionsRequest || workspace !== state.workspace) return;
+      const evidence = detail.evidence || [];
+      const total = number(detail.totals && detail.totals.evidence) || evidence.length;
+      byId('graph-connection-memory-title').textContent = `${total} ${total === 1 ? 'memory' : 'memories'} for ${title}`;
+      renderGraphConnectionMemories(
+        evidence.map(graphMemoryCard),
+        'No active memories support this connected node.',
+      );
+    } catch (error) {
+      if (request !== state.graphConnectionsRequest || workspace !== state.workspace) return;
+      byId('graph-connection-memory-title').textContent = `Memories for ${title}`;
+      renderGraphConnectionMemories([], error && error.name === 'AbortError'
+        ? 'Memory evidence loading timed out. Choose this node again to retry.'
+        : `Could not load memory evidence: ${error.message}`);
+    } finally {
+      window.clearTimeout(timeout);
+      if (state.graphConnectionsController === controller) state.graphConnectionsController = null;
+    }
+  }
+
+  function graphConnectionRow(entry) {
+    const item = entry.item;
+    const row = node('article', 'graph-connection-row');
+    row.setAttribute('role', 'listitem');
+    const details = node('div');
+    const relations = [...entry.relations];
+    const relationLabel = relations.length ? ` · ${relations.join(', ')}` : '';
+    details.append(
+      node('h3', '', item.name),
+      node('p', '', `${number(item.degree)} connections · ${item.etype}${relationLabel}`),
+    );
+    const actions = node('div', 'graph-connection-actions');
+    actions.append(
+      button('Focus graph', 'secondary-button', () => {
+        closeGraphConnections();
+        revealGraphNode(item.id, item.name);
+      }),
+      button('Memories', 'secondary-button', () => showGraphConnectionMemories(item)),
+    );
+    row.append(details, actions);
+    return row;
+  }
+
+  function openGraphConnections(item) {
+    if (!item || !item.id) return;
+    cancelGraphConnectionMemoryLoad();
+    const dialog = byId('graph-connections-dialog');
+    const entries = graphConnectionEntries(item);
+    const title = item.name || item.label || item.id;
+    byId('graph-connections-title').textContent = `Connected to ${title}`;
+    byId('graph-connections-meta').textContent = `${entries.length} direct ${entries.length === 1 ? 'connection' : 'connections'} visible in this graph view`;
+    const target = byId('graph-connections-list');
+    target.replaceChildren();
+    if (!entries.length) target.append(empty('No connected nodes are visible in this graph view.'));
+    else entries.forEach(entry => target.append(graphConnectionRow(entry)));
+    byId('graph-connection-memory-title').textContent = 'Memories';
+    renderGraphConnectionMemories([], 'Choose a connected node to inspect its memory evidence.');
+    if (!dialog.open) dialog.showModal();
+  }
+
   function updateGraphFacts(data) {
     const stats = byId('graph-stats');
     stats.replaceChildren();
@@ -931,20 +1111,14 @@
       const control = node('button', 'compact-row');
       control.type = 'button';
       control.append(node('strong', '', item.name), node('span', '', `${number(item.degree)} connections · ${item.etype}`));
-      control.addEventListener('click', () => revealGraphNode(item.id, item.name));
+      control.addEventListener('click', () => openGraphConnections(item));
       top.append(control);
     });
   }
 
   function updateGraphModeControls() {
     const full = state.graphMode === 'full';
-    const control = byId('graph-full');
-    control.textContent = full ? 'Show responsive overview' : 'Show all nodes';
-    control.setAttribute('aria-pressed', String(full));
-    control.title = full
-      ? 'Return to the fast 320-node overview'
-      : 'Load every node, including unconnected entities, for this graph view';
-    ['graph-min-degree', 'graph-tune-min-degree', 'graph-unlinked', 'graph-tune-unlinked', 'graph-collapse'].forEach(id => {
+    ['graph-min-degree', 'graph-tune-min-degree', 'graph-collapse'].forEach(id => {
       const scopeControl = byId(id);
       scopeControl.disabled = full;
       scopeControl.title = full
@@ -1031,7 +1205,7 @@
     const full = state.graphMode === 'full';
     return {
       minDegree: full ? 0 : number(byId('graph-min-degree').value),
-      showUnlinked: full || byId('graph-unlinked').checked,
+      showUnlinked: full || state.graphShowUnlinked,
       depth: number(byId('graph-depth').value),
     };
   }
@@ -1061,8 +1235,13 @@
 
   function setGraphShowUnlinked(on, apply = true) {
     const next = on === true;
-    byId('graph-unlinked').checked = next;
-    setGraphSwitch('graph-tune-unlinked', next);
+    state.graphShowUnlinked = next;
+    const control = byId('graph-show-unlinked');
+    control.textContent = next ? 'Hide unlinked nodes' : 'Show unlinked nodes';
+    control.setAttribute('aria-pressed', String(next));
+    control.title = next
+      ? 'Hide entities that have no relations in this graph view'
+      : 'Show entities that have no relations in this graph view';
     if (apply) applyGraphScope();
   }
 
@@ -1129,7 +1308,7 @@
       tuning: graphTuningSettings(),
       minDegree: number(byId('graph-min-degree').value),
       depth: number(byId('graph-depth').value),
-      showUnlinked: byId('graph-unlinked').checked,
+      showUnlinked: state.graphShowUnlinked,
       layers: graphLayerState(),
       includeCode: state.graphIncludeCode,
       savedView: state.graphSavedView,
@@ -1177,7 +1356,7 @@
     const savedAsOf = graphPreference('asOf', '');
     byId('graph-as-of').value = typeof savedAsOf === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(savedAsOf)
       ? savedAsOf : '';
-    setGraphShowUnlinked(graphPreference('showUnlinked', byId('graph-unlinked').checked) === true);
+    setGraphShowUnlinked(graphPreference('showUnlinked', state.graphShowUnlinked) === true);
     byId('graph-bridges').checked = graphPreference('bridges', byId('graph-bridges').checked) === true;
     byId('graph-collapse').checked = graphPreference('collapse', byId('graph-collapse').checked) === true;
     byId('graph-ghosts').checked = graphPreference('ghosts', byId('graph-ghosts').checked) !== false;
@@ -1222,6 +1401,7 @@
     const palette = ['theme', 'aurora', 'ocean', 'ember', 'contrast', 'custom'].includes(view.palette)
       ? view.palette : byId('graph-palette').value;
     const previousIncludeCode = state.graphIncludeCode;
+    const previousShowUnlinked = state.graphShowUnlinked;
     const previousAsOf = byId('graph-as-of').value;
     const asOf = typeof view.asOf === 'string' ? view.asOf : previousAsOf;
     const repoFilter = typeof view.repoFilter === 'string'
@@ -1276,7 +1456,10 @@
       state.graphEngine.freeze(state.graphFrozen);
     }
     saveGraphPreferences();
-    if (previousIncludeCode !== state.graphIncludeCode || previousAsOf !== asOf) loadGraph({ force: true });
+    if (previousIncludeCode !== state.graphIncludeCode
+      || previousShowUnlinked !== state.graphShowUnlinked || previousAsOf !== asOf) {
+      loadGraph({ force: true });
+    }
     const label = all('[data-graph-saved-view]').find(control => control.dataset.graphSavedView === id);
     showNotice(`${id === 'custom' ? 'Saved' : (label ? label.textContent : 'Saved')} graph view applied.`);
   }
@@ -1294,6 +1477,7 @@
   function resetGraphTuning() {
     const preset = byId('graph-preset').value;
     const previousIncludeCode = state.graphIncludeCode;
+    const previousShowUnlinked = state.graphShowUnlinked;
     state.graphIncludeCode = false;
     syncGraphTuning({ ...graphPresetTuning(preset), flowSpeed: 45 });
     setGraphMinDegree(1, false);
@@ -1311,7 +1495,7 @@
       state.graphEngine.freeze(state.graphFrozen);
     }
     saveGraphPreferences();
-    if (previousIncludeCode) loadGraph({ force: true });
+    if (previousIncludeCode || previousShowUnlinked) loadGraph({ force: true });
     showNotice('Graph tuning reset to the selected layout defaults.');
   }
 
@@ -1418,7 +1602,8 @@
     return Number.isFinite(timestamp) ? timestamp : null;
   }
 
-  function graphAsOfQuery(timestamp = graphAsOfTimestamp()) {
+  function graphAsOfQuery() {
+    const timestamp = graphAsOfTimestamp();
     return timestamp === null ? '' : `&as_of=${encodeURIComponent(timestamp / 1000)}`;
   }
 
@@ -1427,6 +1612,7 @@
     if (!force && state.graphWorkspace === state.workspace
       && state.graphDataMode === state.graphMode
       && state.graphDataIncludeCode === state.graphIncludeCode
+      && state.graphDataShowUnlinked === state.graphShowUnlinked
       && state.graphDataAsOf === graphAsOfTimestamp() && state.graphData) {
       if (state.graphEngine) state.graphEngine.resize();
       return;
@@ -1434,10 +1620,12 @@
     const targetWorkspace = state.workspace;
     const targetMode = state.graphMode;
     const targetIncludeCode = state.graphIncludeCode;
+    const targetShowUnlinked = state.graphShowUnlinked;
     const targetAsOf = graphAsOfTimestamp();
     const fullGraph = targetMode === 'full';
     if (state.graphLoadPromise && state.graphLoadWorkspace === targetWorkspace
       && state.graphLoadMode === targetMode && state.graphLoadIncludeCode === targetIncludeCode
+      && state.graphLoadShowUnlinked === targetShowUnlinked
       && state.graphLoadAsOf === targetAsOf) {
       return state.graphLoadPromise;
     }
@@ -1456,20 +1644,23 @@
       try {
         const limit = fullGraph ? GRAPH_FULL_NODE_LIMIT : GRAPH_INITIAL_NODE_LIMIT;
         const complete = fullGraph ? '&full=true' : '';
+        const connectedOnly = !fullGraph && !targetShowUnlinked ? '&connected_only=true' : '';
         const includeCode = targetIncludeCode ? '&include_code=true' : '';
-        const asOf = graphAsOfQuery(targetAsOf);
+        const asOf = targetAsOf === null ? '' : `&as_of=${encodeURIComponent(targetAsOf / 1000)}`;
         const [payload] = await Promise.all([
-          api(`/graph?${query(targetWorkspace)}&limit=${limit}${complete}${includeCode}${asOf}`, { signal: controller.signal }),
+          api(`/graph?${query(targetWorkspace)}&limit=${limit}${complete}${connectedOnly}${includeCode}${asOf}`, { signal: controller.signal }),
           ensureGraphAssets(),
         ]);
         if (state.workspace !== targetWorkspace || state.graphMode !== targetMode
           || state.graphIncludeCode !== targetIncludeCode
+          || state.graphShowUnlinked !== targetShowUnlinked
           || graphAsOfTimestamp() !== targetAsOf) return;
         const data = { nodes: graphNodes(payload), links: graphLinks(payload), suggestions: payload.suggestions || [] };
         state.graphData = data;
         state.graphWorkspace = targetWorkspace;
         state.graphDataMode = targetMode;
         state.graphDataIncludeCode = targetIncludeCode;
+        state.graphDataShowUnlinked = targetShowUnlinked;
         state.graphDataAsOf = targetAsOf;
         state.graphMeta = payload.meta || {
           nodes_available: data.nodes.length,
@@ -1479,7 +1670,7 @@
         if (typeof window.EngraphisGraph === 'undefined') throw new Error('graph engine asset is unavailable');
         state.graphEngine = window.EngraphisGraph.create(byId('graph-canvas'), {
           renderMode: targetMode,
-          onNodeClick: item => showNotice(`${item.name || item.label || item.id} · ${number(item.degree)} connections`),
+          onNodeClick: item => openGraphConnections(item),
           onBackgroundClick: () => state.graphEngine && state.graphEngine.clearFocus(),
           onStats: graphStatsChanged,
           onMetrics: graphMetricsChanged,
@@ -1502,7 +1693,7 @@
           graph.setScope(graphScope());
           graph.setLayers(graphLayerState());
           graph.setRepoFilter(byId('graph-repo-filter').value);
-          graph.setAsOf(targetAsOf);
+          graph.setAsOf(graphAsOfTimestamp());
           graph.setSizeBy(byId('graph-size').value);
           graph.setBridges(byId('graph-bridges').checked);
           graph.setCollapse(fullGraph ? false : (byId('graph-collapse').checked ? 'auto' : false));
@@ -1516,9 +1707,7 @@
         updateGraphFacts(data);
         updateGraphLayerCounts(data, payload.layers);
       } catch (error) {
-        if (state.workspace !== targetWorkspace || state.graphMode !== targetMode
-          || state.graphIncludeCode !== targetIncludeCode
-          || graphAsOfTimestamp() !== targetAsOf) return;
+        if (state.workspace !== targetWorkspace || state.graphMode !== targetMode) return;
         byId('graph-empty').hidden = false;
         byId('graph-empty').textContent = error && error.name === 'AbortError'
           ? `${fullGraph ? 'Full graph' : 'Graph'} loading timed out. Choose Retry to try again.`
@@ -1531,6 +1720,7 @@
     state.graphLoadWorkspace = targetWorkspace;
     state.graphLoadMode = targetMode;
     state.graphLoadIncludeCode = targetIncludeCode;
+    state.graphLoadShowUnlinked = targetShowUnlinked;
     state.graphLoadAsOf = targetAsOf;
     state.graphLoadPromise = task;
     try {
@@ -1541,46 +1731,10 @@
         state.graphLoadWorkspace = '';
         state.graphLoadMode = '';
         state.graphLoadIncludeCode = false;
+        state.graphLoadShowUnlinked = false;
         state.graphLoadAsOf = null;
       }
     }
-  }
-
-  function toggleGraphMode() {
-    const enteringFull = state.graphMode !== 'full';
-    if (enteringFull) {
-      state.graphScopeBeforeFull = {
-        minDegree: byId('graph-min-degree').value,
-        showUnlinked: byId('graph-unlinked').checked,
-        collapse: byId('graph-collapse').checked,
-      };
-      byId('graph-min-degree').value = '0';
-      byId('graph-min-degree-output').value = '0';
-      byId('graph-tune-min-degree').value = '0';
-      byId('graph-tune-min-degree-output').value = '0';
-      byId('graph-unlinked').checked = true;
-      setGraphSwitch('graph-tune-unlinked', true);
-      byId('graph-collapse').checked = false;
-    } else if (state.graphScopeBeforeFull) {
-      const prior = state.graphScopeBeforeFull;
-      byId('graph-min-degree').value = prior.minDegree;
-      byId('graph-min-degree-output').value = prior.minDegree;
-      byId('graph-tune-min-degree').value = prior.minDegree;
-      byId('graph-tune-min-degree-output').value = prior.minDegree;
-      byId('graph-unlinked').checked = prior.showUnlinked;
-      setGraphSwitch('graph-tune-unlinked', prior.showUnlinked);
-      byId('graph-collapse').checked = prior.collapse;
-      state.graphScopeBeforeFull = null;
-    }
-    state.graphMode = enteringFull ? 'full' : 'overview';
-    if (state.graphLoadController) state.graphLoadController.abort();
-    state.graphData = null;
-    state.graphWorkspace = '';
-    state.graphDataMode = state.graphMode;
-    state.graphDataIncludeCode = false;
-    state.graphMeta = null;
-    updateGraphModeControls();
-    loadGraph({ force: true });
   }
 
   function searchGraph(value) {
@@ -1867,6 +2021,8 @@
           dry_run: true,
         },
       });
+      // The preview is an approval only for the exact workspace and choices that
+      // produced it; never let a late response authorize a changed form.
       if (!sameConsolidationOptions(options, consolidationOptions())) return;
       state.consolidationReview = options;
       byId('consolidate-commit').disabled = false;
@@ -2341,10 +2497,11 @@
     clearGraphSavedView();
     saveGraphPreferences();
   });
-  byId('graph-unlinked').addEventListener('change', event => {
-    setGraphShowUnlinked(event.target.checked);
+  byId('graph-show-unlinked').addEventListener('click', event => {
+    setGraphShowUnlinked(event.currentTarget.getAttribute('aria-pressed') !== 'true');
     clearGraphSavedView();
     saveGraphPreferences();
+    loadGraph({ force: true });
   });
   byId('graph-tune-min-degree').addEventListener('input', event => {
     setGraphMinDegree(event.target.value);
@@ -2353,11 +2510,6 @@
   });
   byId('graph-depth').addEventListener('input', event => {
     setGraphDepth(event.target.value);
-    clearGraphSavedView();
-    saveGraphPreferences();
-  });
-  byId('graph-tune-unlinked').addEventListener('click', event => {
-    setGraphShowUnlinked(event.currentTarget.getAttribute('aria-checked') !== 'true');
     clearGraphSavedView();
     saveGraphPreferences();
   });
@@ -2382,7 +2534,6 @@
   all('[data-graph-saved-view]').forEach(control => control.addEventListener('click', () => applyGraphView(control.dataset.graphSavedView)));
   byId('graph-save-view').addEventListener('click', saveCurrentGraphView);
   byId('graph-reset-tuning').addEventListener('click', resetGraphTuning);
-  byId('graph-full').addEventListener('click', toggleGraphMode);
   byId('graph-retry').addEventListener('click', () => loadGraph({ force: true }));
   byId('graph-bridges').addEventListener('change', event => {
     if (state.graphEngine) state.graphEngine.setBridges(event.target.checked);
@@ -2420,6 +2571,10 @@
     byId('graph-export-menu').hidden = true;
     byId('graph-export').setAttribute('aria-expanded', 'false');
     exportGraphJson();
+  });
+  byId('graph-connections-close').addEventListener('click', closeGraphConnections);
+  byId('graph-connections-dialog').addEventListener('click', event => {
+    if (event.target === event.currentTarget) closeGraphConnections();
   });
   restoreGraphPreferences();
   syncGraphChoices();

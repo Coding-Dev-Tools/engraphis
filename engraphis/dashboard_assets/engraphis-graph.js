@@ -826,9 +826,28 @@
        the whole layout. See `sameData`/`render`. */
     let seeded = null;
     let destroyed = false, running = true, fitTimer = 0, suspended = 0, pendingRender = null;
+    let suppressNodeClickAfterDrag = false, dragClickFrame = 0;
+    const requestFrame = typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function'
+      ? window.requestAnimationFrame.bind(window)
+      : callback => setTimeout(callback, 0);
+    const cancelFrame = typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function'
+      ? window.cancelAnimationFrame.bind(window)
+      : clearTimeout;
     let betweennessReady = false;
     const fg = ForceGraph()(el);
     const api = {};
+
+    function suppressNodeClick() {
+      suppressNodeClickAfterDrag = true;
+      cancelFrame(dragClickFrame);
+      // force-graph dispatches its synthetic click from pointer-up on the next animation
+      // frame. Clear after that frame, not a zero-delay timer, so dragging a node can never
+      // open the click-only connections panel.
+      dragClickFrame = requestFrame(() => {
+        suppressNodeClickAfterDrag = false;
+        dragClickFrame = 0;
+      });
+    }
 
     /* The dashboard already honours `prefers-reduced-motion` for the classic renderer; this
        engine must not quietly reintroduce perpetual motion for the same user. */
@@ -941,7 +960,8 @@
 
     function visible() {
       const keepLayer = l => state.layers[l.layer] !== false;
-      let nodes = raw.nodes.filter(n => (state.showUnlinked || n.degree > 0) && n.degree >= state.minDegree);
+      let nodes = raw.nodes.filter(n => (n.degree > 0 && n.degree >= state.minDegree)
+        || (state.showUnlinked && n.degree === 0));
       if (state.repo) {
         nodes = nodes.filter(n => [n.repo, n.topic, nodeName(n)]
           .filter(Boolean)
@@ -1430,10 +1450,14 @@
         invalidate();
       })
       .onNodeClick(node => {
+        if (suppressNodeClickAfterDrag) {
+          suppressNodeClickAfterDrag = false;
+          return;
+        }
         if (node.cluster) { collapsed = false; state.collapse = false; render(false, true); setTimeout(() => { fg.centerAt(node.x, node.y, 500); fg.zoom(1.6, 500); }, 60); if (opts.onCollapseChange) opts.onCollapseChange(false); return; }
         if (opts.onNodeClick) opts.onNodeClick(node);
       })
-      .onNodeDragEnd(node => { node.fx = node.x; node.fy = node.y; })
+      .onNodeDragEnd(node => { node.fx = node.x; node.fy = node.y; suppressNodeClick(); })
       .onBackgroundClick(() => { if (opts.onBackgroundClick) opts.onBackgroundClick(); })
       .onZoom(z => {
         zoom = z.k || 1;
@@ -1739,6 +1763,7 @@
       if (destroyed) return;
       destroyed = true;
       clearTimeout(fitTimer);
+      cancelFrame(dragClickFrame);
       try {
         if (api._ro) { api._ro.disconnect(); api._ro = null; }
         // `_destructor` pauses the rAF and drops the graph data; it does not detach the

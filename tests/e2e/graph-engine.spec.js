@@ -417,22 +417,12 @@ test('the graph view without the flag stays on the classic renderer', async ({ p
   expect(session.pageErrors).toEqual([]);
 });
 
-test('Show all nodes fetches the complete graph and includes unlinked entities', async ({ page }) => {
+test('Classic does not expose a complete graph control', async ({ page }) => {
   const session = await openDashboard(page);
   await openGraphView(page);
 
-  const fullGraphRequest = page.waitForRequest(request => {
-    const url = new URL(request.url());
-    return url.pathname === '/api/graph' && url.searchParams.get('full') === 'true';
-  });
-  await page.locator('#graph-show-all').click();
-  await fullGraphRequest;
-
-  await expect(page.locator('#graph-show-all')).toHaveText('Show responsive overview');
-  await expect(page.locator('#graph-show-all')).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.locator('#graph-show-iso')).toBeDisabled();
-  await expect(page.locator('#graph-hud-count')).toContainText('8 entities');
-  expect(fetched(session.requested, 'engraphis-graph.js').length).toBe(1);
-  expect(await page.evaluate(() => Boolean(GRAPH_ENGINE))).toBe(true);
+  await expect(page.locator('#graph-show-all')).toHaveCount(0);
+  await expect(page.locator('#graph-show-iso')).toBeEnabled();
+  expect(await page.evaluate(() => GRAPH_FULL)).toBe(false);
   expect(session.pageErrors).toEqual([]);
 });

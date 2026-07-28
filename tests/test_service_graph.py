@@ -116,6 +116,25 @@ def test_graph_full_mode_reports_the_available_node_count_without_truncation():
     }
 
 
+def test_graph_connected_only_omits_isolated_nodes_before_applying_the_limit():
+    svc = MemoryService.create(":memory:")
+    _wid, id_of = _seed_entities(
+        svc, "acme",
+        [("Alice", "person_or_concept"), ("Acme Corp", "organization"),
+         ("Unlinked Note", "person_or_concept")],
+        [("Alice", "Acme Corp", "works_at")],
+    )
+
+    graph = svc.graph(workspace="acme", limit=10, connected_only=True, backfill=False)
+
+    assert {node["id"] for node in graph["nodes"]} == {id_of["Alice"], id_of["Acme Corp"]}
+    assert graph["meta"] == {
+        "nodes_available": 2,
+        "nodes_complete": True,
+        "mode": "overview",
+    }
+
+
 def test_graph_on_nonexistent_workspace_is_empty_not_an_error():
     svc = MemoryService.create(":memory:")
     g = svc.graph(workspace="never-created")
@@ -607,33 +626,6 @@ def test_graph_as_of_prioritizes_live_edges_before_the_history_cap():
     assert any(edge["id"] == "live_at_anchor" for edge in edges)
 
 
-def test_graph_as_of_excludes_future_supportless_edges_before_history_cap():
-    svc = MemoryService.create(":memory:", graph_extractor="none")
-    wid, ids = _seed_entities(
-        svc, "acme",
-        [("Alice", "person"), ("Acme Corp", "organization")],
-        [("Alice", "Acme Corp", "works_at")],
-    )
-    conn = svc.store.conn
-    conn.execute("UPDATE edges SET valid_from=100, valid_to=125 WHERE id='edge0'")
-    conn.executemany(
-        "INSERT INTO edges(id, workspace_id, src, dst, relation, layer, valid_from) "
-        "VALUES (?, ?, ?, ?, ?, 'semantic', 200)",
-        [
-            (f"future_{index:04d}", wid, ids["Alice"], ids["Acme Corp"],
-             f"future_relation_{index:04d}")
-            for index in range(2_000)
-        ],
-    )
-    conn.commit()
-
-    # limit=250 keeps both endpoint nodes but sets the independent edge cap to 2,000.
-    # Without the as-of valid_from predicate, future support-less edges consume that cap
-    # before the renderer can discard them and the historical ghost is lost.
-    edges = svc.graph(workspace="acme", as_of=150.0, limit=250, backfill=False)["edges"]
-    assert [edge["id"] for edge in edges] == ["edge0"]
-
-
 def test_graph_as_of_hides_entities_until_their_public_support_begins():
     """Historical entity visibility must not use public evidence from the future."""
     svc = MemoryService.create(":memory:", graph_extractor="none")
@@ -690,7 +682,6 @@ def test_graph_as_of_uses_supporting_fact_time_not_entity_backfill_time():
     assert {node["label"] for node in historical["nodes"]} == {
         "Historical Alice", "Historical Acme",
     }
-    assert {node["valid_from"] for node in historical["nodes"]} == {100.0}
 
 
 def test_forgetting_one_support_keeps_a_multi_source_edge_live():

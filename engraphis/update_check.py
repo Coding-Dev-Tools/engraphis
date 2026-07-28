@@ -329,10 +329,12 @@ def emit_startup_notice(emit: Optional[Callable[[str], None]] = None,
 
 def emit_cli_notice(emit: Optional[Callable[[str], None]] = None,
                     timeout: float = DEFAULT_TIMEOUT) -> None:
-    """Print a cached update notice without delaying local CLI commands.
+    """Print an update notice for a short-lived terminal command.
 
-    A missing or stale cache schedules a background refresh through ``snapshot``;
-    this caller never waits for network I/O.
+    This only reads the cached snapshot on the calling thread. A stale or missing cache
+    schedules its refresh in the background, so an offline local command never waits on
+    the update endpoint. A short-lived command may therefore show a newly discovered
+    update on its next invocation rather than delaying its primary operation.
     """
     if not enabled():
         return

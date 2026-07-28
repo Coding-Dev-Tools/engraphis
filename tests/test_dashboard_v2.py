@@ -71,14 +71,14 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert 'href="/"' in classic.text
         assert 'href="/classic" aria-current="page">Classic (alternate)<' in classic.text
         assert 'value="classic" selected>Classic dashboard (alternate)<' in classic.text
-        assert 'id="graph-show-all"' in classic.text
+        assert 'id="graph-show-all"' not in classic.text
         assert client.get("/v2-assets/ledger.css").status_code == 200
         ledger_js = client.get("/v2-assets/ledger.js")
         assert ledger_js.status_code == 200
         assert "'/v2-assets/vendor/force-graph.min.js?v=20260727-final'" in ledger_js.text
-        assert "'/v2-assets/engraphis-graph.js?v=20260728-reference-materials'" in ledger_js.text
-        assert "/v2-assets/ledger.css?v=20260728-reference-materials" in page.text
-        assert "/v2-assets/ledger.js?v=20260728-reference-materials" in page.text
+        assert "'/v2-assets/engraphis-graph.js?v=20260728-connected-memories'" in ledger_js.text
+        assert "/v2-assets/ledger.css?v=20260728-connected-memories" in page.text
+        assert "/v2-assets/ledger.js?v=20260728-connected-memories" in page.text
         classic_js = client.get("/classic-assets/dashboard.js")
         assert classic_js.status_code == 200
         assert "/static/vendor/force-graph.min.js" in classic_js.text
@@ -92,9 +92,9 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
 def test_dashboard_assets_revalidate_instead_of_pinning_old_visuals(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         for path in (
-            "/v2-assets/engraphis-graph.js?v=20260728-reference-materials",
-            "/v2-assets/ledger.js?v=20260728-reference-materials",
-            "/v2-assets/ledger.css?v=20260728-reference-materials",
+            "/v2-assets/engraphis-graph.js?v=20260728-connected-memories",
+            "/v2-assets/ledger.js?v=20260728-connected-memories",
+            "/v2-assets/ledger.css?v=20260728-connected-memories",
             "/classic-assets/dashboard.js?v=20260728-reference-materials",
         ):
             response = client.get(path)
@@ -119,8 +119,11 @@ def test_graph_load_is_bounded_single_flight_and_retryable(monkeypatch, tmp_path
         page = client.get("/")
         script = client.get("/v2-assets/ledger.js")
         assert 'id="graph-retry"' in page.text
-        assert 'id="graph-full"' in page.text
-        assert '>Show all nodes<' in page.text
+        assert 'id="graph-full"' not in page.text
+        assert '>Show all nodes<' not in page.text
+        assert 'id="graph-show-unlinked"' in page.text
+        assert 'id="graph-unlinked"' not in page.text
+        assert 'id="graph-tune-unlinked"' not in page.text
         assert 'id="graph-style" type="hidden" value="cyber"' in page.text
         assert "const GRAPH_INITIAL_NODE_LIMIT = 320;" in script.text
         assert "const GRAPH_FULL_NODE_LIMIT = 20_000;" in script.text
@@ -128,6 +131,7 @@ def test_graph_load_is_bounded_single_flight_and_retryable(monkeypatch, tmp_path
         assert "AbortController" in script.text
         assert "state.graphLoadPromise" in script.text
         assert "&full=true" in script.text
+        assert "&connected_only=true" in script.text
         assert "style: 'cyber'" in script.text
         assert "renderMode: targetMode" in script.text
         assert "loadGraph({ force: true })" in script.text
@@ -178,12 +182,18 @@ def test_graph_palette_recolors_every_colour_mode(monkeypatch, tmp_path):
 
 def test_graph_facts_and_search_use_the_atomic_node_reveal(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
+        page = client.get("/")
         ledger = client.get("/v2-assets/ledger.js")
         engine = client.get("/v2-assets/engraphis-graph.js")
+        assert 'id="graph-connections-dialog"' in page.text
         assert "function revealGraphNode(id, label = 'Selected entity')" in ledger.text
         assert "revealGraphNode(item.id, item.name)" in ledger.text
+        assert "function openGraphConnections(item)" in ledger.text
+        assert "function showGraphConnectionMemories(item)" in ledger.text
+        assert "onNodeClick: item => openGraphConnections(item)" in ledger.text
         assert "api.reveal = id =>" in engine.text
         assert "function centerRenderedNode(id)" in engine.text
+        assert "suppressNodeClickAfterDrag" in engine.text
         assert "render(true, true);" not in engine.text[engine.text.index("api.focus = id =>"):engine.text.index("api.clearFocus")]
 
 
