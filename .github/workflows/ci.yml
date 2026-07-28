@@ -32,7 +32,9 @@ jobs:
           python scripts/check_commercial_manifest.py
           python scripts/externalize_dashboard_assets.py
       - name: Unit tests (full suite — extras-gated tests included)
-        run: python -m pytest tests/ -q
+        run: |
+          python -c "import fastapi, httpx, mcp, multipart, pydantic, uvicorn"
+          python -m pytest -o addopts="" tests/ -q -rs
       - name: Retrieval eval gate
         run: python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
       - name: Retrieval eval gate — CodeMem (coding-agent wedge, incl. conflict resolution)
@@ -53,7 +55,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install numpy pytest
       - name: Unit tests (extras-gated tests skip; the core must pass)
-        run: python -m pytest tests/ -q
+        run: python -m pytest -o addopts="" tests/ -q -rs
       - name: Retrieval eval gate
         run: python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
       - name: Ablation

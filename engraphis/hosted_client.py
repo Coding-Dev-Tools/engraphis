@@ -19,7 +19,11 @@ from urllib.parse import urlsplit, urlunsplit
 
 TRIAL_DAYS = 3
 TRIAL_SECONDS = 3 * 24 * 60 * 60
-MAX_LOCAL_WRITE_GRACE_SECONDS = 24 * 60 * 60
+MAX_HOSTED_ACCOUNT_GRACE_SECONDS = 24 * 60 * 60
+# Compatibility alias for clients released before the public/private boundary was made
+# explicit. The public local core is never paywalled; this duration belongs to private
+# hosted account continuity.
+MAX_LOCAL_WRITE_GRACE_SECONDS = MAX_HOSTED_ACCOUNT_GRACE_SECONDS
 
 # A credential-bearing cloud connection must never inherit "block forever".  urllib hands
 # ``socket._GLOBAL_DEFAULT_TIMEOUT`` to the connection whenever a caller omits ``timeout=``,
@@ -33,14 +37,35 @@ MIN_ATTEMPT_TIMEOUT_SECONDS = 0.5
 # Upgrade/connect actions must land on the authenticated control-plane portal; the
 # dashboard host does not serve its own ``/account`` route.
 DEFAULT_CLOUD_URL = "https://api.engraphis.com/account"
+_DEFAULT_CHECKOUT_URLS = {
+    ("pro", "monthly"): (
+        "https://api.engraphis.com/account?plan=pro&interval=monthly#billing"
+    ),
+    ("pro", "annual"): (
+        "https://api.engraphis.com/account?plan=pro&interval=annual#billing"
+    ),
+    ("team", "monthly"): (
+        "https://api.engraphis.com/account?plan=team&interval=monthly#billing"
+    ),
+    ("team", "annual"): (
+        "https://api.engraphis.com/account?plan=team&interval=annual#billing"
+    ),
+}
 
 _REQUIRED_PLAN = {
     "analytics": "pro",
     "automation": "pro",
     "consolidation": "pro",
     "dreaming": "pro",
+    "export": "pro",
     "sync": "pro",
     "team": "team",
+    # Team-only capabilities named in commercial_manifest.json.  Without explicit entries
+    # these fell through to the "pro" default, so a Team capability would tell a customer
+    # who already holds Pro to buy Pro again.
+    "hosted_team_audit_export": "team",
+    "hosted_scoped_agent_tokens": "team",
+    "hosted_multi_user_roles": "team",
 }
 
 
@@ -72,21 +97,58 @@ def required_plan(feature: str) -> str:
     return _REQUIRED_PLAN.get(str(feature or "").strip().lower(), "pro")
 
 
-def upgrade_url(plan: Optional[str] = None) -> str:
-    """Return the hosted account URL used by local upgrade/connect affordances."""
+def _safe_target(value: str) -> str:
+    """Return ``value`` only when it is an absolute https:// (or loopback http://) URL.
+
+    These values are operator-supplied environment variables that end up interpolated
+    into customer-facing copy and into the ``href`` the dashboard renders.  A missing
+    scheme ("api.engraphis.com/account") silently resolved against the local dashboard
+    origin and produced a 404 checkout button with no error; a ``javascript:`` value had
+    only the dashboard's own scheme filter standing between it and an anchor.  Validate
+    once, here, and degrade to the known-good destination rather than to a dead link.
+    """
+
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return ""
+    if not parts.hostname:
+        return ""
+    if parts.scheme == "https":
+        return text
+    # Loopback http is allowed so a self-hosted control plane can be pointed at locally.
+    if parts.scheme == "http" and _is_loopback_host(parts.hostname):
+        return text
+    return ""
+
+
+def upgrade_url(plan: Optional[str] = None, interval: Optional[str] = None) -> str:
+    """Return the exact hosted checkout target for a plan and billing interval.
+
+    The four defaults intentionally mirror ``commercial_manifest.json``. Operator
+    overrides stay authoritative and are returned verbatim after validation; deployments
+    that need distinct cadence-specific custom pages can expose those choices in their
+    own account portal.
+    """
 
     name = str(plan or "pro").strip().lower()
+    name = "team" if name == "team" else "pro"
+    cadence = str(interval or "monthly").strip().lower()
+    cadence = cadence if cadence in ("monthly", "annual") else "monthly"
     if name == "team":
         value = (
-            os.environ.get("ENGRAPHIS_TEAM_UPGRADE_URL", "").strip()
-            or os.environ.get("ENGRAPHIS_UPGRADE_URL", "").strip()
+            _safe_target(os.environ.get("ENGRAPHIS_TEAM_UPGRADE_URL", ""))
+            or _safe_target(os.environ.get("ENGRAPHIS_UPGRADE_URL", ""))
         )
     else:
         value = (
-            os.environ.get("ENGRAPHIS_PRO_UPGRADE_URL", "").strip()
-            or os.environ.get("ENGRAPHIS_UPGRADE_URL", "").strip()
+            _safe_target(os.environ.get("ENGRAPHIS_PRO_UPGRADE_URL", ""))
+            or _safe_target(os.environ.get("ENGRAPHIS_UPGRADE_URL", ""))
         )
-    return value or DEFAULT_CLOUD_URL
+    return value or _DEFAULT_CHECKOUT_URLS[(name, cadence)]
 
 
 def account_url() -> str:
@@ -101,7 +163,7 @@ def account_url() -> str:
     hosted account root rather than to either plan's page.
     """
 
-    return os.environ.get("ENGRAPHIS_UPGRADE_URL", "").strip() or DEFAULT_CLOUD_URL
+    return _safe_target(os.environ.get("ENGRAPHIS_UPGRADE_URL", "")) or DEFAULT_CLOUD_URL
 
 
 def _is_loopback_host(host: str) -> bool:

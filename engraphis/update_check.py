@@ -325,3 +325,27 @@ def emit_startup_notice(emit: Optional[Callable[[str], None]] = None,
                 pass
 
     threading.Thread(target=_run, name="engraphis-update-notice", daemon=True).start()
+
+
+def emit_cli_notice(emit: Optional[Callable[[str], None]] = None,
+                    timeout: float = DEFAULT_TIMEOUT) -> None:
+    """Print an update notice for a short-lived terminal command.
+
+    This only reads the cached snapshot on the calling thread. A stale or missing cache
+    schedules its refresh in the background, so an offline local command never waits on
+    the update endpoint. A short-lived command may therefore show a newly discovered
+    update on its next invocation rather than delaying its primary operation.
+    """
+    if not enabled():
+        return
+    printer = emit if emit is not None else (
+        lambda line: print("[engraphis] %s" % line, file=sys.stderr))
+    try:
+        line = notice_line(snapshot())
+    except Exception:  # noqa: BLE001 - a convenience feature must never break the CLI
+        return
+    if line:
+        try:
+            printer(line)
+        except Exception:  # noqa: BLE001
+            pass

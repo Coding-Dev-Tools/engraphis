@@ -728,8 +728,8 @@ async def get_license():
         "plan": summary["plan"],
         "features": summary["features"],
         "cloud_managed": True,
-        "trial_seconds": 259_200,
-        "grace_seconds": 86_400,
+        "trial_seconds": licensing.TRIAL_SECONDS,
+        "grace_seconds": licensing.MAX_HOSTED_ACCOUNT_GRACE_SECONDS,
         "grace_extends_cloud_access": False,
         "upgrade_url": licensing.upgrade_url(),
     })

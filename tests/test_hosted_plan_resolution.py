@@ -171,9 +171,13 @@ def _plan_resolution_isolation(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_CLOUD_CONTROL_URL", raising=False)
     monkeypatch.delenv("ENGRAPHIS_CLOUD_ORGANIZATION_ID", raising=False)
     monkeypatch.setattr(v2_api, "_entitlement_refreshing", False, raising=False)
+    monkeypatch.setattr(v2_api, "_entitlement_retry_after", 0.0, raising=False)
+    monkeypatch.setattr(v2_api, "_entitlement_refresh_failures", 0, raising=False)
     yield
     _drain_refresh()
     v2_api._entitlement_refreshing = False
+    v2_api._entitlement_retry_after = 0.0
+    v2_api._entitlement_refresh_failures = 0
 
 
 def _connect(monkeypatch, *, pinned_token: bool = True) -> None:
@@ -726,6 +730,37 @@ def test_an_unwritable_state_directory_costs_freshness_not_the_dashboard(
 
 
 # ── (4) refresh scheduling ────────────────────────────────────────────────────
+def test_failed_refreshes_use_bounded_backoff(monkeypatch) -> None:
+    """A read loop cannot turn one control-plane outage into a request storm."""
+
+    _connect(monkeypatch)
+    attempts = []
+
+    def _fail():
+        attempts.append(time.monotonic())
+        return None
+
+    monkeypatch.setattr(v2_api, "_fetch_authoritative_entitlement", _fail)
+
+    v2_api._refresh_entitlement_in_background({})
+    _drain_refresh()
+    first_retry = v2_api._entitlement_retry_after
+    assert len(attempts) == 1
+    assert v2_api._entitlement_refresh_failures == 1
+    assert first_retry > time.monotonic()
+
+    v2_api._refresh_entitlement_in_background({})
+    _drain_refresh()
+    assert len(attempts) == 1
+
+    v2_api._entitlement_retry_after = 0.0
+    v2_api._refresh_entitlement_in_background({})
+    _drain_refresh()
+    assert len(attempts) == 2
+    assert v2_api._entitlement_refresh_failures == 2
+    assert v2_api._entitlement_retry_after > first_retry
+
+
 def test_only_one_refresh_is_ever_in_flight(monkeypatch) -> None:
     _connect(monkeypatch)
     release = threading.Event()
@@ -1012,6 +1047,34 @@ def test_a_billing_denial_also_settles_the_compatibility_cache(monkeypatch) -> N
     assert cached["cloud_access_active"] is False, "the cache still advertises paid access"
     assert cached["features"] == []
     assert cached["plan"] == "team", "the lapsed plan is still named for the UI"
+
+
+@pytest.mark.parametrize("status", [401, 402, 403])
+def test_a_direct_token_denial_also_settles_the_compatibility_cache(
+    monkeypatch, status
+) -> None:
+    """The legacy GET path is just as authoritative as a refresh denial."""
+
+    _connect(monkeypatch, pinned_token=True)
+    cached = {
+        "plan": "team",
+        "features": SERVER_HOSTED_ENTITLEMENTS["team"],
+        "cloud_access_active": True,
+        "organization_id": ORGANIZATION,
+        "fetched_at": time.time() - 3600,
+    }
+    cached.update(v2_api._unknown_trial_facts())
+    v2_api._write_entitlement_cache(cached)
+    error = urllib.error.HTTPError(
+        CONTROL_URL, status, "denied", {}, io.BytesIO(b"{}")
+    )
+    _serve(monkeypatch, _FakeControlPlane(error=error))
+
+    assert v2_api._fetch_authoritative_entitlement() is None
+    settled = v2_api._read_entitlement_cache()
+    assert settled["plan"] == "team"
+    assert settled["cloud_access_active"] is False
+    assert settled["features"] == []
 
 
 def _age_session_clock(seconds: float = 3600.0) -> None:

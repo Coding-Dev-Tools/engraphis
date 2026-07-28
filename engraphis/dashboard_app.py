@@ -16,20 +16,56 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from engraphis import licensing
 from engraphis.config import settings
+from engraphis.http_security import wants_https
+from engraphis.local_auth import (
+    BROWSER_SESSION_COOKIE,
+    BROWSER_SESSION_SECONDS,
+    bearer_ok,
+    browser_session,
+    browser_session_ok,
+    token_ok,
+)
 from engraphis.routes import v2_api
 from engraphis.service import MemoryService
 
 _STATIC = Path(__file__).resolve().parent / "static"
+_CLASSIC_ASSETS = Path(__file__).resolve().parent / "classic_assets"
 _V2_ASSETS = Path(__file__).resolve().parent / "dashboard_assets"
-_INDEX = _STATIC / "index.html"
+_INDEX = _V2_ASSETS / "index.html"
+
+
+class _FreshStaticFiles(StaticFiles):
+    """Revalidate local dashboard assets so a running UI cannot pin an old renderer.
+
+    The HTML shells are already ``no-store``, but their JS/CSS dependencies previously
+    inherited StaticFiles' cacheable response.  That made an unchanged query string keep
+    an older graph engine alive after a source/package update.
+    """
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
 
 # The public package is a single-user local runtime. Hosted account, Team, trial, and
 # recovery endpoints live in Engraphis Cloud; only the shell and health/auth metadata are
 # reachable before the optional local API token gate.
-_PUBLIC = {"/", "/api/health", "/api/ready", "/api/auth/state"}
+_PUBLIC = {
+    "/",
+    "/api/health",
+    "/api/ready",
+    "/api/auth/state",
+    "/api/auth/session",
+}
+
+
+class _BrowserSessionReq(BaseModel):
+    token: str = Field(min_length=1, max_length=4096)
 
 
 def _embedder_status(embedder, configured_model: str) -> str:
@@ -151,13 +187,17 @@ def create_app() -> FastAPI:
     @app.exception_handler(licensing.LicenseError)
     async def _license_error(request: Request, exc: licensing.LicenseError):
         feature = exc.feature or "team"
+        tier = licensing.required_plan(feature)
+        # Derive the destination from the tier that was actually required. Calling
+        # upgrade_url() with no argument resolves plan="pro", so a Team-gated feature
+        # produced tier_required="team" alongside the Pro checkout link.
         body = {
             "error": str(exc),
             "upgrade": True,
             "feature": feature,
-            "tier_required": licensing.required_plan(feature),
-            "upgrade_url": licensing.upgrade_url(),
-            "purchase_url": licensing.upgrade_url(),
+            "tier_required": tier,
+            "upgrade_url": licensing.upgrade_url(tier),
+            "purchase_url": licensing.upgrade_url(tier),
         }
         return JSONResponse({**body, "detail": body}, status_code=402)
     svc = MemoryService.create(
@@ -183,14 +223,42 @@ def create_app() -> FastAPI:
     def local_auth_state():
         """Describe the local token gate without exposing hosted Team endpoints."""
         return {
-            "enabled": False,
+            "enabled": bool(settings.api_token),
             "mode": "local-token" if settings.api_token else "open",
             "user": None,
             "hosted_team": True,
             "cloud_url": licensing.upgrade_url("team"),
         }
 
-    from engraphis.local_auth import bearer_ok
+    @app.post("/api/auth/session", include_in_schema=False)
+    def open_browser_session(req: _BrowserSessionReq, request: Request):
+        """Exchange the deployment token for a short-lived HttpOnly browser cookie.
+
+        The bearer is never put in local/session storage. The dashboard holds it only for
+        this same-origin POST, then every API request uses the signed cookie plus a custom
+        request header that ordinary cross-site forms cannot forge.
+        """
+
+        if not settings.api_token:
+            return JSONResponse(
+                {"error": "local API authentication is not configured"},
+                status_code=409,
+            )
+        if not token_ok(req.token, settings.api_token):
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
+        response = JSONResponse({"authenticated": True})
+        response.headers["Cache-Control"] = "no-store"
+        response.set_cookie(
+            BROWSER_SESSION_COOKIE,
+            browser_session(settings.api_token),
+            max_age=BROWSER_SESSION_SECONDS,
+            httponly=True,
+            secure=wants_https(request),
+            samesite="strict",
+            path="/",
+        )
+        return response
+
     from engraphis.netutil import is_local_request
 
     @app.middleware("http")
@@ -216,9 +284,19 @@ def create_app() -> FastAPI:
         # A configured token protects every non-public API and MCP request. This is a
         # single deployment credential, not a user/seat/role authority.
         if settings.api_token:
-            if not bearer_ok(request.headers.get("Authorization"), settings.api_token):
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
-            return await call_next(request)
+            if bearer_ok(request.headers.get("Authorization"), settings.api_token):
+                return await call_next(request)
+            if browser_session_ok(
+                request.cookies.get(BROWSER_SESSION_COOKIE), settings.api_token
+            ):
+                # Cookie authentication is for the same-origin dashboard only. Requiring
+                # this non-simple header forces cross-origin callers through CORS before
+                # they can exercise even side-effectful GETs such as first-use Automation.
+                if request.headers.get("X-Engraphis-Browser-Session") != "1":
+                    return JSONResponse({"error": "browser session header required"},
+                                        status_code=403)
+                return await call_next(request)
+            return JSONResponse({"error": "unauthorized"}, status_code=401)
 
         # Zero-config access is intentionally loopback-only. Hosted Team deployments use
         # the private cloud service, never this local app's removed account database.
@@ -235,13 +313,27 @@ def create_app() -> FastAPI:
     # New dashboard capabilities belong to the v2 application surface.  The old ``static``
     # directory remains mounted for the legacy shell and compatibility adapters only.
     if _V2_ASSETS.is_dir():
-        app.mount("/v2-assets", StaticFiles(directory=str(_V2_ASSETS)), name="v2-assets")
+        app.mount("/v2-assets", _FreshStaticFiles(directory=str(_V2_ASSETS)), name="v2-assets")
+    if _CLASSIC_ASSETS.is_dir():
+        app.mount(
+            "/classic-assets",
+            _FreshStaticFiles(directory=str(_CLASSIC_ASSETS)),
+            name="classic-assets",
+        )
     if _STATIC.is_dir():
-        app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
+        app.mount("/static", _FreshStaticFiles(directory=str(_STATIC)), name="static")
 
     @app.get("/", include_in_schema=False)
     def index():
+        """Serve Ledger as the production default; Classic remains at ``/classic``."""
         resp = FileResponse(_INDEX, media_type="text/html")
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return resp
+
+    @app.get("/classic", include_in_schema=False)
+    def classic_index():
+        """The pre-Ledger dashboard, retained as a reversible local interface."""
+        resp = FileResponse(_CLASSIC_ASSETS / "index.html", media_type="text/html")
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return resp
 

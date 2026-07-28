@@ -30,11 +30,12 @@ infrastructure.
 The no-card Pro or Team trial begins after email confirmation and lasts **exactly 3 active
 days**.
 
-`workspace_write_grace` is separate. It may preserve ordinary writes to an already provisioned
-local workspace for at most **24 hours** following an authoritative entitlement denial. It never
-extends the trial or subscription, and it never grants Cloud Sync, Analytics, Automation, Auto
-Dreaming, Auto Consolidation, Team access, seats, or credentials. Cloud access may stop
-immediately even while local write grace remains.
+`workspace_write_grace` is separate and private-service enforced. It may preserve bounded
+hosted-account continuity operations for at most **24 hours** following an authoritative
+entitlement denial. It never extends the trial or subscription, and it never grants Cloud Sync,
+Analytics, Automation, Auto Dreaming, Auto Consolidation, Team access, seats, or credentials.
+Cloud access may stop immediately. The free local sync-folder primitive and local core are not
+gated by this hosted lifecycle state.
 
 ## Configure a customer installation
 

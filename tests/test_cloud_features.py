@@ -143,6 +143,22 @@ def test_cloud_client_preserves_cloud_session_status(monkeypatch, status) -> Non
     assert "private session detail" not in str(caught.value)
 
 
+def test_cloud_client_marks_a_missing_session_as_trial_eligible(monkeypatch) -> None:
+    def fail_access(*args, **kwargs):
+        raise cloud_features.CloudSessionError("connect first", status=401)
+
+    monkeypatch.setattr(cloud_features, "access_for_workspace", fail_access)
+    monkeypatch.setattr(
+        cloud_features, "cloud_session_configured", lambda require_compute=True: False,
+    )
+
+    with pytest.raises(CloudFeatureError) as caught:
+        CloudFeatureClient.from_environment("ws_test")
+
+    assert caught.value.status == 401
+    assert caught.value.code == "cloud_unconfigured"
+
+
 def test_cloud_client_reports_invalid_session_configuration_as_conflict(monkeypatch) -> None:
     def fail_access(*args, **kwargs):
         raise ValueError("private configuration detail")

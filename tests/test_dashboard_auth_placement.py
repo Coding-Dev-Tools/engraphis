@@ -10,6 +10,7 @@ import pytest
 
 INDEX = Path(__file__).resolve().parents[1] / "engraphis" / "static" / "index.html"
 SCRIPT = Path(__file__).resolve().parents[1] / "engraphis" / "static" / "dashboard.js"
+CLASSIC_SCRIPT = Path(__file__).resolve().parents[1] / "engraphis" / "classic_assets" / "dashboard.js"
 STYLES = Path(__file__).resolve().parents[1] / "engraphis" / "static" / "dashboard.css"
 
 
@@ -59,6 +60,23 @@ def test_first_boot_is_local_and_commercial_actions_open_hosted_cloud():
     assert "'/auth/state'" in script
 
 
+def test_ledger_receipt_export_uses_authenticated_fetch_not_navigation():
+    html = (Path(__file__).resolve().parents[1] / "engraphis" / "dashboard_assets"
+            / "index.html").read_text(encoding="utf-8")
+    script = (Path(__file__).resolve().parents[1] / "engraphis" / "dashboard_assets"
+              / "ledger.js").read_text(encoding="utf-8")
+
+    # Cookie-authenticated browser sessions require the bundle's custom request header.
+    # A normal anchor cannot provide it, while ``api`` always does.
+    assert '<button id="export-receipts"' in html
+    assert 'href="/api/receipts/export"' not in html
+    body = script[script.index("async function exportReceipts()"):
+                  script.index("function switchManageTab")]
+    assert "api(`/receipts/export?${query()}`)" in body
+    assert "URL.createObjectURL(blob)" in body
+    assert "byId('export-receipts').addEventListener('click', exportReceipts)" in script
+
+
 def test_hosted_views_delegate_entitlement_to_cloud_proxy_responses():
     script = SCRIPT.read_text(encoding="utf-8")
     analytics_view = script[script.index("function loadAnalyticsView()"):
@@ -84,10 +102,10 @@ def test_hosted_views_delegate_entitlement_to_cloud_proxy_responses():
 
 
 # ── a paying customer must never be sold the plan they already own ────────────
-# The hosted views route a failed request to one of three answers. Only an entitlement
-# status may draw the purchase panel; a 409 is a conflict, and ``consent_required`` in
-# particular is a customer who HAS paid and whose installation simply has managed compute
-# turned off — connecting it to Engraphis Cloud is what turns it on.
+# The hosted views route a failed request to one of three answers. A 409 is a conflict,
+# and ``consent_required`` means hosted work has not reached the installation yet. The consent
+# panel can explain Pro to a local customer, while an existing subscriber sees their included
+# feature rather than a second purchase or setup prompt.
 #
 # ``_route`` below executes the shipped routing rather than asserting on its source: the
 # regression it guards (409 folded into ``hostedFeatureUnavailable``) kept every string
@@ -98,8 +116,8 @@ _ROUTED_FUNCTIONS = (
     # trial" is answered here by the code that answers it in the browser.
     "licAccessState", "licAccessLive", "licTrialActive", "licTrialAvailable",
     "licPlanName", "licPlanKey", "licTrialEnds", "fmtDay", "lockReason",
-    "hostedPlanUrl", "unlockHtml", "managedConsentHtml",
-    "managedConsentRequired", "hostedFeatureUnavailable",
+    "hostedAccountUrl", "hostedPlanUrl", "unlockHtml", "managedConsentHtml",
+    "managedConsentRequired", "cloudTrialSignupRequired", "hostedFeatureUnavailable",
     "loadAnalytics", "loadAutomation",
 )
 
@@ -153,10 +171,10 @@ const CASES = JSON.parse(process.argv[2]);
 """
 
 
-def _dashboard_function(name):
+def _dashboard_function(name, script_path=SCRIPT):
     """Slice one top-level declaration out of the shipped dashboard bundle."""
 
-    script = SCRIPT.read_text(encoding="utf-8")
+    script = script_path.read_text(encoding="utf-8")
     for head in ("\nasync function %s(" % name, "\nfunction %s(" % name):
         start = script.find(head)
         if start >= 0:
@@ -169,12 +187,12 @@ def _dashboard_function(name):
     return script[start:end.start() if end else len(script)].rstrip()
 
 
-def _route(tmp_path, cases):
+def _route(tmp_path, cases, script_path=SCRIPT):
     """Run the real hosted-view error routing over ``cases`` and return what it rendered."""
 
     bundle = "\n".join([
         _ROUTING_STUBS,
-        "\n".join(_dashboard_function(name) for name in _ROUTED_FUNCTIONS),
+        "\n".join(_dashboard_function(name, script_path) for name in _ROUTED_FUNCTIONS),
         _ROUTING_DRIVER,
     ])
     runner = tmp_path / "routing.js"
@@ -189,26 +207,65 @@ def _route(tmp_path, cases):
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
 @pytest.mark.parametrize("view", ["analytics", "automation"])
-def test_a_consent_required_conflict_is_answered_with_the_consent_panel(
+def test_a_trial_eligible_local_installation_is_answered_with_the_consent_panel(
     tmp_path, view,
 ):
-    """A 409 ``consent_required`` is a conflict, not a bill — never sell Pro for it.
-
-    Analytics and Automation are the two views that reach managed compute, so they are
-    exactly the views this panel has to appear in.
-    """
+    """An unconnected local install gets an honest, value-led Pro opportunity."""
 
     rendered = _route(tmp_path, [{
-        "name": "consent", "view": view,
-        "error": {"status": 409, "detail": {"code": "consent_required"}},
-    }])["consent"]
+        "name": "trial-eligible", "view": view,
+        "error": {"status": 401, "detail": {"code": "cloud_unconfigured"}},
+    }])["trial-eligible"]
 
-    assert "managed compute is turned off for this installation" in rendered["html"]
-    assert "Connect this installation to Engraphis Cloud" in rendered["html"]
-    assert 'class="upgrade-panel"' not in rendered["html"]
-    assert "Purchase Pro license" not in rendered["html"]
-    # Consent travels with the cloud account; the customer is never sent to edit ``.env``.
+    assert 'class="hosted-opportunity"' in rendered["html"]
+    assert ("Let your memory improve after you log off." if view == "automation" else
+            "See the memory your team is about to lose.") in rendered["html"]
+    assert "Start 3-day Pro trial" in rendered["html"]
+    assert "Purchase Pro license" in rendered["html"]
+    assert "Hosted insights and maintenance come on automatically" in rendered["html"]
+    assert "Secret and session-scoped memories stay local." in rendered["html"]
+    # Consent travels with the cloud account; the customer is never sent to edit .env.
     assert "ENGRAPHIS_MANAGED_COMPUTE_CONSENT" not in rendered["html"]
+    assert rendered["pill"] == "CLOUD"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
+@pytest.mark.parametrize("view", ["analytics", "automation"])
+def test_a_consent_panel_sends_an_existing_subscriber_to_cloud_not_checkout(tmp_path, view):
+    rendered = _route(tmp_path, [{
+        "name": "subscriber", "view": view,
+        "error": {"status": 409, "detail": {"code": "consent_required"}},
+        "lic": {
+            "plan": "pro", "access_state": "active",
+            "trial": {"used": False, "active": False, "available": False, "ends_at": 0},
+        },
+    }])["subscriber"]
+
+    assert "Open Engraphis Cloud" in rendered["html"]
+    assert "Hosted insights and maintenance are on by default" in rendered["html"]
+    assert "Purchase Pro license" not in rendered["html"]
+    assert "Start 3-day Pro trial" not in rendered["html"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
+@pytest.mark.parametrize("view", ["analytics", "automation"])
+def test_classic_hosted_tabs_offer_the_local_trial_without_a_setup_step(tmp_path, view):
+    """Classic keeps the automatic three-day Cloud entry, not a local setup workflow."""
+
+    rendered = _route(tmp_path, [{
+        "name": "classic-trial", "view": view,
+        "error": {"status": 401, "detail": {"code": "cloud_unconfigured"}},
+    }], script_path=CLASSIC_SCRIPT)["classic-trial"]
+
+    html = rendered["html"]
+    assert "Start 3-day Pro trial" in html
+    assert "Hosted insights and maintenance come on automatically" in html
+    assert "no settings, toggles, or worker setup" in html
+    # The two Cloud links are the complete unconnected path: trial or purchase. The
+    # Classic tab must not add a local button for connecting, enabling, or configuring.
+    assert html.count("<a ") == 2
+    assert "<button" not in html
+    assert "Connect this installation" not in html
     assert rendered["pill"] == "CLOUD"
 
 
@@ -377,30 +434,18 @@ def _actions(tmp_path, cases):
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
-@pytest.mark.parametrize("plan,mine,theirs", [
-    ("team", "team", "pro"),
-    ("pro", "pro", "team"),
-])
-def test_a_lapsed_customer_renews_the_plan_they_actually_hold(tmp_path, plan, mine, theirs):
-    """"Update billing" was hardcoded to ``hostedPlanUrl('pro')`` for every lapsed plan.
-
-    A lapsed Team customer's most prominent button therefore opened the *Pro* checkout with
-    ``?plan=pro`` — the wrong product offered to fix a billing problem on a subscription
-    they already have — while "Open account portal" sent a lapsed Pro customer to the Team
-    checkout. Neither is a place to update a payment method.
-    """
+@pytest.mark.parametrize("plan", ["team", "pro"])
+def test_a_lapsed_customer_uses_the_plan_neutral_account_portal(tmp_path, plan):
+    """Billing recovery must never be reframed as a new plan checkout."""
 
     html = _actions(tmp_path, [{
         "name": "lapsed", "lic": {"plan": plan, "access_state": "lapsed"},
     }])["lapsed"]["html"]
 
     assert "Update billing" in html and "Open account portal" in html
-    # The renewal follows the plan the customer holds.
-    assert "checkout/%s?plan=%s" % (mine, mine) in html
-    assert theirs not in html
-    # The portal is the plan-neutral hosted entry point; it must not be a checkout at all,
-    # so it carries no ``?plan=`` that would reframe it as one.
-    assert 'href="https://engraphis.example/account"' in html
+    assert html.count('href="https://engraphis.example/account"') == 2
+    assert "checkout/" not in html
+    assert "?plan=" not in html
     # A lapsed customer is never offered a trial.
     assert "Start hosted" not in html
 
@@ -414,7 +459,7 @@ def test_a_lapsed_customer_with_no_readable_plan_still_gets_a_billing_target(tmp
     }])["lapsed"]["html"]
 
     assert "Update billing" in html
-    assert "checkout/pro?plan=pro" in html
+    assert 'href="https://engraphis.example/account"' in html
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")

@@ -423,9 +423,14 @@ def test_license_route_emits_every_field_the_dashboard_reads(monkeypatch) -> Non
 
     payload = v2_api.get_license()
 
-    for field in ("plan", "features", "known_features", "is_trial", "trial",
-                  "access_state", "entitlement_status",
-                  "upgrade_url", "pro_upgrade_url", "team_upgrade_url", "account_url"):
+    for field in (
+        "plan", "features", "known_features", "is_trial", "trial",
+        "access_state", "entitlement_status", "upgrade_url",
+        "pro_upgrade_url", "team_upgrade_url",
+        "pro_monthly_upgrade_url", "pro_annual_upgrade_url",
+        "team_monthly_upgrade_url", "team_annual_upgrade_url",
+        "account_url",
+    ):
         assert field in payload, field
     # ``used`` gates every "Start your free trial" affordance; ``available`` is what stops
     # one being offered to a customer the control plane will answer 409 for; ``active`` and

@@ -25,6 +25,16 @@ from engraphis.config import settings
 from engraphis.service import MemoryService, ValidationError
 
 
+def _emit_update_notice() -> None:
+    """Remind terminal users about a newer release without affecting command output."""
+    try:
+        from engraphis import update_check
+
+        update_check.emit_cli_notice()
+    except Exception:  # noqa: BLE001 - updates are optional and fail-silent
+        pass
+
+
 def _service() -> MemoryService:
     return MemoryService.create(
         settings.db_path,
@@ -170,6 +180,7 @@ def main() -> None:
     args = parser.parse_args()
     if getattr(args, "metadata", None):
         args.metadata = json.loads(args.metadata)
+    _emit_update_notice()
     try:
         args.func(args)
     except ValidationError as exc:
