@@ -3040,9 +3040,10 @@ class MemoryService:
 
     def update_memory(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
                       title: Optional[str] = None, mtype: Optional[str] = None,
+                      importance: Optional[float] = None,
                       actor: str = "user") -> dict:
-        """In-place edit of a memory's label fields (title, type). Content edits go through
-        ``correct`` so bi-temporal history is preserved; title/type are mutable labels."""
+        """In-place edit of a memory's metadata fields. Content edits go through
+        ``correct`` so bi-temporal history is preserved."""
         mid = _clean_text(memory_id, field="memory_id", max_chars=MAX_NAME_CHARS)
         actor = _clean_text(actor, field="actor", max_chars=MAX_NAME_CHARS, required=False) or "user"
         wid, rid = self._require_scope(workspace, repo)
@@ -3058,6 +3059,17 @@ class MemoryService:
             sets.append("mtype=?")
             params.append(mt)
             changes.append(f"type={mt}")
+        if importance is not None:
+            try:
+                importance = float(importance)
+            except (TypeError, ValueError):
+                raise ValidationError("importance must be a number")
+            if not math.isfinite(importance):
+                raise ValidationError("importance must be finite")
+            importance = max(0.0, min(1.0, importance))
+            sets.append("importance=?")
+            params.append(importance)
+            changes.append("importance")
         if not sets:
             raise ValidationError("nothing to update")
         params.append(mid)
@@ -5088,6 +5100,10 @@ class MemoryService:
                 raise ValidationError("as_of must be a timestamp") from exc
             if not math.isfinite(temporal_anchor):
                 raise ValidationError("as_of must be a finite timestamp")
+        # Code symbols and their edges are an index of the checkout as it exists now;
+        # unlike memory and entity relations, they do not carry world-time validity.
+        # Do not blend that live overlay into an otherwise historical graph response.
+        include_live_code = include_code and temporal_anchor is None
 
         def visible_entities():
             """Return public graph entities without a correlated edge scan per node.
@@ -5327,7 +5343,7 @@ class MemoryService:
                 "reason": link.get("reason") or "",
             })
         repo_names: list[str] = []
-        if include_code:
+        if include_live_code:
             repo_rows = []
             if repo:
                 repo_name = _clean_name(repo, field="repo")
@@ -5461,7 +5477,7 @@ class MemoryService:
                             "reason": link.get("reason") or "",
                         })
         payload = build_graph_payload(ws, entity_rows, edgs)
-        payload["unified"] = bool(include_code)
+        payload["unified"] = bool(include_live_code)
         payload["repos"] = repo_names
         payload["meta"] = {
             "nodes_available": max(visible_total, len(entity_rows)),

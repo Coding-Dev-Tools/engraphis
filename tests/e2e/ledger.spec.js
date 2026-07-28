@@ -94,7 +94,10 @@ async function mockApi(page, options = {}) {
       const id = path.split('/').pop();
       return ok({ memory: memories.find(memory => memory.id === id) || null, chain: [] });
     }
-    if (path === '/recall') return ok({ workspace, memories: [memories[0]] });
+    if (path === '/recall') return ok({
+      workspace,
+      memories: options.rawCandidates || [memories[0]],
+    });
     if (path === '/why') return ok({ answer: [memories[0]], supersedes: [memories[1]] });
     if (path === '/timeline') return ok({ history: memories });
     if (path === '/answer') {
@@ -261,6 +264,44 @@ test('memory listings open the editable Library detail from every dashboard view
   await page.getByRole('button', { name: 'Show history' }).click();
   await page.locator('#timeline-result [data-memory-id="mem_database"]').click();
   await expect(page.locator('#memory-detail h2')).toHaveText('Database choice');
+});
+
+test('Ask keeps the raw retrieval preview alongside its single grounded answer', async ({ page }) => {
+  const rawOnlyCandidate = {
+    id: 'mem_raw_only',
+    title: 'Uncited raw candidate',
+    content: 'This candidate is shown for inspection but is not a grounded citation.',
+    memory_type: 'semantic',
+    ingested_at: Date.now() / 1000,
+  };
+  const requests = await mockApi(page, { rawCandidates: [memories[0], rawOnlyCandidate] });
+  await page.goto('/');
+
+  await page.getByRole('button', { name: 'Ask grounded answers' }).click();
+  await page.getByRole('textbox', { name: 'Question' }).fill('Which database?');
+  await page.getByRole('button', { name: 'Grounded answer', exact: true }).click();
+
+  await expect(page.locator('#answer-panel').getByText('Postgres 16 is the main database. [1]'))
+    .toBeVisible();
+  await page.locator('.retrieval-details summary').click();
+  await expect(page.locator('#retrieval-list').getByRole('heading', {
+    name: 'Uncited raw candidate',
+  })).toBeVisible();
+  expect(requests.filter(path => path === '/answer')).toHaveLength(1);
+  expect(requests.filter(path => path === '/recall')).toHaveLength(1);
+});
+
+test('consolidation requires a matching dry preview before commit', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/');
+
+  await page.getByRole('button', { name: /Manage/ }).click();
+  await page.getByRole('tab', { name: 'Consolidate' }).click();
+  await page.getByRole('button', { name: 'Run dry preview' }).click();
+  await expect(page.getByRole('button', { name: 'Commit reviewed result' })).toBeEnabled();
+
+  await page.getByLabel('Structured relationship analysis').check();
+  await expect(page.getByRole('button', { name: 'Commit reviewed result' })).toBeDisabled();
 });
 
 test('Graph & Relations uses the visual explorer controls and applies their state', async ({ page }) => {

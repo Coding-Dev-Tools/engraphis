@@ -182,6 +182,28 @@ def test_importance_is_clamped():
     assert rec.importance == 1.0
 
 
+def test_update_memory_preserves_metadata_changes_on_a_correction_replacement():
+    s = _svc()
+    original = s.remember(
+        "The original deployment runbook.", workspace="acme", title="Runbook",
+        mtype="semantic", importance=0.2,
+    )
+    replacement = s.correct(
+        original["id"], "The revised deployment runbook.", workspace="acme",
+    )
+
+    out = s.update_memory(
+        replacement["id"], workspace="acme", title="Deployment runbook",
+        mtype="procedural", importance=0.9,
+    )
+    saved = s.store.get_memory(replacement["id"])
+
+    assert out["updated"] == ["title", "type=procedural", "importance"]
+    assert (saved.title, saved.mtype.value, saved.importance) == (
+        "Deployment runbook", "procedural", 0.9,
+    )
+
+
 def test_provenance_recorded():
     s = _svc()
     out = s.remember("traceable fact", workspace="acme", source="unit-test")

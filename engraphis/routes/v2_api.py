@@ -894,13 +894,14 @@ class _UpdateMemReq(BaseModel):
     workspace: Optional[str] = None
     title: Optional[str] = None
     memory_type: Optional[str] = None
+    importance: Optional[float] = None
 
 
 @router.post("/memory/update")
 def memory_update(req: _UpdateMemReq):
     ws = req.workspace or _default_ws()
     return _run(service().update_memory, req.id, workspace=ws,
-                title=req.title, mtype=req.memory_type)
+                title=req.title, mtype=req.memory_type, importance=req.importance)
 
 
 class _ReorderReq(BaseModel):

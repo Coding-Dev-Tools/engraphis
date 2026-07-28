@@ -851,3 +851,24 @@ def test_graph_include_code_batches_linked_memory_lookups(monkeypatch):
 
     assert get_memory_calls == []                          # batched, not per-row
     assert set(mem_ids) <= {n["id"] for n in g["nodes"]}
+
+
+def test_graph_as_of_omits_the_live_code_overlay():
+    """Code-index rows have no world-time validity, so they cannot appear in Time view."""
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid = svc.store.get_or_create_workspace("acme")
+    rid = svc.store.get_or_create_repo(wid, "web")
+    symbol_id = svc.store.upsert_symbol(
+        repo_id=rid, kind="function", name="current_only", fqname="current_only",
+        file="current.py", span="1:1-2:1", lang="python",
+    )
+
+    current = svc.graph(workspace="acme", include_code=True, backfill=False)
+    assert f"code:{symbol_id}" in {node["id"] for node in current["nodes"]}
+    assert current["unified"] is True
+
+    historical = svc.graph(
+        workspace="acme", include_code=True, as_of=100.0, backfill=False,
+    )
+    assert f"code:{symbol_id}" not in {node["id"] for node in historical["nodes"]}
+    assert historical["unified"] is False

@@ -32,7 +32,7 @@
     graphFrozen: false,
     graphIncludeCode: false,
     graphSavedView: 'schema',
-    consolidationReviewed: false,
+    consolidationReview: null,
     hostedLoaded: new Set(),
     license: null,
   };
@@ -482,6 +482,7 @@
 
   async function selectWorkspace(name) {
     if (!name) return;
+    invalidateConsolidationReview();
     const epoch = ++state.refreshEpoch;
     state.workspace = name;
     state.graphWorkspace = '';
@@ -659,18 +660,42 @@
     const memoryTypeValue = byId('editor-memory-type').value;
     const content = byId('editor-memory-content').value.trim();
     const importance = number(byId('editor-memory-importance').value);
+    const currentImportance = current && current.importance != null
+      ? number(current.importance) : 0.5;
     if (!content) return;
     try {
       if (current) {
         if (content !== (current.content || current.summary || '')) {
-          await api('/correct', {
+          const corrected = await api('/correct', {
             method: 'POST',
             body: { id: current.id, workspace: state.workspace, content, reason: 'revised in Ledger' },
           });
-        } else if (title !== (current.title || '') || memoryTypeValue !== memoryType(current)) {
+          // A correction creates a replacement, so metadata edits belong on that
+          // replacement rather than the historical source record.
+          if (title !== (current.title || '') || memoryTypeValue !== memoryType(current)
+            || importance !== currentImportance) {
+            await api('/memory/update', {
+              method: 'POST',
+              body: {
+                id: corrected.id,
+                workspace: state.workspace,
+                title,
+                memory_type: memoryTypeValue,
+                importance,
+              },
+            });
+          }
+        } else if (title !== (current.title || '') || memoryTypeValue !== memoryType(current)
+          || importance !== currentImportance) {
           await api('/memory/update', {
             method: 'POST',
-            body: { id: current.id, workspace: state.workspace, title, memory_type: memoryTypeValue },
+            body: {
+              id: current.id,
+              workspace: state.workspace,
+              title,
+              memory_type: memoryTypeValue,
+              importance,
+            },
           });
         }
         showNotice('Memory revision recorded with temporal history preserved.');
@@ -804,6 +829,9 @@
           method: 'POST',
           body: { query: question, workspace: state.workspace, k: Math.max(8, k), max_citations: k },
         }),
+        // The dashboard /recall route is deliberately read-only (reinforce=False).
+        // Keep it alongside /answer for uncited raw candidates without a second
+        // reinforcement of the memories that answer already cited.
         api(`/recall?q=${encodeURIComponent(question)}&${query()}&k=${Math.max(8, k)}`),
       ]);
       renderAnswer(answer);
@@ -1785,33 +1813,59 @@
     else target.append(node('p', '', 'The operation completed.'));
   }
 
+  function consolidationOptions() {
+    return {
+      workspace: state.workspace,
+      infer: false,
+      structured: byId('consolidate-structured').checked,
+      supersede_sources: byId('consolidate-supersede').checked,
+    };
+  }
+
+  function sameConsolidationOptions(left, right) {
+    return Boolean(left && right)
+      && left.workspace === right.workspace
+      && left.infer === right.infer
+      && left.structured === right.structured
+      && left.supersede_sources === right.supersede_sources;
+  }
+
+  function invalidateConsolidationReview() {
+    state.consolidationReview = null;
+    byId('consolidate-commit').disabled = true;
+  }
+
   async function previewConsolidation(event) {
     event.preventDefault();
+    const options = consolidationOptions();
+    invalidateConsolidationReview();
     const target = byId('consolidate-result');
     target.replaceChildren(empty('Scanning local memory without writing changes…'));
     try {
       const result = await api('/consolidate', {
         method: 'POST',
         body: {
-          workspace: state.workspace,
+          ...options,
           dry_run: true,
-          infer: false,
-          structured: byId('consolidate-structured').checked,
-          supersede_sources: byId('consolidate-supersede').checked,
         },
       });
-      state.consolidationReviewed = true;
+      if (!sameConsolidationOptions(options, consolidationOptions())) return;
+      state.consolidationReview = options;
       byId('consolidate-commit').disabled = false;
       renderObject(target, result, 'Dry preview complete · nothing written');
     } catch (error) {
-      state.consolidationReviewed = false;
-      byId('consolidate-commit').disabled = true;
+      invalidateConsolidationReview();
       target.replaceChildren(empty(`Preview failed: ${error.message}`));
     }
   }
 
   async function commitConsolidation() {
-    if (!state.consolidationReviewed) return;
+    const options = consolidationOptions();
+    if (!sameConsolidationOptions(state.consolidationReview, options)) {
+      invalidateConsolidationReview();
+      showNotice('Run a new dry preview after changing the workspace or consolidation options.');
+      return;
+    }
     if (!window.confirm(`Commit the reviewed consolidation result for ${state.workspace}? Original records remain in temporal history.`)) return;
     const target = byId('consolidate-result');
     target.replaceChildren(empty('Committing the reviewed local consolidation…'));
@@ -1819,15 +1873,11 @@
       const result = await api('/consolidate', {
         method: 'POST',
         body: {
-          workspace: state.workspace,
+          ...options,
           dry_run: false,
-          infer: false,
-          structured: byId('consolidate-structured').checked,
-          supersede_sources: byId('consolidate-supersede').checked,
         },
       });
-      state.consolidationReviewed = false;
-      byId('consolidate-commit').disabled = true;
+      invalidateConsolidationReview();
       renderObject(target, result, 'Consolidation committed');
       await selectWorkspace(state.workspace);
     } catch (error) {
@@ -2369,6 +2419,9 @@
   byId('create-workspace-form').addEventListener('submit', createWorkspace);
   byId('consolidate-form').addEventListener('submit', previewConsolidation);
   byId('consolidate-commit').addEventListener('click', commitConsolidation);
+  ['consolidate-structured', 'consolidate-supersede'].forEach(id => {
+    byId(id).addEventListener('change', invalidateConsolidationReview);
+  });
   byId('billing-select').addEventListener('change', renderPlans);
   byId('dashboard-select').addEventListener('change', event => {
     location.assign(event.target.value === 'classic' ? '/classic' : '/');
