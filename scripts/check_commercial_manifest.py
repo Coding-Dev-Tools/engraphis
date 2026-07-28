@@ -74,6 +74,10 @@ def _checkout_mapping(manifest: dict, errors: list[str]) -> dict:
 def _check_repository(manifest: dict, errors: list[str]) -> None:
     if manifest.get("schema") != "engraphis-commercial/v2":
         _fail(errors, "commercial manifest schema must be engraphis-commercial/v2")
+    if manifest.get("account_portal") != "https://api.engraphis.com/account":
+        _fail(errors, "account portal must be the canonical authenticated control-plane URL")
+    if "managed_dashboard" in manifest:
+        _fail(errors, "commercial manifest must not advertise a separate managed dashboard")
     mapping = _checkout_mapping(manifest, errors)
     expected_units = {"free": "installation", "pro": "owner", "team": "seat"}
     for plan, expected_unit in expected_units.items():
