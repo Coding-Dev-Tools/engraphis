@@ -2,7 +2,7 @@
   "schema": "engraphis-commercial/v2",
   "version": "1.1.5",
   "control_plane": "https://api.engraphis.com",
-  "managed_dashboard": "https://team.engraphis.com",
+  "account_portal": "https://api.engraphis.com/account",
   "billing": {
     "authority": "stripe",
     "new_subscriptions": "stripe",

@@ -61,11 +61,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=300s --retries=3 \
 # running the CMD (or any Railway/compose start-command override, which becomes its args).
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
-# Default: the v2 team dashboard (multi-user auth, roles, seats, cloud-license clients,
-# Pro sync clients) — this is what docker-compose.yml already defaults to, and what
-# every hosted deployment (e.g. Railway) needs, since it's the only entrypoint that
-# serves /api/auth/*, /api/license/*, and /api/bootstrap. `--no-open`: never try to launch
-# a browser in a container.
+# Default: the v2 local customer dashboard with hosted-service clients. Team identity, roles,
+# seats, and organization management are hosted at the authenticated account portal, not this
+# public image. This entrypoint serves /api/auth/*, /api/license/*, and /api/bootstrap.
+# `--no-open`: never try to launch a browser in a container.
 #
 # The raw v1 single-user API server is still available — run `engraphis-server` directly
 # (see docker-compose.yml's opt-in "api" profile) — but it shares this image's exposed

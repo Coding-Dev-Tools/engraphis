@@ -110,6 +110,15 @@ def test_environment_refresh_honors_explicit_device_subject(monkeypatch) -> None
     assert writes[0]["refresh_credential"] == "rotated-but-env-owned"
 
 
+def test_persisted_refresh_subject_cannot_be_overridden_by_environment(monkeypatch) -> None:
+    """A bootstrap-only setting must not invalidate an already-bound credential."""
+
+    monkeypatch.setenv("ENGRAPHIS_CLOUD_TOKEN_SUBJECT", "device")
+    saved = {"token_subject": "member", "refresh_credential": "engr_rt_saved"}
+
+    assert cloud_session._token_subject(saved) == "member"
+
+
 def test_environment_bootstrap_persists_and_reuses_rotated_credential(monkeypatch) -> None:
     monkeypatch.setenv("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", "env-bootstrap")
     monkeypatch.setenv("ENGRAPHIS_CLOUD_CONTROL_URL", "https://control.example.test")

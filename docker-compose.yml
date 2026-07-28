@@ -1,6 +1,6 @@
-# Default `docker compose up` runs the TEAM-capable dashboard (multi-user auth, roles,
-# seats, license revocation, Pro sync) — the thing teams actually deploy. The raw
-# single-user v1 API server is available under the "api" profile after setting a strong
+# Default `docker compose up` runs the local customer dashboard and its hosted-service clients.
+# Team identity, roles, seats, and organization management remain in the private account portal.
+# The raw single-user v1 API server is available under the "api" profile after setting a strong
 # ENGRAPHIS_API_TOKEN in .env or the shell:
 #     docker compose --profile api up engraphis-api
 #
@@ -13,7 +13,7 @@ services:
   engraphis:
     build: .
     image: engraphis:latest
-    # Team dashboard on the v2 engine. --no-open: never try to launch a browser in a
+    # Local customer dashboard on the v2 engine. --no-open: never try to launch a browser in a
     # container. Binds 0.0.0.0 via the ENGRAPHIS_HOST below (explicit here; the image
     # itself no longer bakes a host — its entrypoint defaults to `::` dual-stack).
     command: ["engraphis-dashboard", "--no-open"]

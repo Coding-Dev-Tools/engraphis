@@ -103,8 +103,22 @@ def _validated_token_subject(value: object) -> str:
 
 
 def _token_subject(saved: dict) -> str:
+    """Return the immutable subject bound to the current credential family.
+
+    ``ENGRAPHIS_CLOUD_TOKEN_SUBJECT`` selects the subject for an environment-only
+    bootstrap credential.  Once a successful bootstrap has persisted a credential,
+    its subject is part of that credential's server-side contract.  Letting a later
+    environment override win causes the next refresh to present (for example) a
+    member credential as ``device``; the service must reject that mismatch, and the
+    client then has to retire a credential that was never actually spent.  Persisted
+    state therefore wins whenever it carries a subject.
+    """
+
+    persisted = saved.get("token_subject")
+    if persisted is not None and str(persisted).strip():
+        return _validated_token_subject(persisted)
     configured = os.environ.get("ENGRAPHIS_CLOUD_TOKEN_SUBJECT", "").strip()
-    return _validated_token_subject(configured or saved.get("token_subject") or "member")
+    return _validated_token_subject(configured or "member")
 
 
 def _reachable_cloud_base_url(value: str) -> str:
