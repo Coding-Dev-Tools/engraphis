@@ -95,7 +95,7 @@ def test_dashboard_assets_revalidate_instead_of_pinning_old_visuals(monkeypatch,
             "/v2-assets/engraphis-graph.js?v=20260728-connected-memories",
             "/v2-assets/ledger.js?v=20260728-connected-memories",
             "/v2-assets/ledger.css?v=20260728-connected-memories",
-            "/classic-assets/dashboard.js?v=20260728-reference-materials",
+            "/classic-assets/dashboard.js?v=20260729-hub-materials",
         ):
             response = client.get(path)
             assert response.status_code == 200
