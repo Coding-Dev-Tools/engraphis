@@ -136,7 +136,7 @@ def test_graph_assets_are_never_loaded_on_a_plain_page_view() -> None:
     html = INDEX.read_text(encoding="utf-8")
     eager = re.findall(r'<script[^>]+src=["\'](/static/[^"\']+)["\']', html)
     assert "/static/vendor/d3.min.js" in eager
-    assert "/static/dashboard.js?v=20260728-reference-materials" in eager
+    assert "/static/dashboard.js?v=20260728-crisp-node-materials" in eager
     assert "/static/vendor/force-graph.min.js" not in eager
     assert "/static/engraphis-graph.js" not in eager
 
@@ -1947,13 +1947,19 @@ def test_legacy_classic_canvas_uses_the_same_nonwhite_material_profiles_as_ledge
     ):
         assert marker in classic
         assert marker.replace(":'", ": '") in ASSET.read_text(encoding="utf-8")
-    # The fallback selects the gradient-free signature recipe before building/painting a
-    # sprite, so hundreds of nodes keep their material identity without per-node shaders.
+    # Classic's bounded sprite cache makes the material tier a screen-space decision. A large
+    # graph still renders tiny leaves as inexpensive signatures, while a visible hub keeps the
+    # same detailed material representation as Ledger rather than degrading into a flat disc.
     paint = classic[
         classic.index("function graphPaintMaterialSurface("):
         classic.index("function graphStyleBackground(")
     ]
-    assert "graphMaterialTier(r*Math.max(.01,scale),large)" in paint
+    assert "screenRadius=r*Math.max(.01,scale),tier=graphMaterialTier(screenRadius,large)" in paint
+    assert "tier==='full'&&screenRadius>GRAPH_MATERIAL_RADIUS.full" in paint
+    assert "graphPaintMaterialDirect(ctx,x,y,r,profile,tier);return tier" in paint
+    node_painter = classic[classic.index("function graphStyleNode("):]
+    assert node_painter.count("graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,false)") == 4
+    assert "profile,GPERF.large" not in node_painter
     assert classic.count("if(tier==='signature')") >= 4
 
 
