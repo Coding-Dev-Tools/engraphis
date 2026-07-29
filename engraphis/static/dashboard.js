@@ -957,8 +957,15 @@ function graphMaterialSprite(p,tier){
  var spriteCtx=canvas.getContext('2d');if(!spriteCtx)return null;if(typeof spriteCtx.scale==='function'){spriteCtx.scale(dpr,dpr);graphPaintMaterialDirect(spriteCtx,half,half,radius,p,tier)}else graphPaintMaterialDirect(spriteCtx,half*dpr,half*dpr,radius*dpr,p,tier);
  var value={canvas:canvas,half:half,radius:radius};GRAPH_MATERIAL_CACHE.set(key,value);if(GRAPH_MATERIAL_CACHE.size>GRAPH_MATERIAL_CACHE_LIMIT)GRAPH_MATERIAL_CACHE.delete(GRAPH_MATERIAL_CACHE.keys().next().value);return value;
 }
-function graphPaintMaterialSurface(ctx,x,y,r,scale,profile,large){
- var tier=graphMaterialTier(r*Math.max(.01,scale),large),sprite=graphMaterialSprite(profile,tier);
+function graphPaintMaterialSurface(ctx,x,y,r,scale,profile,large,paintDirect){
+ var screenRadius=r*Math.max(.01,scale),tier=graphMaterialTier(screenRadius,large);
+ /* A cached full sprite is 40 CSS pixels in radius. Enlarging it beyond that turns a focused
+    hub into the blocky blob reported in Classic. Only the selected or top-ranked hub may paint
+    directly: a large zoom must not turn every leaf into per-frame gradient and brush work.
+    Every other node stays on the bounded cache. This is paint-only; graph data, geometry,
+    labels, and hit testing stay untouched. */
+ if(paintDirect&&tier==='full'&&screenRadius>GRAPH_MATERIAL_RADIUS.full){graphPaintMaterialDirect(ctx,x,y,r,profile,tier);return tier}
+ var sprite=graphMaterialSprite(profile,tier);
  if(sprite&&typeof ctx.drawImage==='function'){var half=r*sprite.half/sprite.radius;ctx.drawImage(sprite.canvas,x-half,y-half,half*2,half*2)}else graphPaintMaterialDirect(ctx,x,y,r,profile,tier);
  return tier;
 }
@@ -974,17 +981,20 @@ function graphStyleBackground(ctx,scale){
 function graphStyleNode(node,ctx,scale){
  if(!Number.isFinite(node.x)||!Number.isFinite(node.y))return;
  var focus=GHOVERSET&&GHOVERSET.size>1,neighbor=focus&&GHOVERSET.has(node.id),dim=focus&&!neighbor;
- var r=node.radius,col=node.color,profile;
+ var r=node.radius,col=node.color,profile,directMaterial=node.id===GHILITE||node.rank===0;
  ctx.globalAlpha=dim?.12:1;
+ /* The sprite cache keeps material work bounded. Detail is therefore chosen only from this
+    node's rendered size, just as in Ledger's overview; a large graph must not turn an
+    on-screen hub into a flat signature disc solely because it has many distant leaves. */
  if(GSTYLE==='galaxy'){
-  profile=graphMaterialProfile('galaxy',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
+  profile=graphMaterialProfile('galaxy',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,false,directMaterial);
  }else if(GSTYLE==='solar'){
   var sun=node.rank===0;if(sun)r*=1.7;
-  profile=graphMaterialProfile('solar',sun?graphMix(col,'#d38b43',.46):col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
+  profile=graphMaterialProfile('solar',sun?graphMix(col,'#d38b43',.46):col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,false,directMaterial);
  }else if(GSTYLE==='cyber'){
-  profile=graphMaterialProfile('cyber',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
+  profile=graphMaterialProfile('cyber',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,false,directMaterial);
  }else{
-  profile=graphMaterialProfile('classic',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
+  profile=graphMaterialProfile('classic',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,false,directMaterial);
  }
  if(node.id===GHILITE){
   graphMaterialFill(ctx,node.x,node.y,r*.76,graphAlpha('#ffffff',.065));
