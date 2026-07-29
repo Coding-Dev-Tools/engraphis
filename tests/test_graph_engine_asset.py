@@ -136,7 +136,7 @@ def test_graph_assets_are_never_loaded_on_a_plain_page_view() -> None:
     html = INDEX.read_text(encoding="utf-8")
     eager = re.findall(r'<script[^>]+src=["\'](/static/[^"\']+)["\']', html)
     assert "/static/vendor/d3.min.js" in eager
-    assert "/static/dashboard.js?v=20260728-crisp-node-materials" in eager
+    assert "/static/dashboard.js?v=20260729-hub-materials" in eager
     assert "/static/vendor/force-graph.min.js" not in eager
     assert "/static/engraphis-graph.js" not in eager
 
@@ -1955,10 +1955,11 @@ def test_legacy_classic_canvas_uses_the_same_nonwhite_material_profiles_as_ledge
         classic.index("function graphStyleBackground(")
     ]
     assert "screenRadius=r*Math.max(.01,scale),tier=graphMaterialTier(screenRadius,large)" in paint
-    assert "tier==='full'&&screenRadius>GRAPH_MATERIAL_RADIUS.full" in paint
+    assert "paintDirect&&tier==='full'&&screenRadius>GRAPH_MATERIAL_RADIUS.full" in paint
     assert "graphPaintMaterialDirect(ctx,x,y,r,profile,tier);return tier" in paint
     node_painter = classic[classic.index("function graphStyleNode("):]
-    assert node_painter.count("graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,false)") == 4
+    assert "directMaterial=node.id===GHILITE||node.rank===0" in node_painter
+    assert node_painter.count("graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,false,directMaterial)") == 4
     assert "profile,GPERF.large" not in node_painter
     assert classic.count("if(tier==='signature')") >= 4
 
