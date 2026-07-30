@@ -1,6 +1,6 @@
 {
   "schema": "engraphis-commercial/v2",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "control_plane": "https://api.engraphis.com",
   "account_portal": "https://api.engraphis.com/account",
   "billing": {
@@ -87,7 +87,7 @@
     "hosted_multi_user_roles": true,
     "hosted_team_audit_export": true,
     "hosted_scoped_agent_tokens": true,
-    "end_to_end_encrypted_sync": false,
+    "end_to_end_encrypted_sync": true,
     "sso": false,
     "contractual_sla": false
   }
