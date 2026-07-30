@@ -62,11 +62,11 @@ def test_cloud_sync_rejects_tampered_or_plaintext_bundle():
     name, stored = next(iter(relay.bundles.items()))
     relay.bundles[name] = stored[:-1] + bytes([stored[-1] ^ 1])
 
-    with pytest.raises(RelayError, match="could not be authenticated"):
+    with pytest.raises(RelayError, match="unreadable bundle"):
         list(receiver.pull())
 
     relay.bundles[name] = b'{"legacy":"plaintext"}'
-    with pytest.raises(RelayError, match="requires end-to-end encryption"):
+    with pytest.raises(RelayError, match="unreadable bundle"):
         list(receiver.pull())
 
 
@@ -76,14 +76,57 @@ def test_cloud_sync_rejects_a_bundle_from_another_key_or_workspace():
     wrong_key = _transport(relay, 4)
     sender.push("bundle-dev_a.json", b"private content")
 
-    with pytest.raises(RelayError, match="could not be authenticated"):
+    with pytest.raises(RelayError, match="unreadable bundle"):
         list(wrong_key.pull())
 
     wrong_workspace = _transport(_MemoryRelay("other"), 3)
     name, stored = next(iter(relay.bundles.items()))
     wrong_workspace.relay.bundles[name] = stored
-    with pytest.raises(RelayError, match="could not be authenticated"):
+    with pytest.raises(RelayError, match="unreadable bundle"):
         list(wrong_workspace.pull())
+
+
+@pytest.mark.parametrize("bad_kind", ["legacy", "tampered"], ids=["legacy", "tampered"])
+def test_sync_engine_applies_later_encrypted_bundle_after_unreadable_relay_object(bad_kind):
+    """Legacy/corrupt relay objects cannot starve later authenticated peers."""
+    relay = _MemoryRelay()
+    key = bytes(range(32))
+    sender = MemoryEngine.create(":memory:")
+    receiver = MemoryEngine.create(":memory:")
+    sender_workspace = sender.store.get_or_create_workspace("acme")
+    receiver_workspace = receiver.store.get_or_create_workspace("acme")
+    sender.remember("peer fact survives a bad relay object", workspace_id=sender_workspace,
+                    scope=Scope.WORKSPACE)
+    sender_sync = SyncEngine(sender.store, embedder=sender.embedder, vector_index=sender.index)
+    receiver_sync = SyncEngine(
+        receiver.store, embedder=receiver.embedder, vector_index=receiver.index
+    )
+
+    # The bad object is deliberately inserted before the sender's encrypted bundle.
+    if bad_kind == "legacy":
+        relay.bundles["bundle-legacy.json"] = b'{"legacy":"plaintext"}'
+    else:
+        corrupt_writer = EncryptedRelayTransport(relay, key)
+        corrupt_writer.push("bundle-corrupt.json", b"original authenticated ciphertext")
+        corrupt_name, ciphertext = next(iter(relay.bundles.items()))
+        relay.bundles[corrupt_name] = ciphertext[:-1] + bytes([ciphertext[-1] ^ 1])
+    sender_sync.sync(EncryptedRelayTransport(relay, key), sender_workspace)
+
+    report = receiver_sync.sync(
+        EncryptedRelayTransport(relay, key), receiver_workspace, push=False
+    )
+
+    contents = {
+        memory.content
+        for memory in receiver.store.list_memories(SearchFilter(workspace_id=receiver_workspace))
+    }
+    assert contents == {"peer fact survives a bad relay object"}
+    assert report["totals"]["added"] == 1
+    assert report["peers_applied"] == 1
+    assert report["complete"] is False
+    assert report["errors"] == [
+        {"bundle": "?", "error": "transport failure", "error_type": "RelayError"}
+    ]
 
 
 def test_sync_engine_converges_through_encrypted_relay_without_plaintext_storage():
