@@ -1,6 +1,6 @@
 """Fact extractors — implementations of the ``core.interfaces.Extractor`` protocol.
 
-Every SOTA memory system (external memory system, A-Mem, external memory system) auto-distills raw text into discrete
+Modern memory systems often auto-distill raw text into discrete
 facts before storage; Engraphis makes that step *pluggable and optional* so the core
 stays offline-capable (AGENTS.md §3.8):
 

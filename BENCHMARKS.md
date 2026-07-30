@@ -11,8 +11,8 @@ and stated everywhere the numbers appear (`eval/external.py`).
 
 - **Correctness gate** — `eval/harness.py` over `eval/datasets/sample.jsonl` and
   `codemem.jsonl` (conflict resolution) and `graph_multihop.jsonl` (multi-hop graph recall).
-  Runs on the deterministic embedder, so it is a plumbing/regression floor, not a competitive
-  number. This is the gate CI enforces.
+  Runs on the deterministic embedder, so it is a plumbing/regression floor, not a public
+  performance claim. This is the gate CI enforces.
 - **Ablation** — `eval/ablation.py`: vector-only vs. 1-hop graph vs. Personalized-PageRank arm,
   to show the graph arm actually earns its place.
 - **External benchmarks** — `eval/external.py` loads **LoCoMo** and **LongMemEval** and pushes
