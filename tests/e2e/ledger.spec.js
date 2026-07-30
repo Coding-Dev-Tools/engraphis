@@ -772,8 +772,13 @@ test('Ledger gives active Pro members direct Cloud access and saves hosted polic
   await expect(page.getByRole('checkbox', { name: 'Enable hosted maintenance' })).toBeChecked();
   await page.getByRole('spinbutton', { name: 'Run every (hours)' }).fill('12');
   page.once('dialog', dialog => {
+    expect(dialog.message()).toContain(
+      'Cloud Sync encrypts eligible shared-workspace changes end-to-end',
+    );
+    expect(dialog.message()).toContain('Engraphis Cloud cannot read their contents');
+    expect(dialog.message()).toContain('Managed compute: For managed compute');
     expect(dialog.message()).toContain('Engraphis Cloud must read the bounded snapshot');
-    expect(dialog.message()).toContain('not end-to-end encrypted');
+    expect(dialog.message()).toContain('It travels over HTTPS');
     return dialog.accept();
   });
   await page.getByRole('button', { name: 'Save & send policy to Cloud' }).click();
