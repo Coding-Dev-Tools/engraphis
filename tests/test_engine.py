@@ -7,7 +7,7 @@ import pytest
 
 from engraphis.backends.vector_numpy import NumpyVectorIndex
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
+from engraphis.core.interfaces import MemoryRecord, MemoryType, Node, Scope, SearchFilter
 
 
 def test_engine_remember_and_recall():
@@ -20,6 +20,30 @@ def test_engine_remember_and_recall():
     res = eng.recall("how do we deploy?", workspace_id=wid, k=2)
     assert res.count >= 1
     assert "actions" in res.context.lower() or "aws" in res.context.lower()
+
+
+def test_entity_incidence_includes_title_only_mentions_on_write_and_backfill():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    fresh_entity = eng.store.upsert_entity(Node(
+        id="", name="Apollo", ntype="project", workspace_id=wid,
+    ))
+    fresh = eng.remember(
+        "The body intentionally contains no project name.",
+        title="Apollo launch status", workspace_id=wid, resolve_conflicts=False,
+    )
+    legacy = eng.remember(
+        "The body intentionally contains no program name.",
+        title="Beacon migration status", workspace_id=wid, resolve_conflicts=False,
+    )
+    legacy_entity = eng.store.upsert_entity(Node(
+        id="", name="Beacon", ntype="project", workspace_id=wid,
+    ))
+
+    incidence = eng.store.list_memory_entities(SearchFilter(workspace_id=wid))
+    pairs = {(row["memory_id"], row["entity_id"]) for row in incidence}
+    assert (fresh, fresh_entity) in pairs
+    assert (legacy, legacy_entity) in pairs
 
 
 def test_engine_recall_requires_explicit_reinforcement_signal():
@@ -626,6 +650,28 @@ def test_backfilled_keyed_claim_splices_between_existing_validity_intervals():
     assert eng.store.get_memory(first["id"]).valid_to == 2_000.0
     assert eng.store.get_memory(middle["id"]).valid_to == 3_000.0
     assert eng.store.get_memory(later["id"]).valid_to is None
+
+
+def test_titled_keyed_claim_duplicate_is_a_noop_in_temporal_predecessor_path():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    first = eng.remember_with_resolution(
+        "The deployment window is Friday.", title="Deployment policy",
+        workspace_id=wid, subject_key="deploy.window", claim_kind="schedule",
+        valid_from=1_000.0,
+    )
+    duplicate = eng.remember_with_resolution(
+        "The deployment window is Friday.", title="Deployment policy",
+        workspace_id=wid, subject_key="deploy.window", claim_kind="schedule",
+        valid_from=1_000.0,
+    )
+
+    assert duplicate["op"] == "noop"
+    assert duplicate["id"] == first["id"]
+    assert len(eng.store.list_claim_history(
+        workspace_id=wid, repo_id=None, session_id=None, scope=Scope.WORKSPACE,
+        mtype=MemoryType.SEMANTIC, subject_key="deploy.window", claim_kind="schedule",
+    )) == 1
 
 
 def test_anchored_unkeyed_resolution_keeps_a_closed_historical_predecessor():

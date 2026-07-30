@@ -2196,16 +2196,18 @@ class Store:
             scope_sql = "(repo_id=? OR repo_id IS NULL)"
             scope_params.append(repo_id)
         rows = self.conn.execute(
-            "SELECT id, content, workspace_id, repo_id, valid_from, valid_to, "
+            "SELECT id, title, content, workspace_id, repo_id, valid_from, valid_to, "
             "valid_to_recorded_at, ingested_at, expired_at FROM memories "
             "WHERE workspace_id IS ? AND scope<>'session' AND " + scope_sql + " "
-            "AND lower(content) LIKE ? ESCAPE '\\' ORDER BY id LIMIT 12000",
+            "AND (lower(title) LIKE ? ESCAPE '\\' OR lower(content) LIKE ? ESCAPE '\\') "
+            "ORDER BY id LIMIT 12000",
             (workspace_id, *scope_params,
+             "%" + _escape_like(name.casefold()) + "%",
              "%" + _escape_like(name.casefold()) + "%"),
         ).fetchall()
         pattern = re.compile(r"(?<!\w)" + re.escape(name) + r"(?!\w)", re.IGNORECASE)
         for row in rows:
-            if not pattern.search(row["content"]):
+            if not pattern.search(f"{row['title'] or ''}\n{row['content'] or ''}"):
                 continue
             self.link_memory_entity(
                 memory_id=row["id"], entity_id=entity_id,

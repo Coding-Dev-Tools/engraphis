@@ -61,7 +61,8 @@ class Resolution:
 
 
 def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
-            subject_key: str = "", claim_kind: str = "") -> Resolution:
+            subject_key: str = "", claim_kind: str = "",
+            candidate_content: Optional[str] = None) -> Resolution:
     """Decide ADD / NOOP / INVALIDATE for new content against its nearest neighbors.
 
     ``neighbors`` are ``(embedding_similarity, MemoryRecord)`` pairs that the caller has
@@ -110,7 +111,11 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
     )
     same_claim = same_subject and candidate_kind == str(rec.claim_kind or "").strip()
     if same_claim:
-        candidate_normalized = " ".join(candidate_text.split()).casefold()
+        # Candidate embeddings and overlap include a display title, but durable
+        # claim equality is about the stored content.  Comparing title+content to
+        # content would turn an identical titled write into a false supersession.
+        duplicate_text = candidate_content if candidate_content is not None else candidate_text
+        candidate_normalized = " ".join(duplicate_text.split()).casefold()
         record_normalized = " ".join(rec.content.split()).casefold()
         if candidate_normalized == record_normalized:
             return Resolution(

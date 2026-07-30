@@ -153,6 +153,25 @@ def test_keyed_duplicate_ignores_existing_display_title():
     assert res.target_id == "mem_titled"
 
 
+def test_keyed_duplicate_with_matching_display_title_compares_content_only():
+    neighbor = MemoryRecord(
+        id="mem_titled",
+        title="API policy",
+        content="The timeout is 30 seconds.",
+        subject_key="api-timeout",
+        claim_kind="configured_value",
+    )
+    res = resolve(
+        "API policy\nThe timeout is 30 seconds.",
+        [(0.99, neighbor)],
+        subject_key="api-timeout",
+        claim_kind="configured_value",
+        candidate_content="The timeout is 30 seconds.",
+    )
+    assert res.op == ResolutionOp.NOOP
+    assert res.target_id == "mem_titled"
+
+
 def test_new_claim_identity_replaces_instead_of_nooping_unkeyed_duplicate():
     neighbor = MemoryRecord(
         id="mem_unkeyed_duplicate",

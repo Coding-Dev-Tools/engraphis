@@ -458,7 +458,7 @@ class MemoryEngine:
                 text, vec, workspace_id=workspace_id, repo_id=repo_id,
                 session_id=session_id, scope=scope, mtype=mtype,
                 candidate_k=candidate_k, subject_key=subject_key,
-                claim_kind=claim_kind, valid_at=valid_from,
+                claim_kind=claim_kind, valid_at=valid_from, content=content,
             )
         if resolve_conflicts and subject_key and valid_from is not None:
             # A durable claim has a temporal identity in addition to its text. A
@@ -482,7 +482,7 @@ class MemoryEngine:
                     predecessors,
                     key=lambda record: (record.valid_from or float("-inf"), record.id),
                 )
-                if " ".join(text.split()).casefold() == (
+                if " ".join(content.split()).casefold() == (
                     " ".join(predecessor.content.split()).casefold()
                 ):
                     decision = Resolution(
@@ -598,7 +598,7 @@ class MemoryEngine:
                 pass
         if scope != Scope.SESSION:
             self._link_memory_entities(
-                mid, content, workspace_id=workspace_id, repo_id=repo_id,
+                mid, f"{title}\n{content}", workspace_id=workspace_id, repo_id=repo_id,
                 valid_from=rec.valid_from,
             )
 
@@ -798,7 +798,8 @@ class MemoryEngine:
                                    repo_id: Optional[str], session_id: Optional[str],
                                    scope: Scope, mtype: MemoryType, candidate_k: int,
                                    subject_key: str = "", claim_kind: str = "",
-                                   valid_at: Optional[float] = None):
+                                   valid_at: Optional[float] = None,
+                                   content: Optional[str] = None):
         """Fetch same-scope neighbors via the vector index and run the deterministic
         resolver (``core.resolve``). Returns ``(decision, neighbors)`` so the caller can
         also evolve the neighborhood. Never raises — a broken/missing index degrades to
@@ -856,6 +857,7 @@ class MemoryEngine:
                     neighbors.append((1.0, record))
         return resolve(
             text, neighbors, subject_key=subject_key, claim_kind=claim_kind,
+            candidate_content=content,
         ), neighbors
 
     # ── ingest: extract-then-remember ───────────────────────────────────────────
