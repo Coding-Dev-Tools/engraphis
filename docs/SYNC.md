@@ -115,14 +115,17 @@ outside the authorized workspace merely by changing bundle fields.
 
 ## Security and privacy
 
-- Local-only installations send no memory content to Engraphis. Cloud Sync and managed compute
-  send the explicitly eligible records or bounded snapshot to Engraphis Cloud over TLS; the
-  hosted service can read that submitted content and the transport is not end-to-end encrypted.
+- Local-only installations send no memory content to Engraphis. **Cloud Sync encrypts eligible
+  shared-workspace changes end-to-end before they leave this device. Engraphis Cloud cannot read
+  their contents; secret and session-scoped memories stay local.** Managed compute is a separate,
+  opt-in service: it sends a readable, bounded snapshot over TLS because Engraphis Cloud must
+  process that snapshot to produce results.
 - Treat cloud session and refresh files as credentials; keep their directory owner-only.
 - `secret` memories are excluded from managed uploads. Managed compute also rejects secret rows
   server-side.
-- Relay transport is TLS-protected, but Engraphis does not claim end-to-end encryption until a
-  client-side encrypted bundle format ships.
+- Cloud Sync's end-to-end encryption applies to sync bundles, not to managed-compute snapshots or
+  content deliberately submitted to a configured LLM provider. Those processors must be able to
+  read the submitted content to perform the requested work.
 - Device credentials are not seats. Team seats are named organization members managed by the
   hosted control plane.
 - Revocation and expiry are authoritative server decisions. A locally modified client does not

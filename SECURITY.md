@@ -114,15 +114,16 @@ them back as `expected_head` / `expected_count` when independent evidence is req
   no paid-key parser, signer, issuer, local feature gate, or long-lived-key relay exchange.
 - **Server authority:** every hosted and cost-bearing operation is authorized by the private
   control plane; local plan labels and upgrade URLs are presentation metadata only.
-- **Managed-compute consent:** Analytics, Auto Dreaming, and Auto Consolidation upload a
-  bounded snapshot. Consent travels with the cloud account: connecting an installation to
-  Engraphis Cloud accepts the terms covering managed compute, so a connected installation is
-  allowed and an installation with no cloud session is never allowed. Operators may override
-  with `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` (`0` opts a connected installation back out).
-  The snapshot carries normal and sensitive memory content, excludes secret-class and
-  session-scoped rows, is capped at 16 MiB, and travels over HTTPS without end-to-end
-  encryption. Secret-class memories are excluded before serialization and rejected again by
-  the hosted service.
+- **Cloud Sync and managed-compute privacy:** Cloud Sync encrypts eligible shared-workspace
+  changes end-to-end before they leave the device, so Engraphis Cloud cannot read their contents.
+  Managed compute is separate: Analytics, Auto Dreaming, and Auto Consolidation upload a
+  readable bounded snapshot. Consent travels with the cloud account: connecting an installation
+  to Engraphis Cloud accepts the terms covering managed compute, so a connected installation is
+  allowed and an installation with no cloud session is never allowed. Operators may override with
+  `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` (`0` opts a connected installation back out). The snapshot
+  carries normal and sensitive memory content, excludes secret-class and session-scoped rows, and
+  is capped at 16 MiB. Secret-class memories are excluded before serialization and rejected again
+  by the hosted service.
 - **Trial and grace are separate:** an email-confirmed trial lasts exactly 3 active days. A
   separately bounded, maximum-24-hour local workspace-write grace never extends the trial,
   subscription, Cloud Sync, managed compute, Team access, seats, or credentials.

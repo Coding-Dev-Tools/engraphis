@@ -3,6 +3,15 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [Unreleased]
+
+### Changed
+
+- Cloud Sync privacy copy now states that eligible shared-workspace changes are encrypted
+  end-to-end before leaving the device and cannot be read by Engraphis Cloud. Product and
+  security documentation separately identifies managed compute as the readable, bounded-snapshot
+  service it is.
+
 ## [1.2.0] - 2026-07-30
 
 ### Added

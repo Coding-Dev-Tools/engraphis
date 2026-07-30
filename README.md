@@ -537,9 +537,11 @@ immediately. After grace, the private service can enter `recovery_read_only` so 
 and export remain available while hosted mutations are blocked. These hosted states do not gate
 the Apache-licensed local dashboard, MCP tools, or local writes.
 
-Cloud Sync is opt-in and transported over HTTPS; Engraphis does not advertise end-to-end
-encryption. Paid entitlements require current hosted authorization, while the Free core remains
-fully local and offline-capable.
+Cloud Sync is opt-in: **Cloud Sync encrypts eligible shared-workspace changes end-to-end before
+they leave this device. Engraphis Cloud cannot read their contents; secret and session-scoped
+memories stay local.** This does not extend to separately opted-in managed compute, which must
+receive a readable bounded snapshot to produce results. Paid entitlements require current hosted
+authorization, while the Free core remains fully local and offline-capable.
 
 The published repository and clients are Apache-2.0; a paid subscription purchases access
 to the official hosted control plane and managed service, not extra rights over public code.
@@ -650,8 +652,8 @@ The merge remains a state-based CRDT: every field resolves by a commutative, ide
 entity/code graph reconciliation is not yet part of sync. `secret` memories and all live or
 invalidated session-scoped memories are device-local and excluded from every exported sync
 bundle; links are exported only when both endpoints remain. Inbound bundles cannot create or
-overwrite session state. Relay traffic uses HTTPS, but bundles are not yet client-side end-to-end
-encrypted or zero-knowledge.
+overwrite session state. Cloud Sync encrypts eligible shared-workspace changes end-to-end before
+they leave this device; the relay stores ciphertext and cannot read bundle contents.
 
 For development, backup interchange, and offline testing, the public client retains an explicit
 one-shot folder exchange. That manual primitive is not the official Cloud Sync product and has
