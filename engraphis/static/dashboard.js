@@ -584,6 +584,16 @@ const GRAPH_PRESETS={
  custom:{label:'Custom tuning',curve:.1,particles:0}
 };
 window.GSET=window.GSET||{mode:'communities',font:12,size:3,repel:48,link:16,gravity:48,labels:false,linkw:.72,labelDensity:24,flow:true,frozen:false};
+/* Keep legacy Classic geometry in the same compact world-space range as Ledger. The old
+   `size * sqrt(1 + degree)` rule let a highly connected entity become a giant disc, then
+   zoom-to-fit magnified that disc again. Degree still adds a restrained emphasis, but it is
+   normalized and bounded so material/theme painters cannot change node geometry. */
+function graphNodeRadius(node,base,metric){
+ const size=Number.isFinite(+base)&&+base>0?+base:3;
+ const normalized=Math.max(0,Math.min(1,Number(metric)||0));
+ const radius=size*.45*(.55+Math.min(1.6,normalized*1.9));
+ return Math.max(.8,Math.min(size*1.1,radius));
+}
 const ETYPE_TOKEN={person_or_concept:'--entity-concept',mention:'--entity-mention',hashtag:'--entity-hashtag',email:'--entity-email',organization:'--entity-organization',location:'--entity-location'};
 const GRAPH_PALETTES={
  theme:null,
@@ -803,7 +813,8 @@ function graphData(){
  let sourceNodes=GRAPH.nodes;if(hideIso)sourceNodes=sourceNodes.filter(node=>node.degree>0);
  const names=new Set(sourceNodes.map(node=>node.id));
  const nodes=sourceNodes.map(node=>({id:node.id,label:node.label||node.id,displayLabel:(node.label||node.id).length>30?(node.label||node.id).slice(0,29)+'…':(node.label||node.id),etype:node.etype,degree:node.degree||0,val:1+(node.degree||0)}));
- nodes.sort((a,b)=>b.degree-a.degree).forEach((node,index)=>{node.rank=index;node.hub=index<24;node.radius=Math.max(1.6,window.GSET.size*Math.sqrt(node.val)*.45);node.color=graphTypeColor(node.etype);node.stroke=graphContrastColor(node.color)});
+ const maxDegree=Math.max(1,...nodes.map(node=>node.degree||0));
+ nodes.sort((a,b)=>b.degree-a.degree).forEach((node,index)=>{node.rank=index;node.hub=index<24;node.radius=graphNodeRadius(node,window.GSET.size,(node.degree||0)/maxDegree);node.color=graphTypeColor(node.etype);node.stroke=graphContrastColor(node.color)});
  const links=GRAPH.edges.filter(edge=>names.has(edge.from)&&names.has(edge.to)).map(edge=>({source:edge.from,target:edge.to,label:edge.label,layer:edge.layer||'semantic'}));
  const data={nodes,links};GDATA_CACHE={graph:GRAPH,hideIso,data};return data;
 }
@@ -979,6 +990,11 @@ function graphStyleBackground(ctx,scale){
   ctx.strokeStyle='rgba(255,190,120,.10)';ctx.lineWidth=1/scale;var RR=[72,132,200,286,384];for(var k=0;k<RR.length;k++){ctx.beginPath();ctx.ellipse(0,0,RR[k],RR[k]*.66,0,0,6.2832);ctx.stroke();}ctx.restore();
  }
 }
+function graphPaintFlowArrow(x,y,link,ctx,scale){
+ const source=link&&link.source,target=link&&link.target;if(!source||!target||!Number.isFinite(source.x)||!Number.isFinite(target.x))return;
+ const dx=target.x-source.x,dy=target.y-source.y;if(!dx&&!dy)return;const size=1/Math.sqrt(Math.max(.01,Number(scale)||1)),angle=Math.atan2(dy,dx);
+ ctx.save();ctx.translate(x,y);ctx.rotate(angle);ctx.beginPath();ctx.moveTo(size*.55,0);ctx.lineTo(-size*.45,size*.32);ctx.lineTo(-size*.45,-size*.32);ctx.closePath();ctx.fill();ctx.restore();
+}
 function graphStyleNode(node,ctx,scale){
  if(!Number.isFinite(node.x)||!Number.isFinite(node.y))return;
  var focus=GHOVERSET&&GHOVERSET.size>1,neighbor=focus&&GHOVERSET.has(node.id),dim=focus&&!neighbor;
@@ -987,7 +1003,7 @@ function graphStyleNode(node,ctx,scale){
  if(GSTYLE==='galaxy'){
   profile=graphMaterialProfile('galaxy',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
  }else if(GSTYLE==='solar'){
-  var sun=node.rank===0;if(sun)r*=1.7;
+  var sun=node.rank===0;
   profile=graphMaterialProfile('solar',sun?graphMix(col,'#d38b43',.46):col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
  }else if(GSTYLE==='cyber'){
   profile=graphMaterialProfile('cyber',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
@@ -1104,7 +1120,8 @@ function graphSetHighlight(id){
 }
 function graphRefreshNodeMetrics(){
  const nodes=FG&&FG.graphData?FG.graphData().nodes||[]:[];
- nodes.forEach(node=>{node.radius=Math.max(1.6,window.GSET.size*Math.sqrt(node.val)*.45)});
+ const maxDegree=Math.max(1,...nodes.map(node=>node.degree||0));
+ nodes.forEach(node=>{node.radius=graphNodeRadius(node,window.GSET.size,(node.degree||0)/maxDegree)});
 }
 function graphRedraw(){
  if(!FG||GREDRAWFRAME)return;
@@ -1243,8 +1260,8 @@ function graphRender(fit=true,reheat=true){
  FG.linkWidth(link=>{const width=window.GSET.linkw||1,focus=GHOVERSET&&GHOVERSET.size>1,bridge=link.label==='influences';if(!focus)return (bridge?.45:(GPERF.dense?.62:.82))*width;const source=(link.source&&link.source.id)||link.source,target=(link.target&&link.target.id)||link.target;return (source===GHILITE||target===GHILITE)?(bridge?1.0:1.8)*width:.25*width});
  if(FG.linkLineDash)FG.linkLineDash(GPERF.dense?null:(link=>link.layer==='temporal'?[4,3]:(link.layer==='causal'?[2,2]:null)));
  if(FG.linkCurvature)FG.linkCurvature(GPERF.dense?0:mode.curve);
- FG.linkDirectionalArrowLength(GPERF.dense?0:2.5).linkDirectionalArrowRelPos(1);
- if(FG.linkDirectionalParticles){FG.linkDirectionalParticles((reduced||data.links.length>800||window.GSET.flow===false)?0:(GSTYLE==='cyber'?2:(mode.particles||2))).linkDirectionalParticleWidth(1.7).linkDirectionalParticleSpeed(.004)}
+ FG.linkDirectionalArrowLength(GPERF.dense?0:.625).linkDirectionalArrowRelPos(1);
+ if(FG.linkDirectionalParticles){FG.linkDirectionalParticles((reduced||data.links.length>800||window.GSET.flow===false)?0:(GSTYLE==='cyber'?2:(mode.particles||2))).linkDirectionalParticleWidth(.85).linkDirectionalParticleCanvasObject(graphPaintFlowArrow).linkDirectionalParticleSpeed(.004)}
  if(settings.labels){
   FG.linkCanvasObjectMode(()=>'after').linkCanvasObject((link,ctx,scale)=>{
    if(scale<2.4||!link.label||!link.source.x||(GPERF.dense&&!GHILITE))return;
