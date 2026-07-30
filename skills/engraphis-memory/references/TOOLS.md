@@ -1,6 +1,6 @@
 # Engraphis MCP tools — reference
 
-All 29 tools, grouped by job. Parameters are `name (type, default)` — no default means required.
+All 30 tools, grouped by job. Parameters are `name (type, default)` — no default means required.
 Every tool returns a JSON string; on failure it returns `"Error: <reason>"` instead of raising.
 Governance tools (`forget`/`pin`/`correct`/`link`) verify the memory actually belongs to the
 `workspace`/`repo` you pass **before** changing anything, so you can't touch memories outside a
@@ -28,15 +28,21 @@ Store a memory so it can be recalled later, across turns, sessions, and repos.
 - `importance (float, 0.0)` — `0..1`; higher resists decay.
 - `keywords (list[str], None)` — optional, aids lexical recall.
 - `dedupe (bool, True)` — check against similar existing memories first: an exact restatement
-  **reinforces** the existing one (`op:"noop"`); a same-subject update **supersedes** the old one
-  (`op:"invalidate"`, old closed not deleted). Set `False` only for intentionally repeated
-  episodic log entries.
+  **reinforces** the existing one (`op:"noop"`); a keyed or strongly evidenced update
+  **supersedes** the old one (`op:"invalidate"`, old closed not deleted); an uncertain neighbor
+  returns `op:"relate"` and keeps both. Set `False` only for intentionally repeated episodic
+  log entries.
 - `retention_class (str, None)` — optional host classification: `ephemeral` | `normal` |
   `critical`; advisory and bounded, never a silent discard.
 - `retention_reason (str, "")` — short content-free rationale for that classification.
+- `valid_from (float, None)` — optional Unix timestamp for when the fact became true in
+  world time; omit to use ingestion time.
+- `subject_key (str, "")` — optional stable claim subject, such as `api.rate_limit`.
+- `claim_kind (str, "")` — optional predicate/category, such as `configured_value`. A matching
+  subject and compatible kind make supersession deterministic; uncertain neighbors remain live.
 
 Returns `{id, workspace, repo, scope, mtype, stored:true, op}` where `op` is `add` | `noop` |
-`invalidate` (with `superseded:[old_id,…]`).
+`invalidate` (with `superseded:[old_id,…]`) | `relate` (with `related_to`; both claims remain).
 
 > Prefer `dedupe=True` (default). It is what keeps the store contradiction-free without an LLM.
 
@@ -55,9 +61,30 @@ Returns `{id, kind}`. Three similar events about the same thing is a signal to p
 
 ## Recall and read
 
+### `engraphis_recall_context`  *(recommended for agent prompts)*
+Return one hard-budget packed context plus compact source identities, without repeating full memory
+bodies already represented in `context`.
+
+- `query (str)`; `workspace (str, None)`; `repo (str, None)`; `session_id (str, None)`;
+  `mtypes (list[str], None)`; `k (int, 8)`.
+- `token_budget (int, 1024)` — hard packed-context budget, `0..32768`.
+- `retrieval_profile (str, "balanced")` — `balanced` is the default legacy hybrid; `auto` is
+  explicit opt-in, with `lexical`, `graph`, and `code` available for deliberate routing. The
+  specialized graph/code profiles prioritize their named evidence while retaining supporting
+  arms; diagnostics preserves both normalized and profile-adjusted scores.
+- `valid_at (float, None)` — what was true in world time; `known_at (float, None)` — what
+  Engraphis had learned in system time; `as_of (float, None)` is the `valid_at` compatibility
+  alias and must match when both are supplied.
+- `diagnostics (bool, false)` — include the per-arm retrieval trace.
+
+Returns `{query, count, context, sources, packed_sources, usage, valid_at, known_at, historical,
+retrieval_profile, response_mode, receipt}`. `usage` always names `budget_tokens`,
+`context_tokens`, `source_tokens`, `saved_tokens`, `savings_ratio`, `packed_count`,
+`omitted_count`, and `token_counter`.
+
 ### `engraphis_recall`
 Retrieve the memories most relevant to a query (hybrid vector + lexical + graph, fused + reranked).
-Call it before answering or acting when prior context would help.
+It is the full-response compatibility surface; prefer `engraphis_recall_context` for a prompt.
 
 - `query (str)` — natural language, e.g. `"how do we handle auth?"`.
 - `workspace (str, None)` — restrict to this workspace.
@@ -66,12 +93,22 @@ Call it before answering or acting when prior context would help.
   ancestors while excluding every other session.
 - `mtypes (list[str], None)` — restrict to these memory types.
 - `k (int, 8)` — max results, `1..50`.
+- `token_budget (int, None)` — hard packed-context budget; omitted uses the engine default.
+- `retrieval_profile (str, "balanced")` — `balanced` default; `auto` only when explicitly set;
+  `lexical`, `graph`, and `code` are deliberate alternatives whose named arm is prioritized.
+- `response_mode (str, "full")` — `full` preserves legacy memory bodies; `compact` omits bodies
+  already represented in `context`.
+- `valid_at (float, None)`, `known_at (float, None)`; `as_of (float, None)` is the compatible
+  `valid_at` alias and conflicts unless it matches `valid_at` exactly.
+- `diagnostics (bool, false)` — include `retrieval_trace` with raw/normalized/fusion/rerank data.
 
 Returns `{query, count, context, memories:[{id, title, content, scope, mtype, repo_id, score,
-arm, retention, provenance}]}`. `context` is a token-budgeted pack ready to drop into your prompt.
+arm, retention, provenance}], packed_sources, usage, valid_at, known_at, historical,
+retrieval_profile, response_mode}`. `usage` contains the strict token fields listed above.
 `count:0` with a `note` means that workspace/repo isn't known yet — not an error.
-Successful calls reinforce returned memories and append a privacy-safe operation receipt. The MCP
-tool is therefore stateful and non-idempotent even though its primary purpose is retrieval.
+Successful calls append a privacy-safe operation receipt but do not reinforce weak neighbors just
+because they were returned. Grounded recall reinforces cited evidence; explicit-use Python callers
+can opt into reinforcement. The MCP tool remains stateful and non-idempotent because of its receipt.
 
 ### `engraphis_recall_grounded`
 Answer a question **strictly from** stored memories, with `[n]` citations — or **abstain** when
@@ -82,6 +119,10 @@ extractive; optional LLM synthesis is accepted only when its claims remain cited
 - `query (str)` — the question, e.g. `"which auth scheme did we standardise on?"`.
 - `workspace (str, None)`, `repo (str, None)`, `session_id (str, None)`,
   `mtypes (list[str], None)`, `k (int, 8)`.
+- `valid_at (float, None)`, `known_at (float, None)`; `as_of (float, None)` remains the
+  compatibility `valid_at` alias and must match if both are supplied.
+- `token_budget (int, None)`; `retrieval_profile (str, "balanced")`; `response_mode (str,
+  "full" | "compact")`; `diagnostics (bool, false)`.
 - `min_support (float, None)` — absolute support floor `0..1`; raise it to demand stronger
   evidence before answering.
 - `synthesize (bool, false)` — ask a configured LLM for cited prose; falls back safely.
@@ -95,7 +136,7 @@ reinforced. This surface is stateful and non-idempotent.
 ### `engraphis_answer`
 Backward-compatible grounded-answer alias with the same state effects. Prefer
 `engraphis_recall_grounded` for new configs; keep using this only if an existing agent already
-references it.
+references it. It accepts the same temporal, profile, response-mode, and diagnostics fields.
 
 ### `engraphis_recall_proactive`
 Conscious recall with **no query**: high-importance, recent, well-reinforced memories. Use at the
@@ -215,15 +256,19 @@ grepping or dumping files, and answers "what calls this / what breaks if I chang
 
 - `query (str)` — symbol or partial name, `workspace (str)`, `repo (str)` (must be indexed first),
   `limit (int, 20)`.
+- `valid_at (float, None)`, `known_at (float, None)`; `as_of (float, None)` is the compatible
+  `valid_at` alias and must match when both are supplied.
 
 Returns `{query, symbols:[{name, fqname, kind, file, span, signature, docstring,
-called_by:[…], linked_memories:[…]}]}`.
+called_by:[…], linked_memories:[…]}]}` at the requested world/system-time point.
 
 ### `engraphis_code_path`
 Find the shortest path across definitions, calls, imports, aliases, and code↔memory links.
 
 - `source (str)`, `target (str)` — symbol, file, or memory id.
 - `workspace (str)`, `repo (str)`, `max_depth (int, 8)`.
+- `valid_at (float, None)`, `known_at (float, None)`; `as_of (float, None)` is the compatible
+  `valid_at` alias.
 
 Returns `{found, source, target, hops, path, edges}` with direction and provenance fields.
 
@@ -231,6 +276,8 @@ Returns `{found, source, target, hops, path, edges}` with direction and provenan
 Estimate commit/PR impact from repo-relative changed files.
 
 - `changed_files (list[str])`, `workspace (str)`, `repo (str)`.
+- `valid_at (float, None)`, `known_at (float, None)`; `as_of (float, None)` is the compatible
+  `valid_at` alias.
 
 Returns risk score/level, touched symbols, inbound edges, dependent files, linked memories,
 communities affected, hotspots, and potential conflict zones.
@@ -239,6 +286,11 @@ communities affected, hotspots, and potential conflict zones.
 Return portable `graph.json` data plus a human-readable Markdown report and self-contained HTML.
 
 - `workspace (str)`, `repo (str)`.
+- `valid_at (float, None)`, `known_at (float, None)`; `as_of (float, None)` is the compatible
+  `valid_at` alias.
+
+Returns `{graph, report_markdown, graph_html, valid_at, known_at, historical}`. Historical code
+reads are pure reads and never reinforce memories.
 
 ---
 
@@ -351,7 +403,9 @@ Returns `{enabled, current, latest, update_available, url, notice}`.
 ## Quick decision guide
 
 - Learned a durable fact → `remember`. Raw thing that happened → `record_event`.
-- Need raw context and have a question → `recall`. Need raw context and don't yet → `recall_proactive`. Need a task-ready packet → `proactive_context`.
+- Need prompt context and have a question → `recall_context`. Need full legacy memory bodies →
+  `recall`. Need raw context and don't yet → `recall_proactive`. Need a task-ready packet →
+  `proactive_context`.
 - "Why?" / "since when?" → `why` / `timeline` (not `recall` — those see history).
 - Fact is wrong → `correct` (keeps the chain). Fact is obsolete with no replacement → `forget`.
 - Fact applies more broadly than first believed → `promote` (widens without duplicate recall).

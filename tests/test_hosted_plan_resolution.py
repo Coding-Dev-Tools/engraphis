@@ -1274,6 +1274,26 @@ def test_a_plan_without_an_activity_flag_is_not_treated_as_lapsed() -> None:
         "cloud_access_active"] is False
 
 
+@pytest.mark.parametrize("activity", [None, "false", "true", 0, 1, [], {}])
+def test_an_explicit_nonboolean_activity_flag_is_not_an_optimistic_paid_grant(
+    activity,
+) -> None:
+    """Only field omission supports the older-control-plane compatibility default."""
+
+    assert cloud_session._declared_entitlement({
+        "plan": "team", "cloud_access_active": activity,
+    }) == {}
+
+
+def test_a_control_plane_feature_list_cannot_escalate_a_pro_plan_to_team() -> None:
+    """A plan is the maximum grant; its feature list may only narrow it."""
+
+    assert v2_api._normalized_features(
+        ["analytics", "automation", "sync", "team"], "pro"
+    ) == ["analytics", "automation", "consolidation", "dreaming", "sync"]
+    assert "team" in v2_api._normalized_features(["team"], "team")
+
+
 def test_an_oversized_provider_entitlement_cannot_brick_the_saved_session() -> None:
     """The session record is read back under a 64 KiB cap; a huge value must be bounded.
 
@@ -1961,11 +1981,17 @@ def test_the_dashboard_never_offers_a_trial_it_was_not_told_is_available() -> No
         in script
     # No affordance may still be gated on the old always-false flag.
     assert "LIC.trial.used" not in script
-    for marker in ("Start hosted Pro trial", "Start hosted Team trial",
-                   "Start exactly '+TRIAL_DAYS+' days free"):
-        index = script.index(marker)
-        window = script[max(0, index - 400):index]
-        assert "licTrialAvailable()" in window, marker
+    hosted_cta = script[script.index("function hostedCta("):]
+    hosted_cta = hosted_cta[:hosted_cta.index("\n")]
+    assert "Start ${TRIAL_DAYS}-day ${name} trial" in hosted_cta
+    assert "licTrialAvailable()&&state==='inactive'" in hosted_cta
+    team = script[script.index("async function loadTeam()"):
+                  script.index("/* health + settings */")]
+    assert "hostedCta('team','team_tab')" in team
+    marker = "Start exactly '+TRIAL_DAYS+' days free"
+    index = script.index(marker)
+    window = script[max(0, index - 400):index]
+    assert "licTrialAvailable()" in window, marker
 
 
 def test_the_dashboard_explains_a_locked_state_instead_of_badging_it() -> None:
@@ -1986,7 +2012,7 @@ def test_the_dashboard_explains_a_locked_state_instead_of_badging_it() -> None:
     badge = script[script.index("function updateLicBadge()"):]
     badge = badge[:badge.index("\n")]
     assert "licAccessState()" in badge
-    assert "TRIAL ENDED" in badge and "INACTIVE" in badge
+    assert "GET PRO" in badge and "BILLING" in badge
 
 
 def test_both_persisted_answers_read_every_trial_field_the_server_sends() -> None:

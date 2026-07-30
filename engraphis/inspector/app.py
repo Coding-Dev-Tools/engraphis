@@ -263,6 +263,9 @@ def create_app(
         layers: Optional[str] = None,
         include_code: bool = False,
         repo: Optional[str] = None,
+        as_of: Optional[float] = None,
+        valid_at: Optional[float] = None,
+        known_at: Optional[float] = None,
     ):
         selected = (
             None
@@ -276,6 +279,9 @@ def create_app(
             include_code=include_code,
             repo=repo,
             backfill=False,
+            as_of=as_of,
+            valid_at=valid_at,
+            known_at=known_at,
         )
 
     @app.get("/api/export")

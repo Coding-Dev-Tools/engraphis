@@ -169,6 +169,16 @@ def test_opt_in_graph_asset_is_lazily_loaded_after_its_dependencies() -> None:
     assert force_graph_gate < engine_gate < classic
 
 
+def test_classic_dashboard_copies_share_the_canonical_route_gate() -> None:
+    """Classic must use the canonical renderer, including mounted `/classic` routes."""
+    sources = [path.read_text(encoding="utf-8") for path in (DASHBOARD, CLASSIC_DASHBOARD)]
+    assert sources[0] == sources[1]
+    start = sources[0].index("function graphEngineEnabled()")
+    body = sources[0][start:sources[0].index("function graphEngineFallback", start)]
+    assert "/(^|\\/)classic\\/?$/.test(window.location.pathname)" in body
+    assert "GRAPH_ENGINE_FAILED" in body
+
+
 def test_engine_node_labels_honor_the_configured_font_at_normal_zoom() -> None:
     source = ASSET.read_text(encoding="utf-8")
     assert "state.settings.font / scale / 3.4" not in source
@@ -202,7 +212,10 @@ globalThis.document = {
   createElement: () => (pending = {}),
   head: { appendChild: s => log.appended.push(s.src) },
 };
-globalThis.window = { location: { search: '?graph-engine=next' }, GSET: { mode: 'compact' },
+const location = scenario === 'classic'
+  ? { search: '', pathname: '/classic' }
+  : { search: '?graph-engine=next', pathname: '/' };
+globalThis.window = { location, GSET: { mode: 'compact' },
                       console: globalThis.console };
 globalThis.console = { warn: (...a) => log.warned.push(String(a[0])) };
 globalThis.showAs = () => {};
@@ -225,7 +238,9 @@ globalThis.ForceGraph = function () {};
 
 new Function(flags + loaders + routing + '\\nreturn {graphRender};')().graphRender();
 const settled = { engine: log.engine, classic: log.classic };
-if (scenario === 'loads') { globalThis.EngraphisGraph = { create() {} }; pending.onload(); }
+if (scenario === 'loads' || scenario === 'classic') {
+  globalThis.EngraphisGraph = { create() {} }; pending.onload();
+}
 else { pending.onerror(); }
 setTimeout(() => process.stdout.write(JSON.stringify({
   beforeSettle: settled, engine: log.engine, classic: log.classic,
@@ -269,6 +284,19 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     # And it lands on the next engine, never touching the classic renderer.
+    assert report["engine"] == 1
+    assert report["classic"] == 0
+    assert report["warned"] == []
+
+
+@requires_node
+def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> None:
+    report = _run_routing("classic")
+
+    assert report["appended"] == [
+        "/v2-assets/engraphis-graph.js?v=20260728-reference-materials"
+    ]
+    assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
     assert report["classic"] == 0
     assert report["warned"] == []
@@ -343,6 +371,34 @@ def test_create_fails_loudly_when_force_graph_is_unavailable() -> None:
         """
     )
     assert report["message"] == "force-graph not loaded"
+
+
+@requires_node
+def test_node_geometry_stays_compact_for_small_overviews_and_is_style_neutral() -> None:
+    """Material style changes must not turn a compact overview into oversized discs.
+
+    A seven-node workspace is intentionally common in the Ledger overview.  Its normalized
+    degree metric used to produce a dense-graph radius, and ``zoomToFit`` magnified that radius
+    until every node filled a large part of the canvas.  The radius helper now shares the
+    bounded scale used by Classic and does not know about visual style.
+    """
+    report = _run_node(
+        """
+        emit({
+          leaf: I.graphNodeRadius({ degree: 0 }, 3, 0),
+          hub: I.graphNodeRadius({ degree: 6 }, 3, 1),
+          cluster: I.graphNodeRadius({ cluster: true, members: 64 }, 3, 1),
+          styles: ['classic', 'cyber', 'galaxy', 'solar'].map(() => I.graphNodeRadius({ degree: 6 }, 3, 1)),
+        });
+        """
+    )
+    assert report["leaf"] >= 0.8
+    assert report["hub"] < 4
+    assert report["cluster"] < 7
+    assert len(set(report["styles"])) == 1
+    assert "if (sun) r *= 1.7" not in ASSET.read_text(encoding="utf-8")
+    assert "if(sun)r*=1.7;" not in CLASSIC_DASHBOARD.read_text(encoding="utf-8")
+    assert "if(sun)r*=1.7;" not in DASHBOARD.read_text(encoding="utf-8")
 
 
 def test_dashboard_falls_back_to_the_classic_renderer_when_the_engine_throws() -> None:
@@ -708,7 +764,9 @@ def test_flow_particles_are_capped_on_a_large_relation_set() -> None:
         api.setData(chain(801));
         const overLimit = particlesFor();
         api.setData(chain(4000));
-        emit({ small, atLimit, overLimit, realistic: particlesFor() * 4000 });
+        emit({ small, atLimit, overLimit, realistic: particlesFor() * 4000,
+               particleWidth: store.linkDirectionalParticleWidth,
+               particleArrow: typeof store.linkDirectionalParticleCanvasObject === 'function' });
         """
     )
     assert report["small"] == 3
@@ -716,6 +774,19 @@ def test_flow_particles_are_capped_on_a_large_relation_set() -> None:
     assert report["overLimit"] == 0
     # The number this guards: 4k relations x 3 particles was 12,000 animated objects a frame.
     assert report["realistic"] == 0
+    assert report["particleWidth"] == 1
+    assert report["particleArrow"] is True
+
+
+def test_legacy_flow_particles_use_small_directional_arrows() -> None:
+    """Classic and its static compatibility copy must not regress to round flow dots."""
+    for path in (DASHBOARD, CLASSIC_DASHBOARD):
+        source = path.read_text(encoding="utf-8")
+        assert "linkDirectionalArrowLength(GPERF.dense?0:.625)" in source
+        assert (
+            "linkDirectionalParticleWidth(.85).linkDirectionalParticleCanvasObject"
+            "(graphPaintFlowArrow)" in source
+        )
 
 
 #: A canvas 2D stand-in that counts the fills the galaxy starfield performs.  The engine wraps
@@ -1577,7 +1648,7 @@ def test_curves_arrows_and_relation_labels_are_dropped_on_a_dense_graph() -> Non
     )
     # 1500 links is the classic threshold itself, so nothing is dropped yet.
     assert report["atLimit"]["curve"] == 0.12
-    assert report["atLimit"]["arrow"] == 2.5
+    assert report["atLimit"]["arrow"] == 0.625
     assert report["overLimit"]["curve"] == 0
     assert report["overLimit"]["arrow"] == 0
     # Relation labels come back for the one neighbourhood the user is actually pointing at.
@@ -1953,8 +2024,51 @@ def test_legacy_classic_canvas_uses_the_same_nonwhite_material_profiles_as_ledge
         classic.index("function graphPaintMaterialSurface("):
         classic.index("function graphStyleBackground(")
     ]
-    assert "graphMaterialTier(r*Math.max(.01,scale),large)" in paint
+    assert "graphMaterialTier(screenRadius,large)" in paint
+    assert "paintDirect&&tier==='full'&&screenRadius>GRAPH_MATERIAL_RADIUS.full" in paint
+    assert "directMaterial=node.id===GHILITE||node.rank===0" in classic
+    full_classic = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
+    style_node = full_classic[full_classic.index("function graphStyleNode("):full_classic.index("function graphApplyStyleChrome()")]
+    assert "graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large,directMaterial)" in style_node
+    assert "graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large)" not in style_node
     assert classic.count("if(tier==='signature')") >= 4
+
+
+def test_legacy_node_geometry_is_bounded_like_ledger_for_all_styles() -> None:
+    """Classic must not resurrect the degree-squared visual blow-up behind the style switch.
+
+    The material painter is shared across four styles, so a geometry regression here affects
+    every theme even when the newer Ledger engine is correct.  Keep the two legacy copies in
+    lockstep and pin the compact radius contract: normalized degree emphasis, a 0.8 minimum,
+    and a size-slider-relative 1.1 maximum.
+    """
+    classic = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
+    static = DASHBOARD.read_text(encoding="utf-8")
+    helper_start = classic.index("function graphNodeRadius(")
+    helper_end = classic.index("const ETYPE_TOKEN", helper_start)
+    assert static[static.index("function graphNodeRadius("):static.index("const ETYPE_TOKEN", static.index("function graphNodeRadius("))] == classic[helper_start:helper_end]
+    assert "const maxDegree=Math.max(1,...nodes.map(node=>node.degree||0));" in classic
+    assert "graphNodeRadius(node,window.GSET.size,(node.degree||0)/maxDegree)" in classic
+    assert "return Math.max(.8,Math.min(size*1.1,radius));" in classic
+    assert "Math.sqrt(node.val)" not in classic
+    assert "Math.sqrt(node.val)" not in static
+
+
+def test_classic_graph_overview_uses_ledger_scope_and_limit() -> None:
+    """Classic and Ledger must start from the same responsive connected graph.
+
+    Classic used to omit both query parameters, so the backend returned its default 2,000
+    entities and the legacy canvas rendered a fundamentally different graph from Ledger's
+    320-node connected overview.  Keep the full-graph control explicit while pinning the
+    default request to Ledger's contract in both shipped dashboard copies.
+    """
+    for path in (DASHBOARD, CLASSIC_DASHBOARD):
+        source = path.read_text(encoding="utf-8")
+        load = source[source.index("async function loadLegacyGraph("):source.index("function graphUpdateAllNodesControl(")]
+        assert "showUnlinked=GRAPH_FULL||!!document.getElementById('graph-show-iso').checked" in load
+        assert "graphLimit=GRAPH_FULL?20000:320" in load
+        assert "graphScope=GRAPH_FULL?'&full=true':(showUnlinked?'':'&connected_only=true')" in load
+        assert "+'&limit='+graphLimit+graphScope" in load
 
 
 def _community_palettes(source: str) -> dict:

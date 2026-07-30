@@ -26,6 +26,7 @@ import copy
 import time
 import threading
 from collections import Counter, OrderedDict
+from dataclasses import asdict
 from functools import wraps
 from pathlib import Path
 from typing import Any, Optional
@@ -41,7 +42,13 @@ from engraphis.core.graph_scene import (
 from engraphis.core.graph_layers import normalize_graph_layer
 from engraphis.core.ids import new_id as make_id
 from engraphis.core.interfaces import Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter
-from engraphis.core.store import _loads, _merge_edge_provenance, normalize_entity_name
+from engraphis.core.retrieval_policy import RETRIEVAL_PROFILES
+from engraphis.core.store import (
+    _loads,
+    _merge_edge_provenance,
+    _public_receipt_row,
+    normalize_entity_name,
+)
 from engraphis.graphdata import build_graph_payload, empty_graph
 
 logger = logging.getLogger("engraphis.service")
@@ -54,6 +61,8 @@ MAX_KEYWORDS = 64
 MAX_KEYWORD_CHARS = 128
 MAX_METADATA_BYTES = 16_384
 MAX_K = 50
+MAX_TOKEN_BUDGET = 32_768
+RESPONSE_MODES = frozenset({"full", "compact"})
 MAX_CONTEXT_TASK_CHARS = 10_000
 MAX_AGENT_STATE_CHARS = 20_000
 # import_folder/import_files (SECURITY.md §5 — reads/accepts local-content by path or
@@ -178,6 +187,25 @@ _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _NAME_RE = re.compile(r"^[A-Za-z0-9._\-/ ]{1,%d}$" % MAX_NAME_CHARS)
 _PRINCIPAL_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,%d}$" % MAX_NAME_CHARS)
 _PRINCIPAL_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+$")
+_RECEIPT_ID_RE = re.compile(r"^rcpt_[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}$")
+_RECEIPT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_RECEIPT_VERIFICATION_ERRORS = frozenset({
+    "hash_mismatch",
+    "payload_mismatch",
+    "payload_schema_invalid",
+    "sequence_mismatch",
+    "chain_break",
+    "chain_root_count",
+    "chain_cycle",
+    "chain_fork",
+    "chain_disconnected",
+    "missing_anchor",
+    "anchor_count_mismatch",
+    "anchor_head_mismatch",
+    "anchor_integrity_error",
+    "expected_head_mismatch",
+    "expected_count_mismatch",
+})
 
 
 class ValidationError(ValueError):
@@ -422,6 +450,38 @@ def _enum(value: Any, enum_cls, field: str):
         raise ValidationError(f"{field} must be one of: {allowed}")
 
 
+def _optional_timestamp(value: Any, *, field: str) -> Optional[float]:
+    """Validate an optional Unix timestamp at the shared transport boundary."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValidationError(f"{field} must be a finite timestamp")
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"{field} must be a finite timestamp") from exc
+    if not math.isfinite(timestamp):
+        raise ValidationError(f"{field} must be a finite timestamp")
+    return timestamp
+
+
+def _temporal_anchors(*, as_of: Any = None, valid_at: Any = None,
+                      known_at: Any = None) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """Normalize the public bi-temporal aliases once for non-recall reads.
+
+    Recall performs the same validation inline for backwards-compatible error
+    ordering.  Direct code-graph reads use this helper so they cannot silently
+    diverge from recall's ``as_of``/``valid_at`` contract.
+    """
+    as_of_value = _optional_timestamp(as_of, field="as_of")
+    valid_value = _optional_timestamp(valid_at, field="valid_at")
+    known_value = _optional_timestamp(known_at, field="known_at")
+    if as_of_value is not None and valid_value is not None and as_of_value != valid_value:
+        raise ValidationError("as_of and valid_at must match when both are supplied")
+    valid_value = valid_value if valid_value is not None else as_of_value
+    return as_of_value, valid_value, known_value
+
+
 def _write_scope(value: Any, *, repo: Optional[str], session_id: Optional[str]) -> Scope:
     """Resolve and validate the structural scope of a write.
 
@@ -649,6 +709,7 @@ class MemoryService:
 
     @classmethod
     def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
+               embed_revision: Optional[str] = None,
                embed_dim: int = 384, vector_backend: str = "auto",
                rerank_model: Optional[str] = None,
                allowed_workspaces: Optional[list] = None,
@@ -678,7 +739,8 @@ class MemoryService:
         from engraphis.backends.encrypted_db import connector_from_env
         connect = connector_from_env()
         engine = MemoryEngine.create(
-            db_path, embed_model=embed_model, embed_dim=embed_dim,
+            db_path, embed_model=embed_model, embed_revision=embed_revision,
+            embed_dim=embed_dim,
             vector_backend=vector_backend, rerank_model=rerank_model,
             extractor=extractor, graph_extractor=graph_extractor,
             retention_supervisor=retention_supervisor, connect=connect,
@@ -895,9 +957,12 @@ class MemoryService:
                  source: str = "agent", trusted: bool = True,
                  kind: Optional[str] = None, resolve_conflicts: bool = True,
                  retention_class: Optional[str] = None,
-                 retention_reason: str = "") -> dict:
+                 retention_reason: str = "",
+                 valid_from: Optional[float] = None,
+                 subject_key: str = "", claim_kind: str = "") -> dict:
         """Store one memory. Returns its id, resolved scope, and the resolution
-        outcome (``op``: add/noop/invalidate — see ``MemoryEngine.remember_with_resolution``).
+        outcome (``op``: add/noop/invalidate/relate — see
+        ``MemoryEngine.remember_with_resolution``).
         """
         content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
         title = _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS, required=False)
@@ -908,6 +973,13 @@ class MemoryService:
         sc = _write_scope(scope, repo=rp, session_id=session_id)
         kws = _clean_keywords(keywords)
         meta = _clean_metadata(metadata)
+        valid_from = _optional_timestamp(valid_from, field="valid_from")
+        subject_key = _clean_text(
+            subject_key, field="subject_key", max_chars=MAX_TITLE_CHARS, required=False
+        )
+        claim_kind = _clean_text(
+            claim_kind, field="claim_kind", max_chars=MAX_NAME_CHARS, required=False
+        )
         retention = None
         if retention_class:
             label = _clean_text(
@@ -957,9 +1029,13 @@ class MemoryService:
                 content, workspace_id=wid, repo_id=rid, session_id=session_id,
                 mtype=mt, scope=sc, title=title, importance=importance,
                 keywords=kws, metadata={**meta, "provenance": provenance},
+                valid_from=valid_from,
+                subject_key=subject_key, claim_kind=claim_kind,
                 resolve_conflicts=bool(resolve_conflicts),
             )
         except ValueError as exc:
+            if str(exc).startswith("valid_from "):
+                raise ValidationError(str(exc)) from exc
             if session_id and str(exc) in {
                 f"no session with id '{session_id}'",
                 "session_id does not belong to that workspace/repo",
@@ -971,10 +1047,12 @@ class MemoryService:
             "id": result["id"], "workspace": ws, "repo": rp,
             "scope": sc.value, "mtype": mt.value, "stored": True, "op": result["op"],
         }
-        if result["op"] in ("noop", "invalidate"):
+        if result["op"] in ("noop", "invalidate", "relate"):
             out["resolution"] = result.get("reason", "")
         if result["op"] == "invalidate":
             out["superseded"] = result["superseded"]
+        if result["op"] == "relate":
+            out["related_to"] = result.get("related_to")
         out["receipt"] = self.store.record_receipt(
             "remember", workspace_id=wid, repo_id=rid or "", actor=provenance["source"],
             target_count=1, status=result["op"],
@@ -1056,11 +1134,13 @@ class MemoryService:
                         importance: float = 0.0,
                         metadata: Optional[dict] = None,
                         retention_class: Optional[str] = None,
-                        retention_reason: str = "") -> dict:
+                        retention_reason: str = "",
+                        valid_from: Optional[float] = None) -> dict:
         out = self.remember(
             text, workspace=workspace, repo=repo, title=title, mtype=mtype,
             scope=scope, importance=importance, metadata=metadata,
             retention_class=retention_class, retention_reason=retention_reason,
+            valid_from=valid_from,
         )
         return {"operation": "remember", **out}
 
@@ -1076,7 +1156,13 @@ class MemoryService:
                       workspace: Optional[str] = None, repo: Optional[str] = None,
                       mtypes: Optional[list] = None, k: int = 8,
                       as_of: Optional[float] = None,
-                      reinforce: bool = True,
+                      valid_at: Optional[float] = None,
+                      known_at: Optional[float] = None,
+                      token_budget: Optional[int] = None,
+                      retrieval_profile: str = "balanced",
+                      response_mode: str = "full",
+                      diagnostics: bool = False,
+                      reinforce: bool = False,
                       record_receipt: bool = True) -> dict:
         intent_clean = _clean_text(
             intent, field="intent", max_chars=80, required=False
@@ -1094,21 +1180,27 @@ class MemoryService:
         }.get(normalized)
         out = self.recall(
             query, workspace=workspace, repo=repo, mtypes=mtypes, k=k,
-            as_of=as_of, intent=intent_clean, graph_layers=layers,
+            as_of=as_of, valid_at=valid_at, known_at=known_at,
+            token_budget=token_budget, retrieval_profile=retrieval_profile,
+            response_mode=response_mode, diagnostics=diagnostics,
+            intent=intent_clean, graph_layers=layers,
             reinforce=reinforce, record_receipt=record_receipt,
         )
         response = {"operation": "recall", "intent": intent_clean, **out}
         if normalized in {"locate_code", "code"} and workspace and repo:
             response["code"] = self.search_code(
-                query, workspace=workspace, repo=repo, limit=k
+                query, workspace=workspace, repo=repo, limit=k,
+                as_of=as_of, valid_at=valid_at, known_at=known_at,
             )
         elif normalized in {"explain", "why"} and workspace:
             response["explanation"] = self.why(
-                query, workspace=workspace, repo=repo, k=min(k, 10)
+                query, workspace=workspace, repo=repo, k=min(k, 10),
+                as_of=as_of, valid_at=valid_at, known_at=known_at,
             )
         elif normalized in {"summarize_history", "history", "timeline"} and workspace:
             response["history"] = self.timeline(
-                query, workspace=workspace, repo=repo, limit=min(max(k * 2, 10), 50)
+                query, workspace=workspace, repo=repo, limit=min(max(k * 2, 10), 50),
+                as_of=as_of, valid_at=valid_at, known_at=known_at,
             )
         return response
 
@@ -1567,8 +1659,14 @@ class MemoryService:
                repo: Optional[str] = None, session_id: Optional[str] = None,
                mtypes: Optional[list] = None,
                k: int = 8, as_of: Optional[float] = None,
-               reinforce: bool = True, intent: str = "recall",
+               valid_at: Optional[float] = None,
+               known_at: Optional[float] = None,
+               reinforce: bool = False, intent: str = "recall",
                graph_layers: Optional[list] = None,
+               token_budget: Optional[int] = None,
+               retrieval_profile: str = "balanced",
+               response_mode: str = "full",
+               diagnostics: bool = False,
                record_receipt: bool = True) -> dict:
         """Retrieve the most relevant memories for ``query`` within scope."""
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
@@ -1582,6 +1680,27 @@ class MemoryService:
             [_enum(layer, GraphLayer, "graph_layer") for layer in graph_layers]
             if graph_layers else None
         )
+        as_of = _optional_timestamp(as_of, field="as_of")
+        valid_at = _optional_timestamp(valid_at, field="valid_at")
+        known_at = _optional_timestamp(known_at, field="known_at")
+        if as_of is not None and valid_at is not None and as_of != valid_at:
+            raise ValidationError("as_of and valid_at must match when both are supplied")
+        valid_at = valid_at if valid_at is not None else as_of
+        try:
+            token_budget = (
+                self.engine.recall_engine.token_budget
+                if token_budget is None else int(token_budget)
+            )
+        except (TypeError, ValueError):
+            raise ValidationError("token_budget must be an integer")
+        token_budget = max(0, min(MAX_TOKEN_BUDGET, token_budget))
+        retrieval_profile = str(retrieval_profile or "balanced").strip().casefold()
+        if retrieval_profile not in RETRIEVAL_PROFILES:
+            choices = ", ".join(sorted(RETRIEVAL_PROFILES))
+            raise ValidationError(f"retrieval_profile must be one of: {choices}")
+        response_mode = str(response_mode or "full").strip().casefold()
+        if response_mode not in RESPONSE_MODES:
+            raise ValidationError("response_mode must be one of: compact, full")
 
         # A configured workspace binding or a bound dashboard user must never do a
         # workspace-less (global) recall — either case represents a tenant boundary.
@@ -1595,22 +1714,32 @@ class MemoryService:
             ws = self._clean_ws(workspace)
             wid = self._lookup_workspace(ws)
             if wid is None:
-                return {"query": query, "count": 0, "context": "", "memories": [],
-                        "note": f"no workspace named '{ws}' yet"}
+                return _empty_recall(
+                    query, token_budget=token_budget, response_mode=response_mode,
+                    retrieval_profile=retrieval_profile, valid_at=valid_at,
+                    known_at=known_at, note=f"no workspace named '{ws}' yet",
+                )
             if repo:
                 rp = _clean_name(repo, field="repo")
                 rid = self._lookup_repo(wid, rp)
                 if rid is None:
-                    return {"query": query, "count": 0, "context": "", "memories": [],
-                            "note": f"no repo named '{rp}' in workspace '{ws}' yet"}
+                    return _empty_recall(
+                        query, token_budget=token_budget, response_mode=response_mode,
+                        retrieval_profile=retrieval_profile, valid_at=valid_at,
+                        known_at=known_at,
+                        note=f"no repo named '{rp}' in workspace '{ws}' yet",
+                    )
             if session_id:
                 sid = _clean_text(
                     session_id, field="session_id", max_chars=MAX_NAME_CHARS
                 )
                 session = self.store.get_session(sid)
                 if session is None:
-                    return {"query": query, "count": 0, "context": "", "memories": [],
-                            "note": f"no session with id '{sid}'"}
+                    return _empty_recall(
+                        query, token_budget=token_budget, response_mode=response_mode,
+                        retrieval_profile=retrieval_profile, valid_at=valid_at,
+                        known_at=known_at, note=f"no session with id '{sid}'",
+                    )
                 if session["workspace_id"] != wid or (
                         rid is not None and session.get("repo_id") != rid):
                     raise ValidationError("session_id does not belong to that workspace/repo")
@@ -1621,30 +1750,74 @@ class MemoryService:
 
         result = self.engine.recall_engine.recall(
             query,
-            _filter(wid, rid, mts, as_of, layers, session_id=sid),
+            _filter(
+                wid, rid, mts, as_of, layers, session_id=sid,
+                valid_at=valid_at, known_at=known_at,
+            ),
             k=k, reinforce=reinforce,
+            token_budget=token_budget,
+            retrieval_profile=retrieval_profile,
+            diagnostics=bool(diagnostics),
         )
         memories = []
         for chunk in result.chunks:
-            item = dict(chunk)
-            arm = item.get("arm") or "hybrid"
-            item["why_recalled"] = (
-                f"Matched by {arm} retrieval; fused score "
-                f"{float(item.get('score') or 0.0):.3f}, retention "
-                f"{float(item.get('retention') or 0.0):.3f}."
-            )
+            if response_mode == "compact":
+                item = {
+                    key: chunk.get(key)
+                    for key in (
+                        "id", "title", "scope", "mtype", "repo_id", "score", "arm"
+                    )
+                }
+                item["provenance"] = _compact_provenance(chunk.get("provenance"))
+            else:
+                item = dict(chunk)
+                arm = item.get("arm") or "hybrid"
+                item["why_recalled"] = (
+                    f"Matched by {arm} retrieval; fused score "
+                    f"{float(item.get('score') or 0.0):.3f}, retention "
+                    f"{float(item.get('retention') or 0.0):.3f}."
+                )
             memories.append(item)
+        usage = asdict(result.usage) if result.usage is not None else {
+            "budget_tokens": token_budget,
+            "context_tokens": 0,
+            "source_tokens": 0,
+            "saved_tokens": 0,
+            "savings_ratio": 0.0,
+            "packed_count": 0,
+            "omitted_count": 0,
+            "token_counter": "unknown",
+        }
+        packed_sources = [{
+            "id": packed.id,
+            "tokens": packed.tokens,
+            "truncated": packed.truncated,
+            "reason": packed.reason,
+        } for packed in result.packed_chunks]
         out = {
             "query": query, "count": result.count,
             "context": result.context, "memories": memories,
+            "packed_sources": packed_sources,
+            "usage": usage,
+            "valid_at": result.valid_at,
+            "known_at": result.known_at,
+            "historical": result.historical,
+            "retrieval_profile": result.retrieval_profile,
+            "response_mode": response_mode,
         }
+        if diagnostics:
+            out["retrieval_trace"] = result.retrieval_trace or []
         if record_receipt:
             out["receipt"] = self.store.record_receipt(
                 "recall", workspace_id=wid or "", repo_id=rid or "", actor="agent",
                 target_count=result.count, status="ok",
                 metadata={"intent": str(intent or "recall")[:80], "k": k,
                           "result_count": result.count,
-                          "graph_layers": [layer.value for layer in layers] if layers else []},
+                          "graph_layers": [layer.value for layer in layers] if layers else [],
+                          "retrieval_profile": result.retrieval_profile,
+                          "response_mode": response_mode,
+                          "historical": result.historical,
+                          "token_usage": usage},
             )
         return out
 
@@ -1652,8 +1825,14 @@ class MemoryService:
                         repo: Optional[str] = None, session_id: Optional[str] = None,
                         mtypes: Optional[list] = None,
                         k: int = 8, as_of: Optional[float] = None,
+                        valid_at: Optional[float] = None,
+                        known_at: Optional[float] = None,
                         min_support: Optional[float] = None,
-                        max_citations: int = 5, llm=None) -> dict:
+                        max_citations: int = 5, llm=None,
+                        token_budget: Optional[int] = None,
+                        retrieval_profile: str = "balanced",
+                        response_mode: str = "full",
+                        diagnostics: bool = False) -> dict:
         """Grounded recall: an answer built strictly from retrieved memories, with
         ``[n]`` citations and an explicit abstain when evidence is insufficient
         (``core.grounded``). This path is offline/deterministic (extractive answer) — no
@@ -1672,6 +1851,27 @@ class MemoryService:
         except (TypeError, ValueError):
             raise ValidationError("max_citations must be an integer")
         max_citations = max(1, min(MAX_K, max_citations))
+        as_of = _optional_timestamp(as_of, field="as_of")
+        valid_at = _optional_timestamp(valid_at, field="valid_at")
+        known_at = _optional_timestamp(known_at, field="known_at")
+        if as_of is not None and valid_at is not None and as_of != valid_at:
+            raise ValidationError("as_of and valid_at must match when both are supplied")
+        valid_at = valid_at if valid_at is not None else as_of
+        try:
+            token_budget = (
+                self.engine.recall_engine.token_budget
+                if token_budget is None else int(token_budget)
+            )
+        except (TypeError, ValueError):
+            raise ValidationError("token_budget must be an integer")
+        token_budget = max(0, min(MAX_TOKEN_BUDGET, token_budget))
+        retrieval_profile = str(retrieval_profile or "balanced").strip().casefold()
+        if retrieval_profile not in RETRIEVAL_PROFILES:
+            choices = ", ".join(sorted(RETRIEVAL_PROFILES))
+            raise ValidationError(f"retrieval_profile must be one of: {choices}")
+        response_mode = str(response_mode or "full").strip().casefold()
+        if response_mode not in RESPONSE_MODES:
+            raise ValidationError("response_mode must be one of: compact, full")
         if min_support is not None:
             try:
                 min_support = float(min_support)
@@ -1692,25 +1892,35 @@ class MemoryService:
             ws = self._clean_ws(workspace)
             wid = self._lookup_workspace(ws)
             if wid is None:
-                return {"query": query, "grounded": False, "abstained": True,
-                        "answer": "", "support": 0.0, "citations": [],
-                        "reason": f"no workspace named '{ws}' yet"}
+                return _empty_grounded(
+                    query, reason=f"no workspace named '{ws}' yet",
+                    token_budget=token_budget, response_mode=response_mode,
+                    retrieval_profile=retrieval_profile, valid_at=valid_at,
+                    known_at=known_at,
+                )
             if repo:
                 rp = _clean_name(repo, field="repo")
                 rid = self._lookup_repo(wid, rp)
                 if rid is None:
-                    return {"query": query, "grounded": False, "abstained": True,
-                            "answer": "", "support": 0.0, "citations": [],
-                            "reason": f"no repo named '{rp}' in workspace '{ws}' yet"}
+                    return _empty_grounded(
+                        query,
+                        reason=f"no repo named '{rp}' in workspace '{ws}' yet",
+                        token_budget=token_budget, response_mode=response_mode,
+                        retrieval_profile=retrieval_profile, valid_at=valid_at,
+                        known_at=known_at,
+                    )
             if session_id:
                 sid = _clean_text(
                     session_id, field="session_id", max_chars=MAX_NAME_CHARS
                 )
                 session = self.store.get_session(sid)
                 if session is None:
-                    return {"query": query, "grounded": False, "abstained": True,
-                            "answer": "", "support": 0.0, "citations": [],
-                            "reason": f"no session with id '{sid}'"}
+                    return _empty_grounded(
+                        query, reason=f"no session with id '{sid}'",
+                        token_budget=token_budget, response_mode=response_mode,
+                        retrieval_profile=retrieval_profile, valid_at=valid_at,
+                        known_at=known_at,
+                    )
                 if session["workspace_id"] != wid or (
                         rid is not None and session.get("repo_id") != rid):
                     raise ValidationError("session_id does not belong to that workspace/repo")
@@ -1721,16 +1931,31 @@ class MemoryService:
 
         ans = self.engine.grounded_recall(
             query, workspace_id=wid, repo_id=rid, session_id=sid, mtypes=mts,
-            as_of=as_of, k=k, llm=llm, min_support=min_support,
-            max_citations=max_citations,
+            as_of=as_of, valid_at=valid_at, known_at=known_at,
+            k=k, llm=llm, min_support=min_support,
+            max_citations=max_citations, token_budget=token_budget,
+            retrieval_profile=retrieval_profile, diagnostics=bool(diagnostics),
         )
         out = {"query": query, **ans.to_dict()}
+        out["response_mode"] = response_mode
+        if response_mode == "compact":
+            compact_citations = []
+            for citation in out.get("citations") or []:
+                item = dict(citation)
+                item.pop("content", None)
+                item["provenance"] = _compact_provenance(item.get("provenance"))
+                compact_citations.append(item)
+            out["citations"] = compact_citations
         out["receipt"] = self.store.record_receipt(
-            "recall", workspace_id=wid or "", repo_id=rid or "", actor="agent",
+            "grounded_recall", workspace_id=wid or "", repo_id=rid or "", actor="agent",
             target_count=len(out.get("citations") or []),
             status="grounded" if out.get("grounded") else "abstained",
             metadata={"intent": "grounded", "grounded": bool(out.get("grounded")),
-                      "citations": len(out.get("citations") or [])},
+                      "citations": len(out.get("citations") or []),
+                      "retrieval_profile": out.get("retrieval_profile"),
+                      "response_mode": response_mode,
+                      "historical": bool(out.get("historical")),
+                      "token_usage": out.get("usage") or {}},
         )
         return out
 
@@ -1912,23 +2137,38 @@ class MemoryService:
         return out
 
     # ── bi-temporal: why / timeline ──────────────────────────────────────────────
-    def why(self, query: str, *, workspace: str, repo: Optional[str] = None, k: int = 5) -> dict:
+    def why(self, query: str, *, workspace: str, repo: Optional[str] = None, k: int = 5,
+            as_of: Optional[float] = None, valid_at: Optional[float] = None,
+            known_at: Optional[float] = None) -> dict:
         """Rationale + history for a decision/fact: the live answer plus whatever it
         superseded, if anything — the bi-temporal "why" a flat store can't answer."""
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
         wid, rid = self._require_scope(workspace, repo)
         k = max(1, min(MAX_K, int(k)))
-        out = self.engine.why(query, workspace_id=wid, repo_id=rid, k=k)
+        _, valid_at, known_at = _temporal_anchors(
+            as_of=as_of, valid_at=valid_at, known_at=known_at,
+        )
+        out = self.engine.why(
+            query, workspace_id=wid, repo_id=rid, k=k,
+            valid_at=valid_at, known_at=known_at,
+        )
         return {"query": query, "answer": [_mem_to_dict(r) for r in out["answer"]],
                "supersedes": [_mem_to_dict(r) for r in out["supersedes"]]}
 
     def timeline(self, query: str, *, workspace: str, repo: Optional[str] = None,
-                limit: int = 20) -> dict:
+                limit: int = 20, as_of: Optional[float] = None,
+                valid_at: Optional[float] = None, known_at: Optional[float] = None) -> dict:
         """Chronological, bi-temporal history of a fact: what we believed and when."""
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
         wid, rid = self._require_scope(workspace, repo)
         limit = max(1, min(MAX_K, int(limit)))
-        recs = self.engine.timeline(query, workspace_id=wid, repo_id=rid, limit=limit)
+        _, valid_at, known_at = _temporal_anchors(
+            as_of=as_of, valid_at=valid_at, known_at=known_at,
+        )
+        recs = self.engine.timeline(
+            query, workspace_id=wid, repo_id=rid, limit=limit,
+            valid_at=valid_at, known_at=known_at,
+        )
         return {"query": query, "history": [_mem_to_dict(r) for r in recs]}
 
     def recall_proactive(self, *, workspace: str, repo: Optional[str] = None,
@@ -2095,21 +2335,37 @@ class MemoryService:
         )
         return out
 
-    def search_code(self, query: str, *, workspace: str, repo: str, limit: int = 20) -> dict:
+    def search_code(self, query: str, *, workspace: str, repo: str, limit: int = 20,
+                    as_of: Optional[float] = None,
+                    valid_at: Optional[float] = None,
+                    known_at: Optional[float] = None) -> dict:
+        """Search code symbols and their memory bridges at one bi-temporal point.
+
+        ``as_of`` is retained as the legacy alias for ``valid_at``.  Keeping the
+        anchors on the direct code endpoint matters as much as on hybrid recall:
+        callers otherwise receive a historical memory answer accompanied by present-day
+        symbols and code-memory evidence.
+        """
         if not repo:
             raise ValidationError("repo is required to search code")
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
         wid, rid = self._require_scope(workspace, repo)
         limit = max(1, min(MAX_K, int(limit)))
+        as_of, valid_at, known_at = _temporal_anchors(
+            as_of=as_of, valid_at=valid_at, known_at=known_at
+        )
         return self.engine.search_code(
             query, repo_id=rid, limit=limit,
             flt=SearchFilter(
-                workspace_id=wid, repo_id=rid, include_ancestors=True
+                workspace_id=wid, repo_id=rid, include_ancestors=True,
+                as_of=as_of, valid_at=valid_at, known_at=known_at,
             ),
         )
 
     def code_path(self, source: str, target: str, *, workspace: str, repo: str,
-                  max_depth: int = 8) -> dict:
+                  max_depth: int = 8, as_of: Optional[float] = None,
+                  valid_at: Optional[float] = None,
+                  known_at: Optional[float] = None) -> dict:
         if not repo:
             raise ValidationError("repo is required for a code path query")
         source = _clean_text(source, field="source", max_chars=500)
@@ -2119,33 +2375,51 @@ class MemoryService:
             max_depth = max(1, min(32, int(max_depth)))
         except (TypeError, ValueError):
             raise ValidationError("max_depth must be an integer")
+        as_of, valid_at, known_at = _temporal_anchors(
+            as_of=as_of, valid_at=valid_at, known_at=known_at
+        )
         return self.engine.code_path(
             source, target, repo_id=rid, max_depth=max_depth,
             flt=SearchFilter(
-                workspace_id=wid, repo_id=rid, include_ancestors=True
+                workspace_id=wid, repo_id=rid, include_ancestors=True,
+                as_of=as_of, valid_at=valid_at, known_at=known_at,
             ),
         )
 
-    def code_impact(self, changed_files: list, *, workspace: str, repo: str) -> dict:
+    def code_impact(self, changed_files: list, *, workspace: str, repo: str,
+                    as_of: Optional[float] = None,
+                    valid_at: Optional[float] = None,
+                    known_at: Optional[float] = None) -> dict:
         if not repo:
             raise ValidationError("repo is required for impact analysis")
         files = _clean_string_list(
             changed_files, field="changed_files", max_items=2_000, max_chars=4_000
         )
         wid, rid = self._require_scope(workspace, repo)
+        as_of, valid_at, known_at = _temporal_anchors(
+            as_of=as_of, valid_at=valid_at, known_at=known_at
+        )
         return self.engine.analyze_impact(
             files, repo_id=rid,
             flt=SearchFilter(
-                workspace_id=wid, repo_id=rid, include_ancestors=True
+                workspace_id=wid, repo_id=rid, include_ancestors=True,
+                as_of=as_of, valid_at=valid_at, known_at=known_at,
             ),
         )
 
-    def export_code_graph(self, *, workspace: str, repo: str) -> dict:
+    def export_code_graph(self, *, workspace: str, repo: str,
+                          as_of: Optional[float] = None,
+                          valid_at: Optional[float] = None,
+                          known_at: Optional[float] = None) -> dict:
         if not repo:
             raise ValidationError("repo is required to export a code graph")
         wid, rid = self._require_scope(workspace, repo)
+        as_of, valid_at, known_at = _temporal_anchors(
+            as_of=as_of, valid_at=valid_at, known_at=known_at
+        )
         flt = SearchFilter(
-            workspace_id=wid, repo_id=rid, include_ancestors=True
+            workspace_id=wid, repo_id=rid, include_ancestors=True,
+            as_of=as_of, valid_at=valid_at, known_at=known_at,
         )
         graph = self.engine.export_code_graph(repo_id=rid, flt=flt)
         return {
@@ -2156,6 +2430,9 @@ class MemoryService:
             "graph_html": self.engine.code_graph_html(
                 repo_id=rid, payload=graph, flt=flt
             ),
+            "valid_at": valid_at,
+            "known_at": known_at,
+            "historical": flt.historical,
         }
 
     # ── inspection (powers the Memory Inspector UI) ─────────────────────────────
@@ -2396,6 +2673,12 @@ class MemoryService:
             f"OR memory_id IN {msub} OR symbol_id IN {ssub}",
             (wid, wid, wid),
         )
+        c.execute(
+            "DELETE FROM memory_entities WHERE workspace_id=? "
+            f"OR memory_id IN {msub} "
+            "OR entity_id IN (SELECT id FROM entities WHERE workspace_id=?)",
+            (wid, wid, wid),
+        )
         c.execute(f"DELETE FROM mem_fts WHERE id IN {msub}", (wid,))
         c.execute(f"DELETE FROM mem_vectors WHERE id IN {msub}", (wid,))
         try:
@@ -2413,6 +2696,8 @@ class MemoryService:
         c.execute(f"DELETE FROM symbols WHERE repo_id IN {rsub}", (wid,))
         c.execute("DELETE FROM repos WHERE workspace_id=?", (wid,))
         c.execute("DELETE FROM jobs WHERE workspace_id=?", (wid,))
+        c.execute("DELETE FROM operation_receipts WHERE workspace_id=?", (wid,))
+        c.execute("DELETE FROM receipt_chain_heads WHERE workspace_id=?", (wid,))
         # Entity/edge delete triggers may have recreated this generation row.
         c.execute("DELETE FROM graph_index_state WHERE workspace_id=?", (wid,))
         c.execute("DELETE FROM workspaces WHERE id=?", (wid,))
@@ -2596,6 +2881,73 @@ class MemoryService:
                 (new_id, wid_dst, old_id),
             )
 
+        # Rehome the persisted sparse graph index alongside its memory/entity
+        # endpoints. Entity folding can make two live incidences equivalent; retain
+        # the duplicate as closed history instead of violating the partial unique
+        # index or deleting evidence.
+        incidence_closed_at = time.time()
+        source_incidence = [dict(row) for row in c.execute(
+            "SELECT * FROM memory_entities WHERE workspace_id=? ORDER BY id",
+            (wid_src,),
+        )]
+        for incidence in source_incidence:
+            mapped_entity = entity_remap.get(
+                incidence["entity_id"], incidence["entity_id"]
+            )
+            mapped_repo = _new_repo(incidence["repo_id"])
+            live = incidence["valid_to"] is None and incidence["expired_at"] is None
+            duplicate = None
+            if live:
+                duplicate = c.execute(
+                    "SELECT id, confidence, valid_from, ingested_at "
+                    "FROM memory_entities WHERE id<>? AND memory_id=? "
+                    "AND entity_id=? AND source_kind=? "
+                    "AND valid_to IS NULL AND expired_at IS NULL LIMIT 1",
+                    (
+                        incidence["id"], incidence["memory_id"], mapped_entity,
+                        incidence["source_kind"],
+                    ),
+                ).fetchone()
+            if duplicate is None:
+                c.execute(
+                    "UPDATE memory_entities SET workspace_id=?, repo_id=?, entity_id=? "
+                    "WHERE id=?",
+                    (wid_dst, mapped_repo, mapped_entity, incidence["id"]),
+                )
+                continue
+            valid_values = [
+                value for value in (
+                    duplicate["valid_from"], incidence["valid_from"]
+                ) if value is not None
+            ]
+            known_values = [
+                value for value in (
+                    duplicate["ingested_at"], incidence["ingested_at"]
+                ) if value is not None
+            ]
+            c.execute(
+                "UPDATE memory_entities SET confidence=?, valid_from=?, ingested_at=? "
+                "WHERE id=?",
+                (
+                    max(
+                        float(duplicate["confidence"] or 0.0),
+                        float(incidence["confidence"] or 0.0),
+                    ),
+                    min(valid_values) if valid_values else None,
+                    min(known_values) if known_values else None,
+                    duplicate["id"],
+                ),
+            )
+            c.execute(
+                "UPDATE memory_entities SET workspace_id=?, repo_id=?, entity_id=?, "
+                "valid_to=?, valid_to_recorded_at=?, expired_at=? WHERE id=?",
+                (
+                    wid_dst, mapped_repo, mapped_entity,
+                    incidence_closed_at, incidence_closed_at,
+                    incidence_closed_at, incidence["id"],
+                ),
+            )
+
         # 3) Edges: relabel workspace/repo, remapping any entity ids folded in step 2.
         #    When a live source edge collides with an existing live target edge (same
         #    src/dst/relation/layer/repo), merge metadata instead of violating the
@@ -2667,15 +3019,16 @@ class MemoryService:
                 # orphaned live evidence on a non-live edge, mirroring how
                 # Store._deduplicate_live_edges() closes retired supports.
                 c.execute(
-                    "UPDATE edge_supports SET valid_to=?, expired_at=? "
+                    "UPDATE edge_supports SET valid_to=?, valid_to_recorded_at=?, "
+                    "expired_at=? "
                     "WHERE edge_id=? AND valid_to IS NULL AND expired_at IS NULL",
-                    (closed_at, closed_at, ed["id"]))
+                    (closed_at, closed_at, closed_at, ed["id"]))
                 # Bi-temporally close the source edge.
                 src_prov["canonical_deduplicated_into"] = target["id"]
                 c.execute(
-                    "UPDATE edges SET valid_to=?, expired_at=?, "
+                    "UPDATE edges SET valid_to=?, valid_to_recorded_at=?, expired_at=?, "
                     "provenance=? WHERE id=?",
-                    (closed_at, closed_at,
+                    (closed_at, closed_at, closed_at,
                      json.dumps(src_prov, ensure_ascii=False), ed["id"]))
             else:
                 c.execute(
@@ -2694,7 +3047,14 @@ class MemoryService:
                     f"WHERE workspace_id=? AND repo_id IS ?",
                     (wid_dst, _new_repo(b["repo_id"]), wid_src, b["repo_id"]))
 
-        # 5) The source workspace is now empty — drop it.
+        # 5) Receipt payload hashes bind their original workspace scope digest and chain
+        # predecessor. Re-homing them would either forge that evidence or fork the target
+        # chain, so remove the source-only ledger with the source workspace. The merge's
+        # target-scoped audit entry below remains as the durable governance record.
+        c.execute("DELETE FROM operation_receipts WHERE workspace_id=?", (wid_src,))
+        c.execute("DELETE FROM receipt_chain_heads WHERE workspace_id=?", (wid_src,))
+
+        # The source workspace is now empty — drop it.
         c.execute("DELETE FROM graph_index_state WHERE workspace_id=?", (wid_src,))
         c.execute("DELETE FROM workspaces WHERE id=?", (wid_src,))
         self.store.audit(actor, "workspace_merge", wid_dst, f"{src} ({int(n_mem)} memories) -> {dst}")
@@ -2783,20 +3143,25 @@ class MemoryService:
                 symbol_remap[s["id"]] = nsid
                 c.execute(
                     "INSERT INTO symbols(id, repo_id, kind, name, fqname, file, span, signature, "
-                    "docstring, lang, exported, content_hash, embedding_ref, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "docstring, lang, exported, content_hash, embedding_ref, updated_at, "
+                    "valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (nsid, nrid, s["kind"], s["name"], s["fqname"], s["file"], s["span"],
                      s["signature"], s["docstring"], s["lang"], s["exported"],
-                     s["content_hash"], s["embedding_ref"], s["updated_at"]))
+                     s["content_hash"], s["embedding_ref"], s["updated_at"],
+                     s["valid_from"], s["valid_to"], s["valid_to_recorded_at"],
+                     s["ingested_at"], s["expired_at"]))
             for ce in [dict(x) for x in c.execute(
                     "SELECT * FROM code_edges WHERE repo_id=?", (r["id"],))]:
                 c.execute(
-                    "INSERT INTO code_edges(id, repo_id, src, dst, relation, layer, file, line) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
+                    "INSERT INTO code_edges(id, repo_id, src, dst, relation, layer, file, line, "
+                    "valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (ids.new_id("edge"), nrid, symbol_remap.get(ce["src"], ce["src"]),
                      symbol_remap.get(ce["dst"], ce["dst"]), ce["relation"],
                      ce["layer"] or "entity",
-                     ce["file"], ce["line"]))
+                     ce["file"], ce["line"], ce["valid_from"], ce["valid_to"],
+                     ce["valid_to_recorded_at"], ce["ingested_at"], ce["expired_at"]))
 
         def _new_repo(old_repo_id):
             return repo_remap.get(old_repo_id, old_repo_id) if old_repo_id is not None else None
@@ -2835,12 +3200,12 @@ class MemoryService:
             edge_remap[ed["id"]] = new_edge_id
             c.execute(
                 "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation, layer, "
-                "weight, valid_from, valid_to, ingested_at, expired_at, provenance) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "weight, valid_from, valid_to, valid_to_recorded_at, ingested_at, "
+                "expired_at, provenance) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (new_edge_id, wid_dst, _new_repo(ed["repo_id"]),
                  entity_remap.get(ed["src"], ed["src"]), entity_remap.get(ed["dst"], ed["dst"]),
                  ed["relation"], ed["layer"] or "semantic", ed["weight"],
-                 ed["valid_from"], ed["valid_to"], ed["ingested_at"],
+                 ed["valid_from"], ed["valid_to"], ed["valid_to_recorded_at"], ed["ingested_at"],
                  ed["expired_at"], ed["provenance"]))
 
         # 4) Sessions, cloned with fresh ids (memories/events below repoint at these).
@@ -2899,20 +3264,30 @@ class MemoryService:
 
             return json.dumps(walk(value), ensure_ascii=False, separators=(",", ":"))
 
+        def _remap_memory_ids_in_text(raw: Any) -> str:
+            text = str(raw or "")
+            return re.sub(
+                r"mem_[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}",
+                lambda match: memory_remap.get(match.group(0), match.group(0)),
+                text,
+            )
+
         for m in source_memories:
             nmid = memory_remap[m["id"]]
             c.execute(
                 "INSERT INTO memories (id, workspace_id, repo_id, session_id, scope, mtype, "
                 "title, content, summary, keywords, metadata, importance, surprise, stability, "
-                "access_count, last_access, valid_from, valid_to, ingested_at, expired_at, "
-                "pinned, sensitivity, provenance, sort_order) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "access_count, last_access, valid_from, valid_to, valid_to_recorded_at, "
+                "ingested_at, expired_at, subject_key, claim_kind, pinned, sensitivity, "
+                "provenance, sort_order) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (nmid, wid_dst, _new_repo(m["repo_id"]), session_remap.get(m["session_id"]),
                  m["scope"], m["mtype"], m["title"], m["content"], m["summary"], m["keywords"],
                  _remap_json_memory_ids(m["metadata"]), m["importance"],
                  m["surprise"], m["stability"],
                  m["access_count"], m["last_access"], m["valid_from"], m["valid_to"],
-                 m["ingested_at"], m["expired_at"], m["pinned"], m["sensitivity"],
+                 m["valid_to_recorded_at"], m["ingested_at"], m["expired_at"],
+                 m["subject_key"], m["claim_kind"], m["pinned"], m["sensitivity"],
                  _remap_json_memory_ids(m["provenance"]), m["sort_order"]))
             fts_row = c.execute(
                 "SELECT title, content, keywords FROM mem_fts WHERE id=?", (m["id"],)).fetchone()
@@ -2959,11 +3334,12 @@ class MemoryService:
                 )
                 c.execute(
                     "INSERT INTO edge_supports(edge_id, memory_id, source_kind, confidence, "
-                    "valid_from, valid_to, ingested_at, expired_at, provenance) "
-                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    "valid_from, valid_to, valid_to_recorded_at, ingested_at, "
+                    "expired_at, provenance) VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (new_edge_id, new_memory_id, support["source_kind"],
                      support["confidence"], support["valid_from"], support["valid_to"],
-                     support["ingested_at"], support["expired_at"], support_provenance),
+                     support["valid_to_recorded_at"], support["ingested_at"],
+                     support["expired_at"], support_provenance),
                 )
             if not source_supports:
                 try:
@@ -2975,22 +3351,55 @@ class MemoryService:
                         new_edge_id, source_edge["relation"], fallback_provenance,
                         valid_from=source_edge["valid_from"],
                         valid_to=source_edge["valid_to"],
+                        valid_to_recorded_at=source_edge["valid_to_recorded_at"],
                         ingested_at=source_edge["ingested_at"],
                         expired_at=source_edge["expired_at"],
                     )
+
+        # Persisted sparse memory↔entity incidence is a first-class retrieval index,
+        # not disposable cache. Clone it only after both endpoint maps exist so the
+        # copied workspace has graph-recall parity without retaining source ids.
+        for incidence in [dict(row) for row in c.execute(
+                "SELECT * FROM memory_entities WHERE workspace_id=? ORDER BY id",
+                (wid_src,),
+        )]:
+            new_memory_id = memory_remap.get(incidence["memory_id"])
+            new_entity_id = entity_remap.get(incidence["entity_id"])
+            if new_memory_id is None or new_entity_id is None:
+                continue
+            c.execute(
+                "INSERT INTO memory_entities("
+                "id, memory_id, entity_id, workspace_id, repo_id, source_kind, confidence, "
+                "valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at, "
+                "provenance) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    ids.new_id("edge"), new_memory_id, new_entity_id, wid_dst,
+                    _new_repo(incidence["repo_id"]), incidence["source_kind"],
+                    incidence["confidence"], incidence["valid_from"],
+                    incidence["valid_to"], incidence["valid_to_recorded_at"],
+                    incidence["ingested_at"], incidence["expired_at"],
+                    _remap_json_memory_ids(incidence["provenance"]),
+                ),
+            )
 
         if memory_remap:
             old_ids = list(memory_remap.keys())
             marks = ",".join("?" for _ in old_ids)
             for ln in [dict(x) for x in c.execute(
-                    f"SELECT a, b, relation, layer, reason, created_at FROM mem_links "
+                    f"SELECT a, b, relation, layer, reason, created_at, valid_from, valid_to, "
+                    f"valid_to_recorded_at, ingested_at, expired_at FROM mem_links "
                     f"WHERE a IN ({marks}) AND b IN ({marks})", old_ids + old_ids)]:
                 c.execute(
-                    "INSERT INTO mem_links(a, b, relation, layer, reason, created_at) "
-                    "VALUES (?,?,?,?,?,?)",
+                    "INSERT INTO mem_links("
+                    "a, b, relation, layer, reason, created_at, valid_from, valid_to, "
+                    "valid_to_recorded_at, ingested_at, expired_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         memory_remap[ln["a"]], memory_remap[ln["b"]],
-                        ln["relation"], ln["layer"], ln["reason"], ln["created_at"],
+                        ln["relation"], ln["layer"],
+                        _remap_memory_ids_in_text(ln["reason"]), ln["created_at"],
+                        ln["valid_from"], ln["valid_to"], ln["valid_to_recorded_at"],
+                        ln["ingested_at"], ln["expired_at"],
                     ),
                 )
 
@@ -3008,11 +3417,15 @@ class MemoryService:
                     continue
                 c.execute(
                     "INSERT INTO code_memory_links(id, repo_id, symbol_id, memory_id, "
-                    "relation, confidence, created_at) VALUES (?,?,?,?,?,?,?)",
+                    "relation, confidence, created_at, valid_from, valid_to, "
+                    "valid_to_recorded_at, ingested_at, expired_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         ids.new_id("edge"), repo_remap[link["repo_id"]],
                         new_symbol, new_memory, link["relation"],
-                        link["confidence"], link["created_at"],
+                        link["confidence"], link["created_at"], link["valid_from"],
+                        link["valid_to"], link["valid_to_recorded_at"],
+                        link["ingested_at"], link["expired_at"],
                     ),
                 )
 
@@ -3252,58 +3665,645 @@ class MemoryService:
                 raise ValidationError("expected_count must be an integer")
             if expected_count < 0:
                 raise ValidationError("expected_count must be non-negative")
-        return self.store.verify_receipts(
-            workspace_id=wid,
-            expected_head=expected_head,
-            expected_count=expected_count,
+        return self._safe_receipt_verification(
+            self.store.verify_receipts(
+                workspace_id=wid,
+                expected_head=expected_head,
+                expected_count=expected_count,
+            )
         )
 
+    @staticmethod
+    def _redacted_receipt_value(value: Any) -> str:
+        raw = value if isinstance(value, str) else str(value or "")
+        return "redacted_sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _safe_receipt_id(cls, value: Any, *, allow_empty: bool = False) -> str:
+        raw = value if isinstance(value, str) else str(value or "")
+        if allow_empty and not raw:
+            return ""
+        if _RECEIPT_ID_RE.fullmatch(raw):
+            return raw
+        return cls._redacted_receipt_value(raw)
+
+    @classmethod
+    def _safe_receipt_hash(cls, value: Any, *, allow_empty: bool = False) -> str:
+        raw = value if isinstance(value, str) else str(value or "")
+        if allow_empty and not raw:
+            return ""
+        if _RECEIPT_HASH_RE.fullmatch(raw):
+            return raw
+        return cls._redacted_receipt_value(raw)
+
+    @classmethod
+    def _safe_receipt_verification(cls, value: Any) -> dict:
+        """Project Store verification onto a fixed, content-free public schema."""
+        raw = value if isinstance(value, dict) else {}
+        errors: list[dict] = []
+        raw_errors = raw.get("errors")
+        if isinstance(raw_errors, list):
+            for item in raw_errors:
+                item = item if isinstance(item, dict) else {}
+                index = item.get("index")
+                if type(index) is not int or index < 0:
+                    index = 0
+                error = item.get("error")
+                if (
+                    not isinstance(error, str)
+                    or error not in _RECEIPT_VERIFICATION_ERRORS
+                ):
+                    error = cls._redacted_receipt_value(error)
+                errors.append({
+                    "index": index,
+                    "id": cls._safe_receipt_id(
+                        item.get("id"), allow_empty=True
+                    ),
+                    "error": error,
+                })
+        count = raw.get("count")
+        if type(count) is not int or count < 0:
+            count = 0
+        return {
+            "valid": raw.get("valid") is True and not errors,
+            "count": count,
+            "head": cls._safe_receipt_hash(
+                raw.get("head"), allow_empty=True
+            ),
+            "anchored": raw.get("anchored") is True,
+            "errors": errors,
+        }
+
     def export_receipts(self, *, workspace: str) -> dict:
-        """Export only public receipt payloads and chain hashes."""
-        out = self.receipt_log(workspace=workspace, limit=10_000)
-        out["verification"] = self.verify_receipts(workspace=workspace)
-        return out
+        """Export every public receipt payload and chain hash.
 
-    def export_workspace(self, *, workspace: str, recovery: bool = False) -> dict:
-        """Full bi-temporal dump of one workspace — memories (live *and* superseded),
-        sessions, and the audit trail. The compliance story in one artifact: nothing is
-        ever silently deleted, and the export proves it. Scope-checked like any other
-        read. Raw owner data portability is part of the local core; hosted signed and
-        formatted compliance reports are separate Cloud features."""
+        ``receipt_log`` is deliberately a bounded inspection view. An export must not
+        silently inherit that 10,000-row ceiling because the omitted prefix is part of
+        both the chain and its independent count/head anchor.
+        """
+        conn = self.store.conn
+        owns_transaction = not conn.transaction_owned_by_current_thread()
+        if owns_transaction:
+            conn.execute("BEGIN")
+        try:
+            wid, _ = self._require_scope(workspace, None)
+            result = {
+                "format": "engraphis-receipts/1",
+                "workspace_digest": hashlib.sha256(wid.encode("utf-8")).hexdigest()[:24],
+                "entries": self._complete_receipt_rows(wid),
+                "complete": True,
+                "verification": self._safe_receipt_verification(
+                    self.store.verify_receipts(workspace_id=wid)
+                ),
+            }
+            if owns_transaction and conn.transaction_owned_by_current_thread():
+                conn.commit()
+            return result
+        except BaseException:
+            if owns_transaction and conn.transaction_owned_by_current_thread():
+                conn.rollback()
+            raise
 
+    def _complete_receipt_rows(self, workspace_id: str) -> list[dict]:
+        """Return the complete receipt chain in predecessor order.
+
+        Invalid/tampered payloads are represented instead of being dropped. That keeps
+        export counts honest and lets the verification result explain the corruption,
+        without reflecting arbitrary database text into a supposedly privacy-safe export.
+        """
+        rows = list(self.store._receipt_chain_state(workspace_id)["rows"])
+        return [_public_receipt_row(dict(row)) for row in rows]
+
+    def export_workspace(self, *, workspace: str, recovery: bool = False,
+                         canonical: bool = False) -> dict:
+        """Return one internally consistent portable workspace snapshot.
+
+        A caller-owned transaction is never committed or rolled back here. Otherwise a
+        read transaction spans every constituent table and the receipt verification, so a
+        concurrent writer cannot produce a canonical digest of mutually impossible states.
+        """
+        conn = self.store.conn
+        owns_transaction = not conn.transaction_owned_by_current_thread()
+        if owns_transaction:
+            conn.execute("BEGIN")
+        try:
+            result = self._export_workspace_snapshot(
+                workspace=workspace,
+                recovery=recovery,
+                canonical=canonical,
+            )
+            if owns_transaction and conn.transaction_owned_by_current_thread():
+                conn.commit()
+            return result
+        except BaseException:
+            if owns_transaction and conn.transaction_owned_by_current_thread():
+                conn.rollback()
+            raise
+
+    def _export_workspace_snapshot(self, *, workspace: str, recovery: bool = False,
+                                   canonical: bool = False) -> dict:
+        """Portable dump of durable workspace state, including bi-temporal history.
+
+        Version 2 expands the original memory/session/audit export to the durable graph,
+        code, evidence, incidence, event, link, and receipt tables required to reconstruct
+        the workspace. Regenerable search indexes and process-local maintenance state are
+        explicitly disclosed as omitted. Authenticated non-admin callers receive shared
+        records plus only their own session-private records; every derivative reference is
+        filtered through that same boundary.
+        """
+
+        del recovery  # compatibility flag; local portability itself has no plan gate
         wid, _ = self._require_scope(workspace, None)
         conn = self.store.conn
-        user = _authenticated_principal()
-        if user is None:
-            memory_visibility = ""
-            session_visibility = ""
-            visibility_params: list[Any] = []
+        principal = _authenticated_principal()
+        principal_scoped = principal is not None and principal.get("role") != "admin"
+
+        workspace_row = dict(conn.execute(
+            "SELECT * FROM workspaces WHERE id=?", (wid,)
+        ).fetchone())
+        repos = [dict(row) for row in conn.execute(
+            "SELECT * FROM repos WHERE workspace_id=? ORDER BY id", (wid,)
+        ).fetchall()]
+        repo_ids = {str(row["id"]) for row in repos}
+
+        all_sessions = [dict(row) for row in conn.execute(
+            "SELECT * FROM sessions WHERE workspace_id=? ORDER BY id", (wid,)
+        ).fetchall()]
+        if principal_scoped:
+            sessions = [
+                row for row in all_sessions
+                if str(row.get("user_id") or "") == principal["id"]
+            ]
         else:
-            memory_visibility = (
-                " AND (COALESCE(m.scope, 'workspace')!='session' OR EXISTS ("
-                "SELECT 1 FROM sessions visible_session WHERE visible_session.id=m.session_id "
-                "AND visible_session.user_id=?))"
+            sessions = all_sessions
+        session_ids = {str(row["id"]) for row in sessions}
+
+        all_memories = [dict(row) for row in conn.execute(
+            "SELECT * FROM memories WHERE workspace_id=? ORDER BY id", (wid,)
+        ).fetchall()]
+        if principal_scoped:
+            memories = [
+                row for row in all_memories
+                if (
+                    str(row.get("scope") or "workspace") != "session"
+                    or str(row.get("session_id") or "") in session_ids
+                )
+            ]
+        else:
+            memories = all_memories
+        memory_ids = {str(row["id"]) for row in memories}
+
+        all_entities = [dict(row) for row in conn.execute(
+            "SELECT * FROM entities WHERE workspace_id=? ORDER BY id", (wid,)
+        ).fetchall()]
+        workspace_entity_ids = {str(row["id"]) for row in all_entities}
+        all_edges = [dict(row) for row in conn.execute(
+            "SELECT * FROM edges WHERE workspace_id=? ORDER BY id", (wid,)
+        ).fetchall()]
+        all_supports = [dict(row) for row in conn.execute(
+            "SELECT support.* FROM edge_supports support "
+            "JOIN edges edge ON edge.id=support.edge_id "
+            "WHERE edge.workspace_id=? "
+            "ORDER BY support.edge_id, support.memory_id, support.source_kind, support.id",
+            (wid,),
+        ).fetchall()]
+        supports_by_edge: dict[str, list[dict]] = {}
+        for support in all_supports:
+            supports_by_edge.setdefault(str(support["edge_id"]), []).append(support)
+
+        def _json_memory_references(raw: Any) -> set[str]:
+            try:
+                value = json.loads(raw or "{}") if isinstance(raw, str) else raw
+            except (TypeError, ValueError, RecursionError):
+                return set()
+            found: set[str] = set()
+
+            def walk(item: Any) -> None:
+                if isinstance(item, dict):
+                    for child in item.values():
+                        walk(child)
+                elif isinstance(item, (list, tuple)):
+                    for child in item:
+                        walk(child)
+                elif isinstance(item, str) and item.startswith("mem_"):
+                    found.add(item)
+
+            walk(value)
+            return found
+
+        if principal_scoped:
+            edges = []
+            for edge in all_edges:
+                if (
+                    str(edge.get("src") or "") not in workspace_entity_ids
+                    or str(edge.get("dst") or "") not in workspace_entity_ids
+                ):
+                    continue
+                edge_supports = supports_by_edge.get(str(edge["id"]), [])
+                visible_supports = [
+                    row for row in edge_supports
+                    if str(row.get("memory_id") or "") in memory_ids
+                ]
+                provenance_refs = _json_memory_references(edge.get("provenance"))
+                if edge_supports and not visible_supports:
+                    continue
+                if (
+                    not edge_supports
+                    and provenance_refs
+                    and provenance_refs.isdisjoint(memory_ids)
+                ):
+                    continue
+                edges.append(edge)
+        else:
+            edges = all_edges
+        edge_ids = {str(row["id"]) for row in edges}
+        edge_supports = [
+            row for row in all_supports
+            if (
+                str(row.get("edge_id") or "") in edge_ids
+                and str(row.get("memory_id") or "") in memory_ids
             )
-            session_visibility = " AND user_id=?"
-            visibility_params = [user["id"]]
-        memories = [dict(r) for r in conn.execute(
-            "SELECT m.* FROM memories m WHERE m.workspace_id=?" + memory_visibility
-            + " ORDER BY m.rowid", (wid, *visibility_params))]
-        sessions = [dict(r) for r in conn.execute(
-            "SELECT * FROM sessions WHERE workspace_id=?" + session_visibility
-            + " ORDER BY rowid", (wid, *visibility_params))]
-        audit = [dict(r) for r in conn.execute(
-            "SELECT a.* FROM audit a JOIN memories m ON m.id = a.target "
-            "WHERE m.workspace_id=?" + memory_visibility + " ORDER BY a.ts",
-            (wid, *visibility_params))]
-        receipts = self.store.list_receipts(workspace_id=wid, limit=10_000)
-        import time as _time
-        return {"format": "engraphis-export/1", "exported_at": _time.time(),
-                "workspace": workspace, "counts": {"memories": len(memories),
-                "sessions": len(sessions), "audit": len(audit),
-                "receipts": len(receipts)},
-                "memories": memories, "sessions": sessions, "audit": audit,
-                "receipts": receipts}
+        ]
+
+        all_incidence = [dict(row) for row in conn.execute(
+            "SELECT * FROM memory_entities WHERE workspace_id=? "
+            "ORDER BY memory_id, entity_id, source_kind, id",
+            (wid,),
+        ).fetchall()]
+        memory_entities = [
+            row for row in all_incidence
+            if (
+                str(row.get("memory_id") or "") in memory_ids
+                and str(row.get("entity_id") or "") in workspace_entity_ids
+            )
+        ]
+        if principal_scoped:
+            entity_ids = {
+                str(edge["src"]) for edge in edges
+            } | {
+                str(edge["dst"]) for edge in edges
+            } | {
+                str(row["entity_id"]) for row in memory_entities
+            }
+            entities = [
+                row for row in all_entities if str(row["id"]) in entity_ids
+            ]
+        else:
+            entities = all_entities
+            entity_ids = workspace_entity_ids
+
+        # A malformed/cross-workspace endpoint is not portable workspace state.
+        edges = [
+            row for row in edges
+            if str(row.get("src") or "") in entity_ids
+            and str(row.get("dst") or "") in entity_ids
+        ]
+        edge_ids = {str(row["id"]) for row in edges}
+        edge_supports = [
+            row for row in edge_supports
+            if str(row.get("edge_id") or "") in edge_ids
+        ]
+        memory_entities = [
+            row for row in memory_entities
+            if str(row.get("entity_id") or "") in entity_ids
+        ]
+
+        memory_links = [dict(row) for row in conn.execute(
+            "SELECT link.* FROM mem_links link "
+            "JOIN memories left_memory ON left_memory.id=link.a "
+            "JOIN memories right_memory ON right_memory.id=link.b "
+            "WHERE left_memory.workspace_id=? AND right_memory.workspace_id=? "
+            "ORDER BY link.a, link.b, link.relation, link.layer, link.created_at",
+            (wid, wid),
+        ).fetchall()]
+        memory_links = [
+            row for row in memory_links
+            if str(row.get("a") or "") in memory_ids
+            and str(row.get("b") or "") in memory_ids
+        ]
+
+        if repo_ids:
+            symbols = [dict(row) for row in conn.execute(
+                "SELECT symbol.* FROM symbols symbol "
+                "JOIN repos repo ON repo.id=symbol.repo_id "
+                "WHERE repo.workspace_id=? ORDER BY symbol.id",
+                (wid,),
+            ).fetchall()]
+            code_edges = [dict(row) for row in conn.execute(
+                "SELECT edge.* FROM code_edges edge "
+                "JOIN repos repo ON repo.id=edge.repo_id "
+                "WHERE repo.workspace_id=? ORDER BY edge.id",
+                (wid,),
+            ).fetchall()]
+            code_files = [dict(row) for row in conn.execute(
+                "SELECT file.* FROM code_files file "
+                "JOIN repos repo ON repo.id=file.repo_id "
+                "WHERE repo.workspace_id=? ORDER BY file.repo_id, file.file",
+                (wid,),
+            ).fetchall()]
+            code_memory_links = [dict(row) for row in conn.execute(
+                "SELECT link.* FROM code_memory_links link "
+                "JOIN repos repo ON repo.id=link.repo_id "
+                "WHERE repo.workspace_id=? ORDER BY link.id",
+                (wid,),
+            ).fetchall()]
+        else:
+            symbols = []
+            code_edges = []
+            code_files = []
+            code_memory_links = []
+        symbol_ids = {str(row["id"]) for row in symbols}
+        code_memory_links = [
+            row for row in code_memory_links
+            if (
+                str(row.get("memory_id") or "") in memory_ids
+                and str(row.get("symbol_id") or "") in symbol_ids
+            )
+        ]
+
+        events = [dict(row) for row in conn.execute(
+            "SELECT * FROM events WHERE workspace_id=? ORDER BY id", (wid,)
+        ).fetchall()]
+        if principal_scoped:
+            events = [
+                row for row in events
+                if (
+                    not row.get("session_id")
+                    or str(row["session_id"]) in session_ids
+                )
+            ]
+        event_ids = {str(row["id"]) for row in events}
+
+        audit_by_id: dict[str, dict] = {}
+        for row in conn.execute(
+            "SELECT audit.* FROM audit audit "
+            "JOIN memories memory ON memory.id=audit.target "
+            "WHERE memory.workspace_id=? "
+            "UNION ALL SELECT audit.* FROM audit audit WHERE audit.target=?",
+            (wid, wid),
+        ).fetchall():
+            item = dict(row)
+            if (
+                (not principal_scoped and item["target"] == wid)
+                or str(item["target"]) in memory_ids
+            ):
+                audit_by_id[str(item["id"])] = item
+        audit = sorted(
+            audit_by_id.values(),
+            key=lambda row: (
+                float(row.get("ts") or 0.0),
+                str(row.get("id") or ""),
+            ),
+        )
+        audit_ids = {str(row["id"]) for row in audit}
+
+        receipts = self._complete_receipt_rows(wid)
+        receipt_ids = {str(row.get("id") or "") for row in receipts}
+        receipt_chain_row = conn.execute(
+            "SELECT receipt_count, head_hash, integrity_error, updated_at "
+            "FROM receipt_chain_heads WHERE workspace_id=?",
+            (wid,),
+        ).fetchone()
+        receipt_chain = dict(receipt_chain_row) if receipt_chain_row is not None else None
+        if receipt_chain is not None:
+            raw_count = receipt_chain.get("receipt_count")
+            if type(raw_count) is not int or raw_count < 0:
+                receipt_chain["receipt_count"] = None
+            raw_updated_at = receipt_chain.get("updated_at")
+            if (
+                type(raw_updated_at) not in (int, float)
+                or not math.isfinite(float(raw_updated_at))
+            ):
+                receipt_chain["updated_at"] = None
+            raw_error = str(receipt_chain.get("integrity_error") or "")
+            if raw_error not in {
+                "", "pre_append_anchor_mismatch", "pre_append_anchor_missing",
+                "pre_append_chain_corruption", "migration_chain_invalid",
+            }:
+                receipt_chain["integrity_error"] = self._redacted_receipt_value(
+                    raw_error
+                )
+            receipt_chain["head_hash"] = self._safe_receipt_hash(
+                receipt_chain.get("head_hash"), allow_empty=True
+            )
+        receipt_verification = self._safe_receipt_verification(
+            self.store.verify_receipts(workspace_id=wid)
+        )
+
+        # Scrub structured references that point outside the export boundary. This is
+        # essential for Team exports: dropping a private memory while leaving its id in
+        # provenance, incidence, or event refs is still a privacy leak.
+        allowed_reference_ids = {
+            wid,
+            *repo_ids,
+            *session_ids,
+            *memory_ids,
+            *entity_ids,
+            *edge_ids,
+            *symbol_ids,
+            *event_ids,
+            *audit_ids,
+            *receipt_ids,
+            *(str(row.get("id") or "") for row in edge_supports),
+            *(str(row.get("id") or "") for row in memory_entities),
+            *(str(row.get("id") or "") for row in code_edges),
+            *(str(row.get("id") or "") for row in code_memory_links),
+        }
+        typed_reference = re.compile(
+            r"^(?:ws|repo|ses|mem|ent|edg|sym|evt|job|aud|dev|rcpt)_[A-Za-z0-9_-]+$"
+        )
+        embedded_reference = re.compile(
+            r"(?:ws|repo|ses|mem|ent|edg|sym|evt|job|aud|dev|rcpt)_[A-Za-z0-9_-]+"
+        )
+        dropped = object()
+
+        def scrub_value(value: Any) -> Any:
+            if isinstance(value, dict):
+                clean: dict = {}
+                for key, child in value.items():
+                    scrubbed = scrub_value(child)
+                    if scrubbed is not dropped:
+                        clean[key] = scrubbed
+                return clean
+            if isinstance(value, list):
+                return [
+                    scrubbed for child in value
+                    if (scrubbed := scrub_value(child)) is not dropped
+                ]
+            if isinstance(value, tuple):
+                return scrub_value(list(value))
+            if isinstance(value, str):
+                if typed_reference.fullmatch(value) and value not in allowed_reference_ids:
+                    return dropped
+                return embedded_reference.sub(
+                    lambda match: (
+                        "[redacted]"
+                        if match.group(0) not in allowed_reference_ids
+                        else match.group(0)
+                    ),
+                    value,
+                )
+            return value
+
+        def scrub_json(raw: Any, default: Any) -> Any:
+            if not isinstance(raw, str):
+                return raw
+            try:
+                value = json.loads(raw)
+            except (TypeError, ValueError, RecursionError):
+                return embedded_reference.sub(
+                    lambda match: (
+                        "[redacted]"
+                        if match.group(0) not in allowed_reference_ids
+                        else match.group(0)
+                    ),
+                    raw,
+                )
+            clean = scrub_value(value)
+            if clean is dropped:
+                clean = default
+            if not canonical and clean == value:
+                return raw
+            return json.dumps(
+                clean,
+                sort_keys=canonical,
+                separators=(",", ":") if canonical else None,
+                ensure_ascii=False,
+            )
+
+        workspace_row["settings"] = scrub_json(workspace_row.get("settings"), {})
+        if principal_scoped:
+            try:
+                public_settings = json.loads(workspace_row.get("settings") or "{}")
+            except (TypeError, ValueError, RecursionError):
+                public_settings = {}
+            if isinstance(public_settings, dict):
+                public_settings.pop("owner", None)
+                workspace_row["settings"] = json.dumps(
+                    public_settings,
+                    sort_keys=canonical,
+                    separators=(",", ":") if canonical else None,
+                    ensure_ascii=False,
+                )
+            # Do not expose server-local placement or credential-bearing remote URLs to a
+            # remote Team member. Code/file records remain fully portable.
+            for repo in repos:
+                repo["root_path"] = None
+                repo["vcs_remote"] = None
+        for repo in repos:
+            repo["settings"] = scrub_json(repo.get("settings"), {})
+        for session in sessions:
+            session["open_threads"] = scrub_json(session.get("open_threads"), [])
+        for memory in memories:
+            if str(memory.get("session_id") or "") not in session_ids:
+                memory["session_id"] = None
+            memory["keywords"] = scrub_json(memory.get("keywords"), [])
+            memory["metadata"] = scrub_json(memory.get("metadata"), {})
+            memory["provenance"] = scrub_json(memory.get("provenance"), {})
+        for entity in entities:
+            if str(entity.get("canonical_id") or "") not in entity_ids:
+                entity["canonical_id"] = entity["id"]
+        for edge in edges:
+            edge["provenance"] = scrub_json(edge.get("provenance"), {})
+        for support in edge_supports:
+            support["provenance"] = scrub_json(support.get("provenance"), {})
+        for incidence in memory_entities:
+            incidence["provenance"] = scrub_json(incidence.get("provenance"), {})
+        for event in events:
+            event["refs"] = scrub_json(event.get("refs"), [])
+        for item in audit:
+            item["detail"] = embedded_reference.sub(
+                lambda match: (
+                    "[redacted]"
+                    if match.group(0) not in allowed_reference_ids
+                    else match.group(0)
+                ),
+                str(item.get("detail") or ""),
+            )
+
+        table_rows = {
+            "repos": repos,
+            "sessions": sessions,
+            "memories": memories,
+            "entities": entities,
+            "edges": edges,
+            "edge_supports": edge_supports,
+            "memory_entities": memory_entities,
+            "memory_links": memory_links,
+            "symbols": symbols,
+            "code_edges": code_edges,
+            "code_files": code_files,
+            "code_memory_links": code_memory_links,
+            "events": events,
+            "audit": audit,
+            "receipts": receipts,
+        }
+        payload = {
+            "format": "engraphis-export/2",
+            "workspace": workspace,
+            "workspace_record": workspace_row,
+            "schema_version": self.store.schema_version,
+            "visibility": "principal" if principal_scoped else "workspace",
+            "counts": {
+                name: len(rows) for name, rows in table_rows.items()
+            },
+            "ordering": {
+                "repos": ["id"],
+                "sessions": ["id"],
+                "memories": ["id"],
+                "entities": ["id"],
+                "edges": ["id"],
+                "edge_supports": [
+                    "edge_id", "memory_id", "source_kind", "id",
+                ],
+                "memory_entities": [
+                    "memory_id", "entity_id", "source_kind", "id",
+                ],
+                "memory_links": [
+                    "a", "b", "relation", "layer", "created_at",
+                ],
+                "symbols": ["id"],
+                "code_edges": ["id"],
+                "code_files": ["repo_id", "file"],
+                "code_memory_links": ["id"],
+                "events": ["id"],
+                "audit": ["ts", "id"],
+                "receipts": [
+                    "verified predecessor order; deterministic digest order if corrupt",
+                ],
+            },
+            "completeness": {
+                "durable_workspace_state": True,
+                "receipts": True,
+                "omitted_nonportable_or_regenerable_tables": [
+                    "mem_fts",
+                    "mem_vectors",
+                    "mem_vec_ann",
+                    "jobs",
+                    "graph_index_state",
+                ],
+            },
+            **table_rows,
+            "receipt_chain": receipt_chain,
+            "receipt_verification": receipt_verification,
+        }
+        if canonical:
+            # The table queries and filters above already use their declared stable
+            # ordering. The digest intentionally excludes wall-clock export time.
+            payload["canonical"] = True
+            encoded = json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                default=str,
+            ).encode("utf-8")
+            return {
+                **payload,
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+            }
+        payload["exported_at"] = time.time()
+        return payload
 
     def _recover_stale_graph_jobs(self, workspace_id: Optional[str] = None) -> int:
         """Fail expired process-local workers and release their rebuilding gate.
@@ -3383,7 +4383,9 @@ class MemoryService:
         ).fetchone()
         if row is None:
             return {
-                "generation": self.store.schema_version,
+                # Graph generations are write-trigger revisions, independent
+                # of the database schema version.
+                "generation": 0,
                 "state": "ready",
                 "active_job_id": None,
                 "updated_at": None,
@@ -3904,6 +4906,8 @@ class MemoryService:
 
     def _graph_scene_rows(self, *, workspace: str, repo: Optional[str] = None,
                           as_of: Optional[float] = None,
+                          valid_at: Optional[float] = None,
+                          known_at: Optional[float] = None,
                           entity_types: Optional[list[str]] = None,
                           memory_types: Optional[list[str]] = None,
                           time_from: Optional[float] = None,
@@ -3924,6 +4928,8 @@ class MemoryService:
                 workspace=clean_workspace,
                 repo=repo,
                 as_of=as_of,
+                valid_at=valid_at,
+                known_at=known_at,
                 entity_types=entity_types,
                 memory_types=memory_types,
                 time_from=time_from,
@@ -3933,7 +4939,7 @@ class MemoryService:
                 include_complete_rows=include_complete_rows,
             )
             index_info = self._graph_index_info(rows[1]) if rows[1] else {
-                "generation": self.store.schema_version,
+                "generation": 0,
                 "state": "ready",
                 "active_job_id": None,
                 "updated_at": None,
@@ -3949,6 +4955,8 @@ class MemoryService:
 
     def _graph_scene_rows_unlocked(self, *, workspace: str, repo: Optional[str] = None,
                                    as_of: Optional[float] = None,
+                                   valid_at: Optional[float] = None,
+                                   known_at: Optional[float] = None,
                                    entity_types: Optional[list[str]] = None,
                                    memory_types: Optional[list[str]] = None,
                                    time_from: Optional[float] = None,
@@ -3986,12 +4994,12 @@ class MemoryService:
             repo_id = self._lookup_repo(wid, repo_name)
             if repo_id is None:
                 raise ValidationError(f"no repo named '{repo_name}' in workspace '{ws}'")
-        try:
-            t = float(as_of) if as_of is not None else time.time()
-        except (TypeError, ValueError, OverflowError):
-            raise ValidationError("as_of must be a finite timestamp")
-        if not math.isfinite(t):
-            raise ValidationError("as_of must be a finite timestamp")
+        as_of, valid_at, known_at = _temporal_anchors(
+            as_of=as_of, valid_at=valid_at, known_at=known_at
+        )
+        present = time.time()
+        t = valid_at if valid_at is not None else present
+        known_t = known_at if known_at is not None else present
         try:
             lower_time = float(time_from) if time_from is not None else None
             upper_time = float(time_to) if time_to is not None else None
@@ -4007,8 +5015,9 @@ class MemoryService:
             "normalized_name, canonical_method, canonical_confidence, created_at "
             "FROM entities entity WHERE workspace_id=? AND "
             + _graph_entity_visibility_sql("entity", at=t)
+            + " AND (created_at IS NULL OR created_at<=?)"
         )
-        entity_params: list[Any] = [wid]
+        entity_params: list[Any] = [wid, known_t]
         if repo_id:
             entity_sql += " AND (repo_id=? OR repo_id IS NULL)"
             entity_params.append(repo_id)
@@ -4037,9 +5046,12 @@ class MemoryService:
             "SELECT id, workspace_id, repo_id, src, dst, relation, layer, weight, "
             "valid_from, valid_to, ingested_at, expired_at, provenance FROM edges "
             "WHERE workspace_id=? AND (valid_from IS NULL OR valid_from<=?) "
-            "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL"
+            "AND (valid_to IS NULL OR ?<valid_to "
+            "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at)) "
+            "AND (ingested_at IS NULL OR ingested_at<=?) "
+            "AND (expired_at IS NULL OR ?<expired_at)"
         )
-        edge_params: list[Any] = [wid, t, t]
+        edge_params: list[Any] = [wid, t, t, known_t, known_t, known_t]
         if repo_id:
             edge_sql += " AND (repo_id=? OR repo_id IS NULL)"
             edge_params.append(repo_id)
@@ -4070,14 +5082,23 @@ class MemoryService:
                 "JOIN memories graph_memory ON graph_memory.id=graph_support.memory_id "
                 "WHERE graph_support.edge_id=edges.id "
                 "AND (graph_support.valid_from IS NULL OR graph_support.valid_from<=?) "
-                "AND (graph_support.valid_to IS NULL OR ?<graph_support.valid_to) "
-                "AND graph_support.expired_at IS NULL "
+                "AND (graph_support.valid_to IS NULL OR ?<graph_support.valid_to "
+                "OR (graph_support.valid_to_recorded_at IS NOT NULL "
+                "AND ?<graph_support.valid_to_recorded_at)) "
+                "AND (graph_support.ingested_at IS NULL OR graph_support.ingested_at<=?) "
+                "AND (graph_support.expired_at IS NULL OR ?<graph_support.expired_at) "
                 "AND graph_memory.workspace_id=? "
                 "AND (graph_memory.valid_from IS NULL OR graph_memory.valid_from<=?) "
-                "AND (graph_memory.valid_to IS NULL OR ?<graph_memory.valid_to) "
-                "AND graph_memory.expired_at IS NULL"
+                "AND (graph_memory.valid_to IS NULL OR ?<graph_memory.valid_to "
+                "OR (graph_memory.valid_to_recorded_at IS NOT NULL "
+                "AND ?<graph_memory.valid_to_recorded_at)) "
+                "AND (graph_memory.ingested_at IS NULL OR graph_memory.ingested_at<=?) "
+                "AND (graph_memory.expired_at IS NULL OR ?<graph_memory.expired_at)"
             )
-            edge_params.extend((t, t, wid, t, t))
+            edge_params.extend((
+                t, t, known_t, known_t, known_t,
+                wid, t, t, known_t, known_t, known_t,
+            ))
             if restrict_sessions:
                 edge_sql += " AND COALESCE(graph_memory.scope, 'workspace')!='session'"
             if clean_memory_types:
@@ -4106,6 +5127,46 @@ class MemoryService:
                 "graph analysis exceeds the relation candidate limit; filter by repository"
             )
 
+        # ``_graph_entity_visibility_sql`` classifies session privacy across the full
+        # history, but it cannot decide whether the public evidence was known at this
+        # particular pair of anchors. Remove evidence-bearing identities with no
+        # temporally visible touching relation; truly manual/isolated entities remain.
+        touching_sql = (
+            "SELECT src, dst FROM edges WHERE workspace_id=?"
+        )
+        touching_params: list[Any] = [wid]
+        if repo_id:
+            touching_sql += " AND (repo_id=? OR repo_id IS NULL)"
+            touching_params.append(repo_id)
+        touching_ids = {
+            str(row[key])
+            for row in self.store.conn.execute(
+                touching_sql, touching_params
+            ).fetchall()
+            for key in ("src", "dst")
+            if row[key]
+        }
+        visible_endpoint_ids = {
+            str(edge[key])
+            for edge in edge_rows
+            for key in ("src", "dst")
+            if edge.get(key)
+        }
+        canonical_by_id = {
+            str(entity["id"]): str(entity.get("canonical_id") or entity["id"])
+            for entity in entity_rows
+        }
+        visible_canonical_ids = {
+            canonical_by_id.get(entity_id, entity_id)
+            for entity_id in visible_endpoint_ids
+        }
+        entity_rows = [
+            entity for entity in entity_rows
+            if str(entity["id"]) not in touching_ids
+            or canonical_by_id.get(str(entity["id"]), str(entity["id"]))
+            in visible_canonical_ids
+        ]
+
         if include_code:
             repo_sql = "SELECT id, name FROM repos WHERE workspace_id=?"
             repo_params: list[Any] = [wid]
@@ -4119,8 +5180,16 @@ class MemoryService:
                 remaining_entities = MAX_GRAPH_ANALYSIS_ENTITIES - len(entity_rows)
                 symbol_rows = [dict(row) for row in self.store.conn.execute(
                     "SELECT id, kind, name, fqname, file FROM symbols "
-                    "WHERE repo_id=? ORDER BY id LIMIT ?",
-                    (repo_row["id"], remaining_entities + 1),
+                    "WHERE repo_id=? AND (valid_from IS NULL OR valid_from<=?) "
+                    "AND (valid_to IS NULL OR ?<valid_to "
+                    "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at)) "
+                    "AND (ingested_at IS NULL OR ingested_at<=?) "
+                    "AND (expired_at IS NULL OR ?<expired_at) "
+                    "ORDER BY id LIMIT ?",
+                    (
+                        repo_row["id"], t, t, known_t, known_t, known_t,
+                        remaining_entities + 1,
+                    ),
                 ).fetchall()]
                 if len(symbol_rows) > remaining_entities:
                     if include_complete_rows:
@@ -4151,8 +5220,16 @@ class MemoryService:
                 remaining_edges = MAX_GRAPH_ANALYSIS_EDGES - len(edge_rows)
                 code_edges = self.store.conn.execute(
                     "SELECT id, src, dst, relation, layer FROM code_edges "
-                    "WHERE repo_id=? ORDER BY id LIMIT ?",
-                    (repo_row["id"], remaining_edges + 1),
+                    "WHERE repo_id=? AND (valid_from IS NULL OR valid_from<=?) "
+                    "AND (valid_to IS NULL OR ?<valid_to "
+                    "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at)) "
+                    "AND (ingested_at IS NULL OR ingested_at<=?) "
+                    "AND (expired_at IS NULL OR ?<expired_at) "
+                    "ORDER BY id LIMIT ?",
+                    (
+                        repo_row["id"], t, t, known_t, known_t, known_t,
+                        remaining_edges + 1,
+                    ),
                 ).fetchall()
                 if len(code_edges) > remaining_edges:
                     if include_complete_rows:
@@ -4201,8 +5278,12 @@ class MemoryService:
         # Bounded IN chunks avoid a second scan of the relation table while preserving
         # the exact selected edge ids. Weak co-occurrence is filtered after canonical
         # relation bundling, once its aggregate support is known.
+        scene_filter = SearchFilter(
+            workspace_id=wid, repo_id=repo_id, include_ancestors=True,
+            valid_at=t, known_at=known_t,
+        )
         support_rows = self.store.edge_supports_in_scope(
-            edge_ids, at=t, limit=MAX_GRAPH_ANALYSIS_SUPPORTS + 1
+            edge_ids, flt=scene_filter, limit=MAX_GRAPH_ANALYSIS_SUPPORTS + 1
         )
         if len(support_rows) > MAX_GRAPH_ANALYSIS_SUPPORTS:
             if include_complete_rows:
@@ -4228,9 +5309,14 @@ class MemoryService:
                 "SELECT id, mtype, COALESCE(valid_from, ingested_at, 0) AS support_time "
                 "FROM memories WHERE workspace_id=? AND id IN (" + marks + ") "
                 "AND (valid_from IS NULL OR valid_from<=?) "
-                "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL"
+                "AND (valid_to IS NULL OR ?<valid_to "
+                "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at)) "
+                "AND (ingested_at IS NULL OR ingested_at<=?) "
+                "AND (expired_at IS NULL OR ?<expired_at)"
             )
-            memory_params: list[Any] = [wid, *chunk, t, t]
+            memory_params: list[Any] = [
+                wid, *chunk, t, t, known_t, known_t, known_t,
+            ]
             memory_sql += " AND COALESCE(scope, 'workspace')!='session'"
             if clean_memory_types:
                 type_marks = ",".join("?" for _ in clean_memory_types)
@@ -4265,10 +5351,12 @@ class MemoryService:
             memory_where = [
                 "workspace_id=?",
                 "(valid_from IS NULL OR valid_from<=?)",
-                "(valid_to IS NULL OR ?<valid_to)",
-                "expired_at IS NULL",
+                "(valid_to IS NULL OR ?<valid_to "
+                "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at))",
+                "(ingested_at IS NULL OR ingested_at<=?)",
+                "(expired_at IS NULL OR ?<expired_at)",
             ]
-            memory_params: list[Any] = [wid, t, t]
+            memory_params: list[Any] = [wid, t, t, known_t, known_t, known_t]
             memory_where.append("COALESCE(scope, 'workspace')!='session'")
             if repo_id:
                 memory_where.append("(repo_id=? OR repo_id IS NULL)")
@@ -4287,7 +5375,8 @@ class MemoryService:
             memory_rows = [dict(row) for row in self.store.conn.execute(
                 "SELECT id, repo_id, session_id, scope, mtype, title, "
                 "substr(content, 1, 160) AS content, substr(summary, 1, 160) AS summary, "
-                "importance, valid_from, ingested_at, pinned FROM memories WHERE "
+                "importance, valid_from, valid_to, valid_to_recorded_at, "
+                "ingested_at, expired_at, pinned FROM memories WHERE "
                 + " AND ".join(memory_where) + " ORDER BY id LIMIT ?",
                 [*memory_params, MAX_GRAPH_COMPLETE_MEMORIES + 1],
             ).fetchall()]
@@ -4300,12 +5389,21 @@ class MemoryService:
             memory_link_rows = [dict(row) for row in self.store.conn.execute(
                 "WITH selected_memory AS (" + scoped_memory_sql + ") "
                 "SELECT links.a, links.b, links.relation, links.layer, links.reason, "
-                "links.created_at FROM mem_links links "
+                "links.created_at, links.valid_from, links.valid_to, "
+                "links.valid_to_recorded_at, links.ingested_at, links.expired_at "
+                "FROM mem_links links "
                 "JOIN selected_memory source ON source.id=links.a "
                 "JOIN selected_memory target ON target.id=links.b "
+                "WHERE (links.valid_from IS NULL OR links.valid_from<=?) "
+                "AND (links.valid_to IS NULL OR ?<links.valid_to "
+                "OR (links.valid_to_recorded_at IS NOT NULL "
+                "AND ?<links.valid_to_recorded_at)) "
+                "AND (links.ingested_at IS NULL OR links.ingested_at<=?) "
+                "AND (links.expired_at IS NULL OR ?<links.expired_at) "
                 "ORDER BY links.a, links.b, links.relation, links.layer, links.created_at "
                 "LIMIT ?",
-                [*memory_params, MAX_GRAPH_COMPLETE_MEMORY_LINKS + 1],
+                [*memory_params, t, t, known_t, known_t, known_t,
+                 MAX_GRAPH_COMPLETE_MEMORY_LINKS + 1],
             ).fetchall()]
             if len(memory_link_rows) > MAX_GRAPH_COMPLETE_MEMORY_LINKS:
                 raise GraphSceneCapacityExceeded(
@@ -4319,9 +5417,17 @@ class MemoryService:
                     "SELECT links.id, links.repo_id, links.symbol_id, links.memory_id, "
                     "links.relation, links.confidence FROM code_memory_links links "
                     "JOIN selected_memory memory ON memory.id=links.memory_id "
-                    "JOIN repos repo ON repo.id=links.repo_id WHERE repo.workspace_id=?"
+                    "JOIN repos repo ON repo.id=links.repo_id WHERE repo.workspace_id=? "
+                    "AND (links.valid_from IS NULL OR links.valid_from<=?) "
+                    "AND (links.valid_to IS NULL OR ?<links.valid_to "
+                    "OR (links.valid_to_recorded_at IS NOT NULL "
+                    "AND ?<links.valid_to_recorded_at)) "
+                    "AND (links.ingested_at IS NULL OR links.ingested_at<=?) "
+                    "AND (links.expired_at IS NULL OR ?<links.expired_at)"
                 )
-                code_params: list[Any] = [*memory_params, wid]
+                code_params: list[Any] = [
+                    *memory_params, wid, t, t, known_t, known_t, known_t,
+                ]
                 if repo_id:
                     code_sql += " AND links.repo_id=?"
                     code_params.append(repo_id)
@@ -4350,7 +5456,10 @@ class MemoryService:
                      relations: Optional[list[str]] = None,
                      entity_types: Optional[list[str]] = None,
                      memory_types: Optional[list[str]] = None,
-                     as_of: Optional[float] = None, depth: int = 1,
+                     as_of: Optional[float] = None,
+                     valid_at: Optional[float] = None,
+                     known_at: Optional[float] = None,
+                     depth: int = 1,
                      time_from: Optional[float] = None,
                      time_to: Optional[float] = None,
                     min_support: int = 1, min_confidence: float = 0.0,
@@ -4434,12 +5543,9 @@ class MemoryService:
             raise ValidationError("min_confidence must be a finite number")
         if not math.isfinite(clean_min_confidence) or not 0.0 <= clean_min_confidence <= 1.0:
             raise ValidationError("min_confidence must be between 0 and 1")
-        try:
-            clean_as_of = float(as_of) if as_of is not None else None
-        except (TypeError, ValueError, OverflowError):
-            raise ValidationError("as_of must be a finite timestamp")
-        if clean_as_of is not None and not math.isfinite(clean_as_of):
-            raise ValidationError("as_of must be a finite timestamp")
+        clean_as_of, clean_valid_at, clean_known_at = _temporal_anchors(
+            as_of=as_of, valid_at=valid_at, known_at=known_at
+        )
         try:
             clean_time_from = float(time_from) if time_from is not None else None
             clean_time_to = float(time_to) if time_to is not None else None
@@ -4460,13 +5566,16 @@ class MemoryService:
             revision, clean_workspace, clean_level, clean_center_id or "",
             clean_system_id or "", tuple(clean_seeds), clean_repo or "",
             tuple(clean_layers or ()), tuple(clean_relations), tuple(clean_entity_types),
-            tuple(clean_memory_types), clean_as_of, clean_time_from, clean_time_to,
+            tuple(clean_memory_types), clean_as_of, clean_valid_at, clean_known_at,
+            clean_time_from, clean_time_to,
             clean_depth, clean_min_support,
             clean_min_confidence, bool(include_weak_cooccurrence),
             bool(include_code), clean_node_limit, clean_edge_limit,
         )
         cached = self._graph_scene_cache.get(cache_key)
-        if cached is not None and (clean_as_of is not None or time.time() < cached[0]):
+        if cached is not None and (
+                clean_valid_at is not None or clean_known_at is not None
+                or time.time() < cached[0]):
             self._graph_scene_cache.move_to_end(cache_key)
             scene = copy.deepcopy(cached[1])
             scene["meta"]["cache_hit"] = True
@@ -4476,10 +5585,13 @@ class MemoryService:
             return scene
         if cached is not None:
             del self._graph_scene_cache[cache_key]
-        query_at = clean_as_of if clean_as_of is not None else time.time()
+        present = time.time()
+        query_at = clean_valid_at if clean_valid_at is not None else present
+        query_known_at = clean_known_at if clean_known_at is not None else present
         (ws, _wid, entities, edges, supports, memories, memory_links,
          code_memory_links, index_info) = self._graph_scene_rows(
-            workspace=clean_workspace, repo=clean_repo, as_of=query_at,
+            workspace=clean_workspace, repo=clean_repo,
+            valid_at=query_at, known_at=query_known_at,
             entity_types=clean_entity_types, memory_types=clean_memory_types,
             time_from=clean_time_from, time_to=clean_time_to,
             include_weak_cooccurrence=include_weak_cooccurrence,
@@ -4495,6 +5607,8 @@ class MemoryService:
             "entity_types": clean_entity_types,
             "memory_types": clean_memory_types,
             "as_of": clean_as_of,
+            "valid_at": clean_valid_at,
+            "known_at": clean_known_at,
             "time_from": clean_time_from,
             "time_to": clean_time_to,
             "min_support": clean_min_support,
@@ -4539,7 +5653,9 @@ class MemoryService:
                 )
             scene["meta"]["payload_bytes_estimate"] = payload_bytes
         valid_until = (
-            math.inf if clean_as_of is not None or not _wid
+            math.inf if (
+                clean_valid_at is not None or clean_known_at is not None or not _wid
+            )
             else self._graph_scene_valid_until(_wid, query_at)
         )
         # One complete scene can be many megabytes.  Keep at most one in the shared
@@ -4557,6 +5673,8 @@ class MemoryService:
                       repo: Optional[str] = None,
                       memory_types: Optional[list[str]] = None,
                       as_of: Optional[float] = None,
+                      valid_at: Optional[float] = None,
+                      known_at: Optional[float] = None,
                       time_from: Optional[float] = None,
                       time_to: Optional[float] = None,
                       include_weak_cooccurrence: bool = False) -> dict:
@@ -4580,14 +5698,18 @@ class MemoryService:
             repo_id = self._lookup_repo(wid, clean_repo)
             if repo_id is None:
                 raise ValidationError(f"no repo named '{clean_repo}' in workspace '{ws}'")
+        as_of, valid_at, known_at = _temporal_anchors(
+            as_of=as_of, valid_at=valid_at, known_at=known_at
+        )
+        present = time.time()
+        suggestion_at = valid_at if valid_at is not None else present
+        suggestion_known_at = known_at if known_at is not None else present
         try:
-            suggestion_at = float(as_of) if as_of is not None else time.time()
             lower_time = float(time_from) if time_from is not None else None
             upper_time = float(time_to) if time_to is not None else None
         except (TypeError, ValueError, OverflowError):
             raise ValidationError("graph suggestion times must be finite timestamps")
-        if (not math.isfinite(suggestion_at)
-                or (lower_time is not None and not math.isfinite(lower_time))
+        if ((lower_time is not None and not math.isfinite(lower_time))
                 or (upper_time is not None and not math.isfinite(upper_time))):
             raise ValidationError("graph suggestion times must be finite timestamps")
         if lower_time is not None and upper_time is not None and lower_time > upper_time:
@@ -4603,6 +5725,21 @@ class MemoryService:
         like = f"%{escaped}%"
         prefix = f"{escaped}%"
 
+        def visible_sql(alias: str) -> tuple[str, list[float]]:
+            prefix = f"{alias}."
+            return (
+                f"({prefix}valid_from IS NULL OR {prefix}valid_from<=?) "
+                f"AND ({prefix}valid_to IS NULL OR ?<{prefix}valid_to "
+                f"OR ({prefix}valid_to_recorded_at IS NOT NULL "
+                f"AND ?<{prefix}valid_to_recorded_at)) "
+                f"AND ({prefix}ingested_at IS NULL OR {prefix}ingested_at<=?) "
+                f"AND ({prefix}expired_at IS NULL OR ?<{prefix}expired_at)",
+                [
+                    suggestion_at, suggestion_at, suggestion_known_at,
+                    suggestion_known_at, suggestion_known_at,
+                ],
+            )
+
         # Search identity rows directly instead of rebuilding Louvain/PageRank for each
         # keystroke. A canonical entity id also resolves to its current deterministic
         # community in ``build_graph_scene``, so the same stable result can represent an
@@ -4612,8 +5749,11 @@ class MemoryService:
             "FROM entities entity WHERE workspace_id=? AND ("
             "normalized_name LIKE ? ESCAPE '\\' OR canonical_id=? OR id=?) AND "
             + _graph_entity_visibility_sql("entity", at=suggestion_at)
+            + " AND (created_at IS NULL OR created_at<=?)"
         )
-        entity_params: list[Any] = [wid, like, clean_query, clean_query]
+        entity_params: list[Any] = [
+            wid, like, clean_query, clean_query, suggestion_known_at,
+        ]
         if repo_id:
             entity_sql += " AND (repo_id=? OR repo_id IS NULL)"
             entity_params.append(repo_id)
@@ -4685,8 +5825,11 @@ class MemoryService:
                 f"FROM entities entity WHERE workspace_id=? "
                 f"AND canonical_id IN ({marks}) AND "
                 + _graph_entity_visibility_sql("entity", at=suggestion_at)
+                + " AND (created_at IS NULL OR created_at<=?)"
             )
-            member_params: list[Any] = [wid, *selected_canonical_ids]
+            member_params: list[Any] = [
+                wid, *selected_canonical_ids, suggestion_known_at,
+            ]
             if repo_id:
                 member_sql += " AND (repo_id=? OR repo_id IS NULL)"
                 member_params.append(repo_id)
@@ -4708,28 +5851,40 @@ class MemoryService:
             for start in range(0, len(member_ids), 400):
                 chunk = member_ids[start:start + 400]
                 marks = ",".join("?" for _ in chunk)
+                relation_visibility, relation_visibility_params = visible_sql("relation")
+                support_visibility, support_visibility_params = visible_sql("support")
+                memory_visibility, memory_visibility_params = visible_sql("memory")
+                temporal_visibility = (
+                    f"AND {relation_visibility} AND {support_visibility} "
+                    f"AND {memory_visibility} "
+                )
                 support_sql = (
                     "SELECT endpoint, memory_id FROM ("
                     "SELECT relation.src AS endpoint, support.memory_id FROM edges relation "
                     "JOIN edge_supports support ON support.edge_id=relation.id "
                     "JOIN memories memory ON memory.id=support.memory_id "
                     f"WHERE relation.workspace_id=? AND relation.src IN ({marks}) "
-                    "AND relation.valid_to IS NULL AND relation.expired_at IS NULL "
-                    "AND support.valid_to IS NULL AND support.expired_at IS NULL "
-                    "AND memory.valid_to IS NULL AND memory.expired_at IS NULL "
+                    + temporal_visibility +
                     "AND COALESCE(memory.scope, 'workspace')!='session' "
                     "UNION ALL "
                     "SELECT relation.dst AS endpoint, support.memory_id FROM edges relation "
                     "JOIN edge_supports support ON support.edge_id=relation.id "
                     "JOIN memories memory ON memory.id=support.memory_id "
                     f"WHERE relation.workspace_id=? AND relation.dst IN ({marks}) "
-                    "AND relation.valid_to IS NULL AND relation.expired_at IS NULL "
-                    "AND support.valid_to IS NULL AND support.expired_at IS NULL "
-                    "AND memory.valid_to IS NULL AND memory.expired_at IS NULL "
+                    + temporal_visibility +
                     "AND COALESCE(memory.scope, 'workspace')!='session')"
                 )
+                temporal_params = [
+                    *relation_visibility_params,
+                    *support_visibility_params,
+                    *memory_visibility_params,
+                ]
                 rows = self.store.conn.execute(
-                    support_sql, (wid, *chunk, wid, *chunk)
+                    support_sql,
+                    (
+                        wid, *chunk, *temporal_params,
+                        wid, *chunk, *temporal_params,
+                    ),
                 ).fetchall()
                 for row in rows:
                     canonical_id = member_to_canonical.get(str(row["endpoint"]), "")
@@ -4780,14 +5935,16 @@ class MemoryService:
         relations_out = []
         code_symbols = []
         if wid:
+            memory_visibility, memory_visibility_params = visible_sql("memories")
             memory_sql = (
                 "SELECT id, title, content, mtype, repo_id FROM memories "
-                "WHERE workspace_id=? AND (valid_from IS NULL OR valid_from<=?) "
-                "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL "
+                f"WHERE workspace_id=? AND {memory_visibility} "
                 "AND COALESCE(scope, 'workspace')!='session' "
                 "AND (lower(title) LIKE ? ESCAPE '\\' OR lower(content) LIKE ? ESCAPE '\\')"
             )
-            memory_params: list[Any] = [wid, suggestion_at, suggestion_at, like, like]
+            memory_params: list[Any] = [
+                wid, *memory_visibility_params, like, like,
+            ]
             if clean_memory_types:
                 marks = ",".join("?" for _ in clean_memory_types)
                 memory_sql += f" AND mtype IN ({marks})"
@@ -4821,11 +5978,28 @@ class MemoryService:
             relation_sql = (
                 "SELECT relation, COUNT(*) AS count FROM edges relation_edge "
                 "WHERE workspace_id=? "
-                "AND relation LIKE ? ESCAPE '\\' AND (valid_from IS NULL OR valid_from<=?) "
-                "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL AND "
-                + _graph_edge_visibility_sql("relation_edge", at=suggestion_at)
+                "AND relation LIKE ? ESCAPE '\\' "
             )
-            relation_params: list[Any] = [wid, like, suggestion_at, suggestion_at]
+            relation_visibility, relation_visibility_params = visible_sql("relation_edge")
+            support_visibility, support_visibility_params = visible_sql("suggest_support")
+            support_memory_visibility, support_memory_visibility_params = visible_sql(
+                "suggest_memory"
+            )
+            relation_sql += (
+                f"AND {relation_visibility} AND ("
+                "NOT EXISTS (SELECT 1 FROM edge_supports any_suggest_support "
+                "WHERE any_suggest_support.edge_id=relation_edge.id) OR EXISTS ("
+                "SELECT 1 FROM edge_supports suggest_support "
+                "JOIN memories suggest_memory "
+                "ON suggest_memory.id=suggest_support.memory_id "
+                "WHERE suggest_support.edge_id=relation_edge.id "
+                f"AND {support_visibility} AND {support_memory_visibility} "
+                "AND COALESCE(suggest_memory.scope, 'workspace')!='session'))"
+            )
+            relation_params: list[Any] = [
+                wid, like, *relation_visibility_params,
+                *support_visibility_params, *support_memory_visibility_params,
+            ]
             if repo_id:
                 relation_sql += " AND (repo_id=? OR repo_id IS NULL)"
                 relation_params.append(repo_id)
@@ -4842,6 +6016,9 @@ class MemoryService:
                 "OR lower(s.fqname) LIKE ? ESCAPE '\\')"
             )
             symbol_params: list[Any] = [wid, like, like]
+            symbol_visibility, symbol_visibility_params = visible_sql("s")
+            symbol_sql += f" AND {symbol_visibility}"
+            symbol_params.extend(symbol_visibility_params)
             if repo_id:
                 symbol_sql += " AND s.repo_id=?"
                 symbol_params.append(repo_id)
@@ -4855,6 +6032,7 @@ class MemoryService:
             } for row in symbol_rows]
         return {
             "workspace": ws, "query": clean_query,
+            "as_of": as_of, "valid_at": valid_at, "known_at": known_at,
             "groups": {
                 "systems": system_results, "entities": entity_results,
                 "memories": memories, "repositories": repositories,
@@ -4866,15 +6044,22 @@ class MemoryService:
                      repo: Optional[str] = None,
                      memory_types: Optional[list[str]] = None,
                      as_of: Optional[float] = None,
+                     valid_at: Optional[float] = None,
+                     known_at: Optional[float] = None,
                      time_from: Optional[float] = None,
                      time_to: Optional[float] = None,
                      include_weak_cooccurrence: bool = True) -> dict:
         clean_canonical_id = _clean_text(
             canonical_id, field="canonical_id", max_chars=MAX_NAME_CHARS
         )
+        as_of, valid_at, known_at = _temporal_anchors(
+            as_of=as_of, valid_at=valid_at, known_at=known_at
+        )
+        history_known_at = known_at if known_at is not None else time.time()
         (ws, wid, entities, edges, supports, _memories, _memory_links,
          _code_memory_links, _index_info) = self._graph_scene_rows(
             workspace=workspace, repo=repo, as_of=as_of,
+            valid_at=valid_at, known_at=known_at,
             memory_types=memory_types, time_from=time_from, time_to=time_to,
             include_weak_cooccurrence=include_weak_cooccurrence,
         )
@@ -4937,8 +6122,9 @@ class MemoryService:
                 chunk = ordered_ids[start:start + 500]
                 marks = ",".join("?" for _ in chunk)
                 for memory in self.store.conn.execute(
-                    "SELECT id, title, content, mtype, valid_from, valid_to, ingested_at, "
-                    "expired_at, provenance FROM memories WHERE workspace_id=? "
+                    "SELECT id, title, content, mtype, valid_from, valid_to, "
+                    "valid_to_recorded_at, ingested_at, expired_at, provenance "
+                    "FROM memories WHERE workspace_id=? "
                     "AND COALESCE(scope, 'workspace')!='session' "
                     "AND id IN (" + marks + ") "
                     "ORDER BY id", (wid, *chunk)
@@ -4957,6 +6143,7 @@ class MemoryService:
                         "source_kind": support.get("source_kind", "legacy_unknown"),
                         "confidence": float(support.get("confidence", 0.5)),
                         "valid_from": memory["valid_from"], "valid_to": memory["valid_to"],
+                        "valid_to_recorded_at": memory["valid_to_recorded_at"],
                         "ingested_at": memory["ingested_at"], "expired_at": memory["expired_at"],
                         "provenance": memory_provenance,
                     })
@@ -4967,11 +6154,17 @@ class MemoryService:
         ))
         member_ids = node["member_ids"]
         history_filter = (
-            "workspace_id=? AND (valid_to IS NOT NULL OR expired_at IS NOT NULL) "
+            "workspace_id=? AND (ingested_at IS NULL OR ingested_at<=?) "
+            "AND ((valid_to IS NOT NULL AND "
+            "(valid_to_recorded_at IS NULL OR valid_to_recorded_at<=?)) "
+            "OR (expired_at IS NOT NULL AND expired_at<=?)) "
             "AND (src IN (SELECT id FROM entities WHERE workspace_id=? AND canonical_id=?) "
             "OR dst IN (SELECT id FROM entities WHERE workspace_id=? AND canonical_id=?))"
         )
-        history_params: tuple[Any, ...] = (wid, wid, resolved, wid, resolved)
+        history_params: tuple[Any, ...] = (
+            wid, history_known_at, history_known_at, history_known_at,
+            wid, resolved, wid, resolved,
+        )
         history_filter += (
             " AND (NOT EXISTS (SELECT 1 FROM edge_supports any_history_support "
             "WHERE any_history_support.edge_id=edges.id) OR EXISTS ("
@@ -4988,7 +6181,8 @@ class MemoryService:
         ).fetchone()["n"])
         history = [dict(row) for row in self.store.conn.execute(
             "SELECT id, src, dst, relation, layer, weight, valid_from, valid_to, "
-            "ingested_at, expired_at FROM edges WHERE " + history_filter + " "
+            "valid_to_recorded_at, ingested_at, expired_at FROM edges WHERE "
+            + history_filter + " "
             "ORDER BY COALESCE(valid_to, expired_at, valid_from, ingested_at) DESC, id DESC "
             "LIMIT ?",
             (*history_params, GRAPH_ENTITY_HISTORY_LIMIT),
@@ -5020,10 +6214,14 @@ class MemoryService:
                 "history": history_total > len(history),
             },
             "as_of": as_of,
+            "valid_at": valid_at,
+            "known_at": known_at,
         }
 
     def graph_entity_evidence(self, canonical_id: str, *, workspace: str,
-                              as_of: Optional[float] = None) -> dict:
+                              as_of: Optional[float] = None,
+                              valid_at: Optional[float] = None,
+                              known_at: Optional[float] = None) -> dict:
         """Return one graph entity's public supporting memories without rebuilding the graph.
 
         The full entity inspector calculates canonical relations, history, and graph metrics,
@@ -5038,12 +6236,12 @@ class MemoryService:
         if wid is None:
             raise ValidationError(f"no workspace '{ws}'")
         self._assert_graph_index_ready(wid)
-        try:
-            anchor = float(as_of) if as_of is not None else time.time()
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValidationError("as_of must be a finite timestamp") from exc
-        if not math.isfinite(anchor):
-            raise ValidationError("as_of must be a finite timestamp")
+        as_of, valid_at, known_at = _temporal_anchors(
+            as_of=as_of, valid_at=valid_at, known_at=known_at
+        )
+        present = time.time()
+        anchor = valid_at if valid_at is not None else present
+        known_anchor = known_at if known_at is not None else present
 
         target = self.store.conn.execute(
             "SELECT id, canonical_id FROM entities WHERE workspace_id=? AND id=? LIMIT 1",
@@ -5065,19 +6263,35 @@ class MemoryService:
         support_conditions = (
             "relation.workspace_id=? AND relation.{endpoint}=target.id "
             "AND (relation.valid_from IS NULL OR relation.valid_from<=?) "
-            "AND (relation.valid_to IS NULL OR ?<relation.valid_to) "
-            "AND relation.expired_at IS NULL "
+            "AND (relation.valid_to IS NULL OR ?<relation.valid_to "
+            "OR (relation.valid_to_recorded_at IS NOT NULL "
+            "AND ?<relation.valid_to_recorded_at)) "
+            "AND (relation.ingested_at IS NULL OR relation.ingested_at<=?) "
+            "AND (relation.expired_at IS NULL OR ?<relation.expired_at) "
             "AND (support.valid_from IS NULL OR support.valid_from<=?) "
-            "AND (support.valid_to IS NULL OR ?<support.valid_to) "
-            "AND support.expired_at IS NULL AND memory.workspace_id=? "
+            "AND (support.valid_to IS NULL OR ?<support.valid_to "
+            "OR (support.valid_to_recorded_at IS NOT NULL "
+            "AND ?<support.valid_to_recorded_at)) "
+            "AND (support.ingested_at IS NULL OR support.ingested_at<=?) "
+            "AND (support.expired_at IS NULL OR ?<support.expired_at) "
+            "AND memory.workspace_id=? "
             "AND (memory.valid_from IS NULL OR memory.valid_from<=?) "
-            "AND (memory.valid_to IS NULL OR ?<memory.valid_to) "
-            "AND memory.expired_at IS NULL "
+            "AND (memory.valid_to IS NULL OR ?<memory.valid_to "
+            "OR (memory.valid_to_recorded_at IS NOT NULL "
+            "AND ?<memory.valid_to_recorded_at)) "
+            "AND (memory.ingested_at IS NULL OR memory.ingested_at<=?) "
+            "AND (memory.expired_at IS NULL OR ?<memory.expired_at) "
             "AND COALESCE(memory.scope, 'workspace')!='session'"
         )
         source_conditions = support_conditions.format(endpoint="src")
         target_conditions = support_conditions.format(endpoint="dst")
-        branch_params = (wid, anchor, anchor, anchor, anchor, wid, anchor, anchor)
+        branch_params = (
+            wid,
+            anchor, anchor, known_anchor, known_anchor, known_anchor,
+            anchor, anchor, known_anchor, known_anchor, known_anchor,
+            wid,
+            anchor, anchor, known_anchor, known_anchor, known_anchor,
+        )
         sql = """
             WITH target AS (
                 SELECT id FROM entities WHERE workspace_id=? AND (id=? OR canonical_id=?)
@@ -5106,7 +6320,8 @@ class MemoryService:
                 FROM raw_supports GROUP BY memory_id
             )
             SELECT memory.id, memory.title, memory.content, memory.mtype,
-                   memory.valid_from, memory.valid_to, memory.ingested_at,
+                   memory.valid_from, memory.valid_to, memory.valid_to_recorded_at,
+                   memory.ingested_at,
                    memory.expired_at, memory.provenance, ranked.confidence
             FROM ranked JOIN memories memory ON memory.id=ranked.memory_id
             WHERE memory.workspace_id=?
@@ -5140,6 +6355,7 @@ class MemoryService:
                 "memory_type": row["mtype"], "source_kind": "graph_support",
                 "confidence": float(row["confidence"] or 0.0),
                 "valid_from": row["valid_from"], "valid_to": row["valid_to"],
+                "valid_to_recorded_at": row["valid_to_recorded_at"],
                 "ingested_at": row["ingested_at"], "expired_at": row["expired_at"],
                 "provenance": provenance,
             })
@@ -5151,10 +6367,14 @@ class MemoryService:
             "totals": {"evidence": len(evidence)},
             "truncation": {"evidence": truncated},
             "as_of": as_of,
+            "valid_at": valid_at,
+            "known_at": known_at,
         }
 
     def graph_path(self, source: str, target: str, *, workspace: str,
                    repo: Optional[str] = None, as_of: Optional[float] = None,
+                   valid_at: Optional[float] = None,
+                   known_at: Optional[float] = None,
                    memory_types: Optional[list[str]] = None,
                    time_from: Optional[float] = None,
                    time_to: Optional[float] = None,
@@ -5178,6 +6398,7 @@ class MemoryService:
         (ws, _wid, entities, edges, supports, _memories, _memory_links,
          _code_memory_links, _index_info) = self._graph_scene_rows(
             workspace=workspace, repo=repo, as_of=as_of,
+            valid_at=valid_at, known_at=known_at,
             memory_types=memory_types, time_from=time_from, time_to=time_to,
             include_weak_cooccurrence=include_weak_cooccurrence,
         )
@@ -5197,7 +6418,9 @@ class MemoryService:
               layers: Optional[list] = None, include_code: bool = False,
               repo: Optional[str] = None, backfill: bool = True,
               full: bool = False, connected_only: bool = False,
-              as_of: Optional[float] = None) -> dict:
+              as_of: Optional[float] = None,
+              valid_at: Optional[float] = None,
+              known_at: Optional[float] = None) -> dict:
         """Entity-relation network for a workspace: nodes/edges plus type counts,
         top-connected entities, and connectivity stats — powers the Graph tab in
         both the v1-look dashboard and the Inspector UI (engraphis.graphdata
@@ -5207,6 +6430,9 @@ class MemoryService:
         original dashboard-only implementation, which read the DB file directly
         and skipped this check entirely."""
         ws = self._clean_ws(workspace)  # binding enforced here, before any lookup
+        as_of, valid_at, known_at = _temporal_anchors(
+            as_of=as_of, valid_at=valid_at, known_at=known_at
+        )
         wid = self._lookup_workspace(ws)
         if wid is None:
             return empty_graph(ws)
@@ -5219,80 +6445,114 @@ class MemoryService:
         limit = max(1, min(node_limit, int(limit)))
         conn = self.store.conn
         restrict_sessions = True
-        temporal_anchor = None
-        if as_of is not None:
-            try:
-                temporal_anchor = float(as_of)
-            except (TypeError, ValueError) as exc:
-                raise ValidationError("as_of must be a timestamp") from exc
-            if not math.isfinite(temporal_anchor):
-                raise ValidationError("as_of must be a finite timestamp")
-        # Code symbols and their edges are an index of the checkout as it exists now;
-        # unlike memory and entity relations, they do not carry world-time validity.
-        # Do not blend that live overlay into an otherwise historical graph response.
-        include_live_code = include_code and temporal_anchor is None
+        present = time.time()
+        world_anchor = valid_at if valid_at is not None else present
+        system_anchor = known_at if known_at is not None else present
+        # ``as_of``/``valid_at`` powers the Time view, which intentionally retains
+        # superseded public relations as ghosts. A system-time-only read remains an
+        # exact world-time snapshot while limiting the graph to what was then known.
+        include_relation_history = valid_at is not None
+        temporal_requested = valid_at is not None or known_at is not None
+
+        def temporal_sql(alias: str, *, history: bool = False
+                         ) -> tuple[str, list[float]]:
+            """Parameterized world/system visibility for graph-owned SQL.
+
+            ``history`` retains world-time closures for the Time view, but never
+            relaxes system time: future ingestion and later expiry stay invisible.
+            """
+            prefix = f"{alias}."
+            if history:
+                world_sql = f"({prefix}valid_from IS NULL OR {prefix}valid_from<=?)"
+                params: list[float] = [world_anchor]
+            else:
+                world_sql = (
+                    f"({prefix}valid_from IS NULL OR {prefix}valid_from<=?) "
+                    f"AND ({prefix}valid_to IS NULL OR ?<{prefix}valid_to "
+                    f"OR ({prefix}valid_to_recorded_at IS NOT NULL "
+                    f"AND ?<{prefix}valid_to_recorded_at))"
+                )
+                params = [world_anchor, world_anchor, system_anchor]
+            return (
+                world_sql
+                + f" AND ({prefix}ingested_at IS NULL OR {prefix}ingested_at<=?)"
+                + f" AND ({prefix}expired_at IS NULL OR ?<{prefix}expired_at)",
+                [*params, system_anchor, system_anchor],
+            )
+
+        def public_edge_sql(alias: str, *, history: bool = False
+                            ) -> tuple[str, list[float]]:
+            """Evidence visibility for one edge alias, including session isolation."""
+            support_sql, support_params = temporal_sql(
+                "visibility_support", history=history
+            )
+            memory_sql, memory_params = temporal_sql(
+                "visibility_memory", history=history
+            )
+            return (
+                "(NOT EXISTS (SELECT 1 FROM edge_supports any_support "
+                f"WHERE any_support.edge_id={alias}.id) OR EXISTS ("
+                "SELECT 1 FROM edge_supports visibility_support "
+                "JOIN memories visibility_memory "
+                "ON visibility_memory.id=visibility_support.memory_id "
+                f"WHERE visibility_support.edge_id={alias}.id "
+                f"AND {support_sql} AND {memory_sql} "
+                f"AND visibility_memory.workspace_id={alias}.workspace_id "
+                "AND COALESCE(visibility_memory.scope, 'workspace')!='session'))",
+                [*support_params, *memory_params],
+            )
 
         def visible_entities():
-            """Return public graph entities without a correlated edge scan per node.
+            """Return public entities under both temporal anchors in one bounded query.
 
-            The older predicate called ``_graph_entity_visibility_sql`` directly
-            for every candidate entity.  On a mature local workspace that became
-            thousands of nested ``edges``/``edge_supports`` probes before the
-            renderer even received a response.  Aggregate an edge's visibility
-            once, then aggregate that result by endpoint: no-edge entities remain
-            visible, entities supported only by session memories remain hidden,
-            and mixed-history entities stay visible as before.
+            An entity with no relation history remains a public/manual node. Once an
+            entity has relation history, however, it is visible only when at least one
+            touching relation has public evidence at the selected anchors. This avoids
+            revealing session-only or future-supported identities.
             """
-            evidence_at = ""
-            if temporal_anchor is not None:
-                # Entity records are backfilled lazily, so their ``created_at`` is
-                # ingestion time rather than world time.  Anchor the evidence instead:
-                # a later public support must not reveal an entity that was private at
-                # the requested point in time.  Do not bound ``valid_to`` here; the
-                # Time view deliberately retains previously-public facts as ghosts.
-                anchor = repr(temporal_anchor)
-                evidence_at = (
-                    " AND (support.valid_from IS NULL "
-                    f"OR support.valid_from<={anchor}) "
-                    "AND (visibility_memory.valid_from IS NULL "
-                    f"OR visibility_memory.valid_from<={anchor})"
-                )
+            relation_sql, relation_params = temporal_sql(
+                "relation", history=include_relation_history
+            )
+            public_sql, public_params = public_edge_sql(
+                "relation", history=include_relation_history
+            )
             sql = f"""
                 WITH edge_visibility AS (
-                    SELECT relation.id, relation.src, relation.dst,
-                           MAX(CASE
-                               WHEN support.edge_id IS NULL THEN 1
-                               WHEN visibility_memory.id IS NOT NULL
-                                AND COALESCE(visibility_memory.scope, 'workspace') != 'session'
-                               {evidence_at}
-                               THEN 1 ELSE 0
-                           END) AS is_visible
+                    SELECT relation.id, relation.src, relation.dst
                     FROM edges relation
-                    LEFT JOIN edge_supports support ON support.edge_id=relation.id
-                    LEFT JOIN memories visibility_memory
-                      ON visibility_memory.id=support.memory_id
-                    WHERE relation.workspace_id=?
-                    GROUP BY relation.id
-                ), endpoint_visibility AS (
-                    SELECT src AS entity_id, is_visible FROM edge_visibility
+                    WHERE relation.workspace_id=? AND {relation_sql}
+                      AND {public_sql}
+                ), all_endpoint AS (
+                    SELECT src AS entity_id FROM edges WHERE workspace_id=?
                     UNION ALL
-                    SELECT dst AS entity_id, is_visible FROM edge_visibility
+                    SELECT dst AS entity_id FROM edges WHERE workspace_id=?
+                ), entity_history AS (
+                    SELECT entity_id, COUNT(*) AS degree
+                    FROM all_endpoint GROUP BY entity_id
+                ), visible_endpoint AS (
+                    SELECT src AS entity_id FROM edge_visibility
+                    UNION ALL
+                    SELECT dst AS entity_id FROM edge_visibility
                 ), entity_visibility AS (
-                    SELECT entity_id, MAX(is_visible) AS is_visible,
-                           COUNT(*) AS degree
-                    FROM endpoint_visibility
-                    GROUP BY entity_id
+                    SELECT entity_id, COUNT(*) AS degree
+                    FROM visible_endpoint GROUP BY entity_id
                 )
                 SELECT entity.id, entity.name, entity.etype, repo.name AS repo,
                        entity.created_at AS valid_from,
                        COUNT(*) OVER() AS visible_total
                 FROM entities entity
                 LEFT JOIN repos repo ON repo.id=entity.repo_id
+                LEFT JOIN entity_history history ON history.entity_id=entity.id
                 LEFT JOIN entity_visibility visible ON visible.entity_id=entity.id
                 WHERE entity.workspace_id=?
-                  AND COALESCE(visible.is_visible, 1)=1
+                  AND (entity.created_at IS NULL OR entity.created_at<=?)
+                  AND (COALESCE(history.degree, 0)=0
+                       OR COALESCE(visible.degree, 0)>0)
             """
-            params: list[Any] = [wid, wid]
+            params: list[Any] = [
+                wid, *relation_params, *public_params, wid, wid,
+                wid, system_anchor,
+            ]
             if connected_only:
                 sql += " AND COALESCE(visible.degree, 0)>0"
             sql += " ORDER BY COALESCE(visible.degree, 0) DESC, entity.id LIMIT ?"
@@ -5304,8 +6564,14 @@ class MemoryService:
         # structured-metadata graph bridge. On first Graph-tab open in a process, feed
         # the missing graph state once; feed() de-dupes entities/edges.
         # Strictly read-only surfaces disable this write-on-first-read migration.
-        if backfill and self._should_backfill_graph(wid, bool(ents)):
+        if (backfill and not temporal_requested
+                and self._should_backfill_graph(wid, bool(ents))):
             self._lazy_backfill_graph(wid)
+            # Rows created by the migration must be part of the same current read.
+            # Explicit historical anchors never enter this write path.
+            present = time.time()
+            world_anchor = present
+            system_anchor = present
             ents = visible_entities()
         visible_total = int(ents[0]["visible_total"]) if ents else 0
         if full and visible_total > MAX_GRAPH_ANALYSIS_ENTITIES:
@@ -5335,7 +6601,8 @@ class MemoryService:
         # here as a useful fallback for both Graph-tab clients.
         memory_link_fallback: list[dict] = []
         if not entity_rows and selected_graph_layers != []:
-            now = temporal_anchor if temporal_anchor is not None else time.time()
+            left_visibility, left_params = temporal_sql("left_memory")
+            right_visibility, right_params = temporal_sql("right_memory")
             sql = (
                 "SELECT link.a, link.b, link.relation, "
                 "COALESCE(link.layer, 'semantic') AS layer, "
@@ -5352,14 +6619,18 @@ class MemoryService:
                 "WHERE left_memory.workspace_id=? AND right_memory.workspace_id=? "
                 "AND COALESCE(left_memory.scope, 'workspace')!='session' "
                 "AND COALESCE(right_memory.scope, 'workspace')!='session' "
-                "AND (left_memory.valid_from IS NULL OR left_memory.valid_from<=?) "
-                "AND (left_memory.valid_to IS NULL OR ?<left_memory.valid_to) "
-                "AND left_memory.expired_at IS NULL "
-                "AND (right_memory.valid_from IS NULL OR right_memory.valid_from<=?) "
-                "AND (right_memory.valid_to IS NULL OR ?<right_memory.valid_to) "
-                "AND right_memory.expired_at IS NULL "
+                f"AND {left_visibility} AND {right_visibility} "
+                "AND (link.valid_from IS NULL OR link.valid_from<=?) "
+                "AND (link.valid_to IS NULL OR ?<link.valid_to "
+                "OR (link.valid_to_recorded_at IS NOT NULL "
+                "AND ?<link.valid_to_recorded_at)) "
+                "AND (link.ingested_at IS NULL OR link.ingested_at<=?) "
+                "AND (link.expired_at IS NULL OR ?<link.expired_at) "
             )
-            params: list[Any] = [wid, wid, now, now, now, now]
+            params: list[Any] = [
+                wid, wid, *left_params, *right_params,
+                world_anchor, world_anchor, system_anchor, system_anchor, system_anchor,
+            ]
             if selected_graph_layers:
                 marks = ",".join("?" for _ in selected_graph_layers)
                 sql += f"AND COALESCE(link.layer, 'semantic') IN ({marks}) "
@@ -5389,26 +6660,32 @@ class MemoryService:
                 })
             entity_rows = list(fallback_nodes.values())
         visible_edge_ids = None
-        if restrict_sessions:
-            if temporal_anchor is None:
-                visible_edge_ids = {
-                    row["id"] for row in conn.execute(
-                        "SELECT relation.id FROM edges relation "
-                        "WHERE relation.workspace_id=? AND "
-                        + _graph_edge_visibility_sql("relation"),
-                        (wid,),
-                    ).fetchall()
-                }
-        if temporal_anchor is None:
+        if restrict_sessions and not include_relation_history:
+            relation_visibility, relation_visibility_params = temporal_sql("relation")
+            public_visibility, public_visibility_params = public_edge_sql("relation")
+            visible_edge_ids = {
+                row["id"] for row in conn.execute(
+                    "SELECT relation.id FROM edges relation "
+                    f"WHERE relation.workspace_id=? AND {relation_visibility} "
+                    f"AND {public_visibility}",
+                    (
+                        wid, *relation_visibility_params,
+                        *public_visibility_params,
+                    ),
+                ).fetchall()
+            }
+        if not include_relation_history:
+            graph_filter = SearchFilter(
+                workspace_id=wid, graph_layers=selected_graph_layers,
+                valid_at=world_anchor, known_at=system_anchor,
+            )
             edgs = [
                 {
                     "src": edge.src, "dst": edge.dst, "relation": edge.relation,
                     "layer": edge.layer.value if edge.layer else "semantic",
                 }
                 for edge in self.store.edges_in_scope(
-                    SearchFilter(
-                        workspace_id=wid, graph_layers=selected_graph_layers
-                    ),
+                    graph_filter,
                     limit=edge_cap,
                 )
                 if edge.src in node_ids and edge.dst in node_ids
@@ -5419,14 +6696,21 @@ class MemoryService:
                 )
             ]
         else:
+            relation_visibility, relation_visibility_params = temporal_sql(
+                "relation", history=True
+            )
+            public_visibility, public_visibility_params = public_edge_sql(
+                "relation", history=True
+            )
             history_sql = (
                 "SELECT relation.id, relation.src, relation.dst, relation.relation, "
                 "relation.layer, relation.valid_from, relation.valid_to "
                 "FROM edges relation WHERE relation.workspace_id=? "
-                "AND relation.expired_at IS NULL AND "
-                + _graph_edge_history_visibility_sql("relation", at=temporal_anchor)
+                f"AND {relation_visibility} AND {public_visibility}"
             )
-            history_params: list[Any] = [wid]
+            history_params: list[Any] = [
+                wid, *relation_visibility_params, *public_visibility_params,
+            ]
             if selected_layers is not None:
                 if not selected_layers:
                     history_sql += " AND 0"
@@ -5434,10 +6718,13 @@ class MemoryService:
                     marks = ",".join("?" for _ in selected_layers)
                     history_sql += f" AND relation.layer IN ({marks})"
                     history_params.extend(sorted(selected_layers))
-            anchor = repr(temporal_anchor)
+            anchor = repr(world_anchor)
+            known = repr(system_anchor)
             live_at_anchor = (
                 "(relation.valid_from IS NULL OR relation.valid_from<=" + anchor + ") "
-                "AND (relation.valid_to IS NULL OR " + anchor + "<relation.valid_to)"
+                "AND (relation.valid_to IS NULL OR " + anchor + "<relation.valid_to "
+                "OR (relation.valid_to_recorded_at IS NOT NULL AND "
+                + known + "<relation.valid_to_recorded_at))"
             )
             # The bounded Time payload must first preserve relations that were live at
             # the selected anchor. Remaining capacity is then used for recent ghosts.
@@ -5460,7 +6747,9 @@ class MemoryService:
                 "reason": link.get("reason") or "",
             })
         repo_names: list[str] = []
-        if include_live_code:
+        code_node_start = len(entity_rows)
+        code_edge_start = len(edgs)
+        if include_code:
             repo_rows = []
             if repo:
                 repo_name = _clean_name(repo, field="repo")
@@ -5482,9 +6771,12 @@ class MemoryService:
                 repo_name = repo_row["name"]
                 repo_names.append(repo_name)
                 code_filter = SearchFilter(
-                    workspace_id=wid, repo_id=rid, include_ancestors=True
+                    workspace_id=wid, repo_id=rid, include_ancestors=True,
+                    valid_at=world_anchor, known_at=system_anchor,
                 )
-                symbols = self.store.list_symbols(rid, limit=limit)
+                symbols = self.store.list_symbols(
+                    rid, limit=limit, flt=code_filter
+                )
                 symbol_node: dict[str, str] = {}
                 symbol_id_node: dict[str, str] = {}
                 for symbol in symbols:
@@ -5528,7 +6820,8 @@ class MemoryService:
                     return file_nodes.get(file_name)
 
                 for edge in self.store.list_code_edges(
-                    rid, limit=edge_cap, layers=selected_graph_layers
+                    rid, limit=edge_cap, layers=selected_graph_layers,
+                    flt=code_filter,
                 ):
                     if len(edgs) >= edge_cap:
                         break
@@ -5548,14 +6841,6 @@ class MemoryService:
                     code_links = self.store.list_code_memory_links(
                         rid, limit=edge_cap, flt=code_filter
                     )
-                    # Batched: up to `limit` (<=5000) individual get_memory() calls here
-                    # was the dominant cost of an include_code=True request. Collect the
-                    # candidate ids first and resolve them in one IN (...) query
-                    # (Store.get_memories) — same liveness/limit checks below, just no
-                    # per-row round trip.
-                    candidate_ids = [link.get("memory_id") for link in code_links
-                                     if link.get("memory_id")]
-                    memories_by_id = self.store.get_memories(candidate_ids)
                     for link in code_links:
                         if len(edgs) >= edge_cap:
                             break
@@ -5564,14 +6849,16 @@ class MemoryService:
                         if not code_id or not memory_id:
                             continue
                         if memory_id not in linked_memory_ids and len(entity_rows) < limit:
-                            memory = memories_by_id.get(memory_id)
-                            if memory and memory.expired_at is None and memory.valid_to is None:
-                                entity_rows.append({
-                                    "id": memory_id,
-                                    "name": memory.title or memory.content[:80] or memory_id,
-                                    "etype": f"memory_{memory.mtype.value}",
-                                })
-                                linked_memory_ids.add(memory_id)
+                            # ``list_code_memory_links`` already applied the exact
+                            # scope/world/system filter to the joined memory. Re-reading
+                            # it through current-only ``get_memories`` would silently
+                            # drop a valid historical bridge.
+                            entity_rows.append({
+                                "id": memory_id,
+                                "name": link.get("title") or memory_id,
+                                "etype": f"memory_{link.get('mtype') or 'semantic'}",
+                            })
+                            linked_memory_ids.add(memory_id)
                         if memory_id in linked_memory_ids:
                             edgs.append({
                                 "src": code_id, "dst": memory_id,
@@ -5584,6 +6871,7 @@ class MemoryService:
                             [GraphLayer(layer) for layer in selected_layers]
                             if selected_layers else None
                         ),
+                        flt=code_filter,
                     ):
                         if len(edgs) >= edge_cap:
                             break
@@ -5594,13 +6882,23 @@ class MemoryService:
                             "reason": link.get("reason") or "",
                         })
         payload = build_graph_payload(ws, entity_rows, edgs)
-        payload["unified"] = bool(include_live_code)
+        payload["unified"] = bool(
+            include_code
+            and (len(entity_rows) > code_node_start or len(edgs) > code_edge_start)
+        )
         payload["repos"] = repo_names
         payload["meta"] = {
             "nodes_available": max(visible_total, len(entity_rows)),
             "nodes_complete": len(entity_rows) >= visible_total,
             "mode": "full" if full else "overview",
         }
+        if temporal_requested:
+            payload["meta"].update({
+                "as_of": as_of,
+                "valid_at": valid_at,
+                "known_at": known_at,
+                "historical": True,
+            })
         return payload
 
     def _should_backfill_graph(self, wid: str, has_entities: bool) -> bool:
@@ -5738,13 +7036,81 @@ class MemoryService:
         }
 
 
-def _filter(workspace_id, repo_id, mtypes, as_of, graph_layers=None, *, session_id=None):
+def _filter(workspace_id, repo_id, mtypes, as_of, graph_layers=None, *, session_id=None,
+            valid_at=None, known_at=None):
     from engraphis.core.interfaces import SearchFilter
     return SearchFilter(
         workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
         mtypes=mtypes, graph_layers=graph_layers, as_of=as_of,
+        valid_at=valid_at, known_at=known_at,
         include_ancestors=True,
     )
+
+
+def _compact_provenance(value: Any) -> dict:
+    """Return bounded provenance identity without copying source payload details."""
+    if not isinstance(value, dict):
+        return {}
+    keys = ("source", "source_kind", "trusted", "kind", "origin")
+    return {key: value[key] for key in keys if key in value}
+
+
+def _empty_recall(query: str, *, token_budget: int, response_mode: str,
+                  retrieval_profile: str, valid_at: Optional[float],
+                  known_at: Optional[float], note: str) -> dict:
+    """Stable empty response for unknown scopes, including additive v2 accounting."""
+    return {
+        "query": query,
+        "count": 0,
+        "context": "",
+        "memories": [],
+        "packed_sources": [],
+        "usage": {
+            "budget_tokens": token_budget,
+            "context_tokens": 0,
+            "source_tokens": 0,
+            "saved_tokens": 0,
+            "savings_ratio": 0.0,
+            "packed_count": 0,
+            "omitted_count": 0,
+            "token_counter": "engraphis.regex.v1",
+        },
+        "valid_at": valid_at,
+        "known_at": known_at,
+        "historical": valid_at is not None or known_at is not None,
+        "retrieval_profile": retrieval_profile,
+        "response_mode": response_mode,
+        "note": note,
+    }
+
+
+def _empty_grounded(query: str, *, reason: str, token_budget: int,
+                    response_mode: str, retrieval_profile: str,
+                    valid_at: Optional[float], known_at: Optional[float]) -> dict:
+    payload = _empty_recall(
+        query,
+        token_budget=token_budget,
+        response_mode=response_mode,
+        retrieval_profile=retrieval_profile,
+        valid_at=valid_at,
+        known_at=known_at,
+        note=reason,
+    )
+    payload.pop("count", None)
+    payload.pop("context", None)
+    payload.pop("memories", None)
+    payload.pop("note", None)
+    payload.update({
+        "grounded": False,
+        "abstained": True,
+        "answer": "",
+        "support": 0.0,
+        "synthesized": False,
+        "citations": [],
+        "reason": reason,
+    })
+    payload["usage"]["answer_tokens"] = 0
+    return payload
 
 
 def _mem_to_dict(rec: Any) -> dict:
@@ -5754,7 +7120,9 @@ def _mem_to_dict(rec: Any) -> dict:
         "id": rec.id, "title": rec.title, "content": rec.content, "summary": rec.summary,
         "scope": rec.scope.value, "mtype": rec.mtype.value, "repo_id": rec.repo_id,
         "importance": rec.importance, "pinned": rec.pinned,
+        "subject_key": rec.subject_key, "claim_kind": rec.claim_kind,
         "valid_from": rec.valid_from, "valid_to": rec.valid_to,
+        "valid_to_recorded_at": rec.valid_to_recorded_at,
         "ingested_at": rec.ingested_at, "expired_at": rec.expired_at,
         "provenance": rec.provenance,
     }

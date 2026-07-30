@@ -3,6 +3,41 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## Unreleased
+
+### Added
+
+- `engraphis_recall_context` brings the MCP surface to 30 tools and is the compact, hard-budget
+  path for agent prompts. It returns packed context, compact source identities, strict token usage
+  fields, optional retrieval diagnostics, and preserves `engraphis_recall` as the full-response
+  compatibility surface.
+- Recall and grounded recall now expose `valid_at` (world time) and `known_at` (system time);
+  `as_of` remains the compatible `valid_at` alias and conflicting anchors are rejected. Retrieval
+  defaults to the `balanced` profile; `auto` remains explicit opt-in.
+- MCP and HTTP remember calls can set a fact's world-time `valid_from`; recall, grounded recall,
+  and the compatibility answer tool can run a point-in-time `as_of` query.
+- `eval.performance` reports full recall-pipeline quality, packed context tokens, and
+  p50/p95/p99 latency with a reproducible JSON schema and deterministic corpus scaling.
+- Schema v5 adds temporal history for symbols, code edges, code-memory links, and persisted
+  memory-entity incidence. Code retrieval is now a first-class profile, and graph walks use
+  bounded sparse PageRank instead of a dense quadratic transition matrix.
+- Optional `subject_key` and `claim_kind` make mutable claims explicit. Uncertain similar facts
+  are conservatively related while keyed or strongly evidenced contradictions supersede.
+- `engraphis-benchmark/v2`, canonical workspace exports, and release-evidence manifests provide
+  deterministic hashes, per-question records, fixed token-budget curves, and validation before
+  public evidence is written.
+
+### Fixed
+
+- Supersessions now close the old fact at the replacement's effective world time instead of its
+  ingestion time. Superseded, corrected, promoted, merged, forgotten, and consolidated source
+  vectors remain available to historical semantic recall while temporal filters keep them out of
+  the current view.
+- Non-finite write and recall timestamps fail validation instead of entering scoring or SQLite.
+- Ordinary recall is observational by default, so weak nearest-neighbor results do not gain
+  stability merely by being returned. Grounded recall still reinforces only cited evidence, and
+  Python callers with an explicit use signal can request reinforcement.
+
 ## [1.1.5] - 2026-07-28
 
 ### Changed
@@ -277,6 +312,9 @@ authentication, licensing and relay behavior, and the redesigned Knowledge Graph
   work, and suppress expensive dense-graph effects.
 - The duplicate global Recall shortcut was removed from the dashboard header. Recall
   remains available in the Memory Operations sidebar and from contextual page actions.
+- The README documentation was expanded to clarify note-link graphs, agent memory, code
+  awareness, encryption, and sleep-time consolidation without making unmeasured product
+  comparisons.
 - The README now documents Command Code CLI as an MCP-native client and includes its
   verified stdio registration command.
 
@@ -613,9 +651,10 @@ and safe hosted deployment.
   budget (`ENGRAPHIS_CHUNK_TOKENS`, default 256) with a sentence-level overlap
   (`ENGRAPHIS_CHUNK_OVERLAP`, default 32); a hard per-document cap
   (`ENGRAPHIS_CHUNK_MAX`, default 200) bounds amplification. numpy/stdlib only, so it runs
-  under the offline gate and is byte-identical across runs. This lifts recall on long,
-  multi-topic documents that previously became one diluted memory. New: `ChunkingExtractor`
-  in `backends/extractor.py`; `tests/test_chunking_extractor.py`.
+  under the offline gate and is byte-identical across runs. This gives long, multi-topic
+  documents finer retrieval units instead of one diluted memory; the bundled evaluation below
+  preserves Recall@5 while reducing retrieved context. New: `ChunkingExtractor` in
+  `backends/extractor.py`; `tests/test_chunking_extractor.py`.
 - **File/folder imports chunk too.** With `ENGRAPHIS_EXTRACTOR=chunk`,
   `import_folder`/`import_files` split each file into several retrieval-sized memories
   (each still `trusted:false`, stamped with `metadata.chunk={index,of,heading}`) instead of
@@ -625,7 +664,7 @@ and safe hosted deployment.
 - **Chunking eval + `longdoc` dataset.** `eval/chunking_eval.py` +
   `eval/datasets/longdoc.jsonl` compare whole-file vs chunked ingestion through the real
   recall pipeline. On the offline embedder: identical recall@5 (1.000) at **~73% fewer
-  context tokens** (826 → 224) and ~4× smaller tokens-to-evidence — the "quality per token"
+  context tokens** (809 → 219) and ~4× smaller tokens-to-evidence (162 → 42) — the "quality per token"
   number `BENCHMARKS.md` calls for. `tests/test_chunking_eval.py`.
 - **"Dreaming" trigger for automated maintenance.** `automation.should_dream` / `dream_due`
   run a consolidation sweep *before* the cadence when enough new episodic memories have

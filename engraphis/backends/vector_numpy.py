@@ -30,6 +30,8 @@ class NumpyVectorIndex:
 
     def search(self, vec: np.ndarray, k: int,
                *, filter: Optional[SearchFilter] = None) -> list[tuple[str, float]]:
+        if k <= 0:
+            return []
         q = np.asarray(vec, dtype=np.float32)
         n = float(np.linalg.norm(q))
         if n > 0:
@@ -41,9 +43,13 @@ class NumpyVectorIndex:
         mat = np.vstack([r[1] for r in rows])          # already normalized on write
         scores = mat @ q                                # cosine == dot for unit vectors
         k = min(k, len(ids))
-        top = np.argpartition(-scores, k - 1)[:k]
-        top = top[np.argsort(-scores[top])]
-        return [(ids[i], float(scores[i])) for i in top]
+        # ``argpartition`` does not define which equal-scored rows survive at
+        # the top-k boundary. Hashing embeddings produce ties frequently, so
+        # use the memory id as an explicit stable secondary key.
+        top = sorted(
+            range(len(ids)), key=lambda index: (-float(scores[index]), ids[index])
+        )[:k]
+        return [(ids[index], float(scores[index])) for index in top]
 
     def delete(self, ids: list[str]) -> None:
         marks = ",".join("?" for _ in ids)

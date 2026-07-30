@@ -1,0 +1,15 @@
+{
+  "memory_type": "engraphis",
+  "memory_params": {
+    "context_k": 8,
+    "max_context_tokens": 1024,
+    "require_exact_reader_tokenizer": true,
+    "reader_tokenizer_model": "Qwen/Qwen3.5-9B",
+    "reader_tokenizer_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "tokenizer_identity": "Qwen/Qwen3.5-9B@c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "retrieval_profile": "balanced",
+    "embed_model": "Qwen/Qwen3-Embedding-8B",
+    "embed_revision": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af",
+    "vector_backend": "numpy"
+  }
+}

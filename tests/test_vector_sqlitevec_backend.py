@@ -84,35 +84,67 @@ def test_empty_index_returns_empty():
     store.close()
 
 
-def test_engine_resolution_writes_and_deletes_real_sqlitevec_rows():
-    """The engine's ADD/NOOP/INVALIDATE path must exercise the native index, not merely
-    direct index calls: an old superseded vector must be removed and the new one found."""
+def test_engine_resolution_preserves_historical_sqlitevec_rows_and_filters_them():
+    """INVALIDATE must retain the historical ANN row without leaking it into live recall."""
     eng = MemoryEngine.create(
         ":memory:", embed_dim=DIM, vector_backend="sqlite-vec", auto_evolve=False
     )
     wid = eng.store.get_or_create_workspace("w")
     rid = eng.store.get_or_create_repo(wid, "r")
+    old_content = "Until 2026-01 the rate limit was 100 requests per minute per API key."
+    new_content = (
+        "As of 2026-02 the rate limit was raised to 500 requests per minute per API key."
+    )
     old = eng.remember_with_resolution(
-        "Until 2026-01 the rate limit was 100 requests per minute per API key.",
+        old_content,
         workspace_id=wid,
         repo_id=rid,
+        valid_from=100.0,
     )
     duplicate = eng.remember_with_resolution(
-        "Until 2026-01 the rate limit was 100 requests per minute per API key.",
+        old_content,
         workspace_id=wid,
         repo_id=rid,
+        valid_from=100.0,
     )
     new = eng.remember_with_resolution(
-        "As of 2026-02 the rate limit was raised to 500 requests per minute per API key.",
+        new_content,
         workspace_id=wid,
         repo_id=rid,
+        valid_from=200.0,
     )
     assert (old["op"], duplicate["op"], new["op"]) == ("add", "noop", "invalidate")
     assert duplicate["id"] == old["id"] and new["superseded"] == [old["id"]]
     indexed = {
         row["id"] for row in eng.store.conn.execute("SELECT id FROM mem_vec_ann").fetchall()
     }
-    assert indexed == {new["id"]}
+    assert indexed == {old["id"], new["id"]}
+
+    query_vector = eng.embedder.embed(["What is the API rate limit?"])[0]
+    historical = {
+        memory_id for memory_id, _ in eng.index.search(
+            query_vector,
+            k=10,
+            filter=SearchFilter(
+                workspace_id=wid,
+                repo_id=rid,
+                valid_at=150.0,
+            ),
+        )
+    }
+    current = {
+        memory_id for memory_id, _ in eng.index.search(
+            query_vector,
+            k=10,
+            filter=SearchFilter(
+                workspace_id=wid,
+                repo_id=rid,
+                valid_at=250.0,
+            ),
+        )
+    }
+    assert historical == {old["id"]}
+    assert current == {new["id"]}
     eng.store.close()
 
 

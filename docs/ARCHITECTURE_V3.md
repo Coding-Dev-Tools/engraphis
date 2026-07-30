@@ -5,9 +5,9 @@ retention-supervision, and privacy-receipt additions introduced with schema vers
 
 ```mermaid
 flowchart LR
-    Agent["Agent / host LLM"] --> Intent["remember · link · recall"]
+    Agent["Agent / host LLM"] --> Intent["remember · link · recall_context (compact) · recall"]
     CLI["engraphis-graph CLI"] --> Service["MemoryService"]
-    MCP["29 MCP tools"] --> Service
+    MCP["30 MCP tools"] --> Service
     HTTP["Dashboard + read-only graph HTTP"] --> Service
     Import["Local resources / PostgreSQL catalog"] --> Extractors["Optional local extractors"]
     Extractors --> Service

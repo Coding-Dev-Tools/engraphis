@@ -1,7 +1,7 @@
 """Sleep-time consolidation (episodic→semantic distillation).
 
-Some systems ship "sleep-time compute" as a cloud service; the local-first equivalent is a
-background job the *user* schedules (cron / Windows Task Scheduler / a session hook):
+The local-first implementation is a background job the *user* schedules
+(cron / Windows Task Scheduler / a session hook):
 
     python -m scripts.consolidate --db engraphis.db --workspace acme
 
@@ -127,7 +127,9 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
 
     episodic = store.list_memories(
         _replace(flt, mtypes=[MemoryType.EPISODIC]), limit=DISTILL_SCAN_LIMIT)
-    clusters = _cluster_by_subject(episodic, threshold=subject_jaccard)
+    clusters = _cluster_by_subject(
+        episodic, threshold=subject_jaccard, store=store, flt=flt,
+    )
 
     report: dict = {"workspace_id": workspace_id, "repo_id": repo_id, "dry_run": dry_run,
                     "clusters_found": 0, "digests_created": [], "archived": [],
@@ -223,12 +225,9 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
             store.close_validity(
                 m.id, actor="consolidation",
                 reason=f"retention {r:.4f} below {archive_below} (consolidation sweep)")
-            try:
-                engine.index.delete([m.id])
-            except Exception as exc:
-                logger.warning(
-                    "index delete failed for memory %s (%s)", m.id, type(exc).__name__
-                )
+            # Preserve the vector as historical evidence. Temporal filtering keeps the
+            # archived row out of current recall while allowing an explicit ``as_of``
+            # query to reproduce the semantic result from when it was live.
 
     # ── compaction summary: the payoff of the sweep, as a number ─────────────
     report["compaction"] = {
@@ -250,10 +249,74 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
 # ── internals ─────────────────────────────────────────────────────────────────
 
 def _cluster_by_subject(
-    memories: list[MemoryRecord], *, threshold: float
+    memories: list[MemoryRecord], *, threshold: float, store=None,
+    flt: Optional[SearchFilter] = None,
 ) -> list[list[MemoryRecord]]:
-    """Greedy single-link clustering on token Jaccard — deterministic, order-stable
-    (memories arrive newest-first from the store; clusters keep that order)."""
+    """Cluster claim/entity evidence before falling back to token similarity.
+
+    Explicit claim identity is the strongest signal.  Persisted memory↔entity
+    incidence is next, and only records lacking either key take the older
+    deterministic Jaccard path.  Each memory appears in at most one cluster.
+    """
+    keyed: dict[tuple[str, str], list[MemoryRecord]] = {}
+    assigned: set[str] = set()
+    for memory in memories:
+        subject = (memory.subject_key or "").strip()
+        if subject:
+            keyed.setdefault((subject, (memory.claim_kind or "").strip()), []).append(memory)
+            assigned.add(memory.id)
+
+    entity_groups: list[list[MemoryRecord]] = []
+    if store is not None:
+        by_id = {memory.id: memory for memory in memories if memory.id not in assigned}
+        parent = {memory_id: memory_id for memory_id in by_id}
+        first_for_entity: dict[str, str] = {}
+        linked: set[str] = set()
+
+        def find(memory_id: str) -> str:
+            while parent[memory_id] != memory_id:
+                parent[memory_id] = parent[parent[memory_id]]
+                memory_id = parent[memory_id]
+            return memory_id
+
+        def union(left: str, right: str) -> None:
+            left_root, right_root = find(left), find(right)
+            if left_root == right_root:
+                return
+            # Stable root selection makes component construction independent of
+            # incidence-row order and therefore canonical-export friendly.
+            if left_root > right_root:
+                left_root, right_root = right_root, left_root
+            parent[right_root] = left_root
+
+        # Only the bounded consolidation scan can participate in these clusters.
+        # Restrict the database query too, rather than materializing all workspace
+        # incidence rows and discarding the unrelated majority in Python.
+        for link in store.list_memory_entities(flt, memory_ids=list(by_id)):
+            memory = by_id.get(link.get("memory_id"))
+            entity_id = str(link.get("entity_id") or "")
+            if memory is None or not entity_id:
+                continue
+            linked.add(memory.id)
+            existing = first_for_entity.setdefault(entity_id, memory.id)
+            union(existing, memory.id)
+
+        components: dict[str, list[MemoryRecord]] = {}
+        for memory in memories:
+            if memory.id in linked:
+                components.setdefault(find(memory.id), []).append(memory)
+                assigned.add(memory.id)
+        entity_groups = list(components.values())
+
+    remainder = [memory for memory in memories if memory.id not in assigned]
+    similarity = _cluster_by_similarity(remainder, threshold=threshold)
+    return [*keyed.values(), *entity_groups, *similarity]
+
+
+def _cluster_by_similarity(
+    memories: list[MemoryRecord], *, threshold: float,
+) -> list[list[MemoryRecord]]:
+    """Greedy deterministic fallback for memories without durable identity."""
     token_sets = [tokenize(f"{m.title} {m.content}") for m in memories]
     n = len(memories)
     parent = list(range(n))
@@ -647,14 +710,7 @@ def _write_structured_digests(engine, cluster: list[MemoryRecord], facts: list[d
                 continue
             engine.store.close_validity(
                 memory.id, at=now, actor="consolidation", reason=reason)
-            try:
-                engine.index.delete([memory.id])
-            except Exception as exc:
-                logger.warning(
-                    "index delete failed for memory %s (%s)",
-                    memory.id,
-                    type(exc).__name__,
-                )
+            # Preserve the source vector for historical/as_of retrieval.
     return ids
 
 

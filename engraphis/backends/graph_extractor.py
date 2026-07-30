@@ -26,7 +26,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from engraphis.core.interfaces import Edge, Node
+from engraphis.core.interfaces import Edge, Node, SearchFilter
 
 # ── Regex NER (ported from engraphis/engines/ingest.py — the v1 heuristic path) ──
 # Capitalized multi-word sequences, emails, hashtags, and mentions.  Keep the
@@ -346,7 +346,9 @@ def get_graph_extractor(kind: str = "none"):
 def feed(store: Any, content: str, *, workspace_id: str, repo_id: Optional[str] = None,
          title: str = "", extractor: Any = None,
          provenance: Optional[dict] = None, commit: bool = True,
-         extraction: Any = None) -> dict:
+         extraction: Any = None,
+         valid_from: Optional[float] = None,
+         ingested_at: Optional[float] = None) -> dict:
     """Extract entities/relations from free text and write them into the knowledge
     graph, scoped to ``(workspace_id, repo_id)``.
 
@@ -383,7 +385,10 @@ def feed(store: Any, content: str, *, workspace_id: str, repo_id: Optional[str] 
             memory_ids.append(memory_id)
         prov["memory_ids"] = memory_ids
 
-    existing_edges = store.neighbors(list(name_to_id.values()))
+    existing_edges = store.neighbors(
+        list(name_to_id.values()),
+        flt=SearchFilter(workspace_id=workspace_id, repo_id=repo_id),
+    )
     edge_by_key = {(e.src, e.dst, e.relation): e for e in existing_edges}
     specific_pairs: set[frozenset[str]] = set()
     written_relations = 0
@@ -397,10 +402,17 @@ def feed(store: Any, content: str, *, workspace_id: str, repo_id: Optional[str] 
         specific_pairs.add(frozenset((sid, did)))
         existing = edge_by_key.get(key)
         if existing is not None:
-            store.add_edge_support(existing.id, prov, commit=commit)
+            store.add_edge_support(
+                existing.id,
+                prov,
+                valid_from=valid_from,
+                ingested_at=ingested_at,
+                commit=commit,
+            )
             continue
         eid = store.upsert_edge(Edge(id="", src=sid, dst=did, relation=relation,
                                      workspace_id=workspace_id, repo_id=repo_id,
+                                     valid_from=valid_from, ingested_at=ingested_at,
                                      provenance=prov), commit=commit)
         edge_by_key[key] = Edge(id=eid, src=sid, dst=did, relation=relation)
         written_relations += 1
@@ -421,12 +433,19 @@ def feed(store: Any, content: str, *, workspace_id: str, repo_id: Optional[str] 
                 key = (lo, hi, "co_occurs")
                 existing = edge_by_key.get(key)
                 if existing is not None:
-                    store.add_edge_support(existing.id, prov, commit=commit)
+                    store.add_edge_support(
+                        existing.id,
+                        prov,
+                        valid_from=valid_from,
+                        ingested_at=ingested_at,
+                        commit=commit,
+                    )
                     continue
                 eid = store.upsert_edge(Edge(
                     id="", src=lo, dst=hi, relation="co_occurs",
                     weight=_COOCCUR_WEIGHT, workspace_id=workspace_id,
-                    repo_id=repo_id, provenance=prov,
+                    repo_id=repo_id, valid_from=valid_from,
+                    ingested_at=ingested_at, provenance=prov,
                 ), commit=commit)
                 edge_by_key[key] = Edge(id=eid, src=lo, dst=hi, relation="co_occurs")
                 written_relations += 1

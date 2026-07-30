@@ -96,6 +96,7 @@ def test_successful_connection_auto_enables_extractor_and_activity_is_explainabl
     status = client.get("/api/llm/status").json()
     assert status["working"] is True
     assert status["extractor"] == "llm_structured"
+    assert status["retention_supervisor"] == "none"
     assert "base_url" not in status
 
     persisted = (tmp_path / ".env").read_text(encoding="utf-8")

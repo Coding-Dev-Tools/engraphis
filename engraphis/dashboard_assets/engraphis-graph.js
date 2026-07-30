@@ -92,6 +92,45 @@
 
   function idOf(value) { return value && typeof value === 'object' ? value.id : value; }
   function nodeName(node) { return String(node.name || node.label || node.id || ''); }
+  /* Replace force-graph's round flow particles with a small directional glyph. The vendor
+     callback supplies the particle's current position and its link; the context already has
+     the resolved particle colour, so this only changes the silhouette and orientation. */
+  function paintFlowArrow(x, y, link, ctx, globalScale) {
+    const source = link && link.source;
+    const target = link && link.target;
+    if (!source || !target || !Number.isFinite(source.x) || !Number.isFinite(target.x)) return;
+    const dx = target.x - source.x;
+    const dy = target.y - source.y;
+    if (!dx && !dy) return;
+    const size = 1 / Math.sqrt(Math.max(0.01, Number(globalScale) || 1));
+    const angle = Math.atan2(dy, dx);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.beginPath();
+    ctx.moveTo(size * 0.55, 0);
+    ctx.lineTo(-size * 0.45, size * 0.32);
+    ctx.lineTo(-size * 0.45, -size * 0.32);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+  /* Keep node geometry in the same compact world-space range as the Classic/Ledger renderer.
+     The previous overview formula used the full size-slider value plus a normalized degree
+     bonus, which made a seven-node workspace occupy only a small simulation area while each
+     node still had a dense-graph radius. `zoomToFit()` then magnified those radii into large
+     discs. Material style must not change geometry; it only changes the painted surface. */
+  function graphNodeRadius(node, base, metric) {
+    const size = Number.isFinite(+base) && +base > 0 ? +base : 3;
+    if (node && node.cluster) {
+      const members = Math.max(1, Number(node.members) || 1);
+      const radius = size * 0.45 * (1.4 + Math.min(3, Math.sqrt(members) * 0.7));
+      return Math.max(2, Math.min(size * 2.7, radius));
+    }
+    const normalized = Math.max(0, Math.min(1, Number(metric) || 0));
+    const radius = size * 0.45 * (0.55 + Math.min(1.6, normalized * 1.9));
+    return Math.max(0.8, Math.min(size * 1.1, radius));
+  }
   function linkEndpoint(link, side) {
     return idOf(link[side] !== undefined ? link[side] : link[side === 'source' ? 'from' : 'to']);
   }
@@ -1196,7 +1235,6 @@
         paintMaterialSurface(ctx, node.x, node.y, r, scale, nodeMaterial, materialLow);
       } else if (state.styleName === 'solar') {
         const sun = node.rank === 0;
-        if (sun) r *= 1.7;
         nodeMaterial = materialRecipe(
           'solar', state.themeColors, state.palette,
           sun ? mixColours(col, '#d38b43', 0.46) : col
@@ -1340,9 +1378,7 @@
       const sizeMetric = n => state.sizeBy === 'betweenness' ? (n.betweenness || 0) : ((n.degree || 0) / Math.max(1, maxDeg));
       data.nodes.forEach(n => {
         const base = (state.settings.size || 3);
-        n.radius = n.cluster
-          ? Math.max(3, base * (1.4 + Math.min(3, Math.sqrt(n.members || 1) * 0.7)))
-          : Math.max(0.8, base * (0.55 + Math.min(1.6, sizeMetric(n) * 1.9)));
+        n.radius = graphNodeRadius(n, base, sizeMetric(n));
         n.color = nodeColor(n);
         n.stroke = contrastOn(n.color);
       });
@@ -1379,7 +1415,7 @@
       if (fg.linkCurvature) {
         fg.linkCurvature(dense ? 0 : ((PRESETS[state.settings.mode] || PRESETS.compact).curve || 0));
       }
-      fg.linkDirectionalArrowLength(dense ? 0 : 2.5).linkDirectionalArrowRelPos(1);
+      fg.linkDirectionalArrowLength(dense ? 0 : 0.625).linkDirectionalArrowRelPos(1);
       applyLinkLabels();
       if (fg.linkDirectionalParticles) {
         const flowing = !fullGraph
@@ -1390,7 +1426,8 @@
           ? 0
           : (state.styleName === 'cyber' ? 3 : ((PRESETS[state.settings.mode] || {}).particles || 2));
         fg.linkDirectionalParticles(l => l.suggested || l.ghost ? 0 : particles)
-          .linkDirectionalParticleWidth(2)
+          .linkDirectionalParticleWidth(1)
+          .linkDirectionalParticleCanvasObject(paintFlowArrow)
           .linkDirectionalParticleColor(l => alpha(layerColor(l.layer), 0.95))
           .linkDirectionalParticleSpeed(l => 0.002 + ((state.settings.flowSpeed || 45) / 100) * 0.008);
       }
@@ -1804,6 +1841,7 @@
        Nothing in the dashboard uses these; treat them as the engine's unit-test seam. */
     _internals: {
       esc, hexRgb, alpha, contrastOn, communities, betweenness, findBridges, maxOf,
+      graphNodeRadius, paintFlowArrow,
       nodeName, linkEndpoint, asOfValue, materialRecipe, materialTier,
       paintMaterialDirect, renderMaterialSample, sampleMaterialColour,
       materialCacheStats, clearMaterialCache, setMaterialCanvasFactory

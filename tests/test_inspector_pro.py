@@ -95,7 +95,7 @@ def test_local_owner_can_export_their_data_without_a_local_license_issuer(make_c
     assert response.status_code == 200
     assert "attachment" in response.headers["content-disposition"]
     payload = response.json()
-    assert payload["format"] == "engraphis-export/1"
+    assert payload["format"] == "engraphis-export/2"
     assert payload["counts"]["memories"] == 1
 
 
