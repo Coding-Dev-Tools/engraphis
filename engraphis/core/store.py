@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -189,6 +190,28 @@ def _edge_support_confidence(provenance: Any, source_kind: str) -> float:
     return _SUPPORT_CONFIDENCE.get(source_kind, 0.50)
 
 
+_PUBLIC_RECEIPT_LABELS_BY_KEY = {
+    "mtype": {"working", "episodic", "semantic", "procedural"},
+    "scope": {"session", "repo", "workspace", "user"},
+    "resolution": {"add", "noop", "invalidate", "relate"},
+    "retention": {
+        "ephemeral", "normal", "critical", "short", "standard", "long", "permanent",
+    },
+    "intent": {
+        "recall", "recall_context", "grounded", "http_read_only",
+        "explain", "timeline", "code", "locate_code",
+    },
+    "relation": {
+        "related", "mentions", "supports", "supersedes", "consolidates",
+        "promotes", "causes", "depends_on", "calls", "imports", "references",
+        "implements", "tests", "uses", "owned_by", "co_occurs",
+    },
+    "layer": {"temporal", "entity", "causal", "semantic"},
+    "retrieval_profile": {"balanced", "auto", "lexical", "graph", "code"},
+    "response_mode": {"full", "compact"},
+}
+
+
 def _receipt_metadata(metadata: dict) -> dict:
     """Keep receipt metadata useful but content-free and bounded."""
     allowed = {
@@ -197,25 +220,208 @@ def _receipt_metadata(metadata: dict) -> dict:
         "files_scanned", "files_indexed", "files_removed", "symbols", "edges",
         "entities", "relations", "tables", "dry_run", "error_count",
         "entities_added", "relations_added",
+        "retrieval_profile", "response_mode", "historical", "token_usage",
     }
+    def content_free_label(key: str, value: str) -> str:
+        normalized = value.strip().casefold().replace(" ", "_")
+        if normalized in _PUBLIC_RECEIPT_LABELS_BY_KEY.get(key, set()):
+            return normalized
+        return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
     out: dict[str, Any] = {}
     for key in sorted(metadata, key=lambda item: str(item))[:24]:
         safe_key = str(key)[:64]
         if safe_key not in allowed:
             continue
         value = metadata[key]
-        if isinstance(value, bool) or value is None:
+        if safe_key == "token_usage":
+            if not isinstance(value, dict):
+                continue
+            numeric = {
+                name: value[name]
+                for name in (
+                    "budget_tokens", "context_tokens", "source_tokens", "saved_tokens",
+                    "savings_ratio", "packed_count", "omitted_count",
+                )
+                if type(value.get(name)) in (int, float)
+                and math.isfinite(float(value[name]))
+            }
+            counter = value.get("token_counter")
+            if isinstance(counter, str):
+                if counter in {"engraphis.regex.v1", "estimate_tokens"}:
+                    numeric["token_counter"] = counter
+                else:
+                    numeric["token_counter"] = (
+                        "sha256:" + hashlib.sha256(counter.encode("utf-8")).hexdigest()
+                    )
+            out[safe_key] = numeric
+        elif isinstance(value, bool) or value is None:
             out[safe_key] = value
         elif isinstance(value, (int, float)):
-            out[safe_key] = value
+            if math.isfinite(float(value)):
+                out[safe_key] = value
         elif isinstance(value, str):
-            out[safe_key] = (
-                value[:80] if len(value) <= 80
-                else "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
-            )
+            out[safe_key] = content_free_label(safe_key, value)
         elif isinstance(value, (list, tuple)):
             out[safe_key] = len(value)
     return out
+
+
+_PUBLIC_RECEIPT_ID = re.compile(r"^rcpt_[0-9ABCDEFGHJKMNPQRSTVWXYZ]{26}$")
+_PUBLIC_RECEIPT_HASH = re.compile(r"^[0-9a-f]{64}$")
+_PUBLIC_RECEIPT_HASHED_LABEL = re.compile(r"^sha256:[0-9a-f]{64}$")
+_PUBLIC_RECEIPT_KEYS = {
+    "version", "id", "ts_ms", "operation", "scope_digest", "actor_digest",
+    "target_count", "status", "metadata", "prev_hash",
+}
+_PUBLIC_RECEIPT_METADATA_KEYS = {
+    "mtype", "scope", "resolution", "retention", "extracted", "intent", "k",
+    "result_count", "grounded", "citations", "relation", "layer", "graph_layers",
+    "files_scanned", "files_indexed", "files_removed", "symbols", "edges",
+    "entities", "relations", "tables", "dry_run", "error_count",
+    "entities_added", "relations_added", "retrieval_profile", "response_mode",
+    "historical", "token_usage",
+}
+_PUBLIC_RECEIPT_OPERATIONS = {
+    "remember", "recall", "promote", "link", "index_repo",
+    "graph_index", "grounded_recall", "consolidate", "sync",
+}
+_PUBLIC_RECEIPT_STATUSES = {
+    "ok", "add", "noop", "invalidate", "relate", "ingested",
+    "postgres_schema", "grounded", "abstained", "promoted",
+    "indexed", "skipped", "error", "failed", "cancelled", "partial",
+}
+
+
+def _redacted_receipt_value(value: Any) -> str:
+    raw = value if isinstance(value, str) else str(value or "")
+    return "redacted_sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _public_receipt_row(row: dict) -> dict:
+    """Return one validated content-free receipt or a hash-only corruption marker."""
+    raw = row.get("payload")
+    raw = raw if isinstance(raw, str) else str(raw or "")
+    raw_id = row.get("id")
+    raw_prev = row.get("prev_hash")
+    raw_hash = row.get("receipt_hash")
+
+    def safe_id() -> str:
+        value = raw_id if isinstance(raw_id, str) else str(raw_id or "")
+        return value if _PUBLIC_RECEIPT_ID.fullmatch(value) else _redacted_receipt_value(value)
+
+    def safe_hash(value: Any, *, allow_empty: bool = False) -> str:
+        text = value if isinstance(value, str) else str(value or "")
+        if allow_empty and not text:
+            return ""
+        return (
+            text if _PUBLIC_RECEIPT_HASH.fullmatch(text)
+            else _redacted_receipt_value(text)
+        )
+
+    invalid = {
+        "id": safe_id(),
+        "prev_hash": safe_hash(raw_prev, allow_empty=True),
+        "hash": safe_hash(raw_hash),
+        "invalid_payload": True,
+        "payload_bytes": len(raw.encode("utf-8")),
+        "payload_sha256": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+    }
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError, RecursionError):
+        return invalid
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != _PUBLIC_RECEIPT_KEYS
+        or payload.get("version") != 1
+        or payload.get("id") != raw_id
+        or payload.get("prev_hash") != raw_prev
+        or not isinstance(raw_id, str)
+        or _PUBLIC_RECEIPT_ID.fullmatch(raw_id) is None
+        or (
+            raw_prev != ""
+            and (
+                not isinstance(raw_prev, str)
+                or _PUBLIC_RECEIPT_HASH.fullmatch(raw_prev) is None
+            )
+        )
+        or not isinstance(raw_hash, str)
+        or _PUBLIC_RECEIPT_HASH.fullmatch(raw_hash) is None
+        or hashlib.sha256(raw.encode("utf-8")).hexdigest() != raw_hash
+    ):
+        return invalid
+    if type(payload.get("ts_ms")) is not int or payload["ts_ms"] < 0:
+        return invalid
+    if type(payload.get("target_count")) is not int or payload["target_count"] < 0:
+        return invalid
+    operation = payload.get("operation")
+    if not (
+        operation in _PUBLIC_RECEIPT_OPERATIONS
+        or (
+            isinstance(operation, str)
+            and _PUBLIC_RECEIPT_HASHED_LABEL.fullmatch(operation)
+        )
+    ):
+        return invalid
+    status = payload.get("status")
+    if not (
+        status in _PUBLIC_RECEIPT_STATUSES
+        or (
+            isinstance(status, str)
+            and _PUBLIC_RECEIPT_HASHED_LABEL.fullmatch(status)
+        )
+    ):
+        return invalid
+    if not (
+        isinstance(payload.get("scope_digest"), str)
+        and re.fullmatch(r"[0-9a-f]{24}", payload["scope_digest"])
+        and isinstance(payload.get("actor_digest"), str)
+        and re.fullmatch(r"[0-9a-f]{16}", payload["actor_digest"])
+    ):
+        return invalid
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict) or not set(metadata).issubset(
+        _PUBLIC_RECEIPT_METADATA_KEYS
+    ):
+        return invalid
+    for key, value in metadata.items():
+        if key == "token_usage":
+            if not isinstance(value, dict):
+                return invalid
+            allowed_usage = {
+                "budget_tokens", "context_tokens", "source_tokens", "saved_tokens",
+                "savings_ratio", "packed_count", "omitted_count", "token_counter",
+            }
+            if not set(value).issubset(allowed_usage):
+                return invalid
+            for usage_key, usage_value in value.items():
+                if usage_key == "token_counter":
+                    if not (
+                        usage_value in {"engraphis.regex.v1", "estimate_tokens"}
+                        or (
+                            isinstance(usage_value, str)
+                            and _PUBLIC_RECEIPT_HASHED_LABEL.fullmatch(usage_value)
+                        )
+                    ):
+                        return invalid
+                elif (
+                    type(usage_value) not in (int, float)
+                    or not math.isfinite(float(usage_value))
+                ):
+                    return invalid
+        elif isinstance(value, str):
+            public_labels = _PUBLIC_RECEIPT_LABELS_BY_KEY.get(key, set())
+            if not (
+                value in public_labels
+                or _PUBLIC_RECEIPT_HASHED_LABEL.fullmatch(value)
+            ):
+                return invalid
+        elif isinstance(value, bool) or value is None:
+            continue
+        elif type(value) not in (int, float) or not math.isfinite(float(value)):
+            return invalid
+    return {**payload, "hash": raw_hash}
 
 
 def _fts5_available(conn: sqlite3.Connection) -> bool:
@@ -225,6 +431,39 @@ def _fts5_available(conn: sqlite3.Connection) -> bool:
         return True
     except sqlite3.OperationalError:
         return False
+
+
+def _temporal_anchors(flt: Optional[SearchFilter], *, valid_at: Optional[float] = None
+                      ) -> tuple[float, float]:
+    """Return world-time and system-time anchors for one read.
+
+    ``valid_at`` is an explicit per-operation override used by graph traversal;
+    otherwise the filter's normalized ``valid_at``/legacy ``as_of`` value applies.
+    System-time defaults to the present, which preserves ordinary current reads.
+    """
+    world = valid_at
+    if world is None and flt is not None:
+        world = flt.valid_at
+    known = flt.known_at if flt is not None else None
+    present = now_ts()
+    return (present if world is None else world,
+            present if known is None else known)
+
+
+def _temporal_visibility_sql(alias: str, flt: Optional[SearchFilter], *,
+                             valid_at: Optional[float] = None) -> tuple[str, list[Any]]:
+    """SQL predicate shared by temporal code-history reads."""
+    world, known = _temporal_anchors(flt, valid_at=valid_at)
+    p = f"{alias}." if alias else ""
+    return (
+        f"({p}valid_from IS NULL OR {p}valid_from<=?) "
+        f"AND ({p}valid_to IS NULL OR ?<{p}valid_to "
+        f"OR ({p}valid_to_recorded_at IS NOT NULL "
+        f"AND ?<{p}valid_to_recorded_at)) "
+        f"AND ({p}ingested_at IS NULL OR {p}ingested_at<=?) "
+        f"AND ({p}expired_at IS NULL OR ?<{p}expired_at)",
+        [world, world, known, known, known],
+    )
 
 
 def memory_matches_filter(rec: MemoryRecord, flt: Optional[SearchFilter], *,
@@ -270,14 +509,18 @@ def memory_matches_filter(rec: MemoryRecord, flt: Optional[SearchFilter], *,
             return False
     if include_invalid:
         return True
-    t = at if at is not None else (
-        flt.as_of if flt and flt.as_of is not None else now_ts()
-    )
-    if rec.expired_at is not None:
+    valid_at, known_at = _temporal_anchors(flt, valid_at=at)
+    if rec.ingested_at is not None and rec.ingested_at > known_at:
         return False
-    if rec.valid_from is not None and rec.valid_from > t:
+    if rec.expired_at is not None and known_at >= rec.expired_at:
         return False
-    if rec.valid_to is not None and t >= rec.valid_to:
+    if rec.valid_from is not None and rec.valid_from > valid_at:
+        return False
+    if (rec.valid_to is not None and valid_at >= rec.valid_to
+            and not (
+                rec.valid_to_recorded_at is not None
+                and known_at < rec.valid_to_recorded_at
+            )):
         return False
     return True
 
@@ -559,18 +802,25 @@ class Store:
         if changed:
             self._fsync_backup_parent(backup_path)
 
-    def _backup_before_v4_migration(self) -> str:
-        """Create and verify the mandatory pre-v4 backup without mutating source data.
+    def _backup_before_v4_migration(self, *, previous_version: int = 0) -> str:
+        """Create and verify the mandatory pre-migration backup without mutating data.
 
         Source and destination both use the injected connector, so SQLCipher databases
         remain keyed throughout. The caller holds ``BEGIN IMMEDIATE`` on the primary
         connection, preventing another writer from changing the source between this
         snapshot and the migration commit. Only a quick-checked temporary backup may
         atomically replace the stable backup path; every failure aborts the migration.
+
+        The v3→v4 release established ``.pre-migration-v4.bak`` as a durable recovery
+        artifact.  A database that subsequently upgrades from v4 to v5 can legitimately
+        still have that older snapshot. Reusing the same filename would compare the v3
+        snapshot with the current v4 source and abort every v5 upgrade. Preserve the
+        legacy name for pre-v4 sources and use a version-specific v5 name for v4.
         """
         if self.path in (":memory:", "") or self.path.startswith("file::memory:"):
-            raise RuntimeError("schema v4 migration requires a durable pre-migration backup")
-        backup_path = f"{self.path}.pre-migration-v4.bak"
+            raise RuntimeError("schema migration requires a durable pre-migration backup")
+        backup_version = 5 if previous_version >= 4 else 4
+        backup_path = f"{self.path}.pre-migration-v{backup_version}.bak"
         self._cleanup_v4_backup_temps(backup_path)
         temp_path = (
             f"{backup_path}.tmp-{os.getpid()}-{threading.get_ident()}-{time.time_ns()}"
@@ -657,7 +907,7 @@ class Store:
             except OSError:
                 pass
             raise RuntimeError(
-                "schema v4 migration aborted: could not create and verify the "
+                f"schema v{backup_version} migration aborted: could not create and verify the "
                 "pre-migration backup"
             ) from exc
 
@@ -692,18 +942,33 @@ class Store:
             ).fetchone()
             value = row[0] if row is not None else None
             previous_version = int(value) if value is not None else 0
+        # Early v5 databases recorded direct memory links with only ``created_at``.
+        # Track that shape independently of the version row so they receive the
+        # missing bi-temporal fields and backfill on their next safe open.
+        mem_link_columns: set[str] = set()
+        if "mem_links" in object_names:
+            mem_link_columns = {
+                str(row["name"])
+                for row in self.conn.execute("PRAGMA table_info(mem_links)").fetchall()
+            }
+        mem_links_need_temporal_backfill = not {
+            "valid_from", "valid_to", "valid_to_recorded_at", "ingested_at", "expired_at",
+        }.issubset(mem_link_columns)
+        self._mem_links_need_temporal_backfill = mem_links_need_temporal_backfill
         if previous_version > SCHEMA_VERSION:
             raise RuntimeError(
                 f"database schema {previous_version} is newer than supported "
                 f"schema {SCHEMA_VERSION}"
             )
-        needs_backup = bool(object_names) and previous_version < SCHEMA_VERSION
+        needs_backup = bool(object_names) and (
+            previous_version < SCHEMA_VERSION or mem_links_need_temporal_backfill
+        )
         try:
             # Reserve the writer before the snapshot. This is read/locking state only;
             # every schema/data transform remains inside the transaction below.
             self.conn.execute("BEGIN IMMEDIATE")
             if needs_backup:
-                self._backup_before_v4_migration()
+                self._backup_before_v4_migration(previous_version=previous_version)
             self._apply_schema(previous_version)
             self.conn.commit()
         except BaseException:
@@ -712,6 +977,15 @@ class Store:
             raise
 
     def _apply_schema(self, previous_version: int) -> None:
+        mem_links_need_temporal_backfill = bool(
+            getattr(self, "_mem_links_need_temporal_backfill", False)
+        )
+        receipt_sequence_existed = any(
+            str(row["name"]) == "sequence"
+            for row in self.conn.execute(
+                "PRAGMA table_info(operation_receipts)"
+            ).fetchall()
+        )
         self._execute_script_transactional(SCHEMA_SQL)
         self.has_fts5 = _fts5_available(self.conn)
         self.conn.execute(FTS_SQL_FTS5 if self.has_fts5 else FTS_SQL_FALLBACK)
@@ -720,15 +994,38 @@ class Store:
         # explicit, idempotent ALTER TABLE here (SQLite has no "ADD COLUMN IF NOT EXISTS").
         for stmt in (
             "ALTER TABLE memories ADD COLUMN sort_order REAL",
+            "ALTER TABLE memories ADD COLUMN subject_key TEXT DEFAULT ''",
+            "ALTER TABLE memories ADD COLUMN claim_kind TEXT DEFAULT ''",
+            "ALTER TABLE memories ADD COLUMN valid_to_recorded_at REAL",
             "ALTER TABLE edges ADD COLUMN layer TEXT DEFAULT 'semantic'",
             "ALTER TABLE entities ADD COLUMN normalized_name TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE entities ADD COLUMN canonical_method TEXT NOT NULL DEFAULT 'exact'",
             "ALTER TABLE entities ADD COLUMN canonical_confidence REAL NOT NULL DEFAULT 1.0",
             "ALTER TABLE mem_links ADD COLUMN layer TEXT DEFAULT 'semantic'",
             "ALTER TABLE mem_links ADD COLUMN reason TEXT DEFAULT ''",
+            "ALTER TABLE mem_links ADD COLUMN valid_from REAL",
+            "ALTER TABLE mem_links ADD COLUMN valid_to REAL",
+            "ALTER TABLE mem_links ADD COLUMN valid_to_recorded_at REAL",
+            "ALTER TABLE mem_links ADD COLUMN ingested_at REAL",
+            "ALTER TABLE mem_links ADD COLUMN expired_at REAL",
             "ALTER TABLE code_edges ADD COLUMN layer TEXT DEFAULT 'entity'",
             "ALTER TABLE symbols ADD COLUMN docstring TEXT DEFAULT ''",
+            "ALTER TABLE symbols ADD COLUMN valid_from REAL",
+            "ALTER TABLE symbols ADD COLUMN valid_to REAL",
+            "ALTER TABLE symbols ADD COLUMN valid_to_recorded_at REAL",
+            "ALTER TABLE symbols ADD COLUMN ingested_at REAL",
+            "ALTER TABLE symbols ADD COLUMN expired_at REAL",
+            "ALTER TABLE code_edges ADD COLUMN valid_from REAL",
+            "ALTER TABLE code_edges ADD COLUMN valid_to REAL",
+            "ALTER TABLE code_edges ADD COLUMN valid_to_recorded_at REAL",
+            "ALTER TABLE code_edges ADD COLUMN ingested_at REAL",
+            "ALTER TABLE code_edges ADD COLUMN expired_at REAL",
+            "ALTER TABLE edges ADD COLUMN valid_to_recorded_at REAL",
+            "ALTER TABLE edge_supports ADD COLUMN valid_to_recorded_at REAL",
+            "ALTER TABLE memory_entities ADD COLUMN valid_to_recorded_at REAL",
+            "ALTER TABLE code_memory_links ADD COLUMN valid_to_recorded_at REAL",
             "ALTER TABLE receipt_chain_heads ADD COLUMN integrity_error TEXT DEFAULT ''",
+            "ALTER TABLE operation_receipts ADD COLUMN sequence INTEGER",
             "ALTER TABLE jobs ADD COLUMN runner_id TEXT",
             "ALTER TABLE jobs ADD COLUMN heartbeat_at REAL",
         ):
@@ -736,6 +1033,48 @@ class Store:
                 self.conn.execute(stmt)
             except sqlite3.OperationalError:
                 pass  # column already exists
+        # This cannot live in SCHEMA_SQL: CREATE TABLE IF NOT EXISTS leaves an
+        # early-v5 ``mem_links`` table untouched, so the index would reference
+        # temporal columns before the additive ALTERs above install them.
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mem_links_temporal "
+            "ON mem_links(a, valid_to, expired_at)"
+        )
+        self.conn.execute(
+            "UPDATE operation_receipts SET workspace_id='' WHERE workspace_id IS NULL"
+        )
+        self.conn.execute(
+            "UPDATE operation_receipts SET repo_id='' WHERE repo_id IS NULL"
+        )
+        if not receipt_sequence_existed:
+            self._backfill_receipt_sequences()
+        self._execute_script_transactional(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_receipt_sequence "
+            "ON operation_receipts(workspace_id, sequence) "
+            "WHERE sequence IS NOT NULL;"
+            "DROP TRIGGER IF EXISTS trg_receipt_sequence_required;"
+            "CREATE TRIGGER trg_receipt_sequence_required "
+            "BEFORE INSERT ON operation_receipts "
+            "WHEN NEW.sequence IS NULL OR typeof(NEW.sequence)!='integer' "
+            "OR NEW.sequence<1 BEGIN "
+            "SELECT RAISE(ABORT, 'receipt sequence is required'); END;"
+            "DROP TRIGGER IF EXISTS trg_receipt_sequence_immutable;"
+            "CREATE TRIGGER trg_receipt_sequence_immutable "
+            "BEFORE UPDATE OF sequence ON operation_receipts "
+            "WHEN NEW.sequence IS NOT OLD.sequence BEGIN "
+            "SELECT RAISE(ABORT, 'receipt sequence is immutable'); END;"
+        )
+        # These are migration transforms, not startup maintenance. Re-running the
+        # incidence backfill on every open scans the entire evidence graph and turns
+        # otherwise constant-time startup into O(workspace history). The schema-version
+        # row is written in the same transaction below, so an interrupted migration
+        # remains < v5 and safely retries all three transforms.
+        if previous_version < 5:
+            self._migrate_code_history_v5()
+            self._backfill_claim_identity_v5()
+            self._backfill_memory_entities_v5()
+        if previous_version < 5 or mem_links_need_temporal_backfill:
+            self._migrate_mem_link_history_v5()
         # Classify pre-v3 edges. Existing rows defaulted to semantic during ALTER TABLE;
         # infer their more specific logical layer from the relationship label.
         if previous_version < 3:
@@ -780,6 +1119,24 @@ class Store:
             "WHERE workspace_id IS NOT NULL AND repo_id IS NOT NULL "
             "AND valid_to IS NULL AND expired_at IS NULL;"
         )
+        self._execute_script_transactional(
+            "CREATE INDEX IF NOT EXISTS idx_mem_claim_live "
+            "ON memories(workspace_id, repo_id, scope, mtype, subject_key, claim_kind) "
+            "WHERE subject_key<>'' AND valid_to IS NULL AND expired_at IS NULL;"
+            "CREATE INDEX IF NOT EXISTS idx_sym_repo_live "
+            "ON symbols(repo_id, file, fqname, valid_to, expired_at);"
+            "CREATE INDEX IF NOT EXISTS idx_code_edge_live "
+            "ON code_edges(repo_id, file, valid_to, expired_at);"
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_code_mem_live_unique "
+            "ON code_memory_links(repo_id, symbol_id, memory_id, relation) "
+            "WHERE valid_to IS NULL AND expired_at IS NULL;"
+            "CREATE INDEX IF NOT EXISTS idx_code_mem_symbol "
+            "ON code_memory_links(repo_id, symbol_id);"
+            "CREATE INDEX IF NOT EXISTS idx_code_mem_memory "
+            "ON code_memory_links(repo_id, memory_id);"
+            "CREATE INDEX IF NOT EXISTS idx_code_mem_live_symbol "
+            "ON code_memory_links(repo_id, symbol_id, valid_to, expired_at);"
+        )
         # Every workspace has a cheap graph generation/state row, including databases
         # that already contained graph data before the v4 explorer tables were added.
         # Triggers in SCHEMA_SQL advance the generation on subsequent graph mutations.
@@ -793,27 +1150,195 @@ class Store:
         # anchor table existed. From this point onward every append updates it atomically,
         # allowing verification to detect deletion of the newest receipt as well as an
         # interior chain break.
-        self.conn.execute(
-            "UPDATE operation_receipts SET workspace_id='' WHERE workspace_id IS NULL"
-        )
-        self.conn.execute(
-            "UPDATE operation_receipts SET repo_id='' WHERE repo_id IS NULL"
-        )
-        self.conn.execute(
-            "INSERT OR IGNORE INTO receipt_chain_heads "
-            "(workspace_id, receipt_count, head_hash, integrity_error, updated_at) "
-            "SELECT COALESCE(r.workspace_id, ''), COUNT(*), "
-            "  (SELECT r2.receipt_hash FROM operation_receipts r2 "
-            "   WHERE COALESCE(r2.workspace_id, '')=COALESCE(r.workspace_id, '') "
-            "   ORDER BY r2.rowid DESC LIMIT 1), "
-            "  '', "
-            "  COALESCE(MAX(r.ts), 0) "
-            "FROM operation_receipts r GROUP BY COALESCE(r.workspace_id, '')"
-        )
+        if previous_version < 5:
+            receipt_scopes = self.conn.execute(
+                "SELECT r.workspace_id, COALESCE(MAX(r.ts), 0) AS updated_at "
+                "FROM operation_receipts r "
+                "LEFT JOIN receipt_chain_heads h ON h.workspace_id=r.workspace_id "
+                "WHERE h.workspace_id IS NULL "
+                "GROUP BY r.workspace_id"
+            ).fetchall()
+            for receipt_scope in receipt_scopes:
+                workspace_id = str(receipt_scope["workspace_id"] or "")
+                chain = self._receipt_chain_state(workspace_id)
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO receipt_chain_heads "
+                    "(workspace_id, receipt_count, head_hash, integrity_error, updated_at) "
+                    "VALUES (?,?,?,?,?)",
+                    (
+                        workspace_id,
+                        len(chain["rows"]),
+                        chain["head"],
+                        "" if not chain["errors"] else "migration_chain_invalid",
+                        receipt_scope["updated_at"],
+                    ),
+                )
         self.conn.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?,?)",
             (SCHEMA_VERSION, now_ts()),
         )
+
+    def _migrate_code_history_v5(self) -> None:
+        """Give pre-v5 code graph rows open bi-temporal intervals.
+
+        ``code_memory_links`` formerly had a table-level uniqueness constraint, which
+        made it impossible to retain a closed link and later create the same live link.
+        SQLite cannot drop that constraint in place, so rebuild that one narrow table
+        transactionally before installing the partial live-uniqueness index.
+        """
+        stamp = now_ts()
+        self.conn.execute(
+            "UPDATE symbols SET valid_from=COALESCE(valid_from, updated_at, ?), "
+            "ingested_at=COALESCE(ingested_at, updated_at, ?) "
+            "WHERE valid_from IS NULL OR ingested_at IS NULL",
+            (stamp, stamp),
+        )
+        self.conn.execute(
+            "UPDATE code_edges SET valid_from=COALESCE(valid_from, ?), "
+            "ingested_at=COALESCE(ingested_at, ?) "
+            "WHERE valid_from IS NULL OR ingested_at IS NULL",
+            (stamp, stamp),
+        )
+        columns = {
+            row["name"] for row in self.conn.execute(
+                "PRAGMA table_info(code_memory_links)"
+            ).fetchall()
+        }
+        if "valid_from" not in columns:
+            self.conn.execute(
+                "CREATE TABLE code_memory_links_v5 ("
+                "id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, symbol_id TEXT NOT NULL, "
+                "memory_id TEXT NOT NULL, relation TEXT DEFAULT 'mentions', "
+                "confidence REAL DEFAULT 1.0, created_at REAL, valid_from REAL, "
+                "valid_to REAL, valid_to_recorded_at REAL, "
+                "ingested_at REAL, expired_at REAL)"
+            )
+            self.conn.execute(
+                "INSERT INTO code_memory_links_v5("
+                "id, repo_id, symbol_id, memory_id, relation, confidence, created_at, "
+                "valid_from, ingested_at) "
+                "SELECT id, repo_id, symbol_id, memory_id, relation, confidence, "
+                "created_at, COALESCE(created_at, ?), COALESCE(created_at, ?) "
+                "FROM code_memory_links",
+                (stamp, stamp),
+            )
+            self.conn.execute("DROP TABLE code_memory_links")
+            self.conn.execute("ALTER TABLE code_memory_links_v5 RENAME TO code_memory_links")
+        else:
+            self.conn.execute(
+                "UPDATE code_memory_links SET valid_from=COALESCE(valid_from, created_at, ?), "
+                "ingested_at=COALESCE(ingested_at, created_at, ?) "
+                "WHERE valid_from IS NULL OR ingested_at IS NULL",
+                (stamp, stamp),
+            )
+
+    def _migrate_mem_link_history_v5(self) -> None:
+        """Give legacy direct memory links an open bi-temporal interval.
+
+        ``created_at`` was the only historical signal on old rows, so it is both
+        the best available world-time and system-time start. Rows without a clock
+        start at migration time rather than being projected into every past view.
+        """
+        stamp = now_ts()
+        self.conn.execute(
+            "UPDATE mem_links SET valid_from=COALESCE(valid_from, created_at, ?), "
+            "ingested_at=COALESCE(ingested_at, created_at, ?) "
+            "WHERE valid_from IS NULL OR ingested_at IS NULL",
+            (stamp, stamp),
+        )
+
+    def _backfill_claim_identity_v5(self) -> None:
+        """Lift already-present metadata hints into indexed, optional claim columns."""
+        rows = self.conn.execute(
+            "SELECT id, metadata, subject_key, claim_kind FROM memories"
+        ).fetchall()
+        for row in rows:
+            metadata = _loads(row["metadata"], {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            subject_key = str(row["subject_key"] or metadata.get("subject_key") or "").strip()
+            claim_kind = str(row["claim_kind"] or metadata.get("claim_kind") or "").strip()
+            if subject_key != (row["subject_key"] or "") or claim_kind != (row["claim_kind"] or ""):
+                self.conn.execute(
+                    "UPDATE memories SET subject_key=?, claim_kind=? WHERE id=?",
+                    (subject_key, claim_kind, row["id"]),
+                )
+
+    def _backfill_memory_entities_v5(self, memory_id: Optional[str] = None) -> None:
+        """Materialize deterministic incidence already evidenced by graph supports."""
+        sql = (
+            "SELECT s.memory_id, endpoint.entity_id, e.workspace_id, e.repo_id, "
+            "s.confidence, s.valid_from, s.valid_to, s.valid_to_recorded_at, "
+            "s.ingested_at, s.expired_at, "
+            "e.valid_from AS edge_valid_from, e.valid_to AS edge_valid_to, "
+            "e.valid_to_recorded_at AS edge_valid_to_recorded_at, "
+            "e.ingested_at AS edge_ingested_at, e.expired_at AS edge_expired_at, "
+            "s.provenance "
+            "FROM edge_supports s JOIN edges e ON e.id=s.edge_id "
+            "JOIN (SELECT id AS edge_id, src AS entity_id FROM edges "
+            "UNION ALL SELECT id, dst FROM edges) endpoint ON endpoint.edge_id=e.id "
+            "WHERE 1=1"
+        )
+        params: list[Any] = []
+        if memory_id is not None:
+            sql += " AND s.memory_id=?"
+            params.append(memory_id)
+        rows = self.conn.execute(sql, params).fetchall()
+        for row in rows:
+            valid_starts = [
+                value for value in (row["valid_from"], row["edge_valid_from"])
+                if value is not None
+            ]
+            valid_ends = [
+                value for value in (row["valid_to"], row["edge_valid_to"])
+                if value is not None
+            ]
+            known_starts = [
+                value for value in (row["ingested_at"], row["edge_ingested_at"])
+                if value is not None
+            ]
+            known_ends = [
+                value for value in (row["expired_at"], row["edge_expired_at"])
+                if value is not None
+            ]
+            valid_from = max(valid_starts) if valid_starts else None
+            valid_to = min(valid_ends) if valid_ends else None
+            closure_candidates = [
+                (row["valid_to"], row["valid_to_recorded_at"]),
+                (row["edge_valid_to"], row["edge_valid_to_recorded_at"]),
+            ]
+            controlling_closures = [
+                recorded for end, recorded in closure_candidates
+                if end is not None and end == valid_to
+            ]
+            valid_to_recorded_at = (
+                None
+                if not controlling_closures or any(
+                    recorded is None for recorded in controlling_closures
+                )
+                else min(controlling_closures)
+            )
+            ingested_at = max(known_starts) if known_starts else None
+            expired_at = min(known_ends) if known_ends else None
+            if (valid_from is not None and valid_to is not None
+                    and valid_from >= valid_to):
+                continue
+            if (ingested_at is not None and expired_at is not None
+                    and ingested_at >= expired_at):
+                continue
+            self.link_memory_entity(
+                memory_id=row["memory_id"], entity_id=row["entity_id"],
+                workspace_id=row["workspace_id"], repo_id=row["repo_id"],
+                source_kind="edge_support", confidence=row["confidence"],
+                valid_from=valid_from, valid_to=valid_to,
+                valid_to_recorded_at=valid_to_recorded_at,
+                ingested_at=ingested_at, expired_at=expired_at,
+                provenance=_loads(row["provenance"], {}), commit=False,
+            )
+
+    def backfill_memory_entities_for_memory(self, memory_id: str) -> None:
+        """Materialize the evidence incidence for one freshly written memory."""
+        self._backfill_memory_entities_v5(memory_id)
 
     def _backfill_entity_canonicalization(self) -> None:
         rows = [dict(row) for row in self.conn.execute(
@@ -1007,14 +1532,16 @@ class Store:
                     provenance = {}
                 provenance["canonical_deduplicated_into"] = survivor["id"]
                 self.conn.execute(
-                    "UPDATE edges SET valid_to=?, provenance=? WHERE id=?",
-                    (closed_at, _dumps(provenance), row["id"]),
+                    "UPDATE edges SET valid_to=?, valid_to_recorded_at=?, "
+                    "provenance=? WHERE id=?",
+                    (closed_at, closed_at, _dumps(provenance), row["id"]),
                 )
             retired_marks = ",".join("?" for _ in retired_ids)
             self.conn.execute(
-                "UPDATE edge_supports SET valid_to=? WHERE edge_id IN ("
+                "UPDATE edge_supports SET valid_to=?, valid_to_recorded_at=? "
+                "WHERE edge_id IN ("
                 + retired_marks + ") AND valid_to IS NULL AND expired_at IS NULL",
-                (closed_at, *retired_ids),
+                (closed_at, closed_at, *retired_ids),
             )
             # Retire duplicates before normalizing the survivor endpoints. A pre-release
             # v4 database may already have the partial unique index; reversing the
@@ -1305,15 +1832,17 @@ class Store:
                            f"existing provenance={existing['provenance']}, "
                            f"incoming provenance={_dumps(rec.provenance)}", commit=False)
         ts = now_ts()
-        rec.ingested_at = rec.ingested_at or ts
+        rec.ingested_at = rec.ingested_at if rec.ingested_at is not None else ts
         rec.valid_from = rec.valid_from if rec.valid_from is not None else ts
-        rec.last_access = rec.last_access or ts
+        rec.last_access = rec.last_access if rec.last_access is not None else ts
         self.conn.execute(
             """INSERT INTO memories
                (id, workspace_id, repo_id, session_id, scope, mtype, title, content, summary,
                 keywords, metadata, importance, surprise, stability, access_count, last_access,
-                valid_from, valid_to, ingested_at, expired_at, pinned, sensitivity, provenance)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at,
+                subject_key, claim_kind,
+                pinned, sensitivity, provenance)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                 workspace_id=excluded.workspace_id, repo_id=excluded.repo_id,
                 session_id=excluded.session_id, scope=excluded.scope, mtype=excluded.mtype,
@@ -1322,14 +1851,19 @@ class Store:
                 importance=excluded.importance, surprise=excluded.surprise,
                 stability=excluded.stability, access_count=excluded.access_count,
                 last_access=excluded.last_access, valid_from=excluded.valid_from,
-                valid_to=excluded.valid_to, ingested_at=excluded.ingested_at,
-                expired_at=excluded.expired_at, pinned=excluded.pinned,
+                valid_to=excluded.valid_to,
+                valid_to_recorded_at=excluded.valid_to_recorded_at,
+                ingested_at=excluded.ingested_at,
+                expired_at=excluded.expired_at, subject_key=excluded.subject_key,
+                claim_kind=excluded.claim_kind, pinned=excluded.pinned,
                 sensitivity=excluded.sensitivity, provenance=excluded.provenance""",
             (rec.id, rec.workspace_id, rec.repo_id, rec.session_id,
              _enum(rec.scope), _enum(rec.mtype), rec.title, rec.content, rec.summary,
              _dumps(rec.keywords), _dumps(rec.metadata), rec.importance, rec.surprise,
              rec.stability, rec.access_count, rec.last_access, rec.valid_from, rec.valid_to,
-             rec.ingested_at, rec.expired_at, int(rec.pinned), rec.sensitivity,
+             rec.valid_to_recorded_at, rec.ingested_at, rec.expired_at,
+             rec.subject_key, rec.claim_kind,
+             int(rec.pinned), rec.sensitivity,
              _dumps(rec.provenance)),
         )
         # full-text mirror
@@ -1402,9 +1936,13 @@ class Store:
     def close_validity(self, memory_id: str, *, at: Optional[float] = None,
                        actor: str = "system", reason: str = "contradicted") -> None:
         """Bi-temporal invalidation (§8.3): close a fact's validity window without deleting."""
-        at = at if at is not None else now_ts()
-        self.conn.execute("UPDATE memories SET valid_to=? WHERE id=? AND valid_to IS NULL",
-                          (at, memory_id))
+        recorded_at = now_ts()
+        at = at if at is not None else recorded_at
+        self.conn.execute(
+            "UPDATE memories SET valid_to=?, valid_to_recorded_at=? "
+            "WHERE id=? AND valid_to IS NULL",
+            (at, recorded_at, memory_id),
+        )
         self.audit(actor, "invalidate", memory_id, reason, commit=False)
         self.invalidate_edges_for_memory(memory_id, at=at, commit=False)
         self.conn.commit()
@@ -1570,6 +2108,131 @@ class Store:
                      workspace_id=r["workspace_id"], repo_id=r["repo_id"],
                      canonical_id=r["canonical_id"]) for r in rows]
 
+    def link_memory_entity(self, *, memory_id: str, entity_id: str,
+                           workspace_id: Optional[str], repo_id: Optional[str],
+                           source_kind: str = "explicit", confidence: float = 1.0,
+                           valid_from: Optional[float] = None,
+                           valid_to: Optional[float] = None,
+                           valid_to_recorded_at: Optional[float] = None,
+                           ingested_at: Optional[float] = None,
+                           expired_at: Optional[float] = None,
+                           provenance: Optional[dict] = None,
+                           commit: bool = True) -> str:
+        """Create one idempotent, live memory↔entity incidence record."""
+        if valid_to is None and expired_at is None:
+            existing = self.conn.execute(
+                "SELECT id, confidence, valid_from, ingested_at "
+                "FROM memory_entities WHERE memory_id=? AND entity_id=? "
+                "AND source_kind=? AND valid_to IS NULL AND expired_at IS NULL",
+                (memory_id, entity_id, source_kind),
+            ).fetchone()
+        else:
+            existing = self.conn.execute(
+                "SELECT id FROM memory_entities WHERE memory_id=? AND entity_id=? "
+                "AND source_kind=? AND valid_from IS ? AND valid_to IS ? "
+                "AND valid_to_recorded_at IS ? "
+                "AND ingested_at IS ? AND expired_at IS ?",
+                (
+                    memory_id, entity_id, source_kind, valid_from, valid_to,
+                    valid_to_recorded_at, ingested_at, expired_at,
+                ),
+            ).fetchone()
+        if existing is not None:
+            if valid_to is None and expired_at is None:
+                valid_values = [
+                    value for value in (existing["valid_from"], valid_from)
+                    if value is not None
+                ]
+                known_values = [
+                    value for value in (existing["ingested_at"], ingested_at)
+                    if value is not None
+                ]
+                desired_confidence = max(
+                    float(existing["confidence"] or 0.0),
+                    max(0.0, min(1.0, float(confidence))),
+                )
+                desired_valid = min(valid_values) if valid_values else None
+                desired_known = min(known_values) if known_values else None
+                if (
+                    desired_confidence != float(existing["confidence"] or 0.0)
+                    or desired_valid != existing["valid_from"]
+                    or desired_known != existing["ingested_at"]
+                ):
+                    self.conn.execute(
+                        "UPDATE memory_entities SET confidence=?, valid_from=?, "
+                        "ingested_at=? WHERE id=?",
+                        (
+                            desired_confidence, desired_valid, desired_known,
+                            existing["id"],
+                        ),
+                    )
+                    if commit:
+                        self.conn.commit()
+            return existing["id"]
+        stamp = now_ts()
+        link_id = ids.new_id("edge")
+        self.conn.execute(
+            "INSERT INTO memory_entities("
+            "id, memory_id, entity_id, workspace_id, repo_id, source_kind, confidence, "
+            "valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at, "
+            "provenance) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (link_id, memory_id, entity_id, workspace_id, repo_id, source_kind,
+             max(0.0, min(1.0, float(confidence))),
+             valid_from if valid_from is not None else stamp,
+             valid_to, valid_to_recorded_at,
+             ingested_at if ingested_at is not None else stamp,
+             expired_at,
+             _dumps(provenance or {})),
+        )
+        if commit:
+            self.conn.commit()
+        return link_id
+
+    def list_memory_entities(self, flt: Optional[SearchFilter] = None, *,
+                             entity_ids: Optional[list[str]] = None,
+                             limit: Optional[int] = None) -> list[dict]:
+        """Return bounded scoped/temporal incidence rows for graph retrieval."""
+        valid_at, known_at = _temporal_anchors(flt)
+        sql = (
+            "SELECT me.* FROM memory_entities me "
+            "JOIN memories m ON m.id=me.memory_id WHERE "
+            "(me.valid_from IS NULL OR me.valid_from<=?) "
+            "AND (me.valid_to IS NULL OR ?<me.valid_to "
+            "OR (me.valid_to_recorded_at IS NOT NULL "
+            "AND ?<me.valid_to_recorded_at)) "
+            "AND (me.ingested_at IS NULL OR me.ingested_at<=?) "
+            "AND (me.expired_at IS NULL OR ?<me.expired_at)"
+        )
+        params: list[Any] = [
+            valid_at, valid_at, known_at, known_at, known_at,
+        ]
+        if flt and flt.workspace_id:
+            sql += " AND me.workspace_id=?"
+            params.append(flt.workspace_id)
+        if flt and flt.repo_id:
+            if flt.include_ancestors:
+                sql += " AND (me.repo_id=? OR me.repo_id IS NULL)"
+            else:
+                sql += " AND me.repo_id=?"
+            params.append(flt.repo_id)
+        memory_where, memory_params = self._where(
+            flt, include_invalid=False, alias="m"
+        )
+        if memory_where:
+            sql += " AND " + " AND ".join(memory_where)
+            params.extend(memory_params)
+        if entity_ids is not None:
+            if not entity_ids:
+                return []
+            marks = ",".join("?" for _ in entity_ids)
+            sql += f" AND me.entity_id IN ({marks})"
+            params.extend(entity_ids)
+        sql += " ORDER BY me.confidence DESC, me.id"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(0, int(limit)))
+        return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
+
     def upsert_edge(self, edge: Edge, *, commit: bool = True) -> str:
         eid = edge.id or ids.new_id("edge")
         layer = normalize_graph_layer(edge.layer, edge.relation).value
@@ -1579,7 +2242,7 @@ class Store:
         incoming_provenance = _merge_edge_provenance([edge.provenance])
         existing = self.conn.execute(
             "SELECT id, workspace_id, repo_id, src, dst, relation, layer, weight, "
-            "valid_from, valid_to, ingested_at, expired_at, provenance "
+            "valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at, provenance "
             "FROM edges WHERE id=?", (eid,)
         ).fetchone()
         replacing = existing is not None
@@ -1613,17 +2276,29 @@ class Store:
                     value for value in (existing["valid_from"], edge.valid_from)
                     if value is not None
                 )
+            desired_ingested_at = existing["ingested_at"]
+            if edge.ingested_at is not None:
+                desired_ingested_at = min(
+                    value for value in (existing["ingested_at"], edge.ingested_at)
+                    if value is not None
+                )
             serialized_provenance = _dumps(merged_provenance)
             if desired_weight != float(existing["weight"] or 0.0) \
                     or desired_valid_from != existing["valid_from"] \
+                    or desired_ingested_at != existing["ingested_at"] \
                     or serialized_provenance != (existing["provenance"] or "{}"):
                 self.conn.execute(
-                    "UPDATE edges SET weight=?, valid_from=?, provenance=? WHERE id=?",
-                    (desired_weight, desired_valid_from, serialized_provenance, eid),
+                    "UPDATE edges SET weight=?, valid_from=?, ingested_at=?, "
+                    "provenance=? WHERE id=?",
+                    (
+                        desired_weight, desired_valid_from, desired_ingested_at,
+                        serialized_provenance, eid,
+                    ),
                 )
             self._write_edge_supports(
                 eid, edge.relation, incoming_provenance,
                 valid_from=edge.valid_from, valid_to=edge.valid_to,
+                valid_to_recorded_at=edge.valid_to_recorded_at,
                 ingested_at=edge.ingested_at, expired_at=edge.expired_at,
             )
             if commit:
@@ -1632,7 +2307,7 @@ class Store:
         equivalent = None
         if edge.valid_to is None and edge.expired_at is None:
             equivalent = self.conn.execute(
-                "SELECT id, weight, valid_from, provenance FROM edges "
+                "SELECT id, weight, valid_from, ingested_at, provenance FROM edges "
                 "WHERE workspace_id IS ? AND repo_id IS ? AND src=? AND dst=? "
                 "AND relation=? AND layer=? AND valid_to IS NULL AND expired_at IS NULL "
                 "AND id<>? ORDER BY id LIMIT 1",
@@ -1645,13 +2320,15 @@ class Store:
             if replacing:
                 closed_at = now_ts()
                 self.conn.execute(
-                    "UPDATE edges SET valid_to=? WHERE id=? AND valid_to IS NULL",
-                    (closed_at, eid),
+                    "UPDATE edges SET valid_to=?, valid_to_recorded_at=? "
+                    "WHERE id=? AND valid_to IS NULL",
+                    (closed_at, closed_at, eid),
                 )
                 self.conn.execute(
-                    "UPDATE edge_supports SET valid_to=? WHERE edge_id=? "
+                    "UPDATE edge_supports SET valid_to=?, valid_to_recorded_at=? "
+                    "WHERE edge_id=? "
                     "AND valid_to IS NULL AND expired_at IS NULL",
-                    (closed_at, eid),
+                    (closed_at, closed_at, eid),
                 )
             existing_provenance = _loads(equivalent["provenance"], {})
             merged_provenance = _merge_edge_provenance(
@@ -1661,17 +2338,25 @@ class Store:
             valid_values = [value for value in (
                 equivalent["valid_from"], edge.valid_from
             ) if value is not None]
+            known_values = [
+                value for value in (
+                    equivalent["ingested_at"], edge.ingested_at
+                ) if value is not None
+            ]
             self.conn.execute(
-                "UPDATE edges SET weight=?, valid_from=?, provenance=? WHERE id=?",
+                "UPDATE edges SET weight=?, valid_from=?, ingested_at=?, provenance=? "
+                "WHERE id=?",
                 (
                     max(float(equivalent["weight"] or 0.0), float(edge.weight or 0.0)),
                     min(valid_values) if valid_values else now_ts(),
+                    min(known_values) if known_values else now_ts(),
                     _dumps(merged_provenance), equivalent["id"],
                 ),
             )
             self._write_edge_supports(
                 equivalent["id"], edge.relation, incoming_provenance,
                 valid_from=edge.valid_from, valid_to=edge.valid_to,
+                valid_to_recorded_at=edge.valid_to_recorded_at,
                 ingested_at=edge.ingested_at, expired_at=edge.expired_at,
             )
             if commit:
@@ -1681,29 +2366,36 @@ class Store:
             # ``upsert_edge`` replaces the supplied edge record. Close its previous
             # normalized evidence before writing the replacement so sources removed
             # from the new provenance cannot remain live invisibly.
+            closed_at = now_ts()
             self.conn.execute(
-                "UPDATE edge_supports SET valid_to=? WHERE edge_id=? "
+                "UPDATE edge_supports SET valid_to=?, valid_to_recorded_at=? "
+                "WHERE edge_id=? "
                 "AND valid_to IS NULL AND expired_at IS NULL",
-                (now_ts(), eid),
+                (closed_at, closed_at, eid),
             )
         self.conn.execute(
             "INSERT INTO edges(id, workspace_id, repo_id, src, dst, relation, layer, "
-            "weight, valid_from, valid_to, ingested_at, expired_at, provenance) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "weight, valid_from, valid_to, valid_to_recorded_at, ingested_at, "
+            "expired_at, provenance) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET workspace_id=excluded.workspace_id, "
             "repo_id=excluded.repo_id, src=excluded.src, dst=excluded.dst, "
             "relation=excluded.relation, layer=excluded.layer, weight=excluded.weight, "
             "valid_from=excluded.valid_from, valid_to=excluded.valid_to, "
+            "valid_to_recorded_at=excluded.valid_to_recorded_at, "
             "ingested_at=excluded.ingested_at, expired_at=excluded.expired_at, "
             "provenance=excluded.provenance",
             (eid, edge.workspace_id, edge.repo_id, source, target, edge.relation, layer,
              edge.weight, edge.valid_from if edge.valid_from is not None else now_ts(),
-             edge.valid_to, edge.ingested_at or now_ts(), edge.expired_at,
+             edge.valid_to, edge.valid_to_recorded_at,
+             edge.ingested_at if edge.ingested_at is not None else now_ts(),
+             edge.expired_at,
              _dumps(incoming_provenance)),
         )
         self._write_edge_supports(
             eid, edge.relation, incoming_provenance,
             valid_from=edge.valid_from, valid_to=edge.valid_to,
+            valid_to_recorded_at=edge.valid_to_recorded_at,
             ingested_at=edge.ingested_at, expired_at=edge.expired_at,
         )
         if commit:
@@ -1711,18 +2403,24 @@ class Store:
         return eid
 
     def invalidate_edge(self, edge_id: str, at: Optional[float] = None) -> None:
-        ts = now_ts() if at is None else at
-        self.conn.execute("UPDATE edges SET valid_to=? WHERE id=? AND valid_to IS NULL",
-                          (ts, edge_id))
+        recorded_at = now_ts()
+        ts = recorded_at if at is None else at
         self.conn.execute(
-            "UPDATE edge_supports SET valid_to=? WHERE edge_id=? "
-            "AND valid_to IS NULL AND expired_at IS NULL", (ts, edge_id)
+            "UPDATE edges SET valid_to=?, valid_to_recorded_at=? "
+            "WHERE id=? AND valid_to IS NULL",
+            (ts, recorded_at, edge_id),
+        )
+        self.conn.execute(
+            "UPDATE edge_supports SET valid_to=?, valid_to_recorded_at=? "
+            "WHERE edge_id=? AND valid_to IS NULL AND expired_at IS NULL",
+            (ts, recorded_at, edge_id),
         )
         self.conn.commit()
 
     def _write_edge_supports(self, edge_id: str, relation: str, provenance: dict,
                              *, valid_from: Optional[float] = None,
                              valid_to: Optional[float] = None,
+                             valid_to_recorded_at: Optional[float] = None,
                              ingested_at: Optional[float] = None,
                              expired_at: Optional[float] = None) -> None:
         source_kind = _edge_source_kind(provenance, relation)
@@ -1772,13 +2470,17 @@ class Store:
             self.conn.execute(
                 "INSERT OR IGNORE INTO edge_supports "
                 "(edge_id, memory_id, source_kind, confidence, valid_from, valid_to, "
-                "ingested_at, expired_at, provenance) VALUES (?,?,?,?,?,?,?,?,?)",
+                "valid_to_recorded_at, ingested_at, expired_at, provenance) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (edge_id, memory_id, source_kind, confidence,
-                 support_valid_from, valid_to, support_ingested_at, expired_at,
+                 support_valid_from, valid_to, valid_to_recorded_at,
+                 support_ingested_at, expired_at,
                  _dumps(support_provenance)),
             )
 
     def add_edge_support(self, edge_id: str, provenance: dict, *,
+                         valid_from: Optional[float] = None,
+                         ingested_at: Optional[float] = None,
                          commit: bool = True) -> None:
         """Record another source memory supporting an existing graph edge."""
         incoming = _provenance_memory_ids(provenance)
@@ -1795,15 +2497,43 @@ class Store:
             self.conn.execute("UPDATE edges SET provenance=? WHERE id=?",
                               (_dumps(merged_provenance), edge_id))
         edge_row = self.conn.execute(
-            "SELECT relation, valid_from, valid_to, ingested_at, expired_at "
+            "SELECT relation, valid_from, valid_to, valid_to_recorded_at, "
+            "ingested_at, expired_at "
             "FROM edges WHERE id=?", (edge_id,)
         ).fetchone()
         if edge_row:
+            support_valid_from = (
+                valid_from if valid_from is not None else edge_row["valid_from"]
+            )
+            support_ingested_at = (
+                ingested_at if ingested_at is not None else edge_row["ingested_at"]
+            )
             self._write_edge_supports(
                 edge_id, edge_row["relation"] or "", provenance,
-                valid_from=edge_row["valid_from"], valid_to=edge_row["valid_to"],
-                ingested_at=edge_row["ingested_at"], expired_at=edge_row["expired_at"],
+                valid_from=support_valid_from, valid_to=edge_row["valid_to"],
+                valid_to_recorded_at=edge_row["valid_to_recorded_at"],
+                ingested_at=support_ingested_at, expired_at=edge_row["expired_at"],
             )
+            # The edge is the union of its supporting evidence intervals. A
+            # backdated support must make the relation visible at that earlier
+            # world time, and a historically imported support may likewise be
+            # known before the edge's previous system-time anchor.
+            valid_values = [
+                value for value in (edge_row["valid_from"], support_valid_from)
+                if value is not None
+            ]
+            ingested_values = [
+                value for value in (edge_row["ingested_at"], support_ingested_at)
+                if value is not None
+            ]
+            earlier_valid = min(valid_values) if valid_values else None
+            earlier_ingested = min(ingested_values) if ingested_values else None
+            if (earlier_valid != edge_row["valid_from"]
+                    or earlier_ingested != edge_row["ingested_at"]):
+                self.conn.execute(
+                    "UPDATE edges SET valid_from=?, ingested_at=? WHERE id=?",
+                    (earlier_valid, earlier_ingested, edge_id),
+                )
         if commit:
             self.conn.commit()
 
@@ -1826,7 +2556,8 @@ class Store:
         directly (service.py): those edges would carry provenance but no support rows, and
         would then silently never be invalidated. Normalize the edge writes first.
         """
-        ts = at if at is not None else now_ts()
+        recorded_at = now_ts()
+        ts = at if at is not None else recorded_at
         owner = self.conn.fetchall(
             "SELECT workspace_id FROM memories WHERE id=?", (memory_id,))
         workspace_id = owner[0]["workspace_id"] if owner else None
@@ -1857,9 +2588,10 @@ class Store:
             if memory_id not in supports:
                 continue
             self.conn.execute(
-                "UPDATE edge_supports SET valid_to=? WHERE edge_id=? AND memory_id=? "
+                "UPDATE edge_supports SET valid_to=?, valid_to_recorded_at=? "
+                "WHERE edge_id=? AND memory_id=? "
                 "AND valid_to IS NULL AND expired_at IS NULL",
-                (ts, row["id"], memory_id),
+                (ts, recorded_at, row["id"], memory_id),
             )
             normalized_remaining = [r["memory_id"] for r in self.conn.execute(
                 "SELECT DISTINCT memory_id FROM edge_supports WHERE edge_id=? "
@@ -1876,12 +2608,16 @@ class Store:
                               (_dumps(prov), row["id"]))
         if ids_to_close:
             marks = ",".join("?" for _ in ids_to_close)
-            self.conn.execute(f"UPDATE edges SET valid_to=? WHERE id IN ({marks})",
-                              (ts, *ids_to_close))
             self.conn.execute(
-                f"UPDATE edge_supports SET valid_to=? WHERE edge_id IN ({marks}) "
+                f"UPDATE edges SET valid_to=?, valid_to_recorded_at=? "
+                f"WHERE id IN ({marks})",
+                (ts, recorded_at, *ids_to_close),
+            )
+            self.conn.execute(
+                f"UPDATE edge_supports SET valid_to=?, valid_to_recorded_at=? "
+                f"WHERE edge_id IN ({marks}) "
                 "AND valid_to IS NULL AND expired_at IS NULL",
-                (ts, *ids_to_close),
+                (ts, recorded_at, *ids_to_close),
             )
         if commit:
             self.conn.commit()
@@ -1889,19 +2625,44 @@ class Store:
     # ── memory-to-memory links (A-MEM style) ────────────────────────────────────
     def edge_supports_in_scope(self, edge_ids: Optional[list[str]] = None, *,
                                at: Optional[float] = None,
+                               flt: Optional[SearchFilter] = None,
                                limit: Optional[int] = None) -> list[dict]:
-        """Return live normalized evidence rows for graph inspection/scene scoring."""
-        t = at if at is not None else now_ts()
+        """Return evidence visible at the supplied world/system-time anchors."""
+        valid_at, known_at = _temporal_anchors(flt, valid_at=at)
         row_cap = None if limit is None else max(0, int(limit))
         if row_cap == 0:
             return []
         sql = (
-            "SELECT id, edge_id, memory_id, source_kind, confidence, valid_from, "
-            "valid_to, ingested_at, expired_at, provenance FROM edge_supports "
-            "WHERE (valid_from IS NULL OR valid_from<=?) "
-            "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL"
+            "SELECT s.id, s.edge_id, s.memory_id, s.source_kind, s.confidence, "
+            "s.valid_from, s.valid_to, s.valid_to_recorded_at, "
+            "s.ingested_at, s.expired_at, s.provenance "
+            "FROM edge_supports s JOIN edges e ON e.id=s.edge_id "
+            "WHERE (s.valid_from IS NULL OR s.valid_from<=?) "
+            "AND (s.valid_to IS NULL OR ?<s.valid_to "
+            "OR (s.valid_to_recorded_at IS NOT NULL "
+            "AND ?<s.valid_to_recorded_at)) "
+            "AND (s.ingested_at IS NULL OR s.ingested_at<=?) "
+            "AND (s.expired_at IS NULL OR ?<s.expired_at) "
+            "AND (e.valid_from IS NULL OR e.valid_from<=?) "
+            "AND (e.valid_to IS NULL OR ?<e.valid_to "
+            "OR (e.valid_to_recorded_at IS NOT NULL "
+            "AND ?<e.valid_to_recorded_at)) "
+            "AND (e.ingested_at IS NULL OR e.ingested_at<=?) "
+            "AND (e.expired_at IS NULL OR ?<e.expired_at)"
         )
-        params: list[Any] = [t, t]
+        params: list[Any] = [
+            valid_at, valid_at, known_at, known_at, known_at,
+            valid_at, valid_at, known_at, known_at, known_at,
+        ]
+        if flt and flt.workspace_id:
+            sql += " AND e.workspace_id=?"
+            params.append(flt.workspace_id)
+        if flt and flt.repo_id:
+            if flt.include_ancestors:
+                sql += " AND (e.repo_id=? OR e.repo_id IS NULL)"
+            else:
+                sql += " AND e.repo_id=?"
+            params.append(flt.repo_id)
         if edge_ids is not None:
             if not edge_ids:
                 return []
@@ -1911,7 +2672,10 @@ class Store:
                     break
                 chunk = edge_ids[start:start + IN_CLAUSE_CHUNK]
                 marks = ",".join("?" for _ in chunk)
-                statement = sql + f" AND edge_id IN ({marks}) ORDER BY edge_id, memory_id, id"
+                statement = (
+                    sql + f" AND s.edge_id IN ({marks}) "
+                    "ORDER BY s.edge_id, s.memory_id, s.id"
+                )
                 statement_params: tuple[Any, ...] = (*params, *chunk)
                 if row_cap is not None:
                     statement += " LIMIT ?"
@@ -1921,7 +2685,7 @@ class Store:
                 ).fetchall()
                 rows.extend(dict(row) for row in found)
             return rows
-        statement = sql + " ORDER BY edge_id, memory_id, id"
+        statement = sql + " ORDER BY s.edge_id, s.memory_id, s.id"
         statement_params: tuple[Any, ...] = tuple(params)
         if row_cap is not None:
             statement += " LIMIT ?"
@@ -1932,70 +2696,139 @@ class Store:
 
     def add_link(self, a: str, b: str, relation: str = "related",
                  layer: Optional[GraphLayer] = None, reason: str = "",
-                 *, commit: bool = True) -> None:
+                 *, valid_from: Optional[float] = None,
+                 valid_to: Optional[float] = None,
+                 valid_to_recorded_at: Optional[float] = None,
+                 ingested_at: Optional[float] = None,
+                 expired_at: Optional[float] = None,
+                 commit: bool = True) -> None:
         """Idempotent per (pair, relation): re-linking the same two memories with the
         same relation is a no-op in either direction, so auto-evolution and explicit
         ``engraphis_link`` calls can't accrete duplicate rows."""
-        existing = self.conn.execute(
-            "SELECT rowid, layer, reason FROM mem_links "
-            "WHERE ((a=? AND b=?) OR (a=? AND b=?)) AND relation=? LIMIT 1",
-            (a, b, b, a, relation),
-        ).fetchone()
-        if existing:
-            updates: list[str] = []
-            params: list[Any] = []
-            if layer is not None:
-                graph_layer = normalize_graph_layer(layer, relation).value
-                if existing["layer"] != graph_layer:
-                    updates.append("layer=?")
-                    params.append(graph_layer)
-            if reason and existing["reason"] != reason:
-                updates.append("reason=?")
-                params.append(reason)
-            if updates:
-                params.append(existing["rowid"])
-                self.conn.execute(
-                    f"UPDATE mem_links SET {', '.join(updates)} WHERE rowid=?",
-                    params,
-                )
-                if commit:
-                    self.conn.commit()
-            return
-        graph_layer = normalize_graph_layer(layer, relation).value
-        self.conn.execute(
-            "INSERT INTO mem_links(a, b, relation, layer, reason, created_at) "
-            "VALUES (?,?,?,?,?,?)",
-            (a, b, relation, graph_layer, reason, now_ts()),
+        requested_layer = (
+            normalize_graph_layer(layer, relation).value
+            if layer is not None else None
         )
-        if commit:
-            self.conn.commit()
+        started_transaction = not self.conn.in_transaction
+        if started_transaction:
+            self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = self.conn.execute(
+                "SELECT rowid, a, b, relation, layer, reason, created_at, "
+                "valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at "
+                "FROM mem_links "
+                "WHERE ((a=? AND b=?) OR (a=? AND b=?)) AND relation=? "
+                "AND valid_to IS NULL AND expired_at IS NULL "
+                "ORDER BY rowid DESC LIMIT 1",
+                (a, b, b, a, relation),
+            ).fetchone()
+            if existing:
+                graph_layer = (
+                    requested_layer
+                    if requested_layer is not None else existing["layer"]
+                )
+                replacement_reason = reason if reason else existing["reason"]
+                if (
+                    graph_layer != existing["layer"]
+                    or replacement_reason != existing["reason"]
+                ):
+                    # Metadata is part of what the system knew about this link. Updating
+                    # it in place would rewrite a historical ``known_at`` view. Retire the
+                    # system-time version and open a replacement over the same world-time
+                    # interval so past reads remain immutable while current reads converge.
+                    stamp = max(
+                        now_ts(),
+                        (
+                            float(existing["ingested_at"])
+                            if existing["ingested_at"] is not None
+                            else float("-inf")
+                        ),
+                    )
+                    self.conn.execute(
+                        "UPDATE mem_links SET expired_at=? "
+                        "WHERE rowid=? AND expired_at IS NULL",
+                        (stamp, existing["rowid"]),
+                    )
+                    self.conn.execute(
+                        "INSERT INTO mem_links("
+                        "a, b, relation, layer, reason, created_at, valid_from, valid_to, "
+                        "valid_to_recorded_at, ingested_at, expired_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,NULL)",
+                        (
+                            existing["a"], existing["b"], existing["relation"],
+                            graph_layer, replacement_reason, stamp,
+                            existing["valid_from"], existing["valid_to"],
+                            existing["valid_to_recorded_at"], stamp,
+                        ),
+                    )
+                    if commit:
+                        self.conn.commit()
+                elif started_transaction:
+                    # The pre-read reservation has no write to batch. Release it even
+                    # for ``commit=False``; the old no-op path never opened a transaction.
+                    self.conn.commit()
+                return
+            graph_layer = requested_layer or normalize_graph_layer(None, relation).value
+            stamp = now_ts()
+            world_start = stamp if valid_from is None else valid_from
+            system_start = stamp if ingested_at is None else ingested_at
+            self.conn.execute(
+                "INSERT INTO mem_links("
+                "a, b, relation, layer, reason, created_at, valid_from, valid_to, "
+                "valid_to_recorded_at, ingested_at, expired_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (a, b, relation, graph_layer, reason, stamp, world_start, valid_to,
+                 valid_to_recorded_at, system_start, expired_at),
+            )
+            if commit:
+                self.conn.commit()
+        except BaseException:
+            if started_transaction and self.conn.in_transaction:
+                self.conn.rollback()
+            raise
 
     def has_link(self, a: str, b: str, *, relation: Optional[str] = None) -> bool:
-        sql = "SELECT 1 FROM mem_links WHERE ((a=? AND b=?) OR (a=? AND b=?))"
+        """Return whether the pair has a current open link interval.
+
+        Closed history must not block a later reactivation of the same relationship.
+        Historical visibility remains available through ``get_links``/``links_among``.
+        """
+        sql = (
+            "SELECT 1 FROM mem_links WHERE ((a=? AND b=?) OR (a=? AND b=?)) "
+            "AND valid_to IS NULL AND expired_at IS NULL"
+        )
         params: list[Any] = [a, b, b, a]
         if relation is not None:
             sql += " AND relation=?"
             params.append(relation)
         return self.conn.execute(sql + " LIMIT 1", params).fetchone() is not None
 
-    def get_links(self, memory_id: str) -> list[dict]:
+    def get_links(self, memory_id: str, *,
+                  flt: Optional[SearchFilter] = None) -> list[dict]:
+        """Return direct links visible at the filter's bi-temporal anchors."""
+        visible_sql, params = _temporal_visibility_sql("", flt)
         rows = self.conn.execute(
-            "SELECT a, b, relation, layer, reason, created_at "
-            "FROM mem_links WHERE a=? OR b=?",
-            (memory_id, memory_id),
+            "SELECT a, b, relation, layer, reason, created_at, valid_from, valid_to, "
+            "valid_to_recorded_at, ingested_at, expired_at FROM mem_links "
+            f"WHERE (a=? OR b=?) AND {visible_sql} ORDER BY a, b, relation",
+            (memory_id, memory_id, *params),
         ).fetchall()
         return [dict(r) for r in rows]
 
     def edges_in_scope(self, flt: Optional[SearchFilter] = None,
                        *, at: Optional[float] = None,
                        limit: Optional[int] = None) -> list[Edge]:
-        """Every edge valid at ``at`` within the filter's workspace/repo — the graph
-        the PPR retrieval arm walks (edges outside their validity window are invisible,
-        same bi-temporal rule as memories)."""
-        t = at if at is not None else now_ts()
+        """Edges visible at ``at``/``filter.valid_at`` and ``filter.known_at``."""
+        valid_at, known_at = _temporal_anchors(flt, valid_at=at)
         sql = ("SELECT * FROM edges WHERE (valid_from IS NULL OR valid_from<=?) "
-               "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL")
-        params: list[Any] = [t, t]
+               "AND (valid_to IS NULL OR ?<valid_to "
+               "OR (valid_to_recorded_at IS NOT NULL "
+               "AND ?<valid_to_recorded_at)) "
+               "AND (ingested_at IS NULL OR ingested_at<=?) "
+               "AND (expired_at IS NULL OR ?<expired_at)")
+        params: list[Any] = [
+            valid_at, valid_at, known_at, known_at, known_at,
+        ]
         if flt and flt.workspace_id:
             sql += " AND workspace_id=?"
             params.append(flt.workspace_id)
@@ -2008,6 +2841,7 @@ class Store:
             marks = ",".join("?" for _ in flt.graph_layers)
             sql += f" AND layer IN ({marks})"
             params.extend(_enum(layer) for layer in flt.graph_layers)
+        sql += " ORDER BY id"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(max(0, int(limit)))
@@ -2015,60 +2849,122 @@ class Store:
         return [_row_to_edge(r) for r in rows]
 
     def links_among(self, ids: list[str], *,
-                    layers: Optional[list[GraphLayer]] = None) -> list[dict]:
-        """mem_links rows where *both* endpoints are in ``ids`` (for graph retrieval)."""
+                    layers: Optional[list[GraphLayer]] = None,
+                    flt: Optional[SearchFilter] = None,
+                    limit: Optional[int] = None) -> list[dict]:
+        """Return memory links visible under both temporal anchors.
+
+        Chunk only the indexed ``a`` side and filter ``b`` against an in-memory set.
+        This keeps every statement below SQLite's portable variable limit while
+        preserving exact pair semantics for graphs containing thousands of memories.
+        """
         if not ids:
             return []
-        marks = ",".join("?" for _ in ids)
-        sql = (
-            f"SELECT a, b, relation, layer, reason FROM mem_links "
-            f"WHERE a IN ({marks}) AND b IN ({marks})"
-        )
-        params: list[Any] = [*ids, *ids]
-        if layers:
-            layer_marks = ",".join("?" for _ in layers)
-            sql += f" AND layer IN ({layer_marks})"
-            params.extend(_enum(layer) for layer in layers)
-        rows = self.conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
+        if layers is not None and not layers:
+            return []
+        row_cap = None if limit is None else max(0, int(limit))
+        if row_cap == 0:
+            return []
+        wanted = set(ids)
+        ordered_ids = sorted(wanted)
+        visibility_sql, visibility_params = _temporal_visibility_sql("", flt)
+        rows: list[dict] = []
+        # Leave headroom for the time anchor and optional layer parameters.
+        chunk_size = max(1, IN_CLAUSE_CHUNK - 16)
+        for start in range(0, len(ordered_ids), chunk_size):
+            if row_cap is not None and len(rows) >= row_cap:
+                break
+            chunk = ordered_ids[start:start + chunk_size]
+            marks = ",".join("?" for _ in chunk)
+            sql = (
+                "SELECT a, b, relation, layer, reason, created_at, valid_from, valid_to, "
+                "valid_to_recorded_at, ingested_at, expired_at FROM mem_links "
+                f"WHERE a IN ({marks}) "
+                f"AND {visibility_sql}"
+            )
+            params: list[Any] = [*chunk, *visibility_params]
+            if layers is not None:
+                layer_marks = ",".join("?" for _ in layers)
+                sql += f" AND layer IN ({layer_marks})"
+                params.extend(_enum(layer) for layer in layers)
+            sql += " ORDER BY a, b, relation"
+            found = self.conn.execute(sql, params).fetchall()
+            for row in found:
+                if row["b"] not in wanted:
+                    continue
+                rows.append(dict(row))
+                if row_cap is not None and len(rows) >= row_cap:
+                    break
+        return rows
 
     def neighbors(self, node_ids: list[str], *, at: Optional[float] = None,
-                  layers: Optional[list[GraphLayer]] = None) -> list[Edge]:
+                  layers: Optional[list[GraphLayer]] = None,
+                  flt: Optional[SearchFilter] = None) -> list[Edge]:
         if not node_ids:
             return []
-        t = at if at is not None else now_ts()
+        valid_at, known_at = _temporal_anchors(flt, valid_at=at)
         marks = ",".join("?" for _ in node_ids)
         sql = (
             f"SELECT * FROM edges WHERE (src IN ({marks}) OR dst IN ({marks})) "
-            f"AND (valid_from IS NULL OR valid_from<=?) AND (valid_to IS NULL OR ?<valid_to) "
-            f"AND expired_at IS NULL"
+            f"AND (valid_from IS NULL OR valid_from<=?) "
+            f"AND (valid_to IS NULL OR ?<valid_to "
+            f"OR (valid_to_recorded_at IS NOT NULL "
+            f"AND ?<valid_to_recorded_at)) "
+            f"AND (ingested_at IS NULL OR ingested_at<=?) "
+            f"AND (expired_at IS NULL OR ?<expired_at)"
         )
-        params: list[Any] = [*node_ids, *node_ids, t, t]
-        if layers:
+        params: list[Any] = [
+            *node_ids, *node_ids,
+            valid_at, valid_at, known_at, known_at, known_at,
+        ]
+        if layers is not None:
+            if not layers:
+                return []
             layer_marks = ",".join("?" for _ in layers)
             sql += f" AND layer IN ({layer_marks})"
             params.extend(_enum(layer) for layer in layers)
+        if flt and flt.workspace_id:
+            sql += " AND workspace_id=?"
+            params.append(flt.workspace_id)
+        if flt and flt.repo_id:
+            if flt.include_ancestors:
+                sql += " AND (repo_id=? OR repo_id IS NULL)"
+            else:
+                sql += " AND repo_id=?"
+            params.append(flt.repo_id)
         rows = self.conn.execute(sql, params).fetchall()
         return [_row_to_edge(r) for r in rows]
 
     # ── code symbol graph ────────────────────────────────────────────────────────
     def clear_symbols_for_file(self, repo_id: str, file: str, *,
                                commit: bool = True) -> None:
-        """Re-indexing a file replaces its symbols/edges — incremental indexing is
-        idempotent per file, not additive."""
+        """Retire a file's live code graph rows before an incremental re-index."""
+        stamp = now_ts()
         symbol_rows = self.conn.execute(
-            "SELECT id FROM symbols WHERE repo_id=? AND file=?", (repo_id, file)
+            "SELECT id FROM symbols WHERE repo_id=? AND file=? "
+            "AND valid_to IS NULL AND expired_at IS NULL", (repo_id, file)
         ).fetchall()
         symbol_ids = [row["id"] for row in symbol_rows]
         if symbol_ids:
             marks = ",".join("?" for _ in symbol_ids)
             self.conn.execute(
-                f"DELETE FROM code_memory_links WHERE repo_id=? "
-                f"AND symbol_id IN ({marks})",
-                (repo_id, *symbol_ids),
+                f"UPDATE code_memory_links SET valid_to=?, valid_to_recorded_at=? "
+                f"WHERE repo_id=? "
+                f"AND symbol_id IN ({marks}) AND valid_to IS NULL AND expired_at IS NULL",
+                (stamp, stamp, repo_id, *symbol_ids),
             )
-        self.conn.execute("DELETE FROM symbols WHERE repo_id=? AND file=?", (repo_id, file))
-        self.conn.execute("DELETE FROM code_edges WHERE repo_id=? AND file=?", (repo_id, file))
+        self.conn.execute(
+            "UPDATE symbols SET valid_to=?, valid_to_recorded_at=? "
+            "WHERE repo_id=? AND file=? "
+            "AND valid_to IS NULL AND expired_at IS NULL",
+            (stamp, stamp, repo_id, file),
+        )
+        self.conn.execute(
+            "UPDATE code_edges SET valid_to=?, valid_to_recorded_at=? "
+            "WHERE repo_id=? AND file=? "
+            "AND valid_to IS NULL AND expired_at IS NULL",
+            (stamp, stamp, repo_id, file),
+        )
         if commit:
             self.conn.commit()
 
@@ -2079,10 +2975,10 @@ class Store:
         sid = ids.new_id("symbol")
         self.conn.execute(
             "INSERT INTO symbols(id, repo_id, kind, name, fqname, file, span, signature, "
-            "docstring, lang, exported, content_hash, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "docstring, lang, exported, content_hash, updated_at, valid_from, ingested_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (sid, repo_id, kind, name, fqname, file, span, signature, docstring,
-             lang, int(exported), content_hash, now_ts()),
+             lang, int(exported), content_hash, now_ts(), now_ts(), now_ts()),
         )
         if commit:
             self.conn.commit()
@@ -2096,9 +2992,10 @@ class Store:
         if layer is None and graph_layer == GraphLayer.SEMANTIC:
             graph_layer = GraphLayer.ENTITY
         self.conn.execute(
-            "INSERT INTO code_edges(id, repo_id, src, dst, relation, layer, file, line) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (eid, repo_id, src, dst, relation, graph_layer.value, file, line),
+            "INSERT INTO code_edges(id, repo_id, src, dst, relation, layer, file, line, "
+            "valid_from, ingested_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (eid, repo_id, src, dst, relation, graph_layer.value, file, line,
+             now_ts(), now_ts()),
         )
         if commit:
             self.conn.commit()
@@ -2159,9 +3056,11 @@ class Store:
         )
         self.conn.commit()
 
-    def list_symbols(self, repo_id: str, *, limit: Optional[int] = None) -> list[dict]:
-        sql = "SELECT * FROM symbols WHERE repo_id=? ORDER BY file, fqname"
-        params: list[Any] = [repo_id]
+    def list_symbols(self, repo_id: str, *, limit: Optional[int] = None,
+                     flt: Optional[SearchFilter] = None) -> list[dict]:
+        temporal, params = _temporal_visibility_sql("", flt)
+        sql = "SELECT * FROM symbols WHERE repo_id=? AND " + temporal + " ORDER BY file, fqname"
+        params = [repo_id, *params]
         if limit is not None:
             sql += " LIMIT ?"
             params.append(max(0, int(limit)))  # never -1 == SQLite "unlimited"
@@ -2169,9 +3068,11 @@ class Store:
 
     def list_symbols_page(self, repo_id: str, *,
                           after: Optional[tuple[str, str, str]] = None,
-                          limit: int = 500) -> list[dict]:
-        sql = "SELECT * FROM symbols WHERE repo_id=?"
-        params: list[Any] = [repo_id]
+                          limit: int = 500,
+                          flt: Optional[SearchFilter] = None) -> list[dict]:
+        temporal, params = _temporal_visibility_sql("", flt)
+        sql = "SELECT * FROM symbols WHERE repo_id=? AND " + temporal
+        params = [repo_id, *params]
         if after is not None:
             file, fqname, symbol_id = after
             sql += (
@@ -2184,9 +3085,11 @@ class Store:
         return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
 
     def list_code_edges(self, repo_id: str, *, limit: Optional[int] = None,
-                        layers: Optional[list[GraphLayer]] = None) -> list[dict]:
-        sql = "SELECT * FROM code_edges WHERE repo_id=?"
-        params: list[Any] = [repo_id]
+                        layers: Optional[list[GraphLayer]] = None,
+                        flt: Optional[SearchFilter] = None) -> list[dict]:
+        temporal, params = _temporal_visibility_sql("", flt)
+        sql = "SELECT * FROM code_edges WHERE repo_id=? AND " + temporal
+        params = [repo_id, *params]
         if layers is not None:
             if not layers:
                 return []
@@ -2199,68 +3102,88 @@ class Store:
             params.append(max(0, int(limit)))  # never -1 == SQLite "unlimited"
         return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
 
-    def symbols_for_files(self, repo_id: str, files: list[str]) -> list[dict]:
+    def symbols_for_files(self, repo_id: str, files: list[str], *,
+                          flt: Optional[SearchFilter] = None) -> list[dict]:
         if not files:
             return []
         marks = ",".join("?" for _ in files)
+        temporal, params = _temporal_visibility_sql("", flt)
         rows = self.conn.execute(
             f"SELECT * FROM symbols WHERE repo_id=? AND file IN ({marks}) "
-            "ORDER BY file, fqname",
-            (repo_id, *files),
+            f"AND {temporal} ORDER BY file, fqname",
+            (repo_id, *files, *params),
         ).fetchall()
         return [dict(r) for r in rows]
 
     def count_code_edges(self, repo_id: str) -> int:
         row = self.conn.execute(
-            "SELECT COUNT(*) AS n FROM code_edges WHERE repo_id=?", (repo_id,)
+            "SELECT COUNT(*) AS n FROM code_edges WHERE repo_id=? "
+            "AND valid_to IS NULL AND expired_at IS NULL", (repo_id,)
         ).fetchone()
         return int(row["n"]) if row else 0
 
-    def search_symbols(self, repo_id: str, query: str, *, limit: int = 20) -> list[dict]:
+    def search_symbols(self, repo_id: str, query: str, *, limit: int = 20,
+                       flt: Optional[SearchFilter] = None) -> list[dict]:
         """Substring match on name/fqname (no embedding yet — v1 is lexical)."""
         like = f"%{_escape_like(query)}%"
+        temporal, temporal_params = _temporal_visibility_sql("", flt)
         rows = self.conn.execute(
-            "SELECT * FROM symbols WHERE repo_id=? AND (name LIKE ? ESCAPE '\\' OR fqname LIKE ? ESCAPE '\\') "
+            f"SELECT * FROM symbols WHERE repo_id=? AND {temporal} "
+            "AND (name LIKE ? ESCAPE '\\' OR fqname LIKE ? ESCAPE '\\') "
             "ORDER BY name LIMIT ?",
-            (repo_id, like, like, limit),
+            (repo_id, *temporal_params, like, like, limit),
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_symbol_callers(self, repo_id: str, name: str, *, limit: int = 50) -> list[dict]:
+    def get_symbol_callers(self, repo_id: str, name: str, *, limit: int = 50,
+                           flt: Optional[SearchFilter] = None) -> list[dict]:
+        temporal, temporal_params = _temporal_visibility_sql("", flt)
         rows = self.conn.execute(
-            "SELECT * FROM code_edges WHERE repo_id=? AND dst=? AND relation='calls' LIMIT ?",
-            (repo_id, name, limit),
+            "SELECT * FROM code_edges WHERE repo_id=? AND dst=? AND relation='calls' "
+            f"AND {temporal} LIMIT ?",
+            (repo_id, name, *temporal_params, limit),
         ).fetchall()
         return [dict(r) for r in rows]
 
     def count_symbols(self, repo_id: str) -> int:
         row = self.conn.execute(
-            "SELECT COUNT(*) AS n FROM symbols WHERE repo_id=?", (repo_id,)
+            "SELECT COUNT(*) AS n FROM symbols WHERE repo_id=? "
+            "AND valid_to IS NULL AND expired_at IS NULL", (repo_id,)
         ).fetchone()
         return int(row["n"]) if row else 0
 
     def link_memory_symbol(self, *, repo_id: str, symbol_id: str, memory_id: str,
                            relation: str = "mentions", confidence: float = 1.0,
                            commit: bool = True) -> str:
-        link_id = ids.new_id("edge")
-        self.conn.execute(
-            "INSERT OR IGNORE INTO code_memory_links("
-            "id, repo_id, symbol_id, memory_id, relation, confidence, created_at"
-            ") VALUES (?,?,?,?,?,?,?)",
-            (link_id, repo_id, symbol_id, memory_id, relation,
-             max(0.0, min(1.0, float(confidence))), now_ts()),
-        )
-        row = self.conn.execute(
+        existing = self.conn.execute(
             "SELECT id FROM code_memory_links WHERE repo_id=? AND symbol_id=? "
-            "AND memory_id=? AND relation=?",
+            "AND memory_id=? AND relation=? AND valid_to IS NULL AND expired_at IS NULL",
             (repo_id, symbol_id, memory_id, relation),
         ).fetchone()
+        if existing is not None:
+            return existing["id"]
+        link_id = ids.new_id("edge")
+        stamp = now_ts()
+        self.conn.execute(
+            "INSERT OR IGNORE INTO code_memory_links("
+            "id, repo_id, symbol_id, memory_id, relation, confidence, created_at, "
+            "valid_from, ingested_at"
+            ") VALUES (?,?,?,?,?,?,?,?,?)",
+            (link_id, repo_id, symbol_id, memory_id, relation,
+             max(0.0, min(1.0, float(confidence))), stamp, stamp, stamp),
+        )
         if commit:
             self.conn.commit()
-        return row["id"] if row else link_id
+        return link_id
 
     def clear_code_memory_links(self, repo_id: str, *, commit: bool = True) -> None:
-        self.conn.execute("DELETE FROM code_memory_links WHERE repo_id=?", (repo_id,))
+        stamp = now_ts()
+        self.conn.execute(
+            "UPDATE code_memory_links SET valid_to=?, valid_to_recorded_at=? "
+            "WHERE repo_id=? "
+            "AND valid_to IS NULL AND expired_at IS NULL",
+            (stamp, stamp, repo_id),
+        )
         if commit:
             self.conn.commit()
 
@@ -2269,9 +3192,12 @@ class Store:
         if not memory_ids:
             return
         marks = ",".join("?" for _ in memory_ids)
+        stamp = now_ts()
         self.conn.execute(
-            f"DELETE FROM code_memory_links WHERE repo_id=? AND memory_id IN ({marks})",
-            (repo_id, *memory_ids),
+            f"UPDATE code_memory_links SET valid_to=?, valid_to_recorded_at=? "
+            f"WHERE repo_id=? "
+            f"AND memory_id IN ({marks}) AND valid_to IS NULL AND expired_at IS NULL",
+            (stamp, stamp, repo_id, *memory_ids),
         )
         if commit:
             self.conn.commit()
@@ -2280,12 +3206,14 @@ class Store:
         """Remove bridges whose repo-associated memory is no longer live."""
         t = now_ts()
         self.conn.execute(
-            "DELETE FROM code_memory_links WHERE repo_id=? AND NOT EXISTS ("
+            "UPDATE code_memory_links SET valid_to=?, valid_to_recorded_at=? "
+            "WHERE repo_id=? "
+            "AND valid_to IS NULL AND expired_at IS NULL AND NOT EXISTS ("
             "SELECT 1 FROM memories AS m WHERE m.id=code_memory_links.memory_id AND m.repo_id=? "
             "AND (m.valid_from IS NULL OR m.valid_from<=?) "
             "AND (m.valid_to IS NULL OR ?<m.valid_to) AND m.expired_at IS NULL"
             ")",
-            (repo_id, repo_id, t, t),
+            (t, t, repo_id, repo_id, t, t),
         )
         if commit:
             self.conn.commit()
@@ -2296,18 +3224,24 @@ class Store:
                                limit: Optional[int] = None) -> list[dict]:
         sql = (
             "SELECT l.*, s.name, s.fqname, s.file, s.kind AS symbol_kind, "
-            "m.title, m.mtype, m.valid_to, m.expired_at "
+            "m.title, m.mtype, m.valid_to AS memory_valid_to, "
+            "m.expired_at AS memory_expired_at "
             "FROM code_memory_links l "
-            "LEFT JOIN symbols s ON s.id=l.symbol_id "
-            "LEFT JOIN memories m ON m.id=l.memory_id "
+            "JOIN symbols s ON s.id=l.symbol_id "
+            "JOIN memories m ON m.id=l.memory_id "
             "WHERE l.repo_id=?"
         )
         params: list[Any] = [repo_id]
-        if flt is not None:
-            where, visibility_params = self._where(flt, include_invalid=False, alias="m")
-            if where:
-                sql += " AND " + " AND ".join(where)
-                params.extend(visibility_params)
+        link_visibility, link_params = _temporal_visibility_sql("l", flt)
+        sql += " AND " + link_visibility
+        params.extend(link_params)
+        symbol_visibility, symbol_params = _temporal_visibility_sql("s", flt)
+        sql += " AND " + symbol_visibility
+        params.extend(symbol_params)
+        where, visibility_params = self._where(flt, include_invalid=False, alias="m")
+        if where:
+            sql += " AND " + " AND ".join(where)
+            params.extend(visibility_params)
         sql += " ORDER BY l.created_at, l.id"
         if limit is not None:
             sql += " LIMIT ?"
@@ -2325,6 +3259,9 @@ class Store:
             "WHERE l.repo_id=? AND l.symbol_id=?"
         )
         params: list[Any] = [repo_id, symbol_id]
+        link_visibility, link_params = _temporal_visibility_sql("l", flt)
+        sql += " AND " + link_visibility
+        params.extend(link_params)
         where, visibility_params = self._where(flt, include_invalid=False, alias="m")
         if where:
             sql += " AND " + " AND ".join(where)
@@ -2341,12 +3278,60 @@ class Store:
             out.append(item)
         return out
 
-    def symbols_for_memory(self, repo_id: str, memory_id: str) -> list[dict]:
+    def memories_for_symbols(self, repo_id: str, symbol_ids: list[str], *,
+                             flt: Optional[SearchFilter] = None,
+                             limit: int = 20) -> dict[str, list[dict]]:
+        """Return a bounded memory ranking for many symbols in one SQL query."""
+        unique_ids = list(dict.fromkeys(
+            str(symbol_id) for symbol_id in symbol_ids if str(symbol_id)
+        ))[:500]
+        if not unique_ids:
+            return {}
+        per_symbol_limit = max(1, min(100, int(limit)))
+        placeholders = ",".join("?" for _ in unique_ids)
+        sql = (
+            "WITH ranked AS ("
+            "SELECT l.symbol_id, m.id, m.title, m.content, m.mtype, m.scope, "
+            "m.importance, m.provenance, l.relation, l.confidence, "
+            "ROW_NUMBER() OVER (PARTITION BY l.symbol_id "
+            "ORDER BY l.confidence DESC, m.importance DESC, "
+            "m.ingested_at DESC, l.id, m.id) AS row_rank "
+            "FROM code_memory_links l JOIN memories m ON m.id=l.memory_id "
+            f"WHERE l.repo_id=? AND l.symbol_id IN ({placeholders})"
+        )
+        params: list[Any] = [repo_id, *unique_ids]
+        link_visibility, link_params = _temporal_visibility_sql("l", flt)
+        sql += " AND " + link_visibility
+        params.extend(link_params)
+        where, visibility_params = self._where(flt, include_invalid=False, alias="m")
+        if where:
+            sql += " AND " + " AND ".join(where)
+            params.extend(visibility_params)
+        sql += (
+            ") SELECT symbol_id, id, title, content, mtype, scope, importance, "
+            "provenance, relation, confidence FROM ranked WHERE row_rank<=? "
+            "ORDER BY symbol_id, row_rank"
+        )
+        params.append(per_symbol_limit)
+        grouped: dict[str, list[dict]] = {}
+        for row in self.conn.execute(sql, params).fetchall():
+            item = dict(row)
+            symbol_id = str(item.pop("symbol_id"))
+            item["provenance"] = _loads(item.get("provenance"), {})
+            grouped.setdefault(symbol_id, []).append(item)
+        return grouped
+
+    def symbols_for_memory(self, repo_id: str, memory_id: str, *,
+                           flt: Optional[SearchFilter] = None) -> list[dict]:
+        link_visibility, link_params = _temporal_visibility_sql("l", flt)
+        symbol_visibility, symbol_params = _temporal_visibility_sql("s", flt)
         rows = self.conn.execute(
             "SELECT s.*, l.relation, l.confidence FROM code_memory_links l "
             "JOIN symbols s ON s.id=l.symbol_id "
-            "WHERE l.repo_id=? AND l.memory_id=? ORDER BY l.confidence DESC, s.fqname",
-            (repo_id, memory_id),
+            f"WHERE l.repo_id=? AND l.memory_id=? AND {link_visibility} "
+            f"AND {symbol_visibility} "
+            "ORDER BY l.confidence DESC, s.fqname",
+            (repo_id, memory_id, *link_params, *symbol_params),
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -2403,6 +3388,149 @@ class Store:
         if commit:
             self.conn.commit()
 
+    def _backfill_receipt_sequences(self) -> None:
+        """Assign durable logical ordinals once when the sequence column is introduced."""
+        scopes = self.conn.execute(
+            "SELECT DISTINCT workspace_id FROM operation_receipts"
+        ).fetchall()
+        for scope in scopes:
+            workspace_id = str(scope["workspace_id"] or "")
+            chain = self._receipt_chain_state(workspace_id)
+            for sequence, row in enumerate(chain["rows"], 1):
+                self.conn.execute(
+                    "UPDATE operation_receipts SET sequence=? WHERE id=?",
+                    (sequence, row["id"]),
+                )
+
+    def _receipt_chain_state(self, workspace_id: str) -> dict:
+        """Reconstruct one receipt chain from immutable predecessor hashes.
+
+        SQLite ``rowid`` is physical placement, not durable ordering: VACUUM and table
+        rewrites may renumber it. The receipt payload already carries the true linked-list
+        order, while ``receipt_chain_heads`` anchors the expected tail. This helper keeps
+        traversal independent of storage layout and returns a deterministic fallback order
+        when corruption makes a single chain impossible.
+        """
+        rows = [dict(row) for row in self.conn.execute(
+            "SELECT id, sequence, payload, prev_hash, receipt_hash "
+            "FROM operation_receipts "
+            "WHERE workspace_id=?",
+            (workspace_id,),
+        ).fetchall()]
+
+        def text(value: Any) -> str:
+            return value if isinstance(value, str) else str(value or "")
+
+        def stable_key(row: dict) -> tuple[str, str]:
+            material = "\0".join((
+                text(row.get("receipt_hash")),
+                text(row.get("prev_hash")),
+                text(row.get("id")),
+                hashlib.sha256(text(row.get("payload")).encode("utf-8")).hexdigest(),
+            ))
+            return hashlib.sha256(material.encode("utf-8")).hexdigest(), material
+
+        children: dict[str, list[dict]] = {}
+        for row in rows:
+            children.setdefault(text(row.get("prev_hash")), []).append(row)
+        for candidates in children.values():
+            candidates.sort(key=stable_key)
+
+        structure_errors: list[dict] = []
+        ordered: list[dict] = []
+        roots = children.get("", [])
+        if rows and len(roots) != 1:
+            structure_errors.append({
+                "index": 0,
+                "id": "",
+                "error": "chain_root_count",
+            })
+        if len(roots) == 1:
+            current = roots[0]
+            visited_hashes: set[str] = set()
+            while current is not None:
+                receipt_hash = text(current.get("receipt_hash"))
+                if receipt_hash in visited_hashes:
+                    structure_errors.append({
+                        "index": len(ordered),
+                        "id": text(current.get("id")),
+                        "error": "chain_cycle",
+                    })
+                    break
+                visited_hashes.add(receipt_hash)
+                ordered.append(current)
+                successors = children.get(receipt_hash, [])
+                if len(successors) > 1:
+                    structure_errors.append({
+                        "index": len(ordered) - 1,
+                        "id": text(current.get("id")),
+                        "error": "chain_fork",
+                    })
+                    break
+                current = successors[0] if successors else None
+
+        ordered_identity = {id(row) for row in ordered}
+        if len(ordered) != len(rows):
+            structure_errors.append({
+                "index": len(ordered),
+                "id": "",
+                "error": "chain_disconnected",
+            })
+            ordered.extend(sorted(
+                (row for row in rows if id(row) not in ordered_identity),
+                key=stable_key,
+            ))
+
+        row_errors: list[dict] = []
+        for index, row in enumerate(ordered):
+            if type(row.get("sequence")) is not int or row["sequence"] != index + 1:
+                row_errors.append({
+                    "index": index,
+                    "id": text(row.get("id")),
+                    "error": "sequence_mismatch",
+                })
+            raw = text(row.get("payload"))
+            stored_hash = text(row.get("receipt_hash"))
+            if hashlib.sha256(raw.encode("utf-8")).hexdigest() != stored_hash:
+                row_errors.append({
+                    "index": index,
+                    "id": text(row.get("id")),
+                    "error": "hash_mismatch",
+                })
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError, RecursionError):
+                payload = None
+            if (
+                not isinstance(payload, dict)
+                or payload.get("id") != row.get("id")
+                or payload.get("prev_hash") != row.get("prev_hash")
+            ):
+                row_errors.append({
+                    "index": index,
+                    "id": text(row.get("id")),
+                    "error": "payload_mismatch",
+                })
+            if _public_receipt_row(row).get("invalid_payload") is True:
+                row_errors.append({
+                    "index": index,
+                    "id": text(row.get("id")),
+                    "error": "payload_schema_invalid",
+                })
+
+        structurally_valid = not structure_errors and len(ordered) == len(rows)
+        head = (
+            text(ordered[-1].get("receipt_hash"))
+            if ordered and structurally_valid else ""
+        )
+        return {
+            "rows": ordered,
+            "head": head,
+            "structure_errors": structure_errors,
+            "row_errors": row_errors,
+            "errors": [*row_errors, *structure_errors],
+        }
+
     def record_receipt(self, operation: str, *, workspace_id: str = "",
                        repo_id: str = "", actor: str = "system",
                        target_count: int = 0, status: str = "ok",
@@ -2415,7 +3543,24 @@ class Store:
         is anchored independently, so modification, reordering, interior deletion, and
         tail truncation are detectable during verification.
         """
-        operation = str(operation or "unknown")[:80]
+        operation = str(operation or "unknown")
+        operation_normalized = operation.strip().casefold()
+        operation = (
+            operation_normalized
+            if operation_normalized in _PUBLIC_RECEIPT_OPERATIONS
+            else "sha256:" + hashlib.sha256(operation.encode("utf-8")).hexdigest()
+        )
+        raw_status = str(status or "ok")
+        status_normalized = raw_status.strip().casefold()
+        safe_status = (
+            status_normalized
+            if status_normalized in _PUBLIC_RECEIPT_STATUSES
+            else "sha256:" + hashlib.sha256(raw_status.encode("utf-8")).hexdigest()
+        )
+        try:
+            safe_target_count = max(0, int(target_count))
+        except (TypeError, ValueError, OverflowError):
+            safe_target_count = 0
         actor = str(actor or "system")[:200]
         workspace_id = str(workspace_id or "")
         repo_id = str(repo_id or "")
@@ -2433,15 +3578,6 @@ class Store:
                     f"{workspace_id}\0{repo_id}".encode("utf-8")
                 ).hexdigest()[:24]
                 actor_digest = hashlib.sha256(actor.encode("utf-8")).hexdigest()[:16]
-                chain = self.conn.execute(
-                    "SELECT COUNT(*) AS n, "
-                    "COALESCE((SELECT receipt_hash FROM operation_receipts "
-                    "WHERE workspace_id=? ORDER BY rowid DESC LIMIT 1), '') AS head "
-                    "FROM operation_receipts WHERE workspace_id=?",
-                    (workspace_id, workspace_id),
-                ).fetchone()
-                current_count = int(chain["n"] or 0)
-                prev_hash = str(chain["head"] or "")
                 anchor = self.conn.execute(
                     "SELECT receipt_count, head_hash, integrity_error "
                     "FROM receipt_chain_heads "
@@ -2449,15 +3585,72 @@ class Store:
                     (workspace_id,),
                 ).fetchone()
                 anchor_error = str(anchor["integrity_error"] or "") if anchor else ""
-                if anchor is not None and (
-                    int(anchor["receipt_count"]) != current_count
-                    or str(anchor["head_hash"]) != prev_hash
-                ):
-                    # Preserve evidence of the mismatch without bricking the operation that
-                    # requested this receipt. The new receipt continues from the rows that
-                    # actually remain, while verification stays invalid until an explicit
-                    # repair/export decision clears the persistent integrity marker.
-                    anchor_error = anchor_error or "pre_append_anchor_mismatch"
+                latest = self.conn.execute(
+                    "SELECT sequence FROM operation_receipts "
+                    "WHERE workspace_id=? ORDER BY sequence DESC LIMIT 1",
+                    (workspace_id,),
+                ).fetchone()
+                current_count: Optional[int] = None
+                prev_hash = ""
+                if anchor is None and latest is None:
+                    # First receipt for a workspace: no scan and no anchor are expected.
+                    current_count = 0
+                elif anchor is not None:
+                    anchor_count = anchor["receipt_count"]
+                    anchor_head = anchor["head_hash"]
+                    if (
+                        type(anchor_count) is int
+                        and anchor_count == 0
+                        and anchor_head == ""
+                        and latest is None
+                    ):
+                        current_count = 0
+                    elif (
+                        type(anchor_count) is int
+                        and anchor_count > 0
+                        and latest is not None
+                        and latest["sequence"] == anchor_count
+                    ):
+                        head_row = self.conn.execute(
+                            "SELECT id, sequence, payload, prev_hash, receipt_hash "
+                            "FROM operation_receipts "
+                            "WHERE workspace_id=? AND sequence=?",
+                            (workspace_id, anchor_count),
+                        ).fetchone()
+                        if (
+                            head_row is not None
+                            and head_row["receipt_hash"] == anchor_head
+                            and not _public_receipt_row(dict(head_row)).get(
+                                "invalid_payload", False
+                            )
+                        ):
+                            current_count = anchor_count
+                            prev_hash = str(anchor_head)
+
+                if current_count is None:
+                    # The independently stored anchor/ordinal did not describe a healthy
+                    # head. Reconstruct only on this exceptional path so a safe unique
+                    # predecessor can still be extended without retrying the memory action.
+                    chain = self._receipt_chain_state(workspace_id)
+                    if chain["structure_errors"]:
+                        raise sqlite3.IntegrityError(
+                            "receipt chain has no unique structural head; append refused"
+                        )
+                    current_count = len(chain["rows"])
+                    prev_hash = str(chain["head"] or "")
+                    if chain["row_errors"]:
+                        anchor_error = anchor_error or "pre_append_chain_corruption"
+                    if anchor is None and current_count:
+                        anchor_error = anchor_error or "pre_append_anchor_missing"
+                    elif anchor is not None and (
+                        type(anchor["receipt_count"]) is not int
+                        or anchor["receipt_count"] != current_count
+                        or str(anchor["head_hash"]) != prev_hash
+                    ):
+                        # Keep evidence of deletion or anchor damage while extending the
+                        # unique chain that actually remains.
+                        anchor_error = anchor_error or "pre_append_anchor_mismatch"
+                next_sequence = current_count + 1
                 safe_meta = _receipt_metadata(metadata or {})
                 payload_obj = {
                     "version": 1,
@@ -2466,8 +3659,8 @@ class Store:
                     "operation": operation,
                     "scope_digest": scope_digest,
                     "actor_digest": actor_digest,
-                    "target_count": max(0, int(target_count)),
-                    "status": str(status or "ok")[:40],
+                    "target_count": safe_target_count,
+                    "status": safe_status,
                     "metadata": safe_meta,
                     "prev_hash": prev_hash,
                 }
@@ -2477,10 +3670,11 @@ class Store:
                 receipt_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
                 self.conn.execute(
                     "INSERT INTO operation_receipts(id, ts, operation, workspace_id, repo_id, "
-                    "scope_digest, actor, target_count, status, payload, prev_hash, "
-                    "receipt_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "sequence, scope_digest, actor, target_count, status, payload, prev_hash, "
+                    "receipt_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
-                        receipt_id, ts, operation, workspace_id, repo_id, scope_digest,
+                        receipt_id, ts, operation, workspace_id, repo_id, next_sequence,
+                        scope_digest,
                         actor_digest, payload_obj["target_count"], payload_obj["status"],
                         payload, prev_hash, receipt_hash,
                     ),
@@ -2507,40 +3701,21 @@ class Store:
                 raise
 
     def list_receipts(self, *, workspace_id: str, limit: int = 100) -> list[dict]:
+        safe_limit = max(1, min(10_000, int(limit)))
         rows = self.conn.execute(
-            "SELECT payload, receipt_hash FROM operation_receipts WHERE workspace_id=? "
-            "ORDER BY rowid DESC LIMIT ?",
-            (workspace_id, max(1, min(10_000, int(limit)))),
+            "SELECT id, sequence, payload, prev_hash, receipt_hash "
+            "FROM operation_receipts WHERE workspace_id=? "
+            "ORDER BY sequence DESC LIMIT ?",
+            (workspace_id, safe_limit),
         ).fetchall()
-        out = []
-        for row in rows:
-            payload = _loads(row["payload"], {})
-            if isinstance(payload, dict):
-                payload["hash"] = row["receipt_hash"]
-                out.append(payload)
-        return out
+        return [_public_receipt_row(dict(row)) for row in rows]
 
     def verify_receipts(self, *, workspace_id: str, expected_head: str = "",
                         expected_count: Optional[int] = None) -> dict:
-        rows = self.conn.execute(
-            "SELECT id, payload, prev_hash, receipt_hash FROM operation_receipts "
-            "WHERE workspace_id=? ORDER BY rowid ASC",
-            (workspace_id,),
-        ).fetchall()
-        previous = ""
-        errors: list[dict] = []
-        for index, row in enumerate(rows):
-            actual = hashlib.sha256(row["payload"].encode("utf-8")).hexdigest()
-            if actual != row["receipt_hash"]:
-                errors.append({"index": index, "id": row["id"], "error": "hash_mismatch"})
-            payload = _loads(row["payload"], {})
-            if not isinstance(payload, dict) or payload.get("id") != row["id"] \
-                    or payload.get("prev_hash") != row["prev_hash"]:
-                errors.append({"index": index, "id": row["id"],
-                               "error": "payload_mismatch"})
-            if row["prev_hash"] != previous:
-                errors.append({"index": index, "id": row["id"], "error": "chain_break"})
-            previous = row["receipt_hash"]
+        chain = self._receipt_chain_state(workspace_id)
+        rows = chain["rows"]
+        errors: list[dict] = list(chain["errors"])
+        head = str(chain["head"] or "")
         anchor = self.conn.execute(
             "SELECT receipt_count, head_hash, integrity_error "
             "FROM receipt_chain_heads WHERE workspace_id=?",
@@ -2549,11 +3724,12 @@ class Store:
         if rows and anchor is None:
             errors.append({"index": len(rows), "id": "", "error": "missing_anchor"})
         elif anchor is not None:
-            if int(anchor["receipt_count"]) != len(rows):
+            anchor_count = anchor["receipt_count"]
+            if type(anchor_count) is not int or anchor_count < 0 or anchor_count != len(rows):
                 errors.append({
                     "index": len(rows), "id": "", "error": "anchor_count_mismatch",
                 })
-            if str(anchor["head_hash"]) != previous:
+            if str(anchor["head_hash"]) != head:
                 errors.append({
                     "index": len(rows), "id": "", "error": "anchor_head_mismatch",
                 })
@@ -2562,7 +3738,7 @@ class Store:
                     "index": len(rows), "id": "", "error": "anchor_integrity_error",
                 })
         expected_head = str(expected_head or "").strip()
-        if expected_head and previous != expected_head:
+        if expected_head and head != expected_head:
             errors.append({
                 "index": len(rows), "id": "", "error": "expected_head_mismatch",
             })
@@ -2578,7 +3754,7 @@ class Store:
         return {
             "valid": not errors,
             "count": len(rows),
-            "head": previous,
+            "head": head,
             "anchored": anchor is not None,
             "errors": errors,
         }
@@ -2656,12 +3832,19 @@ class Store:
                 where.append(f"{p}mtype IN ({marks})")
                 params.extend(_enum(m) for m in flt.mtypes)
         if not include_invalid:
-            t = (flt.as_of if flt and flt.as_of is not None else now_ts())
+            valid_at, known_at = _temporal_anchors(flt)
             where.append(f"({p}valid_from IS NULL OR {p}valid_from<=?)")
-            params.append(t)
-            where.append(f"({p}valid_to IS NULL OR ?<{p}valid_to)")
-            params.append(t)
-            where.append(f"{p}expired_at IS NULL")
+            params.append(valid_at)
+            where.append(
+                f"({p}valid_to IS NULL OR ?<{p}valid_to OR "
+                f"({p}valid_to_recorded_at IS NOT NULL "
+                f"AND ?<{p}valid_to_recorded_at))"
+            )
+            params.extend((valid_at, known_at))
+            where.append(f"({p}ingested_at IS NULL OR {p}ingested_at<=?)")
+            params.append(known_at)
+            where.append(f"({p}expired_at IS NULL OR ?<{p}expired_at)")
+            params.append(known_at)
         return where, params
 
 
@@ -2681,7 +3864,13 @@ def _row_to_record(row: sqlite3.Row) -> MemoryRecord:
         importance=row["importance"], surprise=row["surprise"], stability=row["stability"],
         access_count=row["access_count"], last_access=row["last_access"],
         valid_from=row["valid_from"], valid_to=row["valid_to"],
+        valid_to_recorded_at=(
+            row["valid_to_recorded_at"]
+            if "valid_to_recorded_at" in row.keys() else None
+        ),
         ingested_at=row["ingested_at"], expired_at=row["expired_at"],
+        subject_key=row["subject_key"] if "subject_key" in row.keys() else "",
+        claim_kind=row["claim_kind"] if "claim_kind" in row.keys() else "",
         pinned=bool(row["pinned"]), sensitivity=row["sensitivity"],
         provenance=_loads(row["provenance"], {}),
     )
@@ -2696,6 +3885,10 @@ def _row_to_edge(row: sqlite3.Row) -> Edge:
         weight=row["weight"], workspace_id=row["workspace_id"] if "workspace_id" in row.keys() else None,
         repo_id=row["repo_id"] if "repo_id" in row.keys() else None,
         valid_from=row["valid_from"], valid_to=row["valid_to"],
+        valid_to_recorded_at=(
+            row["valid_to_recorded_at"]
+            if "valid_to_recorded_at" in row.keys() else None
+        ),
         ingested_at=row["ingested_at"], expired_at=row["expired_at"],
         provenance=_loads(row["provenance"], {}),
     )

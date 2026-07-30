@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import sqlite3
 from pathlib import Path
 
 import pytest
 
 from engraphis.core.store import Store
+from engraphis.core.interfaces import Edge, MemoryRecord, Scope, SearchFilter
 
 
 def _adversarial_link(target: Path, link: Path) -> None:
@@ -55,7 +57,7 @@ def test_v3_upgrade_creates_verified_pre_mutation_backup_and_is_idempotent(tmp_p
     _prepare_v3(db)
 
     migrated = Store(str(db))
-    assert migrated.schema_version == 4
+    assert migrated.schema_version == 5
     assert migrated.conn.execute(
         "SELECT COUNT(*) FROM edge_supports WHERE edge_id='edge_v3'"
     ).fetchone()[0] == 1
@@ -73,6 +75,203 @@ def test_v3_upgrade_creates_verified_pre_mutation_backup_and_is_idempotent(tmp_p
     ).fetchone()[0] == 1
     reopened.close()
     assert hashlib.sha256(backup.read_bytes()).hexdigest() == backup_digest
+
+
+def test_v4_upgrade_rebuilds_code_history_and_backfills_claim_identity(tmp_path):
+    """Exercise the physical v4 link-table shape, not just its version marker."""
+    db = tmp_path / "v4-code-history.db"
+    store = Store(str(db))
+    workspace_id = store.get_or_create_workspace("acme")
+    repo_id = store.get_or_create_repo(workspace_id, "api")
+    memory_id = store.add_memory(MemoryRecord(
+        id="", content="Production deploys require an approval.",
+        workspace_id=workspace_id, repo_id=repo_id, scope=Scope.REPO,
+        metadata={"subject_key": "production-deploy", "claim_kind": "policy"},
+    ))
+    symbol_id = store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="deploy", fqname="deploy",
+        file="deploy.py", span="1-1",
+    )
+    # Recreate v4's non-temporal code-link table, including its table-level UNIQUE
+    # constraint.  A migration that only bumps the version cannot pass this test.
+    for index in (
+        "idx_code_mem_live_unique", "idx_code_mem_live_symbol",
+        "idx_code_mem_symbol", "idx_code_mem_memory",
+    ):
+        store.conn.execute(f"DROP INDEX IF EXISTS {index}")
+    store.conn.execute("DROP TABLE code_memory_links")
+    store.conn.execute(
+        "CREATE TABLE code_memory_links ("
+        "id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, symbol_id TEXT NOT NULL, "
+        "memory_id TEXT NOT NULL, relation TEXT DEFAULT 'mentions', "
+        "confidence REAL DEFAULT 1.0, created_at REAL, "
+        "UNIQUE(repo_id, symbol_id, memory_id, relation))"
+    )
+    store.conn.execute(
+        "INSERT INTO code_memory_links "
+        "(id, repo_id, symbol_id, memory_id, relation, confidence, created_at) "
+        "VALUES ('old_link', ?, ?, ?, 'mentions', 0.7, 10)",
+        (repo_id, symbol_id, memory_id),
+    )
+    store.conn.execute(
+        "UPDATE memories SET subject_key='', claim_kind='' WHERE id=?", (memory_id,)
+    )
+    store.conn.execute("DELETE FROM schema_migrations")
+    store.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (4, 0)")
+    store.conn.commit()
+    store.close()
+
+    # A real v4 database may retain its immutable v3→v4 recovery snapshot.
+    # The v5 migration must not try to overwrite or validate that older file
+    # against the newer source.
+    legacy_backup = Path(f"{db}.pre-migration-v4.bak")
+    shutil.copyfile(db, legacy_backup)
+    legacy_conn = sqlite3.connect(legacy_backup)
+    try:
+        legacy_conn.execute("DELETE FROM schema_migrations")
+        legacy_conn.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (3, 0)"
+        )
+        legacy_conn.commit()
+    finally:
+        legacy_conn.close()
+    legacy_digest = hashlib.sha256(legacy_backup.read_bytes()).hexdigest()
+
+    upgraded = Store(str(db))
+    try:
+        columns = {row["name"] for row in upgraded.conn.execute(
+            "PRAGMA table_info(code_memory_links)"
+        ).fetchall()}
+        link = upgraded.conn.execute(
+            "SELECT valid_from, ingested_at FROM code_memory_links WHERE id='old_link'"
+        ).fetchone()
+        record = upgraded.get_memory(memory_id)
+
+        assert upgraded.schema_version == 5
+        assert Path(f"{db}.pre-migration-v5.bak").is_file()
+        assert hashlib.sha256(legacy_backup.read_bytes()).hexdigest() == legacy_digest
+        assert {"valid_from", "valid_to", "ingested_at", "expired_at"} <= columns
+        assert link["valid_from"] == 10
+        assert link["ingested_at"] == 10
+        assert record.subject_key == "production-deploy"
+        assert record.claim_kind == "policy"
+
+        # Retire and recreate the same tuple: the v5 partial uniqueness constraint
+        # permits history plus one live row, unlike v4's table-level UNIQUE.
+        upgraded.clear_code_memory_links(repo_id)
+        recreated = upgraded.link_memory_symbol(
+            repo_id=repo_id, symbol_id=symbol_id, memory_id=memory_id,
+        )
+        assert recreated != "old_link"
+        assert upgraded.conn.execute(
+            "SELECT COUNT(*) AS n FROM code_memory_links WHERE repo_id=? "
+            "AND symbol_id=? AND memory_id=? AND relation='mentions'",
+            (repo_id, symbol_id, memory_id),
+        ).fetchone()["n"] == 2
+    finally:
+        upgraded.close()
+
+
+def test_v4_upgrade_backfills_closed_graph_support_for_historical_recall(tmp_path):
+    db = tmp_path / "v4-closed-incidence.db"
+    store = Store(str(db))
+    workspace_id = store.get_or_create_workspace("acme")
+    repo_id = store.get_or_create_repo(workspace_id, "api")
+    memory_id = store.add_memory(MemoryRecord(
+        id="", content="Alpha depended on Beta.",
+        workspace_id=workspace_id, repo_id=repo_id, scope=Scope.REPO,
+        valid_from=10.0, ingested_at=10.0,
+    ))
+    edge_id = store.upsert_edge(Edge(
+        id="", src="ent_alpha", dst="ent_beta", relation="depends_on",
+        workspace_id=workspace_id, repo_id=repo_id,
+        valid_from=10.0, ingested_at=10.0,
+        provenance={"memory_id": memory_id},
+    ))
+    store.close_validity(memory_id, at=20.0)
+    store.conn.execute("DELETE FROM memory_entities")
+    store.conn.execute("DELETE FROM schema_migrations")
+    store.conn.execute(
+        "INSERT INTO schema_migrations(version, applied_at) VALUES (4, 0)"
+    )
+    store.conn.commit()
+    store.close()
+
+    upgraded = Store(str(db))
+    try:
+        historical = SearchFilter(
+            workspace_id=workspace_id,
+            repo_id=repo_id,
+            valid_at=15.0,
+            known_at=25.0,
+        )
+        incidence = upgraded.list_memory_entities(historical)
+        assert {
+            (row["memory_id"], row["entity_id"]) for row in incidence
+        } == {
+            (memory_id, "ent_alpha"),
+            (memory_id, "ent_beta"),
+        }
+        assert upgraded.edge_supports_in_scope(
+            [edge_id], flt=historical
+        )
+    finally:
+        upgraded.close()
+
+
+def test_existing_v5_database_with_legacy_memory_links_is_upgraded_safely(tmp_path):
+    """Repair the short-lived v5 shape without treating old links as ancient facts."""
+    db = tmp_path / "v5-direct-link-history.db"
+    store = Store(str(db))
+    store.conn.execute("DROP INDEX IF EXISTS idx_mem_links_temporal")
+    store.conn.execute("DROP INDEX IF EXISTS idx_mem_links_b")
+    store.conn.execute("DROP INDEX IF EXISTS idx_mem_links_ab")
+    store.conn.execute("DROP TABLE mem_links")
+    store.conn.execute(
+        "CREATE TABLE mem_links ("
+        "a TEXT, b TEXT, relation TEXT, layer TEXT DEFAULT 'semantic', "
+        "reason TEXT DEFAULT '', created_at REAL)"
+    )
+    store.conn.execute(
+        "INSERT INTO mem_links(a, b, relation, layer, reason, created_at) "
+        "VALUES ('mem_a', 'mem_b', 'related', 'semantic', 'legacy', 123)"
+    )
+    store.conn.commit()
+    store.close()
+
+    upgraded = Store(str(db))
+    try:
+        columns = {row["name"] for row in upgraded.conn.execute(
+            "PRAGMA table_info(mem_links)"
+        ).fetchall()}
+        row = upgraded.conn.execute(
+            "SELECT valid_from, ingested_at, valid_to, expired_at "
+            "FROM mem_links WHERE a='mem_a'"
+        ).fetchone()
+        assert upgraded.schema_version == 5
+        assert Path(f"{db}.pre-migration-v5.bak").is_file()
+        assert {"valid_from", "valid_to", "valid_to_recorded_at", "ingested_at", "expired_at"} <= columns
+        assert row["valid_from"] == row["ingested_at"] == 123
+        assert row["valid_to"] is None and row["expired_at"] is None
+    finally:
+        upgraded.close()
+
+
+def test_reopening_v5_does_not_repeat_full_history_migrations(tmp_path, monkeypatch):
+    db = tmp_path / "already-v5.db"
+    Store(str(db)).close()
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("v5 migration transform repeated on an already-v5 database")
+
+    monkeypatch.setattr(Store, "_migrate_code_history_v5", unexpected)
+    monkeypatch.setattr(Store, "_backfill_claim_identity_v5", unexpected)
+    monkeypatch.setattr(Store, "_backfill_memory_entities_v5", unexpected)
+    reopened = Store(str(db))
+    try:
+        assert reopened.schema_version == 5
+    finally:
+        reopened.close()
 
 
 def test_migration_transform_failure_rolls_back_and_restart_completes(
@@ -102,7 +301,7 @@ def test_migration_transform_failure_rolls_back_and_restart_completes(
 
     monkeypatch.setattr(Store, "_backfill_edge_supports", original)
     restarted = Store(str(db))
-    assert restarted.schema_version == 4
+    assert restarted.schema_version == 5
     assert restarted.conn.execute(
         "SELECT COUNT(*) FROM edge_supports WHERE edge_id='edge_v3'"
     ).fetchone()[0] == 1
@@ -233,4 +432,4 @@ def test_backup_directory_is_durable_before_schema_transform(monkeypatch, tmp_pa
     monkeypatch.setattr(Store, "_apply_schema", require_flush_before_schema)
 
     Store(str(db)).close()
-    assert _version(db) == 4
+    assert _version(db) == 5

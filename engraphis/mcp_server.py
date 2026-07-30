@@ -47,8 +47,10 @@ Before the first substantive action, call engraphis_recall_proactive with the op
 workspace (or "default" only when none was supplied), the current repository name when known,
 and k=5. For every multi-step task, first call
 engraphis_start_session with the same workspace/repo plus the client name and task goal; retain
-its session_id and use its bootstrap handoff. Recall before asking the user for information they
-may already have provided.
+its session_id and use its bootstrap handoff. For query-driven prompt context, prefer
+engraphis_recall_context with the smallest sufficient token_budget; use engraphis_recall only
+when complete memory bodies are explicitly needed. Recall before asking the user for information
+they may already have provided.
 
 Store only durable facts, decisions with rationale, preferences, bug cause/fix pairs, and reusable
 procedures through engraphis_remember using the narrowest reusable scope. Never store credentials,
@@ -168,8 +170,9 @@ def engraphis_remember(
                         "lexical recall.")] = None,
     dedupe: Annotated[bool, Field(description="If true (default), check this against similar "
                       "existing memories first: an exact restatement reinforces the existing "
-                      "one instead of duplicating it, and a same-subject update supersedes the "
-                      "old one (closed, not deleted) instead of leaving a contradiction. Set "
+                      "one instead of duplicating it; a shared subject_key or strong joint "
+                      "evidence can supersede the old one, while uncertain neighbors are "
+                      "related without discarding either fact. Set "
                       "false to force a plain insert (e.g. for recurring episodic log "
                       "entries where repeats are meaningful).")] = True,
     source: Annotated[str, Field(description="Provenance: who/what produced this memory — "
@@ -189,6 +192,16 @@ def engraphis_remember(
     retention_reason: Annotated[str, Field(
         description="Short explanation for the retention classification; do not repeat "
                     "sensitive memory contents.", max_length=1_000)] = "",
+    valid_from: Annotated[Optional[float], Field(
+        description="Optional Unix timestamp for when this fact became true in world time. "
+                    "Omit to use ingestion time.")] = None,
+    subject_key: Annotated[str, Field(
+        description="Optional stable claim subject (for example 'api.rate_limit'). "
+                    "Matching keys make supersession safer and deterministic.",
+        max_length=1_000)] = "",
+    claim_kind: Annotated[str, Field(
+        description="Optional claim predicate/category (for example 'configured_value').",
+        max_length=200)] = "",
 ) -> str:
     """Store a memory so it can be recalled in later turns, sessions, or repos.
 
@@ -200,7 +213,8 @@ def engraphis_remember(
         ``op`` is ``"add"`` (new), ``"noop"`` (matched an existing memory almost exactly —
         that one was reinforced, ``id`` points to it), or ``"invalidate"`` (superseded an
         existing memory on the same subject — see ``superseded`` for the old id(s); history
-        is preserved, never deleted). Returns ``"Error: <reason>"`` if validation fails.
+        is preserved, never deleted), or ``"relate"`` (kept both uncertain neighboring claims
+        and linked them). Returns ``"Error: <reason>"`` if validation fails.
     """
     try:
         return _ok(service().remember(
@@ -208,6 +222,8 @@ def engraphis_remember(
             mtype=mtype, scope=scope, title=title, importance=importance, keywords=keywords,
             source=source, trusted=trusted, kind=kind,
             retention_class=retention_class, retention_reason=retention_reason,
+            valid_from=valid_from,
+            subject_key=subject_key, claim_kind=claim_kind,
             resolve_conflicts=dedupe,
         ))
     except Exception as exc:  # noqa: BLE001 - surface a safe, actionable message
@@ -234,13 +250,34 @@ def engraphis_recall(
     mtypes: Annotated[Optional[List[str]], Field(description="Restrict to these memory types "
                       "(semantic/episodic/procedural/working).")] = None,
     k: Annotated[int, Field(description="Max memories to return (1-50).", ge=1, le=50)] = 8,
+    as_of: Annotated[Optional[float], Field(
+        description="Compatibility alias for valid_at. If both are supplied they must "
+                    "match.")] = None,
+    valid_at: Annotated[Optional[float], Field(
+        description="Optional world-time Unix timestamp: return facts true then.")] = None,
+    known_at: Annotated[Optional[float], Field(
+        description="Optional system-time Unix timestamp: return only facts Engraphis "
+                    "had learned and not retired then.")] = None,
+    token_budget: Annotated[Optional[int], Field(
+        description="Hard packed-context budget under the named token counter (0-32768).",
+        ge=0, le=32_768)] = None,
+    retrieval_profile: Annotated[str, Field(
+        description="Retrieval profile: balanced (legacy hybrid), auto, lexical, graph, "
+                    "or code. Auto is opt-in until benchmarks demonstrate a win.")] = "balanced",
+    response_mode: Annotated[str, Field(
+        description="full preserves legacy memory bodies; compact omits bodies already "
+                    "represented in the packed context.")] = "full",
+    diagnostics: Annotated[bool, Field(
+        description="Include per-arm raw/normalized/fusion/rerank diagnostics.")] = False,
 ) -> str:
     """Retrieve the memories most relevant to a query (hybrid vector + lexical + graph).
 
     Call this before answering or acting when prior context would help — to avoid re-asking
     the user, to recover decisions/conventions, or to resume earlier work.
-    Successful calls reinforce returned memories and append a privacy-safe recall receipt,
-    so this retrieval surface is intentionally neither read-only nor idempotent.
+    Successful calls append a privacy-safe recall receipt but do not strengthen weak
+    neighbors merely because they were returned. Grounded recall reinforces cited
+    evidence; an explicit-use caller can opt into reinforcement through the Python API.
+    Because the receipt is stateful, this surface is neither read-only nor idempotent.
 
     Returns:
         str: JSON with ``{"query","count","context","memories":[{"id","title","content",
@@ -250,8 +287,96 @@ def engraphis_recall(
     try:
         return _ok(service().recall(
             query, workspace=workspace, repo=repo, session_id=session_id,
-            mtypes=mtypes, k=k,
+            mtypes=mtypes, k=k, as_of=as_of, valid_at=valid_at,
+            known_at=known_at, token_budget=token_budget,
+            retrieval_profile=retrieval_profile, response_mode=response_mode,
+            diagnostics=diagnostics,
         ))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_recall_context",
+    annotations={"title": "Recall token-efficient context", "readOnlyHint": False,
+                 "destructiveHint": False, "idempotentHint": False,
+                 "openWorldHint": False},
+)
+def engraphis_recall_context(
+    query: Annotated[str, Field(description="What prior context is needed.",
+                                min_length=1, max_length=100_000)],
+    workspace: Annotated[Optional[str], Field(description="Restrict to this workspace.",
+                                              max_length=200)] = None,
+    repo: Annotated[Optional[str], Field(description="Restrict to this repo (requires "
+                                         "workspace).", max_length=200)] = None,
+    session_id: Annotated[Optional[str], Field(
+        description="Optional active session; includes its repo/workspace ancestors.")] = None,
+    mtypes: Annotated[Optional[List[str]], Field(
+        description="Optional memory types: semantic/episodic/procedural/working.")] = None,
+    k: Annotated[int, Field(description="Max candidate memories (1-50).", ge=1, le=50)] = 8,
+    token_budget: Annotated[int, Field(
+        description="Hard packed-context budget under the reported token counter.",
+        ge=0, le=32_768)] = 1024,
+    retrieval_profile: Annotated[str, Field(
+        description="balanced, auto, lexical, graph, or code.")] = "balanced",
+    as_of: Annotated[Optional[float], Field(
+        description="Compatibility alias for valid_at.")] = None,
+    valid_at: Annotated[Optional[float], Field(
+        description="Optional world-time Unix timestamp.")] = None,
+    known_at: Annotated[Optional[float], Field(
+        description="Optional system-time Unix timestamp.")] = None,
+    diagnostics: Annotated[bool, Field(
+        description="Include detailed retrieval scoring trace.")] = False,
+) -> str:
+    """Return one hard-budget context plus compact source identities.
+
+    This is the recommended agent path: unlike legacy full recall, it does not
+    repeat every complete memory body alongside the already-packed context.  The
+    response includes exact accounting for the declared counter, omitted/packed
+    counts, and privacy-safe savings metadata.
+    """
+    try:
+        payload = service().recall(
+            query,
+            workspace=workspace,
+            repo=repo,
+            session_id=session_id,
+            mtypes=mtypes,
+            k=k,
+            as_of=as_of,
+            valid_at=valid_at,
+            known_at=known_at,
+            token_budget=token_budget,
+            retrieval_profile=retrieval_profile,
+            response_mode="compact",
+            diagnostics=diagnostics,
+            intent="recall_context",
+        )
+        by_id = {
+            str(source.get("id") or ""): source
+            for source in payload.pop("memories", [])
+        }
+        sources = []
+        for ordinal, packed in enumerate(payload.pop("packed_sources", []), start=1):
+            detail = by_id.get(str(packed.get("id") or ""), {})
+            source = {
+                "n": ordinal,
+                "id": packed.get("id"),
+                "tokens": packed.get("tokens"),
+            }
+            if detail.get("title"):
+                source["title"] = detail["title"]
+            provenance = detail.get("provenance")
+            if provenance:
+                source["provenance"] = provenance
+            if packed.get("truncated"):
+                source["truncated"] = True
+            reason = packed.get("reason")
+            if reason and reason not in {"full", "summary"}:
+                source["reason"] = reason
+            sources.append(source)
+        payload["sources"] = sources
+        return _ok(payload)
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -276,6 +401,9 @@ def engraphis_recall_grounded(
     mtypes: Annotated[Optional[List[str]], Field(description="Restrict to these memory types "
                       "(semantic/episodic/procedural/working).")] = None,
     k: Annotated[int, Field(description="Max memories to consider (1-50).", ge=1, le=50)] = 8,
+    # These original parameters stay before all newly-added options. MCP clients use
+    # named fields, but established Python callers may invoke this decorated callable
+    # positionally.
     min_support: Annotated[Optional[float], Field(description="Absolute support floor 0..1 "
                            "below which the tool abstains instead of answering. Omit for the "
                            "default; raise it to demand stronger evidence (0 disables the abstain gate).", ge=0.0,
@@ -283,6 +411,21 @@ def engraphis_recall_grounded(
     synthesize: Annotated[bool, Field(description="If true and an LLM is configured, "
                           "synthesize cited prose; otherwise return the deterministic "
                           "extractive answer.")] = False,
+    as_of: Annotated[Optional[float], Field(
+        description="Compatibility alias for valid_at.")] = None,
+    valid_at: Annotated[Optional[float], Field(
+        description="Optional world-time Unix timestamp.")] = None,
+    known_at: Annotated[Optional[float], Field(
+        description="Optional system-time Unix timestamp.")] = None,
+    token_budget: Annotated[Optional[int], Field(
+        description="Hard packed-context budget (0-32768).", ge=0, le=32_768)] = None,
+    retrieval_profile: Annotated[str, Field(
+        description="balanced, auto, lexical, graph, or code.")] = "balanced",
+    response_mode: Annotated[str, Field(
+        description="full includes citation bodies; compact omits bodies already present "
+                    "in the cited answer.")] = "full",
+    diagnostics: Annotated[bool, Field(
+        description="Include detailed retrieval scoring trace.")] = False,
 ) -> str:
     """Answer a question *strictly from* stored memories, with citations — or abstain.
 
@@ -312,8 +455,10 @@ def engraphis_recall_grounded(
                 llm = None
         return _ok(service().grounded_recall(
             query, workspace=workspace, repo=repo, session_id=session_id,
-            mtypes=mtypes, k=k,
-            min_support=min_support, llm=llm,
+            mtypes=mtypes, k=k, as_of=as_of, valid_at=valid_at,
+            known_at=known_at, token_budget=token_budget,
+            retrieval_profile=retrieval_profile, response_mode=response_mode,
+            diagnostics=diagnostics, min_support=min_support, llm=llm,
         ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -341,6 +486,21 @@ def engraphis_answer(
     k: Annotated[int, Field(description="Max memories to consider (1-50).", ge=1, le=50)] = 8,
     min_support: Annotated[float, Field(description="Absolute support floor 0..1. Memories below this don't count as evidence.", ge=0.0, le=1.0)] = 0.25,
     synthesize: Annotated[bool, Field(description="If true, ask configured LLM for cited prose; otherwise deterministic/extractive.")] = False,
+    as_of: Annotated[Optional[float], Field(
+        description="Optional Unix timestamp for a point-in-time grounded answer. "
+                    "Omit for now.")] = None,
+    valid_at: Annotated[Optional[float], Field(
+        description="Optional world-time Unix timestamp (must match as_of if both are set).")] = None,
+    known_at: Annotated[Optional[float], Field(
+        description="Optional system-time Unix timestamp.")] = None,
+    token_budget: Annotated[Optional[int], Field(
+        description="Hard packed-context budget (0-32768).", ge=0, le=32_768)] = None,
+    retrieval_profile: Annotated[str, Field(
+        description="balanced, auto, lexical, graph, or code.")] = "balanced",
+    response_mode: Annotated[str, Field(
+        description="full includes citation bodies; compact omits them.")] = "full",
+    diagnostics: Annotated[bool, Field(
+        description="Include detailed retrieval scoring trace.")] = False,
 ) -> str:
     """Backward-compatible alias for ``engraphis_recall_grounded``.
 
@@ -349,6 +509,9 @@ def engraphis_answer(
     """
     return engraphis_recall_grounded(
         query=query, workspace=workspace, repo=repo, session_id=None, mtypes=None, k=k,
+        as_of=as_of, valid_at=valid_at, known_at=known_at,
+        token_budget=token_budget, retrieval_profile=retrieval_profile,
+        response_mode=response_mode, diagnostics=diagnostics,
         min_support=min_support, synthesize=synthesize,
     )
 
@@ -769,6 +932,12 @@ def engraphis_search_code(
                                max_length=200)],
     limit: Annotated[int, Field(description="Max symbols to return (1-50).", ge=1,
                      le=50)] = 20,
+    as_of: Annotated[Optional[float], Field(
+        description="Compatibility alias for valid_at.")] = None,
+    valid_at: Annotated[Optional[float], Field(
+        description="Optional world-time Unix timestamp.")] = None,
+    known_at: Annotated[Optional[float], Field(
+        description="Optional system-time Unix timestamp.")] = None,
 ) -> str:
     """Find function/class/method definitions by name, with their callers — structural
     code search that costs far fewer tokens than grepping/reading whole files, and
@@ -779,7 +948,10 @@ def engraphis_search_code(
         "signature","called_by":[{"src","file","line"}]}]}``.
     """
     try:
-        return _ok(service().search_code(query, workspace=workspace, repo=repo, limit=limit))
+        return _ok(service().search_code(
+            query, workspace=workspace, repo=repo, limit=limit, as_of=as_of,
+            valid_at=valid_at, known_at=known_at,
+        ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 
@@ -800,6 +972,12 @@ def engraphis_code_path(
                                min_length=1, max_length=200)],
     max_depth: Annotated[int, Field(description="Maximum graph hops (1-32).",
                                     ge=1, le=32)] = 8,
+    as_of: Annotated[Optional[float], Field(
+        description="Compatibility alias for valid_at.")] = None,
+    valid_at: Annotated[Optional[float], Field(
+        description="Optional world-time Unix timestamp.")] = None,
+    known_at: Annotated[Optional[float], Field(
+        description="Optional system-time Unix timestamp.")] = None,
 ) -> str:
     """Return the shortest best-effort path between two code nodes.
 
@@ -810,6 +988,7 @@ def engraphis_code_path(
     try:
         return _ok(service().code_path(
             source, target, workspace=workspace, repo=repo, max_depth=max_depth,
+            as_of=as_of, valid_at=valid_at, known_at=known_at,
         ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -829,11 +1008,18 @@ def engraphis_code_impact(
                                     min_length=1, max_length=200)],
     repo: Annotated[str, Field(description="Indexed repo to analyze.",
                                min_length=1, max_length=200)],
+    as_of: Annotated[Optional[float], Field(
+        description="Compatibility alias for valid_at.")] = None,
+    valid_at: Annotated[Optional[float], Field(
+        description="Optional world-time Unix timestamp.")] = None,
+    known_at: Annotated[Optional[float], Field(
+        description="Optional system-time Unix timestamp.")] = None,
 ) -> str:
     """Estimate affected symbols, callers, memories, graph communities, and risk."""
     try:
         return _ok(service().code_impact(
-            changed_files, workspace=workspace, repo=repo,
+            changed_files, workspace=workspace, repo=repo, as_of=as_of,
+            valid_at=valid_at, known_at=known_at,
         ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -849,10 +1035,19 @@ def engraphis_export_code_graph(
                                     min_length=1, max_length=200)],
     repo: Annotated[str, Field(description="Indexed repo to export.",
                                min_length=1, max_length=200)],
+    as_of: Annotated[Optional[float], Field(
+        description="Compatibility alias for valid_at.")] = None,
+    valid_at: Annotated[Optional[float], Field(
+        description="Optional world-time Unix timestamp.")] = None,
+    known_at: Annotated[Optional[float], Field(
+        description="Optional system-time Unix timestamp.")] = None,
 ) -> str:
     """Export portable graph JSON plus a human-readable Markdown report."""
     try:
-        return _ok(service().export_code_graph(workspace=workspace, repo=repo))
+        return _ok(service().export_code_graph(
+            workspace=workspace, repo=repo, as_of=as_of,
+            valid_at=valid_at, known_at=known_at,
+        ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 

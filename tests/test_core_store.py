@@ -22,7 +22,27 @@ def store():
 
 
 def test_schema_version(store):
-    assert store.schema_version == 4
+    assert store.schema_version == 5
+
+
+def test_clean_v5_schema_has_temporal_code_and_memory_link_tables(store):
+    tables = {row["name"] for row in store.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()}
+    link_columns = {row["name"] for row in store.conn.execute(
+        "PRAGMA table_info(code_memory_links)"
+    ).fetchall()}
+    incidence_columns = {row["name"] for row in store.conn.execute(
+        "PRAGMA table_info(memory_entities)"
+    ).fetchall()}
+    direct_link_columns = {row["name"] for row in store.conn.execute(
+        "PRAGMA table_info(mem_links)"
+    ).fetchall()}
+
+    assert "memory_entities" in tables
+    assert {"valid_from", "valid_to", "ingested_at", "expired_at"} <= link_columns
+    assert {"memory_id", "entity_id", "source_kind", "confidence"} <= incidence_columns
+    assert {"valid_from", "valid_to", "valid_to_recorded_at", "ingested_at", "expired_at"} <= direct_link_columns
 
 
 def test_entity_normalization_preserves_meaningful_punctuation():
@@ -149,7 +169,7 @@ def test_v3_migration_classifies_existing_graph_layers_once(tmp_path):
     row = migrated.conn.execute(
         "SELECT layer FROM edges WHERE id='edge_old'"
     ).fetchone()
-    assert migrated.schema_version == 4
+    assert migrated.schema_version == 5
     assert row["layer"] == "entity"
     migrated.conn.execute(
         "UPDATE edges SET layer='causal' WHERE id='edge_old'"
@@ -255,6 +275,162 @@ def test_graph_neighbors_filters_by_layer(store):
     assert store.neighbors(["deploy"], layers=[GraphLayer.TEMPORAL]) == []
 
 
+def test_graph_neighbors_apply_workspace_and_repo_scope(store):
+    w1 = store.get_or_create_workspace("w1")
+    w2 = store.get_or_create_workspace("w2")
+    r1 = store.get_or_create_repo(w1, "r")
+    r2 = store.get_or_create_repo(w2, "r")
+    store.upsert_edge(Edge(
+        id="", src="shared", dst="visible", relation="uses",
+        workspace_id=w1, repo_id=r1,
+    ))
+    store.upsert_edge(Edge(
+        id="", src="shared", dst="leaked", relation="uses",
+        workspace_id=w2, repo_id=r2,
+    ))
+
+    rows = store.neighbors(
+        ["shared"],
+        flt=SearchFilter(workspace_id=w1, repo_id=r1),
+    )
+
+    assert [(edge.src, edge.dst) for edge in rows] == [("shared", "visible")]
+
+
+def test_memory_links_honor_known_at_empty_layers_and_large_id_sets(
+        store, monkeypatch):
+    from engraphis.core import store as store_mod
+
+    ids = [f"mem_{index:04d}" for index in range(600)]
+    store.add_link(ids[0], ids[-1], relation="causes", layer=GraphLayer.CAUSAL)
+    store.conn.execute(
+        "UPDATE mem_links SET created_at=100, valid_from=100, ingested_at=100"
+    )
+    store.conn.commit()
+    monkeypatch.setattr(store_mod, "IN_CLAUSE_CHUNK", 50)
+
+    assert store.links_among(
+        ids, flt=SearchFilter(known_at=99.0)
+    ) == []
+    visible = store.links_among(
+        ids, flt=SearchFilter(known_at=100.0)
+    )
+    assert [(row["a"], row["b"]) for row in visible] == [(ids[0], ids[-1])]
+    assert store.links_among(ids, layers=[]) == []
+
+
+def test_closed_memory_link_can_be_reactivated_without_erasing_history(store):
+    store.add_link(
+        "mem_a", "mem_b", relation="related",
+        valid_from=10.0, valid_to=20.0, valid_to_recorded_at=20.0,
+        ingested_at=10.0,
+    )
+    assert not store.has_link("mem_a", "mem_b", relation="related")
+
+    store.add_link(
+        "mem_b", "mem_a", relation="related",
+        valid_from=40.0, ingested_at=40.0,
+    )
+    # Replaying the same current relation is still idempotent.
+    store.add_link(
+        "mem_a", "mem_b", relation="related",
+        valid_from=50.0, ingested_at=50.0,
+    )
+
+    rows = store.conn.execute(
+        "SELECT valid_from, valid_to, expired_at FROM mem_links "
+        "WHERE relation='related' ORDER BY valid_from"
+    ).fetchall()
+    assert [(row["valid_from"], row["valid_to"]) for row in rows] == [
+        (10.0, 20.0), (40.0, None),
+    ]
+    assert store.has_link("mem_a", "mem_b", relation="related")
+    historical = store.links_among(
+        ["mem_a", "mem_b"],
+        flt=SearchFilter(valid_at=15.0, known_at=50.0),
+    )
+    current = store.links_among(
+        ["mem_a", "mem_b"],
+        flt=SearchFilter(valid_at=50.0, known_at=50.0),
+    )
+    assert [row["valid_from"] for row in historical] == [10.0]
+    assert [row["valid_from"] for row in current] == [40.0]
+
+
+def test_expired_memory_link_does_not_block_reactivation(store):
+    store.add_link(
+        "mem_a", "mem_b", relation="related",
+        valid_from=10.0, ingested_at=10.0, expired_at=20.0,
+    )
+    assert not store.has_link("mem_a", "mem_b", relation="related")
+
+    store.add_link(
+        "mem_a", "mem_b", relation="related",
+        valid_from=40.0, ingested_at=40.0,
+    )
+
+    rows = store.conn.execute(
+        "SELECT valid_from, expired_at FROM mem_links ORDER BY valid_from"
+    ).fetchall()
+    assert [(row["valid_from"], row["expired_at"]) for row in rows] == [
+        (10.0, 20.0), (40.0, None),
+    ]
+    assert [row["valid_from"] for row in store.links_among(
+        ["mem_a", "mem_b"],
+        flt=SearchFilter(valid_at=15.0, known_at=15.0),
+    )] == [10.0]
+    assert [row["valid_from"] for row in store.links_among(
+        ["mem_a", "mem_b"],
+        flt=SearchFilter(valid_at=50.0, known_at=50.0),
+    )] == [40.0]
+
+
+def test_memory_link_metadata_change_versions_system_time_without_rewriting_history(
+        store, monkeypatch):
+    from engraphis.core import store as store_mod
+
+    store.add_link(
+        "mem_a", "mem_b", relation="related", layer=GraphLayer.SEMANTIC,
+        reason="old evidence", valid_from=10.0, ingested_at=10.0,
+    )
+    monkeypatch.setattr(store_mod, "now_ts", lambda: 30.0)
+
+    store.add_link(
+        "mem_b", "mem_a", relation="related", layer=GraphLayer.CAUSAL,
+        reason="new evidence",
+    )
+    # Replaying the converged metadata is idempotent, not another history row.
+    store.add_link(
+        "mem_a", "mem_b", relation="related", layer=GraphLayer.CAUSAL,
+        reason="new evidence",
+    )
+
+    rows = store.conn.execute(
+        "SELECT layer, reason, valid_from, ingested_at, expired_at "
+        "FROM mem_links ORDER BY ingested_at"
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("semantic", "old evidence", 10.0, 10.0, 30.0),
+        ("causal", "new evidence", 10.0, 30.0, None),
+    ]
+
+    past = SearchFilter(valid_at=20.0, known_at=20.0)
+    current = SearchFilter(valid_at=20.0, known_at=30.0)
+    assert [(row["layer"], row["reason"]) for row in store.get_links(
+        "mem_a", flt=past,
+    )] == [("semantic", "old evidence")]
+    assert [(row["layer"], row["reason"]) for row in store.get_links(
+        "mem_a", flt=current,
+    )] == [("causal", "new evidence")]
+    assert store.links_among(
+        ["mem_a", "mem_b"], layers=[GraphLayer.CAUSAL], flt=past,
+    ) == []
+    assert store.links_among(
+        ["mem_a", "mem_b"], layers=[GraphLayer.SEMANTIC], flt=current,
+    ) == []
+    assert store.has_link("mem_a", "mem_b", relation="related")
+
+
 def test_code_listing_helpers_honor_limit(store):
     """service.graph() bounds its per-repo code fetches; the SQL layer must
     actually enforce the cap rather than materializing the whole repo."""
@@ -310,6 +486,25 @@ def test_reinforce_increases_stability_and_count(store):
     assert after.stability > before.stability
 
 
+def test_zero_temporal_anchors_round_trip_without_becoming_present_time(store):
+    wid = store.get_or_create_workspace("w")
+    mid = store.add_memory(MemoryRecord(
+        id="", content="known at the epoch", workspace_id=wid,
+        valid_from=0.0, ingested_at=0.0, last_access=0.0,
+    ))
+    edge_id = store.upsert_edge(Edge(
+        id="", src="a", dst="b", relation="uses", workspace_id=wid,
+        valid_from=0.0, ingested_at=0.0,
+    ))
+
+    record = store.get_memory(mid)
+    edge = store.conn.execute(
+        "SELECT valid_from, ingested_at FROM edges WHERE id=?", (edge_id,)
+    ).fetchone()
+    assert record.valid_from == record.ingested_at == record.last_access == 0.0
+    assert edge["valid_from"] == edge["ingested_at"] == 0.0
+
+
 def test_symbol_roundtrip_and_search(store):
     sid = store.upsert_symbol(repo_id="repo_x", kind="function", name="add", fqname="add",
                               file="calc.py", span="1-2", signature="def add(a, b):",
@@ -328,6 +523,103 @@ def test_clear_symbols_for_file_replaces_not_accumulates(store):
                         file="calc.py", span="1-1")
     names = {h["name"] for h in store.search_symbols("repo_x", "")}
     assert names == {"new"}
+
+
+def test_code_history_closes_live_rows_and_supports_time_travel(store):
+    """Re-indexing retires old code evidence without deleting its history."""
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    mid = store.add_memory(MemoryRecord(
+        id="", content="The old implementation called helper.",
+        workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+    ))
+    symbol_id = store.upsert_symbol(
+        repo_id=rid, kind="function", name="old", fqname="old",
+        file="calc.py", span="1-1",
+    )
+    store.add_code_edge(repo_id=rid, src="old", dst="helper", relation="calls",
+                        file="calc.py", line=1)
+    store.link_memory_symbol(repo_id=rid, symbol_id=symbol_id, memory_id=mid)
+    # Use a stable world/system-time interval rather than relying on sub-millisecond
+    # spacing between indexing and retirement on fast CI hosts.
+    store.conn.execute(
+        "UPDATE symbols SET valid_from=10, ingested_at=10 WHERE id=?", (symbol_id,)
+    )
+    store.conn.execute(
+        "UPDATE memories SET valid_from=10, ingested_at=10 WHERE id=?", (mid,)
+    )
+    store.conn.execute(
+        "UPDATE code_edges SET valid_from=10, ingested_at=10 WHERE repo_id=?", (rid,)
+    )
+    store.conn.execute(
+        "UPDATE code_memory_links SET valid_from=10, ingested_at=10 WHERE repo_id=?", (rid,)
+    )
+    store.conn.commit()
+    store.clear_symbols_for_file(rid, "calc.py")
+
+    closed_at = store.conn.execute(
+        "SELECT valid_to FROM symbols WHERE id=?", (symbol_id,)
+    ).fetchone()["valid_to"]
+    assert store.list_symbols(rid) == []
+    assert store.list_code_edges(rid) == []
+    assert store.list_code_memory_links(rid) == []
+
+    history = SearchFilter(valid_at=11.0,
+                           known_at=float(closed_at) + 1.0)
+    assert [row["id"] for row in store.list_symbols(rid, flt=history)] == [symbol_id]
+    assert [row["id"] for row in store.search_symbols(rid, "old", flt=history)] == [
+        symbol_id
+    ]
+    assert len(store.list_code_edges(rid, flt=history)) == 1
+    assert len(store.get_symbol_callers(rid, "helper", flt=history)) == 1
+    assert len(store.list_code_memory_links(rid, flt=history)) == 1
+    assert [row["id"] for row in store.symbols_for_memory(
+        rid, mid, flt=history
+    )] == [symbol_id]
+
+
+def test_code_memory_link_listing_requires_visible_symbol_and_memory(store):
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    mid = store.add_memory(MemoryRecord(
+        id="", content="deploy", workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+    ))
+    symbol_id = store.upsert_symbol(
+        repo_id=rid, kind="function", name="deploy", fqname="deploy",
+        file="deploy.py", span="1-1",
+    )
+    store.link_memory_symbol(
+        repo_id=rid, symbol_id=symbol_id, memory_id=mid,
+    )
+    assert len(store.list_code_memory_links(rid)) == 1
+
+    # Simulate a legacy/direct writer that retired the symbol but forgot to
+    # retire its bridge. The read must still fail closed.
+    store.conn.execute(
+        "UPDATE symbols SET valid_to=0 WHERE id=?", (symbol_id,)
+    )
+    store.conn.commit()
+
+    assert store.list_code_memory_links(rid) == []
+
+
+def test_memory_entity_incidence_is_scoped_and_temporal(store):
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    mid = store.add_memory(MemoryRecord(
+        id="", content="Alice owns the deployment.", workspace_id=wid,
+        repo_id=rid, scope=Scope.REPO,
+    ))
+    entity_id = store.upsert_entity(Node(
+        id="", name="Alice", ntype="person", workspace_id=wid, repo_id=rid,
+    ))
+    store.link_memory_entity(
+        memory_id=mid, entity_id=entity_id, workspace_id=wid, repo_id=rid,
+        source_kind="text_mention", confidence=0.8,
+    )
+    rows = store.list_memory_entities(SearchFilter(workspace_id=wid, repo_id=rid))
+    assert [(row["memory_id"], row["entity_id"], row["source_kind"])
+            for row in rows] == [(mid, entity_id, "text_mention")]
 
 
 def test_explicit_semantic_code_edge_preserves_its_layer(store):

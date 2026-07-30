@@ -252,8 +252,11 @@ def _mem(m: dict) -> dict:
         "importance": m.get("importance"),
         "valid_from": m.get("valid_from"),
         "valid_to": m.get("valid_to"),
+        "valid_to_recorded_at": m.get("valid_to_recorded_at"),
         "expired_at": m.get("expired_at"),
         "ingested_at": m.get("ingested_at"),
+        "subject_key": m.get("subject_key") or "",
+        "claim_kind": m.get("claim_kind") or "",
         "provenance": m.get("provenance") or {},
     }
 
@@ -264,7 +267,9 @@ def _is_embedder_mismatch(exc) -> bool:
     return "not aligned" in message or ("256" in message and "384" in message)
 
 
-def _keyword_search(ws, q, limit=20):
+def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
+                    valid_at: Optional[float] = None,
+                    known_at: Optional[float] = None):
     """Non-semantic fallback: match memories by keyword (title/content LIKE) so the
     Recall/Why/Timeline tabs still return results when the embedder is unavailable."""
     import json as _json
@@ -276,11 +281,28 @@ def _keyword_search(ws, q, limit=20):
         row = conn.execute("SELECT id FROM workspaces WHERE name=?", (ws,)).fetchone()
         if row is None:
             return []
+        # Match the public Recall contract even if semantic retrieval cannot run.
+        # A model-dimension mismatch must degrade retrieval quality, never silently
+        # turn a historical request into a present-time data leak.
+        if as_of is not None and valid_at is not None and float(as_of) != float(valid_at):
+            raise ValidationError("as_of and valid_at must match when both are supplied")
+        world_anchor = float(valid_at if valid_at is not None else as_of) if (
+            valid_at is not None or as_of is not None
+        ) else time.time()
+        system_anchor = float(known_at) if known_at is not None else time.time()
         sql = ("SELECT id, scope, mtype, title, content, summary, pinned, importance, "
-               "valid_from, valid_to, provenance FROM memories WHERE workspace_id=? "
+               "valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at, "
+               "subject_key, claim_kind, provenance FROM memories WHERE workspace_id=? "
                "AND COALESCE(scope, 'workspace')!='session' "
-               "AND valid_to IS NULL AND expired_at IS NULL")
-        args = [row["id"]]
+               "AND (valid_from IS NULL OR valid_from<=?) "
+               "AND (valid_to IS NULL OR ?<valid_to "
+               "OR (valid_to_recorded_at IS NOT NULL AND ?<valid_to_recorded_at)) "
+               "AND (ingested_at IS NULL OR ingested_at<=?) "
+               "AND (expired_at IS NULL OR ?<expired_at)")
+        args = [
+            row["id"], world_anchor, world_anchor, system_anchor,
+            system_anchor, system_anchor,
+        ]
         terms = [t for t in (q or "").split() if len(t) > 2][:6]
         if terms:
             sql += " AND (" + " OR ".join(["title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'" for _ in terms]) + ")"
@@ -301,7 +323,11 @@ def _keyword_search(ws, q, limit=20):
              "content": r["content"] or r["summary"] or "", "memory_type": r["mtype"] or "semantic",
              "scope": r["scope"] or "", "pinned": bool(r["pinned"]),
              "importance": r["importance"], "valid_from": r["valid_from"],
-             "valid_to": r["valid_to"], "provenance": _prov(r["provenance"])} for r in rows]
+             "valid_to": r["valid_to"],
+             "valid_to_recorded_at": r["valid_to_recorded_at"],
+             "ingested_at": r["ingested_at"], "expired_at": r["expired_at"],
+             "subject_key": r["subject_key"] or "", "claim_kind": r["claim_kind"] or "",
+             "provenance": _prov(r["provenance"])} for r in rows]
 
 
 # ── health / bootstrap ────────────────────────────────────────────────────────
@@ -551,8 +577,9 @@ def _llm_is_verified(provider: str, model: str) -> bool:
 @router.get("/llm/status")
 def llm_status():
     """Report the configured LLM provider/model/key presence and the active extractor,
-    plus a ready-to-paste .env snippet for the dashboard's "Connect your LLM" card.
-    Never returns the API key or custom provider endpoint — only whether each is set."""
+    retention-supervision mode, and a ready-to-paste .env snippet for the dashboard's
+    "Connect your LLM" card. Never returns the API key or custom provider endpoint —
+    only whether each is set."""
     provider = settings.llm_provider or "openai"
     model = settings.llm_model or _LLM_DEFAULT_MODELS.get(provider, "")
     key_set = bool(settings.llm_api_key)
@@ -564,6 +591,7 @@ def llm_status():
         "custom_base_url_configured": bool(settings.llm_base_url),
         "extractor": settings.extractor,
         "extractor_enabled": _extractor_enabled(),
+        "retention_supervisor": settings.retention_supervisor,
         "auto_extract": bool(settings.llm_auto_extract),
         "configured": key_set and bool(model),
         "working": verified,
@@ -925,11 +953,20 @@ def stats(workspace: Optional[str] = None):
 # ── recall / search ───────────────────────────────────────────────────────────
 @router.get("/recall")
 def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
-           mtype: Optional[str] = None):
+           mtype: Optional[str] = None, as_of: Optional[float] = None,
+           valid_at: Optional[float] = None, known_at: Optional[float] = None,
+           token_budget: Optional[int] = Query(default=None, ge=0, le=32_768),
+           retrieval_profile: str = "balanced", response_mode: str = "full",
+           diagnostics: bool = False):
     ws = workspace or _default_ws()
     mtypes = [mtype] if mtype else None
     try:
-        out = service().recall(q, workspace=ws, k=k, mtypes=mtypes, reinforce=False)
+        out = service().recall(
+            q, workspace=ws, k=k, mtypes=mtypes, as_of=as_of,
+            valid_at=valid_at, known_at=known_at, reinforce=False,
+            token_budget=token_budget, retrieval_profile=retrieval_profile,
+            response_mode=response_mode, diagnostics=diagnostics,
+        )
     except ValidationError:
         logger.info("dashboard recall request rejected")
         raise _invalid_request() from None
@@ -937,13 +974,22 @@ def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
         if not _is_embedder_mismatch(exc):
             logger.error("dashboard recall failed (%s)", type(exc).__name__)
             raise HTTPException(status_code=500, detail={"error": "internal server error"})
-        mems = _keyword_search(ws, q, k)
+        mems = _keyword_search(
+            ws, q, k, as_of=as_of, valid_at=valid_at, known_at=known_at,
+        )
         return {"query": q, "workspace": ws, "count": len(mems), "context": "",
                 "memories": mems, "mode": "keyword",
                 "note": "Keyword match — install sentence-transformers for semantic search."}
-    return {"query": q, "workspace": ws, "count": out.get("count", 0),
-            "context": out.get("context", ""), "mode": "semantic",
-            "memories": [_mem(m) for m in out.get("memories", [])]}
+    payload = dict(out)
+    payload.update({
+        "query": q,
+        "workspace": ws,
+        "count": out.get("count", 0),
+        "context": out.get("context", ""),
+        "mode": "semantic",
+        "memories": [_mem(m) for m in out.get("memories", [])],
+    })
+    return payload
 
 
 class _AnswerReq(BaseModel):
@@ -953,6 +999,13 @@ class _AnswerReq(BaseModel):
     k: int = Field(default=8, ge=1, le=50)
     max_citations: int = Field(default=5, ge=1, le=50)
     min_support: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    as_of: Optional[float] = None
+    valid_at: Optional[float] = None
+    known_at: Optional[float] = None
+    token_budget: Optional[int] = Field(default=None, ge=0, le=32_768)
+    retrieval_profile: str = "balanced"
+    response_mode: str = "full"
+    diagnostics: bool = False
 
 
 @router.post("/answer")
@@ -971,6 +1024,13 @@ def answer(req: _AnswerReq):
         workspace=ws,
         repo=req.repo,
         k=req.k,
+        as_of=req.as_of,
+        valid_at=req.valid_at,
+        known_at=req.known_at,
+        token_budget=req.token_budget,
+        retrieval_profile=req.retrieval_profile,
+        response_mode=req.response_mode,
+        diagnostics=req.diagnostics,
         max_citations=req.max_citations,
         min_support=req.min_support,
     )
@@ -1219,6 +1279,9 @@ class _RememberReq(BaseModel):
     dedupe: bool = True
     retention_class: Optional[str] = None
     retention_reason: str = ""
+    valid_from: Optional[float] = None
+    subject_key: str = ""
+    claim_kind: str = ""
 
 
 @router.post("/remember")
@@ -1228,7 +1291,9 @@ def remember(req: _RememberReq):
                 importance=req.importance, keywords=req.keywords, metadata=req.metadata,
                 source=req.source, trusted=req.trusted, resolve_conflicts=req.dedupe,
                 retention_class=req.retention_class,
-                retention_reason=req.retention_reason)
+                retention_reason=req.retention_reason,
+                valid_from=req.valid_from,
+                subject_key=req.subject_key, claim_kind=req.claim_kind)
 
 
 class _IntentRememberReq(BaseModel):
@@ -1242,6 +1307,7 @@ class _IntentRememberReq(BaseModel):
     metadata: Optional[dict] = None
     retention_class: Optional[str] = None
     retention_reason: str = ""
+    valid_from: Optional[float] = None
 
 
 @router.post("/intent/remember")
@@ -1253,6 +1319,7 @@ def intent_remember(req: _IntentRememberReq):
         title=req.title, mtype=req.mtype, scope=req.scope, importance=req.importance,
         metadata=req.metadata, retention_class=req.retention_class,
         retention_reason=req.retention_reason,
+        valid_from=req.valid_from,
     )
 
 
@@ -1283,6 +1350,12 @@ class _IntentRecallReq(BaseModel):
     mtypes: Optional[list] = None
     k: int = 8
     as_of: Optional[float] = None
+    valid_at: Optional[float] = None
+    known_at: Optional[float] = None
+    token_budget: Optional[int] = Field(default=None, ge=0, le=32_768)
+    retrieval_profile: str = "balanced"
+    response_mode: str = "compact"
+    diagnostics: bool = False
 
 
 @router.post("/intent/recall")
@@ -1291,6 +1364,9 @@ def intent_recall(req: _IntentRecallReq):
         service().intent_recall, req.query, intent=req.intent,
         workspace=req.workspace or _default_ws(), repo=req.repo,
         mtypes=req.mtypes, k=req.k, as_of=req.as_of,
+        valid_at=req.valid_at, known_at=req.known_at,
+        token_budget=req.token_budget, retrieval_profile=req.retrieval_profile,
+        response_mode=req.response_mode, diagnostics=req.diagnostics,
     )
 
 
@@ -1369,8 +1445,9 @@ def ready():
 
 # ── workspace export (local, free) ────────────────────────────────────────────
 @router.get("/export")
-def export(workspace: Optional[str] = None, signed: bool = False):
-    """Full bi-temporal workspace dump (memories + sessions + audit).
+def export(workspace: Optional[str] = None, signed: bool = False,
+           canonical: bool = False):
+    """Portable v2 workspace dump, including temporal graph/code evidence and receipts.
 
     This is the free local data-portability path. ``signed=true`` was never
     implemented, so it must not claim availability in Engraphis Cloud either.
@@ -1383,7 +1460,12 @@ def export(workspace: Optional[str] = None, signed: bool = False):
             "alternative": "/export",
         })
     ws = workspace or _default_ws()
-    return _run(service().export_workspace, workspace=ws, recovery=True)
+    return _run(
+        service().export_workspace,
+        workspace=ws,
+        recovery=True,
+        canonical=canonical,
+    )
 
 
 # ── automated maintenance (Pro) ───────────────────────────────────────────────
@@ -1572,7 +1654,9 @@ def graph(workspace: Optional[str] = None, limit: int = 2000,
           layers: Optional[str] = None, include_code: bool = False,
           repo: Optional[str] = None, full: bool = False,
           connected_only: bool = False,
-          as_of: Optional[float] = None):
+          as_of: Optional[float] = None,
+          valid_at: Optional[float] = None,
+          known_at: Optional[float] = None):
     """Entity-relation network for a workspace — vis-network-ready nodes/edges
     plus type counts, top-connected, and connectivity stats.
 
@@ -1591,7 +1675,7 @@ def graph(workspace: Optional[str] = None, limit: int = 2000,
         service().graph, workspace=ws, limit=limit, layers=selected,
         include_code=include_code, repo=repo, backfill=False, full=full,
         connected_only=connected_only,
-        as_of=as_of,
+        as_of=as_of, valid_at=valid_at, known_at=known_at,
     )
 
 
@@ -1615,6 +1699,8 @@ def graph_scene(workspace: Optional[str] = None, level: str = "overview",
                 entity_types: Optional[str] = None,
                 memory_types: Optional[str] = None,
                 as_of: Optional[float] = None,
+                valid_at: Optional[float] = None,
+                known_at: Optional[float] = None,
                 time_from: Optional[float] = None,
                 time_to: Optional[float] = None,
                 depth: int = Query(default=1, ge=0, le=2),
@@ -1647,7 +1733,8 @@ def graph_scene(workspace: Optional[str] = None, level: str = "overview",
         center_id=center_id, system_id=system_id, seeds=_graph_csv(seeds),
         repo=repo, layers=_graph_csv(layers), relations=_graph_csv(relations),
         entity_types=_graph_csv(entity_types), memory_types=_graph_csv(memory_types),
-        as_of=as_of, time_from=time_from, time_to=time_to, depth=depth,
+        as_of=as_of, valid_at=valid_at, known_at=known_at,
+        time_from=time_from, time_to=time_to, depth=depth,
         min_support=min_support, min_confidence=min_confidence,
         include_weak_cooccurrence=weak_cooccurrence,
         include_code=code_enabled, node_limit=node_limit, edge_limit=edge_limit,
@@ -1660,6 +1747,8 @@ def graph_suggest(q: str = "", query: Optional[str] = None,
                   repo: Optional[str] = None,
                   memory_types: Optional[str] = None,
                   as_of: Optional[float] = None,
+                  valid_at: Optional[float] = None,
+                  known_at: Optional[float] = None,
                   time_from: Optional[float] = None,
                   time_to: Optional[float] = None,
                   include_weak_cooccurrence: bool = False,
@@ -1668,7 +1757,8 @@ def graph_suggest(q: str = "", query: Optional[str] = None,
     return _run(
         service().graph_suggest, query if query is not None else q,
         workspace=ws, repo=repo, memory_types=_graph_csv(memory_types),
-        as_of=as_of, time_from=time_from, time_to=time_to,
+        as_of=as_of, valid_at=valid_at, known_at=known_at,
+        time_from=time_from, time_to=time_to,
         include_weak_cooccurrence=include_weak_cooccurrence, limit=limit,
     )
 
@@ -1678,6 +1768,8 @@ def graph_entity(canonical_id: str, workspace: Optional[str] = None,
                  repo: Optional[str] = None,
                  memory_types: Optional[str] = None,
                  as_of: Optional[float] = None,
+                 valid_at: Optional[float] = None,
+                 known_at: Optional[float] = None,
                  time_from: Optional[float] = None,
                  time_to: Optional[float] = None,
                  include_weak_cooccurrence: bool = True):
@@ -1685,6 +1777,7 @@ def graph_entity(canonical_id: str, workspace: Optional[str] = None,
     return _run(
         service().graph_entity, canonical_id, workspace=ws, repo=repo,
         memory_types=_graph_csv(memory_types), as_of=as_of,
+        valid_at=valid_at, known_at=known_at,
         time_from=time_from, time_to=time_to,
         include_weak_cooccurrence=include_weak_cooccurrence,
     )
@@ -1692,17 +1785,22 @@ def graph_entity(canonical_id: str, workspace: Optional[str] = None,
 
 @router.get("/graph/entities/{canonical_id}/memories")
 def graph_entity_memories(canonical_id: str, workspace: Optional[str] = None,
-                          as_of: Optional[float] = None):
+                          as_of: Optional[float] = None,
+                          valid_at: Optional[float] = None,
+                          known_at: Optional[float] = None):
     """Bounded evidence cards for one graph node, without rebuilding the full inspector."""
     ws = workspace or _require_ws()
     return _run(
-        service().graph_entity_evidence, canonical_id, workspace=ws, as_of=as_of,
+        service().graph_entity_evidence, canonical_id, workspace=ws,
+        as_of=as_of, valid_at=valid_at, known_at=known_at,
     )
 
 
 @router.get("/graph/path")
 def graph_path(source: str, target: str, workspace: Optional[str] = None,
                repo: Optional[str] = None, as_of: Optional[float] = None,
+               valid_at: Optional[float] = None,
+               known_at: Optional[float] = None,
                memory_types: Optional[str] = None,
                time_from: Optional[float] = None,
                time_to: Optional[float] = None,
@@ -1712,7 +1810,8 @@ def graph_path(source: str, target: str, workspace: Optional[str] = None,
     ws = workspace or _require_ws()
     return _run(
         service().graph_path, source, target, workspace=ws, repo=repo,
-        as_of=as_of, memory_types=_graph_csv(memory_types),
+        as_of=as_of, valid_at=valid_at, known_at=known_at,
+        memory_types=_graph_csv(memory_types),
         time_from=time_from, time_to=time_to,
         max_hops=max_hops, max_visits=max_visits,
         include_weak_cooccurrence=include_weak_cooccurrence,
@@ -1810,9 +1909,13 @@ def code_index(req: _CodeIndexReq):
 
 
 @router.get("/code/search")
-def code_search(query: str, workspace: str, repo: str, limit: int = 20):
+def code_search(query: str, workspace: str, repo: str, limit: int = 20,
+                as_of: Optional[float] = None,
+                valid_at: Optional[float] = None,
+                known_at: Optional[float] = None):
     return _run(
         service().search_code, query, workspace=workspace, repo=repo, limit=limit,
+        as_of=as_of, valid_at=valid_at, known_at=known_at,
     )
 
 
@@ -1822,13 +1925,17 @@ class _CodePathReq(BaseModel):
     source: str
     target: str
     max_depth: int = 8
+    as_of: Optional[float] = None
+    valid_at: Optional[float] = None
+    known_at: Optional[float] = None
 
 
 @router.post("/code/path")
 def code_path(req: _CodePathReq):
     return _run(
         service().code_path, req.source, req.target, workspace=req.workspace,
-        repo=req.repo, max_depth=req.max_depth,
+        repo=req.repo, max_depth=req.max_depth, as_of=req.as_of,
+        valid_at=req.valid_at, known_at=req.known_at,
     )
 
 
@@ -1836,19 +1943,29 @@ class _CodeImpactReq(BaseModel):
     workspace: str
     repo: str
     changed_files: list[str]
+    as_of: Optional[float] = None
+    valid_at: Optional[float] = None
+    known_at: Optional[float] = None
 
 
 @router.post("/code/impact")
 def code_impact(req: _CodeImpactReq):
     return _run(
         service().code_impact, req.changed_files,
-        workspace=req.workspace, repo=req.repo,
+        workspace=req.workspace, repo=req.repo, as_of=req.as_of,
+        valid_at=req.valid_at, known_at=req.known_at,
     )
 
 
 @router.get("/code/export")
-def code_export(workspace: str, repo: str):
-    return _run(service().export_code_graph, workspace=workspace, repo=repo)
+def code_export(workspace: str, repo: str,
+                as_of: Optional[float] = None,
+                valid_at: Optional[float] = None,
+                known_at: Optional[float] = None):
+    return _run(
+        service().export_code_graph, workspace=workspace, repo=repo,
+        as_of=as_of, valid_at=valid_at, known_at=known_at,
+    )
 
 
 # ── license ───────────────────────────────────────────────────────────────────
@@ -2137,12 +2254,18 @@ def _normalized_features(values: object, plan: str) -> list:
     ``known_features`` even if a future server release adds a key this build predates.
     """
 
+    allowed = set(entitled_features(plan))
     if not isinstance(values, (list, tuple)):
         return entitled_features(plan)
     granted = {str(item).strip().lower() for item in values if isinstance(item, str)}
     if "automation" in granted:
         granted.update(_AUTOMATION_FEATURES)
-    return sorted(granted & set(_FEATURE_LABELS))
+    # The payload is authoritative for a *subset* of the customer's plan grants, but it
+    # must never escalate them.  In particular a stale or malformed Pro response that
+    # still lists ``team`` used to unlock the Team UI even though the plan had already
+    # changed.  The server still authorizes every operation, but presentation must be
+    # conservative too.  Unknown future keys remain hidden as before.
+    return sorted(granted & allowed & set(_FEATURE_LABELS))
 
 
 def _session_entitlement() -> dict:

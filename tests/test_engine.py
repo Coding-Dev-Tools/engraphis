@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import tempfile
+import time
 
 import pytest
 
@@ -19,6 +20,26 @@ def test_engine_remember_and_recall():
     res = eng.recall("how do we deploy?", workspace_id=wid, k=2)
     assert res.count >= 1
     assert "actions" in res.context.lower() or "aws" in res.context.lower()
+
+
+def test_engine_recall_requires_explicit_reinforcement_signal():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    mid = eng.remember("The deployment target is AWS ECS.", workspace_id=wid, repo_id=rid)
+    before = eng.store.get_memory(mid).access_count
+
+    eng.recall("unrelated lunch menu", workspace_id=wid, repo_id=rid, k=1)
+    assert eng.store.get_memory(mid).access_count == before
+
+    eng.recall(
+        "deployment target",
+        workspace_id=wid,
+        repo_id=rid,
+        k=1,
+        reinforce=True,
+    )
+    assert eng.store.get_memory(mid).access_count > before
 
 
 def test_index_upsert_failure_preserves_memory_and_audits(caplog):
@@ -302,6 +323,9 @@ def test_forget_invalidates_without_deleting():
     eng.forget(mid, reason="no longer true")
     assert mid not in [m.id for m in eng.store.list_memories(SearchFilter(workspace_id=wid))]
     assert eng.store.get_memory(mid) is not None      # not hard-deleted
+    assert eng.store.conn.execute(
+        "SELECT 1 FROM mem_vectors WHERE id=?", (mid,)
+    ).fetchone() is not None
 
 
 def test_forget_unknown_id_raises():
@@ -343,6 +367,9 @@ def test_correct_supersedes_without_deleting():
     assert new_rec.metadata.get("corrects") == mid
     live_ids = [m.id for m in eng.store.list_memories(SearchFilter(workspace_id=wid))]
     assert mid not in live_ids and out["id"] in live_ids
+    assert eng.store.conn.execute(
+        "SELECT 1 FROM mem_vectors WHERE id=?", (mid,)
+    ).fetchone() is not None
 
 
 def test_promote_widens_scope_and_preserves_source_history_and_safety():
@@ -437,6 +464,74 @@ def test_timeline_orders_history_chronologically():
     hist = eng.timeline("rate limit", workspace_id=wid, repo_id=rid)
     assert len(hist) == 2
     assert hist[0].valid_from < hist[1].valid_from
+
+
+def test_temporal_supersession_closes_at_effective_time_and_keeps_vectors():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    old = eng.remember(
+        "The API rate limit is 100 requests per minute.",
+        workspace_id=wid,
+        repo_id=rid,
+        valid_from=1_000.0,
+    )
+    new = eng.remember(
+        "The API rate limit is 500 requests per minute.",
+        workspace_id=wid,
+        repo_id=rid,
+        valid_from=2_000.0,
+    )
+
+    assert eng.store.get_memory(old).valid_to == 2_000.0
+    assert eng.store.conn.execute(
+        "SELECT 1 FROM mem_vectors WHERE id=?", (old,)
+    ).fetchone() is not None
+    before = eng.recall_engine.recall(
+        "What is the API rate limit?",
+        SearchFilter(workspace_id=wid, repo_id=rid, as_of=1_500.0),
+        reinforce=False,
+    )
+    after = eng.recall_engine.recall(
+        "What is the API rate limit?",
+        SearchFilter(workspace_id=wid, repo_id=rid, as_of=2_500.0),
+        reinforce=False,
+    )
+    assert [chunk["id"] for chunk in before.chunks] == [old]
+    assert [chunk["id"] for chunk in after.chunks] == [new]
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), "not-a-time", True])
+def test_remember_rejects_non_finite_valid_from_without_writing(invalid):
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+
+    with pytest.raises(ValueError, match="valid_from must be a finite timestamp"):
+        eng.remember("A fact.", workspace_id=wid, valid_from=invalid)
+
+    assert eng.store.list_memories(SearchFilter(workspace_id=wid)) == []
+
+
+def test_backdated_supersession_is_rejected_without_creating_an_invalid_interval():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    old = eng.remember(
+        "The deployment window is Friday afternoon.",
+        workspace_id=wid,
+        valid_from=2_000.0,
+    )
+
+    with pytest.raises(ValueError, match="cannot predate"):
+        eng.remember(
+            "The deployment window is Thursday afternoon.",
+            workspace_id=wid,
+            valid_from=1_000.0,
+        )
+
+    assert eng.store.get_memory(old).valid_to is None
+    assert len(eng.store.list_memories(
+        SearchFilter(workspace_id=wid), include_invalid=True
+    )) == 1
 
 
 def test_recall_proactive_includes_last_session_handoff():
@@ -827,6 +922,66 @@ def test_code_memory_paths_hide_forgotten_memories(tmp_path):
     assert eng.analyze_impact(["deploy.py"], repo_id=rid)["memory_mentions"] == []
 
 
+def test_code_search_and_memory_paths_honor_historical_anchors():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    symbol_id = eng.store.upsert_symbol(
+        repo_id=rid, kind="function", name="old_fn", fqname="old_fn",
+        file="old.py", span="1-1",
+    )
+    eng.store.add_code_edge(
+        repo_id=rid, src="caller", dst="old_fn", relation="calls",
+        file="old.py", line=2,
+    )
+    memory_id = eng.store.add_memory(MemoryRecord(
+        id="", content="old_fn used the historical path", title="old path",
+        workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+        valid_from=10.0, ingested_at=10.0,
+    ))
+    eng.store.link_memory_symbol(
+        repo_id=rid, symbol_id=symbol_id, memory_id=memory_id,
+    )
+    for table in ("symbols", "code_edges", "code_memory_links"):
+        eng.store.conn.execute(
+            f"UPDATE {table} SET valid_from=10, ingested_at=10 WHERE repo_id=?",
+            (rid,),
+        )
+    eng.store.conn.commit()
+    eng.store.close_validity(memory_id, at=20.0)
+    eng.store.clear_symbols_for_file(rid, "old.py")
+    symbol_closed_at = eng.store.conn.execute(
+        "SELECT valid_to FROM symbols WHERE id=?", (symbol_id,)
+    ).fetchone()["valid_to"]
+    historical = SearchFilter(
+        workspace_id=wid,
+        repo_id=rid,
+        valid_at=15.0,
+        known_at=float(symbol_closed_at) + 1.0,
+    )
+
+    search = eng.search_code("old_fn", repo_id=rid, flt=historical)
+
+    assert [symbol["id"] for symbol in search["symbols"]] == [symbol_id]
+    assert search["symbols"][0]["called_by"][0]["src"] == "caller"
+    assert eng.code_path(
+        "old_fn", memory_id, repo_id=rid, flt=historical,
+    )["found"] is True
+    impact = eng.analyze_impact(["old.py"], repo_id=rid, flt=historical)
+    assert {row["id"] for row in impact["symbols"]} == {symbol_id}
+    assert {row["id"] for row in impact["memory_mentions"]} == {memory_id}
+    assert impact["graph"]["edges"] == 1
+    exported = eng.export_code_graph(repo_id=rid, flt=historical)
+    assert {row["id"] for row in exported["nodes"]} == {symbol_id}
+    assert len(exported["edges"]) == 1
+    assert {row["memory_id"] for row in exported["memory_links"]} == {memory_id}
+    assert eng.code_path("old_fn", memory_id, repo_id=rid)["found"] is False
+    assert eng.analyze_impact(
+        ["old.py"], repo_id=rid
+    )["memory_mentions"] == []
+    assert eng.export_code_graph(repo_id=rid)["nodes"] == []
+
+
 def test_code_reads_apply_session_visibility_to_every_memory_surface():
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")
@@ -877,6 +1032,33 @@ def test_code_reads_apply_session_visibility_to_every_memory_surface():
     assert eng.code_path(
         "deploy", session_memory, repo_id=rid, flt=session_filter,
     )["found"]
+
+
+def test_code_reads_reject_mismatched_workspace_or_repo_filters():
+    eng = MemoryEngine.create(":memory:")
+    first_workspace = eng.store.get_or_create_workspace("first")
+    second_workspace = eng.store.get_or_create_workspace("second")
+    first_repo = eng.store.get_or_create_repo(first_workspace, "api")
+    second_repo = eng.store.get_or_create_repo(second_workspace, "api")
+    eng.store.upsert_symbol(
+        repo_id=second_repo, kind="function", name="secret_fn",
+        fqname="secret_fn", file="secret.py", span="1-1",
+    )
+
+    with pytest.raises(ValueError, match="workspace_id"):
+        eng.search_code(
+            "secret_fn",
+            repo_id=second_repo,
+            flt=SearchFilter(workspace_id=first_workspace, repo_id=second_repo),
+        )
+    with pytest.raises(ValueError, match="repo_id"):
+        eng.export_code_graph(
+            repo_id=second_repo,
+            flt=SearchFilter(
+                workspace_id=second_workspace,
+                repo_id=first_repo,
+            ),
+        )
 
 
 def test_rebuild_code_memory_links_keysets_past_five_thousand_session_records():
@@ -1126,3 +1308,54 @@ def test_code_matcher_cache_is_invalidated_when_symbols_change():
 
     assert [r["symbol_id"] for r in eng.store.list_code_memory_links(rid)
             if r["memory_id"] == second], "a new symbol must invalidate the cached matcher"
+
+
+def test_extracted_graph_evidence_inherits_memory_temporal_anchors():
+    eng = MemoryEngine.create(":memory:", graph_extractor="regex")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    future = time.time() + 10_000
+    first = eng.remember(
+        "Alice uses Stripe.",
+        workspace_id=wid,
+        repo_id=rid,
+        valid_from=future,
+        resolve_conflicts=False,
+    )
+    memory = eng.store.get_memory(first)
+    edges = eng.store.edges_in_scope(SearchFilter(
+        workspace_id=wid,
+        repo_id=rid,
+        valid_at=future,
+        known_at=memory.ingested_at,
+    ))
+    assert len(edges) == 1
+    assert edges[0].valid_from == future
+    assert edges[0].ingested_at == memory.ingested_at
+    assert eng.store.edges_in_scope(SearchFilter(
+        workspace_id=wid,
+        repo_id=rid,
+        valid_at=future - 1,
+        known_at=memory.ingested_at,
+    )) == []
+    assert eng.store.edges_in_scope(SearchFilter(
+        workspace_id=wid,
+        repo_id=rid,
+        valid_at=future,
+        known_at=memory.ingested_at - 1,
+    )) == []
+
+    earlier = future - 500
+    eng.remember(
+        "Alice uses Stripe.",
+        workspace_id=wid,
+        repo_id=rid,
+        valid_from=earlier,
+        resolve_conflicts=False,
+    )
+    edge = eng.store.edges_in_scope(SearchFilter(
+        workspace_id=wid,
+        repo_id=rid,
+        valid_at=earlier,
+    ))[0]
+    assert edge.valid_from == earlier

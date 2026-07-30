@@ -51,13 +51,28 @@ def test_recall_bitemporal_excludes_invalidated_fact():
     assert old not in [c["id"] for c in res.chunks]
 
 
-def test_recall_reinforces_returned_memories():
+def test_recall_is_observational_by_default():
     store, emb, eng = _engine()
     wid = store.get_or_create_workspace("w")
     rid = store.get_or_create_repo(wid, "r")
     mid = _add(store, emb, wid, rid, "pnpm is our package manager.")
     before = store.get_memory(mid).access_count
     eng.recall("package manager", SearchFilter(workspace_id=wid), k=1)
+    assert store.get_memory(mid).access_count == before
+
+
+def test_recall_can_reinforce_when_use_is_explicit():
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    mid = _add(store, emb, wid, rid, "pnpm is our package manager.")
+    before = store.get_memory(mid).access_count
+    eng.recall(
+        "package manager",
+        SearchFilter(workspace_id=wid),
+        k=1,
+        reinforce=True,
+    )
     assert store.get_memory(mid).access_count > before
 
 

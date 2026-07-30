@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Mapping
 from datetime import datetime, timezone
 
 
@@ -62,6 +63,32 @@ def redact(value: object) -> str:
         lambda match: match.group("prefix") + '"[redacted]"', text)
     text = _ASSIGNMENT.sub(r"\1=[redacted]", text)
     return _EMAIL.sub("[email]", text)
+
+
+def redact_json_value(value: object, *, _depth: int = 0) -> object:
+    """Return a JSON-safe log value without preserving credential-bearing extras.
+
+    A logger's ``extra`` mapping bypasses ``LogRecord.getMessage()``, so a formatter that
+    emits those fields directly needs the same redaction boundary as an ordinary message.
+    Keep modest structure for useful operational fields while bounding hostile/cyclic values.
+    """
+    if _depth >= 8:
+        return "[redacted]"
+    if isinstance(value, Mapping):
+        result = {}
+        for key, item in value.items():
+            name = str(key)
+            result[name] = (
+                "[redacted]"
+                if re.fullmatch(_SENSITIVE_NAME, name.upper())
+                else redact_json_value(item, _depth=_depth + 1)
+            )
+        return result
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [redact_json_value(item, _depth=_depth + 1) for item in value]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return redact(value)
 
 
 class RedactedJsonFormatter(logging.Formatter):

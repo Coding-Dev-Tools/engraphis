@@ -8,7 +8,7 @@ with a plain-table fallback so the schema initializes on any SQLite build).
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -73,8 +73,11 @@ CREATE TABLE IF NOT EXISTS memories (
     last_access  REAL,
     valid_from   REAL,                             -- world-time validity
     valid_to     REAL,
+    valid_to_recorded_at REAL,                    -- system-time when valid_to was learned
     ingested_at  REAL,                             -- system-time validity
     expired_at   REAL,
+    subject_key  TEXT DEFAULT '',                 -- stable claim subject, optional
+    claim_kind   TEXT DEFAULT '',                 -- optional claim predicate/category
     pinned       INTEGER DEFAULT 0,
     sensitivity  TEXT DEFAULT 'normal',
     provenance   TEXT DEFAULT '{}',
@@ -83,6 +86,31 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_mem_scope   ON memories(workspace_id, repo_id, scope, mtype);
 CREATE INDEX IF NOT EXISTS idx_mem_session ON memories(session_id);
 CREATE INDEX IF NOT EXISTS idx_mem_valid   ON memories(valid_from, valid_to, expired_at);
+
+-- Persisted memory↔entity incidence lets graph retrieval attach evidence without
+-- rescanning every memory's prose.  Temporal fields preserve historical walks.
+CREATE TABLE IF NOT EXISTS memory_entities (
+    id           TEXT PRIMARY KEY,
+    memory_id    TEXT NOT NULL,
+    entity_id    TEXT NOT NULL,
+    workspace_id TEXT,
+    repo_id      TEXT,
+    source_kind  TEXT NOT NULL DEFAULT 'edge_support',
+    confidence   REAL NOT NULL DEFAULT 1.0,
+    valid_from   REAL,
+    valid_to     REAL,
+    valid_to_recorded_at REAL,
+    ingested_at  REAL,
+    expired_at   REAL,
+    provenance   TEXT DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_memory_entity_entity
+    ON memory_entities(workspace_id, repo_id, entity_id, valid_to, expired_at);
+CREATE INDEX IF NOT EXISTS idx_memory_entity_memory
+    ON memory_entities(memory_id, valid_to, expired_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_entity_live_unique
+    ON memory_entities(memory_id, entity_id, source_kind)
+    WHERE valid_to IS NULL AND expired_at IS NULL;
 
 -- Vectors (Phase 0 reference store; Phase 1 → sqlite-vec vec0 virtual table).
 CREATE TABLE IF NOT EXISTS mem_vectors (
@@ -118,6 +146,7 @@ CREATE TABLE IF NOT EXISTS edges (
     weight       REAL DEFAULT 1.0,
     valid_from   REAL,
     valid_to     REAL,
+    valid_to_recorded_at REAL,
     ingested_at  REAL,
     expired_at   REAL,
     provenance   TEXT DEFAULT '{}'
@@ -141,6 +170,7 @@ CREATE TABLE IF NOT EXISTS edge_supports (
     confidence   REAL NOT NULL DEFAULT 0.5,
     valid_from   REAL,
     valid_to     REAL,
+    valid_to_recorded_at REAL,
     ingested_at  REAL,
     expired_at   REAL,
     provenance   TEXT DEFAULT '{}',
@@ -262,7 +292,14 @@ CREATE TABLE IF NOT EXISTS mem_links (
     relation   TEXT,
     layer      TEXT DEFAULT 'semantic',
     reason     TEXT DEFAULT '',
-    created_at REAL
+    created_at REAL,
+    -- Direct memory relationships participate in graph recall. Give them the
+    -- same history as other graph bridges so later links cannot alter past reads.
+    valid_from REAL,
+    valid_to   REAL,
+    valid_to_recorded_at REAL,
+    ingested_at REAL,
+    expired_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_mem_links_ab ON mem_links(a, b);
 -- Links are undirected: Store.get_links()/has_link()/add_link() all match "a=? OR b=?".
@@ -284,7 +321,12 @@ CREATE TABLE IF NOT EXISTS symbols (
     exported      INTEGER,
     content_hash  TEXT,
     embedding_ref TEXT,
-    updated_at    REAL
+    updated_at    REAL,
+    valid_from    REAL,
+    valid_to      REAL,
+    valid_to_recorded_at REAL,
+    ingested_at   REAL,
+    expired_at    REAL
 );
 CREATE INDEX IF NOT EXISTS idx_sym_repo ON symbols(repo_id, name);
 
@@ -296,7 +338,12 @@ CREATE TABLE IF NOT EXISTS code_edges (
     relation TEXT,                                  -- calls|imports|references|implements|tests
     layer    TEXT DEFAULT 'entity',
     file     TEXT,
-    line     INTEGER
+    line     INTEGER,
+    valid_from REAL,
+    valid_to   REAL,
+    valid_to_recorded_at REAL,
+    ingested_at REAL,
+    expired_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_code_edge_src ON code_edges(repo_id, src);
 CREATE INDEX IF NOT EXISTS idx_code_edge_dst ON code_edges(repo_id, dst);
@@ -322,7 +369,11 @@ CREATE TABLE IF NOT EXISTS code_memory_links (
     relation    TEXT DEFAULT 'mentions',
     confidence  REAL DEFAULT 1.0,
     created_at  REAL,
-    UNIQUE(repo_id, symbol_id, memory_id, relation)
+    valid_from REAL,
+    valid_to   REAL,
+    valid_to_recorded_at REAL,
+    ingested_at REAL,
+    expired_at REAL
 );
 CREATE INDEX IF NOT EXISTS idx_code_mem_symbol
     ON code_memory_links(repo_id, symbol_id);
@@ -363,6 +414,7 @@ CREATE TABLE IF NOT EXISTS operation_receipts (
     operation      TEXT NOT NULL,
     workspace_id   TEXT,
     repo_id        TEXT,
+    sequence       INTEGER NOT NULL CHECK(sequence >= 1),
     scope_digest   TEXT NOT NULL,
     actor          TEXT DEFAULT 'system',
     target_count   INTEGER DEFAULT 0,
