@@ -10,17 +10,17 @@ https://discord.com/invite/Wfr2ejBmY
 
 **Give your AI agents a memory. See it, search it, and maintain it, all in a beautiful WebUI on your own machine.**
 
-## What Engraphis gives an agent
-
-An agent should not have to reconstruct a project from scattered chat history on every task.
-Engraphis turns local project knowledge into scoped, time-aware memory; retrieves the evidence
-that supports the current question; and returns a bounded, attributable context packet.
-
 <p align="center">
   <img src="docs/images/knowledge-graph.png" alt="Engraphis Knowledge Graph tab: force-directed entity-relation network" width="100%">
   <br>
   <sup>Knowledge Graph · run <code>engraphis-dashboard</code> to see it live</sup>
 </p>
+
+## What Engraphis gives an agent
+
+An agent should not have to reconstruct a project from scattered chat history on every task.
+Engraphis turns local project knowledge into scoped, time-aware memory; retrieves the evidence
+that supports the current question; and returns a bounded, attributable context packet.
 
 <p align="center">
   <img src="docs/images/engraphis-benefit-flow.png" alt="Diagram: project history becomes scoped and temporal Engraphis memory, hybrid recall, then bounded cited context for an agent" width="100%">
