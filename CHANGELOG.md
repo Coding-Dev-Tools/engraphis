@@ -3,7 +3,16 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
-## [Unreleased]
+## [1.2.1] - 2026-07-30
+
+### Security
+
+- Cloud Sync now encrypts every eligible shared-workspace bundle on the client with
+  ChaCha20-Poly1305 before upload. The relay receives opaque deterministic bundle names and
+  ciphertext only; tampered, renamed, cross-workspace, wrong-key, and legacy plaintext bundles
+  are rejected before the merge engine.
+- Cloud Sync requires a client-held 32-byte workspace key and the `cloud-sync` optional runtime.
+  Missing or malformed encryption configuration stops sync rather than falling back to plaintext.
 
 ### Changed
 

@@ -13,9 +13,9 @@ folder stays small and there is nothing to garbage-collect. Writes are atomic
 (temp file + ``os.replace``) so a half-written bundle is never observed — the same
 mount-safe discipline the rest of the repo uses (AGENTS.md §7).
 
-The managed TLS relay is a different ``SyncTransport`` implementation that plugs in
-here unchanged. Client-side end-to-end encryption is a documented follow-up; today's
-relay stores opaque but plaintext bundle bytes at rest.
+The managed relay is a different ``SyncTransport`` implementation that plugs in here
+unchanged. Its client wrapper encrypts each Cloud bundle before upload and decrypts it
+only on an authorized device; the relay stores opaque ciphertext bytes.
 """
 from __future__ import annotations
 
@@ -176,16 +176,18 @@ def get_transport(kind: str = "folder", **kw):
     name so swapping the folder backend for the managed relay is a config change.
 
     - ``folder`` (default): shared-directory sync. Requires ``root=<shared directory>``.
-    - ``relay``: the managed Cloud Sync transport (``RelayTransport``). Requires
+    - ``relay``: the managed Cloud Sync transport (``EncryptedRelayTransport``). Requires
       ``base_url=<relay root>`` and ``workspace_id=<namespace>`` (use the workspace
       *name*, so every authorized device on the account shares one namespace);
       ``access_token`` is a scoped bearer and ``timeout`` is optional. ``license_key``
       remains a temporary call-site alias for a bearer, never a paid key. The token
-      defaults to the saved per-user sync token.
+      defaults to the saved per-user sync token. ``e2ee_key`` is a shared 32-byte key
+      supplied as URL-safe base64 or through ``ENGRAPHIS_SYNC_E2EE_KEY``; it never
+      reaches the relay and Cloud Sync refuses to run without it.
 
     Both implement the ``SyncTransport`` protocol (``core/interfaces.py``) and plug into
     ``SyncEngine.sync`` unchanged. ``relay`` is imported lazily so a folder-only install
-    never pays for it and ``core`` stays dependency-light (the client is stdlib-only)."""
+    never pays for it and ``core`` stays dependency-light."""
     if kind in ("folder", "auto"):
         root = kw.get("root")
         if not root:
@@ -198,14 +200,19 @@ def get_transport(kind: str = "folder", **kw):
             raise ValueError("relay transport requires base_url=<relay root>")
         if not workspace_id:
             raise ValueError("relay transport requires workspace_id=<namespace>")
-        from engraphis.backends.sync_relay import RelayTransport
+        from engraphis.backends.sync_relay import (
+            EncryptedRelayTransport,
+            RelayTransport,
+            configured_sync_e2ee_key,
+        )
         access_token = kw.get("access_token")
         if access_token is None:
             access_token = kw.get("license_key")
-        return RelayTransport(
+        relay = RelayTransport(
             base_url,
             workspace_id,
             access_token=access_token,
             timeout=kw.get("timeout", 30.0),
         )
+        return EncryptedRelayTransport(relay, configured_sync_e2ee_key(kw.get("e2ee_key")))
     raise ValueError("unknown sync transport %r (have: folder, relay)" % kind)

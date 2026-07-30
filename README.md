@@ -655,6 +655,12 @@ bundle; links are exported only when both endpoints remain. Inbound bundles cann
 overwrite session state. Cloud Sync encrypts eligible shared-workspace changes end-to-end before
 they leave this device; the relay stores ciphertext and cannot read bundle contents.
 
+Cloud Sync fails closed without its client-held workspace key: install `engraphis[cloud-sync]`
+on Python 3.10+ and set the same 32-byte URL-safe-base64 `ENGRAPHIS_SYNC_E2EE_KEY` on each
+authorized device using a secure out-of-band transfer. The relay and Engraphis Cloud never
+receive that key. [`docs/SYNC.md`](docs/SYNC.md) includes the key-generation command and the
+`--relay-e2ee-key` one-off CLI alternative.
+
 For development, backup interchange, and offline testing, the public client retains an explicit
 one-shot folder exchange. That manual primitive is not the official Cloud Sync product and has
 no hosted identity, seat, managed-storage, availability, or support guarantees. See
