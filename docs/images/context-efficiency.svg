@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600" role="img" aria-labelledby="title desc">
   <title id="title">Engraphis context efficiency in deterministic offline fixtures</title>
-  <desc id="desc">Three normalized comparisons show retained token payload after using Engraphis: 27.1 percent for retrieved content, 26.1 percent for an evidence-holding record, and 44.6 percent for a compact MCP response. Every label has a separate line above its corresponding bar. Each row has a separate baseline.</desc>
+  <desc id="desc">Three normalized comparisons show retained token payload after using Engraphis: 27.0 percent for retrieved content, 26.1 percent for an evidence-holding record, and 44.6 percent for a compact MCP response. Every label has a separate line above its corresponding bar. Each row has a separate baseline.</desc>
   <defs>
     <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#0f172a" flood-opacity=".09"/></filter>
   </defs>
@@ -17,7 +17,7 @@
     <text x="96" y="217" font-family="Inter, Arial, sans-serif" font-size="13" fill="#475569">Long-document fixture · top-5 memory content</text>
     <text x="500" y="190" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#334155">Baseline · whole documents · 808.8 tokens</text>
     <rect x="500" y="199" width="440" height="12" rx="6" fill="#64748b"/>
-    <text x="500" y="237" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#1d4ed8">Engraphis · structure-aware chunks · 219.0 tokens · 72.9% lower</text>
+    <text x="500" y="237" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#1d4ed8">Engraphis · structure-aware chunks · 218.4 tokens · 73.0% lower</text>
     <rect x="500" y="246" width="119" height="12" rx="6" fill="#2563eb"/>
   </g>
 

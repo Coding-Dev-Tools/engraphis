@@ -31,6 +31,22 @@ that supports the current question; and returns a bounded, attributable context 
 | Avoid dragging the whole project into every prompt | Packs context to a configured hard budget and can return a compact MCP response. |
 | Keep knowledge in the operator's control | Runs local-first and offline-capable, with scopes, audit records, and optional privacy-safe receipts. |
 
+### See the behavior in reproducible fixtures
+
+The examples below use synthetic, checked-in evaluation inputs. They show three different
+contracts: retrieving focused evidence, returning an answer only with support, and explicitly
+abstaining when no support exists.
+
+<p align="center">
+  <img src="docs/images/evidence-backed-agent-examples.png" alt="Three evidence-backed examples: focused context holds Recall at 5 while reducing retrieved tokens, answerable questions return supported evidence, and off-topic questions abstain" width="100%">
+  <br>
+  <sup>Each card names its deterministic offline fixture and test scope. The examples are illustrative; they are not customer data or external benchmark results.</sup>
+</p>
+
+Run `python -m eval.chunking_eval` and `python -m eval.grounded` to reproduce the behavior;
+the former measures evidence retrieval and context size, while the latter measures the
+answer-versus-abstain decision.
+
 The diagram is the essential path. The sections below cover the dashboard, code graph, local
 installation, governance controls, and hosted services in detail. See [measured quality and token
 efficiency](#measured-quality-and-token-efficiency) for the current reproducible evidence behind
@@ -226,9 +242,9 @@ The current deterministic offline regression fixtures reproduce these quality re
 
 ### Proof at a glance
 
-| **72.9% less retrieved context** | **3.8× smaller evidence record** | **55.38% smaller MCP response** |
+| **73.0% less retrieved context** | **3.8× smaller evidence record** | **55.38% smaller MCP response** |
 |---|---|
-| **808.8 → 219.0** tokens per question | **162.2 → 42.4** tokens to supporting evidence | **17,172 → 7,663** serialized tokens |
+| **808.8 → 218.4** tokens per question | **162.2 → 42.4** tokens to supporting evidence | **17,172 → 7,663** serialized tokens |
 | Same Recall@5 **1.000** in the long-document fixture | Same 18 fixture questions returned an evidence-holding memory | Same CodeMem retrieval scores across 260 timed recalls |
 
 Agents spend less of their context window carrying irrelevant history, leaving more room for the
@@ -236,7 +252,7 @@ current task and cited evidence. These are controlled, deterministic fixtures—
 task-time, or external benchmark claims.
 
 <p align="center">
-  <img src="docs/images/context-efficiency.png" alt="Normalized chart: Engraphis retains 27.1 percent of retrieved content, 26.1 percent of the evidence-holding record, and 44.6 percent of the compact MCP response in separate controlled fixtures" width="100%">
+  <img src="docs/images/context-efficiency.png" alt="Normalized chart: Engraphis retains 27.0 percent of retrieved content, 26.1 percent of the evidence-holding record, and 44.6 percent of the compact MCP response in separate controlled fixtures" width="100%">
   <br>
   <sup>Each row uses a separate 100% baseline. The measurements have different counting boundaries and are not additive.</sup>
 </p>
@@ -246,9 +262,9 @@ task-time, or external benchmark claims.
 | Retrieval mode | Mean returned memory content | Recall@5 |
 |---|---:|---:|
 | Whole documents | 808.8 tokens | 1.000 |
-| Engraphis structure-aware chunks | 219.0 tokens | 1.000 |
+| Engraphis structure-aware chunks | 218.4 tokens | 1.000 |
 
-The chunked mode returns the relevant passage instead of the whole document: **589.8 fewer tokens
+The chunked mode returns the relevant passage instead of the whole document: **590.4 fewer tokens
 per question**. Under the same model-context budget, that leaves roughly **590 tokens** for task
 instructions or other relevant evidence.
 
@@ -259,7 +275,7 @@ boundary.
 
 | What is counted | Comparison | Measured reduction | Quality held constant |
 |---|---|---|---|
-| Retrieved top-5 memory content, averaged per question | Whole documents: **808.8** tokens → structure-aware chunks: **219.0** tokens | **589.8 fewer tokens per question** (**72.9% lower**, about **3.7× smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
+| Retrieved top-5 memory content, averaged per question | Whole documents: **808.8** tokens → structure-aware chunks: **218.4** tokens | **590.4 fewer tokens per question** (**73.0% lower**, about **3.7× smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
 | Smallest returned memory that contains the reference evidence | Whole documents: **162.2** tokens → chunks: **42.4** tokens | **119.8 fewer tokens to evidence** (**73.9% lower**, about **3.8× smaller**) | The same 18 questions had a returned evidence-holding memory in both modes |
 | Serialized MCP recall response across 260 timed CodeMem recalls | Full result: **17,172** `engraphis.regex.v1` tokens → compact result: **7,663** tokens | **9,509 response tokens avoided** (**55.38% lower**) | Recall@5, hit@5, and answer-token recall all **1.000** |
 | Packed prompt-context usage in the same CodeMem performance fixture | Hard budget: **1,500** tokens; observed mean: **87.73**; observed maximum: **106** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
