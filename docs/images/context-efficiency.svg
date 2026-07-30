@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="540" viewBox="0 0 1200 540" role="img" aria-labelledby="title desc">
+  <title id="title">Engraphis context efficiency in deterministic offline fixtures</title>
+  <desc id="desc">Three normalized comparisons show retained token payload after using Engraphis: 27.1 percent for retrieved content, 26.1 percent for an evidence-holding record, and 44.6 percent for a compact MCP response. Each row has a separate baseline.</desc>
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#0f172a" flood-opacity=".09"/></filter>
+  </defs>
+  <rect width="1200" height="540" rx="28" fill="#f8fafc"/>
+  <rect x="24" y="22" width="1152" height="496" rx="22" fill="#fff" stroke="#e2e8f0"/>
+  <text x="72" y="75" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a">Less history in context; the same fixture-level retrieval quality</text>
+  <text x="72" y="105" font-family="Inter, Arial, sans-serif" font-size="16" fill="#475569">Each row is normalized to its own 100% baseline. The measures count different boundaries and are not additive.</text>
+  <rect x="746" y="126" width="15" height="15" rx="3" fill="#cbd5e1"/><text x="770" y="139" font-family="Inter, Arial, sans-serif" font-size="13" fill="#475569">baseline payload (100%)</text>
+  <rect x="948" y="126" width="15" height="15" rx="3" fill="#2563eb"/><text x="972" y="139" font-family="Inter, Arial, sans-serif" font-size="13" fill="#475569">Engraphis payload retained</text>
+
+  <g filter="url(#shadow)">
+    <rect x="72" y="166" width="1056" height="82" rx="15" fill="#f8fafc" stroke="#e2e8f0"/>
+    <text x="96" y="197" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700" fill="#0f172a">Retrieved memory content</text>
+    <text x="96" y="220" font-family="Inter, Arial, sans-serif" font-size="13" fill="#475569">long-document fixture • Recall@5 1.000 in both modes</text>
+    <rect x="428" y="184" width="540" height="17" rx="8.5" fill="#cbd5e1"/>
+    <rect x="428" y="214" width="146" height="17" rx="8.5" fill="#2563eb"/>
+    <text x="978" y="198" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#334155">808.8 tokens</text>
+    <text x="588" y="228" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#1d4ed8">219.0 tokens • 27.1% retained • 72.9% lower</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="72" y="268" width="1056" height="82" rx="15" fill="#f8fafc" stroke="#e2e8f0"/>
+    <text x="96" y="299" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700" fill="#0f172a">Smallest evidence-holding record</text>
+    <text x="96" y="322" font-family="Inter, Arial, sans-serif" font-size="13" fill="#475569">long-document fixture • evidence returned for the same 18 questions</text>
+    <rect x="428" y="286" width="540" height="17" rx="8.5" fill="#cbd5e1"/>
+    <rect x="428" y="316" width="141" height="17" rx="8.5" fill="#2563eb"/>
+    <text x="978" y="300" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#334155">162.2 tokens</text>
+    <text x="583" y="330" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#1d4ed8">42.4 tokens • 26.1% retained • 73.9% lower</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="72" y="370" width="1056" height="82" rx="15" fill="#f8fafc" stroke="#e2e8f0"/>
+    <text x="96" y="401" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700" fill="#0f172a">Serialized MCP recall response</text>
+    <text x="96" y="424" font-family="Inter, Arial, sans-serif" font-size="13" fill="#475569">CodeMem fixture • retrieval scores unchanged across 260 timed recalls</text>
+    <rect x="428" y="388" width="540" height="17" rx="8.5" fill="#cbd5e1"/>
+    <rect x="428" y="418" width="241" height="17" rx="8.5" fill="#2563eb"/>
+    <text x="978" y="402" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#334155">17,172 tokens</text>
+    <text x="683" y="432" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#1d4ed8">7,663 tokens • 44.6% retained • 55.38% lower</text>
+  </g>
+
+  <text x="72" y="487" font-family="Inter, Arial, sans-serif" font-size="13" fill="#64748b">Controlled deterministic offline regression fixtures—not model-billing, task-time, customer-cost, or external benchmark claims.</text>
+</svg>

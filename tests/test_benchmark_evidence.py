@@ -53,6 +53,30 @@ def test_readme_distinguishes_every_current_token_context_measurement():
         assert evidence in readme
 
 
+def test_readme_makes_agent_benefits_and_visual_evidence_scannable():
+    """The public overview and its visual evidence must stay wired to real assets."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    for evidence in (
+        "## What Engraphis gives an agent",
+        "Remember a project across sessions",
+        "Avoid confident guesses",
+        "Avoid dragging the whole project into every prompt",
+        "docs/images/engraphis-benefit-flow.png",
+        "docs/images/context-efficiency.png",
+        "Each row uses a separate 100% baseline",
+    ):
+        assert evidence in readme
+
+    for filename in (
+        "engraphis-benefit-flow.svg",
+        "engraphis-benefit-flow.png",
+        "context-efficiency.svg",
+        "context-efficiency.png",
+    ):
+        assert (ROOT / "docs" / "images" / filename).is_file()
+
+
 def _complete_canonical_report(dataset, config):
     """Minimal but fully auditable canonical envelope for validator coverage."""
     profile = config["canonical_profile"]

@@ -10,6 +10,32 @@ https://discord.com/invite/Wfr2ejBmY
 
 **Give your AI agents a memory. See it, search it, and maintain it — all in a beautiful WebUI on your own machine.**
 
+## What Engraphis gives an agent
+
+An agent should not have to reconstruct a project from scattered chat history on every task.
+Engraphis turns local project knowledge into scoped, time-aware memory; retrieves the evidence
+that supports the current question; and returns a bounded, attributable context packet.
+
+<p align="center">
+  <img src="docs/images/engraphis-benefit-flow.png" alt="Diagram: project history becomes scoped and temporal Engraphis memory, hybrid recall, then bounded cited context for an agent" width="100%">
+  <br>
+  <sup>Store durable project knowledge · retrieve supporting evidence · give the agent only what it needs</sup>
+</p>
+
+| Agent need | What Engraphis changes |
+|---|---|
+| Remember a project across sessions | Stores typed memory in a `workspace → repo → session` hierarchy and provides a last-session handoff. |
+| Find support for the current task | Fuses vector, lexical, graph, and code-aware retrieval instead of relying on one search signal. |
+| Know what is true now—and what changed | Preserves bi-temporal history and supersession chains instead of silently overwriting a fact. |
+| Avoid confident guesses | Returns cited evidence or explicitly abstains when support is too weak. |
+| Avoid dragging the whole project into every prompt | Packs context to a configured hard budget and can return a compact MCP response. |
+| Keep knowledge in the operator's control | Runs local-first and offline-capable, with scopes, audit records, and optional privacy-safe receipts. |
+
+The diagram is the essential path. The sections below cover the dashboard, code graph, local
+installation, governance controls, and hosted services in detail. See [measured quality and token
+efficiency](#measured-quality-and-token-efficiency) for the current reproducible evidence behind
+the context-efficiency claim.
+
 <br>
 
 <p align="center">
@@ -208,6 +234,12 @@ The current deterministic offline regression fixtures reproduce these quality re
 Agents spend less of their context window carrying irrelevant history, leaving more room for the
 current task and cited evidence. These are controlled, deterministic fixtures—not model-billing,
 task-time, or external benchmark claims.
+
+<p align="center">
+  <img src="docs/images/context-efficiency.png" alt="Normalized chart: Engraphis retains 27.1 percent of retrieved content, 26.1 percent of the evidence-holding record, and 44.6 percent of the compact MCP response in separate controlled fixtures" width="100%">
+  <br>
+  <sup>Each row uses a separate 100% baseline. The measurements have different counting boundaries and are not additive.</sup>
+</p>
 
 #### A controlled before-and-after example
 
