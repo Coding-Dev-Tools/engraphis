@@ -211,6 +211,12 @@ test('Cloud Sync denial returns an unlicensed installation to the hosted upgrade
   // Cloud transfer. Confirming here exercises the actual sync denial path rather
   // than treating an unopened consent dialog as a failed relay request.
   await expect(page.locator('#action-overlay')).toHaveClass(/show/);
+  await expect(page.locator('#action-message')).toContainText(
+    'Cloud Sync encrypts eligible shared-workspace changes end-to-end',
+  );
+    await expect(page.locator('#action-message')).toContainText(
+    'Engraphis Cloud cannot read their contents',
+  );
   await page.locator('#action-submit').click();
 
   const sync = page.locator('#sync-body');
