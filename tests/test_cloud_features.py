@@ -181,6 +181,12 @@ def test_explicit_false_consent_cannot_be_overridden_by_environment(monkeypatch)
 
 def test_snapshot_excludes_secret_rows_before_serialization() -> None:
     service = _service()
+    service.store.conn.execute(
+        "UPDATE memories SET valid_to=20, valid_to_recorded_at=30, "
+        "subject_key='queue.worker', claim_kind='configured_value' "
+        "WHERE content LIKE 'A normal%'"
+    )
+    service.store.conn.commit()
     workspace_id, snapshot = build_managed_snapshot(
         service, "acme", consent=True, generation=7
     )
@@ -192,6 +198,10 @@ def test_snapshot_excludes_secret_rows_before_serialization() -> None:
         "A normal managed-compute memory."
     ]
     assert snapshot["memories"][0]["metadata"] == {"subject": "Queue design"}
+    assert snapshot["memories"][0]["valid_to"] == 20
+    assert snapshot["memories"][0]["valid_to_recorded_at"] == 30
+    assert snapshot["memories"][0]["subject_key"] == "queue.worker"
+    assert snapshot["memories"][0]["claim_kind"] == "configured_value"
     assert "do-not-upload" not in repr(snapshot)
     assert "metadata-secret" not in repr(snapshot)
 

@@ -293,6 +293,141 @@ def test_local_agent_write_has_no_client_side_team_paywall(monkeypatch, tmp_path
         assert response.status_code == 200
 
 
+def test_http_memory_api_round_trips_world_time(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        old = client.post(
+            "/api/remember",
+            json={
+                "workspace": "demo",
+                "content": "The API rate limit is 100 requests per minute.",
+                "valid_from": 1_000.0,
+            },
+        ).json()
+        new = client.post(
+            "/api/intent/remember",
+            json={
+                "workspace": "demo",
+                "text": "The API rate limit is 500 requests per minute.",
+                "valid_from": 2_000.0,
+            },
+        ).json()
+
+        before = client.get(
+            "/api/recall",
+            params={
+                "workspace": "demo",
+                "q": "What is the API rate limit?",
+                "as_of": 1_500.0,
+            },
+        )
+        after = client.post(
+            "/api/answer",
+            json={
+                "workspace": "demo",
+                "query": "What is the API rate limit?",
+                "as_of": 2_500.0,
+                "min_support": 0.0,
+            },
+        )
+
+        assert before.status_code == 200
+        assert [memory["id"] for memory in before.json()["memories"]] == [old["id"]]
+        assert after.status_code == 200
+        assert [source["id"] for source in after.json()["sources"]] == [new["id"]]
+
+
+def test_keyword_recall_fallback_keeps_bitemporal_visibility(monkeypatch, tmp_path):
+    """A semantic-backend failure must not leak current facts into historical views."""
+    with _client(monkeypatch, tmp_path) as client:
+        svc = v2_api.service()
+        old = svc.remember(
+            "The fallback retention setting was ten days.", workspace="demo",
+            valid_from=1_000.0,
+        )
+        new = svc.remember(
+            "The fallback retention setting was thirty days.", workspace="demo",
+            valid_from=2_000.0,
+        )
+        # The writes happened during this test, but the fixture models facts learned
+        # before the requested historical system-time anchors.
+        svc.store.conn.execute(
+            "UPDATE memories SET ingested_at=100 WHERE id=?", (old["id"],)
+        )
+        svc.store.conn.execute(
+            "UPDATE memories SET ingested_at=200 WHERE id=?", (new["id"],)
+        )
+        svc.store.conn.execute(
+            "UPDATE memories SET valid_to_recorded_at=200, "
+            "subject_key='retention.days', claim_kind='configured_value' "
+            "WHERE id=?",
+            (old["id"],),
+        )
+        svc.store.conn.commit()
+        old_before = v2_api._keyword_search(
+            "demo", "fallback retention", valid_at=1_500.0, known_at=3_000.0
+        )
+        old_known = v2_api._keyword_search(
+            "demo", "fallback retention", valid_at=1_500.0, known_at=50.0
+        )
+        current = v2_api._keyword_search(
+            "demo", "fallback retention", valid_at=2_500.0, known_at=3_000.0
+        )
+        closure_unknown = v2_api._keyword_search(
+            "demo", "fallback retention", valid_at=2_500.0, known_at=150.0
+        )
+
+        assert [memory["id"] for memory in old_before] == [old["id"]]
+        assert old_known == []
+        assert [memory["id"] for memory in current] == [new["id"]]
+        assert [memory["id"] for memory in closure_unknown] == [old["id"]]
+        assert closure_unknown[0]["valid_to_recorded_at"] == 200.0
+        assert closure_unknown[0]["subject_key"] == "retention.days"
+        assert closure_unknown[0]["claim_kind"] == "configured_value"
+
+        def incompatible_embedder(*_args, **_kwargs):
+            raise ValueError("shapes (256,) and (384,) not aligned")
+
+        monkeypatch.setattr(svc, "recall", incompatible_embedder)
+        fallback = client.get(
+            "/api/recall",
+            params={
+                "workspace": "demo", "q": "fallback retention",
+                "valid_at": 2_500.0, "known_at": 150.0,
+            },
+        )
+        assert fallback.status_code == 200
+        assert fallback.json()["mode"] == "keyword"
+        assert [item["id"] for item in fallback.json()["memories"]] == [old["id"]]
+
+
+def test_http_memory_api_rejects_backdated_supersession_without_partial_write(
+    monkeypatch, tmp_path
+):
+    with _client(monkeypatch, tmp_path) as client:
+        original = client.post(
+            "/api/remember",
+            json={
+                "workspace": "demo",
+                "content": "The deployment window is Friday afternoon.",
+                "valid_from": 2_000.0,
+            },
+        ).json()
+        service = v2_api.service()
+        count_before = len(service.store.list_memories(include_invalid=True))
+        rejected = client.post(
+            "/api/remember",
+            json={
+                "workspace": "demo",
+                "content": "The deployment window is Thursday afternoon.",
+                "valid_from": 1_000.0,
+            },
+        )
+
+        assert rejected.status_code == 400
+        assert service.store.get_memory(original["id"]).valid_to is None
+        assert len(service.store.list_memories(include_invalid=True)) == count_before
+
+
 def test_manual_consolidation_stays_local_but_dreaming_is_cloud_only(
     monkeypatch, tmp_path
 ):

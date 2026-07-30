@@ -10,6 +10,8 @@ issuer, relay, managed compute, Auto Dreaming, Auto Consolidation, or Team ident
 - Service mode: `customer`.
 - Persistent volume: `/data`.
 - Health check: `/api/ready`.
+- `ENGRAPHIS_DASHBOARD_URL` derived from Railway's generated public domain (override it with the
+  canonical HTTPS custom domain once one is active so public MCP origin checks remain strict).
 - Generated local API bearer supplied as `ENGRAPHIS_API_TOKEN`.
 - No vendor signer, billing, mail, Team-admin, relay-storage, or worker secrets.
 
