@@ -3,7 +3,17 @@ import json
 import re
 import subprocess
 import sys
+import tarfile
+import zipfile
 from pathlib import Path
+
+import pytest
+
+from scripts.verify_distribution_contents import (
+    REQUIRED_COMMON,
+    REQUIRED_SDIST,
+    verify_distribution,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,12 +106,58 @@ def test_distribution_configuration_excludes_runtime_bytecode():
     assert "global-exclude *.pyo" in manifest
 
 
+def test_migration_backups_are_ignored_for_database_paths_without_extensions():
+    ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert "*.pre-migration-v*.bak" in ignore
+
+
 def test_distribution_configuration_includes_external_dashboard_assets():
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     package_data = pyproject[pyproject.index('[tool.setuptools.package-data]'):
                              pyproject.index('[tool.setuptools.exclude-package-data]')]
     for pattern in ('"*.html"', '"*.css"', '"*.js"'):
         assert pattern in package_data
+
+
+def test_distribution_configuration_includes_public_evidence_tools():
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+    assert 'include = ["engraphis*", "scripts*", "eval*"]' in pyproject
+    assert '"eval" = ["BASELINES.md", "configs/*.json", "datasets/*.jsonl"]' in pyproject
+    for rule in (
+        "include LICENSE NOTICE README.md CHANGELOG.md BENCHMARKS.md",
+        "recursive-include eval *.py",
+        "include eval/BASELINES.md",
+        "recursive-include eval/configs *.json",
+        "recursive-include eval/datasets *.jsonl",
+    ):
+        assert rule in manifest
+
+
+def test_distribution_archive_verifier_requires_evidence_and_rejects_internal_material(
+        tmp_path):
+    wheel = tmp_path / "engraphis-1.0.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name in sorted(REQUIRED_COMMON):
+            archive.writestr(name, b"public")
+    verify_distribution(wheel)
+
+    unsafe_wheel = tmp_path / "engraphis-1.0.1-py3-none-any.whl"
+    with zipfile.ZipFile(unsafe_wheel, "w") as archive:
+        for name in sorted(REQUIRED_COMMON):
+            archive.writestr(name, b"public")
+        archive.writestr("notes/internal-material.md", b"private")
+        archive.writestr("notes/internal-material/findings.md", b"private")
+    with pytest.raises(ValueError, match="private or generated"):
+        verify_distribution(unsafe_wheel)
+
+    sdist = tmp_path / "engraphis-1.0.0.tar.gz"
+    with tarfile.open(sdist, "w:gz") as archive:
+        for name in sorted(REQUIRED_SDIST):
+            path = tmp_path / name.replace("/", "_")
+            path.write_bytes(b"public")
+            archive.add(path, arcname=f"engraphis-1.0.0/{name}")
+    verify_distribution(sdist)
 
 
 def test_every_vendored_browser_library_has_redistribution_notice():
@@ -133,7 +189,12 @@ def test_manual_release_dispatch_cannot_publish():
     workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     assert workflow.count(
         "if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')"
-    ) == 2
+    ) == 3
+    for job in ("release-evidence", "publish", "github-release"):
+        match = re.search(rf"(?ms)^  {re.escape(job)}:\n(.*?)(?=^  \S[^:\n]*:\n|\Z)", workflow)
+        assert match is not None
+        body = match.group(1)
+        assert "if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')" in body
     assert "Require tag and package version to match" in workflow
     assert "python -m twine check dist/*" in workflow
     assert "python -m pip_audit --local" in workflow

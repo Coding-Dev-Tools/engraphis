@@ -41,6 +41,11 @@
       "value": "*",
       "required": true
     },
+    "ENGRAPHIS_DASHBOARD_URL": {
+      "value": "https://${{RAILWAY_PUBLIC_DOMAIN}}",
+      "prompt": "The Railway public domain is used for the dashboard and MCP HTTP origin allow-list. Override this with your HTTPS custom domain after it is active.",
+      "required": false
+    },
     "ENGRAPHIS_CLOUD_CONTROL_URL": {
       "value": "https://api.engraphis.com",
       "required": false

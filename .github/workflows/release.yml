@@ -61,13 +61,18 @@ jobs:
           ruff check .
           python -c "import fastapi, httpx, mcp, multipart, pydantic, uvicorn"
           python -m pytest -o addopts="" tests/ -q -rs
+          python -m pytest -o addopts="" tests/test_public_research_boundary.py -q
+          python -m pytest -o addopts="" tests/test_compact_recall.py tests/test_eval_performance.py -q
+          python -m pytest -o addopts="" tests/test_eval_harness.py tests/test_benchmark_evidence.py -q
           python -m eval.harness --dataset eval/datasets/sample.jsonl --k 5
           python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5
           python -m eval.ablation
           python -m pip_audit --local
 
       - name: Build source and universal wheel distributions
-        run: python -m build
+        run: |
+          python -m build
+          python scripts/verify_distribution_contents.py dist/*
 
       - name: Validate distributions
         run: python -m twine check dist/*
@@ -134,7 +139,7 @@ jobs:
           npm ci
           npx playwright install --with-deps chromium
       - name: Playwright desktop/mobile, keyboard, CSP, console, and axe checks
-        run: npx playwright test
+        run: npm run test:e2e
 
   docker-smoke:
     name: Production image release gate
@@ -176,9 +181,58 @@ jobs:
         if: always()
         run: docker rm -f engraphis-release || true
 
+  release-evidence:
+    name: Generate public release evidence
+    needs: [build, python-matrix, browser-accessibility, docker-smoke]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install SBOM generator and project dependencies
+        run: >-
+          python -m pip install --upgrade "pip>=26.1.2" "setuptools>=83"
+          cyclonedx-bom==7.3.0 ".[all,test]"
+      - name: Download distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: python-package-distributions
+          path: dist/
+      - name: Generate evidence and reproducible SBOM after all release gates
+        shell: bash
+        run: |
+          mkdir release-evidence
+          sbom="release-evidence/engraphis-${GITHUB_REF_NAME#v}.cdx.json"
+          cyclonedx-py environment --output-reproducible --of JSON --pyproject pyproject.toml -o "$sbom"
+          python scripts/release_evidence.py --dist dist --commit "$GITHUB_SHA" \
+            --tag "$GITHUB_REF_NAME" \
+            --sbom "$sbom" \
+            --verified-check ruff \
+            --verified-check pytest \
+            --verified-check privacy-boundary \
+            --verified-check token-efficiency \
+            --verified-check benchmark-schema-evidence \
+            --verified-check browser-e2e \
+            --verified-check dependency-audit \
+            --verified-check container-smoke \
+            --verified-check retrieval-sample \
+            --verified-check retrieval-codemem \
+            --verified-check retrieval-ablation \
+            --output release-evidence/release-evidence.json
+      - name: Store public release evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: public-release-evidence
+          path: release-evidence/
+
   publish:
     name: Publish to PyPI
-    needs: [build, python-matrix, browser-accessibility, docker-smoke]
+    needs: release-evidence
     # Manual dispatch is intentionally build/check-only. Publication requires a pushed
     # semver tag, whose value was matched to pyproject.toml in the build job above.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -236,6 +290,12 @@ jobs:
           name: python-package-distributions
           path: dist/
 
+      - name: Download public release evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: public-release-evidence
+          path: release-evidence/
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -246,11 +306,11 @@ jobs:
             # A previous partial attempt may have created the release before every
             # canonical package asset uploaded. Reconcile same-named assets from the
             # exact aggregate that passed the publish gate.
-            gh release upload "$GITHUB_REF_NAME" dist/* \
+            gh release upload "$GITHUB_REF_NAME" dist/* release-evidence/release-evidence.json release-evidence/*.cdx.json \
               --repo "$GH_REPO" \
               --clobber
           else
-            gh release create "$GITHUB_REF_NAME" dist/* \
+            gh release create "$GITHUB_REF_NAME" dist/* release-evidence/release-evidence.json release-evidence/*.cdx.json \
               --repo "$GH_REPO" \
               --verify-tag \
               --generate-notes \
@@ -319,10 +379,43 @@ jobs:
                                         (.conclusion == "success" or
                                          .conclusion == "failure"))] | length' \
             <<<"$jobs")" -eq 1
+          test "$(jq '[.jobs[] | select(.name == "Generate public release evidence" and
+                                        .conclusion == "success")] | length' \
+            <<<"$jobs")" -eq 1
           gh run download "$run_id" \
             --repo "$GH_REPO" \
             --name python-package-distributions \
             --dir dist
+
+          gh run download "$run_id" \
+            --repo "$GH_REPO" \
+            --name public-release-evidence \
+            --dir release-evidence
+          python - "$RELEASE_TAG" "$tag_sha" <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+
+          tag, commit = sys.argv[1:]
+          with open("release-evidence/release-evidence.json", encoding="utf-8") as handle:
+              evidence = json.load(handle)
+          assert evidence.get("format") == "engraphis-release-evidence/2"
+          assert evidence.get("package", {}).get("version") == tag.removeprefix("v")
+          assert evidence.get("tag") == tag
+          assert evidence.get("commit") == commit
+          assert evidence.get("provenance", {}).get("source") == {"tag": tag, "commit": commit}
+          expected = {
+              item["filename"]: item["sha256"]
+              for item in evidence.get("artifacts", [])
+          }
+          actual = {
+              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in Path("dist").iterdir()
+              if path.is_file() and (path.name.endswith(".whl") or path.name.endswith(".tar.gz"))
+          }
+          assert expected == actual
+          PY
 
       - name: Verify any previously published subset
         env:
@@ -361,11 +454,11 @@ jobs:
         shell: bash
         run: |
           if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" dist/* \
+            gh release upload "$RELEASE_TAG" dist/* release-evidence/release-evidence.json release-evidence/*.cdx.json \
               --repo "$GH_REPO" \
               --clobber
           else
-            gh release create "$RELEASE_TAG" dist/* \
+            gh release create "$RELEASE_TAG" dist/* release-evidence/release-evidence.json release-evidence/*.cdx.json \
               --repo "$GH_REPO" \
               --verify-tag \
               --generate-notes \

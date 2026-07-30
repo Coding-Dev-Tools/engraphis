@@ -3,9 +3,9 @@ import time
 
 import pytest
 
-from engraphis.core.consolidate import consolidate
+from engraphis.core.consolidate import _cluster_by_subject, consolidate
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.interfaces import MemoryType, SearchFilter
+from engraphis.core.interfaces import MemoryRecord, MemoryType, SearchFilter
 from engraphis.service import MemoryService, ValidationError
 
 
@@ -23,6 +23,32 @@ def _engine_with_repeats():
         eng.remember(t, workspace_id=wid, repo_id=rid, mtype=MemoryType.EPISODIC,
                      resolve_conflicts=False)
     return eng, wid, rid
+
+
+def test_entity_clustering_uses_connected_components_not_first_link_assignment():
+    memories = [
+        MemoryRecord(id="mem_a", content="a"),
+        MemoryRecord(id="mem_b", content="b"),
+        MemoryRecord(id="mem_c", content="c"),
+    ]
+
+    class IncidenceStore:
+        def list_memory_entities(self, _flt, *, memory_ids=None):
+            # A bridges X and Y. A first-link implementation splits C away.
+            assert memory_ids == ["mem_a", "mem_b", "mem_c"]
+            return [
+                {"memory_id": "mem_a", "entity_id": "ent_x"},
+                {"memory_id": "mem_a", "entity_id": "ent_y"},
+                {"memory_id": "mem_b", "entity_id": "ent_x"},
+                {"memory_id": "mem_c", "entity_id": "ent_y"},
+            ]
+
+    groups = _cluster_by_subject(
+        memories, threshold=1.0, store=IncidenceStore(), flt=SearchFilter()
+    )
+    assert [[memory.id for memory in group] for group in groups] == [
+        ["mem_a", "mem_b", "mem_c"]
+    ]
 
 
 def test_service_rejects_non_finite_archive_threshold():
@@ -53,6 +79,35 @@ def test_consolidate_is_idempotent():
     assert len(first["digests_created"]) == 1
     assert len(second["digests_created"]) == 0
     assert second["skipped_already_consolidated"] >= 1
+
+
+def test_subject_clustering_limits_entity_lookup_to_the_scanned_memories(monkeypatch):
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    scanned = eng.remember(
+        "The scanned episodic memory has entity evidence.",
+        workspace_id=wid, mtype=MemoryType.EPISODIC, resolve_conflicts=False,
+    )
+    eng.remember(
+        "An unrelated episodic memory also has entity evidence.",
+        workspace_id=wid, mtype=MemoryType.EPISODIC, resolve_conflicts=False,
+    )
+    calls = []
+    original = eng.store.list_memory_entities
+
+    def limited_lookup(flt, *, entity_ids=None, memory_ids=None, limit=None):
+        calls.append(memory_ids)
+        return original(
+            flt, entity_ids=entity_ids, memory_ids=memory_ids, limit=limit,
+        )
+
+    monkeypatch.setattr(eng.store, "list_memory_entities", limited_lookup)
+    _cluster_by_subject(
+        [eng.store.get_memory(scanned)], threshold=0.5, store=eng.store,
+        flt=SearchFilter(workspace_id=wid),
+    )
+
+    assert calls == [[scanned]]
 
 
 def test_consolidate_processes_new_members_of_an_existing_cluster():
@@ -501,9 +556,7 @@ def test_archive_pass_sees_transients_behind_newer_semantic_rows(monkeypatch):
     assert [row["id"] for row in report["archived"]] == [stale]
 
 
-def test_archive_logs_index_cleanup_failure_without_leaking_exception_text(
-    monkeypatch, caplog
-):
+def test_archive_preserves_vector_for_historical_recall():
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")
     stale = eng.remember(
@@ -518,16 +571,20 @@ def test_archive_logs_index_cleanup_failure_without_leaking_exception_text(
     )
     eng.store.conn.commit()
 
-    def fail_delete(ids):
-        raise RuntimeError("credential-like index detail")
-
-    monkeypatch.setattr(eng.index, "delete", fail_delete)
-    with caplog.at_level("WARNING", logger="engraphis.core.consolidate"):
-        report = consolidate(eng, workspace_id=wid)
+    archived_at = time.time()
+    report = consolidate(eng, workspace_id=wid, now=archived_at)
 
     assert [row["id"] for row in report["archived"]] == [stale]
-    assert "RuntimeError" in caplog.text
-    assert "credential-like index detail" not in caplog.text
+    assert eng.store.conn.execute(
+        "SELECT 1 FROM mem_vectors WHERE id=?", (stale,)
+    ).fetchone() is not None
+    valid_from = eng.store.get_memory(stale).valid_from
+    historical = eng.recall_engine.recall(
+        "What scratch note came from the old session?",
+        SearchFilter(workspace_id=wid, as_of=(valid_from + archived_at) / 2),
+        reinforce=False,
+    )
+    assert [chunk["id"] for chunk in historical.chunks] == [stale]
 
 
 # ── explicit local consolidation command ─────────────────────────────────────

@@ -351,7 +351,8 @@ def _build_managed_snapshot_locked(service: Any, workspace: str, *,
                                 status=413)
     rows = service.store.conn.execute(
         "SELECT id, title, content, mtype, scope, ingested_at, last_access, valid_from, "
-        "valid_to, expired_at, stability, importance, pinned, sensitivity, metadata "
+        "valid_to, valid_to_recorded_at, expired_at, subject_key, claim_kind, "
+        "stability, importance, pinned, sensitivity, metadata "
         "FROM memories WHERE workspace_id=? AND COALESCE(scope, 'workspace')!='session' "
         "ORDER BY ingested_at, id",
         (workspace_id,),
@@ -397,7 +398,10 @@ def _build_managed_snapshot_locked(service: Any, workspace: str, *,
             "last_access": float(item.get("last_access") or item.get("ingested_at") or 0),
             "valid_from": float(item.get("valid_from") or 0),
             "valid_to": item.get("valid_to"),
+            "valid_to_recorded_at": item.get("valid_to_recorded_at"),
             "expired_at": item.get("expired_at"),
+            "subject_key": str(item.get("subject_key") or ""),
+            "claim_kind": str(item.get("claim_kind") or ""),
             "stability": float(item.get("stability") or 1),
             "importance": float(item.get("importance") or 0.5),
             "pinned": bool(item.get("pinned")),

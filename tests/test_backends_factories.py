@@ -38,6 +38,24 @@ def test_embedder_factory_falls_back_offline(monkeypatch):
     assert isinstance(get_embedder("definitely-not-a-real-model-xyz", 128), DeterministicEmbedder)
 
 
+def test_embedder_factory_forwards_an_immutable_model_revision(monkeypatch):
+    import engraphis.backends.embedder_st as embedder_st
+
+    captured = {}
+
+    class _PinnedEmbedder:
+        dim = 128
+
+        def __init__(self, model_name, *, revision=None):
+            captured.update(model_name=model_name, revision=revision)
+
+    monkeypatch.setattr(embedder_st, "SentenceTransformerEmbedder", _PinnedEmbedder)
+    result = get_embedder("Qwen/example", 128, revision="a" * 40)
+
+    assert isinstance(result, _PinnedEmbedder)
+    assert captured == {"model_name": "Qwen/example", "revision": "a" * 40}
+
+
 def test_deterministic_embedder_preserves_legacy_feature_hash_mapping():
     """Changing the feature-hash algorithm would invalidate existing local vectors."""
     vectors = DeterministicEmbedder(dim=64).embed(["alpha beta graph", "offline mapping 123"])

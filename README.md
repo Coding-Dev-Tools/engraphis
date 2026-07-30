@@ -29,6 +29,11 @@ https://discord.com/invite/Wfr2ejBmY
 > Auto Dreaming, Auto Consolidation, and Team identity/seat management run only on the
 > official hosted service; their server implementations are not distributed here.
 
+> **Support continued Engraphis development with Pro.** Your subscription helps cover hosted
+> infrastructure and ongoing development while unlocking Cloud Sync, Analytics, Auto Consolidation,
+> and Auto Dreaming across your installations. [Start a 3-day Pro trial](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro&trial=pro#billing)
+> or [subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro#billing).
+
 ## Full Engraphis install: pip install "engraphis[all]"
 
 Engraphis-Dashboard opens `http://127.0.0.1:8700` in your browser. No cloud, signup, or API key is required for
@@ -119,7 +124,7 @@ embeddings. You bring an LLM only for optional chat, synthesis, structured extra
 or structured consolidation.
 
 - **Local-first & private** — runs offline; the core depends only on `numpy`.
-- **MCP-native** — 29 tools for Claude Code, Command Code, Cursor, Cline, Zed, Windsurf.
+- **MCP-native** — 30 tools for Claude Code, Command Code, Cursor, Cline, Zed, Windsurf.
 - **Self-maintaining facts** — writes are deterministically conflict-resolved (no LLM required).
 - **Advisory retention supervision** — an optional LLM can label writes as ephemeral, normal,
   or critical; outputs are bounded, clamped, audited, and can never silently drop a write.
@@ -175,14 +180,84 @@ memories created before provider/model activity metadata was introduced still ap
 structured-extraction entries.
 
 > Privacy boundary: text sent through structured extraction leaves the local process and is
-> handled under the selected provider/model's data terms. Keep extraction off for material that
-> must remain entirely local, or use the offline `chunk` extractor instead.
+> handled under the selected provider/model's data terms. Turning extraction off disables only
+> this transfer. For ingestion that must remain entirely local, also keep
+> `ENGRAPHIS_RETENTION_SUPERVISOR=none` (the default) and use the offline `chunk` extractor;
+> other explicitly invoked LLM-backed operations have their own transfer boundaries.
 
 ---
 
-## Evidence-backed capabilities
+## Measured quality and token efficiency
 
-Engraphis publishes capability descriptions and reproducible benchmark protocols without narrative vendor comparisons. See [`BENCHMARKS.md`](BENCHMARKS.md) for the evidence and claim policy.
+Engraphis ships typed and scoped memory, bi-temporal history, grounded recall, hybrid
+vector/lexical/graph retrieval, deterministic context packing, and MCP-native agent tools.
+The current deterministic offline regression fixtures reproduce these quality results:
+
+| Fixture | Reproduced result |
+|---|---|
+| CodeMem retrieval — 44 memories, 26 questions | **Recall@5 1.000**, hit@5 1.000, answer-token recall 1.000 |
+| Grounded-answer decisions — 10 cases | **10/10 correct**: 5/5 answerable questions cited evidence and 5/5 off-topic questions abstained |
+
+### Proof at a glance
+
+| **72.9% less retrieved context** | **3.8× smaller evidence record** | **55.38% smaller MCP response** |
+|---|---|
+| **808.8 → 219.0** tokens per question | **162.2 → 42.4** tokens to supporting evidence | **17,172 → 7,663** serialized tokens |
+| Same Recall@5 **1.000** in the long-document fixture | Same 18 fixture questions returned an evidence-holding memory | Same CodeMem retrieval scores across 260 timed recalls |
+
+Agents spend less of their context window carrying irrelevant history, leaving more room for the
+current task and cited evidence. These are controlled, deterministic fixtures—not model-billing,
+task-time, or external benchmark claims.
+
+#### A controlled before-and-after example
+
+| Retrieval mode | Mean returned memory content | Recall@5 |
+|---|---:|---:|
+| Whole documents | 808.8 tokens | 1.000 |
+| Engraphis structure-aware chunks | 219.0 tokens | 1.000 |
+
+The chunked mode returns the relevant passage instead of the whole document: **589.8 fewer tokens
+per question**. Under the same model-context budget, that leaves roughly **590 tokens** for task
+instructions or other relevant evidence.
+
+### Measurement details and reproducibility
+
+The table below records every current token/context efficiency measurement and its counting
+boundary.
+
+| What is counted | Comparison | Measured reduction | Quality held constant |
+|---|---|---|---|
+| Retrieved top-5 memory content, averaged per question | Whole documents: **808.8** tokens → structure-aware chunks: **219.0** tokens | **589.8 fewer tokens per question** (**72.9% lower**, about **3.7× smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
+| Smallest returned memory that contains the reference evidence | Whole documents: **162.2** tokens → chunks: **42.4** tokens | **119.8 fewer tokens to evidence** (**73.9% lower**, about **3.8× smaller**) | The same 18 questions had a returned evidence-holding memory in both modes |
+| Serialized MCP recall response across 260 timed CodeMem recalls | Full result: **17,172** `engraphis.regex.v1` tokens → compact result: **7,663** tokens | **9,509 response tokens avoided** (**55.38% lower**) | Recall@5, hit@5, and answer-token recall all **1.000** |
+| Packed prompt-context usage in the same CodeMem performance fixture | Hard budget: **1,500** tokens; observed mean: **87.73**; observed maximum: **106** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
+
+The compact MCP response avoids duplicating full memory bodies when the packed context and source
+list are enough. That can reduce what an agent must inspect or pass onward, but the fixtures do
+**not** measure model-provider charges, end-to-end task time, or customer cost savings.
+
+The measures are deliberately separate and **must not be added together**: chunking counts the
+content of retrieved memory records before `ContextPacker`, whereas compact recall counts the
+serialized MCP response returned to a client. “Tokens to evidence” is the size of the smallest
+retrieved memory record holding the reference evidence; it is not latency or end-to-end answer
+accuracy. Chunking creates more focused stored records (24 chunks rather than 6 whole-document
+memories in this fixture), so this is a context-efficiency result—not a storage-reduction claim.
+
+Reproduce the quality and token/context measurements without a network connection or API key:
+
+```bash
+python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5
+python -m eval.grounded
+python -m eval.chunking_eval
+python -m eval.performance --dataset eval/datasets/codemem.jsonl --k 5 --iterations 5 --json
+```
+
+These are small deterministic correctness and efficiency fixtures, not official LoCoMo /
+LongMemEval QA scores or a third-party leaderboard result. Compact-response counts use the exact
+`engraphis.regex.v1` counter; the chunking evaluation uses its documented deterministic
+normalized-character estimator. Chunking measures retrieved memory content, while compact recall
+measures serialized MCP response size. See [`BENCHMARKS.md`](BENCHMARKS.md) for definitions,
+limitations, canonical external-evaluation requirements, and the no-unsupported-claims policy.
 
 ---
 
@@ -281,7 +356,8 @@ claude mcp add engraphis -- engraphis-mcp
 cmd mcp add engraphis -- engraphis-mcp  # Command Code CLI
 ```
 
-Your agent now has 29 tools — remember, recall (grounded + proactive), proactive context,
+Your agent now has 30 tools — remember, recall context (plus full, grounded, and proactive recall),
+proactive context,
 grounded answer alias, why, timeline, forget, pin, correct, promote, ingest, consolidate, index_repo,
 search/code path/impact/export, privacy receipts, PostgreSQL schema ingestion, link,
 record_event, start/end_session, stats, and check_update. See the [MCP tools table](#mcp-tools) below.
@@ -342,6 +418,23 @@ print(hit["context"])
 
 The same `MemoryService` backs the dashboard and the MCP server.
 
+For an agent prompt, prefer `engraphis_recall_context`: it returns one hard-budget packed
+`context` plus compact `sources`, deterministic `usage` accounting (`budget_tokens`, `context_tokens`,
+`source_tokens`, `saved_tokens`, `savings_ratio`, `packed_count`, `omitted_count`, and
+`token_counter`), and optional diagnostics. Accounting is exact for the named counter; inject the
+reader's tokenizer when reader-model token parity is required. `engraphis_recall` remains the compatible full-recall
+surface; use `response_mode="compact"` when the packed context is enough and full memory bodies
+would duplicate it. Both default to the `balanced` retrieval profile; `auto` remains opt-in.
+
+For bi-temporal reads, `valid_at` selects what was true at a Unix timestamp and `known_at` selects
+what Engraphis had learned then. `as_of` remains a compatibility alias for `valid_at`; supplying
+both is allowed only when they match.
+
+For a mutable claim, pass a stable `subject_key` and optional `claim_kind`, such as
+`subject_key="api.rate_limit", claim_kind="configured_value"`. Matching claim identities make
+supersession deterministic; when similarity suggests a relationship but not a contradiction,
+Engraphis keeps both memories and returns `op="relate"`.
+
 ---
 
 ## Govern memories without losing history
@@ -350,7 +443,7 @@ Engraphis separates automatic write resolution from explicit human governance:
 
 | Operation | Use it when | What happens to history |
 |---|---|---|
-| `remember` | Adding or restating one fact | Deterministically adds, reinforces, or supersedes a same-scope memory |
+| `remember` | Adding or restating one fact | Adds, reinforces, safely supersedes, or relates an uncertain neighbor |
 | `correct` | Replacing one known-wrong memory | Closes the old validity window and links the replacement |
 | `promote` | A narrow learning now applies more broadly | Writes a wider-scope successor and closes/links the source instead of editing scope in place |
 | `merge` | Combining two or more overlapping memories | Retires every source and creates one memory that supersedes all of them |
@@ -410,10 +503,14 @@ worker implementations live in a private repository and are not part of this pac
 See [`docs/LICENSING.md`](docs/LICENSING.md) for the source-license, service, grace, and
 recovery boundaries.
 
+If Engraphis is useful in your work, a Pro subscription is the simplest way to support the
+project while adding hosted sync, analytics, and managed memory maintenance. [Subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_pricing#billing)
+($10/month or $100/year; annual billing saves two months).
+
 | | Free (available now) | Pro — $10/mo or $100/yr | Team — $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
 | Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
-| Memory engine + 29 MCP tools | ✓ | ✓ | ✓ |
+| Memory engine + 30 MCP tools | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Manual local consolidation (dry-run by default) | ✓ | ✓ | ✓ |
 | Local workspace export (JSON: memories, sessions, audit) | ✓ | ✓ | ✓ |
@@ -439,7 +536,8 @@ recovery boundaries.
 | Write | `engraphis_ingest` | Apply the configured extractor (`chunk`, `llm`, or `llm_structured`); `none` stores one verbatim memory |
 | Write | `engraphis_ingest_postgres_schema` | Store a new PostgreSQL schema snapshot + typed graph per call; DSN is never stored |
 | Write | `engraphis_consolidate` | Pure dry-run or live sleep-time sweep; a live call can write multiple resolved facts and receipts |
-| Stateful read | `engraphis_recall` | Hybrid vector + lexical + graph recall; reinforces returned memories and records a receipt |
+| Stateful read | `engraphis_recall_context` | Recommended prompt context: hard-budget packed text, compact sources, strict token usage, and optional diagnostics |
+| Stateful read | `engraphis_recall` | Hybrid vector + lexical + graph recall; records a receipt without strengthening weak matches |
 | Stateful read | `engraphis_recall_grounded` | Cited answer or abstention; records a receipt and reinforces cited memories |
 | Stateful read | `engraphis_answer` | Backward-compatible grounded-answer alias with the same effects |
 | Pure read | `engraphis_recall_proactive` | "What should I know right now" — no query, reinforcement, or receipt |
@@ -619,10 +717,12 @@ background loop, cron wrapper, or worker.
 
 Secret-class and session-scoped memories are excluded before a managed snapshot is serialized;
 secret-class rows are rejected again by the hosted service. The encoded payload is capped at
-16 MiB and travels over HTTPS without end-to-end encryption. Managed compute is enabled by
-default once an installation is connected to Engraphis Cloud — connecting accepts the terms
-that cover it — and stays off for a local-only installation with no cloud session; cloud
-entitlement is also required. `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=0` opts a connected
+16 MiB. A connected installation sends that bounded, non-secret snapshot to Engraphis Cloud
+over HTTPS, where the hosted service must read it to produce a proposal; this is not
+end-to-end-encrypted processing. Local-only installations send nothing. Managed compute is
+enabled by default once an installation is connected to Engraphis Cloud — connecting accepts
+the terms that cover it — and stays off for a local-only installation with no cloud session;
+cloud entitlement is also required. `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=0` opts a connected
 installation back out. A managed proposal never silently rewrites the local database.
 
 Manual consolidation can also use schema-validated LLM output through
@@ -686,7 +786,7 @@ engraphis/
 │   ├── core/                # v2 engine — interfaces, store, recall, scoring, schema, sync
 │   ├── backends/            # pluggable embedder / vector index / reranker / codegraph / sync transports / encryption
 │   ├── service.py           # validated MemoryService facade
-│   ├── mcp_server.py        # MCP server — 29 tools
+│   ├── mcp_server.py        # MCP server — 30 tools
 │   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
 │   ├── dashboard_assets/    # primary Ledger interface + graph engine
 │   ├── classic_assets/      # selectable full operator dashboard backup
@@ -726,8 +826,20 @@ ruff check .
 ```
 
 Numbers, not assertions: the offline harness is a **correctness floor** (deterministic embedder).
-LoCoMo / LongMemEval adapters run separately with a real embedder — see
+LoCoMo / LongMemEval adapters and the pinned LongMemEval-V2 reader profile are available for
+approved official evaluation runs — see
 [`BENCHMARKS.md`](BENCHMARKS.md).
+
+---
+
+## Release evidence
+
+Each tagged release includes `release-evidence.json` and a reproducible CycloneDX JSON SBOM as
+GitHub Release assets. The evidence binds the matching tag and commit to the built wheel and
+source distribution hashes, SBOM hash, source-input hashes, and the completed release-gate checks.
+It is intentionally limited: it does not attest to publication, hosted services, payments,
+deployments, or runtime data; the SBOM describes the build job's Python environment rather than an
+operating-system or container image.
 
 ---
 

@@ -1,6 +1,6 @@
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
 from engraphis.backends.reranker import IdentityReranker
-from engraphis.core.interfaces import MemoryRecord, SearchFilter
+from engraphis.core.interfaces import MemoryRecord, Scope, SearchFilter
 from engraphis.core.recall import RecallEngine
 from engraphis.core.store import Store
 
@@ -51,13 +51,28 @@ def test_recall_bitemporal_excludes_invalidated_fact():
     assert old not in [c["id"] for c in res.chunks]
 
 
-def test_recall_reinforces_returned_memories():
+def test_recall_is_observational_by_default():
     store, emb, eng = _engine()
     wid = store.get_or_create_workspace("w")
     rid = store.get_or_create_repo(wid, "r")
     mid = _add(store, emb, wid, rid, "pnpm is our package manager.")
     before = store.get_memory(mid).access_count
     eng.recall("package manager", SearchFilter(workspace_id=wid), k=1)
+    assert store.get_memory(mid).access_count == before
+
+
+def test_recall_can_reinforce_when_use_is_explicit():
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    mid = _add(store, emb, wid, rid, "pnpm is our package manager.")
+    before = store.get_memory(mid).access_count
+    eng.recall(
+        "package manager",
+        SearchFilter(workspace_id=wid),
+        k=1,
+        reinforce=True,
+    )
     assert store.get_memory(mid).access_count > before
 
 
@@ -78,6 +93,212 @@ def test_graph_arm_pulls_related_via_entities():
     # Query mentions Redis; graph arm should surface the checkout memory.
     res = eng.recall("how does Redis relate to things?", SearchFilter(workspace_id=wid), k=3)
     assert any("checkout" in c["content"].lower() for c in res.chunks)
+
+
+def test_graph_arm_selects_seed_frontier_edges_before_global_edge_cap(monkeypatch):
+    from engraphis.core.interfaces import Edge, Node
+
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    redis = store.upsert_entity(Node(
+        id="", name="Redis", ntype="tech", workspace_id=wid, repo_id=rid))
+    checkout = store.upsert_entity(Node(
+        id="", name="checkout", ntype="module", workspace_id=wid, repo_id=rid))
+    store.upsert_edge(Edge(
+        id="", src=redis, dst=checkout, relation="used_by",
+        workspace_id=wid, repo_id=rid))
+    memory_id = _add(store, emb, wid, rid, "Checkout uses the Redis cache.")
+    store.link_memory_entity(
+        memory_id=memory_id, entity_id=checkout, workspace_id=wid, repo_id=rid,
+        source_kind="test", confidence=1.0,
+    )
+    def no_global_edges(*_args, **_kwargs):
+        raise AssertionError("PPR must traverse from query seeds, not global edges")
+
+    monkeypatch.setattr(store, "edges_in_scope", no_global_edges)
+
+    scores = eng._graph_arm_ppr(
+        "How does Redis relate to the checkout service?",
+        SearchFilter(workspace_id=wid, repo_id=rid), now=10**12,
+    )
+
+    assert memory_id in scores
+
+
+def test_graph_arm_filters_incidence_to_ppr_frontier_before_cap(monkeypatch):
+    from engraphis.core.interfaces import Edge, Node
+
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    redis = store.upsert_entity(Node(
+        id="", name="Redis", ntype="tech", workspace_id=wid, repo_id=rid))
+    checkout = store.upsert_entity(Node(
+        id="", name="checkout", ntype="module", workspace_id=wid, repo_id=rid))
+    store.upsert_edge(Edge(
+        id="", src=redis, dst=checkout, relation="used_by",
+        workspace_id=wid, repo_id=rid))
+    memory_id = _add(store, emb, wid, rid, "Checkout uses the Redis cache.")
+    store.link_memory_entity(
+        memory_id=memory_id, entity_id=checkout, workspace_id=wid, repo_id=rid,
+        source_kind="test", confidence=1.0,
+    )
+
+    real_list_memory_entities = store.list_memory_entities
+    global_prefix = [
+        {"id": f"inc_{index}", "memory_id": f"mem_{index}",
+         "entity_id": f"ent_{index}", "confidence": 1.0}
+        for index in range(12_000)
+    ]
+
+    def list_memory_entities(flt, *, entity_ids=None, memory_ids=None, limit=None):
+        # This models a crowded global prefix which does not contain checkout's
+        # incidence. The real target remains available when constrained first.
+        if entity_ids is None:
+            return global_prefix[:limit]
+        return real_list_memory_entities(
+            flt, entity_ids=entity_ids, memory_ids=memory_ids, limit=limit,
+        )
+
+    monkeypatch.setattr(store, "list_memory_entities", list_memory_entities)
+
+    scores = eng._graph_arm_ppr(
+        "How does Redis relate to the checkout service?",
+        SearchFilter(workspace_id=wid, repo_id=rid), now=10**12,
+    )
+
+    assert memory_id in scores
+
+
+def test_graph_arm_backfills_text_memory_when_its_entity_is_added_later():
+    from engraphis.core.interfaces import Edge, Node
+
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    related = _add(
+        store, emb, wid, rid, "The checkout service had a race condition.")
+    redis = store.upsert_entity(Node(
+        id="", name="Redis", ntype="tech", workspace_id=wid, repo_id=rid))
+    checkout = store.upsert_entity(Node(
+        id="", name="checkout", ntype="module", workspace_id=wid, repo_id=rid))
+    store.upsert_edge(Edge(
+        id="", src=redis, dst=checkout, relation="used_by",
+        workspace_id=wid, repo_id=rid))
+
+    scores = eng._graph_arm_ppr(
+        "How does Redis relate to things?",
+        SearchFilter(workspace_id=wid, repo_id=rid), now=10**12,
+    )
+
+    assert related in scores
+
+
+def test_graph_arm_traverses_links_to_memories_without_entity_incidence():
+    from engraphis.core.interfaces import Node
+
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    redis = store.upsert_entity(Node(
+        id="", name="Redis", ntype="tech", workspace_id=wid, repo_id=rid,
+    ))
+    attached = _add(store, emb, wid, rid, "Redis owns the cache migration.")
+    linked_only = _add(store, emb, wid, rid, "The migration requires a staged rollout.")
+    store.link_memory_entity(
+        memory_id=attached, entity_id=redis, workspace_id=wid, repo_id=rid,
+        source_kind="test", confidence=1.0,
+    )
+    store.add_link(attached, linked_only, relation="supports")
+
+    scores = eng._graph_arm_ppr(
+        "What does Redis own?", SearchFilter(workspace_id=wid, repo_id=rid), now=10**12,
+    )
+
+    assert linked_only in scores
+
+
+def test_graph_arm_backfills_workspace_mentions_for_a_later_repo_entity():
+    from engraphis.core.interfaces import Edge, Node
+
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    related = _add(
+        store, emb, wid, None, "The checkout service had a race condition.",
+        scope=Scope.WORKSPACE,
+    )
+    redis = store.upsert_entity(Node(
+        id="", name="Redis", ntype="tech", workspace_id=wid, repo_id=rid))
+    checkout = store.upsert_entity(Node(
+        id="", name="checkout", ntype="module", workspace_id=wid, repo_id=rid))
+    store.upsert_edge(Edge(
+        id="", src=redis, dst=checkout, relation="used_by",
+        workspace_id=wid, repo_id=rid))
+    flt = SearchFilter(workspace_id=wid, repo_id=rid, include_ancestors=True)
+
+    incidence = store.list_memory_entities(flt, entity_ids=[checkout])
+    assert [(row["memory_id"], row["repo_id"]) for row in incidence] == [(related, None)]
+    assert related in eng._graph_arm_ppr(
+        "How does Redis relate to things?", flt, now=10**12,
+    )
+
+
+def test_graph_arm_expands_an_older_unmentioned_link_endpoint_from_incidence(monkeypatch):
+    from engraphis.core.interfaces import Node
+
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    redis = store.upsert_entity(Node(
+        id="", name="Redis", ntype="technology", workspace_id=wid, repo_id=rid,
+    ))
+    attached = _add(store, emb, wid, rid, "The cache migration is attached evidence.")
+    older_unmentioned = _add(store, emb, wid, rid, "The old rollout required a staged cutover.")
+    store.link_memory_entity(
+        memory_id=attached, entity_id=redis, workspace_id=wid, repo_id=rid,
+        source_kind="test", confidence=1.0,
+    )
+    store.add_link(attached, older_unmentioned, relation="supports")
+
+    # Simulate a full scope whose bounded newest-memory window excludes the older
+    # endpoint. The incidence frontier still contains ``attached``.
+    monkeypatch.setattr(
+        store,
+        "list_memories",
+        lambda *_args, **_kwargs: [
+            MemoryRecord(id=f"mem_new_{i}", content="") for i in range(12_000)
+        ],
+    )
+
+    scores = eng._graph_arm_ppr(
+        "How does Redis relate to the rollout?",
+        SearchFilter(workspace_id=wid, repo_id=rid), now=10**12,
+    )
+
+    assert older_unmentioned in scores
+
+
+def test_entity_backfill_preserves_closed_workspace_memory_history():
+    from engraphis.core.interfaces import Node
+
+    store, _emb, _eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    historical = store.add_memory(MemoryRecord(
+        id="", content="The checkout service had a race condition.",
+        workspace_id=wid, scope=Scope.WORKSPACE, valid_from=100.0, valid_to=200.0,
+        valid_to_recorded_at=300.0, ingested_at=100.0,
+    ))
+    checkout = store.upsert_entity(Node(
+        id="", name="checkout", ntype="module", workspace_id=wid, repo_id=rid))
+
+    visible = store.list_memory_entities(SearchFilter(
+        workspace_id=wid, repo_id=rid, include_ancestors=True,
+        valid_at=150.0, known_at=250.0,
+    ), entity_ids=[checkout])
+    assert [(row["memory_id"], row["repo_id"]) for row in visible] == [(historical, None)]
 
 
 
