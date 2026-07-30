@@ -669,15 +669,14 @@ function graphUpdateHud(data){
  if(count&&data)count.textContent=data.nodes.length.toLocaleString()+' entities · '+data.links.length.toLocaleString()+' relations';
  if(badge)badge.textContent=GPERF.large?'Large graph mode':'Adaptive rendering';
 }
-/* ── opt-in next-generation renderer (`?graph-engine=next`) ──────────────────────────────
-   The classic renderer stays the default and the rollback path. Everything below is written
-   so that any failure in the opt-in engine degrades to classic rather than taking the graph
-   view down: one throw sets GRAPH_ENGINE_FAILED and the flag is never honoured again for the
-   life of the page. */
+/* ── canonical graph renderer ────────────────────────────────────────────────────────────
+   Classic now uses the same renderer as Ledger for its normal graph view. The legacy canvas
+   remains the rollback path: one engine failure latches GRAPH_ENGINE_FAILED and the graph
+   degrades to the legacy renderer instead of taking the view down. */
 let GRAPH_ENGINE_FAILED=false;
 function graphEngineEnabled(){
  if(GRAPH_ENGINE_FAILED)return false;
- try{return new URLSearchParams(window.location.search).get('graph-engine')==='next'}catch(e){return false}
+ try{return new URLSearchParams(window.location.search).get('graph-engine')==='next'||/(^|\/)classic\/?$/.test(window.location.pathname)}catch(e){return false}
 }
 function graphEngineFallback(error){
  GRAPH_ENGINE_FAILED=true;

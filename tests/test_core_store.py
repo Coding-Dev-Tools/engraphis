@@ -648,6 +648,44 @@ def test_memory_entity_incidence_is_scoped_and_temporal(store):
             for row in rows] == [(mid, entity_id, "text_mention")]
 
 
+def test_memory_entity_incidence_keeps_valid_and_known_coordinates_paired(store):
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    mid = store.add_memory(MemoryRecord(
+        id="", content="The deployment has an assigned owner.", workspace_id=wid,
+        repo_id=rid, scope=Scope.REPO, valid_from=0.0, ingested_at=0.0,
+    ))
+    entity_id = store.upsert_entity(Node(
+        id="", name="Alice", ntype="person", workspace_id=wid, repo_id=rid,
+    ))
+    first = store.link_memory_entity(
+        memory_id=mid, entity_id=entity_id, workspace_id=wid, repo_id=rid,
+        source_kind="edge_support", valid_from=100.0, ingested_at=100.0,
+    )
+    second = store.link_memory_entity(
+        memory_id=mid, entity_id=entity_id, workspace_id=wid, repo_id=rid,
+        source_kind="edge_support", valid_from=50.0, ingested_at=300.0,
+    )
+
+    assert first != second
+    rows = store.conn.execute(
+        "SELECT id, valid_from, ingested_at, expired_at FROM memory_entities "
+        "WHERE memory_id=? ORDER BY ingested_at",
+        (mid,),
+    ).fetchall()
+    assert [
+        (row["valid_from"], row["ingested_at"], row["expired_at"])
+        for row in rows
+    ] == [(100.0, 100.0, 300.0), (50.0, 300.0, None)]
+    assert store.list_memory_entities(SearchFilter(
+        workspace_id=wid, repo_id=rid, valid_at=75.0, known_at=200.0,
+    )) == []
+    visible = store.list_memory_entities(SearchFilter(
+        workspace_id=wid, repo_id=rid, valid_at=75.0, known_at=350.0,
+    ))
+    assert [row["id"] for row in visible] == [second]
+
+
 def test_explicit_semantic_code_edge_preserves_its_layer(store):
     store.add_code_edge(
         repo_id="repo_x", src="deploy", dst="release", relation="related_to",

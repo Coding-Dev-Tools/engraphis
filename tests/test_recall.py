@@ -95,6 +95,30 @@ def test_graph_arm_pulls_related_via_entities():
     assert any("checkout" in c["content"].lower() for c in res.chunks)
 
 
+def test_graph_arm_backfills_text_memory_when_its_entity_is_added_later():
+    from engraphis.core.interfaces import Edge, Node
+
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    related = _add(
+        store, emb, wid, rid, "The checkout service had a race condition.")
+    redis = store.upsert_entity(Node(
+        id="", name="Redis", ntype="tech", workspace_id=wid, repo_id=rid))
+    checkout = store.upsert_entity(Node(
+        id="", name="checkout", ntype="module", workspace_id=wid, repo_id=rid))
+    store.upsert_edge(Edge(
+        id="", src=redis, dst=checkout, relation="used_by",
+        workspace_id=wid, repo_id=rid))
+
+    scores = eng._graph_arm_ppr(
+        "How does Redis relate to things?",
+        SearchFilter(workspace_id=wid, repo_id=rid), now=10**12,
+    )
+
+    assert related in scores
+
+
 
 def test_lexical_recall_is_filtered_before_candidate_limit():
     store, emb, eng = _engine()

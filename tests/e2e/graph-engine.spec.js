@@ -148,7 +148,7 @@ test('a dashboard page that never opens the graph fetches neither graph script',
   expect(session.pageErrors).toEqual([]);
 });
 
-test('the opt-in engine renders a real canvas and registers only under its flag', async ({ page }) => {
+test('the opt-in engine renders a real canvas and registers under its flag', async ({ page }) => {
   const session = await openDashboard(page, { query: '?graph-engine=next' });
   const canvas = await openGraphView(page);
 
@@ -179,6 +179,18 @@ test('the opt-in engine renders a real canvas and registers only under its flag'
   expect(distinctColours).toBeGreaterThan(2);
   await expect(canvas).toBeVisible();
 
+  expect(session.pageErrors).toEqual([]);
+});
+
+test('Classic defaults to the canonical engine without a query flag', async ({ page }) => {
+  const session = await openDashboard(page);
+  const canvas = await openGraphView(page);
+
+  expect(fetched(session.requested, 'engraphis-graph.js').length).toBe(1);
+  expect(fetched(session.requested, 'force-graph.min.js').length).toBe(1);
+  expect(await page.evaluate(() => typeof (window.EngraphisGraph || {}).create)).toBe('function');
+  expect(await page.evaluate(() => Boolean(GRAPH_ENGINE))).toBe(true);
+  await expect(canvas).toBeVisible();
   expect(session.pageErrors).toEqual([]);
 });
 
@@ -379,41 +391,21 @@ test('a physics slider moves the layout under the opt-in engine', async ({ page 
   expect(await positions()).not.toBe(settled);
 });
 
-test('the opt-in engine adds no CSP violation the classic renderer does not already cause', async ({ page }) => {
+test('the canonical engine limits CSP violations to vendor stylesheets', async ({ page }) => {
   /* Opening the graph is *not* CSP-clean and this PR does not make it so: force-graph injects
-     a handful of `<style>` elements when it attaches, which `style-src 'self'` blocks.  That
-     is a vendor behaviour on the classic path too, which is the entire reason both scripts are
-     lazy — the cost is confined to the one view that asked for a graph instead of being paid
-     on every page load.  What must stay true is that the new renderer adds nothing on top:
-     it owns only canvas paint, and any inline style of its own would show up here.
+     a handful of `<style>` elements when it attaches, which `style-src 'self'` blocks.  The
+     scripts are lazy so that cost is confined to the graph view instead of every dashboard
+     load.  What must stay true is that the canonical renderer adds nothing on top: it owns
+     only canvas paint, and any inline style of its own would show up here.
      `style-src-attr 'none'` in particular admits no escape hatch at all. */
   const session = await openDashboard(page, { query: '?graph-engine=next' });
   await openGraphView(page);
   await page.waitForTimeout(2_000);
-  const underNext = await session.violations();
+  const violations = await session.violations();
 
-  await page.goto('/classic');
-  await page.waitForFunction(() => typeof window.selectView === 'function');
-  await openGraphView(page);
-  await page.waitForTimeout(2_000);
-  // The recorder is re-installed by addInitScript on the new document, so this is classic only.
-  const underClassic = await session.violations();
-
-  const shape = list => list.map(v => v.directive).sort();
-  expect(shape(underNext)).toEqual(shape(underClassic));
-  // Every one of them is an injected stylesheet, not an inline style attribute: nothing in
-  // either renderer is reaching for `element.style`, which is what the drift gate enforces.
-  expect(underNext.every(v => v.directive === 'style-src-elem')).toBe(true);
-  expect(session.pageErrors).toEqual([]);
-});
-
-test('the graph view without the flag stays on the classic renderer', async ({ page }) => {
-  const session = await openDashboard(page);
-  await openGraphView(page);
-
-  expect(fetched(session.requested, 'force-graph.min.js').length).toBe(1);
-  expect(fetched(session.requested, 'engraphis-graph.js')).toEqual([]);
-  expect(await page.evaluate(() => typeof window.EngraphisGraph)).toBe('undefined');
+  // Every one is an injected vendor stylesheet, not an inline style attribute: the renderer
+  // itself must never reach for `element.style`, which is what this drift gate enforces.
+  expect(violations.every(v => v.directive === 'style-src-elem')).toBe(true);
   expect(session.pageErrors).toEqual([]);
 });
 

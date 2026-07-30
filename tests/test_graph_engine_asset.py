@@ -169,6 +169,16 @@ def test_opt_in_graph_asset_is_lazily_loaded_after_its_dependencies() -> None:
     assert force_graph_gate < engine_gate < classic
 
 
+def test_classic_dashboard_copies_share_the_canonical_route_gate() -> None:
+    """Classic must use the canonical renderer, including mounted `/classic` routes."""
+    sources = [path.read_text(encoding="utf-8") for path in (DASHBOARD, CLASSIC_DASHBOARD)]
+    assert sources[0] == sources[1]
+    start = sources[0].index("function graphEngineEnabled()")
+    body = sources[0][start:sources[0].index("function graphEngineFallback", start)]
+    assert "/(^|\\/)classic\\/?$/.test(window.location.pathname)" in body
+    assert "GRAPH_ENGINE_FAILED" in body
+
+
 def test_engine_node_labels_honor_the_configured_font_at_normal_zoom() -> None:
     source = ASSET.read_text(encoding="utf-8")
     assert "state.settings.font / scale / 3.4" not in source
@@ -202,7 +212,10 @@ globalThis.document = {
   createElement: () => (pending = {}),
   head: { appendChild: s => log.appended.push(s.src) },
 };
-globalThis.window = { location: { search: '?graph-engine=next' }, GSET: { mode: 'compact' },
+const location = scenario === 'classic'
+  ? { search: '', pathname: '/classic' }
+  : { search: '?graph-engine=next', pathname: '/' };
+globalThis.window = { location, GSET: { mode: 'compact' },
                       console: globalThis.console };
 globalThis.console = { warn: (...a) => log.warned.push(String(a[0])) };
 globalThis.showAs = () => {};
@@ -225,7 +238,9 @@ globalThis.ForceGraph = function () {};
 
 new Function(flags + loaders + routing + '\\nreturn {graphRender};')().graphRender();
 const settled = { engine: log.engine, classic: log.classic };
-if (scenario === 'loads') { globalThis.EngraphisGraph = { create() {} }; pending.onload(); }
+if (scenario === 'loads' || scenario === 'classic') {
+  globalThis.EngraphisGraph = { create() {} }; pending.onload();
+}
 else { pending.onerror(); }
 setTimeout(() => process.stdout.write(JSON.stringify({
   beforeSettle: settled, engine: log.engine, classic: log.classic,
@@ -269,6 +284,19 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     # And it lands on the next engine, never touching the classic renderer.
+    assert report["engine"] == 1
+    assert report["classic"] == 0
+    assert report["warned"] == []
+
+
+@requires_node
+def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> None:
+    report = _run_routing("classic")
+
+    assert report["appended"] == [
+        "/v2-assets/engraphis-graph.js?v=20260728-reference-materials"
+    ]
+    assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
     assert report["classic"] == 0
     assert report["warned"] == []

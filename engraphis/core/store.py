@@ -1942,6 +1942,35 @@ class Store:
         rows = self.conn.execute(sql, params).fetchall()
         return [_row_to_record(r) for r in rows]
 
+    def list_live_claims(self, *, workspace_id: str, repo_id: Optional[str],
+                         session_id: Optional[str], scope: Scope, mtype: MemoryType,
+                         subject_key: str, claim_kind: str) -> list[MemoryRecord]:
+        """Return the current instances of one exact claim identity.
+
+        Conflict resolution normally looks at a candidate's valid-time neighbourhood.  A
+        backdated candidate still needs to see a later, live instance of its *own* durable
+        claim key so it cannot create an overlapping history merely because an unrelated
+        anchored hit filled the vector candidate budget.
+        """
+        subject_key = str(subject_key or "").strip()
+        if not subject_key:
+            return []
+        sql = (
+            "SELECT * FROM memories WHERE workspace_id=? AND repo_id IS ? "
+            "AND scope=? AND mtype=? AND subject_key=? AND claim_kind=? "
+            "AND valid_to IS NULL AND expired_at IS NULL"
+        )
+        params: list[Any] = [
+            workspace_id, repo_id, _enum(scope), _enum(mtype), subject_key,
+            str(claim_kind or "").strip(),
+        ]
+        if scope == Scope.SESSION:
+            sql += " AND session_id=?"
+            params.append(session_id)
+        sql += " ORDER BY ingested_at DESC, id"
+        rows = self.conn.execute(sql, params).fetchall()
+        return [_row_to_record(row) for row in rows]
+
     def list_memories_page(self, flt: Optional[SearchFilter] = None, *,
                            after_id: str = "", limit: int = 500) -> list[MemoryRecord]:
         """Return one deterministic keyset page without materializing the full scope."""
@@ -2083,31 +2112,66 @@ class Store:
             (node.workspace_id, node.repo_id, normalized, node.ntype),
         ).fetchone()
         if existing:
-            return existing["id"]
-        nid = node.id or ids.new_id("entity")
-        canonical_id = node.canonical_id
-        method = "provided" if canonical_id else "identity"
-        if not canonical_id:
-            canonical = self.conn.execute(
-                "SELECT COALESCE(canonical_id, id) AS canonical_id FROM entities "
-                "WHERE workspace_id=? AND normalized_name=? AND etype IS ? "
-                "ORDER BY id LIMIT 1",
-                (node.workspace_id, normalized, node.ntype),
-            ).fetchone()
-            if canonical:
-                canonical_id = canonical["canonical_id"]
-                method = "exact_normalized"
-        canonical_id = canonical_id or nid
-        self.conn.execute(
-            "INSERT INTO entities(id, workspace_id, repo_id, name, etype, canonical_id, "
-            "normalized_name, canonical_method, canonical_confidence, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (nid, node.workspace_id, node.repo_id, node.name, node.ntype,
-             canonical_id, normalized, method, 1.0, now_ts()),
+            nid = existing["id"]
+        else:
+            nid = node.id or ids.new_id("entity")
+            canonical_id = node.canonical_id
+            method = "provided" if canonical_id else "identity"
+            if not canonical_id:
+                canonical = self.conn.execute(
+                    "SELECT COALESCE(canonical_id, id) AS canonical_id FROM entities "
+                    "WHERE workspace_id=? AND normalized_name=? AND etype IS ? "
+                    "ORDER BY id LIMIT 1",
+                    (node.workspace_id, normalized, node.ntype),
+                ).fetchone()
+                if canonical:
+                    canonical_id = canonical["canonical_id"]
+                    method = "exact_normalized"
+            canonical_id = canonical_id or nid
+            self.conn.execute(
+                "INSERT INTO entities(id, workspace_id, repo_id, name, etype, canonical_id, "
+                "normalized_name, canonical_method, canonical_confidence, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (nid, node.workspace_id, node.repo_id, node.name, node.ntype,
+                 canonical_id, normalized, method, 1.0, now_ts()),
+            )
+        self._backfill_entity_text_mentions(
+            nid, name=node.name, workspace_id=node.workspace_id, repo_id=node.repo_id,
         )
         if commit:
             self.conn.commit()
         return nid
+
+    def _backfill_entity_text_mentions(self, entity_id: str, *, name: str,
+                                       workspace_id: Optional[str],
+                                       repo_id: Optional[str]) -> None:
+        """Attach an entity added after its matching prose memories already existed.
+
+        New writes are linked by ``MemoryEngine._link_memory_entities``.  This bounded,
+        exact-word backfill preserves the same graph reachability for imported or legacy
+        memories when their entity is introduced later, without a recall-time prose scan.
+        """
+        name = (name or "").strip()
+        if len(name) < 2:
+            return
+        rows = self.conn.execute(
+            "SELECT id, content, valid_from, ingested_at FROM memories "
+            "WHERE workspace_id IS ? AND repo_id IS ? AND scope<>'session' "
+            "AND valid_to IS NULL AND expired_at IS NULL "
+            "AND lower(content) LIKE ? ESCAPE '\\' LIMIT 12000",
+            (workspace_id, repo_id, "%" + _escape_like(name.casefold()) + "%"),
+        ).fetchall()
+        pattern = re.compile(r"(?<!\w)" + re.escape(name) + r"(?!\w)", re.IGNORECASE)
+        for row in rows:
+            if not pattern.search(row["content"]):
+                continue
+            self.link_memory_entity(
+                memory_id=row["id"], entity_id=entity_id,
+                workspace_id=workspace_id, repo_id=repo_id,
+                source_kind="text_mention", confidence=0.8,
+                valid_from=row["valid_from"], ingested_at=row["ingested_at"],
+                provenance={"source": "exact_text_backfill"}, commit=False,
+            )
 
     def list_entities(self, flt: Optional[SearchFilter] = None,
                       *, limit: Optional[int] = None) -> list[Node]:
@@ -2143,7 +2207,8 @@ class Store:
                            expired_at: Optional[float] = None,
                            provenance: Optional[dict] = None,
                            commit: bool = True) -> str:
-        """Create one idempotent, live memory↔entity incidence record."""
+        """Create one idempotent, bi-temporal memory↔entity incidence record."""
+        stamp = now_ts()
         if valid_to is None and expired_at is None:
             existing = self.conn.execute(
                 "SELECT id, confidence, valid_from, ingested_at "
@@ -2151,50 +2216,59 @@ class Store:
                 "AND source_kind=? AND valid_to IS NULL AND expired_at IS NULL",
                 (memory_id, entity_id, source_kind),
             ).fetchone()
+            requested_valid = (
+                valid_from if valid_from is not None
+                else (existing["valid_from"] if existing is not None else stamp)
+            )
+            requested_known = (
+                ingested_at if ingested_at is not None
+                else (existing["ingested_at"] if existing is not None else stamp)
+            )
         else:
+            requested_valid = valid_from if valid_from is not None else stamp
+            requested_known = ingested_at if ingested_at is not None else stamp
             existing = self.conn.execute(
                 "SELECT id FROM memory_entities WHERE memory_id=? AND entity_id=? "
                 "AND source_kind=? AND valid_from IS ? AND valid_to IS ? "
                 "AND valid_to_recorded_at IS ? "
                 "AND ingested_at IS ? AND expired_at IS ?",
                 (
-                    memory_id, entity_id, source_kind, valid_from, valid_to,
-                    valid_to_recorded_at, ingested_at, expired_at,
+                    memory_id, entity_id, source_kind, requested_valid, valid_to,
+                    valid_to_recorded_at, requested_known, expired_at,
                 ),
             ).fetchone()
         if existing is not None:
             if valid_to is None and expired_at is None:
-                valid_values = [
-                    value for value in (existing["valid_from"], valid_from)
-                    if value is not None
-                ]
-                known_values = [
-                    value for value in (existing["ingested_at"], ingested_at)
-                    if value is not None
-                ]
                 desired_confidence = max(
                     float(existing["confidence"] or 0.0),
                     max(0.0, min(1.0, float(confidence))),
                 )
-                desired_valid = min(valid_values) if valid_values else None
-                desired_known = min(known_values) if known_values else None
-                if (
-                    desired_confidence != float(existing["confidence"] or 0.0)
-                    or desired_valid != existing["valid_from"]
-                    or desired_known != existing["ingested_at"]
-                ):
-                    self.conn.execute(
-                        "UPDATE memory_entities SET confidence=?, valid_from=?, "
-                        "ingested_at=? WHERE id=?",
-                        (
-                            desired_confidence, desired_valid, desired_known,
-                            existing["id"],
-                        ),
-                    )
-                    if commit:
-                        self.conn.commit()
-            return existing["id"]
-        stamp = now_ts()
+                if (requested_valid == existing["valid_from"]
+                        and requested_known == existing["ingested_at"]):
+                    if desired_confidence != float(existing["confidence"] or 0.0):
+                        self.conn.execute(
+                            "UPDATE memory_entities SET confidence=? WHERE id=?",
+                            (desired_confidence, existing["id"]),
+                        )
+                        if commit:
+                            self.conn.commit()
+                    return existing["id"]
+
+                # A later observation can describe the same incidence with a different
+                # valid/known pair.  Version it instead of independently minimising the
+                # coordinates, which would fabricate a historical interval no source ever
+                # asserted (for example valid_from=50 paired with ingested_at=100).
+                retire_at = max(
+                    (value for value in (existing["ingested_at"], requested_known)
+                     if value is not None),
+                    default=stamp,
+                )
+                self.conn.execute(
+                    "UPDATE memory_entities SET expired_at=? WHERE id=?",
+                    (retire_at, existing["id"]),
+                )
+            else:
+                return existing["id"]
         link_id = ids.new_id("edge")
         self.conn.execute(
             "INSERT INTO memory_entities("
@@ -2203,10 +2277,7 @@ class Store:
             "provenance) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (link_id, memory_id, entity_id, workspace_id, repo_id, source_kind,
              max(0.0, min(1.0, float(confidence))),
-             valid_from if valid_from is not None else stamp,
-             valid_to, valid_to_recorded_at,
-             ingested_at if ingested_at is not None else stamp,
-             expired_at,
+             requested_valid, valid_to, valid_to_recorded_at, requested_known, expired_at,
              _dumps(provenance or {})),
         )
         if commit:

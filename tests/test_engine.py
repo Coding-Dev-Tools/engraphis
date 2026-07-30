@@ -534,6 +534,36 @@ def test_backdated_supersession_is_rejected_without_creating_an_invalid_interval
     )) == 1
 
 
+def test_backdated_keyed_claim_checks_its_current_identity_even_with_anchored_hits(monkeypatch):
+    """An unrelated anchored vector hit must not hide the current keyed claim guard."""
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    current = eng.remember(
+        "The deployment API limit is 500 requests per minute.",
+        workspace_id=wid, valid_from=2_000.0,
+        subject_key="deploy.api_limit", claim_kind="configured_value",
+    )
+    unrelated = eng.remember(
+        "The office has three meeting rooms.", workspace_id=wid,
+        valid_from=1_000.0, resolve_conflicts=False,
+    )
+    monkeypatch.setattr(
+        eng.index, "search", lambda *_args, **_kwargs: [(unrelated, 0.99)],
+    )
+
+    with pytest.raises(ValueError, match="cannot predate"):
+        eng.remember(
+            "The deployment API limit is 100 requests per minute.",
+            workspace_id=wid, valid_from=1_000.0,
+            subject_key="deploy.api_limit", claim_kind="configured_value",
+        )
+
+    assert eng.store.get_memory(current).valid_to is None
+    assert len(eng.store.list_memories(
+        SearchFilter(workspace_id=wid), include_invalid=True
+    )) == 2
+
+
 def test_recall_proactive_includes_last_session_handoff():
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")

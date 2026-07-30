@@ -757,7 +757,7 @@ class MemoryEngine:
         try:
             hits = self.index.search(vec, candidate_k, filter=flt)
         except Exception:
-            return None, []
+            hits = []
         if not hits and valid_at is not None:
             # A candidate may be backdated before an already-recorded claim. That claim
             # is intentionally outside the candidate's valid-time view, but it still
@@ -784,6 +784,20 @@ class MemoryEngine:
                     and nrec.expired_at is None
                     and (nrec.valid_to is None or nrec.valid_to > now)):
                 neighbors.append((sim, nrec))
+        if valid_at is not None and subject_key:
+            # The vector search above is intentionally anchored at the candidate's world
+            # time.  Its top-K may still be non-empty with unrelated facts, so a fallback
+            # conditioned on ``not hits`` is not sufficient for a keyed claim: always add
+            # the exact current identity as a chronology guard.
+            known_ids = {rec.id for _, rec in neighbors}
+            for record in self.store.list_live_claims(
+                workspace_id=workspace_id, repo_id=repo_id,
+                session_id=session_id if scope == Scope.SESSION else None,
+                scope=scope, mtype=mtype, subject_key=subject_key,
+                claim_kind=claim_kind,
+            ):
+                if record.id not in known_ids:
+                    neighbors.append((1.0, record))
         return resolve(
             text, neighbors, subject_key=subject_key, claim_kind=claim_kind,
         ), neighbors
