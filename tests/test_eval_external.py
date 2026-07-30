@@ -1,6 +1,8 @@
 import json
 
-from eval.external import load_locomo, load_longmemeval
+import pytest
+
+from eval.external import load_locomo, load_longmemeval, main, source_case_count
 from eval.harness import run
 
 
@@ -68,21 +70,35 @@ def test_load_locomo_normalizes_to_harness_cases(tmp_path):
     tags = {m["tag"] for m in case["memories"]}
     assert tags == {"D1:1", "D1:2", "D2:1"}
     assert case["memories"][0]["text"].startswith("[1:00 pm on 8 May, 2023] Caroline:")
-    assert len(case["questions"]) == 1                 # adversarial (no evidence) skipped
+    assert len(case["questions"]) == 2                 # adversarial is retained and explicit
     assert case["questions"][0]["supporting"] == ["D1:1"]
+    assert case["questions"][1]["category"] == "5"
+    assert case["questions"][1]["answerable"] is False
 
 
 def test_load_longmemeval_sessions_and_abstention(tmp_path):
     cases = load_longmemeval(_longmemeval_fixture(tmp_path))
-    assert len(cases) == 1                             # _abs instance skipped
+    assert len(cases) == 2                             # _abs instance is retained
     case = cases[0]
     assert {m["tag"] for m in case["memories"]} == {"s1", "s2"}
     assert "pnpm" in case["memories"][0]["text"]
     assert case["questions"][0]["supporting"] == ["s1"]
+    assert cases[1]["questions"][0]["category"] == "abstention"
+    assert cases[1]["questions"][0]["answerable"] is False
 
 
 def test_external_cases_run_through_the_real_harness(tmp_path):
     cases = load_locomo(_locomo_fixture(tmp_path))
     report = run(cases, k=3)                           # offline deterministic embedder
-    assert report["questions"] == 1
+    assert report["questions"] == 2
+    assert report["scored_questions"] == 1
+    assert report["exclusions"][0]["reason"] == "no_gold_evidence"
     assert report["recall_at_k"] == 1.0                # evidence found in a 3-memory haystack
+
+
+def test_canonical_external_mode_rejects_partial_limit_before_model_loading(tmp_path):
+    path = _locomo_fixture(tmp_path)
+    assert source_case_count(path) == 1
+    with pytest.raises(SystemExit) as error:
+        main(["--dataset", path, "--format", "locomo", "--canonical", "--limit", "1"])
+    assert error.value.code == 2
