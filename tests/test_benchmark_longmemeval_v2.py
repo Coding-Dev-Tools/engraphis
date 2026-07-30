@@ -149,6 +149,32 @@ def test_v2_adapter_enforces_injected_reader_token_budget_and_exposes_metadata()
     }
 
 
+def test_v2_adapter_reports_only_sources_in_reader_budgeted_items(monkeypatch):
+    memory = EngraphisLongMemEvalV2Memory(
+        context_k=2,
+        max_context_tokens=14,
+        tokenizer=len,
+        tokenizer_identity="test.characters.v1",
+    )
+    monkeypatch.setattr(
+        memory.service,
+        "recall",
+        lambda *_args, **_kwargs: {
+            "context": "[1] first item\n\n[2] second item",
+            "packed_sources": [{"id": "mem_first"}, {"id": "mem_second"}],
+            "usage": {},
+        },
+    )
+
+    items = memory.query("which item?")
+    metadata = memory.post_query_hook(
+        query="which item?", query_image=None, memory_context=items,
+    )
+
+    assert [item["value"] for item in items] == ["[1] first item"]
+    assert metadata["source_ids"] == ["mem_first"]
+
+
 def test_v2_adapter_returns_separate_context_items_for_official_prefix_truncation():
     items = _context_items_with_budget(
         "[1] first\nalpha\n\n[2] second\nbeta",

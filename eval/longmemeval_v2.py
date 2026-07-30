@@ -392,14 +392,22 @@ class EngraphisLongMemEvalV2Memory(_MemoryBase):
             budget=self.max_context_tokens,
             count=self._count_tokens,
         )
+        packed_sources = response.get("packed_sources", [])
+        source_ids: list[str] = []
+        if isinstance(packed_sources, list):
+            for item in items:
+                match = re.match(r"\s*\[(\d+)\]", str(item.get("value") or ""))
+                if match is None:
+                    continue
+                source_index = int(match.group(1)) - 1
+                if 0 <= source_index < len(packed_sources):
+                    source_id = packed_sources[source_index].get("id")
+                    if source_id:
+                        source_ids.append(str(source_id))
         self._query_result_local.metadata = {
             "memory_type": self.memory_type,
             "retrieval_profile": response.get("retrieval_profile"),
-            "source_ids": [
-                source.get("id")
-                for source in response.get("packed_sources", [])
-                if source.get("id")
-            ],
+            "source_ids": source_ids,
             "usage": response.get("usage", {}),
             "returned_context_tokens": sum(
                 self._count_tokens(item["value"]) for item in items

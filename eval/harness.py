@@ -445,8 +445,21 @@ def paired_v2_bootstrap(
     rejected rather than silently intersected away.  This helper lets a caller
     add a comparison after two independently written v2 runs.
     """
-    candidate = {item["question_id"]: item for item in candidate_records if not item.get("excluded")}
-    baseline = {item["question_id"]: item for item in baseline_records if not item.get("excluded")}
+    def by_question_id(records: list[dict], label: str) -> dict:
+        indexed = {}
+        for item in records:
+            if item.get("excluded"):
+                continue
+            question_id = item["question_id"]
+            if question_id in indexed:
+                raise ValueError(
+                    f"paired bootstrap requires unique scored question IDs in {label}"
+                )
+            indexed[question_id] = item
+        return indexed
+
+    candidate = by_question_id(candidate_records, "candidate")
+    baseline = by_question_id(baseline_records, "baseline")
     if set(candidate) != set(baseline):
         raise ValueError("paired bootstrap requires identical scored question IDs")
     result = paired_bootstrap_ci(

@@ -265,6 +265,17 @@ def test_paired_bootstrap_rejects_partial_comparisons():
         paired_v2_bootstrap(candidate, baseline[:1])
 
 
+def test_paired_bootstrap_rejects_duplicate_scored_question_ids():
+    candidate = [
+        {"question_id": "a", "recall_at_5": 1.0},
+        {"question_id": "a", "recall_at_5": 0.0},
+    ]
+    baseline = [{"question_id": "a", "recall_at_5": 0.0}]
+
+    with pytest.raises(ValueError, match="unique scored question IDs in candidate"):
+        paired_v2_bootstrap(candidate, baseline, iterations=8)
+
+
 def test_harness_cli_keeps_legacy_default_and_offers_opt_in_v2_artifacts(tmp_path, capsys):
     artifact = tmp_path / "run.json"
     harness_main([
