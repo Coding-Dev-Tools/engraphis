@@ -8,7 +8,7 @@
   <rect x="24" y="22" width="1152" height="556" rx="22" fill="#fff" stroke="#e2e8f0"/>
   <text x="72" y="75" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a">Less history in context; the same fixture-level retrieval quality</text>
   <text x="72" y="105" font-family="Inter, Arial, sans-serif" font-size="16" fill="#475569">Each row is normalized to its own 100% baseline. The measures count different boundaries and are not additive.</text>
-  <rect x="746" y="126" width="15" height="15" rx="3" fill="#cbd5e1"/><text x="770" y="139" font-family="Inter, Arial, sans-serif" font-size="13" fill="#475569">baseline payload (100%)</text>
+  <rect x="746" y="126" width="15" height="15" rx="3" fill="#64748b"/><text x="770" y="139" font-family="Inter, Arial, sans-serif" font-size="13" fill="#475569">baseline payload (100%)</text>
   <rect x="948" y="126" width="15" height="15" rx="3" fill="#2563eb"/><text x="972" y="139" font-family="Inter, Arial, sans-serif" font-size="13" fill="#475569">Engraphis payload retained</text>
 
   <g filter="url(#shadow)">
@@ -16,7 +16,7 @@
     <text x="96" y="194" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700" fill="#0f172a">Retrieved memory content</text>
     <text x="96" y="217" font-family="Inter, Arial, sans-serif" font-size="13" fill="#475569">Long-document fixture · top-5 memory content</text>
     <text x="500" y="190" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#334155">Baseline · whole documents · 808.8 tokens</text>
-    <rect x="500" y="199" width="440" height="12" rx="6" fill="#cbd5e1"/>
+    <rect x="500" y="199" width="440" height="12" rx="6" fill="#64748b"/>
     <text x="500" y="237" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#1d4ed8">Engraphis · structure-aware chunks · 219.0 tokens · 72.9% lower</text>
     <rect x="500" y="246" width="119" height="12" rx="6" fill="#2563eb"/>
   </g>
@@ -26,7 +26,7 @@
     <text x="96" y="320" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700" fill="#0f172a">Smallest evidence-holding record</text>
     <text x="96" y="343" font-family="Inter, Arial, sans-serif" font-size="13" fill="#475569">Long-document fixture · evidence returned for the same 18 questions</text>
     <text x="500" y="316" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#334155">Baseline · whole documents · 162.2 tokens</text>
-    <rect x="500" y="325" width="440" height="12" rx="6" fill="#cbd5e1"/>
+    <rect x="500" y="325" width="440" height="12" rx="6" fill="#64748b"/>
     <text x="500" y="363" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#1d4ed8">Engraphis · structure-aware chunks · 42.4 tokens · 73.9% lower</text>
     <rect x="500" y="372" width="115" height="12" rx="6" fill="#2563eb"/>
   </g>
@@ -36,7 +36,7 @@
     <text x="96" y="446" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700" fill="#0f172a">Serialized MCP recall response</text>
     <text x="96" y="469" font-family="Inter, Arial, sans-serif" font-size="13" fill="#475569">CodeMem fixture · retrieval scores unchanged across 260 timed recalls</text>
     <text x="500" y="442" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#334155">Baseline · full response · 17,172 tokens</text>
-    <rect x="500" y="451" width="440" height="12" rx="6" fill="#cbd5e1"/>
+    <rect x="500" y="451" width="440" height="12" rx="6" fill="#64748b"/>
     <text x="500" y="489" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#1d4ed8">Engraphis · compact response · 7,663 tokens · 55.38% lower</text>
     <rect x="500" y="498" width="196" height="12" rx="6" fill="#2563eb"/>
   </g>
