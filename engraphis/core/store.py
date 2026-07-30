@@ -2154,12 +2154,21 @@ class Store:
         name = (name or "").strip()
         if len(name) < 2:
             return
+        scope_sql = "repo_id IS NULL"
+        scope_params: list[Any] = []
+        if repo_id is not None:
+            # A contextual repo read includes its workspace/user ancestors.  Do not
+            # lose a legacy workspace mention merely because the matching entity was
+            # introduced later in a repository; sibling repositories stay isolated.
+            scope_sql = "(repo_id=? OR repo_id IS NULL)"
+            scope_params.append(repo_id)
         rows = self.conn.execute(
-            "SELECT id, content, valid_from, ingested_at FROM memories "
-            "WHERE workspace_id IS ? AND repo_id IS ? AND scope<>'session' "
-            "AND valid_to IS NULL AND expired_at IS NULL "
-            "AND lower(content) LIKE ? ESCAPE '\\' LIMIT 12000",
-            (workspace_id, repo_id, "%" + _escape_like(name.casefold()) + "%"),
+            "SELECT id, content, workspace_id, repo_id, valid_from, valid_to, "
+            "valid_to_recorded_at, ingested_at, expired_at FROM memories "
+            "WHERE workspace_id IS ? AND scope<>'session' AND " + scope_sql + " "
+            "AND lower(content) LIKE ? ESCAPE '\\' ORDER BY id LIMIT 12000",
+            (workspace_id, *scope_params,
+             "%" + _escape_like(name.casefold()) + "%"),
         ).fetchall()
         pattern = re.compile(r"(?<!\w)" + re.escape(name) + r"(?!\w)", re.IGNORECASE)
         for row in rows:
@@ -2167,9 +2176,11 @@ class Store:
                 continue
             self.link_memory_entity(
                 memory_id=row["id"], entity_id=entity_id,
-                workspace_id=workspace_id, repo_id=repo_id,
+                workspace_id=row["workspace_id"], repo_id=row["repo_id"],
                 source_kind="text_mention", confidence=0.8,
-                valid_from=row["valid_from"], ingested_at=row["ingested_at"],
+                valid_from=row["valid_from"], valid_to=row["valid_to"],
+                valid_to_recorded_at=row["valid_to_recorded_at"],
+                ingested_at=row["ingested_at"], expired_at=row["expired_at"],
                 provenance={"source": "exact_text_backfill"}, commit=False,
             )
 
@@ -2896,6 +2907,61 @@ class Store:
             )
             if commit:
                 self.conn.commit()
+        except BaseException:
+            if started_transaction and self.conn.in_transaction:
+                self.conn.rollback()
+            raise
+
+    def add_link_version(self, a: str, b: str, relation: str = "related",
+                         layer: Optional[GraphLayer] = None, reason: str = "", *,
+                         valid_from: Optional[float] = None,
+                         valid_to: Optional[float] = None,
+                         valid_to_recorded_at: Optional[float] = None,
+                         ingested_at: Optional[float] = None,
+                         expired_at: Optional[float] = None,
+                         commit: bool = True) -> bool:
+        """Persist one exact temporal link version without collapsing live evidence.
+
+        Normal :meth:`add_link` intentionally de-duplicates active relationships for
+        interactive callers. Sync is different: two peers can independently observe the
+        same relation with distinct valid/known intervals, and both intervals are needed
+        for a convergent historical graph. This method appends that exact observation and
+        returns whether it was new, while replaying the same version remains a no-op.
+        """
+        graph_layer = normalize_graph_layer(layer, relation).value
+        stamp = now_ts()
+        world_start = stamp if valid_from is None else valid_from
+        system_start = stamp if ingested_at is None else ingested_at
+        started_transaction = not self.conn.in_transaction
+        if started_transaction:
+            self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            exact = self.conn.execute(
+                "SELECT 1 FROM mem_links "
+                "WHERE ((a=? AND b=?) OR (a=? AND b=?)) AND relation=? "
+                "AND layer=? AND reason=? AND valid_from IS ? AND valid_to IS ? "
+                "AND valid_to_recorded_at IS ? AND ingested_at IS ? AND expired_at IS ? "
+                "LIMIT 1",
+                (
+                    a, b, b, a, relation, graph_layer, reason,
+                    world_start, valid_to, valid_to_recorded_at, system_start, expired_at,
+                ),
+            ).fetchone()
+            if exact is not None:
+                if started_transaction:
+                    self.conn.commit()
+                return False
+            self.conn.execute(
+                "INSERT INTO mem_links("
+                "a, b, relation, layer, reason, created_at, valid_from, valid_to, "
+                "valid_to_recorded_at, ingested_at, expired_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (a, b, relation, graph_layer, reason, stamp, world_start, valid_to,
+                 valid_to_recorded_at, system_start, expired_at),
+            )
+            if commit:
+                self.conn.commit()
+            return True
         except BaseException:
             if started_transaction and self.conn.in_transaction:
                 self.conn.rollback()

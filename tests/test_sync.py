@@ -314,6 +314,51 @@ def test_sync_v2_preserves_closed_memory_link_history():
     ]
 
 
+def test_sync_v2_converges_concurrent_live_link_intervals():
+    def peer(valid_from: float, ingested_at: float):
+        store = Store(":memory:")
+        workspace_id = store.get_or_create_workspace("w")
+        for memory_id in ("mem_a", "mem_b"):
+            store.add_memory(MemoryRecord(
+                id=memory_id, content=memory_id, workspace_id=workspace_id,
+                valid_from=1.0, ingested_at=1.0,
+            ))
+        store.add_link(
+            "mem_a", "mem_b", relation="related", layer="semantic", reason="peer",
+            valid_from=valid_from, ingested_at=ingested_at,
+        )
+        return store, workspace_id
+
+    left, left_workspace = peer(100.0, 100.0)
+    right, right_workspace = peer(50.0, 300.0)
+    left_sync, right_sync = SyncEngine(left), SyncEngine(right)
+    left_bundle = left_sync.export_bundle(left_workspace)
+    right_bundle = right_sync.export_bundle(right_workspace)
+
+    assert left_sync.apply_bundle(right_bundle)["links_added"] == 1
+    assert right_sync.apply_bundle(left_bundle)["links_added"] == 1
+    assert left_sync.apply_bundle(right_bundle)["links_added"] == 0
+    assert right_sync.apply_bundle(left_bundle)["links_added"] == 0
+
+    def history(store):
+        return [tuple(row) for row in store.conn.execute(
+            "SELECT valid_from, ingested_at, valid_to, expired_at FROM mem_links "
+            "ORDER BY ingested_at, valid_from"
+        ).fetchall()]
+
+    expected = [(100.0, 100.0, None, None), (50.0, 300.0, None, None)]
+    assert history(left) == history(right) == expected
+    assert left.links_among(["mem_a", "mem_b"], flt=SearchFilter(
+        valid_at=75.0, known_at=200.0,
+    )) == []
+    assert [row["valid_from"] for row in left.links_among(
+        ["mem_a", "mem_b"], flt=SearchFilter(valid_at=75.0, known_at=350.0),
+    )] == [50.0]
+    assert [row["valid_from"] for row in left.links_among(
+        ["mem_a", "mem_b"], flt=SearchFilter(valid_at=150.0, known_at=200.0),
+    )] == [100.0]
+
+
 def test_dry_run_writes_nothing():
     store = Store(":memory:")
     se = SyncEngine(store)

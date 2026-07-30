@@ -1,6 +1,6 @@
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
 from engraphis.backends.reranker import IdentityReranker
-from engraphis.core.interfaces import MemoryRecord, SearchFilter
+from engraphis.core.interfaces import MemoryRecord, Scope, SearchFilter
 from engraphis.core.recall import RecallEngine
 from engraphis.core.store import Store
 
@@ -117,6 +117,53 @@ def test_graph_arm_backfills_text_memory_when_its_entity_is_added_later():
     )
 
     assert related in scores
+
+
+def test_graph_arm_backfills_workspace_mentions_for_a_later_repo_entity():
+    from engraphis.core.interfaces import Edge, Node
+
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    related = _add(
+        store, emb, wid, None, "The checkout service had a race condition.",
+        scope=Scope.WORKSPACE,
+    )
+    redis = store.upsert_entity(Node(
+        id="", name="Redis", ntype="tech", workspace_id=wid, repo_id=rid))
+    checkout = store.upsert_entity(Node(
+        id="", name="checkout", ntype="module", workspace_id=wid, repo_id=rid))
+    store.upsert_edge(Edge(
+        id="", src=redis, dst=checkout, relation="used_by",
+        workspace_id=wid, repo_id=rid))
+    flt = SearchFilter(workspace_id=wid, repo_id=rid, include_ancestors=True)
+
+    incidence = store.list_memory_entities(flt, entity_ids=[checkout])
+    assert [(row["memory_id"], row["repo_id"]) for row in incidence] == [(related, None)]
+    assert related in eng._graph_arm_ppr(
+        "How does Redis relate to things?", flt, now=10**12,
+    )
+
+
+def test_entity_backfill_preserves_closed_workspace_memory_history():
+    from engraphis.core.interfaces import Node
+
+    store, _emb, _eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    historical = store.add_memory(MemoryRecord(
+        id="", content="The checkout service had a race condition.",
+        workspace_id=wid, scope=Scope.WORKSPACE, valid_from=100.0, valid_to=200.0,
+        valid_to_recorded_at=300.0, ingested_at=100.0,
+    ))
+    checkout = store.upsert_entity(Node(
+        id="", name="checkout", ntype="module", workspace_id=wid, repo_id=rid))
+
+    visible = store.list_memory_entities(SearchFilter(
+        workspace_id=wid, repo_id=rid, include_ancestors=True,
+        valid_at=150.0, known_at=250.0,
+    ), entity_ids=[checkout])
+    assert [(row["memory_id"], row["repo_id"]) for row in visible] == [(historical, None)]
 
 
 

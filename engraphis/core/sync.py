@@ -789,7 +789,9 @@ class SyncEngine:
             # verbatim (after the normal untrusted-input clamps), including closed
             # intervals. v1 omitted these fields, so it retains the established
             # grow-only/current-link merge below.
-            if "valid_from" in ln and "ingested_at" in ln:
+            if ("valid_from" in ln and "ingested_at" in ln
+                    and _clamp_world_ts(ln.get("valid_from")) is not None
+                    and _clamp_ts(ln.get("ingested_at"), now_ts()) is not None):
                 valid_from = _clamp_world_ts(ln.get("valid_from"))
                 valid_to = _clamp_world_ts(ln.get("valid_to"))
                 valid_to_recorded_at = _clamp_ts(ln.get("valid_to_recorded_at"), now_ts())
@@ -809,17 +811,18 @@ class SyncEngine:
                 if existing_version:
                     continue
                 if not dry_run:
-                    self.store.add_link(
+                    inserted = self.store.add_link_version(
                         a, b, rel, layer=layer, reason=reason,
                         valid_from=valid_from, valid_to=valid_to,
                         valid_to_recorded_at=valid_to_recorded_at,
                         ingested_at=ingested_at, expired_at=expired_at,
                         commit=False,
                     )
-                    self.store.audit(
-                        "sync:%s" % _clamp_str(src_device or "peer", 128),
-                        "sync_link", a,
-                        f"linked to {b} with relation {rel}", commit=False)
+                    if inserted:
+                        self.store.audit(
+                            "sync:%s" % _clamp_str(src_device or "peer", 128),
+                            "sync_link", a,
+                            f"linked to {b} with relation {rel}", commit=False)
                 report["links_added"] += 1
                 continue
             existing_link = self.store.conn.execute(
