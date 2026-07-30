@@ -35,6 +35,11 @@ def test_readme_distinguishes_every_current_token_context_measurement():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     for evidence in (
+        "### Proof at a glance",
+        "72.9% less retrieved context",
+        "3.8× smaller evidence record",
+        "55.38% smaller MCP response",
+        "### Measurement details and reproducibility",
         "808.8** tokens → structure-aware chunks: **219.0** tokens",
         "72.9% lower",
         "162.2** tokens → chunks: **42.4** tokens",
