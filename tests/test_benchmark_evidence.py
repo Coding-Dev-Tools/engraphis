@@ -1,6 +1,8 @@
 import json
+import struct
 from copy import deepcopy
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 
@@ -99,6 +101,23 @@ def test_readme_makes_agent_benefits_and_visual_evidence_scannable():
         "evidence-backed-agent-examples.png",
     ):
         assert (ROOT / "docs" / "images" / filename).is_file()
+
+
+def test_readme_visual_pngs_match_their_svg_canvas():
+    """README image exports must not carry hidden screenshot padding."""
+    image_dir = ROOT / "docs" / "images"
+
+    for stem in (
+        "engraphis-benefit-flow",
+        "evidence-backed-agent-examples",
+        "context-efficiency",
+    ):
+        svg = ElementTree.parse(image_dir / f"{stem}.svg").getroot()
+        expected = (int(svg.attrib["width"]), int(svg.attrib["height"]))
+        png_header = (image_dir / f"{stem}.png").read_bytes()[:24]
+
+        assert png_header[:8] == b"\x89PNG\r\n\x1a\n"
+        assert struct.unpack(">II", png_header[16:24]) == expected
 
 
 def test_example_visual_uses_the_checked_in_offline_fixture_results():
