@@ -6,7 +6,7 @@
   </defs>
   <rect width="1200" height="720" rx="28" fill="#f8fafc"/>
   <rect x="24" y="22" width="1152" height="676" rx="22" fill="#fff" stroke="#e2e8f0"/>
-  <text x="72" y="75" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a">What an agent gets—tested in deterministic offline fixtures</text>
+  <text x="72" y="75" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a">What an agent gets: tested in deterministic offline fixtures</text>
   <text x="72" y="105" font-family="Inter, Arial, sans-serif" font-size="16" fill="#475569">These are synthetic test inputs and reproducible outcomes, not customer data or external benchmark claims.</text>
 
   <g filter="url(#shadow)">

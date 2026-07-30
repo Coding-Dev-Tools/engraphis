@@ -41,5 +41,5 @@
     <rect x="500" y="498" width="196" height="12" rx="6" fill="#2563eb"/>
   </g>
 
-  <text x="72" y="558" font-family="Inter, Arial, sans-serif" font-size="13" fill="#64748b">Controlled deterministic offline regression fixtures—not model-billing, task-time, customer-cost, or external benchmark claims.</text>
+  <text x="72" y="558" font-family="Inter, Arial, sans-serif" font-size="13" fill="#64748b">Controlled deterministic offline regression fixtures, not model-billing, task-time, customer-cost, or external benchmark claims.</text>
 </svg>

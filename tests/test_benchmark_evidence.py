@@ -27,6 +27,23 @@ from eval.chunking_eval import compare as compare_chunking, load as load_chunkin
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_public_facing_docs_do_not_use_em_dashes():
+    """Published prose uses straightforward punctuation that renders consistently."""
+    public_files = [
+        *(ROOT / name for name in ("README.md", "BENCHMARKS.md", "CHANGELOG.md", "SECURITY.md")),
+        *(ROOT / "docs").rglob("*.md"),
+        *(ROOT / "docs" / "images").glob("*.svg"),
+        *(ROOT / "skills" / "engraphis-memory").rglob("*.md"),
+    ]
+    offenders = [
+        path.relative_to(ROOT).as_posix()
+        for path in public_files
+        if "—" in path.read_text(encoding="utf-8")
+    ]
+
+    assert not offenders, f"Public-facing files still contain em dashes: {offenders}"
+
+
 class CharacterTokenizer:
     def encode(self, text):
         return list(text)

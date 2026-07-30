@@ -116,21 +116,21 @@ Public 1.1.0 hosted-connect and graph-experience release.
 
 ### Added
 
-- **`engraphis connect --token engr_ct_…`** — the missing client half of device connect.
+- **`engraphis connect --token engr_ct_…`**: the missing client half of device connect.
   `cloud_session.save_bootstrap()` is the only writer of `~/.engraphis/cloud_session.json`,
   and it had no production caller: the docs told paying customers to prefer a file nothing
   created, so a purchased installation could not be connected without hand-writing state.
   The new command redeems the one-time connect token from the account portal against
   `POST /v1/devices/connect`, saves the returned session with owner-only permissions, and
   verifies `cloud_session.configured()` before reporting success. The token is sent in the
-  request body and nowhere else — never printed, logged, or written to disk — and every
+  request body and nowhere else; it is never printed, logged, or written to disk, and every
   refusal maps to fixed, actionable copy (an expired or already-used token is not confused
   with a lapsed subscription). Session storage is pre-flighted before the exchange, so an
   unwritable state directory or a `cloud_session.json` replaced by a link fails the command
-  *without* spending the single-use token — the customer fixes the path and retries with the
+  *without* spending the single-use token; the customer fixes the path and retries with the
   same token instead of returning to the portal for a new one. Faults that can only happen
-  *after* the exchange — a reply truncated mid-body (`http.client.IncompleteRead`), or an
-  endpoint that stops resolving before the session is written (`CloudUrlUnresolved`) — are
+  *after* the exchange: a reply truncated mid-body (`http.client.IncompleteRead`), or an
+  endpoint that stops resolving before the session is written (`CloudUrlUnresolved`) are
   reported as errors that say the token was already used, rather than escaping as tracebacks
   that leave the customer unable to tell whether to retry. Also installed as
   `engraphis-connect`.
@@ -328,7 +328,7 @@ and safe hosted deployment.
 
 ### Security
 
-- Every entrypoint sends baseline response headers — CSP, `X-Frame-Options: DENY`,
+- Every entrypoint sends baseline response headers: CSP, `X-Frame-Options: DENY`,
   `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, and HSTS over HTTPS
   only. Override with `ENGRAPHIS_CSP` / `ENGRAPHIS_HSTS`; set either to an empty string to
   omit that header where a fronting proxy supplies its own.
@@ -422,10 +422,10 @@ and safe hosted deployment.
   insert sequence (engine-level write lock): concurrent near-duplicate writes can no
   longer both resolve ADD and store duplicates instead of NOOP/INVALIDATE.
 - The Inspector's `/api/auth/login`/`setup` no longer run PBKDF2 (600k iterations)
-  on the asyncio event loop — password hashing moved to a worker thread, so a burst
+  on the asyncio event loop; password hashing moved to a worker thread, so a burst
   of logins can't stall every other request.
 - A failed vector-index upsert on the write path is now logged and audited
-  (`index_upsert_failed`) instead of silently swallowed — previously the memory
+  (`index_upsert_failed`) instead of silently swallowed. Previously, the memory
   stayed invisible to semantic recall with no trace.
 - URLs built from a bind host are now IPv6-safe and connectable (`engraphis.netutil`):
   `ENGRAPHIS_HOST=::` no longer yields the malformed `http://:::8700` in the printed
@@ -468,7 +468,7 @@ and safe hosted deployment.
 
 ### Fixed
 - 1-hop graph recall (and the PPR large-graph fallback) now honors `graph_layers`, matching
-  the PPR arm — `Store.neighbors()` gained a `layers` filter.
+  the PPR arm: `Store.neighbors()` gained a `layers` filter.
 - `FolderTransport.push()` no longer follows peer-planted symlinks in the shared sync folder
   (unpredictable temp name + `O_CREAT|O_EXCL|O_NOFOLLOW`), closing an arbitrary-file-write
   vector that mirrored the already-hardened read side.
@@ -477,7 +477,7 @@ and safe hosted deployment.
 - Caller-supplied `metadata.retention_supervision` is stripped at the service boundary; only
   the validated `retention_class` presets can influence importance/stability.
 - `merge_workspaces()` no longer duplicates symbols/code edges when both workspaces indexed
-  the same file in a same-named repo — the losing snapshot's rows are cleared, and its
+  the same file in a same-named repo: the losing snapshot's rows are cleared, and its
   memory↔code links are re-pointed at the surviving same-fqname symbols.
 - `engraphis-graph impact/prs` reject leading-dash git revisions (git option injection), and
   graph exports refuse a symlinked output directory and are written atomically without
@@ -486,7 +486,7 @@ and safe hosted deployment.
   (`limit`-derived cap) so a large workspace graph or indexed repo can't produce unbounded
   viewer-role responses.
 - Relay sync fails closed when a workspace's settings are unreadable rather than treating a
-  possibly-personal folder as shared — in the sync CLI and in the dashboard/background
+  possibly-personal folder as shared: in the sync CLI and in the dashboard/background
   `_sync_all` path; resource extraction enforces its own raw-size cap.
 
 ## [0.9.6] - 2026-07-16
@@ -574,10 +574,10 @@ and safe hosted deployment.
 ### Changed
 - **Team mode is now ON by default (opt-out).** `ENGRAPHIS_TEAM_MODE` defaults to on;
   set `ENGRAPHIS_TEAM_MODE=0` (or false/no/off) to disable. The per-user login wall is
-  no longer raised just because the mode flag is on — it now requires a *live* `team`
+  no longer raised just because the mode flag is on. It now requires a *live* `team`
   feature entitlement (`licensing.has_feature("team")`), checked at request time in
   `dashboard_app.py` and reflected in `/api/auth/state`. Solo / no-license installs stay
-  fully open, and the wall appears the moment a team license key is added — even via the
+  fully open, and the wall appears the moment a team license key is added, even via the
   dashboard UI at runtime. A `team` license is still required to *add seats* beyond the
   first admin (bootstrap admin is created unconditionally). Docs (`.env.example`,
   `AGENTS.md`, `README.md`, `SECURITY.md`, `scripts/init.py`) and team-mode test fixtures
@@ -585,11 +585,11 @@ and safe hosted deployment.
 - **Team-invite email rewritten to separate "join" from "activate a key".** The old
   invite conflated the two, so members pasted the shared team key into the hosted/Railway
   dashboard, saw it "work" (it just re-activated a license already active there), and
-  thought they'd joined — when joining means signing in with email + password. The email
+  thought they'd joined, when joining means signing in with email + password. The email
   now frames two distinct options: **Option 1** (required to join) sign in to the team
-  dashboard with email + the admin-set password — explicitly *no license key needed here,
+  dashboard with email + the admin-set password, with explicitly *no license key needed here,
   don't paste one*; **Option 2** (optional) run Engraphis on your own machine and access
-  the team's memories locally — that is what the shared team key is for (LOCAL
+  the team's memories locally; that is what the shared team key is for (LOCAL
   `http://127.0.0.1:8700` → Settings → License, then Settings → Cloud Sync to pull the
   converged team store down to a local offline copy). Invites now always carry a
   clickable sign-in link: `dashboard_url` resolves explicit arg → `ENGRAPHIS_DASHBOARD_URL`
@@ -625,7 +625,7 @@ and safe hosted deployment.
 - **The dashboard (`engraphis-dashboard` / `http://127.0.0.1:8700`) would not start.**
   `scripts/start_dashboard.py` runs uvicorn against `engraphis.dashboard_app:app`, but
   `dashboard_app.py` only defined the `create_app()` factory and never built a module-level
-  `app` instance — so uvicorn aborted with `Attribute "app" not found` and nothing bound
+  `app` instance, so uvicorn aborted with `Attribute "app" not found` and nothing bound
   port 8700. The missing `app = create_app()` (present in `engraphis/app.py` and
   `engraphis/redirector.py`, but dropped from `dashboard_app.py`) is now restored. The
   background autosync/dreaming/revalidation loops inside `create_app()` are pytest-guarded,
@@ -649,7 +649,7 @@ and safe hosted deployment.
   `tests/test_online_only_enforcement.py`.
 - **Deterministic, offline sub-file chunking on the write path (`ENGRAPHIS_EXTRACTOR=chunk`).**
   A third `Extractor` alongside passthrough/LLM: `ChunkingExtractor` splits a document into
-  retrieval-sized `ExtractedFact` chunks that preserve meaning — markdown headings start new
+  retrieval-sized `ExtractedFact` chunks that preserve meaning: markdown headings start new
   chunks and become the title, fenced code blocks stay intact, prose is packed to a token
   budget (`ENGRAPHIS_CHUNK_TOKENS`, default 256) with a sentence-level overlap
   (`ENGRAPHIS_CHUNK_OVERLAP`, default 32); a hard per-document cap
@@ -667,7 +667,7 @@ and safe hosted deployment.
 - **Chunking eval + `longdoc` dataset.** `eval/chunking_eval.py` +
   `eval/datasets/longdoc.jsonl` compare whole-file vs chunked ingestion through the real
   recall pipeline. On the offline embedder: identical recall@5 (1.000) at **~73% fewer
-  context tokens** (809 → 219) and ~4× smaller tokens-to-evidence (162 → 42) — the "quality per token"
+  context tokens** (809 → 219) and ~4× smaller tokens-to-evidence (162 → 42); the "quality per token"
   number `BENCHMARKS.md` calls for. `tests/test_chunking_eval.py`.
 - **"Dreaming" trigger for automated maintenance.** `automation.should_dream` / `dream_due`
   run a consolidation sweep *before* the cadence when enough new episodic memories have
@@ -676,7 +676,7 @@ and safe hosted deployment.
   cron behaviour is unchanged; still Pro-gated. `tests/test_dreaming_trigger.py`.
 - **Associative cross-cluster inference (dream pass 4).** `consolidate.infer_links` /
   `consolidate(infer=True)` proposes evidence-only links between memories in *different,
-  dissimilar* subject clusters that share a bridging entity — the "connect distant dots" step
+  dissimilar* subject clusters that share a bridging entity: the "connect distant dots" step
   same-subject distillation never reaches. **Off by default** (`infer=False`); the pass
   follows the sweep's own `dry_run` flag, so a dry-run proposes into the report and a real
   run applies. Applied inferences are low-salience (`importance=0.25`), `trusted:false`,
@@ -686,13 +686,13 @@ and safe hosted deployment.
   `rediscovered`) and the per-sweep text scan is computed once, not per entity.
   `tests/test_inference.py`.
 - **Inference is reachable from the maintenance path.** A new `infer` policy knob (off
-  by default) runs the inference pass inside `run_maintenance` — manual *or* the dream loop
-  — following the sweep's `dry_run`. `/api/consolidate` takes `infer` (`false` by default);
+  by default) runs the inference pass inside `run_maintenance`, whether manual or from the dream loop,
+  following the sweep's `dry_run`. `/api/consolidate` takes `infer` (`false` by default);
   `/api/automation` round-trips `infer`; the dashboard Automation tab has an Inference
   toggle. `tests/test_dashboard_v2.py` (policy round-trip + `/maintenance/run` proposes the
   Redis bridge), `tests/test_dashboard_dream_ui.py`.
 - **Dreaming runs without cron.** A dashboard background loop (`_maybe_start_dreaming`,
-  mirroring auto-sync) runs a maintenance sweep whenever `automation.dream_due` fires — opt-in,
+  mirroring auto-sync) runs a maintenance sweep whenever `automation.dream_due` fires. It is opt-in,
   Pro-gated, fault-isolated, with an `ENGRAPHIS_DREAM_LOOP=0` kill switch. The `/api/automation`
   policy round-trips the `dream` / `dream_min_new` / `dream_idle_minutes` knobs, and the
   dashboard's Automation tab surfaces them as form controls (toggle + thresholds). The
@@ -710,7 +710,7 @@ and safe hosted deployment.
   instance no longer deadlocks on the team-feature gate with no way to proceed.
   No backend change; frontend-only.
 - `MemoryService.create` now defaults `extractor` from `settings.extractor`
-  (`ENGRAPHIS_EXTRACTOR`) when unset — mirroring the existing `graph_extractor` fallback — so
+  (`ENGRAPHIS_EXTRACTOR`) when unset, mirroring the existing `graph_extractor` fallback so
   the dashboard and automated-maintenance front ends honor the config knob, not just the MCP
   server and CLI. An explicit `extractor="none"` still overrides the environment.
 
@@ -733,12 +733,12 @@ and safe hosted deployment.
 ### Added
 - **Personal vs. shared folders + a redesigned Team dashboard.** A folder can now be
   created `visibility='personal'` (owned by, and visible/usable only to, the creating
-  dashboard user) or `shared` (the whole team — the previous, still-default behaviour).
+  dashboard user) or `shared` (the whole team, the previous, still-default behaviour).
   Enforcement runs through a single workspace-authorization chokepoint, so every scoped
   read/write inherits it and a non-owner cannot access another user's personal folder.
   Personal folders are excluded from relay sync so they stay on-device. The **Team
   dashboard** gains a team overview (seat usage + activity), a Folders panel that creates
-  and manages shared/personal folders (folder creation now lives here — the Workspaces
+  and manages shared/personal folders (folder creation now lives here: the Workspaces
   tab is selection-only in team mode), members with last-active, and a team audit log with
   CSV export. New/updated: `service.py`, `routes/v2_api.py`, `dashboard_app.py`,
   `static/index.html`; tests in `tests/test_personal_folders.py`,
@@ -761,7 +761,7 @@ and safe hosted deployment.
   with auth/license/trial routes instead of a permanently signed-out UI.
   `engraphis-server` remains available as an explicit override for single-user
   deployments.
-- **CI**: ruff lint errors and core-floor (numpy-only) test collection —
+- **CI**: ruff lint errors and core-floor (numpy-only) test collection.
   fastapi-dependent tests now skip cleanly on the minimal core floor. `loads_strict`
   now rejects pathologically deep JSON on every Python version (3.12's JSON scanner
   no longer raises RecursionError for ~1000-deep input, which had broken the
@@ -825,14 +825,14 @@ and safe hosted deployment.
 ### Fixed
 - Static package discovery: `engraphis/static/__init__.py` added
 - Vendor glob: recursive pattern so `static/vendor/` bundles ship in wheel
-- Dashboard 500 on `GET /` — `static/index.html` was missing from wheel (packaging bug)
-- Dashboard 500 on fresh install — `GET /api/memories` crashed on empty workspace
+- Dashboard 500 on `GET /`: `static/index.html` was missing from wheel (packaging bug)
+- Dashboard 500 on fresh install: `GET /api/memories` crashed on empty workspace
 
 ---
 
 ## Earlier versions (condensed)
 
-### 0.5.x — 0.7.x
+### Versions 0.5.x to 0.7.x
 - MCP server with 18 tools
 - Memory Inspector product UI (`engraphis-inspector`, port 8710)
 - Dashboard rebuilt on v2 engine with recall, governance, consolidate, analytics
@@ -846,7 +846,7 @@ and safe hosted deployment.
 - Docker + docker-compose deployment
 - 300+ tests, eval harness, ablation suite
 
-### 0.1.0 — 2026-07-09
+### [0.1.0] - 2026-07-09
 - Initial public release: local-first AI memory engine for agents
 - Ebbinghaus decay, interaction-aware recall, bi-temporal facts
 - Background consolidation; you bring the LLM

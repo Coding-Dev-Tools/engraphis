@@ -9,30 +9,30 @@ been written; when this and the code disagree, the code wins (CLAUDE.md).
 Engraphis's eval harness scores **retrieval**, not end-to-end QA. That distinction is deliberate
 and stated everywhere the numbers appear (`eval/external.py`).
 
-- **Correctness gate** — `eval/harness.py` over `eval/datasets/sample.jsonl` and
+- **Correctness gate**: `eval/harness.py` over `eval/datasets/sample.jsonl` and
   `codemem.jsonl` (conflict resolution) and `graph_multihop.jsonl` (multi-hop graph recall).
   Runs on the deterministic embedder, so it is a plumbing/regression floor, not a public
   performance claim. This is the gate CI enforces.
-- **Ablation** — `eval/ablation.py`: vector-only vs. 1-hop graph vs. Personalized-PageRank arm,
+- **Ablation**: `eval/ablation.py`: vector-only vs. 1-hop graph vs. Personalized-PageRank arm,
   to show the graph arm actually earns its place.
-- **External benchmarks** — `eval/external.py` loads **LoCoMo** and **LongMemEval** and pushes
+- **External benchmarks**: `eval/external.py` loads **LoCoMo** and **LongMemEval** and pushes
   them through the *real* `MemoryEngine` write path (conflict resolution + evolution) and hybrid
   recall with a real sentence-transformers embedder. It reports `recall_at_k` / `hit_at_k` /
-  `answer_token_recall` — i.e. *did the evidence come back*, not *did an LLM answer correctly*.
+  `answer_token_recall`: i.e. *did the evidence come back*, not *did an LLM answer correctly*.
   It retains source categories and abstention/no-evidence questions as explicit exclusions from
   retrieval-only aggregates rather than silently dropping them. `eval.longmemeval_v2` is a local,
   text-only adapter for the official LongMemEval-V2 `insert(trajectory)` / `query(query,
   query_image=None)` memory interface; it does not download data or call a model.
-- **Grounded** — `eval/grounded.py`: answerable → cite, off-topic → abstain.
-- **Chunking (quality per token)** — `eval/chunking_eval.py` over `eval/datasets/longdoc.jsonl`
-  ingests a multi-topic corpus twice — one memory per document (`whole`) vs. sub-file
-  `ChunkingExtractor` (`chunked`) — and queries both through the real recall pipeline. This is
+- **Grounded**: `eval/grounded.py`: answerable → cite, off-topic → abstain.
+- **Chunking (quality per token)**: `eval/chunking_eval.py` over `eval/datasets/longdoc.jsonl`
+  ingests a multi-topic corpus twice: once as one memory per document (`whole`) and once with
+  sub-file `ChunkingExtractor` (`chunked`), then queries both through the real recall pipeline. This is
   the first cut of the context-reduction metric (item 3 below). On the deterministic embedder:
   **recall@5 1.000 for both, at ~73% fewer context tokens (809 → 219) and ~4× smaller
   tokens-to-evidence (162 → 42).** Pass `--embed-model sentence-transformers/all-MiniLM-L6-v2`
   for a real retrieval number (recall should then favour chunked on larger corpora, not just
   tie).
-- **Full-pipeline latency + quality** — `eval/performance.py` times the shipped semantic +
+- **Full-pipeline latency + quality**: `eval/performance.py` times the shipped semantic +
   lexical + graph + fusion + scoring + rerank + packing path after warmup, with reinforcement
   disabled so repeated measurements do not mutate their corpus. It reports p50/p95/p99 latency,
   retrieval quality, and packed context tokens in one JSON-safe schema. `--filler-memories`

@@ -65,18 +65,18 @@ Useful options:
 
 The same command is installed as `engraphis-connect`, matching the other `engraphis-*` scripts.
 
-Connect tokens are **single-use and short-lived**. The service answers every refusal — expired,
-already redeemed, or never valid — with the same `401`, so the client reports all three
+Connect tokens are **single-use and short-lived**. The service answers every refusal, whether expired,
+already redeemed, or never valid, with the same `401`, so the client reports all three
 possibilities and the fix is always the same: generate a new token in the account portal. A `402`
 means the subscription itself has lapsed; fix billing rather than the token.
 
 Because the token is single-use, the client checks that it can actually write the session file
 *before* redeeming it. If the state directory is not writable, or `cloud_session.json` has been
 replaced by a symlink, a hard link, or a directory, the command fails immediately, names the path
-to fix, and sends nothing — your token is untouched, so you can correct the path and rerun the
+to fix, and sends nothing. Your token is untouched, so you can correct the path and rerun the
 same command rather than issuing a new token.
 
-The token is a credential. It is sent in the request body and nowhere else — it is never
+The token is a credential. It is sent in the request body and nowhere else; it is never
 printed, never logged, and never written to disk. What *is* written is the rotating refresh
 credential the service returns, which is why the session file is owner-only.
 

@@ -47,7 +47,7 @@ DOMPurify at all render sites. Verified against payloads with `onerror` handlers
 - Every read takes a `SearchFilter`; tools only return memories within requested `workspace`/`repo`
 - Every write targeting a memory by ID re-validates scope membership
 - **Hard workspace binding** (`ENGRAPHIS_WORKSPACES`): comma-separated allow-list makes
-  workspace a hard boundary — requests outside the list are refused before touching the store
+  workspace a hard boundary; requests outside the list are refused before touching the store
 
 ### 4. Secrets & data at rest
 - `.env`, `*.db`, `*.db-wal`, `*.db-shm` are git-ignored; never logged
@@ -57,7 +57,7 @@ DOMPurify at all render sites. Verified against payloads with `onerror` handlers
 - Review your LLM provider's data-handling terms.
 
 ### 5. Code indexing
-`engraphis_index_repo` parses source files under a path you give it — same trust boundary as
+`engraphis_index_repo` parses source files under a path you give it, with the same trust boundary as
 any other local tool the agent has. Path is attacker-controlled if agent's instructions are.
 Canonical roots are restricted to the working, home, or temporary directories by default.
 Set `ENGRAPHIS_INDEX_ROOTS` to a path-separator-delimited absolute-path operator allow-list to

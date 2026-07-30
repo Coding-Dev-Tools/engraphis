@@ -43,7 +43,7 @@
     <circle cx="440" cy="215" r="4" fill="#10b981"/><circle cx="468" cy="207" r="4" fill="#10b981"/><circle cx="494" cy="216" r="4" fill="#10b981"/>
     <text x="382" y="319" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700" fill="#0f172a">Engraphis memory</text>
     <text x="382" y="346" font-family="Inter, Arial, sans-serif" font-size="14" fill="#475569">scoped, temporal, and</text>
-    <text x="382" y="366" font-family="Inter, Arial, sans-serif" font-size="14" fill="#475569">auditable—without overwriting</text>
+    <text x="382" y="366" font-family="Inter, Arial, sans-serif" font-size="14" fill="#475569">auditable without overwriting</text>
     <rect x="382" y="377" width="159" height="22" rx="11" fill="#d1fae5"/>
     <text x="394" y="393" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="600" fill="#047857">history stays explainable</text>
   </g>
