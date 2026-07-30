@@ -191,16 +191,40 @@ structured-extraction entries.
 
 Engraphis ships typed and scoped memory, bi-temporal history, grounded recall, hybrid
 vector/lexical/graph retrieval, deterministic context packing, and MCP-native agent tools.
-The current deterministic offline regression fixtures reproduce these results:
+The current deterministic offline regression fixtures reproduce these quality results:
 
 | Fixture | Reproduced result |
 |---|---|
 | CodeMem retrieval — 44 memories, 26 questions | **Recall@5 1.000**, hit@5 1.000, answer-token recall 1.000 |
-| Compact MCP recall — same 26 questions | **55.4% fewer serialized response tokens** (17,172 → 7,663) with the same retrieval scores |
-| Long-document chunking — 6 documents, 18 questions | **73.0% fewer retrieved memory-content tokens** (808.8 → 218.0 mean) at unchanged Recall@5 1.000 |
 | Grounded-answer decisions — 10 cases | **10/10 correct**: 5/5 answerable questions cited evidence and 5/5 off-topic questions abstained |
 
-Reproduce all four without a network connection or API key:
+### Measured token and context savings
+
+These are all of the current token/context efficiency measurements. They show that Engraphis can
+return the relevant passage and a compact evidence packet instead of repeatedly carrying complete
+documents and unpacked candidate records.
+
+| What is counted | Comparison | Measured reduction | Quality held constant |
+|---|---|---|---|
+| Retrieved top-5 memory content, averaged per question | Whole documents: **808.8** tokens → structure-aware chunks: **219.0** tokens | **589.8 fewer tokens per question** (**72.9% lower**, about **3.7× smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
+| Smallest returned memory that contains the reference evidence | Whole documents: **162.2** tokens → chunks: **42.4** tokens | **119.8 fewer tokens to evidence** (**73.9% lower**, about **3.8× smaller**) | The same 18 questions had a returned evidence-holding memory in both modes |
+| Serialized MCP recall response across 260 timed CodeMem recalls | Full result: **17,172** `engraphis.regex.v1` tokens → compact result: **7,663** tokens | **9,509 response tokens avoided** (**55.38% lower**) | Recall@5, hit@5, and answer-token recall all **1.000** |
+| Packed prompt-context usage in the same CodeMem performance fixture | Hard budget: **1,500** tokens; observed mean: **87.73**; observed maximum: **106** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
+
+In practical terms, the chunking fixture leaves roughly **590 tokens per query** available for
+task instructions or other relevant evidence under the same model-context budget. The compact MCP
+response avoids duplicating full memory bodies when the packed context and source list are enough.
+That can reduce what an agent must inspect or pass onward, but the fixtures do **not** measure model
+provider charges, end-to-end task time, or customer cost savings.
+
+The measures are deliberately separate and **must not be added together**: chunking counts the
+content of retrieved memory records before `ContextPacker`, whereas compact recall counts the
+serialized MCP response returned to a client. “Tokens to evidence” is the size of the smallest
+retrieved memory record holding the reference evidence; it is not latency or end-to-end answer
+accuracy. Chunking creates more focused stored records (24 chunks rather than 6 whole-document
+memories in this fixture), so this is a context-efficiency result—not a storage-reduction claim.
+
+Reproduce the quality and token/context measurements without a network connection or API key:
 
 ```bash
 python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5

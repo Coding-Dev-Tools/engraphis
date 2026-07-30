@@ -1,5 +1,6 @@
 import json
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
@@ -21,9 +22,30 @@ from eval.benchmark import (
 )
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 class CharacterTokenizer:
     def encode(self, text):
         return list(text)
+
+
+def test_readme_distinguishes_every_current_token_context_measurement():
+    """Public token-efficiency copy must preserve each metric's counting boundary."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    for evidence in (
+        "808.8** tokens → structure-aware chunks: **219.0** tokens",
+        "72.9% lower",
+        "162.2** tokens → chunks: **42.4** tokens",
+        "73.9% lower",
+        "17,172** `engraphis.regex.v1` tokens → compact result: **7,663** tokens",
+        "55.38% lower",
+        "1,500** tokens; observed mean: **87.73**; observed maximum: **106**",
+        "must not be added together",
+        "not a storage-reduction claim",
+    ):
+        assert evidence in readme
 
 
 def _complete_canonical_report(dataset, config):
