@@ -180,6 +180,12 @@ structured-extraction entries.
 
 ---
 
+## Evidence-backed capabilities
+
+Engraphis publishes capability descriptions and reproducible benchmark protocols without narrative vendor comparisons. See [`BENCHMARKS.md`](BENCHMARKS.md) for the evidence and claim policy.
+
+---
+
 ## Hosted Pro and Team
 
 Pro and Team are services, not alternate modes hidden in the public image. The official cloud

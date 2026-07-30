@@ -7,7 +7,7 @@ benchmarks the field actually quotes and pushes them through the *same*
 ships — so the number you get is about the product, not a bare index.
 
 What it measures — honestly: **retrieval** (evidence recall@k / hit@k), not
-end-to-end QA accuracy. Published LoCoMo/LongMemEval scores from external memory system/external memory system also hinge
+end-to-end QA accuracy. Published LoCoMo/LongMemEval scores from other systems also hinge
 on an answering LLM + judge; this harness isolates the part Engraphis owns, needs no
 API key, and states exactly that in the report. Add an answering model on top for a
 QA-accuracy number when you want one.
