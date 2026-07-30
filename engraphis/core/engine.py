@@ -37,8 +37,8 @@ from engraphis.core.interfaces import (
     SearchFilter,
 )
 from engraphis.core.recall import RecallEngine, RecallResult
-from engraphis.core.resolve import RELATED_SIM_FLOOR, ResolutionOp, resolve
-from engraphis.core.store import Store, now_ts
+from engraphis.core.resolve import RELATED_SIM_FLOOR, Resolution, ResolutionOp, resolve
+from engraphis.core.store import Store, memory_matches_filter, now_ts
 from engraphis.core.textutil import estimate_tokens, jaccard, tokenize
 
 logger = logging.getLogger("engraphis.core.engine")
@@ -310,6 +310,7 @@ class MemoryEngine:
 
     @classmethod
     def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
+               embed_revision: Optional[str] = None,
                embed_dim: int = 384, vector_backend: str = "auto",
                rerank_model: Optional[str] = None, extractor: str = "none",
                graph_extractor: str = "none",
@@ -319,7 +320,7 @@ class MemoryEngine:
         from engraphis.backends.graph_extractor import get_graph_extractor as _get_ge
         from engraphis.backends.retention import get_retention_supervisor
         store = Store(db_path, connect=connect)
-        embedder = get_embedder(embed_model, embed_dim)
+        embedder = get_embedder(embed_model, embed_dim, revision=embed_revision)
         index = get_vector_index(store, dim=embedder.dim, prefer=vector_backend)
         reranker = get_reranker(rerank_model)
         ext = get_extractor(extractor)
@@ -337,7 +338,7 @@ class MemoryEngine:
                  scope: Optional[Scope] = None, title: str = "", importance: float = 0.0,
                  keywords: Optional[list] = None, metadata: Optional[dict] = None,
                  valid_from: Optional[float] = None, resolve_conflicts: bool = True,
-                 candidate_k: int = 5,
+                 candidate_k: int = 5, subject_key: str = "", claim_kind: str = "",
                  _trusted_graph_keys: Optional[frozenset] = None) -> str:
         """Store one memory. Returns the id of the *live* record: a new id for ADD/
         INVALIDATE, or the existing memory's id if this was resolved as a NOOP
@@ -347,7 +348,8 @@ class MemoryEngine:
             content, workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
             mtype=mtype, scope=scope, title=title, importance=importance, keywords=keywords,
             metadata=metadata, valid_from=valid_from, resolve_conflicts=resolve_conflicts,
-            candidate_k=candidate_k, _trusted_graph_keys=_trusted_graph_keys,
+            candidate_k=candidate_k, subject_key=subject_key, claim_kind=claim_kind,
+            _trusted_graph_keys=_trusted_graph_keys,
         )["id"]
 
     def remember_with_resolution(self, content: str, *, workspace_id: str,
@@ -356,6 +358,7 @@ class MemoryEngine:
                  title: str = "", importance: float = 0.0, keywords: Optional[list] = None,
                  metadata: Optional[dict] = None, valid_from: Optional[float] = None,
                  resolve_conflicts: bool = True, candidate_k: int = 5,
+                 subject_key: str = "", claim_kind: str = "",
                  _trusted_graph_keys: Optional[frozenset] = None) -> dict:
         """Store one memory with deterministic conflict resolution.
 
@@ -367,7 +370,20 @@ class MemoryEngine:
         * ``"invalidate"``  — same subject as an existing memory but new content; the old
           one's validity was closed (never deleted) and this was inserted. ``superseded``
           lists the closed id(s).
+        * ``"relate"``      — evidence shows a nearby claim but not a safe contradiction;
+          both remain live and a semantic relation is persisted.
         """
+        if valid_from is not None:
+            if isinstance(valid_from, bool):
+                raise ValueError("valid_from must be a finite timestamp")
+            try:
+                valid_from = float(valid_from)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("valid_from must be a finite timestamp") from exc
+            if not math.isfinite(valid_from):
+                raise ValueError("valid_from must be a finite timestamp")
+        subject_key = str(subject_key or "").strip()
+        claim_kind = str(claim_kind or "").strip()
         scope_was_omitted = scope is None
         scope = (
             Scope.REPO if (repo_id or session_id) else Scope.WORKSPACE
@@ -413,7 +429,8 @@ class MemoryEngine:
                     session_id=session_id, mtype=mtype, scope=scope, title=title,
                     importance=importance, keywords=keywords, metadata=metadata,
                     valid_from=valid_from, resolve_conflicts=resolve_conflicts,
-                    candidate_k=candidate_k, trusted_graph_keys=_trusted_graph_keys,
+                    candidate_k=candidate_k, subject_key=subject_key,
+                    claim_kind=claim_kind, trusted_graph_keys=_trusted_graph_keys,
                 )
             except BaseException:
                 if (owns_session_transaction
@@ -427,6 +444,7 @@ class MemoryEngine:
                            title: str, importance: float, keywords: Optional[list],
                            metadata: Optional[dict], valid_from: Optional[float],
                            resolve_conflicts: bool, candidate_k: int,
+                           subject_key: str, claim_kind: str,
                            trusted_graph_keys: Optional[frozenset] = None) -> dict:
         """The resolve→insert body of ``remember_with_resolution``. The caller holds
         ``self._write_lock`` for the whole call (atomicity of the resolve decision).
@@ -439,8 +457,55 @@ class MemoryEngine:
             decision, neighbors = self._resolve_against_neighbors(
                 text, vec, workspace_id=workspace_id, repo_id=repo_id,
                 session_id=session_id, scope=scope, mtype=mtype,
-                candidate_k=candidate_k,
+                candidate_k=candidate_k, subject_key=subject_key,
+                claim_kind=claim_kind, valid_at=valid_from, content=content,
             )
+        if resolve_conflicts and subject_key and valid_from is not None:
+            # A durable claim has a temporal identity in addition to its text. A
+            # scheduled successor can be a better prose match than the version visible
+            # at this write's effective time, but it is not the version being replaced.
+            # Select that visible predecessor directly so a backfill is spliced into the
+            # recorded chain rather than rejected for predating a future match.
+            claim_history = self.store.list_claim_history(
+                workspace_id=workspace_id, repo_id=repo_id,
+                session_id=session_id if scope == Scope.SESSION else None,
+                scope=scope, mtype=mtype, subject_key=subject_key,
+                claim_kind=claim_kind,
+            )
+            predecessors = [
+                record for record in claim_history
+                if record.valid_from is not None and record.valid_from <= valid_from
+                and (record.valid_to is None or valid_from < record.valid_to)
+            ]
+            if predecessors:
+                predecessor = max(
+                    predecessors,
+                    key=lambda record: (record.valid_from or float("-inf"), record.id),
+                )
+                if " ".join(content.split()).casefold() == (
+                    " ".join(predecessor.content.split()).casefold()
+                ):
+                    decision = Resolution(
+                        ResolutionOp.NOOP, target_id=predecessor.id,
+                        reason=f"exact duplicate of keyed claim {predecessor.id}",
+                    )
+                else:
+                    decision = Resolution(
+                        ResolutionOp.INVALIDATE, target_id=predecessor.id,
+                        reason=(f"supersedes temporal predecessor {predecessor.id} "
+                                f"for keyed claim"),
+                    )
+        if (decision is not None
+                and decision.op == ResolutionOp.INVALIDATE
+                and valid_from is not None):
+            previous = self.store.get_memory(decision.target_id)
+            if (previous is not None
+                    and previous.valid_from is not None
+                    and valid_from < previous.valid_from):
+                raise ValueError(
+                    "valid_from cannot predate the memory it supersedes; "
+                    "record the historical interval separately or correct the older memory"
+                )
 
         if decision is not None and decision.op == ResolutionOp.NOOP:
             self.store.reinforce(decision.target_id, boost=scoring.INTERACTION_BOOST["create"])
@@ -469,7 +534,7 @@ class MemoryEngine:
         rec = MemoryRecord(
             id="", content=content, mtype=mtype, scope=scope, workspace_id=workspace_id,
             repo_id=repo_id, session_id=session_id, title=title, importance=importance,
-            stability=stability,
+            stability=stability, subject_key=subject_key, claim_kind=claim_kind,
             keywords=keywords or [], metadata=meta, valid_from=valid_from,
             # Lift provenance into its dedicated field/column so recall/why/timeline
             # surface it (copied, not popped: consolidate.py still reads
@@ -518,7 +583,8 @@ class MemoryEngine:
                 _graph_feed(self.store, content, workspace_id=workspace_id,
                             repo_id=repo_id, title=title,
                             extractor=StructuredMetadataGraphExtractor(meta),
-                            provenance={"source": "structured_extractor", "memory_id": mid})
+                            provenance={"source": "structured_extractor", "memory_id": mid},
+                            valid_from=rec.valid_from, ingested_at=rec.ingested_at)
             except Exception:
                 pass
         if scope != Scope.SESSION and self.graph_extractor is not None:
@@ -526,18 +592,46 @@ class MemoryEngine:
                 from engraphis.backends.graph_extractor import feed as _graph_feed
                 _graph_feed(self.store, content, workspace_id=workspace_id,
                             repo_id=repo_id, title=title, extractor=self.graph_extractor,
-                            provenance={"source": "graph_extractor", "memory_id": mid})
+                            provenance={"source": "graph_extractor", "memory_id": mid},
+                            valid_from=rec.valid_from, ingested_at=rec.ingested_at)
             except Exception:
                 pass
+        if scope != Scope.SESSION:
+            self._link_memory_entities(
+                mid, f"{title}\n{content}", workspace_id=workspace_id, repo_id=repo_id,
+                valid_from=rec.valid_from,
+            )
 
         if decision is not None and decision.op == ResolutionOp.INVALIDATE:
-            self.store.close_validity(decision.target_id, reason=decision.reason)
-            try:
-                self.index.delete([decision.target_id])
-            except Exception as exc:  # noqa: BLE001 — merely stale in the index; recall
-                # re-checks validity on read, so log (don't audit) and continue.
-                logger.warning("vector-index delete failed for %s (%s)",
-                               decision.target_id, type(exc).__name__)
+            # World time closes when the replacement becomes true, not when this process
+            # happened to ingest it. This keeps backdated and scheduled facts queryable at
+            # the correct ``as_of`` anchor.
+            predecessor = self.store.get_memory(decision.target_id)
+            predecessor_end = predecessor.valid_to if predecessor is not None else None
+            if (predecessor_end is not None and rec.valid_from is not None
+                    and rec.valid_from < predecessor_end):
+                # The target was already retired by its recorded successor.  Splicing an
+                # intermediate version must shorten that historical interval, not leave
+                # the old end in place (``close_validity`` intentionally only closes live
+                # rows).  The new row inherits the old boundary below.
+                self.store.conn.execute(
+                    "UPDATE memories SET valid_to=?, valid_to_recorded_at=? WHERE id=?",
+                    (rec.valid_from, now_ts(), decision.target_id),
+                )
+                self.store.audit("system", "invalidate", decision.target_id,
+                                 decision.reason)
+                self.store.close_validity(
+                    mid, at=predecessor_end,
+                    reason="bounded by the recorded successor interval",
+                )
+            else:
+                self.store.close_validity(
+                    decision.target_id, at=rec.valid_from, reason=decision.reason
+                )
+            # Keep the superseded vector. Every vector backend applies the same temporal
+            # SearchFilter as lexical/graph retrieval, so it is hidden from current recall
+            # but remains available for historical ``as_of`` queries. Deleting it made
+            # time travel silently lose the semantic arm.
             self.store.audit("resolver", "invalidate", decision.target_id, decision.reason)
             linked = self._evolve(mid, neighbors, exclude={decision.target_id})
             out = {"id": mid, "op": "invalidate", "superseded": [decision.target_id],
@@ -547,7 +641,16 @@ class MemoryEngine:
             return out
 
         linked = self._evolve(mid, neighbors)
-        out = {"id": mid, "op": "add", "reason": decision.reason if decision else ""}
+        if decision is not None and decision.op == ResolutionOp.RELATE:
+            related_to = decision.target_id
+            if related_to and not self.store.has_link(mid, related_to):
+                self.store.add_link(mid, related_to, "related", reason=decision.reason)
+            out = {
+                "id": mid, "op": "relate", "related_to": related_to,
+                "reason": decision.reason,
+            }
+        else:
+            out = {"id": mid, "op": "add", "reason": decision.reason if decision else ""}
         if linked:
             out["linked"] = linked
         return out
@@ -630,6 +733,38 @@ class MemoryEngine:
             or isinstance(structured.get("relations"), list)
         )
 
+    def _link_memory_entities(self, memory_id: str, content: str, *,
+                              workspace_id: str, repo_id: Optional[str],
+                              valid_from: Optional[float]) -> None:
+        """Persist edge-derived and exact textual entity evidence for one memory."""
+        owns_transaction = not self.store.conn.transaction_owned_by_current_thread()
+        try:
+            self.store.backfill_memory_entities_for_memory(memory_id)
+            entities = self.store.list_entities(SearchFilter(
+                # New repo memories must attach to workspace entities already
+                # visible to that repo, not only entities owned by the repo.
+                workspace_id=workspace_id, repo_id=repo_id, include_ancestors=True,
+            ))
+            for entity in entities:
+                name = (entity.name or "").strip()
+                if len(name) < 2:
+                    continue
+                if re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", content, re.IGNORECASE):
+                    self.store.link_memory_entity(
+                        memory_id=memory_id, entity_id=entity.id,
+                        workspace_id=workspace_id, repo_id=repo_id,
+                        source_kind="text_mention", confidence=0.8,
+                        valid_from=valid_from, commit=False,
+                    )
+            self.store.conn.commit()
+        except Exception:
+            # ``link_memory_entity(..., commit=False)`` opens a transaction. Never
+            # leave a failed best-effort graph enrichment transaction pinned to this
+            # thread: it could be committed by an unrelated later write.
+            if (owns_transaction
+                    and self.store.conn.transaction_owned_by_current_thread()):
+                self.store.conn.rollback()
+
     def _evolve(self, new_id: str, neighbors: list, *, exclude: Optional[set] = None) -> list[str]:
         """A-MEM-style memory evolution on write: a new memory
         auto-links to its closest still-live neighbors and gives them a small
@@ -663,7 +798,10 @@ class MemoryEngine:
 
     def _resolve_against_neighbors(self, text: str, vec: np.ndarray, *, workspace_id: str,
                                    repo_id: Optional[str], session_id: Optional[str],
-                                   scope: Scope, mtype: MemoryType, candidate_k: int):
+                                   scope: Scope, mtype: MemoryType, candidate_k: int,
+                                   subject_key: str = "", claim_kind: str = "",
+                                   valid_at: Optional[float] = None,
+                                   content: Optional[str] = None):
         """Fetch same-scope neighbors via the vector index and run the deterministic
         resolver (``core.resolve``). Returns ``(decision, neighbors)`` so the caller can
         also evolve the neighborhood. Never raises — a broken/missing index degrades to
@@ -671,23 +809,58 @@ class MemoryEngine:
         flt = SearchFilter(
             workspace_id=workspace_id, repo_id=repo_id,
             session_id=session_id if scope == Scope.SESSION else None,
-            scopes=[scope], mtypes=[mtype],
+            scopes=[scope], mtypes=[mtype], valid_at=valid_at,
         )
         try:
             hits = self.index.search(vec, candidate_k, filter=flt)
         except Exception:
-            return None, []
-        now = now_ts()
+            hits = []
+        current_fallback = False
+        if not hits and valid_at is not None:
+            # A candidate may be backdated before an already-recorded claim. That claim
+            # is intentionally outside the candidate's valid-time view, but it still
+            # has to be found so the caller can reject an impossible supersession rather
+            # than silently creating overlapping history. This fallback is only a guard
+            # for an otherwise-empty temporal neighborhood; normal scheduled resolution
+            # remains anchored at the candidate's validity time above.
+            current_filter = SearchFilter(
+                workspace_id=workspace_id, repo_id=repo_id,
+                session_id=session_id if scope == Scope.SESSION else None,
+                scopes=[scope], mtypes=[mtype],
+            )
+            try:
+                hits = self.index.search(vec, candidate_k, filter=current_filter)
+                current_fallback = True
+            except Exception:
+                pass
         neighbors = []
         for nid, sim in hits:
             nrec = self.store.get_memory(nid)
             if (nrec and nrec.workspace_id == workspace_id and nrec.repo_id == repo_id
                     and nrec.scope == scope and nrec.mtype == mtype
                     and (scope != Scope.SESSION or nrec.session_id == session_id)
-                    and nrec.expired_at is None
-                    and (nrec.valid_to is None or nrec.valid_to > now)):
+                    and (memory_matches_filter(nrec, flt)
+                         or (current_fallback and nrec.expired_at is None
+                             and nrec.valid_to is None))):
                 neighbors.append((sim, nrec))
-        return resolve(text, neighbors), neighbors
+        if valid_at is not None and subject_key:
+            # The vector search above is intentionally anchored at the candidate's world
+            # time.  Its top-K may still be non-empty with unrelated facts, so a fallback
+            # conditioned on ``not hits`` is not sufficient for a keyed claim: always add
+            # the exact current identity as a chronology guard.
+            known_ids = {rec.id for _, rec in neighbors}
+            for record in self.store.list_live_claims(
+                workspace_id=workspace_id, repo_id=repo_id,
+                session_id=session_id if scope == Scope.SESSION else None,
+                scope=scope, mtype=mtype, subject_key=subject_key,
+                claim_kind=claim_kind,
+            ):
+                if record.id not in known_ids:
+                    neighbors.append((1.0, record))
+        return resolve(
+            text, neighbors, subject_key=subject_key, claim_kind=claim_kind,
+            candidate_content=content,
+        ), neighbors
 
     # ── ingest: extract-then-remember ───────────────────────────────────────────
     def ingest(self, text: str, *, workspace_id: str, repo_id: Optional[str] = None,
@@ -767,7 +940,9 @@ class MemoryEngine:
     # ── read ──────────────────────────────────────────────────────────────────
     def _recall_filter(self, *, workspace_id: Optional[str], repo_id: Optional[str],
                        session_id: Optional[str], scopes: Optional[list],
-                       mtypes: Optional[list], as_of: Optional[float]) -> SearchFilter:
+                       mtypes: Optional[list], as_of: Optional[float],
+                       valid_at: Optional[float] = None,
+                       known_at: Optional[float] = None) -> SearchFilter:
         """Build an ancestor-aware filter, resolving a session's parent repo in core.
 
         The service performs the same validation for friendly error payloads, but direct
@@ -785,25 +960,40 @@ class MemoryEngine:
             repo_id = repo_id or session.get("repo_id")
         return SearchFilter(
             workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
-            scopes=scopes, mtypes=mtypes, as_of=as_of, include_ancestors=True,
+            scopes=scopes, mtypes=mtypes, as_of=as_of, valid_at=valid_at,
+            known_at=known_at, include_ancestors=True,
         )
 
     def recall(self, query: str, *, workspace_id: Optional[str] = None,
                repo_id: Optional[str] = None, session_id: Optional[str] = None,
                scopes: Optional[list] = None,
                mtypes: Optional[list] = None, as_of: Optional[float] = None,
-               k: int = 8) -> RecallResult:
+               valid_at: Optional[float] = None, known_at: Optional[float] = None,
+               k: int = 8, token_budget: Optional[int] = None,
+               retrieval_profile: str = "balanced", diagnostics: bool = False,
+               reinforce: bool = False) -> RecallResult:
         flt = self._recall_filter(
             workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
-            scopes=scopes, mtypes=mtypes, as_of=as_of,
+            scopes=scopes, mtypes=mtypes, as_of=as_of, valid_at=valid_at,
+            known_at=known_at,
         )
-        return self.recall_engine.recall(query, flt, k=k)
+        # Recall is observational unless the caller has an explicit use signal.
+        # Historical inspection is always observational: reinforcement would make a
+        # past reconstruction alter future ranking.
+        return self.recall_engine.recall(
+            query, flt, k=k, reinforce=bool(reinforce) and not flt.historical,
+            token_budget=token_budget, retrieval_profile=retrieval_profile,
+            diagnostics=diagnostics,
+        )
 
     def grounded_recall(self, query: str, *, workspace_id: Optional[str] = None,
                         repo_id: Optional[str] = None, session_id: Optional[str] = None,
                         scopes: Optional[list] = None,
                         mtypes: Optional[list] = None, as_of: Optional[float] = None,
+                        valid_at: Optional[float] = None, known_at: Optional[float] = None,
                         k: int = 8, llm=None, min_support: Optional[float] = None,
+                        token_budget: Optional[int] = None,
+                        retrieval_profile: str = "balanced", diagnostics: bool = False,
                         max_citations: int = 5, reinforce: bool = True):
         """Recall, then answer *strictly from* what was recalled — with citations and an
         explicit abstain when the evidence is too weak (``core.grounded``). Offline and
@@ -817,23 +1007,28 @@ class MemoryEngine:
         from engraphis.core import grounded as _grounded
         flt = self._recall_filter(
             workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
-            scopes=scopes, mtypes=mtypes, as_of=as_of,
+            scopes=scopes, mtypes=mtypes, as_of=as_of, valid_at=valid_at,
+            known_at=known_at,
         )
         # Recall without reinforcing here: a grounded read should reward only the memories
         # it actually cites, and an abstain should reward nothing — don't reinforce the
         # irrelevant nearest-neighbours an off-topic query happened to surface.
-        result = self.recall_engine.recall(query, flt, k=k, reinforce=False)
+        result = self.recall_engine.recall(
+            query, flt, k=k, reinforce=False, token_budget=token_budget,
+            retrieval_profile=retrieval_profile, diagnostics=diagnostics,
+        )
         floor = _grounded.GROUNDED_SUPPORT_FLOOR if min_support is None else min_support
         answer = _grounded.build_grounded_answer(query, result, self.embedder, llm=llm,
                                                  min_support=floor, max_citations=max_citations)
-        if reinforce and answer.grounded:
+        if reinforce and not flt.historical and answer.grounded:
             for cite in answer.citations:
                 if cite.get("id"):
                     self.store.reinforce(cite["id"], boost=scoring.INTERACTION_BOOST["recall"])
         return answer
 
     def why(self, query: str, *, workspace_id: str, repo_id: Optional[str] = None,
-            k: int = 5) -> dict:
+            k: int = 5, valid_at: Optional[float] = None,
+            known_at: Optional[float] = None) -> dict:
         """Rationale + history for a decision or fact: the live
         answer, plus whatever it superseded, if anything. This is the bi-temporal "why"
         that a flat-namespace store (or a plain vector store) cannot answer — the
@@ -841,6 +1036,7 @@ class MemoryEngine:
         """
         flt = SearchFilter(
             workspace_id=workspace_id, repo_id=repo_id, include_ancestors=True,
+            valid_at=valid_at, known_at=known_at,
         )
         live = [r for _, r in self._relatedness(query, flt, include_invalid=False)[:k]]
         history: list[MemoryRecord] = []
@@ -857,12 +1053,14 @@ class MemoryEngine:
         return {"answer": live, "supersedes": history}
 
     def timeline(self, query: str, *, workspace_id: str, repo_id: Optional[str] = None,
-                limit: int = 20) -> list[MemoryRecord]:
+                limit: int = 20, valid_at: Optional[float] = None,
+                known_at: Optional[float] = None) -> list[MemoryRecord]:
         """Chronological, bi-temporal history of a fact: what we believed and when.
         Includes invalidated versions; sorted by ``valid_from``.
         """
         flt = SearchFilter(
             workspace_id=workspace_id, repo_id=repo_id, include_ancestors=True,
+            valid_at=valid_at, known_at=known_at,
         )
         recs = [r for _, r in self._relatedness(query, flt, include_invalid=True)[:limit]]
         recs.sort(key=lambda r: r.valid_from or r.ingested_at or 0.0)
@@ -884,7 +1082,16 @@ class MemoryEngine:
             sem[mid] = float(np.dot(qn, vec))
         q_tokens = tokenize(query)
         out: list[tuple[float, MemoryRecord]] = []
-        for rec in self.store.list_memories(flt, include_invalid=include_invalid, limit=500):
+        records = self.store.list_memories(flt, include_invalid=include_invalid, limit=500)
+        if include_invalid and flt.known_at is not None:
+            # History must retain closed valid-time intervals, but cannot expose a
+            # record that was not known at the requested system-time snapshot.
+            records = [
+                rec for rec in records
+                if (rec.ingested_at is None or rec.ingested_at <= flt.known_at)
+                and (rec.expired_at is None or flt.known_at < rec.expired_at)
+            ]
+        for rec in records:
             lex = jaccard(q_tokens, tokenize(f"{rec.title} {rec.content}"))
             score = max(sem.get(rec.id, 0.0), lex)
             if score > 0.05:
@@ -931,10 +1138,8 @@ class MemoryEngine:
         if self.store.get_memory(memory_id) is None:
             raise KeyError(f"no memory with id '{memory_id}'")
         self.store.close_validity(memory_id, actor=actor, reason=reason or "forgotten by request")
-        try:
-            self.index.delete([memory_id])
-        except Exception:
-            pass
+        # Preserve the vector for explicit historical/as_of recall. Temporal filtering
+        # keeps this retired row out of the current live view.
         return {"id": memory_id, "status": "forgotten", "reason": reason}
 
     def pin(self, memory_id: str, *, pinned: bool = True, actor: str = "user") -> dict:
@@ -980,10 +1185,8 @@ class MemoryEngine:
         if old.pinned:
             self.store.set_pinned(new_id, True)
         self.store.close_validity(memory_id, actor=actor, reason=reason or "corrected")
-        try:
-            self.index.delete([memory_id])
-        except Exception:
-            pass
+        # The old vector is historical evidence; SearchFilter validity hides it from
+        # current recall while keeping semantic time travel complete.
         return {"id": new_id, "superseded": [memory_id], "reason": reason}
 
     def promote(self, memory_id: str, target_scope: Scope, *, reason: str = "",
@@ -1096,10 +1299,7 @@ class MemoryEngine:
             old.id, actor=actor,
             reason=reason or f"promoted from {old.scope.value} to {target_scope.value}",
         )
-        try:
-            self.index.delete([old.id])
-        except Exception:
-            pass
+        # Preserve the source vector for historical/as_of inspection.
         if not self.store.has_link(promoted_id, old.id, relation="promotes"):
             self.store.add_link(
                 promoted_id, old.id, "promotes", reason=reason or "scope promotion"
@@ -1207,10 +1407,7 @@ class MemoryEngine:
         for r in sources:
             self.store.close_validity(r.id, actor=actor,
                                       reason=reason or "merged into a combined memory")
-            try:
-                self.index.delete([r.id])
-            except Exception:
-                pass
+            # Preserve source vectors for historical/as_of retrieval.
         # Linking/auditing stays a separate pass so the audit trail keeps its original
         # shape: every source's invalidate entry, then every source's merge entry.
         for r in sources:
@@ -1434,9 +1631,12 @@ class MemoryEngine:
         """Symbol-graph + lexical code search — far cheaper than
         dumping files for structural questions, and (via ``called_by``) answers "what
         breaks if I change X" directly from the call graph."""
-        symbols = self.store.search_symbols(repo_id, query, limit=limit)
+        self._validate_code_filter(repo_id, flt)
+        symbols = self.store.search_symbols(repo_id, query, limit=limit, flt=flt)
         for s in symbols:
-            s["called_by"] = self.store.get_symbol_callers(repo_id, s["name"], limit=10)
+            s["called_by"] = self.store.get_symbol_callers(
+                repo_id, s["name"], limit=10, flt=flt
+            )
             s["linked_memories"] = self.store.memories_for_symbol(
                 repo_id, s["id"], flt=flt, limit=10
             )
@@ -1523,10 +1723,6 @@ class MemoryEngine:
             )
             if not records:
                 break
-            memory_ids = [record.id for record in records]
-            self.store.clear_code_memory_links_for_memories(
-                repo_id, memory_ids, commit=False,
-            )
             linked_per_memory = {record.id: 0 for record in records}
             symbol_cursor: Optional[tuple[str, str, str]] = None
             while True:
@@ -1562,8 +1758,9 @@ class MemoryEngine:
     def code_path(self, source: str, target: str, *, repo_id: str,
                   max_depth: int = 8, flt: Optional[SearchFilter] = None) -> dict:
         """Shortest path across definitions, calls, imports, and symbol aliases."""
-        symbols = self.store.list_symbols(repo_id)
-        stored_edges = self.store.list_code_edges(repo_id)
+        self._validate_code_filter(repo_id, flt)
+        symbols = self.store.list_symbols(repo_id, flt=flt)
+        stored_edges = self.store.list_code_edges(repo_id, flt=flt)
         adjacency: dict[str, list[tuple[str, dict, bool]]] = defaultdict(list)
         node_meta: dict[str, dict] = {}
         for sym in symbols:
@@ -1586,13 +1783,7 @@ class MemoryEngine:
             node_meta.setdefault(src, {"kind": "code", "name": src})
             node_meta.setdefault(dst, {"kind": "code", "name": dst})
         symbol_by_id = {symbol["id"]: symbol for symbol in symbols}
-        now = now_ts()
         for link in self.store.list_code_memory_links(repo_id, flt=flt):
-            if link.get("expired_at") is not None:
-                continue
-            valid_to = link.get("valid_to")
-            if valid_to is not None and now >= float(valid_to):
-                continue
             symbol = symbol_by_id.get(link.get("symbol_id"))
             if not symbol or not link.get("memory_id"):
                 continue
@@ -1705,15 +1896,17 @@ class MemoryEngine:
 
     def analyze_code_graph(self, *, repo_id: str,
                            limit: Optional[int] = None,
-                           edge_limit: Optional[int] = None) -> dict:
+                           edge_limit: Optional[int] = None,
+                           flt: Optional[SearchFilter] = None) -> dict:
         """Deterministic weighted communities, hotspots, and cross-file connections.
 
         ``limit``/``edge_limit`` bound the symbol/edge fetch. They default to ``None``
         (unbounded) so ``analyze_impact`` keeps today's exact answer; ``export_code_graph``
         passes its own caps because that payload is reachable by a ``viewer``.
         """
-        edges = self.store.list_code_edges(repo_id, limit=edge_limit)
-        symbols = self.store.list_symbols(repo_id, limit=limit)
+        self._validate_code_filter(repo_id, flt)
+        edges = self.store.list_code_edges(repo_id, limit=edge_limit, flt=flt)
+        symbols = self.store.list_symbols(repo_id, limit=limit, flt=flt)
         adjacency: dict[str, dict[str, float]] = defaultdict(dict)
         degree: dict[str, int] = defaultdict(int)
         for edge in edges:
@@ -1814,6 +2007,7 @@ class MemoryEngine:
     def analyze_impact(self, changed_files: list[str], *, repo_id: str,
                        flt: Optional[SearchFilter] = None) -> dict:
         """Estimate graph and memory impact for a git diff / PR file list."""
+        self._validate_code_filter(repo_id, flt)
         normalized = []
         seen = set()
         for file in changed_files:
@@ -1825,12 +2019,12 @@ class MemoryEngine:
             if rel and rel not in seen:
                 seen.add(rel)
                 normalized.append(rel)
-        symbols = self.store.symbols_for_files(repo_id, normalized)
+        symbols = self.store.symbols_for_files(repo_id, normalized, flt=flt)
         touched_names = {
             name for sym in symbols for name in (sym.get("name"), sym.get("fqname")) if name
         }
         touched_leaf_names = {str(name).split(".")[-1] for name in touched_names}
-        edges = self.store.list_code_edges(repo_id)
+        edges = self.store.list_code_edges(repo_id, flt=flt)
         inbound = [
             edge for edge in edges
             if edge.get("dst") in touched_names
@@ -1844,13 +2038,7 @@ class MemoryEngine:
 
         memory_mentions: dict[str, dict] = {}
         touched_symbol_ids = {symbol["id"] for symbol in symbols}
-        now = now_ts()
         for link in self.store.list_code_memory_links(repo_id, flt=flt):
-            if link.get("expired_at") is not None:
-                continue
-            valid_to = link.get("valid_to")
-            if valid_to is not None and now >= float(valid_to):
-                continue
             if link.get("symbol_id") not in touched_symbol_ids:
                 continue
             item = memory_mentions.setdefault(
@@ -1881,7 +2069,7 @@ class MemoryEngine:
                 )
                 item["symbols"].append(name)
 
-        analysis = self.analyze_code_graph(repo_id=repo_id)
+        analysis = self.analyze_code_graph(repo_id=repo_id, flt=flt)
         node_community = analysis.pop("_node_community")
         communities_affected = sorted({
             node_community[name] for name in touched_names if name in node_community
@@ -1940,16 +2128,17 @@ class MemoryEngine:
         """
         limit = max(1, min(CODE_EXPORT_MAX_LIMIT, int(limit)))
         edge_cap = max(limit * 8, 2_000)
+        self._validate_code_filter(repo_id, flt)
         analysis = self.analyze_code_graph(repo_id=repo_id, limit=limit,
-                                           edge_limit=edge_cap)
+                                           edge_limit=edge_cap, flt=flt)
         analysis.pop("_node_community", None)
         # Fetch one sentinel row beyond the payload cap so truncation stays observable
         # without materializing every indexed file in a large repository.
-        files = self.store.list_code_files(repo_id, limit=limit + 1)
+        files = self.store.list_code_files(repo_id, flt=flt, limit=limit + 1)
         truncated_files = len(files) > limit
         files = files[:limit]
-        nodes = self.store.list_symbols(repo_id, limit=limit)
-        edges = self.store.list_code_edges(repo_id, limit=edge_cap)
+        nodes = self.store.list_symbols(repo_id, limit=limit, flt=flt)
+        edges = self.store.list_code_edges(repo_id, limit=edge_cap, flt=flt)
         memory_links = self.store.list_code_memory_links(
             repo_id, flt=flt, limit=edge_cap
         )
@@ -1969,6 +2158,28 @@ class MemoryEngine:
             "memory_links": memory_links,
             "analysis": analysis,
         }
+
+    def _validate_code_filter(
+        self, repo_id: str, flt: Optional[SearchFilter]
+    ) -> None:
+        """Reject inconsistent repo/workspace filters before any code row is read.
+
+        Code-history tables are keyed by ``repo_id`` rather than duplicating a
+        workspace column. Without this check, a direct engine caller could pair a
+        workspace-A filter with a workspace-B repo id and receive B's symbols even
+        though memory reads correctly returned nothing.
+        """
+        if flt is None:
+            return
+        if flt.repo_id is not None and flt.repo_id != repo_id:
+            raise ValueError("code filter repo_id does not match the requested repo")
+        if flt.workspace_id is None:
+            return
+        row = self.store.conn.execute(
+            "SELECT workspace_id FROM repos WHERE id=?", (repo_id,)
+        ).fetchone()
+        if row is None or row["workspace_id"] != flt.workspace_id:
+            raise ValueError("code filter workspace_id does not own the requested repo")
 
     def code_graph_report(self, *, repo_id: str, payload: Optional[dict] = None,
                           flt: Optional[SearchFilter] = None) -> str:

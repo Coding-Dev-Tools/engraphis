@@ -51,6 +51,24 @@ def test_grounded_abstains_off_topic():
     assert ans.reason
 
 
+def test_grounded_abstains_when_distractor_shares_only_a_topic_keyword():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    eng.remember(
+        "The office kitchen orders sourdough every Friday.",
+        workspace_id=wid,
+        repo_id=rid,
+    )
+
+    ans = eng.grounded_recall(
+        "How do I bake sourdough bread?", workspace_id=wid, repo_id=rid,
+    )
+
+    assert ans.abstained and not ans.grounded
+    assert ans.support < GROUNDED_SUPPORT_FLOOR
+
+
 def test_grounded_abstains_on_empty_store():
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")
@@ -145,6 +163,7 @@ def test_service_grounded_recall_shape():
     svc.remember("We use PASETO for auth.", workspace="acme", repo="backend", title="auth")
     out = svc.grounded_recall("which auth scheme did we standardise on?", workspace="acme", repo="backend")
     assert {"query", "grounded", "abstained", "answer", "support", "citations"} <= set(out)
+    assert out["receipt"]["operation"] == "grounded_recall"
 
 
 def test_service_grounded_recall_unknown_workspace_is_soft():
@@ -256,6 +275,108 @@ def test_llm_prose_without_citation_falls_back_to_extractive():
     assert ans.grounded and ans.synthesized is False
     assert "paseto" in ans.answer.lower()                    # the real, cited evidence
     assert "kerberos" not in ans.answer.lower()              # uncited prose rejected
+
+
+def test_llm_prose_with_any_out_of_range_citation_falls_back_to_extractive():
+    eng, wid, rid = _engine_with_facts()
+    ans = eng.grounded_recall(
+        "which auth scheme did we standardise on?",
+        workspace_id=wid,
+        repo_id=rid,
+        llm=_FakeLLM("PASETO is supported by [1], while Kerberos is supported by [99]."),
+    )
+    assert ans.grounded and ans.synthesized is False
+    assert "kerberos" not in ans.answer.lower()
+
+
+def test_llm_invented_fact_with_valid_marker_falls_back_to_extractive():
+    # A valid [1] marker alone is not evidence for the generated claim.
+    eng, wid, rid = _engine_with_facts()
+    ans = eng.grounded_recall(
+        "which auth scheme did we standardise on?",
+        workspace_id=wid,
+        repo_id=rid,
+        llm=_FakeLLM("Invented fact [1]."),
+    )
+    assert ans.grounded and ans.synthesized is False
+    assert "invented fact" not in ans.answer.lower()
+    assert "paseto" in ans.answer.lower()
+
+
+def test_llm_reordered_source_tokens_cannot_reverse_the_grounded_claim():
+    eng, wid, rid = _engine_with_facts()
+    generated = "We standardised on JWT tokens for auth, replacing PASETO [1]."
+
+    ans = eng.grounded_recall(
+        "which auth scheme did we standardise on?",
+        workspace_id=wid,
+        repo_id=rid,
+        llm=_FakeLLM(generated),
+    )
+
+    assert ans.grounded and ans.synthesized is False
+    assert ans.answer != generated
+    assert "paseto tokens for auth, replacing jwt" in ans.answer.lower()
+
+
+def test_llm_uncited_second_sentence_falls_back_even_when_its_words_are_in_source():
+    eng, wid, rid = _engine_with_facts()
+    generated = "PASETO, per source [1]. JWT tokens."
+    ans = eng.grounded_recall(
+        "which auth scheme did we standardise on?",
+        workspace_id=wid,
+        repo_id=rid,
+        llm=_FakeLLM(generated),
+    )
+    assert ans.grounded and ans.synthesized is False
+    assert ans.answer != generated
+
+
+def test_tiny_budget_cannot_ground_from_raw_unpacked_memory():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    eng.remember(
+        "PASETO authenticates API requests. " + "Unpacked private detail. " * 500,
+        workspace_id=wid,
+        repo_id=rid,
+    )
+
+    ans = eng.grounded_recall(
+        "How are API requests authenticated?",
+        workspace_id=wid,
+        repo_id=rid,
+        min_support=0.0,
+        token_budget=1,
+    )
+
+    assert ans.abstained and not ans.grounded
+    assert ans.answer == "" and ans.citations == []
+    assert ans.packed_sources == []
+    assert ans.usage["answer_tokens"] == 0
+
+
+@pytest.mark.parametrize("min_support", [float("nan"), -0.1, 1.1])
+def test_grounded_recall_rejects_invalid_support_thresholds(min_support):
+    eng, wid, rid = _engine_with_facts()
+    with pytest.raises(ValueError, match="min_support"):
+        eng.grounded_recall(
+            "which auth scheme did we standardise on?",
+            workspace_id=wid,
+            repo_id=rid,
+            min_support=min_support,
+        )
+
+
+def test_grounded_recall_rejects_zero_citation_budget():
+    eng, wid, rid = _engine_with_facts()
+    with pytest.raises(ValueError, match="max_citations"):
+        eng.grounded_recall(
+            "which auth scheme did we standardise on?",
+            workspace_id=wid,
+            repo_id=rid,
+            max_citations=0,
+        )
 
 
 def test_llm_abstain_sentinel_has_no_citations():

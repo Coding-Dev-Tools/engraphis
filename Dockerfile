@@ -17,8 +17,9 @@ ENV PYTHONUNBUFFERED=1 \
     # ONCE, not on every cold container. A fresh in-container download blocks startup and
     # can lose the healthcheck race; caching on the volume makes subsequent boots instant.
     HF_HOME=/data/.cache/huggingface \
-    # Customer license / trial / machine-id / lease state. Kept on the /data volume
-    # (not the container's ephemeral home) so activation and device binding survive.
+    # Customer-side cloud session and entitlement display cache. Keep it on /data rather
+    # than the container's ephemeral home so reconnects do not lose rotated credentials.
+    # License issuance, trial state, leases, and revocations remain private services.
     ENGRAPHIS_STATE_DIR=/data/.engraphis
 
 WORKDIR /app

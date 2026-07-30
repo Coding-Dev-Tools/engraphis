@@ -440,6 +440,12 @@ def _declared_entitlement(response: object) -> dict:
         return {}
     plan = plan.strip().lower()[:_MAX_PLAN_CHARS]
     active = response.get("cloud_access_active")
+    # Compatibility is for an *omitted* field from a control plane that predates this
+    # disclosure.  An explicitly malformed field is not an older-server response: treating
+    # ``"false"`` (or ``0``) as absent would take the optimistic compatibility path and
+    # render a paid entitlement live.  Keep the last good persisted answer instead.
+    if "cloud_access_active" in response and not isinstance(active, bool):
+        return {}
     named = response.get("status")
     named = named.strip().lower() if isinstance(named, str) else ""
     declared = {
@@ -916,5 +922,25 @@ def access_for_workspace(
                     if key not in declared:
                         updated.pop(key, None)
         updated.update(declared)
-        _save(updated)
+        try:
+            _save(updated)
+        except (OSError, RuntimeError) as exc:
+            # The control plane has already consumed ``refresh``.  Leaving that stale
+            # value usable after a local write fault makes the next request replay it,
+            # which can revoke the credential family.  Retire it in memory first (so this
+            # process cannot replay it even when the state mount remains broken), then
+            # make a best-effort persisted retirement for a fault that was transient.
+            # The original write is deliberately never retried: it contains a replacement
+            # credential that may have reached disk only partially on an exotic mount.
+            _UNUSABLE_REFRESHES.add(_refresh_identity(refresh))
+            try:
+                _mark_refresh_unusable(saved, refresh)
+            except Exception:  # noqa: BLE001 - the state store is already failing
+                pass
+            raise CloudSessionError(
+                "Engraphis Cloud refreshed this session but the rotated credential "
+                "could not be saved. Connect this installation again.",
+                status=409,
+                refresh_unusable=True,
+            ) from exc
         return access, organization_id, compute

@@ -134,3 +134,17 @@ def test_vendor_authority_is_not_shipped_in_the_public_tree():
     assert (ROOT / "engraphis/hosted_client.py").is_file()
     assert (ROOT / "engraphis/cloud_session.py").is_file()
     assert (ROOT / "engraphis/backends/sync_relay.py").is_file()
+
+
+def test_container_examples_do_not_describe_private_license_or_relay_state_as_local():
+    """Compose must not imply that this customer image runs the private authority."""
+
+    dockerfile = _text("Dockerfile")
+    compose = _text("docker-compose.yml")
+    combined = dockerfile + "\n" + compose
+
+    assert "license/trial/machine-id/lease" not in combined
+    assert "revocation registry" not in combined
+    assert "ENGRAPHIS_RELAY_DB" not in combined
+    assert "cloud session" in combined
+    assert "Issuance, trial state, leases, and revocations stay private." in compose

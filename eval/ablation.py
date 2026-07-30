@@ -10,6 +10,7 @@ both modes may saturate — the point is the measurement scaffold.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
 from engraphis.backends.reranker import IdentityReranker
@@ -20,7 +21,9 @@ from eval import metrics
 from eval.harness import load_dataset
 
 
-def _seed_graph(store: Store, *, workspace_id: str, repo_id: str, case: dict) -> None:
+def _seed_graph(
+    store: Store, *, workspace_id: str, repo_id: str, case: dict,
+) -> dict[str, str]:
     """Persist readable dataset edges with the entity IDs returned by the store."""
     entity_ids: dict[str, str] = {}
     for entity in case.get("entities", []):
@@ -42,9 +45,39 @@ def _seed_graph(store: Store, *, workspace_id: str, repo_id: str, case: dict) ->
             relation=(edge[2] if len(edge) > 2 else "rel"),
             workspace_id=workspace_id, repo_id=repo_id,
         ))
+    return entity_ids
 
 
-def _score(dataset: list[dict], *, k: int, hybrid: bool, graph_mode: str = "ppr") -> float:
+def _link_fixture_mentions(
+    store: Store,
+    *,
+    memory_id: str,
+    text: str,
+    entity_ids: dict[str, str],
+    workspace_id: str,
+    repo_id: str,
+) -> None:
+    """Materialize the same exact-mention incidence used by production writes."""
+    for name, entity_id in entity_ids.items():
+        if re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", text, re.IGNORECASE):
+            store.link_memory_entity(
+                memory_id=memory_id,
+                entity_id=entity_id,
+                workspace_id=workspace_id,
+                repo_id=repo_id,
+                source_kind="eval_fixture",
+                confidence=1.0,
+            )
+
+
+def _score(
+    dataset: list[dict],
+    *,
+    k: int,
+    hybrid: bool,
+    graph_mode: str = "ppr",
+    retrieval_profile: str = "balanced",
+) -> float:
     emb = DeterministicEmbedder(256)
     per = []
     for case in dataset:
@@ -54,17 +87,32 @@ def _score(dataset: list[dict], *, k: int, hybrid: bool, graph_mode: str = "ppr"
         index = NumpyVectorIndex(store)
         # Seed the entity graph when the case provides one (optional keys), so the graph
         # arm has something to walk — mirrors what production extraction populates.
-        _seed_graph(store, workspace_id=wid, repo_id=rid, case=case)
+        entity_ids = _seed_graph(store, workspace_id=wid, repo_id=rid, case=case)
         engine = RecallEngine(store, emb, index, IdentityReranker(), graph_mode=graph_mode)
         tag_by_id = {}
         for m in case["memories"]:
             mid = store.add_memory(MemoryRecord(
                 id="", content=m["text"], mtype=MemoryType.EPISODIC, scope=Scope.REPO,
                 workspace_id=wid, repo_id=rid, embedding=emb.embed([m["text"]])[0]))
+            _link_fixture_mentions(
+                store,
+                memory_id=mid,
+                text=m["text"],
+                entity_ids=entity_ids,
+                workspace_id=wid,
+                repo_id=rid,
+            )
             tag_by_id[mid] = m.get("tag")
         for q in case["questions"]:
             if hybrid:
-                ids = [c["id"] for c in engine.recall(q["q"], SearchFilter(workspace_id=wid), k=k).chunks]
+                ids = [
+                    c["id"] for c in engine.recall(
+                        q["q"],
+                        SearchFilter(workspace_id=wid),
+                        k=k,
+                        retrieval_profile=retrieval_profile,
+                    ).chunks
+                ]
             else:
                 ids = [i for i, _ in index.search(emb.embed([q["q"]])[0], k,
                                                    filter=SearchFilter(workspace_id=wid))]
@@ -89,7 +137,7 @@ def _arm_recall(dataset: list[dict], *, k: int, arm: str) -> float:
         wid = store.get_or_create_workspace("eval")
         rid = store.get_or_create_repo(wid, case.get("id", "c"))
         index = NumpyVectorIndex(store)
-        _seed_graph(store, workspace_id=wid, repo_id=rid, case=case)
+        entity_ids = _seed_graph(store, workspace_id=wid, repo_id=rid, case=case)
         mode = "1hop" if arm == "graph1hop" else "ppr"
         engine = RecallEngine(store, emb, index, IdentityReranker(), graph_mode=mode)
         tag_by_id = {}
@@ -97,6 +145,14 @@ def _arm_recall(dataset: list[dict], *, k: int, arm: str) -> float:
             mid = store.add_memory(MemoryRecord(
                 id="", content=m["text"], mtype=MemoryType.EPISODIC, scope=Scope.REPO,
                 workspace_id=wid, repo_id=rid, embedding=emb.embed([m["text"]])[0]))
+            _link_fixture_mentions(
+                store,
+                memory_id=mid,
+                text=m["text"],
+                entity_ids=entity_ids,
+                workspace_id=wid,
+                repo_id=rid,
+            )
             tag_by_id[mid] = m.get("tag")
         for q in case["questions"]:
             if arm == "vector":
@@ -127,6 +183,13 @@ def main() -> None:
         print(f"  vector arm   : {_arm_recall(mh, k=5, arm='vector')}")
         print(f"  graph 1-hop  : {_arm_recall(mh, k=5, arm='graph1hop')}   (reaches 1 hop only)")
         print(f"  graph PPR    : {_arm_recall(mh, k=5, arm='graphppr')}   (multi-hop walk)")
+        print("\nEngraphis retrieval-policy fixture — recall@5")
+        print(f"  balanced     : {_score(mh, k=5, hybrid=True)}")
+        print(
+            "  auto         : "
+            f"{_score(mh, k=5, hybrid=True, retrieval_profile='auto')} "
+            "(opt-in graph specialization)"
+        )
 
 
 if __name__ == "__main__":

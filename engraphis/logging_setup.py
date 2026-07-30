@@ -14,6 +14,8 @@ import logging
 import os
 import time
 
+from engraphis.observability import redact, redact_json_value
+
 _PLAIN_FORMAT = "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
 
 # Attributes present on every LogRecord — everything else came in via ``extra=``.
@@ -31,13 +33,16 @@ class JsonFormatter(logging.Formatter):
                   + ".%03dZ" % (record.msecs,),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": redact(record.getMessage()),
         }
         for key, value in record.__dict__.items():
             if key not in _RESERVED and not key.startswith("_"):
-                payload[key] = value
+                # Use the same field-name-aware path as nested mappings: a bare
+                # ``extra={"refresh_credential": ...}`` otherwise has no adjacent
+                # text for the value-level credential recognizer to rely on.
+                payload[key] = redact_json_value({key: value})[key]
         if record.exc_info:
-            payload["exc_info"] = self.formatException(record.exc_info)
+            payload["exc_info"] = redact(self.formatException(record.exc_info))
         return json.dumps(payload, ensure_ascii=False, default=str)
 
 

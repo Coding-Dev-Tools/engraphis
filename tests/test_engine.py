@@ -1,12 +1,13 @@
 import os
 import sqlite3
 import tempfile
+import time
 
 import pytest
 
 from engraphis.backends.vector_numpy import NumpyVectorIndex
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
+from engraphis.core.interfaces import MemoryRecord, MemoryType, Node, Scope, SearchFilter
 
 
 def test_engine_remember_and_recall():
@@ -19,6 +20,72 @@ def test_engine_remember_and_recall():
     res = eng.recall("how do we deploy?", workspace_id=wid, k=2)
     assert res.count >= 1
     assert "actions" in res.context.lower() or "aws" in res.context.lower()
+
+
+def test_entity_incidence_includes_title_only_mentions_on_write_and_backfill():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    fresh_entity = eng.store.upsert_entity(Node(
+        id="", name="Apollo", ntype="project", workspace_id=wid,
+    ))
+    fresh = eng.remember(
+        "The body intentionally contains no project name.",
+        title="Apollo launch status", workspace_id=wid, resolve_conflicts=False,
+    )
+    legacy = eng.remember(
+        "The body intentionally contains no program name.",
+        title="Beacon migration status", workspace_id=wid, resolve_conflicts=False,
+    )
+    legacy_entity = eng.store.upsert_entity(Node(
+        id="", name="Beacon", ntype="project", workspace_id=wid,
+    ))
+
+    incidence = eng.store.list_memory_entities(SearchFilter(workspace_id=wid))
+    pairs = {(row["memory_id"], row["entity_id"]) for row in incidence}
+    assert (fresh, fresh_entity) in pairs
+    assert (legacy, legacy_entity) in pairs
+
+
+def test_repo_memory_links_existing_workspace_entity_on_write():
+    """A repo write must see the workspace ancestor entity already in scope."""
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    entity_id = eng.store.upsert_entity(Node(
+        id="", name="Apollo", ntype="project", workspace_id=wid,
+    ))
+
+    memory_id = eng.remember(
+        "Apollo owns the release calendar.",
+        workspace_id=wid, repo_id=rid, resolve_conflicts=False,
+    )
+
+    rows = eng.store.list_memory_entities(SearchFilter(
+        workspace_id=wid, repo_id=rid, include_ancestors=True,
+    ))
+    assert (memory_id, entity_id) in {
+        (row["memory_id"], row["entity_id"]) for row in rows
+    }
+
+
+def test_engine_recall_requires_explicit_reinforcement_signal():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    mid = eng.remember("The deployment target is AWS ECS.", workspace_id=wid, repo_id=rid)
+    before = eng.store.get_memory(mid).access_count
+
+    eng.recall("unrelated lunch menu", workspace_id=wid, repo_id=rid, k=1)
+    assert eng.store.get_memory(mid).access_count == before
+
+    eng.recall(
+        "deployment target",
+        workspace_id=wid,
+        repo_id=rid,
+        k=1,
+        reinforce=True,
+    )
+    assert eng.store.get_memory(mid).access_count > before
 
 
 def test_index_upsert_failure_preserves_memory_and_audits(caplog):
@@ -302,6 +369,9 @@ def test_forget_invalidates_without_deleting():
     eng.forget(mid, reason="no longer true")
     assert mid not in [m.id for m in eng.store.list_memories(SearchFilter(workspace_id=wid))]
     assert eng.store.get_memory(mid) is not None      # not hard-deleted
+    assert eng.store.conn.execute(
+        "SELECT 1 FROM mem_vectors WHERE id=?", (mid,)
+    ).fetchone() is not None
 
 
 def test_forget_unknown_id_raises():
@@ -343,6 +413,9 @@ def test_correct_supersedes_without_deleting():
     assert new_rec.metadata.get("corrects") == mid
     live_ids = [m.id for m in eng.store.list_memories(SearchFilter(workspace_id=wid))]
     assert mid not in live_ids and out["id"] in live_ids
+    assert eng.store.conn.execute(
+        "SELECT 1 FROM mem_vectors WHERE id=?", (mid,)
+    ).fetchone() is not None
 
 
 def test_promote_widens_scope_and_preserves_source_history_and_safety():
@@ -437,6 +510,211 @@ def test_timeline_orders_history_chronologically():
     hist = eng.timeline("rate limit", workspace_id=wid, repo_id=rid)
     assert len(hist) == 2
     assert hist[0].valid_from < hist[1].valid_from
+
+
+def test_why_and_timeline_history_respect_known_time_but_keep_closed_records():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    records = (
+        MemoryRecord(
+            id="", workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+            content="Launch history current policy", valid_from=1.0, ingested_at=1.0,
+        ),
+        MemoryRecord(
+            id="", workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+            content="Launch history closed policy", valid_from=2.0, valid_to=3.0,
+            ingested_at=2.0,
+        ),
+        MemoryRecord(
+            id="", workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+            content="Launch history learned later", valid_from=4.0, valid_to=5.0,
+            ingested_at=200.0,
+        ),
+    )
+    for record in records:
+        eng.store.add_memory(record)
+
+    timeline = eng.timeline(
+        "launch history", workspace_id=wid, repo_id=rid, known_at=100.0,
+    )
+    why = eng.why(
+        "launch history", workspace_id=wid, repo_id=rid, known_at=100.0,
+    )
+
+    assert {record.content for record in timeline} == {
+        "Launch history current policy", "Launch history closed policy",
+    }
+    assert [record.content for record in why["supersedes"]] == [
+        "Launch history closed policy",
+    ]
+
+
+def test_temporal_supersession_closes_at_effective_time_and_keeps_vectors():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    old = eng.remember(
+        "The API rate limit is 100 requests per minute.",
+        workspace_id=wid,
+        repo_id=rid,
+        valid_from=1_000.0,
+    )
+    new = eng.remember(
+        "The API rate limit is 500 requests per minute.",
+        workspace_id=wid,
+        repo_id=rid,
+        valid_from=2_000.0,
+    )
+
+    assert eng.store.get_memory(old).valid_to == 2_000.0
+    assert eng.store.conn.execute(
+        "SELECT 1 FROM mem_vectors WHERE id=?", (old,)
+    ).fetchone() is not None
+    before = eng.recall_engine.recall(
+        "What is the API rate limit?",
+        SearchFilter(workspace_id=wid, repo_id=rid, as_of=1_500.0),
+        reinforce=False,
+    )
+    after = eng.recall_engine.recall(
+        "What is the API rate limit?",
+        SearchFilter(workspace_id=wid, repo_id=rid, as_of=2_500.0),
+        reinforce=False,
+    )
+    assert [chunk["id"] for chunk in before.chunks] == [old]
+    assert [chunk["id"] for chunk in after.chunks] == [new]
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), "not-a-time", True])
+def test_remember_rejects_non_finite_valid_from_without_writing(invalid):
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+
+    with pytest.raises(ValueError, match="valid_from must be a finite timestamp"):
+        eng.remember("A fact.", workspace_id=wid, valid_from=invalid)
+
+    assert eng.store.list_memories(SearchFilter(workspace_id=wid)) == []
+
+
+def test_backdated_supersession_is_rejected_without_creating_an_invalid_interval():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    old = eng.remember(
+        "The deployment window is Friday afternoon.",
+        workspace_id=wid,
+        valid_from=2_000.0,
+    )
+
+    with pytest.raises(ValueError, match="cannot predate"):
+        eng.remember(
+            "The deployment window is Thursday afternoon.",
+            workspace_id=wid,
+            valid_from=1_000.0,
+        )
+
+    assert eng.store.get_memory(old).valid_to is None
+    assert len(eng.store.list_memories(
+        SearchFilter(workspace_id=wid), include_invalid=True
+    )) == 1
+
+
+def test_backdated_keyed_claim_checks_its_current_identity_even_with_anchored_hits(monkeypatch):
+    """An unrelated anchored vector hit must not hide the current keyed claim guard."""
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    current = eng.remember(
+        "The deployment API limit is 500 requests per minute.",
+        workspace_id=wid, valid_from=2_000.0,
+        subject_key="deploy.api_limit", claim_kind="configured_value",
+    )
+    unrelated = eng.remember(
+        "The office has three meeting rooms.", workspace_id=wid,
+        valid_from=1_000.0, resolve_conflicts=False,
+    )
+    monkeypatch.setattr(
+        eng.index, "search", lambda *_args, **_kwargs: [(unrelated, 0.99)],
+    )
+
+    with pytest.raises(ValueError, match="cannot predate"):
+        eng.remember(
+            "The deployment API limit is 100 requests per minute.",
+            workspace_id=wid, valid_from=1_000.0,
+            subject_key="deploy.api_limit", claim_kind="configured_value",
+        )
+
+    assert eng.store.get_memory(current).valid_to is None
+    assert len(eng.store.list_memories(
+        SearchFilter(workspace_id=wid), include_invalid=True
+    )) == 2
+
+
+def test_backfilled_keyed_claim_splices_between_existing_validity_intervals():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    first = eng.remember_with_resolution(
+        "The deployment used the original operating mode.", workspace_id=wid,
+        subject_key="deploy.rollout_phase", claim_kind="configured_value",
+        valid_from=1_000.0,
+    )
+    later = eng.remember_with_resolution(
+        "The deployment rollout phase is beta release.", workspace_id=wid,
+        subject_key="deploy.rollout_phase", claim_kind="configured_value",
+        valid_from=3_000.0,
+    )
+    middle = eng.remember_with_resolution(
+        "The deployment rollout phase is beta.", workspace_id=wid,
+        subject_key="deploy.rollout_phase", claim_kind="configured_value",
+        valid_from=2_000.0,
+    )
+
+    assert later["op"] == middle["op"] == "invalidate"
+    assert middle["superseded"] == [first["id"]]
+    assert eng.store.get_memory(first["id"]).valid_to == 2_000.0
+    assert eng.store.get_memory(middle["id"]).valid_to == 3_000.0
+    assert eng.store.get_memory(later["id"]).valid_to is None
+
+
+def test_titled_keyed_claim_duplicate_is_a_noop_in_temporal_predecessor_path():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    first = eng.remember_with_resolution(
+        "The deployment window is Friday.", title="Deployment policy",
+        workspace_id=wid, subject_key="deploy.window", claim_kind="schedule",
+        valid_from=1_000.0,
+    )
+    duplicate = eng.remember_with_resolution(
+        "The deployment window is Friday.", title="Deployment policy",
+        workspace_id=wid, subject_key="deploy.window", claim_kind="schedule",
+        valid_from=1_000.0,
+    )
+
+    assert duplicate["op"] == "noop"
+    assert duplicate["id"] == first["id"]
+    assert len(eng.store.list_claim_history(
+        workspace_id=wid, repo_id=None, session_id=None, scope=Scope.WORKSPACE,
+        mtype=MemoryType.SEMANTIC, subject_key="deploy.window", claim_kind="schedule",
+    )) == 1
+
+
+def test_anchored_unkeyed_resolution_keeps_a_closed_historical_predecessor():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    first = eng.remember_with_resolution(
+        "The deployment rollout phase is alpha.", workspace_id=wid,
+        valid_from=1_000.0,
+    )
+    eng.remember_with_resolution(
+        "The deployment rollout phase is gamma.", workspace_id=wid,
+        valid_from=3_000.0,
+    )
+    backfilled = eng.remember_with_resolution(
+        "The deployment rollout phase is beta.", workspace_id=wid,
+        valid_from=2_000.0,
+    )
+
+    assert backfilled["op"] == "invalidate"
+    assert backfilled["superseded"] == [first["id"]]
+    assert eng.store.get_memory(first["id"]).valid_to == 2_000.0
 
 
 def test_recall_proactive_includes_last_session_handoff():
@@ -827,6 +1105,97 @@ def test_code_memory_paths_hide_forgotten_memories(tmp_path):
     assert eng.analyze_impact(["deploy.py"], repo_id=rid)["memory_mentions"] == []
 
 
+def test_code_search_and_memory_paths_honor_historical_anchors():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "sample")
+    eng.store.upsert_code_file(
+        repo_id=rid, file="old.py", lang="python", content_hash="old-file",
+        size_bytes=1, mtime_ns=1, backend="test",
+    )
+    symbol_id = eng.store.upsert_symbol(
+        repo_id=rid, kind="function", name="old_fn", fqname="old_fn",
+        file="old.py", span="1-1",
+    )
+    eng.store.add_code_edge(
+        repo_id=rid, src="caller", dst="old_fn", relation="calls",
+        file="old.py", line=2,
+    )
+    memory_id = eng.store.add_memory(MemoryRecord(
+        id="", content="old_fn used the historical path", title="old path",
+        workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+        valid_from=10.0, ingested_at=10.0,
+    ))
+    eng.store.link_memory_symbol(
+        repo_id=rid, symbol_id=symbol_id, memory_id=memory_id,
+    )
+    for table in ("symbols", "code_edges", "code_memory_links", "code_file_history"):
+        eng.store.conn.execute(
+            f"UPDATE {table} SET valid_from=10, ingested_at=10 WHERE repo_id=?",
+            (rid,),
+        )
+    eng.store.conn.commit()
+    eng.store.close_validity(memory_id, at=20.0)
+    eng.store.remove_code_file(rid, "old.py")
+    symbol_closed_at = eng.store.conn.execute(
+        "SELECT valid_to FROM symbols WHERE id=?", (symbol_id,)
+    ).fetchone()["valid_to"]
+    file_closed_at = eng.store.conn.execute(
+        "SELECT valid_to FROM code_file_history WHERE repo_id=? AND file='old.py'",
+        (rid,),
+    ).fetchone()["valid_to"]
+    historical = SearchFilter(
+        workspace_id=wid,
+        repo_id=rid,
+        valid_at=15.0,
+        known_at=max(float(symbol_closed_at), float(file_closed_at)) + 1.0,
+    )
+
+    search = eng.search_code("old_fn", repo_id=rid, flt=historical)
+
+    assert [symbol["id"] for symbol in search["symbols"]] == [symbol_id]
+    assert search["symbols"][0]["called_by"][0]["src"] == "caller"
+    assert eng.code_path(
+        "old_fn", memory_id, repo_id=rid, flt=historical,
+    )["found"] is True
+    impact = eng.analyze_impact(["old.py"], repo_id=rid, flt=historical)
+    assert {row["id"] for row in impact["symbols"]} == {symbol_id}
+    assert {row["id"] for row in impact["memory_mentions"]} == {memory_id}
+    assert impact["graph"]["edges"] == 1
+    exported = eng.export_code_graph(repo_id=rid, flt=historical)
+    assert {row["id"] for row in exported["nodes"]} == {symbol_id}
+    assert len(exported["edges"]) == 1
+    assert [row["file"] for row in exported["files"]] == ["old.py"]
+    assert {row["memory_id"] for row in exported["memory_links"]} == {memory_id}
+    assert eng.code_path("old_fn", memory_id, repo_id=rid)["found"] is False
+    assert eng.analyze_impact(
+        ["old.py"], repo_id=rid
+    )["memory_mentions"] == []
+    assert eng.export_code_graph(repo_id=rid)["nodes"] == []
+    assert eng.export_code_graph(repo_id=rid)["files"] == []
+
+
+def test_scheduled_keyed_claims_resolve_at_the_candidate_validity_time():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    first_at = time.time() + 3_600.0
+    second_at = first_at + 3_600.0
+    first = eng.remember_with_resolution(
+        "The scheduled API limit is 100 requests per minute.",
+        workspace_id=wid, subject_key="api-limit", claim_kind="configured_value",
+        valid_from=first_at,
+    )
+    second = eng.remember_with_resolution(
+        "The scheduled API limit is 200 requests per minute.",
+        workspace_id=wid, subject_key="api-limit", claim_kind="configured_value",
+        valid_from=second_at,
+    )
+
+    assert first["op"] == "add"
+    assert second["op"] == "invalidate"
+    assert eng.store.get_memory(first["id"]).valid_to == second_at
+
+
 def test_code_reads_apply_session_visibility_to_every_memory_surface():
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")
@@ -877,6 +1246,33 @@ def test_code_reads_apply_session_visibility_to_every_memory_surface():
     assert eng.code_path(
         "deploy", session_memory, repo_id=rid, flt=session_filter,
     )["found"]
+
+
+def test_code_reads_reject_mismatched_workspace_or_repo_filters():
+    eng = MemoryEngine.create(":memory:")
+    first_workspace = eng.store.get_or_create_workspace("first")
+    second_workspace = eng.store.get_or_create_workspace("second")
+    first_repo = eng.store.get_or_create_repo(first_workspace, "api")
+    second_repo = eng.store.get_or_create_repo(second_workspace, "api")
+    eng.store.upsert_symbol(
+        repo_id=second_repo, kind="function", name="secret_fn",
+        fqname="secret_fn", file="secret.py", span="1-1",
+    )
+
+    with pytest.raises(ValueError, match="workspace_id"):
+        eng.search_code(
+            "secret_fn",
+            repo_id=second_repo,
+            flt=SearchFilter(workspace_id=first_workspace, repo_id=second_repo),
+        )
+    with pytest.raises(ValueError, match="repo_id"):
+        eng.export_code_graph(
+            repo_id=second_repo,
+            flt=SearchFilter(
+                workspace_id=second_workspace,
+                repo_id=first_repo,
+            ),
+        )
 
 
 def test_rebuild_code_memory_links_keysets_past_five_thousand_session_records():
@@ -1126,3 +1522,54 @@ def test_code_matcher_cache_is_invalidated_when_symbols_change():
 
     assert [r["symbol_id"] for r in eng.store.list_code_memory_links(rid)
             if r["memory_id"] == second], "a new symbol must invalidate the cached matcher"
+
+
+def test_extracted_graph_evidence_inherits_memory_temporal_anchors():
+    eng = MemoryEngine.create(":memory:", graph_extractor="regex")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    future = time.time() + 10_000
+    first = eng.remember(
+        "Alice uses Stripe.",
+        workspace_id=wid,
+        repo_id=rid,
+        valid_from=future,
+        resolve_conflicts=False,
+    )
+    memory = eng.store.get_memory(first)
+    edges = eng.store.edges_in_scope(SearchFilter(
+        workspace_id=wid,
+        repo_id=rid,
+        valid_at=future,
+        known_at=memory.ingested_at,
+    ))
+    assert len(edges) == 1
+    assert edges[0].valid_from == future
+    assert edges[0].ingested_at == memory.ingested_at
+    assert eng.store.edges_in_scope(SearchFilter(
+        workspace_id=wid,
+        repo_id=rid,
+        valid_at=future - 1,
+        known_at=memory.ingested_at,
+    )) == []
+    assert eng.store.edges_in_scope(SearchFilter(
+        workspace_id=wid,
+        repo_id=rid,
+        valid_at=future,
+        known_at=memory.ingested_at - 1,
+    )) == []
+
+    earlier = future - 500
+    eng.remember(
+        "Alice uses Stripe.",
+        workspace_id=wid,
+        repo_id=rid,
+        valid_from=earlier,
+        resolve_conflicts=False,
+    )
+    edge = eng.store.edges_in_scope(SearchFilter(
+        workspace_id=wid,
+        repo_id=rid,
+        valid_at=earlier,
+    ))[0]
+    assert edge.valid_from == earlier

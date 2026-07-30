@@ -41,24 +41,35 @@ and returns an `op`, decided deterministically from token overlap on the text it
 - **`add`** — genuinely new; inserted.
 - **`noop`** — an almost-exact restatement; the existing memory is **reinforced** (its stability
   grows) and its `id` is returned. You did not create a duplicate.
-- **`invalidate`** — a same-subject update; the old memory is **closed** (`valid_to` set, not
-  deleted) and the new one supersedes it. `superseded:[old_id,…]` tells you what it replaced.
+- **`invalidate`** — a shared claim identity or strong joint lexical+semantic evidence shows an
+  update; the old memory is **closed** (`valid_to` set, not deleted) and the new one supersedes
+  it. `superseded:[old_id,…]` tells you what it replaced.
+- **`relate`** — the memories are close but contradiction evidence is uncertain. Both remain
+  live and are linked instead of silently discarding a potentially distinct fact.
 
 This is why you should almost never set `dedupe=False` — it is the mechanism that keeps the store
 clean without calling a model on untrusted input. Set `False` only for intentionally repeated
 episodic entries where each repeat is meaningful.
+
+For facts that have one mutable value, pass a stable `subject_key` and optional `claim_kind`
+(for example `subject_key="api.rate_limit", claim_kind="configured_value"`). This is safer than
+asking similarity alone to decide whether two related statements contradict.
 
 ## Truth is temporal — never overwrite
 
 There is no destructive edit. When a fact changes:
 
 - New value on the same subject → just `engraphis_remember` it; dedup invalidates the old one.
+  When the change became true at a known time, pass `valid_from=<unix timestamp>`; the old
+  validity window closes at that effective time, not at ingestion time.
 - Fixing wrong content → `engraphis_correct` (closes old, stores a replacement that records what it
   fixed). Preferred over forget-then-remember because it keeps the *why* chain intact.
 
 Afterwards, `engraphis_why` and `engraphis_timeline` can still reconstruct "we used to do X, then
-switched to Y because Z". Reach for those two tools for any history question — plain `recall` only
-sees the live view.
+switched to Y because Z". For relevance-ranked time travel, use `valid_at=<unix timestamp>` for
+what was true and `known_at=<unix timestamp>` for what Engraphis had learned; `as_of` remains the
+`valid_at` compatibility alias and must match it when both are supplied. Reach for
+`why`/`timeline` when you want the version chain rather than one point-in-time answer.
 
 ## Governance — retire, don't delete
 

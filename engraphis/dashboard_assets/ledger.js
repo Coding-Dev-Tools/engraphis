@@ -9,6 +9,7 @@
     memories: [],
     selectedMemory: '',
     editorMemory: null,
+    editorReturnFocus: null,
     view: 'today',
     provenanceTab: 'belief',
     manageTab: 'workspaces',
@@ -45,6 +46,8 @@
   const all = selector => [...document.querySelectorAll(selector)];
   const text = value => value == null ? '' : String(value);
   const number = value => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const CLOUD_PRIVACY_NOTICE = 'Engraphis Cloud must read the bounded snapshot you submit to produce results. It travels over HTTPS but is not end-to-end encrypted; secret and session-scoped memories stay local.';
+  const EXTERNAL_LLM_PRIVACY_NOTICE = 'Memory text is sent to your configured LLM provider for processing under that provider’s terms. The provider must read that text to return extracted facts.';
   const truncate = (value, length = 260) => {
     const source = text(value).trim();
     return source.length > length ? `${source.slice(0, length - 1)}…` : source;
@@ -257,6 +260,183 @@
     } catch (_) {
       return '';
     }
+  }
+
+  function licenseAccessState(license = state.license) {
+    const value = license && license.access_state;
+    return ['active', 'trial', 'trial_expired', 'lapsed'].includes(value) ? value : 'inactive';
+  }
+
+  function licensePlanKey(license = state.license) {
+    const value = String((license && license.plan) || 'local').toLowerCase();
+    return value === 'pro' || value === 'team' ? value : '';
+  }
+
+  function licenseTrialAvailable(license = state.license) {
+    return Boolean(license && license.trial && license.trial.available
+      && licenseAccessState(license) === 'inactive' && license.plan_source === 'local');
+  }
+
+  function licenseHasHostedAccess(license = state.license) {
+    const access = licenseAccessState(license);
+    return access === 'active' || access === 'trial';
+  }
+
+  function withCtaAttribution(raw, content, medium = 'product') {
+    const safe = safeUrl(raw);
+    if (!safe) return '';
+    try {
+      const url = new URL(safe, location.href);
+      url.searchParams.set('utm_source', 'engraphis');
+      url.searchParams.set('utm_medium', medium);
+      url.searchParams.set('utm_campaign', 'pro_conversion');
+      url.searchParams.set('utm_content', content || 'plans');
+      return url.href;
+    } catch (_) {
+      return safe;
+    }
+  }
+
+  function hostedPlanUrl(plan, trial, interval = 'monthly', content = plan) {
+    const cadence = interval === 'annual' ? 'annual' : 'monthly';
+    const license = state.license || {};
+    const raw = license[`${plan}_${cadence}_upgrade_url`]
+      || license[`${plan}_upgrade_url`] || license.upgrade_url;
+    const safe = safeUrl(raw);
+    if (!safe) return '';
+    try {
+      const url = new URL(safe, location.href);
+      url.searchParams.set('plan', plan);
+      url.searchParams.set('interval', cadence);
+      if (trial) url.searchParams.set('trial', plan);
+      if (!url.hash) url.hash = 'billing';
+      return withCtaAttribution(url.href, content);
+    } catch (_) {
+      return safe;
+    }
+  }
+
+  function hostedAccountUrl(content = 'account') {
+    const license = state.license || {};
+    return withCtaAttribution(license.account_url || license.upgrade_url, content);
+  }
+
+  function hostedCta(plan = 'pro', content = 'plans', interval = 'monthly') {
+    const stateName = licenseAccessState();
+    const currentPlan = licensePlanKey();
+    const name = plan === 'team' ? 'Team' : 'Pro';
+    if (stateName === 'lapsed') {
+      return { label: 'Update billing', href: hostedAccountUrl(content), kind: 'account' };
+    }
+    if (licenseHasHostedAccess() && (currentPlan === plan
+      || (currentPlan === 'team' && plan === 'pro'))) {
+      return {
+        label: currentPlan === 'team' && plan === 'team' ? 'Open Team Cloud' : 'Open Engraphis Cloud',
+        href: hostedAccountUrl(content),
+        kind: 'account',
+      };
+    }
+    const trial = licenseTrialAvailable() && stateName === 'inactive';
+    return {
+      label: trial ? `Start 3-day ${name} trial` : `Subscribe to ${name}`,
+      href: hostedPlanUrl(plan, trial, interval, content),
+      kind: trial ? 'trial' : 'subscribe',
+    };
+  }
+
+  function updatePlanBadge() {
+    const badge = byId('plan-badge');
+    if (!badge || !state.license) return;
+    const access = licenseAccessState();
+    const plan = licensePlanKey();
+    const trial = licenseTrialAvailable();
+    const label = access === 'active' ? plan.toUpperCase()
+      : access === 'trial' ? 'TRIAL'
+        : access === 'lapsed' ? 'BILLING'
+          : trial ? 'TRY PRO' : 'GET PRO';
+    const aria = licenseHasHostedAccess() ? 'Open Engraphis Cloud account'
+      : access === 'lapsed' ? 'Update billing in Plans and billing'
+        : trial ? 'Start the 3-day Pro trial in Plans and billing'
+          : 'Subscribe to Pro in Plans and billing';
+    badge.textContent = label;
+    badge.setAttribute('aria-label', aria);
+    badge.title = aria;
+    const cta = hostedCta(plan || 'pro', 'header');
+    const opensAccount = cta.kind === 'account' && Boolean(cta.href);
+    badge.href = opensAccount ? cta.href : '#';
+    badge.target = opensAccount ? '_blank' : '';
+    badge.rel = opensAccount ? 'noopener' : '';
+    badge.dataset.opensAccount = String(opensAccount);
+  }
+
+  function renderSidebarCta() {
+    const copy = byId('sidebar-pro-copy');
+    const detail = byId('sidebar-pro-detail');
+    const link = byId('sidebar-pro-cta');
+    if (!copy || !detail || !link || !state.license) return;
+    const renderFeatureCtas = () => {
+      [
+        ['analytics-pro-cta', 'analytics', 'pro'],
+        ['automation-pro-cta', 'automation', 'pro'],
+        ['team-cloud-cta', 'team', 'team'],
+      ].forEach(([id, content, plan]) => {
+        const featureLink = byId(id);
+        if (!featureLink) return;
+        const featureCta = hostedCta(plan, content);
+        featureLink.textContent = featureCta.label;
+        featureLink.href = featureCta.href || '#';
+        featureLink.setAttribute('aria-disabled', featureCta.href ? 'false' : 'true');
+      });
+    };
+    if (licenseHasHostedAccess()) {
+      const cta = hostedCta(licensePlanKey() || 'pro', 'sidebar');
+      copy.textContent = 'Thank you for supporting Engraphis.';
+      detail.textContent = 'Your subscription funds hosted infrastructure and ongoing development.';
+      link.hidden = false;
+      link.textContent = cta.label;
+      link.href = cta.href || '#';
+      link.setAttribute('aria-disabled', cta.href ? 'false' : 'true');
+      renderFeatureCtas();
+      return;
+    }
+    const cta = hostedCta('pro', 'sidebar');
+    copy.textContent = 'Support continued Engraphis development with Pro.';
+    detail.textContent = 'Cloud Sync, Analytics, and managed memory maintenance.';
+    link.hidden = false;
+    link.textContent = cta.label;
+    link.href = cta.href || '#';
+    link.setAttribute('aria-disabled', cta.href ? 'false' : 'true');
+    link.dataset.proCta = 'sidebar';
+    renderFeatureCtas();
+  }
+
+  function renderCloudAccountSettings() {
+    const target = byId('cloud-account-settings');
+    if (!target) return;
+    target.replaceChildren();
+    const plan = licensePlanKey() || 'pro';
+    const cta = hostedCta(plan, 'settings');
+    const live = licenseHasHostedAccess();
+    const detail = live
+      ? 'Your hosted account is connected. Manage membership in Cloud, or edit this workspace’s hosted maintenance policy locally.'
+      : licenseAccessState() === 'lapsed'
+        ? 'Your hosted subscription needs attention. Update billing in Engraphis Cloud to restore hosted features.'
+        : 'Open Engraphis Cloud to start a trial, subscribe, or manage a connected hosted account.';
+    const action = node('a', 'primary-button', cta.label);
+    action.href = cta.href || '#';
+    if (cta.href) {
+      action.target = '_blank';
+      action.rel = 'noopener';
+    } else {
+      action.addEventListener('click', event => {
+        event.preventDefault();
+        showNotice('Connect this installation to Engraphis Cloud to open hosted account settings.');
+      });
+    }
+    const actions = node('div', 'automation-policy-actions');
+    actions.append(action);
+    if (live) actions.append(button('Configure hosted policy', 'secondary-button', () => switchManageTab('automation')));
+    target.append(node('p', 'automation-policy-note', detail), actions);
   }
 
   function renderUpdateBanner(update) {
@@ -662,6 +842,8 @@
 
   function openEditor(memory = null) {
     state.editorMemory = memory;
+    state.editorReturnFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement : byId('new-memory-button');
     byId('memory-detail').hidden = true;
     const editor = byId('memory-editor');
     editor.hidden = false;
@@ -669,14 +851,22 @@
     byId('editor-memory-title').value = memory ? (memory.title || '') : '';
     byId('editor-memory-type').value = memory ? memoryType(memory) : 'semantic';
     byId('editor-memory-content').value = memory ? (memory.content || memory.summary || '') : '';
+    byId('editor-memory-content').removeAttribute('aria-invalid');
+    byId('editor-error').hidden = true;
+    byId('editor-error').textContent = '';
     byId('editor-memory-importance').value = memory && memory.importance != null ? memory.importance : 0.5;
     byId('editor-memory-title').focus();
   }
 
   function closeEditor() {
+    const returnFocus = state.editorReturnFocus;
     byId('memory-editor').hidden = true;
     byId('memory-detail').hidden = false;
     state.editorMemory = null;
+    state.editorReturnFocus = null;
+    if (returnFocus && document.contains(returnFocus) && !returnFocus.hidden
+      && !returnFocus.disabled) returnFocus.focus();
+    else byId('new-memory-button').focus();
   }
 
   async function saveMemory(event) {
@@ -688,7 +878,19 @@
     const importance = number(byId('editor-memory-importance').value);
     const currentImportance = current && current.importance != null
       ? number(current.importance) : 0.5;
-    if (!content) return;
+    const contentField = byId('editor-memory-content');
+    const editorError = byId('editor-error');
+    contentField.removeAttribute('aria-invalid');
+    editorError.hidden = true;
+    editorError.textContent = '';
+    if (!content) {
+      contentField.setAttribute('aria-invalid', 'true');
+      editorError.textContent = 'Enter memory content before saving.';
+      editorError.hidden = false;
+      showNotice('Enter memory content before saving.');
+      contentField.focus();
+      return;
+    }
     try {
       if (current) {
         if (content !== (current.content || current.summary || '')) {
@@ -846,7 +1048,16 @@
     event.preventDefault();
     const input = byId('ask-input');
     const question = input.value.trim();
-    if (!question || !state.workspace) return;
+    if (!question) {
+      showNotice('Enter a question before requesting a grounded answer.');
+      input.focus();
+      return;
+    }
+    if (!state.workspace) {
+      showNotice('Choose a workspace before requesting a grounded answer.');
+      return;
+    }
+    showNotice('');
     const k = number(byId('ask-k').value) || 5;
     byId('answer-panel').replaceChildren(empty('Searching, checking support and building citations…'));
     byId('retrieval-list').replaceChildren(empty('Retrieving candidate memories…'));
@@ -1776,7 +1987,12 @@
   async function whySearch(event) {
     event.preventDefault();
     const question = byId('why-input').value.trim();
-    if (!question) return;
+    if (!question) {
+      showNotice('Enter a claim or topic before tracing belief.');
+      byId('why-input').focus();
+      return;
+    }
+    showNotice('');
     const target = byId('why-result');
     target.replaceChildren(empty('Tracing the live belief and supersession chain…'));
     try {
@@ -1800,7 +2016,12 @@
     const input = byId(supersessionsOnly ? 'supersession-input' : 'timeline-input');
     const target = byId(supersessionsOnly ? 'supersession-list' : 'timeline-result');
     const question = input.value.trim();
-    if (!question) return;
+    if (!question) {
+      showNotice(`Enter a topic before ${supersessionsOnly ? 'finding supersessions' : 'showing history'}.`);
+      input.focus();
+      return;
+    }
+    showNotice('');
     target.replaceChildren(empty('Loading temporal history…'));
     try {
       const payload = await api(`/timeline?q=${encodeURIComponent(question)}&${query()}&limit=50`);
@@ -1929,7 +2150,12 @@
     event.preventDefault();
     const name = byId('new-workspace-name').value.trim();
     const description = byId('new-workspace-description').value.trim();
-    if (!name) return;
+    if (!name) {
+      showNotice('Enter a workspace name before creating it.');
+      byId('new-workspace-name').focus();
+      return;
+    }
+    showNotice('');
     try {
       await api('/workspaces/create', {
         method: 'POST',
@@ -2059,6 +2285,92 @@
     }
   }
 
+  function automationCheckbox(id, label, checked) {
+    const field = node('label', 'check-row');
+    const input = node('input');
+    input.id = id;
+    input.type = 'checkbox';
+    input.checked = Boolean(checked);
+    field.htmlFor = id;
+    field.append(input, document.createTextNode(label));
+    return field;
+  }
+
+  function automationNumber(id, label, value, min, max) {
+    const field = node('label', '', label);
+    const input = node('input');
+    input.id = id;
+    input.type = 'number';
+    input.min = String(min);
+    input.max = String(max);
+    input.value = String(value);
+    field.htmlFor = id;
+    field.append(input);
+    return field;
+  }
+
+  function renderAutomationPolicy(policy) {
+    const target = byId('automation-result');
+    if (!target) return;
+    target.replaceChildren();
+    const form = node('form', 'automation-policy-form');
+    form.dataset.lastRun = String(policy.last_run || '');
+    const enabled = Boolean(policy.enabled);
+    const dreamEnabled = policy.dream_enabled != null ? policy.dream_enabled : policy.dream;
+    const lastRun = policy.last_run ? ` Last managed run: ${relative(policy.last_run)}.` : '';
+    form.append(
+      node('p', 'automation-policy-note', enabled
+        ? `This workspace has an active hosted maintenance policy.${lastRun}`
+        : 'Hosted maintenance is paused for this workspace.'),
+      automationCheckbox('automation-enabled', 'Enable hosted maintenance', enabled),
+      automationNumber('automation-cadence', 'Run every (hours)', Math.max(1, Number(policy.cadence_hours) || 24), 1, 8760),
+      automationCheckbox('automation-dream', 'Enable Auto Dreaming after accumulation and idle time', dreamEnabled),
+      automationNumber('automation-dream-min', 'Minimum new memories', Math.max(1, Number(policy.dream_min_new) || 25), 1, 100000),
+      automationNumber('automation-dream-idle', 'Idle minutes before Dreaming', Math.max(0, Number(policy.dream_idle_minutes) || 0), 0, 10080),
+      automationCheckbox('automation-infer', 'Allow hosted relationship inference proposals', policy.infer),
+      node('p', 'automation-policy-note', `Saving an enabled policy uploads this workspace’s normal and sensitive memory content to Engraphis Cloud; secret and session-scoped rows stay local. ${CLOUD_PRIVACY_NOTICE} Cloud work returns proposals and never silently changes the local database.`),
+    );
+    const actions = node('div', 'automation-policy-actions');
+    const save = node('button', 'primary-button', enabled ? 'Save & send policy to Cloud' : 'Save hosted policy');
+    save.type = 'submit';
+    actions.append(save);
+    form.append(actions);
+    form.addEventListener('submit', saveAutomationPolicy);
+    target.append(form);
+  }
+
+  async function saveAutomationPolicy(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const policy = {
+      enabled: byId('automation-enabled').checked,
+      cadence_hours: Math.max(1, Number(byId('automation-cadence').value) || 1),
+      dream_enabled: byId('automation-dream').checked,
+      dream_min_new: Math.max(1, Number(byId('automation-dream-min').value) || 1),
+      dream_idle_minutes: Math.max(0, Number(byId('automation-dream-idle').value) || 0),
+      infer: byId('automation-infer').checked,
+    };
+    if (policy.enabled && !window.confirm(
+      `Save this hosted policy for ${state.workspace}? Engraphis will upload that workspace’s normal and sensitive memory content to Cloud; secret and session-scoped rows stay local.\n\nPrivacy: ${CLOUD_PRIVACY_NOTICE}`,
+    )) return;
+    const save = form.querySelector('button[type="submit"]');
+    if (save) {
+      save.disabled = true;
+      save.textContent = 'Saving…';
+    }
+    try {
+      const saved = await api(`/automation?${query()}`, { method: 'POST', body: policy });
+      renderAutomationPolicy({ ...saved, last_run: form.dataset.lastRun });
+      showNotice('Hosted maintenance policy saved to Engraphis Cloud.');
+    } catch (error) {
+      if (save) {
+        save.disabled = false;
+        save.textContent = policy.enabled ? 'Save & send policy to Cloud' : 'Save hosted policy';
+      }
+      showNotice(`Could not save the hosted policy: ${error.message}`);
+    }
+  }
+
   async function loadHosted(kind) {
     const target = byId(`${kind}-result`);
     if (state.hostedLoaded.has(`${kind}:${state.workspace}`)) return;
@@ -2067,6 +2379,8 @@
       if (kind === 'team') {
         const [auth, license] = await Promise.all([api('/auth/state'), api('/license')]);
         state.license = license;
+        updatePlanBadge();
+        renderSidebarCta();
         renderObject(target, {
           local_mode: auth.mode || 'open',
           hosted_team: Boolean(auth.hosted_team),
@@ -2075,7 +2389,8 @@
         }, 'Connection state');
       } else {
         const result = await api(`/${kind}?${query()}`);
-        renderObject(target, result, `${kind[0].toUpperCase()}${kind.slice(1)} status`);
+        if (kind === 'automation') renderAutomationPolicy(result);
+        else renderObject(target, result, `${kind[0].toUpperCase()}${kind.slice(1)} status`);
       }
       state.hostedLoaded.add(`${kind}:${state.workspace}`);
     } catch (error) {
@@ -2096,8 +2411,8 @@
     const prices = planPrices();
     const plans = [
       { id: 'free', name: 'Free', price: prices.free, note: 'The complete local memory engine and every core operation.', action: 'Current local plan' },
-      { id: 'pro', name: 'Pro', price: prices.pro, note: 'Cloud sync, managed automation and portfolio analytics.', action: 'Open Pro options' },
-      { id: 'team', name: 'Team', price: prices.team, note: 'Shared workspaces, member roles, seats and remote agents.', action: 'Open Team options' },
+      { id: 'pro', name: 'Pro', price: prices.pro, note: 'Cloud sync, managed automation and portfolio analytics.' },
+      { id: 'team', name: 'Team', price: prices.team, note: 'Shared workspaces, member roles, seats and remote agents.' },
     ];
     plans.forEach(plan => {
       const card = node('article', `plan-card${plan.id === 'pro' ? ' featured' : ''}`);
@@ -2107,17 +2422,21 @@
         node('div', 'price', plan.price),
         node('p', '', plan.note),
       );
+      if (plan.id === 'pro') {
+        card.append(
+          node('p', 'plan-support', 'Support continued Engraphis development with Pro. Your subscription helps cover hosted infrastructure and ongoing development.'),
+          node('p', 'plan-benefits', 'Cloud Sync, Analytics, Auto Consolidation, and Auto Dreaming across your installations.'),
+        );
+      }
       if (plan.id === 'free') {
         const status = node('span', 'secondary-button', plan.action);
         card.append(status);
       } else {
         const interval = byId('billing-select').value === 'annual' ? 'annual' : 'monthly';
-        const exactKey = `${plan.id}_${interval}_upgrade_url`;
-        const fallbackKey = `${plan.id}_upgrade_url`;
-        const url = safeUrl(state.license
-          && (state.license[exactKey] || state.license[fallbackKey]
-            || state.license.upgrade_url));
-        const action = node('a', 'primary-button', plan.action);
+        const cta = hostedCta(plan.id, 'plans', interval);
+        const action = node('a', 'primary-button', cta.label);
+        const url = cta.href;
+        action.dataset.proCta = plan.id;
         action.href = url || '#';
         if (url) {
           action.target = '_blank';
@@ -2140,6 +2459,8 @@
     } catch (_) {
       state.license = { plan: 'free' };
     }
+    updatePlanBadge();
+    renderSidebarCta();
     renderPlans();
   }
 
@@ -2220,7 +2541,15 @@
       node('span', '', 'LLM extraction'),
       node('span', `llm-status-badge ${extractionEnabled ? 'ready' : 'muted'}`, extractionEnabled ? 'ON' : 'OFF'),
     );
-    const extractionNote = node('p', 'llm-extraction-note', 'While ON, ingested memory content is sent to your configured provider for schema-validated extraction. OFF keeps ingestion on this machine.');
+    const extractionNote = node('p', 'llm-extraction-note', 'While ON, ingested memory content is sent to your configured provider for schema-validated extraction. OFF disables extraction transfers only; retention supervision is configured separately.');
+    const retentionUsesLlm = text(status.retention_supervisor).toLowerCase() === 'llm';
+    const retentionNote = node(
+      'p',
+      'llm-extraction-note',
+      retentionUsesLlm
+        ? 'Retention supervision is ON. New memories may send their title and a bounded excerpt to the configured provider.'
+        : 'Retention supervision is OFF.',
+    );
     const extractionActions = node('div', 'llm-actions');
     const turnOn = button('Turn on', 'primary-button', () => setLlmExtractor(true));
     turnOn.disabled = extractionEnabled || !configured;
@@ -2242,7 +2571,7 @@
       updateLlmSnippet(status);
     });
     modelSelect.addEventListener('change', () => updateLlmSnippet(status));
-    target.append(overview, pickerGrid, keyState, setupNote, snippetWrap, extraction, extractionNote, extractionActions, testActions);
+    target.append(overview, pickerGrid, keyState, setupNote, snippetWrap, extraction, extractionNote, retentionNote, extractionActions, testActions);
   }
 
   async function copyLlmSnippet() {
@@ -2260,6 +2589,12 @@
 
   async function loadSettings() {
     try {
+      state.license = await api('/license');
+      updatePlanBadge();
+      renderSidebarCta();
+    } catch (_) {}
+    renderCloudAccountSettings();
+    try {
       renderLlmSettings(await api('/llm/status'));
     } catch (error) {
       byId('llm-connection').replaceChildren(empty(`Model status unavailable: ${error.message}`));
@@ -2267,11 +2602,12 @@
   }
 
   async function setLlmExtractor(enabled) {
+    if (enabled && !window.confirm(`Turn on LLM extraction? ${EXTERNAL_LLM_PRIVACY_NOTICE}`)) return;
     setLlmTestResult(enabled ? 'Verifying the configured provider…' : 'Turning extraction off…');
     try {
       const result = await api('/llm/extractor', { method: 'POST', body: { enabled } });
       await loadSettings();
-      const state = result.extractor_enabled ? 'LLM extraction is on for new ingested memories.' : 'LLM extraction is off; ingestion stays local.';
+      const state = result.extractor_enabled ? 'LLM extraction is on for new ingested memories.' : 'LLM extraction is off for new ingested memories.';
       setLlmTestResult(`${state}${result.persisted === false ? ' The restart setting could not be saved.' : ''}`, result.extractor_enabled ? 'ready' : 'muted');
     } catch (error) {
       setLlmTestResult(`Could not change extraction: ${error.message}`, 'error');
@@ -2330,6 +2666,8 @@
     renderUpdateBanner(bootstrap.update);
     state.workspaces = bootstrap.workspaces || [];
     state.license = bootstrap.license || state.license;
+    updatePlanBadge();
+    renderSidebarCta();
     const select = byId('workspace-select');
     select.replaceChildren();
     state.workspaces.forEach(item => {
@@ -2389,6 +2727,12 @@
     switchView('manage');
     switchManageTab(control.dataset.manage);
   }));
+  byId('plan-badge').addEventListener('click', event => {
+    if (event.currentTarget.dataset.opensAccount === 'true') return;
+    event.preventDefault();
+    switchView('manage');
+    switchManageTab('plans');
+  });
   all('[data-provenance]').forEach(control => control.addEventListener('click', () => {
     switchView('provenance');
     switchProvenanceTab(control.dataset.provenance);

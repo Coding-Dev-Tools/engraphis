@@ -1,8 +1,8 @@
 """Fact extractors — implementations of the ``core.interfaces.Extractor`` protocol.
 
-Modern memory systems often auto-distill raw text into discrete
-facts before storage; Engraphis makes that step *pluggable and optional* so the core
-stays offline-capable (AGENTS.md §3.8):
+Fact extraction can distill raw text into discrete records before storage. Engraphis
+makes that step *pluggable and optional* so the core stays offline-capable
+(AGENTS.md §3.8):
 
 * ``PassthroughExtractor`` — the default: the caller's text is stored exactly as given
   (today's behaviour, zero dependencies, zero network).

@@ -20,6 +20,12 @@ class IntentRecallRequest(BaseModel):
     mtypes: Optional[list[str]] = None
     k: int = 8
     as_of: Optional[float] = None
+    valid_at: Optional[float] = None
+    known_at: Optional[float] = None
+    token_budget: Optional[int] = None
+    retrieval_profile: str = "balanced"
+    response_mode: str = "compact"
+    diagnostics: bool = False
 
 
 class CodePathRequest(BaseModel):
@@ -28,12 +34,18 @@ class CodePathRequest(BaseModel):
     source: str
     target: str
     max_depth: int = 8
+    as_of: Optional[float] = None
+    valid_at: Optional[float] = None
+    known_at: Optional[float] = None
 
 
 class CodeImpactRequest(BaseModel):
     workspace: str
     repo: str
     changed_files: list[str]
+    as_of: Optional[float] = None
+    valid_at: Optional[float] = None
+    known_at: Optional[float] = None
 
 
 def create_read_only_app(service: Optional[MemoryService] = None, *,
@@ -72,9 +84,19 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
 
     @app.get("/recall")
     def recall(query: str, workspace: Optional[str] = None,
-               repo: Optional[str] = None, k: int = 8):
+               repo: Optional[str] = None, k: int = 8,
+               as_of: Optional[float] = None,
+               valid_at: Optional[float] = None,
+               known_at: Optional[float] = None,
+               token_budget: Optional[int] = None,
+               retrieval_profile: str = "balanced",
+               response_mode: str = "compact",
+               diagnostics: bool = False):
         return run(
             svc.recall, query, workspace=workspace, repo=repo, k=k,
+            as_of=as_of, valid_at=valid_at, known_at=known_at,
+            token_budget=token_budget, retrieval_profile=retrieval_profile,
+            response_mode=response_mode, diagnostics=diagnostics,
             reinforce=False, intent="http_read_only", record_receipt=False,
         )
 
@@ -83,43 +105,63 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
         return run(
             svc.intent_recall, req.query, intent=req.intent,
             workspace=req.workspace, repo=req.repo, mtypes=req.mtypes,
-            k=req.k, as_of=req.as_of, reinforce=False, record_receipt=False,
+            k=req.k, as_of=req.as_of, valid_at=req.valid_at,
+            known_at=req.known_at, token_budget=req.token_budget,
+            retrieval_profile=req.retrieval_profile,
+            response_mode=req.response_mode, diagnostics=req.diagnostics,
+            reinforce=False, record_receipt=False,
         )
 
     @app.get("/graph")
     def graph(workspace: str, limit: int = 2_000, layers: Optional[str] = None,
-              include_code: bool = False, repo: Optional[str] = None):
+              include_code: bool = False, repo: Optional[str] = None,
+              as_of: Optional[float] = None,
+              valid_at: Optional[float] = None,
+              known_at: Optional[float] = None):
         selected = None if layers is None else [
             value.strip() for value in layers.split(",") if value.strip()
         ]
         return run(
             svc.graph, workspace=workspace, limit=limit, layers=selected,
             include_code=include_code, repo=repo, backfill=False,
+            as_of=as_of, valid_at=valid_at, known_at=known_at,
         )
 
     @app.get("/code/search")
-    def code_search(query: str, workspace: str, repo: str, limit: int = 20):
+    def code_search(query: str, workspace: str, repo: str, limit: int = 20,
+                    as_of: Optional[float] = None,
+                    valid_at: Optional[float] = None,
+                    known_at: Optional[float] = None):
         return run(
             svc.search_code, query, workspace=workspace, repo=repo, limit=limit,
+            as_of=as_of, valid_at=valid_at, known_at=known_at,
         )
 
     @app.post("/code/path")
     def code_path(req: CodePathRequest):
         return run(
             svc.code_path, req.source, req.target, workspace=req.workspace,
-            repo=req.repo, max_depth=req.max_depth,
+            repo=req.repo, max_depth=req.max_depth, as_of=req.as_of,
+            valid_at=req.valid_at, known_at=req.known_at,
         )
 
     @app.post("/code/impact")
     def code_impact(req: CodeImpactRequest):
         return run(
             svc.code_impact, req.changed_files,
-            workspace=req.workspace, repo=req.repo,
+            workspace=req.workspace, repo=req.repo, as_of=req.as_of,
+            valid_at=req.valid_at, known_at=req.known_at,
         )
 
     @app.get("/code/export")
-    def code_export(workspace: str, repo: str):
-        return run(svc.export_code_graph, workspace=workspace, repo=repo)
+    def code_export(workspace: str, repo: str,
+                    as_of: Optional[float] = None,
+                    valid_at: Optional[float] = None,
+                    known_at: Optional[float] = None):
+        return run(
+            svc.export_code_graph, workspace=workspace, repo=repo,
+            as_of=as_of, valid_at=valid_at, known_at=known_at,
+        )
 
     @app.get("/receipts")
     def receipts(workspace: str, limit: int = 100):

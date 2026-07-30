@@ -8,7 +8,7 @@ description: 'Give the agent durable, scoped, explainable memory across sessions
 Engraphis is a local-first memory engine exposed to agents over MCP. This skill is the
 *discipline* for using it well: what to store, how to scope it, and which tool answers which
 question. It assumes the Engraphis MCP server is connected, so tools are named `engraphis_*`
-(29 of them). If those tools are absent, see [Setup](#setup) — do not fall back to ad-hoc notes.
+(30 of them). If those tools are absent, see [Setup](#setup) — do not fall back to ad-hoc notes.
 
 Memory here is **scoped, typed, bi-temporal, and self-maintaining**: writes are deduplicated and
 contradictions supersede (never silently overwrite), and forgetting lowers priority instead of
@@ -22,7 +22,9 @@ hard-deleting. You get those guarantees for free *if* you use the right tool wit
    of starting cold or inheriting somebody else's handoff.
    `reused=true` means the exact same user/agent/goal task is already active. Use
    `force_new=true` only to branch a second session for that same task identity.
-2. **Before you answer or act** and prior context would help → `engraphis_recall`. Do this
+2. **Before you answer or act** and prior context would help → `engraphis_recall_context`. It
+   returns one hard-budget packet for the prompt. Use legacy `engraphis_recall` only when you
+   need full memory bodies or another caller already depends on that response shape. Do this
    *before* asking the user something they may have already told you.
 3. **The moment you learn something durable** → `engraphis_remember` (a convention, a decision and
    its *why*, a bug's cause and fix, a user preference, a reusable procedure).
@@ -62,8 +64,9 @@ promotion: [SCOPING.md](references/SCOPING.md).
 
 | Need | Tool | Notes |
 |---|---|---|
-| Store a fact | `engraphis_remember` | Returns `op`: `add` / `noop` (reinforced a near-dup) / `invalidate` (superseded old). |
-| Recall by query | `engraphis_recall` | Hybrid vector+lexical+graph; returns packed `context` + scored memories. |
+| Store a fact | `engraphis_remember` | Returns `op`: `add` / `noop` / `invalidate` / `relate`; use `subject_key` + `claim_kind` for deterministic claim updates. |
+| Prompt context by query | `engraphis_recall_context` | Recommended: hard-budget context, compact sources, strict token usage, and optional diagnostics. |
+| Full recall by query | `engraphis_recall` | Legacy-compatible hybrid recall; `full` keeps bodies, `compact` avoids repeating packed content. |
 | Load context, no query | `engraphis_recall_proactive` | Start-of-task; authenticated callers receive only their own last-session handoff. |
 | "Why is it like this?" | `engraphis_why` | Live answer **plus** what it superseded (bi-temporal). |
 | "How has X changed?" | `engraphis_timeline` | Every version oldest→newest with `valid_from/valid_to`. |
@@ -91,8 +94,9 @@ Full signatures, parameters, defaults, and return shapes: [TOOLS.md](references/
 
 Never delete-and-rewrite a fact. When something changes, `engraphis_remember` the new version
 (dedup **invalidates** the old one, preserving it) or use `engraphis_correct`. Then "we used to do
-X, switched to Y because Z" stays answerable via `engraphis_why` / `engraphis_timeline`. This is
-the single biggest difference from a plain vector store — lean on it.
+X, switched to Y because Z" stays answerable via `engraphis_why` / `engraphis_timeline`. For
+time travel, `valid_at` selects what was true and `known_at` what Engraphis had learned; `as_of`
+remains the `valid_at` alias and must match it when both are supplied.
 
 ## Worked example
 
@@ -102,7 +106,8 @@ engraphis_start_session(workspace="acme", repo="backend", agent="claude-code",
                         goal="fix flaky auth tests")
   → bootstrap.open_threads: ["tests 3-5 still failing after token refactor"]
 
-engraphis_recall(query="how do we handle auth token expiry?", workspace="acme", repo="backend")
+engraphis_recall_context(query="how do we handle auth token expiry?", workspace="acme",
+                          repo="backend", token_budget=1024)
   → "Access tokens expire in 15m; refresh in Redis keyed by session (PASETO, not JWT)."
 
 # You discover and fix the cause
@@ -145,6 +150,6 @@ is needed for the memory layer. Details: the repo `README.md` "Quickstart A — 
 
 ## References
 
-- [TOOLS.md](references/TOOLS.md) — all 29 tools: parameters, defaults, returns, when to reach for each.
+- [TOOLS.md](references/TOOLS.md) — all 30 tools: parameters, defaults, returns, when to reach for each.
 - [SCOPING.md](references/SCOPING.md) — the `workspace → repo → session → memory` model, scope vs. type, and promotion.
 - [CONVENTIONS.md](references/CONVENTIONS.md) — memory types, provenance, importance, dedup/resolution, governance, and anti-patterns

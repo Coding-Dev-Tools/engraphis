@@ -24,7 +24,11 @@ import webbrowser
 
 
 _DEFAULT_EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-_ADDRESS_IN_USE_ERRNOS = {errno.EADDRINUSE, 10048}  # 10048 is Windows WSAEADDRINUSE.
+# Windows may report an occupied listener as WSAEACCES (10013) instead of
+# WSAEADDRINUSE (10048) when the probe uses SO_REUSEADDR. Treat both as a busy
+# port so the health check can distinguish an existing Engraphis server from a
+# genuinely unavailable socket.
+_ADDRESS_IN_USE_ERRNOS = {errno.EADDRINUSE, errno.EACCES, 10013, 10048}
 
 
 def _embed_model_from_environment() -> str:

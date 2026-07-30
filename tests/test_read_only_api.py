@@ -57,6 +57,56 @@ def test_read_only_api_serves_graph_and_intent_recall():
     assert response.json()["operation"] == "recall"
 
 
+def test_read_only_code_search_forwards_bitemporal_anchors():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    svc.remember("Code search anchor.", workspace="w", repo="repo")
+    observed = {}
+    original = svc.search_code
+
+    def observe(*args, **kwargs):
+        observed.update(kwargs)
+        return original(*args, **kwargs)
+
+    svc.search_code = observe
+    response = TestClient(create_read_only_app(svc)).get(
+        "/code/search",
+        params={
+            "query": "missing", "workspace": "w", "repo": "repo",
+            "as_of": 10.0, "valid_at": 10.0, "known_at": 20.0,
+        },
+    )
+
+    assert response.status_code == 200
+    assert observed["as_of"] == observed["valid_at"] == 10.0
+    assert observed["known_at"] == 20.0
+
+
+@pytest.mark.parametrize("path", ["/graph", "/code/export"])
+def test_read_only_graph_surfaces_forward_bitemporal_anchors(path):
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    svc.remember("Temporal adapter anchor.", workspace="w", repo="repo")
+    observed = {}
+    method_name = "graph" if path == "/graph" else "export_code_graph"
+    original = getattr(svc, method_name)
+
+    def observe(*args, **kwargs):
+        observed.update(kwargs)
+        return original(*args, **kwargs)
+
+    setattr(svc, method_name, observe)
+    response = TestClient(create_read_only_app(svc)).get(
+        path,
+        params={
+            "workspace": "w", "repo": "repo",
+            "as_of": 10.0, "valid_at": 10.0, "known_at": 20.0,
+        },
+    )
+
+    assert response.status_code == 200
+    assert observed["as_of"] == observed["valid_at"] == 10.0
+    assert observed["known_at"] == 20.0
+
+
 def test_read_only_graph_does_not_lazy_backfill():
     svc = MemoryService.create(":memory:", graph_extractor="none")
     svc.remember(

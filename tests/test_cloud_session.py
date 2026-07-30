@@ -721,3 +721,58 @@ def test_record_billing_denial_writes_under_the_refresh_lock(tmp_path, monkeypat
     assert record["cloud_access_active"] is False
     assert record["cloud_features"] == []
     assert record["refresh_credential"] == "engr_rt_live", "the credential was clobbered"
+
+
+def test_refresh_save_failure_retires_the_spent_credential_without_replay(monkeypatch) -> None:
+    """A local state failure after a successful refresh cannot leave a replayable token.
+
+    The refresh credential is single-use.  A storage error occurs after the control plane
+    has consumed it, so retrying the old value risks revoking its entire family.  The
+    client must return a reconnect error and fence the value in-process even if the best
+    effort persisted retirement is also unavailable.
+    """
+
+    state = {
+        "control_url": "https://control.example.test",
+        "organization_id": "org_1",
+        "refresh_credential": "old-refresh",
+        "token_subject": "member",
+    }
+    posts = []
+    saves = []
+
+    monkeypatch.setattr(cloud_session, "_UNUSABLE_REFRESHES", set())
+    monkeypatch.setattr(cloud_session, "_load", lambda: dict(state))
+    monkeypatch.setattr(
+        cloud_session, "validate_cloud_base_url", lambda value: value.rstrip("/")
+    )
+
+    def _post(*args):
+        posts.append(args)
+        return {
+            "access_token": "short-lived-access",
+            "organization_id": "org_1",
+            "refresh_credential": "rotated-refresh",
+            "token_subject": "member",
+        }
+
+    def _save(_value):
+        saves.append(dict(_value))
+        raise cloud_session.UnsafeStateFile("state path changed during write")
+
+    monkeypatch.setattr(cloud_session, "_post_refresh", _post)
+    monkeypatch.setattr(cloud_session, "_save", _save)
+
+    with pytest.raises(cloud_session.CloudSessionError) as caught:
+        cloud_session.access_for_workspace("ws", require_compute=False)
+
+    assert caught.value.status == 409
+    assert "Connect this installation again" in str(caught.value)
+    assert "old-refresh" not in str(caught.value)
+    assert len(posts) == 1
+    # The initial rotated-session write and the best-effort persisted retirement both
+    # failed; the in-process fence must still stop a second POST with the spent value.
+    with pytest.raises(cloud_session.CloudSessionError):
+        cloud_session.access_for_workspace("ws", require_compute=False)
+    assert len(posts) == 1
+    assert len(saves) == 2

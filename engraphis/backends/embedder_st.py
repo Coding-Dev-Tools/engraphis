@@ -15,9 +15,15 @@ from engraphis.backends.embedder_deterministic import DeterministicEmbedder
 
 
 class SentenceTransformerEmbedder:
-    def __init__(self, model_name: str) -> None:
+    def __init__(self, model_name: str, *, revision: Optional[str] = None) -> None:
         from sentence_transformers import SentenceTransformer  # lazy: optional dependency
-        self.model = SentenceTransformer(model_name)
+        kwargs = {"revision": revision} if revision else {}
+        # Keep declared model provenance beside the loaded object.  Benchmark
+        # artifacts must be able to distinguish a pinned model from a mutable
+        # fallback without inspecting implementation-specific internals.
+        self.model_name = model_name
+        self.revision = revision
+        self.model = SentenceTransformer(model_name, **kwargs)
         self._dim = int(self.model.get_embedding_dimension())
 
     @property
@@ -34,12 +40,17 @@ class SentenceTransformerEmbedder:
 LAST_EMBEDDER_ERROR = ""
 
 
-def get_embedder(model_name: Optional[str] = None, dim: int = 256):
+def get_embedder(
+    model_name: Optional[str] = None,
+    dim: int = 256,
+    *,
+    revision: Optional[str] = None,
+):
     """A real model if available, else the deterministic offline embedder."""
     global LAST_EMBEDDER_ERROR
     if model_name:
         try:
-            emb = SentenceTransformerEmbedder(model_name)
+            emb = SentenceTransformerEmbedder(model_name, revision=revision)
             LAST_EMBEDDER_ERROR = ""
             return emb
         except Exception as exc:  # noqa: BLE001 - optional dep; record why we fall back

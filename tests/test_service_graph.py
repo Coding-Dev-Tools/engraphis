@@ -506,11 +506,44 @@ def test_graph_memory_link_fallback_honors_the_requested_as_of_anchor():
         "UPDATE memories SET valid_from=?, valid_to=? WHERE id IN (?, ?)",
         (100.0, 200.0, first["id"], second["id"]),
     )
+    svc.store.conn.execute(
+        "UPDATE mem_links SET valid_from=100 WHERE a=? AND b=?",
+        (first["id"], second["id"]),
+    )
     svc.store.conn.commit()
 
     assert svc.graph(workspace="acme", backfill=False)["edges"] == []
     historical = svc.graph(workspace="acme", as_of=150.0, backfill=False)
     assert historical["edges"] == [{
+        "from": first["id"], "to": second["id"],
+        "label": "causes", "layer": "causal",
+    }]
+
+
+def test_graph_memory_link_fallback_honors_both_temporal_anchors():
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    svc.engine.auto_evolve = False
+    first = svc.remember("Historical alpha", workspace="acme", scope="workspace")
+    second = svc.remember("Historical beta", workspace="acme", scope="workspace")
+    svc.link(first["id"], second["id"], workspace="acme", relation="causes")
+    svc.store.conn.execute(
+        "UPDATE memories SET valid_from=100, ingested_at=100 WHERE id IN (?, ?)",
+        (first["id"], second["id"]),
+    )
+    svc.store.conn.execute(
+        "UPDATE mem_links SET valid_from=100, ingested_at=200 "
+        "WHERE a=? AND b=?", (first["id"], second["id"]),
+    )
+    svc.store.conn.commit()
+
+    unknown = svc.graph(
+        workspace="acme", valid_at=150.0, known_at=199.0, backfill=False,
+    )
+    known = svc.graph(
+        workspace="acme", valid_at=150.0, known_at=200.0, backfill=False,
+    )
+    assert unknown["edges"] == []
+    assert known["edges"] == [{
         "from": first["id"], "to": second["id"],
         "label": "causes", "layer": "causal",
     }]
@@ -682,6 +715,59 @@ def test_graph_as_of_uses_supporting_fact_time_not_entity_backfill_time():
     assert {node["label"] for node in historical["nodes"]} == {
         "Historical Alice", "Historical Acme",
     }
+
+
+def test_graph_applies_independent_world_and_system_time_anchors():
+    """Future-ingested public evidence must not leak into a world-time graph."""
+    svc = MemoryService.create(":memory:", graph_extractor="none")
+    wid, ids = _seed_entities(
+        svc, "acme",
+        [("Historical Alice", "person"), ("Historical Acme", "organization")],
+        [],
+    )
+    memory_id = svc.store.add_memory(MemoryRecord(
+        id="", content="Historical Alice works at Historical Acme.",
+        workspace_id=wid, scope=Scope.WORKSPACE,
+        valid_from=100.0, ingested_at=200.0,
+    ))
+    edge_id = svc.store.upsert_edge(Edge(
+        id="", src=ids["Historical Alice"], dst=ids["Historical Acme"],
+        relation="works_at", workspace_id=wid,
+        valid_from=100.0, ingested_at=200.0,
+        provenance={"memory_id": memory_id},
+    ))
+    svc.store.conn.execute(
+        "UPDATE edge_supports SET valid_from=100, ingested_at=200 "
+        "WHERE edge_id=? AND memory_id=?",
+        (edge_id, memory_id),
+    )
+    svc.store.conn.commit()
+
+    unknown = svc.graph(
+        workspace="acme", valid_at=150.0, known_at=199.0, backfill=False,
+    )
+    known = svc.graph(
+        workspace="acme", as_of=150.0, valid_at=150.0,
+        known_at=200.0, backfill=False,
+    )
+
+    assert unknown["nodes"] == [] and unknown["edges"] == []
+    assert [(edge["from"], edge["to"]) for edge in known["edges"]] == [(
+        ids["Historical Alice"], ids["Historical Acme"],
+    )]
+    assert known["meta"] == {
+        "nodes_available": 2,
+        "nodes_complete": True,
+        "mode": "overview",
+        "as_of": 150.0,
+        "valid_at": 150.0,
+        "known_at": 200.0,
+        "historical": True,
+    }
+    with pytest.raises(ValidationError, match="as_of and valid_at"):
+        svc.graph(
+            workspace="acme", as_of=149.0, valid_at=150.0, backfill=False
+        )
 
 
 def test_forgetting_one_support_keeps_a_multi_source_edge_live():
