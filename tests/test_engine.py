@@ -926,6 +926,10 @@ def test_code_search_and_memory_paths_honor_historical_anchors():
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")
     rid = eng.store.get_or_create_repo(wid, "sample")
+    eng.store.upsert_code_file(
+        repo_id=rid, file="old.py", lang="python", content_hash="old-file",
+        size_bytes=1, mtime_ns=1, backend="test",
+    )
     symbol_id = eng.store.upsert_symbol(
         repo_id=rid, kind="function", name="old_fn", fqname="old_fn",
         file="old.py", span="1-1",
@@ -942,22 +946,26 @@ def test_code_search_and_memory_paths_honor_historical_anchors():
     eng.store.link_memory_symbol(
         repo_id=rid, symbol_id=symbol_id, memory_id=memory_id,
     )
-    for table in ("symbols", "code_edges", "code_memory_links"):
+    for table in ("symbols", "code_edges", "code_memory_links", "code_file_history"):
         eng.store.conn.execute(
             f"UPDATE {table} SET valid_from=10, ingested_at=10 WHERE repo_id=?",
             (rid,),
         )
     eng.store.conn.commit()
     eng.store.close_validity(memory_id, at=20.0)
-    eng.store.clear_symbols_for_file(rid, "old.py")
+    eng.store.remove_code_file(rid, "old.py")
     symbol_closed_at = eng.store.conn.execute(
         "SELECT valid_to FROM symbols WHERE id=?", (symbol_id,)
+    ).fetchone()["valid_to"]
+    file_closed_at = eng.store.conn.execute(
+        "SELECT valid_to FROM code_file_history WHERE repo_id=? AND file='old.py'",
+        (rid,),
     ).fetchone()["valid_to"]
     historical = SearchFilter(
         workspace_id=wid,
         repo_id=rid,
         valid_at=15.0,
-        known_at=float(symbol_closed_at) + 1.0,
+        known_at=max(float(symbol_closed_at), float(file_closed_at)) + 1.0,
     )
 
     search = eng.search_code("old_fn", repo_id=rid, flt=historical)
@@ -974,12 +982,35 @@ def test_code_search_and_memory_paths_honor_historical_anchors():
     exported = eng.export_code_graph(repo_id=rid, flt=historical)
     assert {row["id"] for row in exported["nodes"]} == {symbol_id}
     assert len(exported["edges"]) == 1
+    assert [row["file"] for row in exported["files"]] == ["old.py"]
     assert {row["memory_id"] for row in exported["memory_links"]} == {memory_id}
     assert eng.code_path("old_fn", memory_id, repo_id=rid)["found"] is False
     assert eng.analyze_impact(
         ["old.py"], repo_id=rid
     )["memory_mentions"] == []
     assert eng.export_code_graph(repo_id=rid)["nodes"] == []
+    assert eng.export_code_graph(repo_id=rid)["files"] == []
+
+
+def test_scheduled_keyed_claims_resolve_at_the_candidate_validity_time():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    first_at = time.time() + 3_600.0
+    second_at = first_at + 3_600.0
+    first = eng.remember_with_resolution(
+        "The scheduled API limit is 100 requests per minute.",
+        workspace_id=wid, subject_key="api-limit", claim_kind="configured_value",
+        valid_from=first_at,
+    )
+    second = eng.remember_with_resolution(
+        "The scheduled API limit is 200 requests per minute.",
+        workspace_id=wid, subject_key="api-limit", claim_kind="configured_value",
+        valid_from=second_at,
+    )
+
+    assert first["op"] == "add"
+    assert second["op"] == "invalidate"
+    assert eng.store.get_memory(first["id"]).valid_to == second_at
 
 
 def test_code_reads_apply_session_visibility_to_every_memory_surface():

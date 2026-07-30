@@ -8,7 +8,7 @@ with a plain-table fallback so the schema initializes on any SQLite build).
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -360,6 +360,31 @@ CREATE TABLE IF NOT EXISTS code_files (
     PRIMARY KEY(repo_id, file)
 );
 CREATE INDEX IF NOT EXISTS idx_code_files_lang ON code_files(repo_id, lang);
+
+-- ``code_files`` is the current indexing manifest. Historical code exports use this
+-- append-only companion so a deleted or replaced file remains visible at the correct
+-- world/system-time anchors alongside its retired symbols and code edges.
+CREATE TABLE IF NOT EXISTS code_file_history (
+    version                INTEGER PRIMARY KEY,
+    repo_id                TEXT NOT NULL,
+    file                   TEXT NOT NULL,
+    lang                   TEXT,
+    content_hash           TEXT NOT NULL,
+    size_bytes             INTEGER DEFAULT 0,
+    mtime_ns               INTEGER DEFAULT 0,
+    backend                TEXT DEFAULT '',
+    indexed_at             REAL,
+    valid_from             REAL,
+    valid_to               REAL,
+    valid_to_recorded_at   REAL,
+    ingested_at            REAL,
+    expired_at             REAL
+);
+CREATE INDEX IF NOT EXISTS idx_code_file_history_temporal
+    ON code_file_history(repo_id, file, valid_to, expired_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_code_file_history_live
+    ON code_file_history(repo_id, file)
+    WHERE valid_to IS NULL AND expired_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS code_memory_links (
     id          TEXT PRIMARY KEY,

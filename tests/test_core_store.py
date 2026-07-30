@@ -22,10 +22,10 @@ def store():
 
 
 def test_schema_version(store):
-    assert store.schema_version == 5
+    assert store.schema_version == 6
 
 
-def test_clean_v5_schema_has_temporal_code_and_memory_link_tables(store):
+def test_clean_v6_schema_has_temporal_code_and_memory_link_tables(store):
     tables = {row["name"] for row in store.conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     ).fetchall()}
@@ -38,9 +38,14 @@ def test_clean_v5_schema_has_temporal_code_and_memory_link_tables(store):
     direct_link_columns = {row["name"] for row in store.conn.execute(
         "PRAGMA table_info(mem_links)"
     ).fetchall()}
+    file_history_columns = {row["name"] for row in store.conn.execute(
+        "PRAGMA table_info(code_file_history)"
+    ).fetchall()}
 
     assert "memory_entities" in tables
+    assert "code_file_history" in tables
     assert {"valid_from", "valid_to", "ingested_at", "expired_at"} <= link_columns
+    assert {"valid_from", "valid_to", "valid_to_recorded_at", "ingested_at", "expired_at"} <= file_history_columns
     assert {"memory_id", "entity_id", "source_kind", "confidence"} <= incidence_columns
     assert {"valid_from", "valid_to", "valid_to_recorded_at", "ingested_at", "expired_at"} <= direct_link_columns
 
@@ -169,7 +174,7 @@ def test_v3_migration_classifies_existing_graph_layers_once(tmp_path):
     row = migrated.conn.execute(
         "SELECT layer FROM edges WHERE id='edge_old'"
     ).fetchone()
-    assert migrated.schema_version == 5
+    assert migrated.schema_version == 6
     assert row["layer"] == "entity"
     migrated.conn.execute(
         "UPDATE edges SET layer='causal' WHERE id='edge_old'"
@@ -255,6 +260,27 @@ def test_graph_neighbors(store):
     nbrs = store.neighbors(["auth.py"])
     assert any(e.dst == "PASETO" and e.relation == "uses" for e in nbrs)
     assert nbrs[0].layer == GraphLayer.ENTITY
+
+
+def test_edge_visibility_requires_a_timestamp_paired_support(store):
+    wid = store.get_or_create_workspace("w")
+    edge_id = store.upsert_edge(Edge(
+        id="edge_pair", src="a", dst="b", relation="uses", workspace_id=wid,
+        valid_from=100.0, ingested_at=100.0,
+        provenance={"memory_id": "mem_initial"},
+    ))
+    # The edge aggregates support starts for current reads. These starts are deliberately
+    # crossed: neither source establishes the relation at (world=75, known=200).
+    store.add_edge_support(
+        edge_id, {"memory_id": "mem_later_knowledge"},
+        valid_from=50.0, ingested_at=300.0,
+    )
+    invisible = SearchFilter(workspace_id=wid, valid_at=75.0, known_at=200.0)
+    visible = SearchFilter(workspace_id=wid, valid_at=75.0, known_at=301.0)
+
+    assert store.edges_in_scope(invisible) == []
+    assert store.neighbors(["a"], flt=invisible) == []
+    assert [edge.id for edge in store.edges_in_scope(visible)] == [edge_id]
 
 
 def test_graph_neighbors_filters_by_layer(store):

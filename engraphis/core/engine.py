@@ -458,7 +458,7 @@ class MemoryEngine:
                 text, vec, workspace_id=workspace_id, repo_id=repo_id,
                 session_id=session_id, scope=scope, mtype=mtype,
                 candidate_k=candidate_k, subject_key=subject_key,
-                claim_kind=claim_kind,
+                claim_kind=claim_kind, valid_at=valid_from,
             )
         if (decision is not None
                 and decision.op == ResolutionOp.INVALIDATE
@@ -743,7 +743,8 @@ class MemoryEngine:
     def _resolve_against_neighbors(self, text: str, vec: np.ndarray, *, workspace_id: str,
                                    repo_id: Optional[str], session_id: Optional[str],
                                    scope: Scope, mtype: MemoryType, candidate_k: int,
-                                   subject_key: str = "", claim_kind: str = ""):
+                                   subject_key: str = "", claim_kind: str = "",
+                                   valid_at: Optional[float] = None):
         """Fetch same-scope neighbors via the vector index and run the deterministic
         resolver (``core.resolve``). Returns ``(decision, neighbors)`` so the caller can
         also evolve the neighborhood. Never raises — a broken/missing index degrades to
@@ -751,12 +752,28 @@ class MemoryEngine:
         flt = SearchFilter(
             workspace_id=workspace_id, repo_id=repo_id,
             session_id=session_id if scope == Scope.SESSION else None,
-            scopes=[scope], mtypes=[mtype],
+            scopes=[scope], mtypes=[mtype], valid_at=valid_at,
         )
         try:
             hits = self.index.search(vec, candidate_k, filter=flt)
         except Exception:
             return None, []
+        if not hits and valid_at is not None:
+            # A candidate may be backdated before an already-recorded claim. That claim
+            # is intentionally outside the candidate's valid-time view, but it still
+            # has to be found so the caller can reject an impossible supersession rather
+            # than silently creating overlapping history. This fallback is only a guard
+            # for an otherwise-empty temporal neighborhood; normal scheduled resolution
+            # remains anchored at the candidate's validity time above.
+            current_filter = SearchFilter(
+                workspace_id=workspace_id, repo_id=repo_id,
+                session_id=session_id if scope == Scope.SESSION else None,
+                scopes=[scope], mtypes=[mtype],
+            )
+            try:
+                hits = self.index.search(vec, candidate_k, filter=current_filter)
+            except Exception:
+                pass
         now = now_ts()
         neighbors = []
         for nid, sim in hits:
@@ -2030,7 +2047,7 @@ class MemoryEngine:
         analysis.pop("_node_community", None)
         # Fetch one sentinel row beyond the payload cap so truncation stays observable
         # without materializing every indexed file in a large repository.
-        files = self.store.list_code_files(repo_id, limit=limit + 1)
+        files = self.store.list_code_files(repo_id, flt=flt, limit=limit + 1)
         truncated_files = len(files) > limit
         files = files[:limit]
         nodes = self.store.list_symbols(repo_id, limit=limit, flt=flt)

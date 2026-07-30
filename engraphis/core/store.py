@@ -1075,6 +1075,8 @@ class Store:
             self._backfill_memory_entities_v5()
         if previous_version < 5 or mem_links_need_temporal_backfill:
             self._migrate_mem_link_history_v5()
+        if previous_version < 6:
+            self._migrate_code_file_history_v6()
         # Classify pre-v3 edges. Existing rows defaulted to semantic during ALTER TABLE;
         # infer their more specific logical layer from the relationship label.
         if previous_version < 3:
@@ -1246,6 +1248,29 @@ class Store:
             "WHERE valid_from IS NULL OR ingested_at IS NULL",
             (stamp, stamp),
         )
+
+    def _migrate_code_file_history_v6(self) -> None:
+        """Seed temporal file manifests from the v5 current-file snapshot."""
+        stamp = now_ts()
+        rows = self.conn.execute("SELECT * FROM code_files").fetchall()
+        for row in rows:
+            existing = self.conn.execute(
+                "SELECT 1 FROM code_file_history WHERE repo_id=? AND file=? "
+                "AND valid_to IS NULL AND expired_at IS NULL",
+                (row["repo_id"], row["file"]),
+            ).fetchone()
+            if existing is None:
+                started = row["indexed_at"] if row["indexed_at"] is not None else stamp
+                self.conn.execute(
+                    "INSERT INTO code_file_history("
+                    "repo_id, file, lang, content_hash, size_bytes, mtime_ns, backend, "
+                    "indexed_at, valid_from, ingested_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        row["repo_id"], row["file"], row["lang"], row["content_hash"],
+                        row["size_bytes"], row["mtime_ns"], row["backend"],
+                        row["indexed_at"], started, started,
+                    ),
+                )
 
     def _backfill_claim_identity_v5(self) -> None:
         """Lift already-present metadata hints into indexed, optional claim columns."""
@@ -2709,10 +2734,29 @@ class Store:
             normalize_graph_layer(layer, relation).value
             if layer is not None else None
         )
+        graph_layer = requested_layer or normalize_graph_layer(None, relation).value
         started_transaction = not self.conn.in_transaction
         if started_transaction:
             self.conn.execute("BEGIN IMMEDIATE")
         try:
+            # A sync bundle may carry a closed link interval.  It has no live row to
+            # match below, so recognize an exact historical version before inserting
+            # it again on every replay. ``IS`` deliberately gives NULL-safe equality.
+            exact = self.conn.execute(
+                "SELECT 1 FROM mem_links "
+                "WHERE ((a=? AND b=?) OR (a=? AND b=?)) AND relation=? "
+                "AND layer=? AND reason=? AND valid_from IS ? AND valid_to IS ? "
+                "AND valid_to_recorded_at IS ? AND ingested_at IS ? AND expired_at IS ? "
+                "LIMIT 1",
+                (
+                    a, b, b, a, relation, graph_layer, reason,
+                    valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at,
+                ),
+            ).fetchone()
+            if exact is not None:
+                if started_transaction:
+                    self.conn.commit()
+                return
             existing = self.conn.execute(
                 "SELECT rowid, a, b, relation, layer, reason, created_at, "
                 "valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at "
@@ -2768,7 +2812,6 @@ class Store:
                     # for ``commit=False``; the old no-op path never opened a transaction.
                     self.conn.commit()
                 return
-            graph_layer = requested_layer or normalize_graph_layer(None, relation).value
             stamp = now_ts()
             world_start = stamp if valid_from is None else valid_from
             system_start = stamp if ingested_at is None else ingested_at
@@ -2818,7 +2861,14 @@ class Store:
     def edges_in_scope(self, flt: Optional[SearchFilter] = None,
                        *, at: Optional[float] = None,
                        limit: Optional[int] = None) -> list[Edge]:
-        """Edges visible at ``at``/``filter.valid_at`` and ``filter.known_at``."""
+        """Edges visible at ``at``/``filter.valid_at`` and ``filter.known_at``.
+
+        Normalized supports are authoritative for edges that have them.  The edge row
+        aggregates its support starts for current-read efficiency, but independently
+        minimizing world and system time can fabricate a pair no source established.
+        A historical read must therefore see at least one individually visible support.
+        Legacy direct edges with no normalized support retain the edge-row fallback.
+        """
         valid_at, known_at = _temporal_anchors(flt, valid_at=at)
         sql = ("SELECT * FROM edges WHERE (valid_from IS NULL OR valid_from<=?) "
                "AND (valid_to IS NULL OR ?<valid_to "
@@ -2829,6 +2879,16 @@ class Store:
         params: list[Any] = [
             valid_at, valid_at, known_at, known_at, known_at,
         ]
+        support_visibility, support_params = _temporal_visibility_sql(
+            "s", flt, valid_at=valid_at
+        )
+        sql += (
+            " AND (NOT EXISTS (SELECT 1 FROM edge_supports any_support "
+            "WHERE any_support.edge_id=edges.id) OR EXISTS (SELECT 1 FROM "
+            "edge_supports s WHERE s.edge_id=edges.id AND "
+            + support_visibility + "))"
+        )
+        params.extend(support_params)
         if flt and flt.workspace_id:
             sql += " AND workspace_id=?"
             params.append(flt.workspace_id)
@@ -2851,8 +2911,12 @@ class Store:
     def links_among(self, ids: list[str], *,
                     layers: Optional[list[GraphLayer]] = None,
                     flt: Optional[SearchFilter] = None,
+                    include_invalid: bool = False,
                     limit: Optional[int] = None) -> list[dict]:
         """Return memory links visible under both temporal anchors.
+
+        ``include_invalid`` is for full-state replication only: a closed interval is
+        state that must synchronize even though normal graph reads do not expose it.
 
         Chunk only the indexed ``a`` side and filter ``b`` against an in-memory set.
         This keeps every statement below SQLite's portable variable limit while
@@ -2879,15 +2943,17 @@ class Store:
             sql = (
                 "SELECT a, b, relation, layer, reason, created_at, valid_from, valid_to, "
                 "valid_to_recorded_at, ingested_at, expired_at FROM mem_links "
-                f"WHERE a IN ({marks}) "
-                f"AND {visibility_sql}"
+                f"WHERE a IN ({marks})"
             )
-            params: list[Any] = [*chunk, *visibility_params]
+            params: list[Any] = [*chunk]
+            if not include_invalid:
+                sql += f" AND {visibility_sql}"
+                params.extend(visibility_params)
             if layers is not None:
                 layer_marks = ",".join("?" for _ in layers)
                 sql += f" AND layer IN ({layer_marks})"
                 params.extend(_enum(layer) for layer in layers)
-            sql += " ORDER BY a, b, relation"
+            sql += " ORDER BY a, b, relation, valid_from, ingested_at"
             found = self.conn.execute(sql, params).fetchall()
             for row in found:
                 if row["b"] not in wanted:
@@ -2917,6 +2983,16 @@ class Store:
             *node_ids, *node_ids,
             valid_at, valid_at, known_at, known_at, known_at,
         ]
+        support_visibility, support_params = _temporal_visibility_sql(
+            "s", flt, valid_at=valid_at
+        )
+        sql += (
+            " AND (NOT EXISTS (SELECT 1 FROM edge_supports any_support "
+            "WHERE any_support.edge_id=edges.id) OR EXISTS (SELECT 1 FROM "
+            "edge_supports s WHERE s.edge_id=edges.id AND "
+            + support_visibility + "))"
+        )
+        params.extend(support_params)
         if layers is not None:
             if not layers:
                 return []
@@ -3009,14 +3085,22 @@ class Store:
 
     def list_code_files(self, repo_id: str, *,
                         languages: Optional[set] = None,
+                        flt: Optional[SearchFilter] = None,
                         limit: Optional[int] = None) -> list[dict]:
-        sql = "SELECT * FROM code_files WHERE repo_id=?"
+        """Return the current manifest, or its bi-temporal history when anchored."""
+        historical = bool(flt and flt.historical)
+        table = "code_file_history" if historical else "code_files"
+        sql = f"SELECT * FROM {table} WHERE repo_id=?"
         params: list[Any] = [repo_id]
+        if historical:
+            temporal, temporal_params = _temporal_visibility_sql("", flt)
+            sql += " AND " + temporal
+            params.extend(temporal_params)
         if languages:
             marks = ",".join("?" for _ in languages)
             sql += f" AND lang IN ({marks})"
             params.extend(sorted(languages))
-        sql += " ORDER BY file"
+        sql += " ORDER BY file" + (", version" if historical else "")
         if limit is not None:
             sql += " LIMIT ?"
             params.append(max(0, int(limit)))  # never -1 == SQLite "unlimited"
@@ -3025,6 +3109,34 @@ class Store:
     def upsert_code_file(self, *, repo_id: str, file: str, lang: str,
                          content_hash: str, size_bytes: int, mtime_ns: int,
                          backend: str, commit: bool = True) -> None:
+        stamp = now_ts()
+        current_history = self.conn.execute(
+            "SELECT version, lang, content_hash, size_bytes, mtime_ns, backend "
+            "FROM code_file_history WHERE repo_id=? AND file=? "
+            "AND valid_to IS NULL AND expired_at IS NULL",
+            (repo_id, file),
+        ).fetchone()
+        unchanged = current_history is not None and (
+            current_history["lang"], current_history["content_hash"],
+            int(current_history["size_bytes"] or 0), int(current_history["mtime_ns"] or 0),
+            current_history["backend"] or "",
+        ) == (lang, content_hash, int(size_bytes), int(mtime_ns), backend)
+        if not unchanged:
+            if current_history is not None:
+                self.conn.execute(
+                    "UPDATE code_file_history SET valid_to=?, valid_to_recorded_at=? "
+                    "WHERE version=?",
+                    (stamp, stamp, current_history["version"]),
+                )
+            self.conn.execute(
+                "INSERT INTO code_file_history("
+                "repo_id, file, lang, content_hash, size_bytes, mtime_ns, backend, "
+                "indexed_at, valid_from, ingested_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    repo_id, file, lang, content_hash, int(size_bytes), int(mtime_ns),
+                    backend, stamp, stamp, stamp,
+                ),
+            )
         self.conn.execute(
             "INSERT INTO code_files(repo_id, file, lang, content_hash, size_bytes, "
             "mtime_ns, backend, indexed_at) VALUES (?,?,?,?,?,?,?,?) "
@@ -3033,13 +3145,19 @@ class Store:
             "size_bytes=excluded.size_bytes, mtime_ns=excluded.mtime_ns, "
             "backend=excluded.backend, indexed_at=excluded.indexed_at",
             (repo_id, file, lang, content_hash, int(size_bytes), int(mtime_ns),
-             backend, now_ts()),
+             backend, stamp),
         )
         if commit:
             self.conn.commit()
 
     def remove_code_file(self, repo_id: str, file: str, *, commit: bool = True) -> None:
         self.clear_symbols_for_file(repo_id, file, commit=False)
+        stamp = now_ts()
+        self.conn.execute(
+            "UPDATE code_file_history SET valid_to=?, valid_to_recorded_at=? "
+            "WHERE repo_id=? AND file=? AND valid_to IS NULL AND expired_at IS NULL",
+            (stamp, stamp, repo_id, file),
+        )
         self.conn.execute("DELETE FROM code_files WHERE repo_id=? AND file=?", (repo_id, file))
         if commit:
             self.conn.commit()

@@ -272,6 +272,48 @@ def test_sync_reactivates_closed_link_once_and_preserves_history(monkeypatch):
     )] == [40.0]
 
 
+def test_sync_v2_preserves_closed_memory_link_history():
+    source = Store(":memory:")
+    source_ws = source.get_or_create_workspace("w")
+    for memory_id in ("mem_a", "mem_b"):
+        source.add_memory(MemoryRecord(
+            id=memory_id, content=memory_id, workspace_id=source_ws,
+            valid_from=1.0, ingested_at=1.0,
+        ))
+    source.add_link(
+        "mem_a", "mem_b", relation="related", layer="semantic", reason="old",
+        valid_from=10.0, valid_to=20.0, valid_to_recorded_at=30.0,
+        ingested_at=11.0, expired_at=40.0,
+    )
+    source.add_link(
+        "mem_a", "mem_b", relation="related", layer="semantic", reason="current",
+        valid_from=50.0, ingested_at=51.0,
+    )
+
+    bundle = SyncEngine(source).export_bundle(source_ws)
+    assert [link["valid_from"] for link in bundle["mem_links"]] == [10.0, 50.0]
+    assert bundle["mem_links"][0]["valid_to_recorded_at"] == 30.0
+    assert bundle["mem_links"][0]["expired_at"] == 40.0
+
+    target = Store(":memory:")
+    syncer = SyncEngine(target)
+    first = syncer.apply_bundle(bundle)
+    replay = syncer.apply_bundle(bundle)
+    rows = [dict(row) for row in target.conn.execute(
+        "SELECT valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at "
+        "FROM mem_links ORDER BY valid_from"
+    ).fetchall()]
+
+    assert first["links_added"] == 2
+    assert replay["links_added"] == 0
+    assert rows == [
+        {"valid_from": 10.0, "valid_to": 20.0, "valid_to_recorded_at": 30.0,
+         "ingested_at": 11.0, "expired_at": 40.0},
+        {"valid_from": 50.0, "valid_to": None, "valid_to_recorded_at": None,
+         "ingested_at": 51.0, "expired_at": None},
+    ]
+
+
 def test_dry_run_writes_nothing():
     store = Store(":memory:")
     se = SyncEngine(store)

@@ -59,7 +59,7 @@ def test_v4_migration_backfills_canonical_entities_and_edge_supports(tmp_path):
     ).fetchall()]
     supports = store.edge_supports_in_scope(["edg_a"], at=2)
 
-    assert store.schema_version == 5
+    assert store.schema_version == 6
     assert {row["normalized_name"] for row in rows} == {"redis"}
     assert len({row["canonical_id"] for row in rows}) == 1
     assert all(row["canonical_confidence"] == 1.0 for row in rows)

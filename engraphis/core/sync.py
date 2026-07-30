@@ -521,7 +521,7 @@ class SyncEngine:
             repo_rows = self.store.conn.execute(
                 "SELECT id, name FROM repos WHERE workspace_id=?", (workspace_id,)).fetchall()
         ids_in = [m.id for m in mems]
-        links = self.store.links_among(ids_in) if ids_in else []
+        links = self.store.links_among(ids_in, include_invalid=True) if ids_in else []
         return {
             "format": SYNC_FORMAT, "version": SYNC_VERSION,
             "device_id": self.device_id, "created_at": now_ts(),
@@ -533,6 +533,11 @@ class SyncEngine:
                     "a": ln["a"], "b": ln["b"], "relation": ln["relation"],
                     "layer": ln.get("layer") or "semantic",
                     "reason": ln.get("reason") or "",
+                    "valid_from": ln.get("valid_from"),
+                    "valid_to": ln.get("valid_to"),
+                    "valid_to_recorded_at": ln.get("valid_to_recorded_at"),
+                    "ingested_at": ln.get("ingested_at"),
+                    "expired_at": ln.get("expired_at"),
                 }
                 for ln in links
             ],
@@ -780,6 +785,43 @@ class SyncEngine:
                 if not dry_run:
                     self.store.conn.commit()
                 pending = 0
+            # v2 bundles carry a complete bi-temporal link version. Preserve it
+            # verbatim (after the normal untrusted-input clamps), including closed
+            # intervals. v1 omitted these fields, so it retains the established
+            # grow-only/current-link merge below.
+            if "valid_from" in ln and "ingested_at" in ln:
+                valid_from = _clamp_world_ts(ln.get("valid_from"))
+                valid_to = _clamp_world_ts(ln.get("valid_to"))
+                valid_to_recorded_at = _clamp_ts(ln.get("valid_to_recorded_at"), now_ts())
+                ingested_at = _clamp_ts(ln.get("ingested_at"), now_ts())
+                expired_at = _clamp_ts(ln.get("expired_at"), now_ts())
+                existing_version = self.store.conn.execute(
+                    "SELECT 1 FROM mem_links "
+                    "WHERE ((a=? AND b=?) OR (a=? AND b=?)) AND relation=? "
+                    "AND layer=? AND reason=? AND valid_from IS ? AND valid_to IS ? "
+                    "AND valid_to_recorded_at IS ? AND ingested_at IS ? AND expired_at IS ? "
+                    "LIMIT 1",
+                    (
+                        a, b, b, a, rel, layer, reason,
+                        valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at,
+                    ),
+                ).fetchone()
+                if existing_version:
+                    continue
+                if not dry_run:
+                    self.store.add_link(
+                        a, b, rel, layer=layer, reason=reason,
+                        valid_from=valid_from, valid_to=valid_to,
+                        valid_to_recorded_at=valid_to_recorded_at,
+                        ingested_at=ingested_at, expired_at=expired_at,
+                        commit=False,
+                    )
+                    self.store.audit(
+                        "sync:%s" % _clamp_str(src_device or "peer", 128),
+                        "sync_link", a,
+                        f"linked to {b} with relation {rel}", commit=False)
+                report["links_added"] += 1
+                continue
             existing_link = self.store.conn.execute(
                 "SELECT layer, reason FROM mem_links "
                 "WHERE ((a=? AND b=?) OR (a=? AND b=?)) AND relation=? "

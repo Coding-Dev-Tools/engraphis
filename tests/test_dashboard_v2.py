@@ -83,7 +83,8 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         assert classic_js.status_code == 200
         assert "/static/vendor/force-graph.min.js" in classic_js.text
         assert "/v2-assets/engraphis-graph.js?v=20260728-reference-materials" in classic_js.text
-        assert "&full=true&limit=20000" in classic_js.text
+        assert "graphLimit=GRAPH_FULL?20000:320" in classic_js.text
+        assert "graphScope=GRAPH_FULL?'&full=true':(showUnlinked?'':'&connected_only=true')" in classic_js.text
         bootstrap = client.get("/api/bootstrap")
         assert bootstrap.status_code == 200
         assert bootstrap.json()["stats"]["memories"] >= 1
