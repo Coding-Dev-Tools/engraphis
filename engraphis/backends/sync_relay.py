@@ -415,22 +415,42 @@ class EncryptedRelayTransport:
         self.relay.push(stored_name, SYNC_E2EE_MAGIC + nonce + ciphertext)
 
     def pull(self) -> Iterable[Tuple[str, bytes]]:
+        """Yield every authentic bundle and flag an incomplete encrypted round.
+
+        A Cloud Sync workspace may contain bundles written before E2EE existed, or a
+        relay object may have been damaged.  Neither is eligible for plaintext
+        fallback, but neither may prevent a later authenticated peer bundle from
+        being applied.  Match ``RelayTransport.pull``: fail closed for each bad
+        object, yield every valid one, then raise one sanitized error so
+        ``SyncEngine`` reports an incomplete round rather than a false success.
+        """
+        skipped = 0
         for name, data in self.relay.pull():
-            safe = _safe_bundle_name(name)
-            if not safe or not isinstance(data, (bytes, bytearray)):
-                raise RelayError("relay returned an invalid encrypted bundle")
-            raw = bytes(data)
-            if not raw.startswith(SYNC_E2EE_MAGIC):
-                raise RelayError("relay bundle requires end-to-end encryption")
-            payload = raw[len(SYNC_E2EE_MAGIC):]
-            if len(payload) < SYNC_E2EE_NONCE_BYTES + SYNC_E2EE_TAG_BYTES:
-                raise RelayError("bundle could not be authenticated")
-            nonce, ciphertext = payload[:SYNC_E2EE_NONCE_BYTES], payload[SYNC_E2EE_NONCE_BYTES:]
             try:
+                safe = _safe_bundle_name(name)
+                if not safe or not isinstance(data, (bytes, bytearray)):
+                    raise RelayError("relay returned an invalid encrypted bundle")
+                raw = bytes(data)
+                if not raw.startswith(SYNC_E2EE_MAGIC):
+                    raise RelayError("relay bundle requires end-to-end encryption")
+                payload = raw[len(SYNC_E2EE_MAGIC):]
+                if len(payload) < SYNC_E2EE_NONCE_BYTES + SYNC_E2EE_TAG_BYTES:
+                    raise RelayError("bundle could not be authenticated")
+                nonce = payload[:SYNC_E2EE_NONCE_BYTES]
+                ciphertext = payload[SYNC_E2EE_NONCE_BYTES:]
                 plaintext = self._cipher.decrypt(nonce, ciphertext, self._aad(safe))
             except self._invalid_tag:
-                raise RelayError("bundle could not be authenticated") from None
+                skipped += 1
+                continue
+            except RelayError:
+                skipped += 1
+                continue
             yield safe, plaintext
+        if skipped:
+            raise RelayError(
+                "encrypted relay skipped %d unreadable bundle%s this round"
+                % (skipped, "" if skipped == 1 else "s")
+            )
 
     def list_names(self) -> List[str]:
         return self.relay.list_names()
