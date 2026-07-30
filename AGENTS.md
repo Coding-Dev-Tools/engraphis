@@ -20,7 +20,7 @@ most common mistake here.
 | Status | Primary scoped, bi-temporal, interface-driven implementation. | Compatibility/reference implementation with flat namespaces. |
 | Model | Scoped + bi-temporal + typed; interface-driven. | Single flat `namespace` string per memory. |
 | Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/`, `static/` |
-| Data | new v2 schema (`SCHEMA_VERSION = 4`) | `engraphis_v1.db` |
+| Data | new v2 schema (`SCHEMA_VERSION = 5`) | `engraphis_v1.db` |
 | Entry | `MemoryEngine.create()` → `core/engine.py` | `python -m scripts.start_server` → FastAPI on :8700 |
 
 **Rule:** build new capability on **v2** (`core/` + `backends/`) behind the interfaces.
@@ -79,8 +79,6 @@ python -m scripts.cli recall "what do we know about X" -n vault    # CLI: ingest
 python -m scripts.migrate_to_v2 --old engraphis_v1.db --new engraphis_v2.db --dry-run
 python -m scripts.migrate_to_v2 --old engraphis_v1.db --new engraphis_v2.db
 
-# ── Seed memories from an Obsidian/markdown vault (v1) ───────────────────────
-python -m scripts.seed_from_obsidian "C:/path/to/Vault" --namespace vault
 ```
 
 `requires-python >= 3.9` (ruff targets `py39`); CI and the recommended dev environment use **3.11**.
@@ -93,15 +91,17 @@ python -m scripts.seed_from_obsidian "C:/path/to/Vault" --namespace vault
 
 ```
 query
-  └─ SearchFilter (scope + as_of time anchor)            core/interfaces.py
-     └─ 3 retrieval arms (run in parallel, then fused):
+  └─ SearchFilter (scope + valid_at/known_at anchors)    core/interfaces.py
+     └─ 4 retrieval arms (run in parallel, then fused):
         • vector   — VectorIndex.search (cosine)         backends/vector_*.py
         • lexical  — Store.fts_search (FTS5/BM25 + LIKE fallback)   core/store.py
         • graph    — Personalized PageRank over entities+links      core/recall.py + core/graphrank.py
                      (graph_mode="1hop" keeps the old expansion for ablation)
+        • code     — symbols/files/calls with memory bridges          core/engine.py
      └─ RRF fusion + six-term weighted score             core/scoring.py
      └─ rerank top-N                                      backends/reranker.py
-     └─ context packing (token budget) + reinforce()      core/recall.py / core/store.py
+     └─ context packing (token budget) + optional explicit reinforcement
+                                                       core/recall.py / core/store.py
 ```
 
 Backends are selected by `get_embedder()` / `get_vector_index()` / `get_reranker()` and
@@ -177,7 +177,7 @@ These are pure, unit-tested functions — change them only with a corresponding 
 
 ---
 
-## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 4`)
+## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 5`)
 
 - **Scope hierarchy:** `workspace → repo → session → memory`. Scopes: `session|repo|workspace|user`.
 - **Bi-temporal validity on every record:** world-time `valid_from/valid_to` +
@@ -188,7 +188,8 @@ These are pure, unit-tested functions — change them only with a corresponding 
   Lexicographic sort == chronological.
 - **Tables:** `workspaces`, `repos`, `sessions`, `memories`, `mem_vectors`,
   `mem_fts` (FTS5 + plain-table fallback), `entities`, `edges` (bi-temporal), `mem_links`,
-  `symbols`, `code_edges`, `code_files`, `code_memory_links`, `operation_receipts`,
+  `memory_entities`, `symbols`, `code_edges`, `code_files`, `code_memory_links`,
+  `operation_receipts`,
   `events`, `audit`, `schema_migrations`.
 - **Vectors are stored L2-normalized** so cosine similarity == dot product.
 
@@ -221,7 +222,7 @@ These are pure, unit-tested functions — change them only with a corresponding 
 - **`README.md`** — installation, product surfaces, configuration, and public API usage.
 - **`CHANGELOG.md`** — shipped capability and release history. Keep phase/status ledgers out of
   this operating manual.
-- **`docs/SYNC.md`** — cloud sync (Pro): architecture, the convergent merge, CLI usage, the
+- **`docs/SYNC.md`** — cloud sync (Pro): architecture, the convergent merge, CLI usage, and the
   untrusted-bundle security model.
 - **`AGENTS.md`** (this file) + **`CLAUDE.md`** — how to work in the repo.
 - **`skills/engraphis-memory/`** — portable Agent Skill (SKILL.md + `references/`) that teaches any
