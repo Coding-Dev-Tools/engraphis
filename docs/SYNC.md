@@ -128,9 +128,10 @@ outside the authorized workspace merely by changing bundle fields.
 
 - Local-only installations send no memory content to Engraphis. **Cloud Sync encrypts eligible
   shared-workspace changes end-to-end before they leave this device. Engraphis Cloud cannot read
-  their contents; secret and session-scoped memories stay local.** Managed compute is a separate,
-  opt-in service: it sends a readable, bounded snapshot over TLS because Engraphis Cloud must
-  process that snapshot to produce results.
+  their contents; secret and session-scoped memories stay local.** Managed compute is separate:
+  connecting an installation to Engraphis Cloud accepts its terms and enables it by default;
+  operators may opt out with `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=0`. It sends a readable, bounded
+  snapshot over TLS because Engraphis Cloud must process that snapshot to produce results.
 - Treat cloud session and refresh files as credentials; keep their directory owner-only.
 - `secret` memories are excluded from managed uploads. Managed compute also rejects secret rows
   server-side.
