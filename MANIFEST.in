@@ -8,10 +8,13 @@ recursive-include engraphis/classic_assets/vendor *
 recursive-include engraphis/dashboard_assets *.html *.css *.js *.png *.ico
 recursive-include engraphis/dashboard_assets/vendor *
 include engraphis/commercial_manifest.json
-include LICENSE NOTICE README.md CHANGELOG.md
+include LICENSE NOTICE README.md CHANGELOG.md BENCHMARKS.md
 include pyproject.toml
 include .env.example requirements.txt
 include docker-entrypoint.sh Dockerfile docker-compose.yml
 include railway.json
+recursive-include eval *.py
+include eval/BASELINES.md
+recursive-include eval/configs *.json
 recursive-include eval/datasets *.jsonl
 recursive-include tests *.py

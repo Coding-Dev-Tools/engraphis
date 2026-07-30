@@ -42,9 +42,12 @@ function license() {
 
 async function mockApi(page, options = {}) {
   const requests = [];
+  requests.automationPolicies = [];
   const audit = options.audit || [];
   const receipts = options.receipts || [];
   const workspaceList = options.workspaces || [{ name: workspace, memories: memories.length }];
+  const licenseState = options.license || license();
+  let automationPolicy = options.automationPolicy || null;
   const memoriesFor = requestUrl => {
     const selected = requestUrl.searchParams.get('workspace') || workspace;
     return (options.memoriesByWorkspace && options.memoriesByWorkspace[selected]) || memories;
@@ -56,6 +59,7 @@ async function mockApi(page, options = {}) {
     model: 'gpt-4o-mini',
     extractor: 'none',
     extractor_enabled: false,
+    retention_supervisor: 'none',
     default_models: {
       openai: 'gpt-4o-mini',
       anthropic: 'claude-3-5-sonnet-20241022',
@@ -76,7 +80,7 @@ async function mockApi(page, options = {}) {
     });
     if (path === '/bootstrap') {
       return ok({
-        license: license(),
+        license: licenseState,
         workspaces: workspaceList,
         stats: {
           memories: memories.length,
@@ -166,7 +170,7 @@ async function mockApi(page, options = {}) {
       truncation: { evidence: false },
     });
     if (path === '/health') return ok({ status: 'ok' });
-    if (path === '/license') return ok(license());
+    if (path === '/license') return ok(licenseState);
     if (path === '/auth/state') {
       return ok({
         enabled: false,
@@ -197,6 +201,18 @@ async function mockApi(page, options = {}) {
       return ok({ totals: {}, entities: [], series: [] });
     }
     if (path === '/automation') {
+      if (automationPolicy) {
+        if (request.method() === 'POST') {
+          const body = JSON.parse(request.postData() || '{}');
+          requests.automationPolicies.push(body);
+          automationPolicy = {
+            ...automationPolicy,
+            ...body,
+            dream: body.dream_enabled,
+          };
+        }
+        return ok(automationPolicy);
+      }
       return route.fulfill({
         status: 402,
         contentType: 'application/json',
@@ -247,6 +263,7 @@ test('Ledger is live, safe, lazy, accessible, and responsive', async ({ page }) 
 
   await page.setViewportSize({ width: 375, height: 812 });
   await expect(page.getByRole('button', { name: 'Manage' })).toBeVisible();
+  await expect(page.locator('#sidebar-pro-cta')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 
   const accessibility = await new AxeBuilder({ page }).analyze();
@@ -682,6 +699,7 @@ test('Ledger applies the configured LLM extraction toggle', async ({ page }) => 
     model: 'gpt-4o-mini',
     extractor: 'none',
     extractor_enabled: false,
+    retention_supervisor: 'llm',
     default_models: { openai: 'gpt-4o-mini' },
   } });
   await page.goto('/');
@@ -690,39 +708,134 @@ test('Ledger applies the configured LLM extraction toggle', async ({ page }) => 
 
   const turnOn = page.getByRole('button', { name: 'Turn on' });
   await expect(turnOn).toBeEnabled();
+  await expect(page.getByText(/Retention supervision is ON/)).toBeVisible();
+  await expect(page.getByText(/bounded excerpt/)).toBeVisible();
+  page.once('dialog', dialog => {
+    expect(dialog.message()).toContain('configured LLM provider');
+    expect(dialog.message()).toContain('provider must read that text');
+    return dialog.accept();
+  });
   await turnOn.click();
   await expect(page.getByText('ON', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Turn off' })).toBeEnabled();
 
   await page.getByRole('button', { name: 'Turn off' }).click();
   await expect(page.getByText('OFF', { exact: true })).toBeVisible();
+  await expect(page.getByText(/Retention supervision is ON/)).toBeVisible();
   await expect(turnOn).toBeEnabled();
+});
+
+test('Ledger gives active Pro members direct Cloud access and saves hosted policy changes', async ({ page }) => {
+  const activePro = {
+    ...license(),
+    plan: 'pro',
+    features: ['cloud_sync', 'analytics', 'automation'],
+    cloud_access_active: true,
+    access_state: 'active',
+    plan_source: 'cloud',
+    trial: { used: true, active: false, available: false, trial_days: 3 },
+  };
+  const requests = await mockApi(page, {
+    license: activePro,
+    automationPolicy: {
+      enabled: true,
+      cadence_hours: 24,
+      dream: true,
+      dream_min_new: 25,
+      dream_idle_minutes: 15,
+      infer: false,
+      last_run: Date.now() / 1000,
+    },
+  });
+  await page.goto('/');
+
+  await expect(page.locator('#plan-badge')).toHaveText('PRO');
+  await expect(page.locator('#plan-badge')).toHaveAttribute(
+    'href',
+    'https://cloud.engraphis.test/account?utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=header',
+  );
+  await expect(page.locator('#sidebar-pro-cta')).toHaveText('Open Engraphis Cloud');
+  await expect(page.locator('#sidebar-pro-cta')).toHaveAttribute(
+    'href',
+    'https://cloud.engraphis.test/account?utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=sidebar',
+  );
+
+  await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('tab', { name: 'Settings' }).click();
+  const cloudSettings = page.locator('#cloud-account-settings');
+  await expect(cloudSettings.getByRole('link', { name: 'Open Engraphis Cloud' })).toHaveAttribute(
+    'href',
+    'https://cloud.engraphis.test/account?utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=settings',
+  );
+
+  await page.getByRole('tab', { name: 'Automation' }).click();
+  await expect(page.getByRole('checkbox', { name: 'Enable hosted maintenance' })).toBeChecked();
+  await page.getByRole('spinbutton', { name: 'Run every (hours)' }).fill('12');
+  page.once('dialog', dialog => {
+    expect(dialog.message()).toContain('Engraphis Cloud must read the bounded snapshot');
+    expect(dialog.message()).toContain('not end-to-end encrypted');
+    return dialog.accept();
+  });
+  await page.getByRole('button', { name: 'Save & send policy to Cloud' }).click();
+  await expect.poll(() => requests.automationPolicies.length).toBe(1);
+  expect(requests.automationPolicies[0]).toEqual({
+    enabled: true,
+    cadence_hours: 12,
+    dream_enabled: true,
+    dream_min_new: 25,
+    dream_idle_minutes: 15,
+    infer: false,
+  });
+  await expect(page.getByRole('spinbutton', { name: 'Run every (hours)' })).toHaveValue('12');
 });
 
 test('billing cadence selects the exact Pro and Team checkout target', async ({ page }) => {
   await mockApi(page);
   await page.goto('/');
+  await expect(page.locator('#sidebar-pro-cta')).toHaveText('Start 3-day Pro trial');
+  await expect(page.locator('#sidebar-pro-cta')).toHaveAttribute(
+    'href',
+    'https://cloud.engraphis.test/account?plan=pro&interval=monthly&trial=pro&utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=sidebar#billing',
+  );
   await page.getByRole('button', { name: 'Manage' }).click();
+  await page.getByRole('tab', { name: 'Analytics' }).click();
+  await expect(page.locator('#analytics-pro-cta')).toHaveText('Start 3-day Pro trial');
+  await expect(page.locator('#analytics-pro-cta')).toHaveAttribute(
+    'href',
+    'https://cloud.engraphis.test/account?plan=pro&interval=monthly&trial=pro&utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=analytics#billing',
+  );
+  await page.getByRole('tab', { name: 'Automation' }).click();
+  await expect(page.locator('#automation-pro-cta')).toHaveText('Start 3-day Pro trial');
+  await expect(page.locator('#automation-pro-cta')).toHaveAttribute(
+    'href',
+    'https://cloud.engraphis.test/account?plan=pro&interval=monthly&trial=pro&utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=automation#billing',
+  );
   await page.getByRole('tab', { name: 'Plans & billing' }).click();
+  await expect(page.locator('.plan-card.featured .plan-support')).toContainText(
+    'Support continued Engraphis development with Pro.',
+  );
+  await expect(page.locator('.plan-card.featured .plan-benefits')).toContainText(
+    'Cloud Sync, Analytics, Auto Consolidation, and Auto Dreaming',
+  );
 
-  const pro = page.getByRole('link', { name: 'Open Pro options' });
-  const team = page.getByRole('link', { name: 'Open Team options' });
+  const pro = page.locator('#plan-cards [data-pro-cta="pro"]');
+  const team = page.locator('#plan-cards [data-pro-cta="team"]');
   await expect(pro).toHaveAttribute(
     'href',
-    'https://cloud.engraphis.test/account?plan=pro&interval=monthly#billing',
+    'https://cloud.engraphis.test/account?plan=pro&interval=monthly&trial=pro&utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=plans#billing',
   );
   await expect(team).toHaveAttribute(
     'href',
-    'https://cloud.engraphis.test/account?plan=team&interval=monthly#billing',
+    'https://cloud.engraphis.test/account?plan=team&interval=monthly&trial=team&utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=plans#billing',
   );
 
   await page.getByRole('combobox', { name: 'Billing' }).selectOption('annual');
   await expect(pro).toHaveAttribute(
     'href',
-    'https://cloud.engraphis.test/account?plan=pro&interval=annual#billing',
+    'https://cloud.engraphis.test/account?plan=pro&interval=annual&trial=pro&utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=plans#billing',
   );
   await expect(team).toHaveAttribute(
     'href',
-    'https://cloud.engraphis.test/account?plan=team&interval=annual#billing',
+    'https://cloud.engraphis.test/account?plan=team&interval=annual&trial=team&utm_source=engraphis&utm_medium=product&utm_campaign=pro_conversion&utm_content=plans#billing',
   );
 });

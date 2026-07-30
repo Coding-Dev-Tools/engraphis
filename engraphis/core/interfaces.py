@@ -7,6 +7,7 @@ Rust one is a configuration change rather than a refactor.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Iterable, Literal, Optional, Protocol, runtime_checkable
@@ -40,6 +41,21 @@ class GraphLayer(str, Enum):
     SEMANTIC = "semantic"
 
 
+def _finite_timestamp(value: Optional[float], name: str) -> Optional[float]:
+    """Normalize public temporal anchors and reject SQLite's non-finite values."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a finite timestamp")
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite timestamp") from exc
+    if not math.isfinite(timestamp):
+        raise ValueError(f"{name} must be a finite timestamp")
+    return timestamp
+
+
 # ── Records ──────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -65,10 +81,13 @@ class MemoryRecord:
     valid_to: Optional[float] = None     # world-time: when it stopped being true
     ingested_at: Optional[float] = None  # system-time: when we learned it
     expired_at: Optional[float] = None   # system-time: when we retired it
+    subject_key: str = ""                # stable optional claim subject
+    claim_kind: str = ""                 # optional claim predicate/category
     pinned: bool = False
     sensitivity: str = "normal"          # normal | sensitive | secret
     provenance: dict[str, Any] = field(default_factory=dict)
     embedding: Optional[np.ndarray] = None
+    valid_to_recorded_at: Optional[float] = None  # when valid_to was learned
 
 
 @dataclass
@@ -80,11 +99,34 @@ class SearchFilter:
     scopes: Optional[list[Scope]] = None
     mtypes: Optional[list[MemoryType]] = None
     graph_layers: Optional[list[GraphLayer]] = None
-    as_of: Optional[float] = None    # bi-temporal time anchor; None = now
+    # ``as_of`` remains a compatibility alias for the world-time ``valid_at``
+    # anchor.  New callers can independently select what was true and what
+    # had been learned at that time.
+    as_of: Optional[float] = None
     # Contextual recall sees broader scopes as ancestors: a repo read can see that
     # repo plus workspace/user memories, and a session read can additionally see its
     # exact session.  Storage/governance queries stay exact unless they opt in.
     include_ancestors: bool = False
+    # Appended after every 1.x field so positional construction remains compatible.
+    valid_at: Optional[float] = None
+    known_at: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        self.as_of = _finite_timestamp(self.as_of, "as_of")
+        self.valid_at = _finite_timestamp(self.valid_at, "valid_at")
+        self.known_at = _finite_timestamp(self.known_at, "known_at")
+        if self.as_of is not None and self.valid_at is not None:
+            if self.as_of != self.valid_at:
+                raise ValueError("as_of and valid_at must match when both are supplied")
+        # Keep legacy backends that read ``as_of`` correct as callers move to
+        # the less ambiguous ``valid_at`` name.
+        self.valid_at = self.valid_at if self.valid_at is not None else self.as_of
+        self.as_of = self.valid_at
+
+    @property
+    def historical(self) -> bool:
+        """Whether either time axis was explicitly anchored by the caller."""
+        return self.valid_at is not None or self.known_at is not None
 
 
 @dataclass
@@ -94,6 +136,29 @@ class Candidate:
     score: float
     arm: str = ""                    # semantic | lexical | graph | fused
     record: Optional[MemoryRecord] = None
+
+
+@dataclass
+class PackedChunk:
+    """One source excerpt selected by a context-packing implementation."""
+    id: str
+    excerpt: str
+    tokens: int
+    truncated: bool = False
+    reason: str = ""
+
+
+@dataclass
+class ContextUsage:
+    """Token accounting emitted by a context-packing implementation."""
+    budget_tokens: int
+    context_tokens: int
+    source_tokens: int
+    saved_tokens: int
+    savings_ratio: float
+    packed_count: int
+    omitted_count: int
+    token_counter: str = "estimate_tokens"
 
 
 @dataclass
@@ -123,6 +188,7 @@ class Edge:
     ingested_at: Optional[float] = None
     expired_at: Optional[float] = None
     provenance: dict[str, Any] = field(default_factory=dict)
+    valid_to_recorded_at: Optional[float] = None
 
 
 @dataclass
@@ -217,6 +283,20 @@ class GraphStore(Protocol):
 class Reranker(Protocol):
     """Cross-encoder reranking of fused candidates (§7.1 stage 4)."""
     def rerank(self, query: str, candidates: list[Candidate], k: int) -> list[Candidate]: ...
+
+
+@runtime_checkable
+class ContextPacker(Protocol):
+    """Choose budgeted, explainable source excerpts for an agent context."""
+    def pack(self, query: str, candidates: list[Candidate], token_budget: int
+             ) -> tuple[str, list[PackedChunk], ContextUsage]: ...
+    def count_tokens(self, text: str) -> int: ...
+
+
+@runtime_checkable
+class RetrievalPolicy(Protocol):
+    """Select a named retrieval profile without coupling core to a backend."""
+    def profile(self, query: str) -> str: ...
 
 
 @runtime_checkable

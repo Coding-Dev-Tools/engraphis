@@ -32,11 +32,9 @@ services:
       # safe only because the published host port above is loopback-only.
       ENGRAPHIS_LOCAL_TRUSTED_PEERS: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7
       ENGRAPHIS_DB_PATH: /data/engraphis.db
-      # Persist license/trial/machine-id/lease + the revocation registry on the volume.
+      # Persist the customer-side cloud session and non-authoritative entitlement display
+      # cache on the volume. Issuance, trial state, leases, and revocations stay private.
       ENGRAPHIS_STATE_DIR: /data/.engraphis
-      # Relay/registry DB (issued keys + revocations) — on the persistent volume so a
-      # revoked key STAYS revoked across redeploys.
-      ENGRAPHIS_RELAY_DB: /data/.engraphis/relay.db
     volumes:
       - engraphis-data:/data
     restart: unless-stopped

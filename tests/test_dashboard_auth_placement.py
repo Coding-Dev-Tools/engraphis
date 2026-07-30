@@ -22,8 +22,8 @@ def test_dashboard_has_no_local_team_auth_or_license_activation_ui():
         assert removed not in html
     assert "activateLicense" not in script
     assert "'/license/activate'" not in script
-    assert "Start hosted Pro trial" in script
-    assert "Start hosted Team trial" in script
+    assert "Start ${TRIAL_DAYS}-day ${name} trial" in script
+    assert "hostedCta('team','team_tab')" in script
     # ``plan: local`` is the free customer runtime, not a paid local plan.
     assert "raw==='pro'||raw==='team'" in script
     assert "d.plan&&d.plan!=='free'" not in script
@@ -98,7 +98,54 @@ def test_hosted_views_delegate_entitlement_to_cloud_proxy_responses():
     # here is the only way a non-billing failure can reach ``unlockHtml``.
     assert "error.status===402||error.status===501" in script
     assert "error.status===409" in script
-    assert "Purchase Pro license" in script
+    assert "Subscribe to ${name}" in script
+
+
+def test_hosted_transfer_and_llm_consents_state_the_real_privacy_boundary():
+    """Every local consent states which processor can read submitted content."""
+
+    legacy_scripts = (SCRIPT, CLASSIC_SCRIPT)
+    for path in legacy_scripts:
+        script = path.read_text(encoding="utf-8")
+        assert "Engraphis Cloud must read the bounded snapshot" in script
+        assert "not end-to-end encrypted" in script
+        assert "configured LLM provider" in script
+        assert "provider must read that text" in script
+        assert "retention supervision is configured separately" in script
+        assert "will never see, read, or access your data" not in script
+        assert "confirmCloudTransfer('Save hosted policy'" in script
+        assert "confirmCloudTransfer('Request hosted proposal'" in script
+        assert "confirmCloudTransfer('Sync shared workspaces'" in script
+        assert "Turn on LLM extraction" in script
+
+    ledger = (Path(__file__).resolve().parents[1] / "engraphis" / "dashboard_assets"
+              / "ledger.js").read_text(encoding="utf-8")
+    assert "Engraphis Cloud must read the bounded snapshot" in ledger
+    assert "not end-to-end encrypted" in ledger
+    assert "configured LLM provider" in ledger
+    assert "provider must read that text" in ledger
+    assert "Retention supervision is ON" in ledger
+    assert "bounded excerpt to the configured provider" in ledger
+    assert "will never see, read, or access your data" not in ledger
+    assert "Save this hosted policy" in ledger
+    assert "Turn on LLM extraction" in ledger
+
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(
+        encoding="utf-8"
+    )
+    normalized_readme = " ".join(readme.split())
+    assert "hosted service must read it to produce a proposal" in normalized_readme
+    assert "this is not end-to-end-encrypted processing" in normalized_readme
+    assert "Local-only installations send nothing" in normalized_readme
+    assert "ENGRAPHIS_RETENTION_SUPERVISOR=none" in normalized_readme
+    assert "will never see, read, or access your data" not in normalized_readme
+
+    sync_doc = (Path(__file__).resolve().parents[1] / "docs" / "SYNC.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Local-only installations send no memory content" in sync_doc
+    assert "hosted service can read that submitted content" in sync_doc
+    assert "will never see, read, or access it" not in sync_doc
 
 
 # ── a paying customer must never be sold the plan they already own ────────────
@@ -116,7 +163,8 @@ _ROUTED_FUNCTIONS = (
     # trial" is answered here by the code that answers it in the browser.
     "licAccessState", "licAccessLive", "licTrialActive", "licTrialAvailable",
     "licPlanName", "licPlanKey", "licTrialEnds", "fmtDay", "lockReason",
-    "hostedAccountUrl", "hostedPlanUrl", "unlockHtml", "managedConsentHtml",
+    "withCtaAttribution", "hostedAccountUrl", "hostedPlanUrl", "hostedCta", "ctaLinkHtml",
+    "unlockHtml", "managedConsentHtml",
     "managedConsentRequired", "cloudTrialSignupRequired", "hostedFeatureUnavailable",
     "loadAnalytics", "loadAutomation",
 )
@@ -221,7 +269,7 @@ def test_a_trial_eligible_local_installation_is_answered_with_the_consent_panel(
     assert ("Let your memory improve after you log off." if view == "automation" else
             "See the memory your team is about to lose.") in rendered["html"]
     assert "Start 3-day Pro trial" in rendered["html"]
-    assert "Purchase Pro license" in rendered["html"]
+    assert "Annual Pro option" in rendered["html"]
     assert "Hosted insights and maintenance come on automatically" in rendered["html"]
     assert "Secret and session-scoped memories stay local." in rendered["html"]
     # Consent travels with the cloud account; the customer is never sent to edit .env.
@@ -286,8 +334,8 @@ def test_a_genuine_entitlement_failure_still_renders_the_upgrade_panel(
     }])["unentitled"]
 
     assert 'class="upgrade-panel"' in rendered["html"]
-    assert "Purchase Pro license" in rendered["html"]
-    assert "Start hosted Pro trial" in rendered["html"]
+    assert "Start 3-day Pro trial" in rendered["html"]
+    assert "Subscribe to Pro" not in rendered["html"]
     assert rendered["pill"] == "PRO"
 
 
@@ -321,10 +369,15 @@ def test_the_upgrade_panel_never_offers_a_trial_the_server_would_refuse(
     }])["gated"]
 
     assert 'class="upgrade-panel"' in rendered["html"]
-    # The one thing that must always still be offered.
-    assert "Purchase Pro license" in rendered["html"]
+    expected_action = {
+        "trial": "Open Engraphis Cloud",
+        "trial_expired": "Subscribe to Pro",
+        "lapsed": "Update billing",
+        "active": "Open Engraphis Cloud",
+    }[state]
+    assert expected_action in rendered["html"]
     # And the one thing that must not.
-    assert "Start hosted Pro trial" not in rendered["html"]
+    assert "Start 3-day Pro trial" not in rendered["html"]
     assert reason in rendered["html"]
 
 
@@ -378,7 +431,8 @@ def test_a_transient_hosted_conflict_is_not_answered_with_a_purchase_panel(
 _ACTION_FUNCTIONS = (
     "licAccessState", "licAccessLive", "licTrialAvailable", "licPlanName", "licPlanKey",
     "licTrialEnds", "fmtDay", "lockReason", "teamTeaserNote",
-    "hostedAccountUrl", "hostedPlanUrl", "licActionsHtml",
+    "withCtaAttribution", "hostedAccountUrl", "hostedPlanUrl", "hostedCta", "ctaLinkHtml",
+    "licActionsHtml",
 )
 
 _ACTION_STUBS = """
@@ -442,12 +496,12 @@ def test_a_lapsed_customer_uses_the_plan_neutral_account_portal(tmp_path, plan):
         "name": "lapsed", "lic": {"plan": plan, "access_state": "lapsed"},
     }])["lapsed"]["html"]
 
-    assert "Update billing" in html and "Open account portal" in html
-    assert html.count('href="https://engraphis.example/account"') == 2
+    assert html.count("Update billing") == 1
+    assert html.count('href="https://engraphis.example/account?utm_source=engraphis') == 1
     assert "checkout/" not in html
     assert "?plan=" not in html
     # A lapsed customer is never offered a trial.
-    assert "Start hosted" not in html
+    assert "Start 3-day" not in html
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
@@ -459,17 +513,17 @@ def test_a_lapsed_customer_with_no_readable_plan_still_gets_a_billing_target(tmp
     }])["lapsed"]["html"]
 
     assert "Update billing" in html
-    assert 'href="https://engraphis.example/account"' in html
+    assert 'href="https://engraphis.example/account?utm_source=engraphis' in html
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is required to run the UI")
 @pytest.mark.parametrize("state,expected,absent", [
     # Only the state a trial can actually be started in draws the trial buttons; the
     # control plane refuses one for every organization that already holds an entitlement.
-    ("inactive", "Start hosted Pro trial", "Subscribe to Pro"),
-    ("trial_expired", "Subscribe to Pro", "Start hosted Pro trial"),
-    ("trial", "Open Pro Cloud", "Start hosted Pro trial"),
-    ("active", "Open Pro Cloud", "Start hosted Pro trial"),
+    ("inactive", "Start 3-day Pro trial", "Subscribe to Pro"),
+    ("trial_expired", "Subscribe to Pro", "Start 3-day Pro trial"),
+    ("trial", "Open Engraphis Cloud", "Start 3-day Pro trial"),
+    ("active", "Open Engraphis Cloud", "Start 3-day Pro trial"),
 ])
 def test_each_access_state_offers_the_one_action_that_can_succeed(
     tmp_path, state, expected, absent,
@@ -582,13 +636,13 @@ def test_sync_status_does_not_sell_pro_to_a_customer_who_already_owns_it():
     assert "esc(e.message)" in body
 
 
-def test_pro_upgrade_panel_lists_every_pro_benefit_and_purchase_cta():
+def test_pro_upgrade_panel_lists_every_pro_benefit_and_state_specific_cta():
     script = SCRIPT.read_text(encoding="utf-8")
     styles = STYLES.read_text(encoding="utf-8")
 
     assert 'class="upgrade-panel"' in script
-    assert "Start hosted Pro trial" in script
-    assert "Purchase Pro license" in script
+    assert "Start ${TRIAL_DAYS}-day ${name} trial" in script
+    assert "Subscribe to ${name}" in script
     for benefit in (
         "Hosted Cloud Sync across your installations",
         "Growth, retention, decay, and entity Analytics",

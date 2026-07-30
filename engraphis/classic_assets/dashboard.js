@@ -192,8 +192,9 @@ function fmtDay(epoch){const n=Number(epoch)||0;if(!(n>0))return '';try{const d=
    prefers ENGRAPHIS_PRO_UPGRADE_URL, so where the portal and the checkout are configured
    separately it is the Pro checkout under a neutral name. LIC.account_url resolves the
    generic value directly; the fallback only matters against a build that predates it. */
-function hostedAccountUrl(){return safeUrl((LIC&&LIC.account_url)||(LIC&&LIC.upgrade_url))}
-function hostedPlanUrl(plan,trial,interval){const cadence=interval==='annual'?'annual':'monthly',key=plan+'_'+cadence+'_upgrade_url',raw=(LIC&&(LIC[key]||(plan==='team'?LIC.team_upgrade_url:LIC.pro_upgrade_url)))||(LIC&&LIC.upgrade_url);const safe=safeUrl(raw);if(!safe||safe==='#')return '#';try{const url=new URL(safe,location.href);if(plan==='pro'||plan==='team')url.searchParams.set('plan',plan);url.searchParams.set('interval',cadence);if(!url.hash)url.hash='billing';if(trial)url.searchParams.set('trial',plan);return url.href}catch(e){return safe}}
+function withCtaAttribution(raw,content,medium){const safe=safeUrl(raw);if(!safe||safe==='#')return '#';try{const url=new URL(safe,location.href);url.searchParams.set('utm_source','engraphis');url.searchParams.set('utm_medium',medium||'product');url.searchParams.set('utm_campaign','pro_conversion');url.searchParams.set('utm_content',content||'plans');return url.href}catch(e){return safe}}
+function hostedAccountUrl(content){return withCtaAttribution((LIC&&LIC.account_url)||(LIC&&LIC.upgrade_url),content||'account','product')}
+function hostedPlanUrl(plan,trial,interval,content){const cadence=interval==='annual'?'annual':'monthly',key=plan+'_'+cadence+'_upgrade_url',raw=(LIC&&(LIC[key]||(plan==='team'?LIC.team_upgrade_url:LIC.pro_upgrade_url)))||(LIC&&LIC.upgrade_url);const safe=safeUrl(raw);if(!safe||safe==='#')return '#';try{const url=new URL(safe,location.href);if(plan==='pro'||plan==='team')url.searchParams.set('plan',plan);url.searchParams.set('interval',cadence);if(!url.hash)url.hash='billing';if(trial)url.searchParams.set('trial',plan);return withCtaAttribution(url.href,content||plan,'product')}catch(e){return safe}}
 /* Why is this feature locked? One sentence per access state, so the panel never claims a
    trial the customer cannot start nor blames billing for a trial that simply ran out.
    This is DENIAL copy: every caller reaches it because a hosted request was refused. The
@@ -216,13 +217,15 @@ function teamTeaserNote(){const ends=licTrialEnds();
  if(licPlanKey()!=='team'||!licAccessLive())return lockReason(true);
  if(licAccessState()==='trial')return `Your free trial includes Team${ends?` until ${esc(ends)}`:''}. Organizations, roles, and seats are managed in Engraphis Cloud.`;
  return 'Your TEAM subscription includes this. Organizations, roles, and seats are managed in Engraphis Cloud.'}
-function unlockHtml(feature,plan){const url=hostedPlanUrl(plan,false,'monthly'),annualUrl=hostedPlanUrl(plan,false,'annual'),trialUrl=hostedPlanUrl(plan,true,'monthly'),team=plan==='team';const offerTrial=licTrialAvailable();const trial=team?'Start hosted Team trial':'Start hosted Pro trial';const purchase=team?'Purchase Team license':'Purchase Pro license';const price=team?'$20 per seat/month or $200 per seat/year':'$10/month or $100/year';const detail=lockReason(team);const benefits=team?['Everything in Pro','Hosted organizations, invitations, and named seats','Roles, scoped credentials, and Team audit history']:['Hosted Cloud Sync across your installations','Growth, retention, decay, and entity Analytics','Auto Consolidation with hosted retention policies','Auto Dreaming with reviewable managed proposals','Priority support'];return `<section class="upgrade-panel" aria-label="Engraphis ${team?'Team':'Pro'} upgrade"><div class="upgrade-panel-kicker">ENGRAPHIS ${team?'TEAM':'PRO'}</div><h2>Unlock ${esc(feature)} and more</h2><p class="upgrade-panel-lede">Make the local memory engine work across your installations—and keep improving without manual upkeep.</p><div class="upgrade-panel-price">${price}</div><div class="upgrade-panel-benefits"><div class="upgrade-panel-benefits-title">Your license unlocks</div><ul>${benefits.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div><p class="upgrade-panel-trial">${detail}</p><div class="upgrade-panel-actions">${offerTrial?`<a class="btn btn-primary" href="${esc(trialUrl)}" target="_blank" rel="noopener">${trial}</a>`:''}<a class="btn btn-ghost" href="${esc(url)}" target="_blank" rel="noopener">${purchase}</a><a class="btn btn-ghost" href="${esc(annualUrl)}" target="_blank" rel="noopener">Annual option</a></div></section>`}
+function hostedCta(plan,content,interval){const team=plan==='team',name=team?'Team':'Pro',state=licAccessState(),current=licPlanKey();if(state==='lapsed')return {label:'Update billing',href:hostedAccountUrl(content||'account'),kind:'account'};if(licAccessLive()&&(current===plan||(current==='team'&&plan==='pro')))return {label:current==='team'&&team?'Open Team Cloud':'Open Engraphis Cloud',href:hostedAccountUrl(content||'account'),kind:'account'};const trial=licTrialAvailable()&&state==='inactive';return {label:trial?`Start ${TRIAL_DAYS}-day ${name} trial`:`Subscribe to ${name}`,href:hostedPlanUrl(plan,trial,interval||'monthly',content||plan),kind:trial?'trial':'subscribe'} }
+function ctaLinkHtml(cta,className,content){return `<a class="${className}" data-pro-cta="${esc(content||'pro')}" href="${esc(cta.href)}" target="_blank" rel="noopener">${esc(cta.label)}</a>`}
+function unlockHtml(feature,plan){const team=plan==='team',name=team?'Team':'Pro',featureKey=`feature_${String(feature).toLowerCase().replace(/[^a-z0-9]+/g,'_')}`,primary=hostedCta(plan,featureKey),annual=primary.kind==='account'?'':{label:`Annual ${name} option`,href:hostedPlanUrl(plan,false,'annual',`${featureKey}_annual`),kind:'subscribe'},price=team?'$20 per seat/month or $200 per seat/year':'$10/month or $100/year',detail=lockReason(team),benefits=team?['Everything in Pro','Hosted organizations, invitations, and named seats','Roles, scoped credentials, and Team audit history']:['Hosted Cloud Sync across your installations','Growth, retention, decay, and entity Analytics','Auto Consolidation with hosted retention policies','Auto Dreaming with reviewable managed proposals','Priority support'],lede=team?'Team adds shared workspaces, named seats, roles, and remote agent access.':'Support continued Engraphis development with Pro. Your subscription helps cover hosted infrastructure and ongoing development while unlocking Cloud Sync, Analytics, Auto Consolidation, and Auto Dreaming across your installations.';return `<section class="upgrade-panel" aria-label="Engraphis ${name} upgrade"><div class="upgrade-panel-kicker">ENGRAPHIS ${name.toUpperCase()}</div><h2>Unlock ${esc(feature)} and more</h2><p class="upgrade-panel-lede">${lede}</p><div class="upgrade-panel-price">${price}</div><div class="upgrade-panel-benefits"><div class="upgrade-panel-benefits-title">Your license unlocks</div><ul>${benefits.map(item=>`<li>${esc(item)}</li>`).join('')}</ul></div><p class="upgrade-panel-trial">${detail}</p><div class="upgrade-panel-actions">${ctaLinkHtml(primary,'btn btn-primary',name.toLowerCase())}${annual.href&&annual.href!=='#'?ctaLinkHtml(annual,'btn btn-ghost',`${featureKey}_annual`):''}</div></section>`}
 function startTrialPlan(plan){const url=hostedPlanUrl(plan,true);if(url==='#'){toast('Hosted signup URL is not configured','err');return}const link=document.createElement('a');link.href=url;link.target='_blank';link.rel='noopener';link.click()}
 function startTrial(){return startTrialPlan('pro')}
 function startTeamTrial(){return startTrialPlan('team')}
 /* The badge follows the access state, not the plan name. A plan name alone told a trialist
    they were a subscriber, and told a lapsed or expired customer nothing was wrong. */
-function updateLicBadge(){const bd=document.getElementById('lic-badge');if(!bd||!LIC)return;const st=licAccessState(),plan=licPlanName();bd.textContent=st==='trial'?'TRIAL':st==='trial_expired'?'TRIAL ENDED':st==='lapsed'?plan+' INACTIVE':st==='active'?plan:'LOCAL';bd.className='pill '+(licAccessLive()?'pill-accent':'pill-muted')}
+function updateLicBadge(){const bd=document.getElementById('lic-badge');if(!bd||!LIC)return;const st=licAccessState(),plan=licPlanName(),trial=licTrialAvailable(),label=st==='trial'?'TRIAL':st==='trial_expired'?'GET PRO':st==='lapsed'?'BILLING':st==='active'?plan:trial?'TRY PRO':'GET PRO',aria=st==='active'?'Open Engraphis Cloud account':st==='lapsed'?'Update billing in hosted plan settings':trial?'Start the 3-day Pro trial in hosted plan settings':'Subscribe to Pro in hosted plan settings';bd.textContent=label;bd.className='pill '+(licAccessLive()?'pill-accent':'pill-muted');bd.setAttribute('aria-label',aria);bd.title=aria}
 function updateFeatureLocks(){
  const has=f=>LIC&&(LIC.features||[]).includes(f);
  const apply=(id,feature,label,plan)=>{
@@ -245,8 +248,13 @@ function renderAnalytics(a,isPortfolio){const t=a.totals||{},f=a.decay_forecast|
 /* A consent-required response is a valuable moment to show the job Pro can do, not a
    dead end about configuration. A customer with live access must never be offered their
    own plan again: hosted features are on by default once their account is available. */
-function managedConsentHtml(feature){const automation=/automation/i.test(feature),live=licAccessLive(),trial=licTrialAvailable(),copy=automation?{eyebrow:'MEMORY MAINTENANCE',title:'Let your memory improve after you log off.',lede:'Turn repetitive cleanup into a steady, reviewable habit. Pro watches the rhythm of your workspace and brings the useful changes back for approval.',cards:[['CONSOLIDATE','Distill recurring work into durable knowledge on a cadence you control.'],['DREAM','Surface useful links after accumulation and idle time, before fresh context gets buried.'],['REVIEW','Every managed result is a proposal. Nothing silently rewrites your local memory.']]}:{eyebrow:'MEMORY INTELLIGENCE',title:'See the memory your team is about to lose.',lede:'Pro turns your local memory into an operating signal—so you can see what is growing, what is fading, and what is quietly shaping recall.',cards:[['GROWTH','Separate knowledge that compounds from activity that only accumulates.'],['RETENTION','Catch fading context before an important answer disappears from reach.'],['ENTITY SIGNAL','See the people, projects, and ideas organizing your workspace.']]};const accountUrl=hostedAccountUrl(),trialUrl=hostedPlanUrl('pro',true),purchaseUrl=hostedPlanUrl('pro'),actions=live?`<a class="btn btn-primary" href="${esc(accountUrl)}" target="_blank" rel="noopener">Open Engraphis Cloud</a>`:`${trial?`<a class="btn btn-primary" href="${esc(trialUrl)}" target="_blank" rel="noopener">Start ${TRIAL_DAYS}-day Pro trial</a>`:''}<a class="btn btn-ghost" href="${esc(purchaseUrl)}" target="_blank" rel="noopener">Purchase Pro license</a>`,next=live?'Included in your Pro plan. Hosted insights and maintenance are on by default—nothing else to configure.':trial?`Start with ${TRIAL_DAYS} days of Pro. Hosted insights and maintenance come on automatically—no settings, toggles, or worker setup.`:'Purchase Pro and hosted insights and maintenance come on automatically—no settings, toggles, or worker setup.';return `<section class="hosted-opportunity" aria-label="${esc(feature)} in Engraphis Pro"><div class="hosted-opportunity-copy"><div class="hosted-opportunity-kicker">ENGRAPHIS PRO <span>/${copy.eyebrow}</span></div><h2>${copy.title}</h2><p class="hosted-opportunity-lede">${copy.lede}</p><p class="hosted-opportunity-next">${next}</p><div class="hosted-opportunity-actions">${actions}</div></div><div class="hosted-opportunity-preview" aria-label="What hosted ${esc(feature)} unlocks"><div class="hosted-opportunity-preview-label">WHAT PRO IS WATCHING</div>${copy.cards.map(card=>`<div class="hosted-opportunity-card"><span>${card[0]}</span><p>${card[1]}</p></div>`).join('')}</div><div class="hosted-opportunity-privacy"><strong>Your memory stays yours.</strong> Hosted work is automatic with Pro. Secret and session-scoped memories stay local.</div></section>`}
+function managedConsentHtml(feature){const automation=/automation/i.test(feature),featureKey=`managed_${String(feature).toLowerCase().replace(/[^a-z0-9]+/g,'_')}`,live=licAccessLive(),trial=licTrialAvailable(),copy=automation?{eyebrow:'MEMORY MAINTENANCE',title:'Let your memory improve after you log off.',lede:'Turn repetitive cleanup into a steady, reviewable habit. Pro watches the rhythm of your workspace and brings the useful changes back for approval.',cards:[['CONSOLIDATE','Distill recurring work into durable knowledge on a cadence you control.'],['DREAM','Surface useful links after accumulation and idle time, before fresh context gets buried.'],['REVIEW','Every managed result is a proposal. Nothing silently rewrites your local memory.']]}:{eyebrow:'MEMORY INTELLIGENCE',title:'See the memory your team is about to lose.',lede:'Pro turns your local memory into an operating signal—so you can see what is growing, what is fading, and what is quietly shaping recall.',cards:[['GROWTH','Separate knowledge that compounds from activity that only accumulates.'],['RETENTION','Catch fading context before an important answer disappears from reach.'],['ENTITY SIGNAL','See the people, projects, and ideas organizing your workspace.']]};const primary=hostedCta('pro',featureKey),annual=primary.kind==='account'?'':{label:'Annual Pro option',href:hostedPlanUrl('pro',false,'annual',`${featureKey}_annual`),kind:'subscribe'},actions=`${ctaLinkHtml(primary,'btn btn-primary',featureKey)}${annual.href?ctaLinkHtml(annual,'btn btn-ghost',`${featureKey}_annual`):''}`,next=live?'Included in your Pro plan. Hosted insights and maintenance are on by default—nothing else to configure.':licAccessState()==='lapsed'?'Your subscription needs billing attention. Update billing to restore hosted insights and maintenance.':trial?`Start with ${TRIAL_DAYS} days of Pro. Hosted insights and maintenance come on automatically—no settings, toggles, or worker setup.`:'Subscribe to Pro and hosted insights and maintenance come on automatically—no settings, toggles, or worker setup.';return `<section class="hosted-opportunity" aria-label="${esc(feature)} in Engraphis Pro"><div class="hosted-opportunity-copy"><div class="hosted-opportunity-kicker">ENGRAPHIS PRO <span>/${copy.eyebrow}</span></div><h2>${copy.title}</h2><p class="hosted-opportunity-lede">${copy.lede}</p><p class="hosted-opportunity-next">${next}</p><div class="hosted-opportunity-actions">${actions}</div></div><div class="hosted-opportunity-preview" aria-label="What hosted ${esc(feature)} unlocks"><div class="hosted-opportunity-preview-label">WHAT PRO IS WATCHING</div>${copy.cards.map(card=>`<div class="hosted-opportunity-card"><span>${card[0]}</span><p>${card[1]}</p></div>`).join('')}</div><div class="hosted-opportunity-privacy"><strong>Your memory stays yours.</strong> Hosted work is automatic with Pro. Secret and session-scoped memories stay local.</div></section>`}
 function managedConsentRequired(error){return error&&error.status===409&&error.detail&&error.detail.code==='consent_required'}
+const CLOUD_PRIVACY_COPY='Engraphis Cloud must read the bounded snapshot you submit to produce results. It travels over HTTPS but is not end-to-end encrypted; secret and session-scoped memories stay local.';
+const EXTERNAL_LLM_PRIVACY_COPY='Memory text is sent to your configured LLM provider for processing under that provider’s terms. The provider must read that text to return extracted facts.';
+async function confirmCloudTransfer(title,summary,submit){return confirmAction(title,summary+'\n\nPrivacy: '+CLOUD_PRIVACY_COPY,submit||'Continue')}
+const managedConsentHtmlBase=managedConsentHtml;
+managedConsentHtml=function(feature){return managedConsentHtmlBase(feature).replace('</div></section>',`<div class="hosted-opportunity-privacy"><strong>Privacy, by design.</strong> ${esc(CLOUD_PRIVACY_COPY)}</div></section>`)};
 /* Only an unconfigured local installation may turn a 401 into trial signup. A revoked
    or expired Cloud session is also a 401, but ``trial.available`` is false there and it
    must remain a reconnect error instead of offering a trial the control plane rejects. */
@@ -276,9 +284,12 @@ async function saveAutomation(){const body={enabled:document.getElementById('au-
 async function runMaintenance(){const el=document.getElementById('au-result');if(el)el.innerHTML='<div class="spinner" data-csp-style="s93"></div>';try{const d=await api('/maintenance/run?workspace='+encodeURIComponent(WS||''),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dry_run:true})});if(el)el.innerHTML=`<span class="pill pill-green" data-csp-style="s9">PROPOSAL</span> Hosted work was submitted for review.<pre data-csp-style="s94">${esc(JSON.stringify(d,null,2))}</pre>`;toast('Managed proposal requested','ok')}catch(e){if(el)el.innerHTML=managedConsentRequired(e)?managedConsentHtml('Hosted Automation'):'<div class="empty" data-csp-style="s85">'+esc(e.message)+'</div>';toast(managedConsentRequired(e)?'Hosted Automation starts automatically with Pro':((e.status===402||e.status===501)?'Hosted Automation requires Pro or Team':e.message),'err')}}
 
 const runMaintenanceBase=runMaintenance;
+const saveAutomationBase=saveAutomation;
+saveAutomation=async function(){const enabled=document.getElementById('au-enabled');if(enabled&&enabled.checked&&!await confirmCloudTransfer('Save hosted policy','Saving this enabled policy uploads this workspace’s normal and sensitive memory content to Engraphis Cloud; secret and session-scoped rows stay local.','Save policy'))return;return saveAutomationBase()}
 let MAINTENANCE_PENDING=false;
 runMaintenance=async function(dry){
  if(MAINTENANCE_PENDING)return;
+ if(!await confirmCloudTransfer('Request hosted proposal','This sends this workspace’s normal and sensitive memory content to Engraphis Cloud for a reviewable proposal; secret and session-scoped rows stay local.','Request proposal'))return;
   const buttons=Array.from(document.querySelectorAll('#automation-body button[data-onclick="h90"]')),labels=buttons.map(button=>button.textContent);
  MAINTENANCE_PENDING=true;
  buttons.forEach(button=>{button.disabled=true});
@@ -505,17 +516,7 @@ function licStateBanner(state,plan,ends,status){
  if(state==='lapsed'){const note=LIC_STATUS_NOTE[status];return `<div class="lic-banner lic-banner-warn"><strong>Your ${esc(plan||'hosted')} subscription is no longer active</strong>${note?esc(note.charAt(0).toUpperCase()+note.slice(1))+', so hosted':'Hosted'} features are locked until billing is up to date. Your local memories are unaffected. Open the account portal to restore access.</div>`}
  if(state==='inactive')return `<div class="lic-banner"><strong>No hosted plan on this installation</strong>The local memory engine is free and complete on its own. Cloud Sync, Analytics, Automation, and Team administration run in Engraphis Cloud.</div>`;
  return ''}
-function licActionsHtml(state){
- if(licTrialAvailable())return `<div data-csp-style="s123"><button class="btn btn-primary btn-sm" data-onclick="h84">Start hosted Pro trial</button><button class="btn btn-ghost btn-sm" data-onclick="h87">Start hosted Team trial</button></div>`;
- /* A lapsed customer is fixing an existing subscription, not shopping. Both actions go
-    to the plan-neutral account portal so a payment-method problem is never reframed as a
-    new Pro or Team purchase. */
- if(state==='lapsed')return `<div data-csp-style="s123"><a class="btn btn-primary btn-sm" href="${esc(hostedAccountUrl())}" target="_blank" rel="noopener">Update billing</a><a class="btn btn-ghost btn-sm" href="${esc(hostedAccountUrl())}" target="_blank" rel="noopener">Open account portal</a></div>`;
- const buy=state==='trial_expired';
- if(state==='active'){const label=licPlanKey()==='team'?'Open Team Cloud':'Open Pro Cloud';return `<div data-csp-style="s123"><a class="btn btn-primary btn-sm" href="${esc(hostedAccountUrl())}" target="_blank" rel="noopener">${label}</a></div>`}
- const primary=buy?'Subscribe to Pro':'Open Pro Cloud';
- const secondary=buy?'Subscribe to Team':'Open Team Cloud';
- return `<div data-csp-style="s123"><a class="btn btn-primary btn-sm" href="${esc(hostedPlanUrl('pro'))}" target="_blank" rel="noopener">${primary}</a><a class="btn btn-ghost btn-sm" href="${esc(hostedPlanUrl('team'))}" target="_blank" rel="noopener">${secondary}</a></div>`}
+function licActionsHtml(state){const pro=hostedCta('pro','license');if(state==='active'||state==='lapsed')return `<div data-csp-style="s123">${ctaLinkHtml(pro,'btn btn-primary btn-sm','license')}</div>`;const team=hostedCta('team','license_team');return `<div data-csp-style="s123">${ctaLinkHtml(pro,'btn btn-primary btn-sm','license')}${ctaLinkHtml(team,'btn btn-ghost btn-sm','license_team')}</div>`}
 function renderLicense(d){
  const el=document.getElementById('lic-body');if(!el)return;
  const state=licAccessState(),raw=String(d.plan||'local').toLowerCase();
@@ -535,6 +536,8 @@ function renderLicense(d){
     it. Emitted by /api/license since the plan resolver landed, and never shown until now —
     so "the dashboard says PRO" and "the cloud says PRO" could not be told apart. */
  if(d.plan_source)h+=`<div class="cfg-row"><span>Plan source</span><span>${esc(LIC_SOURCE_LABEL[d.plan_source]||d.plan_source)}${d.plan_checked_at?' · confirmed '+esc(fmtRel(d.plan_checked_at)):''}</span></div>`;
+ if(state==='active')h+=`<div class="pro-support-copy"><strong>Thank you for supporting Engraphis.</strong> Your subscription helps fund hosted infrastructure and ongoing development.</div>`;
+ else if(state!=='lapsed')h+=`<div class="pro-support-copy"><strong>Support continued Engraphis development with Pro.</strong> Your subscription helps cover hosted infrastructure and ongoing development while unlocking Cloud Sync, Analytics, Auto Consolidation, and Auto Dreaming.</div>`;
  h+=`<div class="field-hint" data-csp-style="s97">The local core remains free. Pro and Team capabilities execute in Engraphis Cloud. The email-confirmed, no-card trial lasts exactly ${TRIAL_DAYS} active days; private-service account grace is separate, capped at 24 hours, and never extends cloud access or restricts local MCP and dashboard use.</div>`;
  h+=licActionsHtml(state);
  el.innerHTML=h;
@@ -542,20 +545,22 @@ function renderLicense(d){
 async function exportWorkspace(){try{const d=await api('/export?workspace='+encodeURIComponent(WS||''));const blob=new Blob([JSON.stringify(d,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='engraphis-export-'+Date.now()+'.json';a.click();URL.revokeObjectURL(a.href);toast('Exported','ok')}catch(e){toast(e.message,'err')}}
 
 /* Hosted Team is a service CTA; local identity and seat administration are not shipped. */
-async function loadTeam(){const el=document.getElementById('team-body');let url=licPlanKey()==='team'&&licAccessLive()?hostedAccountUrl():hostedPlanUrl('team');try{const st=await api('/auth/state');if(url==='#'&&st&&st.cloud_url)url=safeUrl(st.cloud_url)}catch(e){}const trialUrl=hostedPlanUrl('team',true);el.innerHTML=`<div class="card teaser"><div class="card-head">Engraphis Team Cloud <span class="pill pill-accent" data-csp-style="s9">HOSTED</span></div><div data-csp-style="s149">Organizations, invitations, roles, named seats, scoped device credentials, and team audit run on the private hosted service. This local dashboard is intentionally single-user.</div><div class="field-hint" data-csp-style="s97">${esc(teamTeaserNote())} Private-service account grace is capped at 24 hours, never extends Team access, and never restricts the free local core.</div><div data-csp-style="s150">${licTrialAvailable()?`<a class="btn btn-primary btn-sm" href="${esc(trialUrl)}" target="_blank" rel="noopener">Start hosted Team trial</a>`:''}<a class="btn btn-ghost btn-sm" href="${esc(url)}" target="_blank" rel="noopener">Open Team Cloud</a></div></div>`}
+async function loadTeam(){const el=document.getElementById('team-body'),teamCta=hostedCta('team','team_tab');try{const st=await api('/auth/state');if(teamCta.href==='#'&&st&&st.cloud_url)teamCta.href=safeUrl(st.cloud_url)}catch(e){}el.innerHTML=`<div class="card teaser"><div class="card-head">Engraphis Team Cloud <span class="pill pill-accent" data-csp-style="s9">HOSTED</span></div><div data-csp-style="s149">Organizations, invitations, roles, named seats, scoped device credentials, and team audit run on the private hosted service. This local dashboard is intentionally single-user.</div><div class="field-hint" data-csp-style="s97">${esc(teamTeaserNote())} Private-service account grace is capped at 24 hours, never extends Team access, and never restricts the free local core.</div><div data-csp-style="s150">${ctaLinkHtml(teamCta,'btn btn-primary btn-sm','team_tab')}</div></div>`}
 /* health + settings */
 function connectionContext(){const host=(location.hostname||'').toLowerCase();return host==='localhost'||host==='127.0.0.1'||host==='::1'||host.endsWith('.localhost')?'Local engine':'Remote customer node'}
 async function checkHealth(){const label=connectionContext();try{await api('/health');const d=document.getElementById('health-dot'),t=document.getElementById('health-text');if(d){d.classList.add('health-ok');d.classList.remove('health-error')}if(t)t.textContent=label+' connected'}catch(e){const d=document.getElementById('health-dot'),t=document.getElementById('health-text');if(d){d.classList.add('health-error');d.classList.remove('health-ok')}if(t)t.textContent=label+' unavailable'}}
 function loadSettings(){loadLicense();loadSyncStatus();loadHostedAgentAccess();loadLlmStatus();const s=document.getElementById('cfg-store');if(s)s.textContent=location.host}
 
-async function loadLlmStatus(){const el=document.getElementById('llm-body');if(!el)return;try{const st=await api('/llm/status');const ok=st.configured;const badge=ok?'<span class="pill pill-green" data-csp-style="s9">configured</span>':'<span class="pill pill-amber" data-csp-style="s9">not configured</span>';const keyLine=st.key_set?'API key set ✓':'<span data-csp-style="s160">No API key set</span>';let modelSel='<select class="select" id="llm-model" data-csp-style="s49" data-onchange="h128">';const models=(st.default_models||{});if(!Object.values(models).includes(st.model)){modelSel+='<option value="'+esc(st.model)+'" selected>'+esc(st.model)+' (current)</option>'}Object.entries(models).forEach(([p,m])=>{modelSel+='<option value="'+esc(m)+'"'+(m===st.model?' selected':'')+'>'+esc(m)+'</option>'});modelSel+='</select>';let provSel='<select class="select" id="llm-prov" data-csp-style="s49" data-onchange="h129">';['openai','anthropic','google','openrouter'].forEach(p=>{provSel+='<option value="'+p+'"'+(p===st.provider?' selected':'')+'>'+p+'</option>'});provSel+='</select>';el.innerHTML=`<div class="cfg-row" data-csp-style="s110"><span>Provider · Model</span><span>${badge}</span></div><div data-csp-style="s161">${provSel}${modelSel}</div><div class="cfg-row" data-csp-style="s162">${keyLine} · extractor: <code data-csp-style="s159">${esc(st.extractor)}</code></div><div data-csp-style="s163">Add this to your <code data-csp-style="s159">.env</code> and restart Engraphis:</div><div data-csp-style="s164"><textarea id="llm-snippet" class="input" readonly data-csp-style="s165">${esc(st.env_snippet)}</textarea><button class="btn btn-ghost btn-sm" data-csp-style="s166" data-onclick="h130">Copy</button></div><div class="cfg-row" data-csp-style="s110"><span>LLM extraction</span><span class="pill ${st.extractor_enabled?'pill-green':'pill-muted'}" data-csp-style="s9">${st.extractor_enabled?'ON':'OFF'}</span></div><div class="field-hint" data-csp-style="s97">While ON, ingested memory content is sent to your LLM provider for schema-validated extraction. OFF keeps everything on this machine.</div><div data-csp-style="s167"><button class="btn ${st.extractor_enabled?'btn-ghost':'btn-primary'} btn-sm" data-onclick="h150"${(st.extractor_enabled||!st.configured)?' disabled':''}>Turn on</button><button class="btn ${st.extractor_enabled?'btn-danger':'btn-ghost'} btn-sm" data-onclick="h151"${st.extractor_enabled?'':' disabled'}>Turn off</button></div><div data-csp-style="s167"><button class="btn btn-primary btn-sm" data-onclick="h131">Test connection</button><span id="llm-test-result" data-csp-style="s168"></span></div>`}catch(e){el.innerHTML='<div class="empty" data-csp-style="s10">'+esc(e.message)+'</div>'}}
+async function loadLlmStatus(){const el=document.getElementById('llm-body');if(!el)return;try{const st=await api('/llm/status');const ok=st.configured;const badge=ok?'<span class="pill pill-green" data-csp-style="s9">configured</span>':'<span class="pill pill-amber" data-csp-style="s9">not configured</span>';const keyLine=st.key_set?'API key set ✓':'<span data-csp-style="s160">No API key set</span>';let modelSel='<select class="select" id="llm-model" data-csp-style="s49" data-onchange="h128">';const models=(st.default_models||{});if(!Object.values(models).includes(st.model)){modelSel+='<option value="'+esc(st.model)+'" selected>'+esc(st.model)+' (current)</option>'}Object.entries(models).forEach(([p,m])=>{modelSel+='<option value="'+esc(m)+'"'+(m===st.model?' selected':'')+'>'+esc(m)+'</option>'});modelSel+='</select>';let provSel='<select class="select" id="llm-prov" data-csp-style="s49" data-onchange="h129">';['openai','anthropic','google','openrouter'].forEach(p=>{provSel+='<option value="'+p+'"'+(p===st.provider?' selected':'')+'>'+p+'</option>'});provSel+='</select>';el.innerHTML=`<div class="cfg-row" data-csp-style="s110"><span>Provider · Model</span><span>${badge}</span></div><div data-csp-style="s161">${provSel}${modelSel}</div><div class="cfg-row" data-csp-style="s162">${keyLine} · extractor: <code data-csp-style="s159">${esc(st.extractor)}</code></div><div data-csp-style="s163">Add this to your <code data-csp-style="s159">.env</code> and restart Engraphis:</div><div data-csp-style="s164"><textarea id="llm-snippet" class="input" readonly data-csp-style="s165">${esc(st.env_snippet)}</textarea><button class="btn btn-ghost btn-sm" data-csp-style="s166" data-onclick="h130">Copy</button></div><div class="cfg-row" data-csp-style="s110"><span>LLM extraction</span><span class="pill ${st.extractor_enabled?'pill-green':'pill-muted'}" data-csp-style="s9">${st.extractor_enabled?'ON':'OFF'}</span></div><div class="field-hint" data-csp-style="s97">While ON, ingested memory content is sent to your LLM provider for schema-validated extraction. OFF disables extraction transfers only; retention supervision is configured separately.</div><div data-csp-style="s167"><button class="btn ${st.extractor_enabled?'btn-ghost':'btn-primary'} btn-sm" data-onclick="h150"${(st.extractor_enabled||!st.configured)?' disabled':''}>Turn on</button><button class="btn ${st.extractor_enabled?'btn-danger':'btn-ghost'} btn-sm" data-onclick="h151"${st.extractor_enabled?'':' disabled'}>Turn off</button></div><div data-csp-style="s167"><button class="btn btn-primary btn-sm" data-onclick="h131">Test connection</button><span id="llm-test-result" data-csp-style="s168"></span></div>`}catch(e){el.innerHTML='<div class="empty" data-csp-style="s10">'+esc(e.message)+'</div>'}}
 function onLlmProvChange(){const p=document.getElementById('llm-prov').value;const sel=document.getElementById('llm-model');const defs={openai:'gpt-4o-mini',anthropic:'claude-3-5-sonnet-20241022',google:'gemini-1.5-flash',openrouter:'openai/gpt-4o-mini'};if(sel&&defs[p]){sel.value=defs[p]}updateLlmSnippet()}
 function updateLlmSnippet(){const p=(document.getElementById('llm-prov')||{}).value||'openai';const m=(document.getElementById('llm-model')||{}).value||'';const ta=document.getElementById('llm-snippet');if(!ta)return;ta.value='ENGRAPHIS_LLM_PROVIDER='+p+'\nENGRAPHIS_LLM_MODEL='+m+'\nENGRAPHIS_LLM_API_KEY=<your-key>\nENGRAPHIS_EXTRACTOR=llm_structured\n'}
 function copyLlmSnippet(){const ta=document.getElementById('llm-snippet');if(!ta)return;ta.select();try{navigator.clipboard.writeText(ta.value);toast('Copied .env snippet','ok')}catch(e){toast('Copy failed — select and Ctrl+C','err')}}
-async function setLlmExtractor(on){try{const d=await api('/llm/extractor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:!!on})});const ok=!!d.extractor_enabled;toast(ok?'LLM extraction turned on — new memories will be sent to your provider':'LLM extraction turned off — memories stay on this machine'+(d.persisted===false?' (could not save for restart)':''),ok?'ok':'muted');loadLlmStatus()}catch(e){toast(e.message,'err')}}
+async function setLlmExtractor(on){try{const d=await api('/llm/extractor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:!!on})});const ok=!!d.extractor_enabled;toast(ok?'LLM extraction turned on — new memories will be sent to your provider':'LLM extraction turned off — extractor transfers are disabled'+(d.persisted===false?' (could not save for restart)':''),ok?'ok':'muted');loadLlmStatus()}catch(e){toast(e.message,'err')}}
 async function testLlm(){const r=document.getElementById('llm-test-result');if(r){r.textContent='Testing…';setTone(r,'muted')}try{const d=await api('/llm/test',{method:'POST'});if(r){if(d.ok){const transient=d.auto_enabled&&d.persisted===false;r.textContent=(transient?'⚠ ':'✓ ')+'Connected — '+esc(d.provider)+'/'+esc(d.model)+(transient?' Extraction is active for this process, but the setting could not be saved for restart. Set ENGRAPHIS_EXTRACTOR=llm_structured and ENGRAPHIS_LLM_AUTO_EXTRACT=1 in the deployment environment.':'');setTone(r,transient?'red':'green')}else{r.textContent='✗ '+(d.error||'failed');setTone(r,'red')}}}catch(e){if(r){r.textContent='✗ '+esc(e.message);setTone(r,'red')}}}
 
-async function loadHostedAgentAccess(){const el=document.getElementById('tokens-body');if(!el)return;let url=licPlanKey()==='team'&&licAccessLive()?hostedAccountUrl():hostedPlanUrl('team');try{const st=await api('/auth/state');if(url==='#'&&st&&st.cloud_url)url=safeUrl(st.cloud_url)}catch(e){}el.innerHTML=`<div class="field-hint">Per-member agent accounts, roles, named seats, and rotating device credentials are managed in Team Cloud, not by this local dashboard.</div><div data-csp-style="s167"><a class="btn btn-primary btn-sm" href="${esc(url)}" target="_blank" rel="noopener">Open Team Cloud</a><a class="btn btn-ghost btn-sm" href="https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/AGENT_CONNECT.md" target="_blank" rel="noopener">Agent Connect guide</a></div>`}
+async function loadHostedAgentAccess(){const el=document.getElementById('tokens-body');if(!el)return;const teamCta=hostedCta('team','agent_access');try{const st=await api('/auth/state');if(teamCta.href==='#'&&st&&st.cloud_url)teamCta.href=safeUrl(st.cloud_url)}catch(e){}el.innerHTML=`<div class="field-hint">Per-member agent accounts, roles, named seats, and rotating device credentials are managed in Team Cloud, not by this local dashboard.</div><div data-csp-style="s167">${ctaLinkHtml(teamCta,'btn btn-primary btn-sm','agent_access')}<a class="btn btn-ghost btn-sm" href="https://github.com/Coding-Dev-Tools/engraphis/blob/main/docs/AGENT_CONNECT.md" target="_blank" rel="noopener">Agent Connect guide</a></div>`}
+const setLlmExtractorBase=setLlmExtractor;
+setLlmExtractor=async function(on){if(on&&!await confirmAction('Turn on LLM extraction',EXTERNAL_LLM_PRIVACY_COPY,'Turn on'))return;return setLlmExtractorBase(on)};
 /* Route by cause, exactly like loadAnalytics/loadAutomation. Rendering the purchase panel for
    every failure told a paying customer to buy the plan they already own whenever the network
    blipped or the cloud answered 5xx. Only 401/402/501 are billing answers. */
@@ -564,6 +569,9 @@ function syncTotalAuthorizationDenial(last){if(!last||!(Number(last.attempted)>0
 function syncRecoveryHtml(){return unlockHtml('Cloud Sync','pro')+`<div data-csp-style="s177"><button class="btn btn-ghost btn-sm" id="sync-retry-btn" data-onclick="h136">Try Cloud Sync again</button></div>`}
 function renderSync(d){const el=document.getElementById('sync-body');if(!el)return;d=d||{};const last=d.last;if(!d.available){el.innerHTML=unlockHtml('Cloud Sync','pro');return}if(syncTotalAuthorizationDenial(last)){el.innerHTML=syncRecoveryHtml();return}let status='Cloud session connected; no sync recorded on this installation.';if(last){const when=new Date((last.at||0)*1000).toLocaleString();status='Last synced '+when+' — pushed '+(last.exported||0)+', +'+(last.added||0)+' received'+((last.errors&&last.errors.length)?' · '+last.errors.length+' issue(s)':'')+'.'}el.innerHTML=`<div class="cfg-row"><span>Hosted relay</span><span class="pill pill-green">CONNECTED</span></div><div class="field-hint">Relay storage and authorization run in Engraphis Cloud. This package contains only the customer client; it does not run a local relay or background scheduler.</div><div data-csp-style="s177"><button class="btn btn-primary" id="sync-btn" data-onclick="h136">Sync now</button><span class="field-hint" id="sync-status">${esc(status)}</span></div>`}
 async function syncNow(){const b=document.getElementById('sync-btn')||document.getElementById('sync-retry-btn');const original=b&&b.textContent;const s=document.getElementById('sync-status');if(b){b.disabled=true;b.textContent='Syncing…'}if(s)s.textContent='Contacting the cloud…';try{const d=await api('/sync/run',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});const su=d.summary||{};toast('Synced — pushed '+(su.exported||0)+', '+(su.added||0)+' new from other devices','ok');await loadSyncStatus()}catch(e){if(e.status===401||e.status===402||e.status===403){const el=document.getElementById('sync-body');if(el)el.innerHTML=syncRecoveryHtml();toast(e.status===402?'Cloud Sync requires an active Pro or Team entitlement — open Engraphis Cloud to upgrade or renew.':'Cloud Sync authorization is no longer active — reconnect in Engraphis Cloud.','err');return}toast('Sync failed: '+e.message,'err');if(b){b.disabled=false;b.textContent=original||'Sync now'}if(s)s.textContent='Sync failed — try again.'}}
+
+const syncNowBase=syncNow;
+syncNow=async function(){if(!await confirmCloudTransfer('Sync shared workspaces','Cloud Sync sends eligible changes from your shared workspaces to Engraphis Cloud and receives authorized changes from your other installations; secret and session-scoped rows stay local.','Sync now'))return;return syncNowBase()}
 
 /* ─── knowledge graph (force-graph + d3-force: compact defaults and selectable layouts) ─── */
 let GRAPH=null, FG=null, GRAPH_ENGINE=null, GRESIZE=false, GRESIZEFRAME=0, GADJ={}, GCOMM_ADJ={}, GCOMPONENTS={}, GCOMPONENT_LAYOUT=null, GHILITE=null, GHOVERSET=null, GLABELRANK={}, GLABELBOXES=[], GDATA_CACHE=null, GACTIVE_DATA=null, GREDRAWFRAME=0, GPERF={large:false,dense:false}, GRAPH_FULL=false, GRAPH_SCOPE_BEFORE_FULL=null;
@@ -576,6 +584,16 @@ const GRAPH_PRESETS={
  custom:{label:'Custom tuning',curve:.1,particles:0}
 };
 window.GSET=window.GSET||{mode:'communities',font:12,size:3,repel:48,link:16,gravity:48,labels:false,linkw:.72,labelDensity:24,flow:true,frozen:false};
+/* Keep legacy Classic geometry in the same compact world-space range as Ledger. The old
+   `size * sqrt(1 + degree)` rule let a highly connected entity become a giant disc, then
+   zoom-to-fit magnified that disc again. Degree still adds a restrained emphasis, but it is
+   normalized and bounded so material/theme painters cannot change node geometry. */
+function graphNodeRadius(node,base,metric){
+ const size=Number.isFinite(+base)&&+base>0?+base:3;
+ const normalized=Math.max(0,Math.min(1,Number(metric)||0));
+ const radius=size*.45*(.55+Math.min(1.6,normalized*1.9));
+ return Math.max(.8,Math.min(size*1.1,radius));
+}
 const ETYPE_TOKEN={person_or_concept:'--entity-concept',mention:'--entity-mention',hashtag:'--entity-hashtag',email:'--entity-email',organization:'--entity-organization',location:'--entity-location'};
 const GRAPH_PALETTES={
  theme:null,
@@ -651,15 +669,14 @@ function graphUpdateHud(data){
  if(count&&data)count.textContent=data.nodes.length.toLocaleString()+' entities · '+data.links.length.toLocaleString()+' relations';
  if(badge)badge.textContent=GPERF.large?'Large graph mode':'Adaptive rendering';
 }
-/* ── opt-in next-generation renderer (`?graph-engine=next`) ──────────────────────────────
-   The classic renderer stays the default and the rollback path. Everything below is written
-   so that any failure in the opt-in engine degrades to classic rather than taking the graph
-   view down: one throw sets GRAPH_ENGINE_FAILED and the flag is never honoured again for the
-   life of the page. */
+/* ── canonical graph renderer ────────────────────────────────────────────────────────────
+   Classic now uses the same renderer as Ledger for its normal graph view. The legacy canvas
+   remains the rollback path: one engine failure latches GRAPH_ENGINE_FAILED and the graph
+   degrades to the legacy renderer instead of taking the view down. */
 let GRAPH_ENGINE_FAILED=false;
 function graphEngineEnabled(){
  if(GRAPH_ENGINE_FAILED)return false;
- try{return new URLSearchParams(window.location.search).get('graph-engine')==='next'}catch(e){return false}
+ try{return new URLSearchParams(window.location.search).get('graph-engine')==='next'||/(^|\/)classic\/?$/.test(window.location.pathname)}catch(e){return false}
 }
 function graphEngineFallback(error){
  GRAPH_ENGINE_FAILED=true;
@@ -762,9 +779,9 @@ async function loadLegacyGraph(){
    GRESIZEFRAME=requestAnimationFrame(()=>{GRESIZEFRAME=0;const element=document.getElementById('graph-net');if(GRAPH_ENGINE)GRAPH_ENGINE.resize();else if(FG&&element)FG.width(element.clientWidth).height(element.clientHeight)});
   });
  }
- const layerInputs=Array.from(document.querySelectorAll('#graph-layer-filters input')),selectedLayers=layerInputs.filter(input=>input.checked).map(input=>input.value),layerFilter=selectedLayers.length===layerInputs.length?'':'&layers='+encodeURIComponent(selectedLayers.join(',')),includeCode=document.getElementById('graph-include-code').checked,repo=(document.getElementById('graph-repo-filter').value||'').trim(),fullGraph=GRAPH_FULL?'&full=true&limit=20000':'';
+ const layerInputs=Array.from(document.querySelectorAll('#graph-layer-filters input')),selectedLayers=layerInputs.filter(input=>input.checked).map(input=>input.value),layerFilter=selectedLayers.length===layerInputs.length?'':'&layers='+encodeURIComponent(selectedLayers.join(',')),includeCode=document.getElementById('graph-include-code').checked,repo=(document.getElementById('graph-repo-filter').value||'').trim(),showUnlinked=GRAPH_FULL||!!document.getElementById('graph-show-iso').checked,graphLimit=GRAPH_FULL?20000:320,graphScope=GRAPH_FULL?'&full=true':(showUnlinked?'':'&connected_only=true');
  try{
-   GRAPH=await api('/graph?workspace='+encodeURIComponent(WS||'')+layerFilter+'&include_code='+(includeCode?'true':'false')+fullGraph+(repo?'&repo='+encodeURIComponent(repo):''));
+   GRAPH=await api('/graph?workspace='+encodeURIComponent(WS||'')+layerFilter+'&include_code='+(includeCode?'true':'false')+'&limit='+graphLimit+graphScope+(repo?'&repo='+encodeURIComponent(repo):''));
   renderGraphSide();graphRender();
  }catch(error){
   showAs(empty,true,'flex');empty.textContent='Graph failed: '+error.message;graphSetLayoutStatus('Load failed',false);
@@ -795,7 +812,8 @@ function graphData(){
  let sourceNodes=GRAPH.nodes;if(hideIso)sourceNodes=sourceNodes.filter(node=>node.degree>0);
  const names=new Set(sourceNodes.map(node=>node.id));
  const nodes=sourceNodes.map(node=>({id:node.id,label:node.label||node.id,displayLabel:(node.label||node.id).length>30?(node.label||node.id).slice(0,29)+'…':(node.label||node.id),etype:node.etype,degree:node.degree||0,val:1+(node.degree||0)}));
- nodes.sort((a,b)=>b.degree-a.degree).forEach((node,index)=>{node.rank=index;node.hub=index<24;node.radius=Math.max(1.6,window.GSET.size*Math.sqrt(node.val)*.45);node.color=graphTypeColor(node.etype);node.stroke=graphContrastColor(node.color)});
+ const maxDegree=Math.max(1,...nodes.map(node=>node.degree||0));
+ nodes.sort((a,b)=>b.degree-a.degree).forEach((node,index)=>{node.rank=index;node.hub=index<24;node.radius=graphNodeRadius(node,window.GSET.size,(node.degree||0)/maxDegree);node.color=graphTypeColor(node.etype);node.stroke=graphContrastColor(node.color)});
  const links=GRAPH.edges.filter(edge=>names.has(edge.from)&&names.has(edge.to)).map(edge=>({source:edge.from,target:edge.to,label:edge.label,layer:edge.layer||'semantic'}));
  const data={nodes,links};GDATA_CACHE={graph:GRAPH,hideIso,data};return data;
 }
@@ -957,8 +975,14 @@ function graphMaterialSprite(p,tier){
  var spriteCtx=canvas.getContext('2d');if(!spriteCtx)return null;if(typeof spriteCtx.scale==='function'){spriteCtx.scale(dpr,dpr);graphPaintMaterialDirect(spriteCtx,half,half,radius,p,tier)}else graphPaintMaterialDirect(spriteCtx,half*dpr,half*dpr,radius*dpr,p,tier);
  var value={canvas:canvas,half:half,radius:radius};GRAPH_MATERIAL_CACHE.set(key,value);if(GRAPH_MATERIAL_CACHE.size>GRAPH_MATERIAL_CACHE_LIMIT)GRAPH_MATERIAL_CACHE.delete(GRAPH_MATERIAL_CACHE.keys().next().value);return value;
 }
-function graphPaintMaterialSurface(ctx,x,y,r,scale,profile,large){
- var tier=graphMaterialTier(r*Math.max(.01,scale),large),sprite=graphMaterialSprite(profile,tier);
+function graphPaintMaterialSurface(ctx,x,y,r,scale,profile,large,paintDirect){
+ var screenRadius=r*Math.max(.01,scale),tier=graphMaterialTier(screenRadius,large);
+ /* The full material sprite is intentionally bounded to 40 CSS pixels. On a focused or
+    high-rank node, enlarging that raster sprite is what produces the blocky/pixelated blob
+    users see in Classic. Paint only that exceptional node directly at its final size; keep
+    ordinary nodes on the cache so the large graph remains responsive. */
+ if(paintDirect&&tier==='full'&&screenRadius>GRAPH_MATERIAL_RADIUS.full){graphPaintMaterialDirect(ctx,x,y,r,profile,tier);return tier}
+ var sprite=graphMaterialSprite(profile,tier);
  if(sprite&&typeof ctx.drawImage==='function'){var half=r*sprite.half/sprite.radius;ctx.drawImage(sprite.canvas,x-half,y-half,half*2,half*2)}else graphPaintMaterialDirect(ctx,x,y,r,profile,tier);
  return tier;
 }
@@ -971,20 +995,25 @@ function graphStyleBackground(ctx,scale){
   ctx.strokeStyle='rgba(255,190,120,.10)';ctx.lineWidth=1/scale;var RR=[72,132,200,286,384];for(var k=0;k<RR.length;k++){ctx.beginPath();ctx.ellipse(0,0,RR[k],RR[k]*.66,0,0,6.2832);ctx.stroke();}ctx.restore();
  }
 }
+function graphPaintFlowArrow(x,y,link,ctx,scale){
+ const source=link&&link.source,target=link&&link.target;if(!source||!target||!Number.isFinite(source.x)||!Number.isFinite(target.x))return;
+ const dx=target.x-source.x,dy=target.y-source.y;if(!dx&&!dy)return;const size=1/Math.sqrt(Math.max(.01,Number(scale)||1)),angle=Math.atan2(dy,dx);
+ ctx.save();ctx.translate(x,y);ctx.rotate(angle);ctx.beginPath();ctx.moveTo(size*.55,0);ctx.lineTo(-size*.45,size*.32);ctx.lineTo(-size*.45,-size*.32);ctx.closePath();ctx.fill();ctx.restore();
+}
 function graphStyleNode(node,ctx,scale){
  if(!Number.isFinite(node.x)||!Number.isFinite(node.y))return;
  var focus=GHOVERSET&&GHOVERSET.size>1,neighbor=focus&&GHOVERSET.has(node.id),dim=focus&&!neighbor;
- var r=node.radius,col=node.color,profile;
+ var r=node.radius,col=node.color,profile,directMaterial=node.id===GHILITE||node.rank===0;
  ctx.globalAlpha=dim?.12:1;
  if(GSTYLE==='galaxy'){
-  profile=graphMaterialProfile('galaxy',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
+  profile=graphMaterialProfile('galaxy',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large,directMaterial);
  }else if(GSTYLE==='solar'){
-  var sun=node.rank===0;if(sun)r*=1.7;
-  profile=graphMaterialProfile('solar',sun?graphMix(col,'#d38b43',.46):col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
+  var sun=node.rank===0;
+  profile=graphMaterialProfile('solar',sun?graphMix(col,'#d38b43',.46):col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large,directMaterial);
  }else if(GSTYLE==='cyber'){
-  profile=graphMaterialProfile('cyber',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
+  profile=graphMaterialProfile('cyber',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large,directMaterial);
  }else{
-  profile=graphMaterialProfile('classic',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
+  profile=graphMaterialProfile('classic',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large,directMaterial);
  }
  if(node.id===GHILITE){
   graphMaterialFill(ctx,node.x,node.y,r*.76,graphAlpha('#ffffff',.065));
@@ -1096,7 +1125,8 @@ function graphSetHighlight(id){
 }
 function graphRefreshNodeMetrics(){
  const nodes=FG&&FG.graphData?FG.graphData().nodes||[]:[];
- nodes.forEach(node=>{node.radius=Math.max(1.6,window.GSET.size*Math.sqrt(node.val)*.45)});
+ const maxDegree=Math.max(1,...nodes.map(node=>node.degree||0));
+ nodes.forEach(node=>{node.radius=graphNodeRadius(node,window.GSET.size,(node.degree||0)/maxDegree)});
 }
 function graphRedraw(){
  if(!FG||GREDRAWFRAME)return;
@@ -1235,8 +1265,8 @@ function graphRender(fit=true,reheat=true){
  FG.linkWidth(link=>{const width=window.GSET.linkw||1,focus=GHOVERSET&&GHOVERSET.size>1,bridge=link.label==='influences';if(!focus)return (bridge?.45:(GPERF.dense?.62:.82))*width;const source=(link.source&&link.source.id)||link.source,target=(link.target&&link.target.id)||link.target;return (source===GHILITE||target===GHILITE)?(bridge?1.0:1.8)*width:.25*width});
  if(FG.linkLineDash)FG.linkLineDash(GPERF.dense?null:(link=>link.layer==='temporal'?[4,3]:(link.layer==='causal'?[2,2]:null)));
  if(FG.linkCurvature)FG.linkCurvature(GPERF.dense?0:mode.curve);
- FG.linkDirectionalArrowLength(GPERF.dense?0:2.5).linkDirectionalArrowRelPos(1);
- if(FG.linkDirectionalParticles){FG.linkDirectionalParticles((reduced||data.links.length>800||window.GSET.flow===false)?0:(GSTYLE==='cyber'?2:(mode.particles||2))).linkDirectionalParticleWidth(1.7).linkDirectionalParticleSpeed(.004)}
+ FG.linkDirectionalArrowLength(GPERF.dense?0:.625).linkDirectionalArrowRelPos(1);
+ if(FG.linkDirectionalParticles){FG.linkDirectionalParticles((reduced||data.links.length>800||window.GSET.flow===false)?0:(GSTYLE==='cyber'?2:(mode.particles||2))).linkDirectionalParticleWidth(.85).linkDirectionalParticleCanvasObject(graphPaintFlowArrow).linkDirectionalParticleSpeed(.004)}
  if(settings.labels){
   FG.linkCanvasObjectMode(()=>'after').linkCanvasObject((link,ctx,scale)=>{
    if(scale<2.4||!link.label||!link.source.x||(GPERF.dense&&!GHILITE))return;
@@ -1545,7 +1575,7 @@ document.addEventListener('keydown',event=>{
  if(memories&&memories.classList.contains('show')){closeEntityMems();return}
  const theme=document.getElementById('theme-menu');
  if(theme&&theme.classList.contains('is-open')){closeThemeMenu();document.getElementById('theme-btn').focus();return}
- if(document.querySelector('.app').classList.contains('mobile-nav-open')){closeMobileNav();document.getElementById('mobile-nav-toggle').focus();return}
+ if(document.querySelector('.app').classList.contains('mobile-nav-open')){closeMobileNav(true);return}
  if(document.getElementById('view-mem-editor').classList.contains('active'))closeMem();
 });
 

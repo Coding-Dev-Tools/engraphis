@@ -34,7 +34,10 @@ def test_port_accepts_boundaries():
     assert start_dashboard._port("65535") == 65535
 
 
-def test_port_probe_matches_uvicorn_reuseaddr_without_accepting_busy_port(monkeypatch):
+@pytest.mark.parametrize("busy_errno", [errno.EADDRINUSE, errno.EACCES, 10013, 10048])
+def test_port_probe_matches_uvicorn_reuseaddr_without_accepting_busy_port(
+    monkeypatch, busy_errno,
+):
     calls = []
 
     class Probe:
@@ -43,7 +46,7 @@ def test_port_probe_matches_uvicorn_reuseaddr_without_accepting_busy_port(monkey
 
         def bind(self, sockaddr):
             calls.append(("bind", sockaddr))
-            raise OSError(errno.EADDRINUSE, "address already in use")
+            raise OSError(busy_errno, "address already in use")
 
         def close(self):
             calls.append(("close",))
