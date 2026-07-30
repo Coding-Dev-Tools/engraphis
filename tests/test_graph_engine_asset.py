@@ -1996,7 +1996,13 @@ def test_legacy_classic_canvas_uses_the_same_nonwhite_material_profiles_as_ledge
         classic.index("function graphPaintMaterialSurface("):
         classic.index("function graphStyleBackground(")
     ]
-    assert "graphMaterialTier(r*Math.max(.01,scale),large)" in paint
+    assert "graphMaterialTier(screenRadius,large)" in paint
+    assert "paintDirect&&tier==='full'&&screenRadius>GRAPH_MATERIAL_RADIUS.full" in paint
+    assert "directMaterial=node.id===GHILITE||node.rank===0" in classic
+    full_classic = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
+    style_node = full_classic[full_classic.index("function graphStyleNode("):full_classic.index("function graphApplyStyleChrome()")]
+    assert "graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large,directMaterial)" in style_node
+    assert "graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large)" not in style_node
     assert classic.count("if(tier==='signature')") >= 4
 
 

@@ -976,8 +976,14 @@ function graphMaterialSprite(p,tier){
  var spriteCtx=canvas.getContext('2d');if(!spriteCtx)return null;if(typeof spriteCtx.scale==='function'){spriteCtx.scale(dpr,dpr);graphPaintMaterialDirect(spriteCtx,half,half,radius,p,tier)}else graphPaintMaterialDirect(spriteCtx,half*dpr,half*dpr,radius*dpr,p,tier);
  var value={canvas:canvas,half:half,radius:radius};GRAPH_MATERIAL_CACHE.set(key,value);if(GRAPH_MATERIAL_CACHE.size>GRAPH_MATERIAL_CACHE_LIMIT)GRAPH_MATERIAL_CACHE.delete(GRAPH_MATERIAL_CACHE.keys().next().value);return value;
 }
-function graphPaintMaterialSurface(ctx,x,y,r,scale,profile,large){
- var tier=graphMaterialTier(r*Math.max(.01,scale),large),sprite=graphMaterialSprite(profile,tier);
+function graphPaintMaterialSurface(ctx,x,y,r,scale,profile,large,paintDirect){
+ var screenRadius=r*Math.max(.01,scale),tier=graphMaterialTier(screenRadius,large);
+ /* The full material sprite is intentionally bounded to 40 CSS pixels. On a focused or
+    high-rank node, enlarging that raster sprite is what produces the blocky/pixelated blob
+    users see in Classic. Paint only that exceptional node directly at its final size; keep
+    ordinary nodes on the cache so the large graph remains responsive. */
+ if(paintDirect&&tier==='full'&&screenRadius>GRAPH_MATERIAL_RADIUS.full){graphPaintMaterialDirect(ctx,x,y,r,profile,tier);return tier}
+ var sprite=graphMaterialSprite(profile,tier);
  if(sprite&&typeof ctx.drawImage==='function'){var half=r*sprite.half/sprite.radius;ctx.drawImage(sprite.canvas,x-half,y-half,half*2,half*2)}else graphPaintMaterialDirect(ctx,x,y,r,profile,tier);
  return tier;
 }
@@ -998,17 +1004,17 @@ function graphPaintFlowArrow(x,y,link,ctx,scale){
 function graphStyleNode(node,ctx,scale){
  if(!Number.isFinite(node.x)||!Number.isFinite(node.y))return;
  var focus=GHOVERSET&&GHOVERSET.size>1,neighbor=focus&&GHOVERSET.has(node.id),dim=focus&&!neighbor;
- var r=node.radius,col=node.color,profile;
+ var r=node.radius,col=node.color,profile,directMaterial=node.id===GHILITE||node.rank===0;
  ctx.globalAlpha=dim?.12:1;
  if(GSTYLE==='galaxy'){
-  profile=graphMaterialProfile('galaxy',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
+  profile=graphMaterialProfile('galaxy',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large,directMaterial);
  }else if(GSTYLE==='solar'){
   var sun=node.rank===0;
-  profile=graphMaterialProfile('solar',sun?graphMix(col,'#d38b43',.46):col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
+  profile=graphMaterialProfile('solar',sun?graphMix(col,'#d38b43',.46):col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large,directMaterial);
  }else if(GSTYLE==='cyber'){
-  profile=graphMaterialProfile('cyber',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
+  profile=graphMaterialProfile('cyber',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large,directMaterial);
  }else{
-  profile=graphMaterialProfile('classic',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large);
+  profile=graphMaterialProfile('classic',col);graphPaintMaterialSurface(ctx,node.x,node.y,r,scale,profile,GPERF.large,directMaterial);
  }
  if(node.id===GHILITE){
   graphMaterialFill(ctx,node.x,node.y,r*.76,graphAlpha('#ffffff',.065));
