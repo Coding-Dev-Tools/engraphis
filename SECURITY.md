@@ -150,8 +150,8 @@ repository or its release artifacts.
   use reverse proxy for multi-process/distributed
 - Encryption at rest is opt-in for the local memory DB (SQLCipher via
   `ENGRAPHIS_DB_KEY`). Protect customer credential state and backups separately.
-- Managed relay bundles are HTTPS-protected in transit but remain plaintext at rest until
-  client-side end-to-end encryption ships. `secret` memories are never uploaded.
+- Cloud Sync requires an authorized device to hold its workspace encryption key. The relay cannot
+  recover a lost key or decrypt its ciphertext; `secret` memories are never uploaded.
 - Per-token scope/tenant authorization is partial: isolate distinct tenants by running
   one instance each
 - Legacy v1 REST server/dashboard is a compatibility surface; prefer v2/MCP path
