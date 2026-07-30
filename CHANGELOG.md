@@ -3,7 +3,7 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
-## Unreleased
+## [1.2.0] - 2026-07-30
 
 ### Added
 
@@ -37,6 +37,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Ordinary recall is observational by default, so weak nearest-neighbor results do not gain
   stability merely by being returned. Grounded recall still reinforces only cited evidence, and
   Python callers with an explicit use signal can request reinforcement.
+- Code and PPR retrieval now restrict incident-symbol and memory-entity lookups to the reachable
+  frontier before applying their safety caps, and repo writes link text mentions to visible
+  workspace-level entities.
 
 ## [1.1.5] - 2026-07-28
 
