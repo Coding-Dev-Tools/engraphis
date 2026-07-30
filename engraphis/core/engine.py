@@ -1078,7 +1078,16 @@ class MemoryEngine:
             sem[mid] = float(np.dot(qn, vec))
         q_tokens = tokenize(query)
         out: list[tuple[float, MemoryRecord]] = []
-        for rec in self.store.list_memories(flt, include_invalid=include_invalid, limit=500):
+        records = self.store.list_memories(flt, include_invalid=include_invalid, limit=500)
+        if include_invalid and flt.known_at is not None:
+            # History must retain closed valid-time intervals, but cannot expose a
+            # record that was not known at the requested system-time snapshot.
+            records = [
+                rec for rec in records
+                if (rec.ingested_at is None or rec.ingested_at <= flt.known_at)
+                and (rec.expired_at is None or flt.known_at < rec.expired_at)
+            ]
+        for rec in records:
             lex = jaccard(q_tokens, tokenize(f"{rec.title} {rec.content}"))
             score = max(sem.get(rec.id, 0.0), lex)
             if score > 0.05:

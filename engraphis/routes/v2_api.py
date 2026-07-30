@@ -977,8 +977,34 @@ def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
         mems = _keyword_search(
             ws, q, k, as_of=as_of, valid_at=valid_at, known_at=known_at,
         )
+        if response_mode == "compact":
+            # Preserve the public compact-response contract even when semantic recall
+            # degrades to the keyword path during an embedding migration.
+            mems = [
+                {
+                    key: memory.get(key)
+                    for key in (
+                        "id", "document_id", "title", "memory_type", "scope", "pinned",
+                        "importance", "valid_from", "valid_to", "valid_to_recorded_at",
+                        "ingested_at", "expired_at", "subject_key", "claim_kind", "provenance",
+                    )
+                }
+                for memory in mems
+            ]
+        historical = valid_at is not None or known_at is not None or as_of is not None
+        effective_budget = (
+            token_budget if token_budget is not None else service().engine.recall_engine.token_budget
+        )
         return {"query": q, "workspace": ws, "count": len(mems), "context": "",
-                "memories": mems, "mode": "keyword",
+                "memories": mems, "mode": "keyword", "response_mode": response_mode,
+                "retrieval_profile": retrieval_profile,
+                "valid_at": valid_at if valid_at is not None else as_of,
+                "known_at": known_at, "historical": historical,
+                "packed_sources": [],
+                "usage": {"budget_tokens": effective_budget, "context_tokens": 0,
+                          "source_tokens": 0, "saved_tokens": 0, "savings_ratio": 0.0,
+                          "packed_count": 0, "omitted_count": len(mems),
+                          "token_counter": "engraphis.regex.v1"},
                 "note": "Keyword match — install sentence-transformers for semantic search."}
     payload = dict(out)
     payload.update({

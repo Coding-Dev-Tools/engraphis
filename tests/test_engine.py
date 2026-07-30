@@ -466,6 +466,44 @@ def test_timeline_orders_history_chronologically():
     assert hist[0].valid_from < hist[1].valid_from
 
 
+def test_why_and_timeline_history_respect_known_time_but_keep_closed_records():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    records = (
+        MemoryRecord(
+            id="", workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+            content="Launch history current policy", valid_from=1.0, ingested_at=1.0,
+        ),
+        MemoryRecord(
+            id="", workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+            content="Launch history closed policy", valid_from=2.0, valid_to=3.0,
+            ingested_at=2.0,
+        ),
+        MemoryRecord(
+            id="", workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+            content="Launch history learned later", valid_from=4.0, valid_to=5.0,
+            ingested_at=200.0,
+        ),
+    )
+    for record in records:
+        eng.store.add_memory(record)
+
+    timeline = eng.timeline(
+        "launch history", workspace_id=wid, repo_id=rid, known_at=100.0,
+    )
+    why = eng.why(
+        "launch history", workspace_id=wid, repo_id=rid, known_at=100.0,
+    )
+
+    assert {record.content for record in timeline} == {
+        "Launch history current policy", "Launch history closed policy",
+    }
+    assert [record.content for record in why["supersedes"]] == [
+        "Launch history closed policy",
+    ]
+
+
 def test_temporal_supersession_closes_at_effective_time_and_keeps_vectors():
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")

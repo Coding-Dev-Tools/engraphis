@@ -400,6 +400,21 @@ def test_keyword_recall_fallback_keeps_bitemporal_visibility(monkeypatch, tmp_pa
         assert fallback.json()["mode"] == "keyword"
         assert [item["id"] for item in fallback.json()["memories"]] == [old["id"]]
 
+        compact_fallback = client.get(
+            "/api/recall",
+            params={
+                "workspace": "demo", "q": "fallback retention", "response_mode": "compact",
+                "token_budget": 0,
+            },
+        )
+        payload = compact_fallback.json()
+        assert compact_fallback.status_code == 200
+        assert payload["mode"] == "keyword"
+        assert payload["response_mode"] == "compact"
+        assert payload["usage"]["budget_tokens"] == 0
+        assert payload["usage"]["context_tokens"] == 0
+        assert payload["memories"] and "content" not in payload["memories"][0]
+
 
 def test_http_memory_api_rejects_backdated_supersession_without_partial_write(
     monkeypatch, tmp_path
