@@ -3168,9 +3168,68 @@ class Store:
                     break
         return rows
 
+    def links_touching(self, ids: list[str], *,
+                       layers: Optional[list[GraphLayer]] = None,
+                       flt: Optional[SearchFilter] = None,
+                       include_invalid: bool = False,
+                       limit: Optional[int] = None) -> list[dict]:
+        """Return visible links with at least one endpoint in ``ids``.
+
+        This bounded frontier expansion is distinct from :meth:`links_among`: graph
+        recall uses it to retain an unmentioned endpoint linked to an entity-attached
+        memory, without first materializing every memory in a large scope.
+        """
+        if not ids:
+            return []
+        if layers is not None and not layers:
+            return []
+        row_cap = None if limit is None else max(0, int(limit))
+        if row_cap == 0:
+            return []
+        ordered_ids = sorted(set(ids))
+        visibility_sql, visibility_params = _temporal_visibility_sql("", flt)
+        rows: list[dict] = []
+        seen: set[tuple] = set()
+        # Each id appears once for each endpoint predicate; reserve parameters for
+        # time/layer filters so this remains under SQLite's portable bind limit.
+        chunk_size = max(1, (IN_CLAUSE_CHUNK - 16) // 2)
+        for start in range(0, len(ordered_ids), chunk_size):
+            if row_cap is not None and len(rows) >= row_cap:
+                break
+            chunk = ordered_ids[start:start + chunk_size]
+            marks = ",".join("?" for _ in chunk)
+            sql = (
+                "SELECT a, b, relation, layer, reason, created_at, valid_from, valid_to, "
+                "valid_to_recorded_at, ingested_at, expired_at FROM mem_links "
+                f"WHERE (a IN ({marks}) OR b IN ({marks}))"
+            )
+            params: list[Any] = [*chunk, *chunk]
+            if not include_invalid:
+                sql += f" AND {visibility_sql}"
+                params.extend(visibility_params)
+            if layers is not None:
+                layer_marks = ",".join("?" for _ in layers)
+                sql += f" AND layer IN ({layer_marks})"
+                params.extend(_enum(layer) for layer in layers)
+            sql += " ORDER BY a, b, relation, valid_from, ingested_at"
+            for row in self.conn.execute(sql, params).fetchall():
+                item = dict(row)
+                key = (
+                    item["a"], item["b"], item["relation"], item["layer"],
+                    item["valid_from"], item["valid_to"], item["ingested_at"],
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(item)
+                if row_cap is not None and len(rows) >= row_cap:
+                    break
+        return rows
+
     def neighbors(self, node_ids: list[str], *, at: Optional[float] = None,
                   layers: Optional[list[GraphLayer]] = None,
-                  flt: Optional[SearchFilter] = None) -> list[Edge]:
+                  flt: Optional[SearchFilter] = None,
+                  limit: Optional[int] = None) -> list[Edge]:
         if not node_ids:
             return []
         valid_at, known_at = _temporal_anchors(flt, valid_at=at)
@@ -3213,6 +3272,10 @@ class Store:
             else:
                 sql += " AND repo_id=?"
             params.append(flt.repo_id)
+        sql += " ORDER BY id"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(0, int(limit)))
         rows = self.conn.execute(sql, params).fetchall()
         return [_row_to_edge(r) for r in rows]
 
@@ -3409,6 +3472,7 @@ class Store:
 
     def list_code_edges(self, repo_id: str, *, limit: Optional[int] = None,
                         layers: Optional[list[GraphLayer]] = None,
+                        endpoints: Optional[list[str]] = None,
                         flt: Optional[SearchFilter] = None) -> list[dict]:
         temporal, params = _temporal_visibility_sql("", flt)
         sql = "SELECT * FROM code_edges WHERE repo_id=? AND " + temporal
@@ -3419,6 +3483,13 @@ class Store:
             marks = ",".join("?" for _ in layers)
             sql += f" AND layer IN ({marks})"
             params.extend(_enum(layer) for layer in layers)
+        if endpoints is not None:
+            if not endpoints:
+                return []
+            marks = ",".join("?" for _ in endpoints)
+            sql += f" AND (src IN ({marks}) OR dst IN ({marks}))"
+            params.extend(endpoints)
+            params.extend(endpoints)
         sql += " ORDER BY file, line, id"
         if limit is not None:
             sql += " LIMIT ?"

@@ -364,23 +364,39 @@ class RecallEngine:
         if not symbols:
             return {}
 
-        # Expand one stored code edge to capture callers/callees, bounded by a
-        # multiple of candidate_k.  Both symbol ids and parser-emitted names are
-        # accepted because language backends use both representations.
-        code_edges = _call_temporal_store(
-            self.store.list_code_edges,
-            flt,
-            flt.repo_id,
-            limit=max(100, min(2000, candidate_k * 20)),
-            layers=flt.graph_layers,
-            requested_historical=historical,
-        )
         aliases: dict[str, str] = {}
         for symbol_id, symbol in symbols.items():
             for key in ("id", "name", "fqname"):
                 value = str(symbol.get(key) or "")
                 if value:
                     aliases[value] = symbol_id
+        # Expand one stored code edge to capture callers/callees, bounded by a
+        # multiple of candidate_k. Query only edges incident to matched aliases
+        # before applying that cap, so later files cannot be hidden by a global prefix.
+        edge_kwargs = {
+            "limit": max(100, min(2000, candidate_k * 20)),
+            "layers": flt.graph_layers,
+        }
+        # ``endpoints`` is a v2 Store optimization. Preserve compatibility with
+        # external code stores that have not added the optional filter yet.
+        try:
+            edge_parameters = inspect.signature(self.store.list_code_edges).parameters.values()
+            supports_endpoints = any(
+                parameter.name == "endpoints"
+                or parameter.kind == inspect.Parameter.VAR_KEYWORD
+                for parameter in edge_parameters
+            )
+        except (TypeError, ValueError):
+            supports_endpoints = False
+        if supports_endpoints:
+            edge_kwargs["endpoints"] = list(aliases)
+        code_edges = _call_temporal_store(
+            self.store.list_code_edges,
+            flt,
+            flt.repo_id,
+            requested_historical=historical,
+            **edge_kwargs,
+        )
         related_names: dict[str, float] = {}
         for edge in code_edges:
             src, dst = str(edge.get("src") or ""), str(edge.get("dst") or "")
@@ -493,8 +509,31 @@ class RecallEngine:
             adj.setdefault(a, []).append((b, w))
             adj.setdefault(b, []).append((a, w))
 
-        edges = self.store.edges_in_scope(flt, at=now, limit=4000)
-        for e in edges:
+        # Build a bounded edge set outward from the query entities.  A global
+        # ULID-ordered cap would let old unrelated edges crowd out a new relation
+        # required by this query before PPR sees it.
+        edge_cap = 4000
+        edges_by_id = {}
+        frontier = set(seeds)
+        expanded: set[str] = set()
+        while frontier and len(edges_by_id) < edge_cap:
+            batch = sorted(frontier - expanded)[:400]
+            if not batch:
+                break
+            frontier.difference_update(batch)
+            expanded.update(batch)
+            next_frontier: set[str] = set()
+            for edge in self.store.neighbors(
+                    batch, at=now, layers=flt.graph_layers, flt=flt,
+                    limit=edge_cap - len(edges_by_id)):
+                if edge.id in edges_by_id:
+                    continue
+                edges_by_id[edge.id] = edge
+                next_frontier.update((edge.src, edge.dst))
+                if len(edges_by_id) >= edge_cap:
+                    break
+            frontier.update(next_frontier - expanded)
+        for e in edges_by_id.values():
             connect(ent(e.src), ent(e.dst), max(float(e.weight or 1.0), 1e-6))
 
         incidence = self.store.list_memory_entities(flt, limit=12_000)
@@ -505,9 +544,23 @@ class RecallEngine:
         # retrieval arms so PPR can traverse that edge without widening scope. Keep
         # the incidence frontier as well when independent caps choose a different
         # subset of the scoped memory universe.
-        memory_ids = sorted({
+        incidence_memory_ids = {
             str(row.get("memory_id") or "")
             for row in incidence if row.get("memory_id")
+        }
+        frontier_links = self.store.links_touching(
+            sorted(incidence_memory_ids),
+            layers=flt.graph_layers,
+            flt=flt,
+            limit=20_000,
+        )
+        # Expand from the entity-incidence frontier before adding the bounded newest
+        # memory window. An older unmentioned endpoint can then participate in PPR
+        # through its visible link instead of being silently dropped by that window.
+        memory_ids = sorted(incidence_memory_ids | {
+            endpoint
+            for link in frontier_links
+            for endpoint in (link["a"], link["b"])
         } | {
             memory.id for memory in self.store.list_memories(flt, limit=12_000)
         })

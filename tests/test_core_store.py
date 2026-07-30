@@ -491,6 +491,22 @@ def test_code_listing_helpers_honor_limit(store):
     assert store.list_code_files("repo_x", languages={"rust"}, limit=3) == []
 
 
+def test_code_edge_endpoint_filter_applies_before_limit(store):
+    for index in range(4):
+        store.add_code_edge(
+            repo_id="repo_x", src=f"noise_{index}", dst=f"other_{index}",
+            relation="calls", file="a_noise.py", line=index,
+        )
+    store.add_code_edge(
+        repo_id="repo_x", src="target", dst="caller", relation="calls",
+        file="z_target.py", line=1,
+    )
+
+    edges = store.list_code_edges("repo_x", endpoints=["target"], limit=1)
+
+    assert [(edge["src"], edge["dst"]) for edge in edges] == [("target", "caller")]
+
+
 def test_memory_links_infer_and_filter_graph_layers(store):
     wid = store.get_or_create_workspace("w")
     a = store.add_memory(MemoryRecord(id="", content="cause", workspace_id=wid))
