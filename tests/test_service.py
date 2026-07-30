@@ -410,6 +410,34 @@ def test_timeline_orders_chronologically():
     assert out["history"][0]["valid_from"] <= out["history"][1]["valid_from"]
 
 
+@pytest.mark.parametrize(
+    ("intent", "result_key", "engine_method"),
+    [
+        ("why", "explanation", "why"),
+        ("timeline", "history", "timeline"),
+    ],
+)
+def test_intent_recall_forwards_temporal_anchors_to_secondary_reads(
+        monkeypatch, intent, result_key, engine_method):
+    s = _svc()
+    s.remember("Temporal intent anchor regression fixture.", workspace="acme", repo="web")
+    observed = {}
+
+    def observe(*args, **kwargs):
+        observed.update(kwargs)
+        return {"answer": [], "supersedes": []} if engine_method == "why" else []
+
+    monkeypatch.setattr(s.engine, engine_method, observe)
+    out = s.intent_recall(
+        "Temporal intent anchor", intent=intent, workspace="acme", repo="web",
+        as_of=10.0, valid_at=10.0, known_at=20.0,
+    )
+
+    assert result_key in out
+    assert observed["valid_at"] == 10.0
+    assert observed["known_at"] == 20.0
+
+
 def test_service_exposes_world_time_writes_and_point_in_time_recall():
     s = _svc()
     old = s.remember(

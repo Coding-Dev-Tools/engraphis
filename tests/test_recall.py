@@ -119,6 +119,30 @@ def test_graph_arm_backfills_text_memory_when_its_entity_is_added_later():
     assert related in scores
 
 
+def test_graph_arm_traverses_links_to_memories_without_entity_incidence():
+    from engraphis.core.interfaces import Node
+
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    redis = store.upsert_entity(Node(
+        id="", name="Redis", ntype="tech", workspace_id=wid, repo_id=rid,
+    ))
+    attached = _add(store, emb, wid, rid, "Redis owns the cache migration.")
+    linked_only = _add(store, emb, wid, rid, "The migration requires a staged rollout.")
+    store.link_memory_entity(
+        memory_id=attached, entity_id=redis, workspace_id=wid, repo_id=rid,
+        source_kind="test", confidence=1.0,
+    )
+    store.add_link(attached, linked_only, relation="supports")
+
+    scores = eng._graph_arm_ppr(
+        "What does Redis own?", SearchFilter(workspace_id=wid, repo_id=rid), now=10**12,
+    )
+
+    assert linked_only in scores
+
+
 def test_graph_arm_backfills_workspace_mentions_for_a_later_repo_entity():
     from engraphis.core.interfaces import Edge, Node
 

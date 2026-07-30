@@ -37,8 +37,8 @@ from engraphis.core.interfaces import (
     SearchFilter,
 )
 from engraphis.core.recall import RecallEngine, RecallResult
-from engraphis.core.resolve import RELATED_SIM_FLOOR, ResolutionOp, resolve
-from engraphis.core.store import Store, now_ts
+from engraphis.core.resolve import RELATED_SIM_FLOOR, Resolution, ResolutionOp, resolve
+from engraphis.core.store import Store, memory_matches_filter, now_ts
 from engraphis.core.textutil import estimate_tokens, jaccard, tokenize
 
 logger = logging.getLogger("engraphis.core.engine")
@@ -460,6 +460,41 @@ class MemoryEngine:
                 candidate_k=candidate_k, subject_key=subject_key,
                 claim_kind=claim_kind, valid_at=valid_from,
             )
+        if resolve_conflicts and subject_key and valid_from is not None:
+            # A durable claim has a temporal identity in addition to its text. A
+            # scheduled successor can be a better prose match than the version visible
+            # at this write's effective time, but it is not the version being replaced.
+            # Select that visible predecessor directly so a backfill is spliced into the
+            # recorded chain rather than rejected for predating a future match.
+            claim_history = self.store.list_claim_history(
+                workspace_id=workspace_id, repo_id=repo_id,
+                session_id=session_id if scope == Scope.SESSION else None,
+                scope=scope, mtype=mtype, subject_key=subject_key,
+                claim_kind=claim_kind,
+            )
+            predecessors = [
+                record for record in claim_history
+                if record.valid_from is not None and record.valid_from <= valid_from
+                and (record.valid_to is None or valid_from < record.valid_to)
+            ]
+            if predecessors:
+                predecessor = max(
+                    predecessors,
+                    key=lambda record: (record.valid_from or float("-inf"), record.id),
+                )
+                if " ".join(text.split()).casefold() == (
+                    " ".join(predecessor.content.split()).casefold()
+                ):
+                    decision = Resolution(
+                        ResolutionOp.NOOP, target_id=predecessor.id,
+                        reason=f"exact duplicate of keyed claim {predecessor.id}",
+                    )
+                else:
+                    decision = Resolution(
+                        ResolutionOp.INVALIDATE, target_id=predecessor.id,
+                        reason=(f"supersedes temporal predecessor {predecessor.id} "
+                                f"for keyed claim"),
+                    )
         if (decision is not None
                 and decision.op == ResolutionOp.INVALIDATE
                 and valid_from is not None):
@@ -571,9 +606,28 @@ class MemoryEngine:
             # World time closes when the replacement becomes true, not when this process
             # happened to ingest it. This keeps backdated and scheduled facts queryable at
             # the correct ``as_of`` anchor.
-            self.store.close_validity(
-                decision.target_id, at=rec.valid_from, reason=decision.reason
-            )
+            predecessor = self.store.get_memory(decision.target_id)
+            predecessor_end = predecessor.valid_to if predecessor is not None else None
+            if (predecessor_end is not None and rec.valid_from is not None
+                    and rec.valid_from < predecessor_end):
+                # The target was already retired by its recorded successor.  Splicing an
+                # intermediate version must shorten that historical interval, not leave
+                # the old end in place (``close_validity`` intentionally only closes live
+                # rows).  The new row inherits the old boundary below.
+                self.store.conn.execute(
+                    "UPDATE memories SET valid_to=?, valid_to_recorded_at=? WHERE id=?",
+                    (rec.valid_from, now_ts(), decision.target_id),
+                )
+                self.store.audit("system", "invalidate", decision.target_id,
+                                 decision.reason)
+                self.store.close_validity(
+                    mid, at=predecessor_end,
+                    reason="bounded by the recorded successor interval",
+                )
+            else:
+                self.store.close_validity(
+                    decision.target_id, at=rec.valid_from, reason=decision.reason
+                )
             # Keep the superseded vector. Every vector backend applies the same temporal
             # SearchFilter as lexical/graph retrieval, so it is hidden from current recall
             # but remains available for historical ``as_of`` queries. Deleting it made
@@ -758,6 +812,7 @@ class MemoryEngine:
             hits = self.index.search(vec, candidate_k, filter=flt)
         except Exception:
             hits = []
+        current_fallback = False
         if not hits and valid_at is not None:
             # A candidate may be backdated before an already-recorded claim. That claim
             # is intentionally outside the candidate's valid-time view, but it still
@@ -772,17 +827,18 @@ class MemoryEngine:
             )
             try:
                 hits = self.index.search(vec, candidate_k, filter=current_filter)
+                current_fallback = True
             except Exception:
                 pass
-        now = now_ts()
         neighbors = []
         for nid, sim in hits:
             nrec = self.store.get_memory(nid)
             if (nrec and nrec.workspace_id == workspace_id and nrec.repo_id == repo_id
                     and nrec.scope == scope and nrec.mtype == mtype
                     and (scope != Scope.SESSION or nrec.session_id == session_id)
-                    and nrec.expired_at is None
-                    and (nrec.valid_to is None or nrec.valid_to > now)):
+                    and (memory_matches_filter(nrec, flt)
+                         or (current_fallback and nrec.expired_at is None
+                             and nrec.valid_to is None))):
                 neighbors.append((sim, nrec))
         if valid_at is not None and subject_key:
             # The vector search above is intentionally anchored at the candidate's world
@@ -967,7 +1023,8 @@ class MemoryEngine:
         return answer
 
     def why(self, query: str, *, workspace_id: str, repo_id: Optional[str] = None,
-            k: int = 5) -> dict:
+            k: int = 5, valid_at: Optional[float] = None,
+            known_at: Optional[float] = None) -> dict:
         """Rationale + history for a decision or fact: the live
         answer, plus whatever it superseded, if anything. This is the bi-temporal "why"
         that a flat-namespace store (or a plain vector store) cannot answer — the
@@ -975,6 +1032,7 @@ class MemoryEngine:
         """
         flt = SearchFilter(
             workspace_id=workspace_id, repo_id=repo_id, include_ancestors=True,
+            valid_at=valid_at, known_at=known_at,
         )
         live = [r for _, r in self._relatedness(query, flt, include_invalid=False)[:k]]
         history: list[MemoryRecord] = []
@@ -991,12 +1049,14 @@ class MemoryEngine:
         return {"answer": live, "supersedes": history}
 
     def timeline(self, query: str, *, workspace_id: str, repo_id: Optional[str] = None,
-                limit: int = 20) -> list[MemoryRecord]:
+                limit: int = 20, valid_at: Optional[float] = None,
+                known_at: Optional[float] = None) -> list[MemoryRecord]:
         """Chronological, bi-temporal history of a fact: what we believed and when.
         Includes invalidated versions; sorted by ``valid_from``.
         """
         flt = SearchFilter(
             workspace_id=workspace_id, repo_id=repo_id, include_ancestors=True,
+            valid_at=valid_at, known_at=known_at,
         )
         recs = [r for _, r in self._relatedness(query, flt, include_invalid=True)[:limit]]
         recs.sort(key=lambda r: r.valid_from or r.ingested_at or 0.0)

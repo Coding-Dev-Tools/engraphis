@@ -1194,11 +1194,13 @@ class MemoryService:
             )
         elif normalized in {"explain", "why"} and workspace:
             response["explanation"] = self.why(
-                query, workspace=workspace, repo=repo, k=min(k, 10)
+                query, workspace=workspace, repo=repo, k=min(k, 10),
+                as_of=as_of, valid_at=valid_at, known_at=known_at,
             )
         elif normalized in {"summarize_history", "history", "timeline"} and workspace:
             response["history"] = self.timeline(
-                query, workspace=workspace, repo=repo, limit=min(max(k * 2, 10), 50)
+                query, workspace=workspace, repo=repo, limit=min(max(k * 2, 10), 50),
+                as_of=as_of, valid_at=valid_at, known_at=known_at,
             )
         return response
 
@@ -2135,23 +2137,38 @@ class MemoryService:
         return out
 
     # ── bi-temporal: why / timeline ──────────────────────────────────────────────
-    def why(self, query: str, *, workspace: str, repo: Optional[str] = None, k: int = 5) -> dict:
+    def why(self, query: str, *, workspace: str, repo: Optional[str] = None, k: int = 5,
+            as_of: Optional[float] = None, valid_at: Optional[float] = None,
+            known_at: Optional[float] = None) -> dict:
         """Rationale + history for a decision/fact: the live answer plus whatever it
         superseded, if anything — the bi-temporal "why" a flat store can't answer."""
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
         wid, rid = self._require_scope(workspace, repo)
         k = max(1, min(MAX_K, int(k)))
-        out = self.engine.why(query, workspace_id=wid, repo_id=rid, k=k)
+        _, valid_at, known_at = _temporal_anchors(
+            as_of=as_of, valid_at=valid_at, known_at=known_at,
+        )
+        out = self.engine.why(
+            query, workspace_id=wid, repo_id=rid, k=k,
+            valid_at=valid_at, known_at=known_at,
+        )
         return {"query": query, "answer": [_mem_to_dict(r) for r in out["answer"]],
                "supersedes": [_mem_to_dict(r) for r in out["supersedes"]]}
 
     def timeline(self, query: str, *, workspace: str, repo: Optional[str] = None,
-                limit: int = 20) -> dict:
+                limit: int = 20, as_of: Optional[float] = None,
+                valid_at: Optional[float] = None, known_at: Optional[float] = None) -> dict:
         """Chronological, bi-temporal history of a fact: what we believed and when."""
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
         wid, rid = self._require_scope(workspace, repo)
         limit = max(1, min(MAX_K, int(limit)))
-        recs = self.engine.timeline(query, workspace_id=wid, repo_id=rid, limit=limit)
+        _, valid_at, known_at = _temporal_anchors(
+            as_of=as_of, valid_at=valid_at, known_at=known_at,
+        )
+        recs = self.engine.timeline(
+            query, workspace_id=wid, repo_id=rid, limit=limit,
+            valid_at=valid_at, known_at=known_at,
+        )
         return {"query": query, "history": [_mem_to_dict(r) for r in recs]}
 
     def recall_proactive(self, *, workspace: str, repo: Optional[str] = None,

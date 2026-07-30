@@ -1971,6 +1971,34 @@ class Store:
         rows = self.conn.execute(sql, params).fetchall()
         return [_row_to_record(row) for row in rows]
 
+    def list_claim_history(self, *, workspace_id: str, repo_id: Optional[str],
+                           session_id: Optional[str], scope: Scope, mtype: MemoryType,
+                           subject_key: str, claim_kind: str) -> list[MemoryRecord]:
+        """Return every recorded interval for one exact durable claim identity.
+
+        Resolution uses this only to bound a newly inserted, backfilled keyed claim at
+        the next known successor. Closed rows are deliberately included: they are the
+        authoritative temporal chain and must not disappear merely because they are no
+        longer visible to present-day recall.
+        """
+        subject_key = str(subject_key or "").strip()
+        if not subject_key:
+            return []
+        sql = (
+            "SELECT * FROM memories WHERE workspace_id=? AND repo_id IS ? "
+            "AND scope=? AND mtype=? AND subject_key=? AND claim_kind=?"
+        )
+        params: list[Any] = [
+            workspace_id, repo_id, _enum(scope), _enum(mtype), subject_key,
+            str(claim_kind or "").strip(),
+        ]
+        if scope == Scope.SESSION:
+            sql += " AND session_id=?"
+            params.append(session_id)
+        sql += " ORDER BY valid_from, ingested_at, id"
+        rows = self.conn.execute(sql, params).fetchall()
+        return [_row_to_record(row) for row in rows]
+
     def list_memories_page(self, flt: Optional[SearchFilter] = None, *,
                            after_id: str = "", limit: int = 500) -> list[MemoryRecord]:
         """Return one deterministic keyset page without materializing the full scope."""
@@ -1989,16 +2017,21 @@ class Store:
 
     def close_validity(self, memory_id: str, *, at: Optional[float] = None,
                        actor: str = "system", reason: str = "contradicted") -> None:
-        """Bi-temporal invalidation (§8.3): close a fact's validity window without deleting."""
+        """Bi-temporal invalidation (§8.3): shorten a fact's validity without deleting."""
         recorded_at = now_ts()
         at = at if at is not None else recorded_at
-        self.conn.execute(
+        updated = self.conn.execute(
             "UPDATE memories SET valid_to=?, valid_to_recorded_at=? "
-            "WHERE id=? AND valid_to IS NULL",
-            (at, recorded_at, memory_id),
-        )
+            "WHERE id=? AND (valid_to IS NULL OR valid_to>?)",
+            (at, recorded_at, memory_id, at),
+        ).rowcount
+        if updated:
+            self.invalidate_edges_for_memory(memory_id, at=at, commit=False)
+        # Governance attempts are audit-worthy even when the interval was already
+        # closed.  MCP callers deliberately expose forget as non-idempotent so a
+        # repeated request keeps its own audit evidence while avoiding a second edge
+        # invalidation or widening a closed interval.
         self.audit(actor, "invalidate", memory_id, reason, commit=False)
-        self.invalidate_edges_for_memory(memory_id, at=at, commit=False)
         self.conn.commit()
 
     def set_pinned(self, memory_id: str, pinned: bool) -> None:

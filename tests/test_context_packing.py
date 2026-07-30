@@ -237,6 +237,29 @@ def test_supersession_and_claim_family_deduplication_keep_best_candidate() -> No
     assert usage.omitted_count == 2
 
 
+def test_legacy_subject_key_families_keep_distinct_claim_kinds() -> None:
+    packer = DeterministicContextPacker()
+    candidates = [
+        _candidate(
+            "mem_owner",
+            "The service owner is the platform team.",
+            score=0.9,
+            metadata={"subject_key": "service.api", "claim_kind": "owner"},
+        ),
+        _candidate(
+            "mem_status",
+            "The service status is in maintenance.",
+            score=0.8,
+            metadata={"subject_key": "service.api", "claim_kind": "status"},
+        ),
+    ]
+
+    _, chunks, usage = packer.pack("service owner and status", candidates, token_budget=80)
+
+    assert [chunk.id for chunk in chunks] == ["mem_owner", "mem_status"]
+    assert usage.omitted_count == 0
+
+
 @pytest.mark.parametrize("bridge_arm", ["graph", "code"])
 def test_graph_and_code_bridge_evidence_gets_selected_for_bridge_queries(bridge_arm: str) -> None:
     packer = DeterministicContextPacker()

@@ -564,6 +564,53 @@ def test_backdated_keyed_claim_checks_its_current_identity_even_with_anchored_hi
     )) == 2
 
 
+def test_backfilled_keyed_claim_splices_between_existing_validity_intervals():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    first = eng.remember_with_resolution(
+        "The deployment used the original operating mode.", workspace_id=wid,
+        subject_key="deploy.rollout_phase", claim_kind="configured_value",
+        valid_from=1_000.0,
+    )
+    later = eng.remember_with_resolution(
+        "The deployment rollout phase is beta release.", workspace_id=wid,
+        subject_key="deploy.rollout_phase", claim_kind="configured_value",
+        valid_from=3_000.0,
+    )
+    middle = eng.remember_with_resolution(
+        "The deployment rollout phase is beta.", workspace_id=wid,
+        subject_key="deploy.rollout_phase", claim_kind="configured_value",
+        valid_from=2_000.0,
+    )
+
+    assert later["op"] == middle["op"] == "invalidate"
+    assert middle["superseded"] == [first["id"]]
+    assert eng.store.get_memory(first["id"]).valid_to == 2_000.0
+    assert eng.store.get_memory(middle["id"]).valid_to == 3_000.0
+    assert eng.store.get_memory(later["id"]).valid_to is None
+
+
+def test_anchored_unkeyed_resolution_keeps_a_closed_historical_predecessor():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    first = eng.remember_with_resolution(
+        "The deployment rollout phase is alpha.", workspace_id=wid,
+        valid_from=1_000.0,
+    )
+    eng.remember_with_resolution(
+        "The deployment rollout phase is gamma.", workspace_id=wid,
+        valid_from=3_000.0,
+    )
+    backfilled = eng.remember_with_resolution(
+        "The deployment rollout phase is beta.", workspace_id=wid,
+        valid_from=2_000.0,
+    )
+
+    assert backfilled["op"] == "invalidate"
+    assert backfilled["superseded"] == [first["id"]]
+    assert eng.store.get_memory(first["id"]).valid_to == 2_000.0
+
+
 def test_recall_proactive_includes_last_session_handoff():
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")

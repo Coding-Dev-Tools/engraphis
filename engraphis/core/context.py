@@ -438,6 +438,11 @@ def _family_representatives(
         for field in ("subject_key", "claim_key", "consolidation_family"):
             value = str(metadata.get(field) or "").strip()
             if value:
+                if field == "subject_key":
+                    # Legacy rows may carry their claim identity solely in metadata.
+                    # Preserve independently relevant kinds for the same subject.
+                    claim_kind = str(metadata.get("claim_kind") or direct_kind).strip()
+                    value = f"{value}\0{claim_kind}"
                 prior = by_claim.setdefault(f"{field}:{value}", candidate.id)
                 union(candidate.id, prior)
         related = metadata.get("supersedes") or metadata.get("source_ids") or []

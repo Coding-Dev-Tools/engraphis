@@ -498,9 +498,18 @@ class RecallEngine:
             connect(ent(e.src), ent(e.dst), max(float(e.weight or 1.0), 1e-6))
 
         incidence = self.store.list_memory_entities(flt, limit=12_000)
+        # Links are graph evidence in their own right. Restricting their endpoints
+        # to incidence rows silently drops a linked memory which has no entity
+        # mention, even when its peer is reachable from a seeded entity. Use the
+        # same bounded, scoped, bi-temporally visible memory universe as the other
+        # retrieval arms so PPR can traverse that edge without widening scope. Keep
+        # the incidence frontier as well when independent caps choose a different
+        # subset of the scoped memory universe.
         memory_ids = sorted({
             str(row.get("memory_id") or "")
             for row in incidence if row.get("memory_id")
+        } | {
+            memory.id for memory in self.store.list_memories(flt, limit=12_000)
         })
         incidence_strength: dict[tuple[str, str], float] = {}
         for row in incidence:
