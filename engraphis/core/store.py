@@ -2232,7 +2232,10 @@ class Store:
             where.append("workspace_id=?")
             params.append(flt.workspace_id)
         if flt and flt.repo_id:
-            where.append("repo_id=?")
+            if flt.include_ancestors:
+                where.append("(repo_id=? OR repo_id IS NULL)")
+            else:
+                where.append("repo_id=?")
             params.append(flt.repo_id)
         if where:
             sql += " WHERE " + " AND ".join(where)
@@ -3444,10 +3447,47 @@ class Store:
         self.conn.commit()
 
     def list_symbols(self, repo_id: str, *, limit: Optional[int] = None,
+                     identifiers: Optional[list[str]] = None,
                      flt: Optional[SearchFilter] = None) -> list[dict]:
+        """List visible symbols, optionally resolving exact identifiers first.
+
+        ``identifiers`` matches a symbol's ID, short name, or fully-qualified
+        name.  The predicate deliberately precedes ``LIMIT``: callers that
+        follow a code edge must not lose its endpoint merely because unrelated
+        files sort earlier in a large repository.
+        """
+        if identifiers is not None:
+            identifiers = list(dict.fromkeys(value for value in identifiers if value))
+            if not identifiers:
+                return []
+            # Three IN predicates consume three bindings per identifier.  Keep
+            # each recursive query below SQLite's conservative parameter limit,
+            # then apply the requested cap to the merged, ordered result.
+            chunk_size = max(1, IN_CLAUSE_CHUNK // 3)
+            if len(identifiers) > chunk_size:
+                rows_by_id = {
+                    row["id"]: row
+                    for start in range(0, len(identifiers), chunk_size)
+                    for row in self.list_symbols(
+                        repo_id,
+                        identifiers=identifiers[start:start + chunk_size],
+                        flt=flt,
+                    )
+                }
+                rows = sorted(rows_by_id.values(), key=lambda row: (
+                    row.get("file") or "", row.get("fqname") or "", row.get("id") or "",
+                ))
+                return rows if limit is None else rows[:max(0, int(limit))]
         temporal, params = _temporal_visibility_sql("", flt)
-        sql = "SELECT * FROM symbols WHERE repo_id=? AND " + temporal + " ORDER BY file, fqname"
+        sql = "SELECT * FROM symbols WHERE repo_id=? AND " + temporal
         params = [repo_id, *params]
+        if identifiers is not None:
+            marks = ",".join("?" for _ in identifiers)
+            sql += f" AND (id IN ({marks}) OR name IN ({marks}) OR fqname IN ({marks}))"
+            params.extend(identifiers)
+            params.extend(identifiers)
+            params.extend(identifiers)
+        sql += " ORDER BY file, fqname"
         if limit is not None:
             sql += " LIMIT ?"
             params.append(max(0, int(limit)))  # never -1 == SQLite "unlimited"

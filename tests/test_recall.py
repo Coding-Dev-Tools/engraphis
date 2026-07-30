@@ -126,6 +126,51 @@ def test_graph_arm_selects_seed_frontier_edges_before_global_edge_cap(monkeypatc
     assert memory_id in scores
 
 
+def test_graph_arm_filters_incidence_to_ppr_frontier_before_cap(monkeypatch):
+    from engraphis.core.interfaces import Edge, Node
+
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    redis = store.upsert_entity(Node(
+        id="", name="Redis", ntype="tech", workspace_id=wid, repo_id=rid))
+    checkout = store.upsert_entity(Node(
+        id="", name="checkout", ntype="module", workspace_id=wid, repo_id=rid))
+    store.upsert_edge(Edge(
+        id="", src=redis, dst=checkout, relation="used_by",
+        workspace_id=wid, repo_id=rid))
+    memory_id = _add(store, emb, wid, rid, "Checkout uses the Redis cache.")
+    store.link_memory_entity(
+        memory_id=memory_id, entity_id=checkout, workspace_id=wid, repo_id=rid,
+        source_kind="test", confidence=1.0,
+    )
+
+    real_list_memory_entities = store.list_memory_entities
+    global_prefix = [
+        {"id": f"inc_{index}", "memory_id": f"mem_{index}",
+         "entity_id": f"ent_{index}", "confidence": 1.0}
+        for index in range(12_000)
+    ]
+
+    def list_memory_entities(flt, *, entity_ids=None, memory_ids=None, limit=None):
+        # This models a crowded global prefix which does not contain checkout's
+        # incidence. The real target remains available when constrained first.
+        if entity_ids is None:
+            return global_prefix[:limit]
+        return real_list_memory_entities(
+            flt, entity_ids=entity_ids, memory_ids=memory_ids, limit=limit,
+        )
+
+    monkeypatch.setattr(store, "list_memory_entities", list_memory_entities)
+
+    scores = eng._graph_arm_ppr(
+        "How does Redis relate to the checkout service?",
+        SearchFilter(workspace_id=wid, repo_id=rid), now=10**12,
+    )
+
+    assert memory_id in scores
+
+
 def test_graph_arm_backfills_text_memory_when_its_entity_is_added_later():
     from engraphis.core.interfaces import Edge, Node
 

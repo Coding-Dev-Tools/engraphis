@@ -46,6 +46,28 @@ def test_entity_incidence_includes_title_only_mentions_on_write_and_backfill():
     assert (legacy, legacy_entity) in pairs
 
 
+def test_repo_memory_links_existing_workspace_entity_on_write():
+    """A repo write must see the workspace ancestor entity already in scope."""
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    entity_id = eng.store.upsert_entity(Node(
+        id="", name="Apollo", ntype="project", workspace_id=wid,
+    ))
+
+    memory_id = eng.remember(
+        "Apollo owns the release calendar.",
+        workspace_id=wid, repo_id=rid, resolve_conflicts=False,
+    )
+
+    rows = eng.store.list_memory_entities(SearchFilter(
+        workspace_id=wid, repo_id=rid, include_ancestors=True,
+    ))
+    assert (memory_id, entity_id) in {
+        (row["memory_id"], row["entity_id"]) for row in rows
+    }
+
+
 def test_engine_recall_requires_explicit_reinforcement_signal():
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")

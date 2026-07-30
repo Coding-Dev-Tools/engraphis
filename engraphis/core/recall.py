@@ -411,12 +411,33 @@ class RecallEngine:
                     symbol_strength[aliases[dst]] * 0.55,
                 )
         if related_names:
+            symbol_kwargs = {
+                "limit": max(100, min(2000, candidate_k * 20)),
+            }
+            # Like code edges, direct symbol resolution is an optional Store
+            # optimization.  When it is available, apply it before the cap so
+            # a caller/callee in a later file is still eligible for recall.
+            try:
+                symbol_parameters = inspect.signature(self.store.list_symbols).parameters.values()
+                supports_identifiers = any(
+                    parameter.name == "identifiers"
+                    or parameter.kind == inspect.Parameter.VAR_KEYWORD
+                    for parameter in symbol_parameters
+                )
+            except (TypeError, ValueError):
+                supports_identifiers = False
+            if supports_identifiers:
+                symbol_kwargs["identifiers"] = list(related_names)
+            else:
+                # External legacy stores cannot filter this lookup.  Do not
+                # reintroduce the incorrect global prefix cap for them.
+                symbol_kwargs["limit"] = None
             all_symbols = _call_temporal_store(
                 self.store.list_symbols,
                 flt,
                 flt.repo_id,
-                limit=max(100, min(2000, candidate_k * 20)),
                 requested_historical=historical,
+                **symbol_kwargs,
             )
             for symbol in all_symbols:
                 matched_strength = max(
@@ -536,7 +557,16 @@ class RecallEngine:
         for e in edges_by_id.values():
             connect(ent(e.src), ent(e.dst), max(float(e.weight or 1.0), 1e-6))
 
-        incidence = self.store.list_memory_entities(flt, limit=12_000)
+        # Query only the entity frontier before applying the incidence cap. A
+        # global confidence/ID prefix can otherwise omit a memory attached to a
+        # seeded or reached entity in a large scope.
+        incidence_entity_ids = sorted({
+            *seeds,
+            *(endpoint for edge in edges_by_id.values() for endpoint in (edge.src, edge.dst)),
+        })
+        incidence = self.store.list_memory_entities(
+            flt, entity_ids=incidence_entity_ids, limit=12_000,
+        )
         # Links are graph evidence in their own right. Restricting their endpoints
         # to incidence rows silently drops a linked memory which has no entity
         # mention, even when its peer is reachable from a seeded entity. Use the

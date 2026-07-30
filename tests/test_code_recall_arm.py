@@ -158,3 +158,45 @@ def test_code_arm_batches_memory_lookup_for_many_symbols(monkeypatch):
     assert batch_calls[0][0] == repo_id
     assert len(batch_calls[0][1]) == 100
     assert len(scores) == 50
+
+
+def test_code_arm_resolves_incident_symbols_before_global_symbol_cap():
+    engine = MemoryEngine.create(":memory:")
+    workspace_id = engine.store.get_or_create_workspace("acme")
+    repo_id = engine.store.get_or_create_repo(workspace_id, "api")
+    entry_id = engine.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="entry", fqname="entry",
+        file="a/entry.py", span="1-1",
+    )
+    for index in range(1_000):
+        engine.store.upsert_symbol(
+            repo_id=repo_id, kind="function", name=f"noise_{index:04d}",
+            fqname=f"noise_{index:04d}", file=f"a/{index:04d}.py", span="1-1",
+        )
+    late_id = engine.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="late_callee",
+        fqname="worker.late_callee", file="z/worker.py", span="1-1",
+    )
+    engine.store.add_code_edge(
+        repo_id=repo_id, src="entry", dst="worker.late_callee",
+        relation="calls", file="a/entry.py", line=1,
+    )
+    memory_id = engine.remember(
+        "The remote deployment worker requires a sealed credential.",
+        workspace_id=workspace_id, repo_id=repo_id, resolve_conflicts=False,
+    )
+    engine.store.link_memory_symbol(
+        repo_id=repo_id, symbol_id=late_id, memory_id=memory_id,
+    )
+
+    # The ordinary sorted prefix contains the caller and unrelated symbols but
+    # not the edge's callee in z/worker.py.
+    assert late_id not in {
+        row["id"] for row in engine.store.list_symbols(repo_id, limit=1_000)
+    }
+    scores = engine.recall_engine._code_arm(
+        "entry()", SearchFilter(workspace_id=workspace_id, repo_id=repo_id), 50
+    )
+
+    assert entry_id != late_id
+    assert memory_id in scores

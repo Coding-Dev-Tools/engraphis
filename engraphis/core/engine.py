@@ -741,7 +741,9 @@ class MemoryEngine:
         try:
             self.store.backfill_memory_entities_for_memory(memory_id)
             entities = self.store.list_entities(SearchFilter(
-                workspace_id=workspace_id, repo_id=repo_id,
+                # New repo memories must attach to workspace entities already
+                # visible to that repo, not only entities owned by the repo.
+                workspace_id=workspace_id, repo_id=repo_id, include_ancestors=True,
             ))
             for entity in entities:
                 name = (entity.name or "").strip()
