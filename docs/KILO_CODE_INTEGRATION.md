@@ -1,8 +1,8 @@
-# Engraphis + Kilo Code — Technical User Manual
+# Engraphis + Kilo Code: Technical User Manual
 
 **How Engraphis works, how to set up Kilo Code, and how to wire the two together so your coding agent stops forgetting.**
 
-This manual is written for someone who wants the full technical picture: what Engraphis actually is, how its memory engine behaves, how Kilo Code talks to it over MCP, and the exact configuration to make the connection reliable and optimal. It deliberately covers both layers — the *transport* (getting the pipe connected) and the *orchestration* (how to use it well once it's connected), because those are two different problems and most confusion comes from mixing them up.
+This manual is written for someone who wants the full technical picture: what Engraphis actually is, how its memory engine behaves, how Kilo Code talks to it over MCP, and the exact configuration to make the connection reliable and optimal. It deliberately covers both layers: the *transport* (getting the pipe connected) and the *orchestration* (how to use it well once it's connected), because those are two different problems and most confusion comes from mixing them up.
 
 ---
 
@@ -10,9 +10,9 @@ This manual is written for someone who wants the full technical picture: what En
 
 There are two separate questions hiding inside "connect Kilo Code to Engraphis," and they are usually where people talk past each other:
 
-1. **Transport layer — "get the pipes connected."** This is: install the Engraphis MCP server, tell Kilo Code how to launch it, confirm the tools show up. It's a plumbing task. When it's done, Kilo Code can *see* 30 `engraphis_*` tools. Success here is binary — either the tools appear or they don't.
+1. **Transport layer: "get the pipes connected."** This is: install the Engraphis MCP server, tell Kilo Code how to launch it, confirm the tools show up. It's a plumbing task. When it's done, Kilo Code can *see* 30 `engraphis_*` tools. Success here is binary: either the tools appear or they don't.
 
-2. **Orchestration layer — "use the memory well."** This is: *when* should the agent remember vs. recall, how should memories be scoped (`workspace → repo → session`), which of the 30 tools answers which question, and how to keep the store clean over time. This is where the actual value is, and it's a discipline, not a config.
+2. **Orchestration layer: "use the memory well."** This is: *when* should the agent remember vs. recall, how should memories be scoped (`workspace → repo → session`), which of the 30 tools answers which question, and how to keep the store clean over time. This is where the actual value is, and it's a discipline, not a config.
 
 You need both. A perfect config with no discipline gives you an agent that has memory tools and never uses them correctly. Good discipline with a broken config gives you an agent that wants to remember and can't. **Section 3 is the transport layer. Sections 4–6 are the orchestration layer.** Do them in order.
 
@@ -20,12 +20,12 @@ You need both. A perfect config with no discipline gives you an agent that has m
 
 ## 1. What Kilo Code is (and what role it plays here)
 
-Kilo Code is an open-source AI coding agent that runs as a VS Code extension (and a CLI). For the purposes of this integration, the only thing that matters is: **Kilo Code is an MCP client.** MCP (Model Context Protocol) is the open standard that lets an AI agent call external tools exposed by a "server." Kilo Code speaks MCP; Engraphis ships an MCP server. That's the entire basis of the integration — no plugin, no bespoke API, no glue code.
+Kilo Code is an open-source AI coding agent that runs as a VS Code extension (and a CLI). For the purposes of this integration, the only thing that matters is: **Kilo Code is an MCP client.** MCP (Model Context Protocol) is the open standard that lets an AI agent call external tools exposed by a "server." Kilo Code speaks MCP; Engraphis ships an MCP server. That's the entire basis of the integration: no plugin, no bespoke API, no glue code.
 
 Kilo Code supports two MCP transport types:
 
-- **Local (STDIO)** — the server runs as a child process on your machine and communicates over standard input/output. Lower latency, no network exposure, simpler. **This is what you want for Engraphis**, because Engraphis is a local-first engine that lives on your machine.
-- **Remote (HTTP/SSE)** — the server is hosted over HTTP. Only relevant if you're pointing at a shared/hosted Engraphis instance, which is the exception, not the rule.
+- **Local (STDIO)**: the server runs as a child process on your machine and communicates over standard input/output. Lower latency, no network exposure, simpler. **This is what you want for Engraphis**, because Engraphis is a local-first engine that lives on your machine.
+- **Remote (HTTP/SSE)**: the server is hosted over HTTP. Only relevant if you're pointing at a shared/hosted Engraphis instance, which is the exception, not the rule.
 
 Kilo Code stores MCP configuration in a JSON-with-comments file (`kilo.jsonc`) at two levels: **global** (`~/.config/kilo/kilo.jsonc`, applies to every project) and **project-level** (`kilo.jsonc` or `.kilo/kilo.jsonc` in a project root, which takes precedence). You can edit these through the extension UI (**Settings → MCP → Add Server**) or by hand.
 
@@ -39,9 +39,9 @@ Everything runs on your machine. The whole store is a single SQLite file. Local 
 
 You interact with Engraphis through three surfaces, all backed by the *same* engine (`MemoryService`), so they can never drift apart:
 
-- **The dashboard WebUI** (`engraphis-dashboard`, `http://127.0.0.1:8700`) — a visual product to see, search, and curate memory.
-- **The MCP server** (`engraphis-mcp`) — the 30 tools your coding agent calls. **This is the surface Kilo Code uses.**
-- **The Python library** (`from engraphis.service import MemoryService`) — for direct programmatic use.
+- **The dashboard WebUI** (`engraphis-dashboard`, `http://127.0.0.1:8700`): a visual product to see, search, and curate memory.
+- **The MCP server** (`engraphis-mcp`): the 30 tools your coding agent calls. **This is the surface Kilo Code uses.**
+- **The Python library** (`from engraphis.service import MemoryService`): for direct programmatic use.
 
 ### 2.1 The five ideas that make it more than a vector store
 
@@ -49,11 +49,11 @@ These are the properties that matter when you're deciding how to use it well:
 
 1. **Scoped.** Every memory lives in a `workspace → repo → session` hierarchy. A memory can be visible at `session`, `repo`, `workspace`, or `user` level. This is what lets one agent work across many repos without cross-contaminating context.
 
-2. **Typed.** Every memory is one of four types — `semantic` (durable facts/conventions), `episodic` (events/decisions that happened), `procedural` (how-tos), or `working` (transient scratch). Each type has its own scoring weights and lifecycle. Getting scope + type right is ~90% of using Engraphis well.
+2. **Typed.** Every memory is one of four types: `semantic` (durable facts/conventions), `episodic` (events/decisions that happened), `procedural` (how-tos), or `working` (transient scratch). Each type has its own scoring weights and lifecycle. Getting scope + type right is ~90% of using Engraphis well.
 
-3. **Bi-temporal.** Truth is temporal. When a fact changes, Engraphis does **not** overwrite the old one — it *invalidates* it (closes its validity window) and stores the new version, recording that the new one supersedes the old. History is preserved, so "we used to do X, then switched to Y because Z" stays answerable forever. This is the single biggest difference from a plain vector store.
+3. **Bi-temporal.** Truth is temporal. When a fact changes, Engraphis does **not** overwrite the old one. It *invalidates* it (closes its validity window) and stores the new version, recording that the new one supersedes the old. History is preserved, so "we used to do X, then switched to Y because Z" stays answerable forever. This is the single biggest difference from a plain vector store.
 
-4. **Self-maintaining.** Writes are *deterministically* conflict-resolved with no LLM call: on each write, Engraphis checks the new content against similar existing memories and decides **ADD** (new), **NOOP** (near-duplicate — reinforce the existing one instead of duplicating), or **INVALIDATE** (same subject, changed — supersede the old one). Decay follows the Ebbinghaus forgetting curve; use reinforces (spacing effect). Forgetting *lowers retrieval priority* — it never hard-deletes.
+4. **Self-maintaining.** Writes are *deterministically* conflict-resolved with no LLM call: on each write, Engraphis checks the new content against similar existing memories and decides **ADD** (new), **NOOP** (near-duplicate: reinforce the existing one instead of duplicating), or **INVALIDATE** (same subject, changed: supersede the old one). Decay follows the Ebbinghaus forgetting curve; use reinforces (spacing effect). Forgetting *lowers retrieval priority*; it never hard-deletes.
 
 5. **Explainable / grounded.** Every memory carries provenance ("why is this known?"). Recall can return a cited answer or explicitly *abstain* when nothing in scope actually supports the query, so you get "insufficient evidence" instead of a confident guess.
 
@@ -61,15 +61,15 @@ These are the properties that matter when you're deciding how to use it well:
 
 When the agent calls `engraphis_recall`, the query runs through three retrieval arms **in parallel**, which are then fused:
 
-- **Vector** — cosine similarity over local embeddings.
-- **Lexical** — FTS5/BM25 full-text (with a `LIKE` fallback on SQLite builds without FTS5).
-- **Graph** — Personalized PageRank over an entity/link graph.
+- **Vector**: cosine similarity over local embeddings.
+- **Lexical**: FTS5/BM25 full-text (with a `LIKE` fallback on SQLite builds without FTS5).
+- **Graph**: Personalized PageRank over an entity/link graph.
 
-The three are combined with Reciprocal Rank Fusion, then scored by a six-term weighted function over **retention, semantic similarity, lexical match, graph centrality, importance, and recency** (minus a staleness penalty), then the top results are reranked and packed into a token budget. The upshot: recall is hybrid and principled, not just nearest-neighbor. You don't have to do anything to get this — it's what `engraphis_recall` does by default.
+The three are combined with Reciprocal Rank Fusion, then scored by a six-term weighted function over **retention, semantic similarity, lexical match, graph centrality, importance, and recency** (minus a staleness penalty), then the top results are reranked and packed into a token budget. The upshot: recall is hybrid and principled, not just nearest-neighbor. You don't have to do anything to get this; it's what `engraphis_recall` does by default.
 
 ---
 
-## 3. Transport layer — connecting Kilo Code to Engraphis
+## 3. Transport layer: connecting Kilo Code to Engraphis
 
 This is the "get the pipes connected" part. Three steps: install the server, register it with Kilo Code, verify.
 
@@ -87,7 +87,7 @@ Then run the one-time initializer, which writes an `.env` with an absolute DB pa
 engraphis-init
 ```
 
-This gives you a console command, `engraphis-mcp`, which is the actual MCP server (it speaks stdio — exactly the transport Kilo Code's "Local (STDIO)" type expects). You can sanity-check that it's on your PATH:
+This gives you a console command, `engraphis-mcp`, which is the actual MCP server (it speaks stdio, exactly the transport Kilo Code's "Local (STDIO)" type expects). You can sanity-check that it's on your PATH:
 
 ```bash
 engraphis-mcp --help    # or just confirm the command resolves
@@ -99,14 +99,14 @@ engraphis-mcp --help    # or just confirm the command resolves
 
 You have two equivalent options.
 
-**Option A — the UI (recommended for first-timers).** In VS Code: open Kilo Code **Settings → MCP → Add Server → Local (stdio)**. Fill in:
+**Option A: the UI (recommended for first-timers).** In VS Code: open Kilo Code **Settings → MCP → Add Server → Local (stdio)**. Fill in:
 
 - **Name:** `engraphis`
 - **Command / Arguments:** see the platform note below.
 
-**Option B — edit the config file directly.** MCP servers live under the top-level `mcp` key in `kilo.jsonc`. Put it in `~/.config/kilo/kilo.jsonc` for every project, or `.kilo/kilo.jsonc` in a specific project root (project-level wins if both exist).
+**Option B: edit the config file directly.** MCP servers live under the top-level `mcp` key in `kilo.jsonc`. Put it in `~/.config/kilo/kilo.jsonc` for every project, or `.kilo/kilo.jsonc` in a specific project root (project-level wins if both exist).
 
-**macOS / Linux** — the executable can be used directly:
+**macOS / Linux**: the executable can be used directly:
 
 ```jsonc
 {
@@ -124,7 +124,7 @@ You have two equivalent options.
 }
 ```
 
-**Windows** — wrap console commands with `cmd /c` (this is Kilo Code's documented pattern for local servers on Windows):
+**Windows**: wrap console commands with `cmd /c` (this is Kilo Code's documented pattern for local servers on Windows):
 
 ```jsonc
 {
@@ -179,26 +179,26 @@ operation receipt. `engraphis_proactive_context` is also conservatively stateful
 non-empty task or agent state runs receipt-recording recall. The queryless
 `engraphis_recall_proactive` path does neither, so it remains safe to auto-approve.
 
-You can also click **Approve Always** on any tool at runtime to write the same rule. A blanket `"engraphis_*": "allow"` works too, but auto-approving *writes* means the agent can reshape your memory without you seeing it — approve those consciously at first.
+You can also click **Approve Always** on any tool at runtime to write the same rule. A blanket `"engraphis_*": "allow"` works too, but auto-approving *writes* means the agent can reshape your memory without you seeing it; approve those consciously at first.
 
 ---
 
-## 4. The 30 tools — the orchestration surface
+## 4. The 30 tools: the orchestration surface
 
-Once connected, Kilo Code sees these. Do **not** assume only `remember`/`recall` exist — the value is in the rest. This is the full surface, grouped by what question each one answers.
+Once connected, Kilo Code sees these. Do **not** assume only `remember`/`recall` exist. The value is in the rest. This is the full surface, grouped by what question each one answers.
 
 | Category | Tool | What it does |
 |---|---|---|
 | **Write** | `engraphis_remember` | Store a fact; deterministically resolved to add / reinforce (noop) / supersede (invalidate). |
-| Write | `engraphis_record_event` | Append a lightweight episodic log entry — lower ceremony than remember; repeats are a promotion signal. |
+| Write | `engraphis_record_event` | Append a lightweight episodic log entry: lower ceremony than remember; repeats are a promotion signal. |
 | Write | `engraphis_link` | Explicitly connect two related memories (e.g. a bug ↔ its fix). |
 | Write | `engraphis_ingest` | Store raw/undistilled text; extracts discrete facts first when an LLM extractor is configured. |
 | Write | `engraphis_ingest_postgres_schema` | Store a new point-in-time PostgreSQL schema + graph per call; the DSN is never stored. |
 | **Stateful recall** | `engraphis_recall_context` | Recommended prompt packet: hard-budget context, compact source identities, strict token usage, and optional diagnostics. |
 | **Stateful recall** | `engraphis_recall` | Hybrid vector + lexical + graph recall, with independent `valid_at`/`known_at`; appends a privacy-safe receipt without strengthening weak matches. |
-| Stateful recall | `engraphis_recall_grounded` | Cited answer assembled *only* from retrieved memories — or abstains — with optional point-in-time `as_of`; records a receipt and reinforces cited memories. |
+| Stateful recall | `engraphis_recall_grounded` | Cited answer assembled only from retrieved memories. It either answers with evidence or abstains; supports optional point-in-time `as_of`, records a receipt, and reinforces cited memories. |
 | Stateful recall | `engraphis_answer` | Backward-compatible grounded-answer alias with the same state effects; prefer `engraphis_recall_grounded` for new configs. |
-| **Read** | `engraphis_recall_proactive` | "What should I know right now" — pure queryless ranking + last-session handoff, with no reinforcement or receipt. |
+| **Read** | `engraphis_recall_proactive` | "What should I know right now": pure queryless ranking + last-session handoff, with no reinforcement or receipt. |
 | Stateful recall | `engraphis_proactive_context` | Build a task-aware, cited context packet; task/agent-state recall records a receipt without reinforcement. |
 | Read | `engraphis_why` | The current answer to a question **plus** what it superseded (bi-temporal). |
 | Read | `engraphis_timeline` | Every version of a fact, oldest → newest, with `valid_from`/`valid_to`. |
@@ -210,19 +210,19 @@ Once connected, Kilo Code sees these. Do **not** assume only `remember`/`recall`
 | **Audit** | `engraphis_receipts` | List content-free hashed operation receipts. |
 | Audit | `engraphis_verify_receipts` | Verify the tamper-evident receipt chain. |
 | Audit | `engraphis_export_receipts` | Export a privacy-safe receipt-only audit bundle. |
-| **Governance** | `engraphis_forget` | Retire a memory — bi-temporal close, never a hard delete; every request is audited. |
+| **Governance** | `engraphis_forget` | Retire a memory: bi-temporal close, never a hard delete; every request is audited. |
 | Governance | `engraphis_pin` | Exempt a memory from decay/pruning; every pin/unpin request is audited. |
-| Governance | `engraphis_correct` | Replace a memory's content without losing history — keeps the "why" chain. |
+| Governance | `engraphis_correct` | Replace a memory's content without losing history: keeps the "why" chain. |
 | Governance | `engraphis_promote` | Widen scope while preserving and linking the narrow-scope history. |
 | **Session** | `engraphis_start_session` | Exact retries reuse by default; `force_new=true` creates another session every call. |
 | Session | `engraphis_end_session` | Close with a summary + `open_threads`; an identical retry is a no-op. |
-| **Ops** | `engraphis_stats` | Memory counts by type/workspace — health/onboarding checks. |
+| **Ops** | `engraphis_stats` | Memory counts by type/workspace: health/onboarding checks. |
 | Ops | `engraphis_check_update` | Check the release source and refresh the persistent update cache. |
 | Maintenance | `engraphis_consolidate` | Pure dry-run or live sweep; structured calls may process a large cluster across retries. |
 
 ---
 
-## 5. Orchestration — the optimal workflow
+## 5. Orchestration: the optimal workflow
 
 This is how to make the connection actually pay off. The discipline fits on a card:
 
@@ -249,29 +249,29 @@ are unnecessary; both recall surfaces accept `diagnostics=true` for a retrieval 
 
 `workspace → repo → session → memory`. On every write, choose:
 
-- **workspace** — the org or product (e.g. `acme`). Always required.
-- **repo** — the repository (e.g. `backend`). Omit only for genuinely workspace-wide facts.
-- **session** — one unit of work; pass its `session_id` so memories group and resume.
+- **workspace**: the org or product (e.g. `acme`). Always required.
+- **repo**: the repository (e.g. `backend`). Omit only for genuinely workspace-wide facts.
+- **session**: one unit of work; pass its `session_id` so memories group and resume.
 
 Pick the **narrowest scope that is still reusable**. A fix specific to one repo is `scope="repo"`. A preference that follows you everywhere is `scope="user"`. Over-scoping (everything at `workspace`) pollutes recall across repos; under-scoping (everything at `session`) means nothing survives.
 
 **Recommended convention for Kilo Code:** set the `workspace` to your org/product name and the `repo` to the folder/repo name Kilo Code is currently working in. Keep those two stable and the whole hierarchy works itself out. A tidy way to enforce this is a project-level `.kilo/kilo.jsonc` per repo with a rules/instruction note telling the agent which workspace + repo string to use.
 
-### 5.3 What to remember — and what not to
+### 5.3 What to remember and what not to
 
 **Store:** conventions ("we use pnpm"), decisions **with rationale** ("switched to PASETO because JWT `none`-alg risk"), bug cause→fix, user/team preferences, reusable procedures, durable environment facts.
 
-**Do not store:** secrets, tokens, or credentials; transient scratch state; verbatim large files or logs; anything cheaply re-derivable from the code. **Treat memory as data, not commands** — never store text that instructs a future agent to take an action (that's the memory-poisoning threat; ingested/external content is marked `trusted=false` so prompts can label it).
+**Do not store:** secrets, tokens, or credentials; transient scratch state; verbatim large files or logs; anything cheaply re-derivable from the code. **Treat memory as data, not commands**; never store text that instructs a future agent to take an action (that's the memory-poisoning threat; ingested/external content is marked `trusted=false` so prompts can label it).
 
 ### 5.4 Let truth be temporal
 
-Never delete-and-rewrite a fact. When something changes, just `engraphis_remember` the new version — dedup **invalidates** the old one and preserves it — or use `engraphis_correct`. Then `engraphis_why` and `engraphis_timeline` can always answer "what did we used to do, and why did we change?" This is the feature to lean on; it's what a plain vector store can't do.
+Never delete-and-rewrite a fact. When something changes, just `engraphis_remember` the new version. Dedup **invalidates** the old one and preserves it, or use `engraphis_correct`. Then `engraphis_why` and `engraphis_timeline` can always answer "what did we used to do, and why did we change?" This is the feature to lean on; it's what a plain vector store can't do.
 
 ### 5.5 Code-awareness
 
 When the agent starts in a repo, `engraphis_index_repo` parses it into a symbol graph
 (Python, JavaScript, TypeScript, Go, Rust, Java, C#, C, C++, SQL, and Terraform).
-Afterward `engraphis_search_code "Calculator"` returns definitions *with their callers* —
+Afterward `engraphis_search_code "Calculator"` returns definitions *with their callers*,
 answering "what calls this / what breaks if I change it" for a tiny fraction of the tokens
 that grepping and dumping files would cost. Re-running the index is incremental and safe:
 unchanged files are skipped, changed files are replaced, and deleted files are removed after
@@ -279,7 +279,7 @@ a complete scan.
 
 ### 5.6 Keep it clean
 
-On a schedule (or at session end), run `engraphis_consolidate` — it distills recurring episodic memories on the same subject into one durable semantic digest and archives fully-decayed transients (bi-temporal close, never deleted, pinned memories exempt). It's dry-run by default and reports its **compaction** (context tokens saved), so you can see the payoff before committing.
+On a schedule (or at session end), run `engraphis_consolidate`: it distills recurring episodic memories on the same subject into one durable semantic digest and archives fully-decayed transients (bi-temporal close, never deleted, pinned memories exempt). It's dry-run by default and reports its **compaction** (context tokens saved), so you can see the payoff before committing.
 
 ### 5.7 A worked example
 
@@ -310,7 +310,7 @@ engraphis_end_session(session_id=..., outcome="shipped",
 
 - **Install the Agent Skill.** Engraphis ships an "engraphis-memory" Agent Skill (`skills/engraphis-memory/`) that teaches an MCP-capable agent the *discipline* above (when to remember/recall, scoping, tool selection). If your Kilo Code setup supports skills/rules, adding this makes the agent reach for the right tool on its own instead of you having to prompt it each time.
 - **Turn on LLM fact extraction.** By default `engraphis_ingest` stores raw text as one memory (passthrough). Set `ENGRAPHIS_EXTRACTOR=llm` (plus an LLM key) in the server's `environment` to have it break transcripts/notes into discrete, individually-recallable facts.
-- **Watch it in the dashboard.** Run `engraphis-dashboard` against the same DB to *see* what your agent is remembering — supersession chains with word-level diffs, the knowledge graph, recall score breakdowns, and the audit ledger. Great for building trust that the memory layer is doing what you think.
+- **Watch it in the dashboard.** Run `engraphis-dashboard` against the same DB to *see* what your agent is remembering: supersession chains with word-level diffs, the knowledge graph, recall score breakdowns, and the audit ledger. Great for building trust that the memory layer is doing what you think.
 - **Reduce prompt bloat when idle.** Kilo Code notes that if you're not using MCP at all, turning it off shrinks the system prompt. When you *are* using Engraphis, the read-tool auto-approve list (3.4) keeps the loop fast.
 
 ---
@@ -327,7 +327,7 @@ engraphis_end_session(session_id=..., outcome="shipped",
 | Tool call blocked every time | Approval prompt not auto-approved | Click **Approve Always**, or add the tool to the `permission` key (3.4). |
 | `mcp` package missing error on launch | Installed `engraphis` core only | Reinstall with `pip install "engraphis[mcp]"`. |
 
-If the server itself starts but a specific tool errors, the error string is designed to be actionable and safe (it never leaks internals) — read it; it usually names the missing/invalid parameter or an unknown workspace/repo.
+If the server itself starts but a specific tool errors, the error string is designed to be actionable and safe (it never leaks internals); read it. It usually names the missing/invalid parameter or an unknown workspace/repo.
 
 ---
 
@@ -339,7 +339,7 @@ Kilo Code is an MCP client; Engraphis ships an MCP server (`engraphis-mcp`, loca
 `kilo.jsonc` (`["cmd","/c","engraphis-mcp"]` on Windows, `["engraphis-mcp"]` on
 macOS/Linux), pin `ENGRAPHIS_DB_PATH`, bump `timeout` to 15000, and verify with
 `engraphis_stats`. That gets the pipes connected. The *value* is the orchestration layer
-above it — 30 scoped, typed, bi-temporal memory, code, audit, and maintenance tools plus the
+above it: 30 scoped, typed, bi-temporal memory, code, audit, and maintenance tools plus the
 discipline of "recall before you ask, remember before you move on," with
 `workspace → repo → session` scoping and periodic `engraphis_consolidate` to keep it clean.
 
@@ -347,6 +347,6 @@ discipline of "recall before you ask, remember before you move on," with
 
 ### Sources
 
-- [Using MCP in Kilo Code — official docs](https://kilo.ai/docs/automate/mcp/using-in-kilo-code)
+- [Using MCP in Kilo Code (official docs)](https://kilo.ai/docs/automate/mcp/using-in-kilo-code)
 - [Kilo Code MCP Overview](https://kilo.ai/docs/automate/mcp/overview)
 - Engraphis repository: `README.md`, `AGENTS.md`, `engraphis/mcp_server.py`, `skills/engraphis-memory/SKILL.md`

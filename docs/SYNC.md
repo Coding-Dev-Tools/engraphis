@@ -68,6 +68,17 @@ python -m scripts.sync \
   --relay https://relay.engraphis.com
 ```
 
+Cloud Sync is fail-closed: install `engraphis[cloud-sync]` on Python 3.10+ and provision a
+32-byte URL-safe-base64 workspace key as `ENGRAPHIS_SYNC_E2EE_KEY` on every authorized device
+before the first upload. Generate it once on a trusted device and transfer it only through your
+own secure channel; Engraphis Cloud never receives, derives, or recovers this key. For a
+one-off command, pass the same value with `--relay-e2ee-key`. A missing or malformed key stops
+Cloud Sync rather than uploading a plaintext bundle.
+
+```bash
+python -c "import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip('='))"
+```
+
 The dashboard's **Sync now** action invokes the same customer protocol. The public package does
 not run a local auto-sync loop or ship a cron/Task Scheduler wrapper. Hosted automation belongs
 to the private service. If the relay denies every attempted shared workspace because the session
@@ -115,14 +126,21 @@ outside the authorized workspace merely by changing bundle fields.
 
 ## Security and privacy
 
-- Local-only installations send no memory content to Engraphis. Cloud Sync and managed compute
-  send the explicitly eligible records or bounded snapshot to Engraphis Cloud over TLS; the
-  hosted service can read that submitted content and the transport is not end-to-end encrypted.
+- Local-only installations send no memory content to Engraphis. **Cloud Sync encrypts eligible
+  shared-workspace changes end-to-end before they leave this device. Engraphis Cloud cannot read
+  their contents; secret and session-scoped memories stay local.** Managed compute is a separate,
+  opt-in service: it sends a readable, bounded snapshot over TLS because Engraphis Cloud must
+  process that snapshot to produce results.
 - Treat cloud session and refresh files as credentials; keep their directory owner-only.
 - `secret` memories are excluded from managed uploads. Managed compute also rejects secret rows
   server-side.
-- Relay transport is TLS-protected, but Engraphis does not claim end-to-end encryption until a
-  client-side encrypted bundle format ships.
+- Cloud Sync's end-to-end encryption applies to sync bundles, not to managed-compute snapshots or
+  content deliberately submitted to a configured LLM provider. Those processors must be able to
+  read the submitted content to perform the requested work.
+- Cloud Sync uses a fresh ChaCha20-Poly1305 nonce for each upload and authenticates the stored
+  opaque bundle name plus workspace as associated data. The relay can store or replay ciphertext,
+  but a tampered, renamed, cross-workspace, wrong-key, or legacy plaintext bundle is rejected
+  before it reaches the merge engine.
 - Device credentials are not seats. Team seats are named organization members managed by the
   hosted control plane.
 - Revocation and expiry are authoritative server decisions. A locally modified client does not

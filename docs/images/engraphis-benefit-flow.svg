@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600" role="img" aria-labelledby="title desc">
+  <title id="title">From project history to task-ready evidence with Engraphis</title>
+  <desc id="desc">A four-step flow: project history is stored as scoped and temporal Engraphis memory, hybrid recall finds the relevant evidence, and context packing returns a bounded and cited result.</desc>
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="5" stdDeviation="7" flood-color="#0f172a" flood-opacity=".10"/></filter>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#2563eb"/></marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#059669"/></marker>
+  </defs>
+
+  <rect width="1200" height="600" rx="28" fill="#f8fafc"/>
+  <rect x="24" y="22" width="1152" height="556" rx="22" fill="#fff" stroke="#e2e8f0"/>
+  <text x="72" y="77" font-family="Inter, Arial, sans-serif" font-size="29" font-weight="700" fill="#0f172a">From project history to task-ready evidence</text>
+  <text x="72" y="108" font-family="Inter, Arial, sans-serif" font-size="16" fill="#475569">Engraphis keeps what matters, finds supporting evidence, and returns only what fits the task.</text>
+
+  <path d="M278 293H317" stroke="#059669" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow-green)"/>
+  <text x="281" y="273" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="600" fill="#047857">remember</text>
+  <path d="M578 293H617" stroke="#2563eb" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow-blue)"/>
+  <text x="577" y="273" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="600" fill="#1d4ed8">retrieve</text>
+  <path d="M878 293H917" stroke="#2563eb" stroke-width="4" stroke-linecap="round" marker-end="url(#arrow-blue)"/>
+  <text x="874" y="273" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="600" fill="#1d4ed8">pack</text>
+
+  <g filter="url(#shadow)">
+    <rect x="58" y="161" width="220" height="235" rx="20" fill="#eff6ff" stroke="#bfdbfe" stroke-width="2"/>
+    <rect x="81" y="191" width="60" height="74" rx="7" fill="#fff" stroke="#2563eb" stroke-width="2"/>
+    <path d="M124 191V208H141" fill="none" stroke="#2563eb" stroke-width="2"/>
+    <path d="M93 222H129M93 236H126M93 250H116" stroke="#93c5fd" stroke-width="5" stroke-linecap="round"/>
+    <rect x="102" y="181" width="60" height="74" rx="7" fill="#fff" stroke="#60a5fa" stroke-width="2"/>
+    <path d="M145 181V198H162" fill="none" stroke="#60a5fa" stroke-width="2"/>
+    <path d="M114 212H150M114 226H147M114 240H137" stroke="#bfdbfe" stroke-width="5" stroke-linecap="round"/>
+    <text x="82" y="306" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700" fill="#0f172a">Project history</text>
+    <text x="82" y="333" font-family="Inter, Arial, sans-serif" font-size="14" fill="#475569">decisions, documents,</text>
+    <text x="82" y="353" font-family="Inter, Arial, sans-serif" font-size="14" fill="#475569">sessions, and code</text>
+    <rect x="82" y="366" width="137" height="22" rx="11" fill="#dbeafe"/>
+    <text x="94" y="382" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="600" fill="#1d4ed8">local source material</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="358" y="161" width="220" height="235" rx="20" fill="#ecfdf5" stroke="#a7f3d0" stroke-width="2"/>
+    <ellipse cx="468" cy="211" rx="46" ry="17" fill="#d1fae5" stroke="#059669" stroke-width="2"/>
+    <path d="M422 211V270C422 279 443 287 468 287C493 287 514 279 514 270V211" fill="#fff" stroke="#059669" stroke-width="2"/>
+    <path d="M422 239C422 248 443 256 468 256C493 256 514 248 514 239" fill="none" stroke="#a7f3d0" stroke-width="2"/>
+    <path d="M422 268C422 277 443 285 468 285C493 285 514 277 514 268" fill="none" stroke="#a7f3d0" stroke-width="2"/>
+    <circle cx="440" cy="215" r="4" fill="#10b981"/><circle cx="468" cy="207" r="4" fill="#10b981"/><circle cx="494" cy="216" r="4" fill="#10b981"/>
+    <text x="382" y="319" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700" fill="#0f172a">Engraphis memory</text>
+    <text x="382" y="346" font-family="Inter, Arial, sans-serif" font-size="14" fill="#475569">scoped, temporal, and</text>
+    <text x="382" y="366" font-family="Inter, Arial, sans-serif" font-size="14" fill="#475569">auditable without overwriting</text>
+    <rect x="382" y="377" width="159" height="22" rx="11" fill="#d1fae5"/>
+    <text x="394" y="393" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="600" fill="#047857">history stays explainable</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="658" y="161" width="220" height="235" rx="20" fill="#eef2ff" stroke="#c7d2fe" stroke-width="2"/>
+    <circle cx="747" cy="225" r="34" fill="#fff" stroke="#4f46e5" stroke-width="3"/>
+    <circle cx="747" cy="225" r="13" fill="#c7d2fe"/>
+    <path d="M771 249L802 280" stroke="#4f46e5" stroke-width="8" stroke-linecap="round"/>
+    <circle cx="815" cy="202" r="10" fill="#a5b4fc"/><circle cx="828" cy="238" r="8" fill="#818cf8"/><circle cx="786" cy="187" r="7" fill="#c7d2fe"/>
+    <path d="M775 204L806 202M773 236L820 238M769 200L783 189" stroke="#818cf8" stroke-width="2"/>
+    <text x="682" y="319" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700" fill="#0f172a">Hybrid recall</text>
+    <text x="682" y="346" font-family="Inter, Arial, sans-serif" font-size="14" fill="#475569">vector, lexical, graph,</text>
+    <text x="682" y="366" font-family="Inter, Arial, sans-serif" font-size="14" fill="#475569">and code evidence together</text>
+    <rect x="682" y="377" width="158" height="22" rx="11" fill="#e0e7ff"/>
+    <text x="694" y="393" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="600" fill="#4338ca">find what supports the task</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="958" y="161" width="184" height="235" rx="20" fill="#f5f3ff" stroke="#ddd6fe" stroke-width="2"/>
+    <rect x="1001" y="188" width="99" height="102" rx="8" fill="#fff" stroke="#7c3aed" stroke-width="2"/>
+    <path d="M1082 188V205H1100" fill="none" stroke="#7c3aed" stroke-width="2"/>
+    <path d="M1018 219H1081M1018 234H1070M1018 249H1078" stroke="#c4b5fd" stroke-width="6" stroke-linecap="round"/>
+    <rect x="1018" y="262" width="28" height="15" rx="4" fill="#ede9fe"/>
+    <text x="1025" y="274" font-family="Inter, Arial, sans-serif" font-size="11" font-weight="700" fill="#6d28d9">[1]</text>
+    <rect x="1051" y="262" width="28" height="15" rx="4" fill="#ede9fe"/>
+    <text x="1058" y="274" font-family="Inter, Arial, sans-serif" font-size="11" font-weight="700" fill="#6d28d9">[2]</text>
+    <text x="980" y="319" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700" fill="#0f172a">Task-ready context</text>
+    <text x="980" y="346" font-family="Inter, Arial, sans-serif" font-size="14" fill="#475569">bounded, cited evidence</text>
+    <text x="980" y="366" font-family="Inter, Arial, sans-serif" font-size="14" fill="#475569">or an explicit abstain</text>
+    <rect x="980" y="377" width="126" height="22" rx="11" fill="#ede9fe"/>
+    <text x="992" y="393" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="600" fill="#6d28d9">ready for an agent</text>
+  </g>
+
+  <path d="M724 119H768V150" fill="none" stroke="#2563eb" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow-blue)"/>
+  <rect x="587" y="104" width="136" height="31" rx="15.5" fill="#dbeafe"/>
+  <circle cx="606" cy="119" r="7" fill="#2563eb"/>
+  <path d="M602 119H610M606 115V123" stroke="#fff" stroke-width="1.5"/>
+  <text x="619" y="124" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#1d4ed8">agent question</text>
+
+  <line x1="72" y1="447" x2="1128" y2="447" stroke="#e2e8f0"/>
+  <text x="72" y="487" font-family="Inter, Arial, sans-serif" font-size="15" font-weight="700" fill="#0f172a">Why it matters</text>
+  <text x="72" y="518" font-family="Inter, Arial, sans-serif" font-size="15" fill="#475569">Carry durable project knowledge forward without treating old information as current truth.</text>
+  <text x="72" y="545" font-family="Inter, Arial, sans-serif" font-size="15" fill="#475569">Then give the agent relevant, attributable evidence that fits its configured context budget.</text>
+  <rect x="897" y="482" width="231" height="44" rx="10" fill="#f0fdf4" stroke="#bbf7d0"/>
+  <text x="914" y="510" font-family="Inter, Arial, sans-serif" font-size="14" font-weight="700" fill="#047857">Local-first • inspectable • scoped</text>
+</svg>

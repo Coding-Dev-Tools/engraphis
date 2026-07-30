@@ -47,7 +47,7 @@ DOMPurify at all render sites. Verified against payloads with `onerror` handlers
 - Every read takes a `SearchFilter`; tools only return memories within requested `workspace`/`repo`
 - Every write targeting a memory by ID re-validates scope membership
 - **Hard workspace binding** (`ENGRAPHIS_WORKSPACES`): comma-separated allow-list makes
-  workspace a hard boundary — requests outside the list are refused before touching the store
+  workspace a hard boundary; requests outside the list are refused before touching the store
 
 ### 4. Secrets & data at rest
 - `.env`, `*.db`, `*.db-wal`, `*.db-shm` are git-ignored; never logged
@@ -57,7 +57,7 @@ DOMPurify at all render sites. Verified against payloads with `onerror` handlers
 - Review your LLM provider's data-handling terms.
 
 ### 5. Code indexing
-`engraphis_index_repo` parses source files under a path you give it — same trust boundary as
+`engraphis_index_repo` parses source files under a path you give it, with the same trust boundary as
 any other local tool the agent has. Path is attacker-controlled if agent's instructions are.
 Canonical roots are restricted to the working, home, or temporary directories by default.
 Set `ENGRAPHIS_INDEX_ROOTS` to a path-separator-delimited absolute-path operator allow-list to
@@ -114,15 +114,16 @@ them back as `expected_head` / `expected_count` when independent evidence is req
   no paid-key parser, signer, issuer, local feature gate, or long-lived-key relay exchange.
 - **Server authority:** every hosted and cost-bearing operation is authorized by the private
   control plane; local plan labels and upgrade URLs are presentation metadata only.
-- **Managed-compute consent:** Analytics, Auto Dreaming, and Auto Consolidation upload a
-  bounded snapshot. Consent travels with the cloud account: connecting an installation to
-  Engraphis Cloud accepts the terms covering managed compute, so a connected installation is
-  allowed and an installation with no cloud session is never allowed. Operators may override
-  with `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` (`0` opts a connected installation back out).
-  The snapshot carries normal and sensitive memory content, excludes secret-class and
-  session-scoped rows, is capped at 16 MiB, and travels over HTTPS without end-to-end
-  encryption. Secret-class memories are excluded before serialization and rejected again by
-  the hosted service.
+- **Cloud Sync and managed-compute privacy:** Cloud Sync encrypts eligible shared-workspace
+  changes end-to-end before they leave the device, so Engraphis Cloud cannot read their contents.
+  Managed compute is separate: Analytics, Auto Dreaming, and Auto Consolidation upload a
+  readable bounded snapshot. Consent travels with the cloud account: connecting an installation
+  to Engraphis Cloud accepts the terms covering managed compute, so a connected installation is
+  allowed and an installation with no cloud session is never allowed. Operators may override with
+  `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` (`0` opts a connected installation back out). The snapshot
+  carries normal and sensitive memory content, excludes secret-class and session-scoped rows, and
+  is capped at 16 MiB. Secret-class memories are excluded before serialization and rejected again
+  by the hosted service.
 - **Trial and grace are separate:** an email-confirmed trial lasts exactly 3 active days. A
   separately bounded, maximum-24-hour local workspace-write grace never extends the trial,
   subscription, Cloud Sync, managed compute, Team access, seats, or credentials.

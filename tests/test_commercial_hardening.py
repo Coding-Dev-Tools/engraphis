@@ -20,6 +20,13 @@ from engraphis.hosted_client import DEFAULT_CLOUD_URL, account_url, required_pla
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_website_claim_gate_allows_current_cloud_sync_encryption() -> None:
+    """The marketing gate must not reject the shipped Cloud Sync E2EE claim."""
+
+    gate = (ROOT / "scripts" / "check_commercial_manifest.py").read_text(encoding="utf-8")
+    assert '"end-to-end encrypted",' not in gate
+
+
 # --------------------------------------------------------------------------- plan gating
 
 #: Manifest capability keys README's plan matrix marks Team-only (rows 423-426:
