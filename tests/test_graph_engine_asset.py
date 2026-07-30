@@ -2026,6 +2026,23 @@ def test_legacy_node_geometry_is_bounded_like_ledger_for_all_styles() -> None:
     assert "Math.sqrt(node.val)" not in static
 
 
+def test_classic_graph_overview_uses_ledger_scope_and_limit() -> None:
+    """Classic and Ledger must start from the same responsive connected graph.
+
+    Classic used to omit both query parameters, so the backend returned its default 2,000
+    entities and the legacy canvas rendered a fundamentally different graph from Ledger's
+    320-node connected overview.  Keep the full-graph control explicit while pinning the
+    default request to Ledger's contract in both shipped dashboard copies.
+    """
+    for path in (DASHBOARD, CLASSIC_DASHBOARD):
+        source = path.read_text(encoding="utf-8")
+        load = source[source.index("async function loadLegacyGraph("):source.index("function graphUpdateAllNodesControl(")]
+        assert "showUnlinked=GRAPH_FULL||!!document.getElementById('graph-show-iso').checked" in load
+        assert "graphLimit=GRAPH_FULL?20000:320" in load
+        assert "graphScope=GRAPH_FULL?'&full=true':(showUnlinked?'':'&connected_only=true')" in load
+        assert "+'&limit='+graphLimit+graphScope" in load
+
+
 def _community_palettes(source: str) -> dict:
     """Parse a ``COMMUNITY_PALS`` literal out of either renderer."""
     # Anchor on the declaration: both files also name the table in prose comments.
