@@ -1,6 +1,6 @@
 """Sleep-time consolidation (episodic→semantic distillation).
 
-Some hosted memory systems offer "sleep-time compute"; the local-first equivalent is a
+Some systems ship "sleep-time compute" as a cloud service; the local-first equivalent is a
 background job the *user* schedules (cron / Windows Task Scheduler / a session hook):
 
     python -m scripts.consolidate --db engraphis.db --workspace acme

@@ -6,6 +6,7 @@ __pycache__/
 *.db-wal
 *.db-shm
 *.db-journal
+*.db.*.bak
 
 # Webhook fulfillment runtime state — dedup DB + the undelivered-key fallback,
 # which can contain live license keys. Must never be committed.
@@ -34,6 +35,27 @@ test-results/
 models_cache/
 .secrets/
 internal/
+
+# Private product research. Public releases may include reproducible benchmark artifacts,
+# never narrative commercial/competitive audits or market-analysis working papers.
+/COMMERCIAL_AUDIT.md
+/COMPETITIVE_ANALYSIS.md
+/docs/COMMERCIAL_AUDIT.md
+/docs/COMPETITIVE_ANALYSIS.md
+# Git ignores are case-sensitive on many release builders. Spell these with
+# character classes so an all-caps or mixed-case private working paper cannot
+# slip through merely because a contributor is on a case-insensitive machine.
+*[Cc][Oo][Mm][Mm][Ee][Rr][Cc][Ii][Aa][Ll]*[Aa][Uu][Dd][Ii][Tt]*
+*[Cc][Oo][Mm][Pp][Ee][Tt][Ii][Tt][Ii][Vv][Ee]*[Aa][Nn][Aa][Ll][Yy][Ss][Ii][Ss]*
+*[Cc][Oo][Mm][Pp][Ee][Tt][Ii][Tt][Oo][Rr]*[Rr][Ee][Ss][Ee][Aa][Rr][Cc][Hh]*
+*[Mm][Aa][Rr][Kk][Ee][Tt]*[Rr][Ee][Ss][Ee][Aa][Rr][Cc][Hh]*
+*[Pp][Rr][Ii][Cc][Ii][Nn][Gg]*[Rr][Ee][Ss][Ee][Aa][Rr][Cc][Hh]*
+*[Pp][Rr][Ii][Vv][Aa][Tt][Ee]*[Rr][Ee][Ss][Ee][Aa][Rr][Cc][Hh]*
+
+# Schema-migration snapshots contain the entire local memory database. The
+# original database may have any extension (or none), so do not key this rule
+# to ``*.db``.
+*.pre-migration-v*.bak
 
 # Local review/snapshot staging. These archives can recursively capture ignored runtime
 # state (including engraphis.db), so they must never enter a source or release archive.

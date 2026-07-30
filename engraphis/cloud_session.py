@@ -102,7 +102,7 @@ def _validated_token_subject(value: object) -> str:
     return subject
 
 
-def _token_subject(saved: dict, *, uses_persisted_credential: bool = True) -> str:
+def _token_subject(saved: dict) -> str:
     """Return the immutable subject bound to the current credential family.
 
     ``ENGRAPHIS_CLOUD_TOKEN_SUBJECT`` selects the subject for an environment-only
@@ -111,13 +111,11 @@ def _token_subject(saved: dict, *, uses_persisted_credential: bool = True) -> st
     environment override win causes the next refresh to present (for example) a
     member credential as ``device``; the service must reject that mismatch, and the
     client then has to retire a credential that was never actually spent.  Persisted
-    state therefore wins only while the selected credential itself is persisted.
-    A retired saved credential leaves its subject behind for auditability; a replacement
-    environment bootstrap credential must instead use its explicitly configured subject.
+    state therefore wins whenever it carries a subject.
     """
 
     persisted = saved.get("token_subject")
-    if uses_persisted_credential and persisted is not None and str(persisted).strip():
+    if persisted is not None and str(persisted).strip():
         return _validated_token_subject(persisted)
     configured = os.environ.get("ENGRAPHIS_CLOUD_TOKEN_SUBJECT", "").strip()
     return _validated_token_subject(configured or "member")
@@ -796,15 +794,15 @@ def configured(*, require_compute: bool = True) -> bool:
     # A configured environment value is bootstrap material. After its first successful
     # use, the server-returned rotation is persisted and must take precedence; otherwise
     # every subsequent call would replay the now-invalid bootstrap credential.
-    saved_refresh = str(saved.get("refresh_credential") or "").strip()
-    refresh = saved_refresh or os.environ.get("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", "").strip()
+    refresh = str(saved.get("refresh_credential") or "").strip()
+    refresh = refresh or os.environ.get("ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", "").strip()
     if _refresh_is_unusable(saved, refresh):
         refresh = ""
     control = os.environ.get("ENGRAPHIS_CLOUD_CONTROL_URL", "").strip()
     control = control or str(saved.get("control_url") or "").strip()
     compute = direct_compute or str(saved.get("compute_url") or "").strip()
     if refresh and control:
-        _token_subject(saved, uses_persisted_credential=bool(saved_refresh))
+        _token_subject(saved)
     return bool(refresh and control and (compute or not require_compute))
 
 
@@ -839,8 +837,8 @@ def access_for_workspace(
         # single-use credential; reading it before the lock lets two workers spend the
         # same value and causes one request to fail as a replay.
         saved = _load()
-        saved_refresh = str(saved.get("refresh_credential") or "").strip()
-        refresh = saved_refresh or os.environ.get(
+        refresh = str(saved.get("refresh_credential") or "").strip()
+        refresh = refresh or os.environ.get(
             "ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL", ""
         ).strip()
         if _refresh_is_unusable(saved, refresh):
@@ -858,9 +856,7 @@ def access_for_workspace(
             )
         control = _reachable_cloud_base_url(control)
         compute = _reachable_cloud_base_url(compute) if compute else ""
-        token_subject = _token_subject(
-            saved, uses_persisted_credential=bool(saved_refresh)
-        )
+        token_subject = _token_subject(saved)
         try:
             body = _post_refresh(control, refresh, workspace_id, token_subject)
         except CloudSessionError as exc:
