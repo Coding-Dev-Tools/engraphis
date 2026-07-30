@@ -47,10 +47,10 @@ Run `python -m eval.chunking_eval` and `python -m eval.grounded` to reproduce th
 the former measures evidence retrieval and context size, while the latter measures the
 answer-versus-abstain decision.
 
-The diagram is the essential path. The sections below cover the dashboard, code graph, local
-installation, governance controls, and hosted services in detail. See [measured quality and token
-efficiency](#measured-quality-and-token-efficiency) for the current reproducible evidence behind
-the context-efficiency claim.
+The diagram is the essential path. See [measured context savings](#measured-quality-and-token-efficiency)
+for reproducible fixture-level evidence of less returned content at the same tested retrieval
+scores, without billing or latency claims. The sections below cover the dashboard, code graph,
+local installation, governance controls, and hosted services in detail.
 
 <br>
 
@@ -66,69 +66,30 @@ the context-efficiency claim.
 
 > Open-source users: update regularly for the latest fixes and improvements.
 >
-> **Open-core boundary:** this repository contains the free local engine, single-user
-> dashboard, MCP server, and customer-side clients. Cloud Sync, Analytics, Automation,
-> Auto Dreaming, Auto Consolidation, and Team identity/seat management run only on the
+> **Open-core boundary:** this repository contains the free local engine, dashboard, MCP server,
+> and customer-side clients. Hosted sync, analytics, automation, and team services run on the
 > official hosted service; their server implementations are not distributed here.
 
-> **Support continued Engraphis development with Pro.** Your subscription helps cover hosted
-> infrastructure and ongoing development while unlocking Cloud Sync, Analytics, Auto Consolidation,
-> and Auto Dreaming across your installations. [Start a 3-day Pro trial](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro&trial=pro#billing)
+> **Support continued Engraphis development with Pro.** [Start a 3-day Pro trial](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro&trial=pro#billing)
 > or [subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro#billing).
 
 ## Full Engraphis install: pip install "engraphis[all]"
 
-Engraphis-Dashboard opens `http://127.0.0.1:8700` in your browser. No cloud, signup, or API key is required for
-local memory. Memory lives in a local SQLite file on your machine. The public dashboard is
-single-user; Team accounts, invitations, roles, seats, and organization audit live in Engraphis
-Cloud.
+Engraphis-Dashboard opens `http://127.0.0.1:8700`. Local memory needs no cloud account,
+signup, or API key and stays in a SQLite file on your machine.
 
-**Ledger is the primary interface**: the complete final five-area design, backed by real v2
-data rather than the design reference’s sample store. It includes Today, cited/abstaining Ask,
-the governed Library, the advanced Graph & Relations view, Provenance (beliefs, timeline, audit,
-receipts, supersessions), and Manage (workspaces, consolidation, hosted services, plans, and
-settings). It stays local and CSP-safe and includes Slate, Midnight, Paper, and Matrix themes.
-
-The complete former operator interface is preserved as **Classic**. Switch between Ledger and
-Classic from **Manage → Settings → Interface** in Ledger or **Settings → Appearance & Engine** in Classic; both
-interfaces use the same workspaces, memories, receipts, and v2 engine. Classic contains the
-full tool suite:
-
-**New graphical interface!** Shape the Knowledge Graph with several **Styles, Colors,
-and Presets**. Switch among Cyberpunk, Galaxy, Solar system, and Classic looks; choose
-a color palette and layout preset; or change the colors used for each type of node.
-
-| Tab | What you see |
-|-----|-------------|
-| **Overview** | Live memory counts, memory-type mix, and a health summary at a glance |
-| **Analytics** *(hosted Pro/Team)* | A cloud-backed status and launch surface for growth, retention, decay, and entity insights computed by the private managed service |
-| **Recall** | Hybrid search across the memory bank: each result shows its score breakdown (retention, semantic, lexical, graph, importance, recency) |
-| **Memories** | Browse and curate every memory by workspace: click into a full reader with type and retention pills, drag-to-reorder, inline title/type edits |
-| **Proactive** | "What should I know right now": importance × recency × retention, plus the last session handoff |
-| **Why** | The current answer to a question, and the facts it superseded |
-| **Timeline** | Bi-temporal history of a topic: what was believed, and when |
-| **Audit** | Full governance ledger: who did what, when, and why |
-| **Knowledge Graph** | Interactive force-directed graph of entities and their relationships: click any node to see every linked memory |
-| **Consolidate** | Run the free local consolidation tool manually; dry-run remains the default and no scheduler is bundled |
-| **Automation** *(hosted Pro/Team)* | Configure hosted Auto Consolidation and Auto Dreaming policies, inspect job status, and review managed proposals before applying them locally |
-| **Workspaces** | Create, rename, describe, copy, merge, and delete workspaces; import files & folders; drag-and-drop upload |
-| **Team Cloud** *(hosted Team)* | Open the hosted organization dashboard for invitations, roles, named seats, scoped credentials, and team audit history |
-| **Settings** | Hosted-plan and Cloud Sync status, LLM provider setup/test, a live structured-extraction switch and activity viewer, appearance, and local engine/store info |
+**Ledger** is the primary local interface for recall, memories, graph exploration, provenance,
+workspaces, and manual consolidation. **Classic** preserves the former full tool suite; both use
+the same local data. Switch in **Manage → Settings → Interface** (Ledger) or **Settings →
+Appearance & Engine** (Classic).
 
 ### Managed compute
 
-The open package can upload bounded workspace snapshots to the Engraphis Cloud service
-for managed analytics, dreaming, and consolidation. A local-only installation with no
-cloud session is **never** allowed to upload. Connecting an installation to Engraphis
-Cloud accepts the terms that cover managed compute, so a **connected installation is
-enabled by default**. There is no separate opt-in step to complete.
-`ENGRAPHIS_MANAGED_COMPUTE_CONSENT` remains as an operator override (`=0` opts a
-connected installation back out, `=1` forces it on); it is not a customer-facing
-setting. The cloud service is authoritative for all paid computation; no local setting
-turns this package into a compute worker or relay.
-
-The dashboard is powered by the v2 engine: the same `MemoryService` that backs the MCP server
-and the Python library. What you see in the UI is what your agents get.
+Managed compute is separate from Cloud Sync. A connected installation may send a bounded,
+non-secret snapshot for a hosted proposal; the hosted service must read it to produce a proposal,
+so this is not end-to-end-encrypted processing. Local-only installations send nothing. Set
+`ENGRAPHIS_MANAGED_COMPUTE_CONSENT=0` to opt out; `ENGRAPHIS_RETENTION_SUPERVISOR=none` keeps
+retention supervision local (the default).
 
 ### Start it on every platform
 
@@ -142,90 +103,35 @@ and the Python library. What you see in the UI is what your agents get.
 
 ### Accessibility-first inspection, built in
 
-The dashboard has the focused memory-inspection view built in: no separate app or port:
-
-- Open any memory to see its **supersession chain with word-level diffs**: exactly when a fact changed and why
-- **Offline knowledge graph** (vendored renderer: no CDN, works air-gapped)
-- Score breakdowns on every recall, Why/Timeline/link browsing, proactive recall, consolidation, audit trail
-- Keyboard-navigable, ARIA-annotated, light/dark mode
-
-> The standalone Inspector (`:8710`) was retired 2026-07-10 and folded into the one dashboard on `:8700`.
+Inspect memories, supersession diffs, recall scores, timelines, links, consolidation, and audit
+records in the dashboard. The offline graph renderer is vendored, and the interface is keyboard-
+navigable with light and dark themes.
 
 ---
 
 ## What's under the UI
 
-Your agents forget everything between sessions. Engraphis fixes that on your machine. Every new
-session, your coding agent starts from zero: re-asking which package manager you use, re-learning
-the codebase, forgetting why you chose PASETO over JWT. Engraphis gives agents durable, scoped,
-*explainable* memory.
+Engraphis gives agents durable, scoped, *explainable* project knowledge. The local engine combines
+Ebbinghaus decay, bi-temporal facts, and hybrid vector/lexical/graph recall; it runs offline with
+SQLite, local embeddings, and `numpy` only.
 
-Under the hood: Ebbinghaus forgetting-curve decay, interaction-aware reinforcement, bi-temporal
-facts, and hybrid (vector + lexical + graph) recall. The engine is 100% local: SQLite + local
-embeddings. You bring an LLM only for optional chat, synthesis, structured extraction,
-or structured consolidation.
-
-- **Local-first & private**: runs offline; the core depends only on `numpy`.
-- **MCP-native**: 30 tools for Claude Code, Command Code, Cursor, Cline, Zed, Windsurf.
-- **Self-maintaining facts**: writes are deterministically conflict-resolved (no LLM required).
-- **Advisory retention supervision**: an optional LLM can label writes as ephemeral, normal,
-  or critical; outputs are bounded, clamped, audited, and can never silently drop a write.
-- **Principled recall**: six-term score over retention, semantic, lexical, graph, importance, recency.
-- **Bi-temporal truth**: contradictions invalidate instead of overwriting (`engraphis_why` / `engraphis_timeline`).
-- **Grounded, not guessed**: cited answers or explicit abstain; provenance on every memory.
-- **Task-ready context**: bounded proactive packets combine task/agent state, cited memories, suggested follow-ups, and the last-session handoff; optional LLM prose is accepted only when its citations validate.
-- **Composable intelligence**: opt-in deterministic conflict triage (`duplicate` / `refinement` / `contradiction` / `obsolete`) and `UserModel` recall reranking helpers; neither changes default recall unless called.
-- **Human-governed lifecycle**: pin, forget, correct, promote to a wider scope, and manually merge several memories into one without deleting their history; every change is audited.
-- **One layered graph**: temporal, entity, causal, and semantic overlays share the same database, with persistent code↔memory links and intent-aware recall.
-- **Privacy-safe receipts**: remember, link, recall, and indexing operations can be verified through a content-free SHA-256 receipt chain without exporting memory or query text.
-- **Code-aware**: incremental multi-language symbol/call/import graph, code↔memory links,
-  path queries, communities/hotspots, git/PR impact analysis, and portable graph exports.
-- **Manual consolidation**: the local tool distills recurring episodes on demand and reports
-  compaction; hosted plans add Auto Consolidation and Auto Dreaming.
-- **Scoped**: `workspace → repo → session` hierarchy.
-- **Encryption at rest**: optional SQLCipher (AES-256) encryption for the main memory
-  database via `ENGRAPHIS_DB_KEY`. No plaintext fallback when a key is set; protect hosted
-  customer credentials and backups separately (see `SECURITY.md`).
-- **Cloud-ready client**: the public client can connect an authorized installation to the
-  private hosted Cloud Sync relay; relay storage, authorization, and automation remain server-side.
-- **Import & ingest**: local documents/code/DOCX plus optional PDF text extraction, image OCR,
-  audio/video transcription, and live PostgreSQL schema introspection.
+- **Grounded and governed:** deterministic conflict resolution, cited answers or abstention,
+  explicit correction/promotion/forgetting, and a complete history.
+- **Agent-ready:** MCP tools, hard-budget context packets, handoffs, and code-aware retrieval.
+- **Auditable:** content-free receipt chains, provenance, and temporal/entity/code relationships.
+- **Practical:** local file and code ingest, optional PDF/OCR/transcription, and SQLCipher at rest.
 
 ### Connect an LLM and inspect exactly what it changed
 
-The memory engine, embeddings, conflict resolution, and normal recall remain local and do not
-need an LLM. Connecting one adds optional structured extraction, cited prose synthesis,
-structured consolidation, and retention supervision.
+The memory engine, embeddings, conflict resolution, and recall stay local without an LLM. An
+explicitly configured provider adds structured extraction, cited synthesis, consolidation, and
+retention supervision. Configure it in **Settings → Connect an LLM**; `llm_structured` validates
+facts, entities, relations, and keywords before storage, while failures fall back to local
+chunking. The activity view records outcomes, never keys, prompts, or raw provider responses.
 
-Open **Settings → Connect an LLM**, configure the provider/model/key in `.env`, restart, and
-click **Test connection**. When that live test succeeds, Engraphis automatically turns
-`llm_structured` extraction on unless you previously chose **Turn extraction off**. The adjacent
-button changes the live engine immediately and persists both the extractor mode and your
-automatic-extraction preference to the project `.env` when it is writable; no restart is required
-for the running dashboard. Explicit deployment environment variables remain authoritative after
-a restart. Turning extraction off does not disconnect the provider, so explicitly requested
-synthesis or consolidation can still use it.
-
-Structured extraction applies to `engraphis_ingest` and to file/folder imports where **Derive
-discrete facts with the configured extractor** is explicitly selected. It does not silently send
-ordinary `engraphis_remember` writes, existing memories, or every imported file to the provider.
-For each successful source, the validated output becomes one or more individually recallable
-memories with typed facts, keywords, entities, and relations. A provider/schema failure falls
-back to deterministic local chunking so the source write is not lost.
-
-Click **View LLM memory activity** to open a workspace-scoped window listing memories the LLM
-extracted, structurally consolidated, or retention-classified. Extraction entries show the
-provider/model when recorded, fact position within the source batch, extracted entities and
-relations, and a link to the resulting memory. The activity API and window expose stored outcomes
-only, never the API key, prompt, original provider payload, or raw response. Older structured
-memories created before provider/model activity metadata was introduced still appear as legacy
-structured-extraction entries.
-
-> Privacy boundary: text sent through structured extraction leaves the local process and is
-> handled under the selected provider/model's data terms. Turning extraction off disables only
-> this transfer. For ingestion that must remain entirely local, also keep
-> `ENGRAPHIS_RETENTION_SUPERVISOR=none` (the default) and use the offline `chunk` extractor;
-> other explicitly invoked LLM-backed operations have their own transfer boundaries.
+> Privacy boundary: text sent to an explicitly selected provider leaves the local process under
+> that provider's terms. Use `ENGRAPHIS_RETENTION_SUPERVISOR=none` (the default) and the offline
+> `chunk` extractor when ingestion must remain entirely local.
 
 ---
 
@@ -247,9 +153,9 @@ The current deterministic offline regression fixtures reproduce these quality re
 | **808.8 → 218.4** tokens per question | **162.2 → 42.4** tokens to supporting evidence | **17,172 → 7,663** serialized tokens |
 | Same Recall@5 **1.000** in the long-document fixture | Same 18 fixture questions returned an evidence-holding memory | Same CodeMem retrieval scores across 260 timed recalls |
 
-Agents spend less of their context window carrying irrelevant history, leaving more room for the
-current task and cited evidence. These are controlled, deterministic fixtures, not model-billing,
-task-time, or external benchmark claims.
+**What it means:** agents carry less irrelevant history, leaving more room for the current task
+and cited evidence. These controlled, deterministic fixtures measure context, not model billing,
+task time, customer savings, or external-benchmark performance.
 
 <p align="center">
   <img src="docs/images/context-efficiency.png" alt="Normalized chart: Engraphis retains 27.0 percent of retrieved content, 26.1 percent of the evidence-holding record, and 44.6 percent of the compact MCP response in separate controlled fixtures" width="100%">
@@ -297,7 +203,7 @@ Reproduce the quality and token/context measurements without a network connectio
 python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5
 python -m eval.grounded
 python -m eval.chunking_eval
-python -m eval.performance --dataset eval/datasets/codemem.jsonl --k 5 --iterations 5 --json
+python -m eval.performance --dataset eval/datasets/codemem.jsonl --k 5 --iterations 10 --json
 ```
 
 These are small deterministic correctness and efficiency fixtures, not official LoCoMo /
@@ -308,23 +214,6 @@ measures serialized MCP response size. See [`BENCHMARKS.md`](BENCHMARKS.md) for 
 limitations, canonical external-evaluation requirements, and the no-unsupported-claims policy.
 
 ---
-
-## Hosted Pro and Team
-
-Pro and Team are services, not alternate modes hidden in the public image. The official cloud
-runs separate control, relay, compute, and worker roles. That boundary keeps entitlement
-authority, Cloud Sync storage, Analytics, Auto Dreaming, Auto Consolidation, and Team identity
-outside code that a fork controls.
-
-- **Pro** connects one owner and their local installations to hosted sync and managed compute.
-- **Team** adds hosted organizations, invitations, named seats, roles, scoped credentials, and
-  organization audit. Devices do not consume seats.
-
-The no-card trial starts only after email confirmation and lasts **exactly 3 active days**.
-See [Licensing](docs/LICENSING.md), [Cloud Sync](docs/SYNC.md), and
-[Agent Connect](docs/AGENT_CONNECT.md). The public image can still be deployed as a free local
-customer node; it does not become a Pro/Team backend through an environment switch. See
-[Railway hosting](docs/HOSTING_RAILWAY.md) for that limited deployment shape.
 
 ## Install
 
@@ -519,43 +408,24 @@ pinned. The full multi-predecessor chain remains visible through inspection, Why
 
 ---
 
-## Free forever vs. Pro vs. Team
+## Free forever vs. hosted plans
 
-The core engine, single-user dashboard, standalone MCP server, manual consolidation, and
-governance tools are free and Apache-2.0, permanently. A paid subscription authorizes access
-to the official hosted service; it does not unlock private server code inside this package.
-**Pro is $10/mo ($100/yr), Team is $20/seat/mo ($200/seat/yr)**, and the dashboard offers
-an email-confirmed Pro or Team trial, with no card required. The trial term is **exactly 3 active
-days**.
+The core engine, local dashboard, MCP server, and manual consolidation are Apache-2.0 and free.
+**Pro and Team are services**, not hidden modes in this package: a subscription authorizes the
+official hosted service, whose private control plane, relay, compute, billing, and Team identity
+run in a private repository. **Pro is $10/mo ($100/yr); Team is $20/seat/mo ($200/seat/yr).** The
+email-confirmed, no-card trial lasts **exactly 3 active days**.
 
-Separately, the private control plane may apply `workspace_write_grace` to continuity operations
-for an already authorized hosted account for at most **24 hours** after an entitlement denial.
-This is an availability cushion, not a fourth trial day. It never extends trial or subscription expiry,
-never grants Cloud Sync, Analytics, Automation, Auto Dreaming, Auto Consolidation, Team
-access, new seats, or new credentials, and never resets an expiry clock. Hosted access may stop
-immediately. After grace, the private service can enter `recovery_read_only` so account recovery
-and export remain available while hosted mutations are blocked. These hosted states do not gate
-the Apache-licensed local dashboard, MCP tools, or local writes.
+After a denial, `workspace_write_grace` may retain only private-service-approved hosted-account
+continuity operations for at most **24 hours**. It never extends trial or subscription expiry or
+grants Cloud Sync, Analytics, Automation, Auto Dreaming, Auto Consolidation, Team access, seats,
+or credentials. Then `recovery_read_only` provides recovery and data export. Neither state
+restricts local dashboard, MCP tools, or local writes. Cloud Sync encrypts eligible shared-workspace
+changes end-to-end; managed compute is a separate readable-snapshot service. See [`docs/LICENSING.md`](docs/LICENSING.md) and
+[`docs/SYNC.md`](docs/SYNC.md) for the full boundaries.
 
-Cloud Sync is opt-in: **Cloud Sync encrypts eligible shared-workspace changes end-to-end before
-they leave this device. Engraphis Cloud cannot read their contents; secret and session-scoped
-memories stay local.** This does not extend to separately opted-in managed compute, which must
-receive a readable bounded snapshot to produce results. Paid entitlements require current hosted
-authorization, while the Free core remains fully local and offline-capable.
-
-The published repository and clients are Apache-2.0; a paid subscription purchases access
-to the official hosted control plane and managed service, not extra rights over public code.
-Already published Apache-2.0 releases and forks **cannot be clawed back or relicensed
-retroactively**. The sustainable boundary applies to future proprietary service code and
-official service access.
-The license issuer, billing fulfillment, Team identity, hosted relay, managed compute, and
-worker implementations live in a private repository and are not part of this package.
-See [`docs/LICENSING.md`](docs/LICENSING.md) for the source-license, service, grace, and
-recovery boundaries.
-
-If Engraphis is useful in your work, a Pro subscription is the simplest way to support the
-project while adding hosted sync, analytics, and managed memory maintenance. [Subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_pricing#billing)
-($10/month or $100/year; annual billing saves two months).
+[Subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_pricing#billing)
+to support the project and add hosted services.
 
 | | Free (available now) | Pro: $10/mo or $100/yr | Team: $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
