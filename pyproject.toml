@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "engraphis"
-version = "1.2.0"
+version = "1.2.1"
 description = "Local-first AI memory engine for agents — Ebbinghaus decay, interaction-aware recall, bi-temporal facts, hybrid retrieval, and an MCP server. You bring the LLM."
 readme = "README.md"
 license = "Apache-2.0"
@@ -34,6 +34,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Managed Cloud Sync encrypts every bundle client-side with ChaCha20-Poly1305.  Keep this
+# outside the NumPy-only core so local/offline users do not acquire a crypto runtime.
+cloud-sync = [
+    "cryptography>=48.0.1; python_version >= '3.10'",
+]
 # The REST server + real embeddings (the full self-hosted stack).
 server = [
     # These floors exclude known request-parsing, StaticFiles/UNC, and URL-boundary

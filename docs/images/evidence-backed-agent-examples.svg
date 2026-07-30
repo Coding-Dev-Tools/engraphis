@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">Evidence-backed examples of Engraphis agent behavior</title>
+  <desc id="desc">Three synthetic deterministic fixture examples: focused context reduces returned tokens without a recall regression, an answerable question returns cited support, and an unsupported question abstains. The chart states the exact fixture results and test scope.</desc>
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="4" stdDeviation="7" flood-color="#0f172a" flood-opacity=".10"/></filter>
+  </defs>
+  <rect width="1200" height="720" rx="28" fill="#f8fafc"/>
+  <rect x="24" y="22" width="1152" height="676" rx="22" fill="#fff" stroke="#e2e8f0"/>
+  <text x="72" y="75" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a">What an agent gets: tested in deterministic offline fixtures</text>
+  <text x="72" y="105" font-family="Inter, Arial, sans-serif" font-size="16" fill="#475569">These are synthetic test inputs and reproducible outcomes, not customer data or external benchmark claims.</text>
+
+  <g filter="url(#shadow)">
+    <rect x="72" y="154" width="320" height="448" rx="20" fill="#eff6ff" stroke="#bfdbfe" stroke-width="2"/>
+    <rect x="96" y="181" width="147" height="27" rx="13.5" fill="#dbeafe"/>
+    <text x="110" y="200" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" fill="#1d4ed8">FOCUSED CONTEXT</text>
+    <circle cx="337" cy="195" r="22" fill="#fff" stroke="#2563eb" stroke-width="2"/>
+    <circle cx="334" cy="192" r="8" fill="none" stroke="#2563eb" stroke-width="3"/>
+    <path d="M340 198L349 207" stroke="#2563eb" stroke-width="3" stroke-linecap="round"/>
+    <text x="96" y="246" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700" fill="#0f172a">Find the relevant passage</text>
+    <text x="96" y="283" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" fill="#475569">QUESTION</text>
+    <text x="96" y="307" font-family="Inter, Arial, sans-serif" font-size="14" fill="#334155">“What does grounded recall do</text>
+    <text x="96" y="328" font-family="Inter, Arial, sans-serif" font-size="14" fill="#334155">when support is low?”</text>
+    <text x="96" y="369" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" fill="#475569">RETURNED EVIDENCE</text>
+    <rect x="96" y="384" width="272" height="48" rx="10" fill="#fff" stroke="#bfdbfe"/>
+    <text x="112" y="414" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700" fill="#1d4ed8">“…abstains”</text>
+    <line x1="96" y1="456" x2="368" y2="456" stroke="#bfdbfe"/>
+    <text x="96" y="486" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" fill="#1d4ed8">TESTED: LONG-DOCUMENT FIXTURE</text>
+    <text x="96" y="513" font-family="Inter, Arial, sans-serif" font-size="14" fill="#334155">6 documents · 18 questions</text>
+    <text x="96" y="539" font-family="Inter, Arial, sans-serif" font-size="14" fill="#334155">Recall@5 1.000 in both modes</text>
+    <rect x="96" y="554" width="244" height="26" rx="13" fill="#dbeafe"/>
+    <text x="110" y="572" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#1d4ed8">808.8 → 218.4 tokens</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="440" y="154" width="320" height="448" rx="20" fill="#ecfdf5" stroke="#a7f3d0" stroke-width="2"/>
+    <rect x="464" y="181" width="137" height="27" rx="13.5" fill="#d1fae5"/>
+    <text x="478" y="200" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" fill="#047857">CITED ANSWER</text>
+    <circle cx="705" cy="195" r="22" fill="#fff" stroke="#059669" stroke-width="2"/>
+    <path d="M695 195L702 202L716 187" fill="none" stroke="#059669" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="464" y="246" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700" fill="#0f172a">Answer when evidence supports it</text>
+    <text x="464" y="283" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" fill="#475569">QUESTION</text>
+    <text x="464" y="307" font-family="Inter, Arial, sans-serif" font-size="14" fill="#334155">“Which auth scheme did we</text>
+    <text x="464" y="328" font-family="Inter, Arial, sans-serif" font-size="14" fill="#334155">standardise on?”</text>
+    <text x="464" y="369" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" fill="#475569">RETURNED EVIDENCE</text>
+    <rect x="464" y="384" width="272" height="48" rx="10" fill="#fff" stroke="#a7f3d0"/>
+    <text x="480" y="414" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700" fill="#047857">PASETO tokens · source: auth</text>
+    <line x1="464" y1="456" x2="736" y2="456" stroke="#a7f3d0"/>
+    <text x="464" y="486" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" fill="#047857">TESTED: GROUNDED FIXTURE</text>
+    <text x="464" y="513" font-family="Inter, Arial, sans-serif" font-size="14" fill="#334155">5/5 answerable questions grounded</text>
+    <text x="464" y="539" font-family="Inter, Arial, sans-serif" font-size="14" fill="#334155">Answer only with source support</text>
+    <rect x="464" y="554" width="215" height="26" rx="13" fill="#d1fae5"/>
+    <text x="478" y="572" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#047857">grounded answer + source</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="808" y="154" width="320" height="448" rx="20" fill="#fff7ed" stroke="#fed7aa" stroke-width="2"/>
+    <rect x="832" y="181" width="128" height="27" rx="13.5" fill="#ffedd5"/>
+    <text x="846" y="200" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" fill="#c2410c">SAFE ABSTAIN</text>
+    <circle cx="1073" cy="195" r="22" fill="#fff" stroke="#ea580c" stroke-width="2"/>
+    <path d="M1065 187L1081 203M1081 187L1065 203" stroke="#ea580c" stroke-width="3" stroke-linecap="round"/>
+    <text x="832" y="246" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700" fill="#0f172a">Refuse unsupported prompts</text>
+    <text x="832" y="283" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" fill="#475569">QUESTION</text>
+    <text x="832" y="307" font-family="Inter, Arial, sans-serif" font-size="14" fill="#334155">“How do I bake sourdough</text>
+    <text x="832" y="328" font-family="Inter, Arial, sans-serif" font-size="14" fill="#334155">bread?”</text>
+    <text x="832" y="369" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" fill="#475569">RETURNED RESULT</text>
+    <rect x="832" y="384" width="272" height="48" rx="10" fill="#fff" stroke="#fed7aa"/>
+    <text x="848" y="414" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700" fill="#c2410c">Abstained: no support</text>
+    <line x1="832" y1="456" x2="1104" y2="456" stroke="#fed7aa"/>
+    <text x="832" y="486" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" fill="#c2410c">TESTED: GROUNDED FIXTURE</text>
+    <text x="832" y="513" font-family="Inter, Arial, sans-serif" font-size="14" fill="#334155">5/5 off-topic questions abstained</text>
+    <text x="832" y="539" font-family="Inter, Arial, sans-serif" font-size="14" fill="#334155">No source support, no answer</text>
+    <rect x="832" y="554" width="213" height="26" rx="13" fill="#ffedd5"/>
+    <text x="846" y="572" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#c2410c">explicit abstain, no citation</text>
+  </g>
+
+  <line x1="72" y1="636" x2="1128" y2="636" stroke="#e2e8f0"/>
+  <text x="72" y="668" font-family="Inter, Arial, sans-serif" font-size="14" font-weight="700" fill="#0f172a">Reproducible scope:</text>
+  <text x="220" y="668" font-family="Inter, Arial, sans-serif" font-size="14" fill="#475569">eval.chunking_eval + eval.grounded · 10/10 grounded decisions correct · deterministic offline fixtures</text>
+</svg>
