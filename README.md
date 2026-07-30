@@ -416,10 +416,12 @@ official hosted service, whose private control plane, relay, compute, billing, a
 run in a private repository. **Pro is $10/mo ($100/yr); Team is $20/seat/mo ($200/seat/yr).** The
 email-confirmed, no-card trial lasts **exactly 3 active days**.
 
-Hosted access can use `workspace_write_grace` for continuity operations for at most **24 hours**
-after a denial, then `recovery_read_only` for recovery and data export. This never extends trial or subscription expiry,
-grants hosted access, or restricts local dashboard, MCP tools, or local writes. Cloud Sync encrypts eligible shared-workspace changes end-to-end; managed compute
-is a separate readable-snapshot service. See [`docs/LICENSING.md`](docs/LICENSING.md) and
+After a denial, `workspace_write_grace` may retain only private-service-approved hosted-account
+continuity operations for at most **24 hours**. It never extends trial or subscription expiry or
+grants Cloud Sync, Analytics, Automation, Auto Dreaming, Auto Consolidation, Team access, seats,
+or credentials. Then `recovery_read_only` provides recovery and data export. Neither state
+restricts local dashboard, MCP tools, or local writes. Cloud Sync encrypts eligible shared-workspace
+changes end-to-end; managed compute is a separate readable-snapshot service. See [`docs/LICENSING.md`](docs/LICENSING.md) and
 [`docs/SYNC.md`](docs/SYNC.md) for the full boundaries.
 
 [Subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_pricing#billing)
