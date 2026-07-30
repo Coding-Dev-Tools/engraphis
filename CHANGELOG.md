@@ -3,6 +3,17 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [1.2.2] - 2026-07-30
+
+### Fixed
+
+- Cloud Sync now continues past legacy plaintext, malformed, and tampered relay objects while
+  still failing closed for each object. Later authenticated peer bundles apply, and the affected
+  sync round is explicitly reported as incomplete rather than successful.
+- Security and sync documentation now consistently distinguish end-to-end encrypted Cloud Sync
+  from the separately readable managed-compute snapshot service.
+- README visual PNG exports now use their SVG canvas dimensions without hidden screenshot padding.
+
 ## [1.2.1] - 2026-07-30
 
 ### Security
