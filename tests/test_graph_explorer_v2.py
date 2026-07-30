@@ -59,7 +59,7 @@ def test_v4_migration_backfills_canonical_entities_and_edge_supports(tmp_path):
     ).fetchall()]
     supports = store.edge_supports_in_scope(["edg_a"], at=2)
 
-    assert store.schema_version == 4
+    assert store.schema_version == 6
     assert {row["normalized_name"] for row in rows} == {"redis"}
     assert len({row["canonical_id"] for row in rows}) == 1
     assert all(row["canonical_confidence"] == 1.0 for row in rows)
@@ -824,7 +824,57 @@ def test_graph_entity_evidence_avoids_rebuilding_the_workspace_graph(monkeypatch
     service.store.conn.execute("UPDATE edge_supports SET valid_from=100 WHERE edge_id='edge_ab'")
     service.store.conn.commit()
     assert service.graph_entity_evidence(alpha, workspace="acme", as_of=99)["evidence"] == []
-    assert service.graph_entity_evidence(alpha, workspace="acme", as_of=101)["evidence"]
+    visible = service.graph_entity_evidence(alpha, workspace="acme", as_of=101)
+    assert visible["evidence"]
+    assert "valid_to_recorded_at" in visible["evidence"][0]
+
+    service.store.conn.execute(
+        "UPDATE memories SET ingested_at=200 WHERE content='Alpha uses Beta.'"
+    )
+    service.store.conn.execute(
+        "UPDATE edges SET ingested_at=200 WHERE id='edge_ab'"
+    )
+    service.store.conn.execute(
+        "UPDATE edge_supports SET ingested_at=200 WHERE edge_id='edge_ab'"
+    )
+    service.store.conn.commit()
+    assert service.graph_entity_evidence(
+        alpha, workspace="acme", valid_at=101, known_at=199,
+    )["evidence"] == []
+    assert service.graph_entity_evidence(
+        alpha, workspace="acme", valid_at=101, known_at=200,
+    )["evidence"]
+
+
+def test_graph_scene_applies_independent_world_and_system_anchors():
+    service, _alpha, _beta, _gamma = _seed_service()
+    service.store.conn.execute(
+        "UPDATE memories SET valid_from=100, ingested_at=200"
+    )
+    service.store.conn.execute(
+        "UPDATE edges SET valid_from=100, ingested_at=200"
+    )
+    service.store.conn.execute(
+        "UPDATE edge_supports SET valid_from=100, ingested_at=200"
+    )
+    service.store.conn.execute("UPDATE entities SET created_at=200")
+    service.store.conn.commit()
+
+    unknown = service.graph_scene(
+        workspace="acme", valid_at=150, known_at=199,
+    )
+    known = service.graph_scene(
+        workspace="acme", as_of=150, valid_at=150, known_at=200,
+    )
+
+    assert unknown["nodes"] == [] and unknown["edges"] == []
+    assert {edge["id"] for edge in known["edges"]} == {"edge_ab", "edge_bg"}
+    assert known["meta"]["filters"]["valid_at"] == 150
+    assert known["meta"]["filters"]["known_at"] == 200
+    with pytest.raises(ValidationError, match="as_of and valid_at"):
+        service.graph_scene(
+            workspace="acme", as_of=149, valid_at=150, known_at=200,
+        )
 
 
 def test_graph_explorer_endpoints_and_legacy_graph_gets_are_read_only():

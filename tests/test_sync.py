@@ -90,6 +90,71 @@ def test_serialization_roundtrip_preserves_signature():
     assert _signature(r2) == _signature(rec)
 
 
+def test_sync_roundtrip_preserves_claim_identity_and_closure_knowledge_time():
+    rec = MemoryRecord(
+        id="mem_claim",
+        content="The cap is 30.",
+        subject_key="api-cap",
+        claim_kind="configured_value",
+        valid_to=200.0,
+        valid_to_recorded_at=300.0,
+    )
+    restored = dict_to_record(record_to_dict(rec))
+    assert restored is not None
+    assert restored.subject_key == "api-cap"
+    assert restored.claim_kind == "configured_value"
+    assert restored.valid_to == 200.0
+    assert restored.valid_to_recorded_at == 300.0
+    assert _signature(restored) == _signature(rec)
+
+
+def test_sync_merge_keeps_closure_transaction_time_paired_with_earliest_close():
+    later_world = MemoryRecord(
+        id="mem_1", content="x", valid_to=500.0, valid_to_recorded_at=100.0
+    )
+    earlier_world = MemoryRecord(
+        id="mem_1", content="x", valid_to=300.0, valid_to_recorded_at=400.0
+    )
+    merged = merge_record(later_world, earlier_world)
+    assert merged.valid_to == 300.0
+    assert merged.valid_to_recorded_at == 400.0
+    assert _signature(merged) == _signature(
+        merge_record(earlier_world, later_world)
+    )
+
+
+def test_sync_v1_omitted_claim_fields_do_not_erase_local_identity():
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    store.add_memory(MemoryRecord(
+        id="mem_claim",
+        content="local",
+        workspace_id=wid,
+        subject_key="api-cap",
+        claim_kind="configured_value",
+        last_access=1.0,
+        ingested_at=1.0,
+        valid_from=1.0,
+    ))
+    bundle = {
+        "format": SYNC_FORMAT,
+        "version": 1,
+        "workspace_name": "w",
+        "repos": {},
+        "memories": [{
+            "id": "mem_claim",
+            "content": "remote",
+            "last_access": 2.0,
+            "ingested_at": 2.0,
+            "valid_from": 1.0,
+        }],
+    }
+    SyncEngine(store).apply_bundle(bundle)
+    restored = store.get_memory("mem_claim")
+    assert restored.subject_key == "api-cap"
+    assert restored.claim_kind == "configured_value"
+
+
 # ── untrusted-bundle boundary (memory-poisoning threat, SECURITY.md) ──────────
 
 def test_apply_rejects_bad_header():
@@ -100,6 +165,33 @@ def test_apply_rejects_bad_header():
         se.apply_bundle({"format": SYNC_FORMAT, "version": 999})
     with pytest.raises(SyncError):
         se.apply_bundle("i am not a dict")
+
+
+def test_sync_exports_v2_but_accepts_legacy_v1_without_silent_downgrade():
+    engine = MemoryEngine.create(":memory:")
+    wid = engine.store.get_or_create_workspace("w")
+    engine.remember(
+        "The cap is 30.",
+        workspace_id=wid,
+        subject_key="api-cap",
+        claim_kind="configured_value",
+        resolve_conflicts=False,
+    )
+    syncer = SyncEngine(engine.store)
+    exported = syncer.export_bundle(wid)
+    assert exported["version"] == 2
+    assert exported["memories"][0]["subject_key"] == "api-cap"
+
+    legacy = dict(exported)
+    legacy["version"] = 1
+    legacy["memories"] = [{
+        key: value
+        for key, value in exported["memories"][0].items()
+        if key not in {"subject_key", "claim_kind", "valid_to_recorded_at"}
+    }]
+    target = Store(":memory:")
+    report = SyncEngine(target).apply_bundle(legacy)
+    assert report["added"] == 1
 
 
 def test_apply_clamps_and_drops_bad_rows():
@@ -134,6 +226,137 @@ def test_apply_is_idempotent_on_replay():
     second = se.apply_bundle(bundle)
     assert second["added"] == 0 and second["updated"] == 0
     assert second["unchanged"] == 2 and second["links_added"] == 0
+
+
+def test_sync_reactivates_closed_link_once_and_preserves_history(monkeypatch):
+    store = Store(":memory:")
+    syncer = SyncEngine(store)
+    memories = [
+        {"id": "mem_a", "content": "one"},
+        {"id": "mem_b", "content": "two"},
+    ]
+    syncer.apply_bundle({
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
+        "memories": memories, "mem_links": [],
+    })
+    store.add_link(
+        "mem_a", "mem_b", relation="related",
+        valid_from=10.0, valid_to=20.0, valid_to_recorded_at=20.0,
+        ingested_at=10.0,
+    )
+    bundle = {
+        "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
+        "memories": memories,
+        "mem_links": [{"a": "mem_a", "b": "mem_b", "relation": "related"}],
+    }
+    monkeypatch.setattr("engraphis.core.store.now_ts", lambda: 40.0)
+
+    first = syncer.apply_bundle(bundle)
+    replay = syncer.apply_bundle(bundle)
+
+    assert first["links_added"] == 1
+    assert replay["links_added"] == 0
+    rows = store.conn.execute(
+        "SELECT valid_from, valid_to FROM mem_links ORDER BY valid_from"
+    ).fetchall()
+    assert [(row["valid_from"], row["valid_to"]) for row in rows] == [
+        (10.0, 20.0), (40.0, None),
+    ]
+    assert [row["valid_from"] for row in store.links_among(
+        ["mem_a", "mem_b"],
+        flt=SearchFilter(valid_at=15.0, known_at=50.0),
+    )] == [10.0]
+    assert [row["valid_from"] for row in store.links_among(
+        ["mem_a", "mem_b"],
+        flt=SearchFilter(valid_at=50.0, known_at=50.0),
+    )] == [40.0]
+
+
+def test_sync_v2_preserves_closed_memory_link_history():
+    source = Store(":memory:")
+    source_ws = source.get_or_create_workspace("w")
+    for memory_id in ("mem_a", "mem_b"):
+        source.add_memory(MemoryRecord(
+            id=memory_id, content=memory_id, workspace_id=source_ws,
+            valid_from=1.0, ingested_at=1.0,
+        ))
+    source.add_link(
+        "mem_a", "mem_b", relation="related", layer="semantic", reason="old",
+        valid_from=10.0, valid_to=20.0, valid_to_recorded_at=30.0,
+        ingested_at=11.0, expired_at=40.0,
+    )
+    source.add_link(
+        "mem_a", "mem_b", relation="related", layer="semantic", reason="current",
+        valid_from=50.0, ingested_at=51.0,
+    )
+
+    bundle = SyncEngine(source).export_bundle(source_ws)
+    assert [link["valid_from"] for link in bundle["mem_links"]] == [10.0, 50.0]
+    assert bundle["mem_links"][0]["valid_to_recorded_at"] == 30.0
+    assert bundle["mem_links"][0]["expired_at"] == 40.0
+
+    target = Store(":memory:")
+    syncer = SyncEngine(target)
+    first = syncer.apply_bundle(bundle)
+    replay = syncer.apply_bundle(bundle)
+    rows = [dict(row) for row in target.conn.execute(
+        "SELECT valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at "
+        "FROM mem_links ORDER BY valid_from"
+    ).fetchall()]
+
+    assert first["links_added"] == 2
+    assert replay["links_added"] == 0
+    assert rows == [
+        {"valid_from": 10.0, "valid_to": 20.0, "valid_to_recorded_at": 30.0,
+         "ingested_at": 11.0, "expired_at": 40.0},
+        {"valid_from": 50.0, "valid_to": None, "valid_to_recorded_at": None,
+         "ingested_at": 51.0, "expired_at": None},
+    ]
+
+
+def test_sync_v2_converges_concurrent_live_link_intervals():
+    def peer(valid_from: float, ingested_at: float):
+        store = Store(":memory:")
+        workspace_id = store.get_or_create_workspace("w")
+        for memory_id in ("mem_a", "mem_b"):
+            store.add_memory(MemoryRecord(
+                id=memory_id, content=memory_id, workspace_id=workspace_id,
+                valid_from=1.0, ingested_at=1.0,
+            ))
+        store.add_link(
+            "mem_a", "mem_b", relation="related", layer="semantic", reason="peer",
+            valid_from=valid_from, ingested_at=ingested_at,
+        )
+        return store, workspace_id
+
+    left, left_workspace = peer(100.0, 100.0)
+    right, right_workspace = peer(50.0, 300.0)
+    left_sync, right_sync = SyncEngine(left), SyncEngine(right)
+    left_bundle = left_sync.export_bundle(left_workspace)
+    right_bundle = right_sync.export_bundle(right_workspace)
+
+    assert left_sync.apply_bundle(right_bundle)["links_added"] == 1
+    assert right_sync.apply_bundle(left_bundle)["links_added"] == 1
+    assert left_sync.apply_bundle(right_bundle)["links_added"] == 0
+    assert right_sync.apply_bundle(left_bundle)["links_added"] == 0
+
+    def history(store):
+        return [tuple(row) for row in store.conn.execute(
+            "SELECT valid_from, ingested_at, valid_to, expired_at FROM mem_links "
+            "ORDER BY ingested_at, valid_from"
+        ).fetchall()]
+
+    expected = [(100.0, 100.0, None, None), (50.0, 300.0, None, None)]
+    assert history(left) == history(right) == expected
+    assert left.links_among(["mem_a", "mem_b"], flt=SearchFilter(
+        valid_at=75.0, known_at=200.0,
+    )) == []
+    assert [row["valid_from"] for row in left.links_among(
+        ["mem_a", "mem_b"], flt=SearchFilter(valid_at=75.0, known_at=350.0),
+    )] == [50.0]
+    assert [row["valid_from"] for row in left.links_among(
+        ["mem_a", "mem_b"], flt=SearchFilter(valid_at=150.0, known_at=200.0),
+    )] == [100.0]
 
 
 def test_dry_run_writes_nothing():
@@ -820,6 +1043,10 @@ def test_link_metadata_merge_converges_independent_of_bundle_order():
     right_link = right.get_links("mem_a")[0]
     assert (left_link["layer"], left_link["reason"]) == ("causal", "zeta")
     assert (right_link["layer"], right_link["reason"]) == ("causal", "zeta")
+    assert left_sync.apply_bundle(causal)["links_updated"] == 0
+    assert right_sync.apply_bundle(semantic)["links_updated"] == 0
+    assert left.conn.execute("SELECT COUNT(*) FROM mem_links").fetchone()[0] == 2
+    assert right.conn.execute("SELECT COUNT(*) FROM mem_links").fetchone()[0] == 2
 
 
 def test_deeply_nested_json_does_not_crash_sync_decoding(tmp_path):

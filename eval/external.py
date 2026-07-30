@@ -1,16 +1,12 @@
 """External benchmark adapter — run LoCoMo / LongMemEval through the real engine.
 
 The fixture evals (``eval.harness`` on ``sample.jsonl``/``codemem.jsonl``) are a
-pipeline-correctness gate, not a performance claim. This adapter loads the two
-benchmarks the field actually quotes and pushes them through the *same*
-``MemoryEngine`` write path (conflict resolution, evolution) and hybrid recall that
-ships — so the number you get is about the product, not a bare index.
+pipeline-correctness gate, not a public benchmark claim. This adapter loads each
+benchmark and pushes it through the shipped ``MemoryEngine`` write path (conflict
+resolution, evolution) and hybrid recall.
 
-What it measures — honestly: **retrieval** (evidence recall@k / hit@k), not
-end-to-end QA accuracy. Published LoCoMo/LongMemEval scores from other systems also hinge
-on an answering LLM + judge; this harness isolates the part Engraphis owns, needs no
-API key, and states exactly that in the report. Add an answering model on top for a
-QA-accuracy number when you want one.
+It measures **retrieval** (evidence recall@k / hit@k), not end-to-end QA accuracy.
+An official answering model and evaluator are required before reporting QA accuracy.
 
 Usage::
 
@@ -24,6 +20,9 @@ Usage::
     # Plumbing check without the model download (deterministic embedder):
     python -m eval.external --dataset locomo10.json --format locomo --offline --limit 2
 
+    # A canonical run refuses --limit so its denominator cannot be partial:
+    python -m eval.external --dataset longmemeval_s.json --format longmemeval --canonical
+
 Both loaders normalize to the ``eval.harness`` case shape, so every metric and
 resolution behaviour is identical to the CI gate.
 """
@@ -31,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -46,8 +46,9 @@ def load_locomo(path: str, *, limit: Optional[int] = None) -> list[dict]:
 
     Each dialog turn becomes one memory tagged with its LoCoMo ``dia_id`` (e.g.
     ``D1:3``); each QA item's ``evidence`` lists the supporting ``dia_id``s.
-    Adversarial items (category 5) have no evidence and are skipped — retrieval
-    recall is undefined for "unanswerable".
+    Adversarial items (category 5) are retained with ``answerable=False``.  A
+    retrieval score is undefined for those items, but retaining them prevents a
+    public report from silently changing the benchmark denominator.
     """
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     if isinstance(raw, dict):
@@ -71,13 +72,18 @@ def load_locomo(path: str, *, limit: Optional[int] = None) -> list[dict]:
                 prefix = f"[{stamp}] " if stamp else ""
                 memories.append({"tag": tag, "text": f"{prefix}{speaker}: {text}"})
         questions = []
-        for qa in sample.get("qa") or []:
+        for question_number, qa in enumerate(sample.get("qa") or []):
             supporting = [str(e).strip() for e in (qa.get("evidence") or []) if str(e).strip()]
-            if not supporting:
-                continue
-            questions.append({"q": str(qa.get("question") or ""),
-                              "answer": str(qa.get("answer") or ""),
-                              "supporting": supporting})
+            category = str(qa.get("category") or "unknown")
+            questions.append({
+                "id": f"{sample.get('sample_id') or len(cases)}:{question_number}",
+                "q": str(qa.get("question") or ""),
+                "answer": str(qa.get("answer") or ""),
+                "supporting": supporting,
+                "category": category,
+                "answerable": bool(supporting),
+                "exclusion_reason": "no_gold_evidence" if not supporting else "",
+            })
         if memories and questions:
             cases.append({"id": str(sample.get("sample_id") or f"locomo-{len(cases)}"),
                           "memories": memories, "questions": questions})
@@ -91,15 +97,13 @@ def load_longmemeval(path: str, *, limit: Optional[int] = None) -> list[dict]:
 
     Each haystack *session* becomes one memory (turns joined, newline-separated),
     tagged with its session id; ``answer_session_ids`` are the supporting evidence.
-    Abstention instances (id ending ``_abs``) are skipped — same rationale as
-    LoCoMo's adversarial category.
+    Abstention instances (id ending ``_abs``) are retained with their question
+    type and an explicit ``answerable=False`` marker.
     """
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     cases = []
     for inst in raw[: limit or len(raw)]:
         qid = str(inst.get("question_id") or f"lme-{len(cases)}")
-        if qid.endswith("_abs"):
-            continue
         session_ids = inst.get("haystack_session_ids") or []
         sessions = inst.get("haystack_sessions") or []
         dates = inst.get("haystack_dates") or [""] * len(sessions)
@@ -114,24 +118,43 @@ def load_longmemeval(path: str, *, limit: Optional[int] = None) -> list[dict]:
             prefix = f"[{date}] " if date else ""
             memories.append({"tag": str(sid), "text": prefix + "\n".join(lines)})
         supporting = [str(s) for s in (inst.get("answer_session_ids") or [])]
-        if memories and supporting:
+        if memories:
             cases.append({"id": qid, "memories": memories,
                           "questions": [{"q": str(inst.get("question") or ""),
                                          "answer": str(inst.get("answer") or ""),
-                                         "supporting": supporting}]})
+                                         "supporting": supporting,
+                                         "id": qid,
+                                         "category": ("abstention" if qid.endswith("_abs")
+                                                      else str(inst.get("question_type") or "unknown")),
+                                         "answerable": not qid.endswith("_abs"),
+                                         "question_date": str(inst.get("question_date") or ""),
+                                         "exclusion_reason": (
+                                             "abstention_no_gold_evidence"
+                                             if qid.endswith("_abs") else ""
+                                         )}]})
     return cases
 
 
 LOADERS = {"locomo": load_locomo, "longmemeval": load_longmemeval}
 
 
-def main() -> int:
+def source_case_count(path: str) -> int:
+    """Count source cases before normalization so canonical runs catch drops."""
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    return 1 if isinstance(raw, dict) else len(raw) if isinstance(raw, list) else 0
+
+
+def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Run an external memory benchmark through Engraphis.")
     ap.add_argument("--dataset", required=True, help="Path to the benchmark JSON file.")
     ap.add_argument("--format", required=True, choices=sorted(LOADERS),
                     help="Benchmark format.")
     ap.add_argument("--k", type=int, default=10)
     ap.add_argument("--limit", type=int, default=None, help="Cap the number of cases.")
+    ap.add_argument(
+        "--canonical", action="store_true",
+        help="Require a full official-dataset run; rejects --limit/partial input.",
+    )
     ap.add_argument("--embed-model", default="sentence-transformers/all-MiniLM-L6-v2",
                     help="sentence-transformers model for real numbers.")
     ap.add_argument("--offline", action="store_true",
@@ -141,9 +164,14 @@ def main() -> int:
                          "recommended for turn-level dialogue datasets).")
     ap.add_argument("--json", dest="json_out", default=None,
                     help="Also write the full JSON report to this path.")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+    if args.canonical and args.limit is not None:
+        ap.error("--canonical rejects --limit; canonical artifacts must score every source case")
 
     cases = LOADERS[args.format](args.dataset, limit=args.limit)
+    if args.canonical and len(cases) != source_case_count(args.dataset):
+        print("canonical run rejected: normalization excluded source cases", file=sys.stderr)
+        return 2
     if not cases:
         print("no usable cases found — is the file the right format?")
         return 2
@@ -166,12 +194,15 @@ def main() -> int:
     report["embedder"] = embedder_name
     report["measures"] = "retrieval (evidence recall@k), not end-to-end QA accuracy"
     report["wall_seconds"] = round(dt, 1)
+    report["canonical"] = bool(args.canonical)
 
     print(f"\nEngraphis × {args.format} — {report['questions']} questions @ k={args.k} "
           f"({dt:.1f}s)")
     print(f"  evidence recall@k   : {report['recall_at_k']:.3f}")
     print(f"  evidence hit@k      : {report['hit_at_k']:.3f}")
     print(f"  answer_token_recall : {report['answer_token_recall']:.3f}")
+    print(f"  retrieval scored    : {report['scored_questions']}/{report['questions']} "
+          f"(exclusions={len(report['exclusions'])})")
     if args.json_out:
         slim = {k: v for k, v in report.items() if k != "detail"}
         Path(args.json_out).write_text(json.dumps(slim, indent=2), encoding="utf-8")

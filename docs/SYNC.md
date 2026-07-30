@@ -25,6 +25,10 @@ The split is deliberate. Local checks in Apache-licensed code are not DRM and ca
 a fork. The paid boundary is authorization to use the official private service and its operated
 infrastructure.
 
+If you want hosted sync across your installations while helping fund continued Engraphis
+development, [start a 3-day Pro trial](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=sync_doc&trial=pro#billing)
+or [subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=sync_doc#billing).
+
 ## Trial and grace
 
 The no-card Pro or Team trial begins after email confirmation and lasts **exactly 3 active
@@ -100,14 +104,20 @@ when both endpoints remain in the export. Inbound legacy or untrusted bundles ca
 relabel, or overwrite session-scoped state because the sync format carries no authenticated
 session owner or lifecycle contract.
 
+Bundle format v2 preserves durable claim identity and the system-time at which a
+world-time invalidation was learned. Current Engraphis accepts inbound v1 bundles for
+compatibility but exports v2. Older clients reject v2 instead of silently forwarding a
+downgraded bundle that loses those fields.
+
 Bundle input is untrusted. The client validates schema and size limits before applying records,
 rechecks workspace scope, and retains provenance/audit evidence. A relay cannot inject a record
 outside the authorized workspace merely by changing bundle fields.
 
 ## Security and privacy
 
-- Use HTTPS for every hosted endpoint. The public client rejects redirects, embedded URL
-  credentials, and unsafe remote targets.
+- Local-only installations send no memory content to Engraphis. Cloud Sync and managed compute
+  send the explicitly eligible records or bounded snapshot to Engraphis Cloud over TLS; the
+  hosted service can read that submitted content and the transport is not end-to-end encrypted.
 - Treat cloud session and refresh files as credentials; keep their directory owner-only.
 - `secret` memories are excluded from managed uploads. Managed compute also rejects secret rows
   server-side.

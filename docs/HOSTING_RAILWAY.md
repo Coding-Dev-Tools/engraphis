@@ -25,6 +25,16 @@ Set `ENGRAPHIS_FORWARDED_ALLOW_IPS=*` only when the container is reachable exclu
 Railway's trusted proxy. Set the dashboard's public URL where the runtime supports it, terminate
 TLS at the platform edge, and keep the volume private.
 
+The published template derives `ENGRAPHIS_DASHBOARD_URL` from Railway's generated public domain.
+That lets the dashboard's MCP-over-HTTP endpoint accept the public dashboard origin without
+loosening its host/origin allow-list. If you attach a custom domain, override it with that domain's
+canonical HTTPS URL after Railway has activated the domain; do not use an internal Railway domain
+or a URL containing credentials.
+
+Do not add Resend (or any other email-provider) credentials to this customer node. The public
+runtime has no transactional-email sender, verification, invitation, or billing-email service;
+those systems remain in the official hosted control plane.
+
 ## Connect to hosted Pro/Team services
 
 Complete onboarding through the official Engraphis Cloud dashboard, then configure only the

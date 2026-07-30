@@ -3,8 +3,8 @@
 The zero-infrastructure, self-hostable tier of cloud sync: point two or more
 devices at the same folder that is *already* replicated between them — a Dropbox /
 iCloud Drive / OneDrive folder, a Syncthing share, a mounted network drive, or even
-a git repo you push/pull — and Engraphis handles the memory-aware merge on top.
-This folder transport provides a free local sync path with deterministic bundle merging.
+a git repo you push/pull — and Engraphis handles the memory-aware, deterministic
+merge on top.
 
 It implements the ``SyncTransport`` Protocol (``core/interfaces.py``): opaque named
 byte blobs, no knowledge of memory semantics. Each device writes exactly one
@@ -13,9 +13,9 @@ folder stays small and there is nothing to garbage-collect. Writes are atomic
 (temp file + ``os.replace``) so a half-written bundle is never observed — the same
 mount-safe discipline the rest of the repo uses (AGENTS.md §7).
 
-The managed TLS relay (the headline Pro upsell) is a different ``SyncTransport``
-implementation that plugs in here unchanged. Client-side end-to-end encryption is a
-documented follow-up; today's relay stores opaque but plaintext bundle bytes at rest.
+The managed TLS relay is a different ``SyncTransport`` implementation that plugs in
+here unchanged. Client-side end-to-end encryption is a documented follow-up; today's
+relay stores opaque but plaintext bundle bytes at rest.
 """
 from __future__ import annotations
 

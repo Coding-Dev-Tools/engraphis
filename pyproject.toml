@@ -184,7 +184,7 @@ engraphis-update = "scripts.update:main"
 include-package-data = false
 
 [tool.setuptools.packages.find]
-include = ["engraphis*", "scripts*"]
+include = ["engraphis*", "scripts*", "eval*"]
 
 [tool.setuptools.package-data]
 # Keep the shipped dashboard assets explicit. A recursive catch-all also packages ignored
@@ -194,6 +194,7 @@ include = ["engraphis*", "scripts*"]
 "engraphis.classic_assets" = ["*.html", "*.css", "*.js", "*.png", "*.ico", "vendor/*", "vendor/**/*"]
 "engraphis.dashboard_assets" = ["*.html", "*.css", "*.js", "*.png", "*.ico", "vendor/*", "vendor/**/*"]
 "engraphis" = ["commercial_manifest.json"]
+"eval" = ["BASELINES.md", "configs/*.json", "datasets/*.jsonl"]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["*.pyc", "*.pyo", "__pycache__/*"]

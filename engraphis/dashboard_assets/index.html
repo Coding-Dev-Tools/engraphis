@@ -14,7 +14,7 @@
     <aside class="sidebar" aria-label="Ledger navigation">
       <div class="brand-row">
         <a class="brand" href="/" aria-label="Engraphis Ledger home">Engraphis</a>
-        <button class="plan-badge" type="button" data-manage="plans">Free · local</button>
+        <a id="plan-badge" class="plan-badge" href="#" aria-label="Subscribe to Pro in Plans and billing">GET PRO</a>
       </div>
 
       <label class="workspace-switcher">
@@ -65,10 +65,9 @@
       </div>
 
       <div class="sidebar-promo">
-        <button class="outline-button" type="button" data-manage="plans">
-          <span>Compare plans</span>
-          <small>Automation, analytics and team sharing</small>
-        </button>
+        <div class="pro-sidebar-copy" id="sidebar-pro-copy">Support continued Engraphis development with Pro.</div>
+        <small class="pro-sidebar-detail" id="sidebar-pro-detail">Cloud Sync, Analytics, and managed memory maintenance.</small>
+        <a id="sidebar-pro-cta" class="outline-button" data-pro-cta="sidebar" href="#" target="_blank" rel="noopener">Subscribe to Pro</a>
         <div class="engine-status">
           <span><i class="status-dot" aria-hidden="true"></i><span id="connection-status">Connecting…</span></span>
           <span>Engine v2 · bi-temporal</span>
@@ -148,7 +147,7 @@
             <p>Every claim links to a memory. If the evidence is weak, Engraphis says so.</p>
           </header>
 
-          <form id="ask-form" class="question-card">
+          <form id="ask-form" class="question-card" novalidate>
             <label for="ask-input">Question</label>
             <textarea id="ask-input" rows="3" maxlength="10000" placeholder="What do we know about the current database choice?" required></textarea>
             <div class="form-actions">
@@ -209,7 +208,7 @@
                 <p class="empty-state">Select a memory from the library to inspect its content, scope, provenance and history.</p>
               </section>
 
-              <form id="memory-editor" class="detail-panel editor-panel" hidden>
+              <form id="memory-editor" class="detail-panel editor-panel" novalidate hidden>
                 <div class="section-heading">
                   <div><p class="eyebrow">Write</p><h2 id="editor-title">New memory</h2></div>
                   <button id="editor-close" class="text-button" type="button">Close</button>
@@ -217,6 +216,7 @@
                 <label>Title<input id="editor-memory-title" maxlength="500" placeholder="Concise title"></label>
                 <label>Type<select id="editor-memory-type"><option>working</option><option>episodic</option><option selected>semantic</option><option>procedural</option></select></label>
                 <label>Content<textarea id="editor-memory-content" rows="12" maxlength="10000" required placeholder="A discrete, durable fact or procedure…"></textarea></label>
+                <p id="editor-error" class="form-error" role="alert" hidden></p>
                 <label>Importance<input id="editor-memory-importance" type="range" min="0" max="1" step="0.05" value="0.5"></label>
                 <div class="form-actions">
                   <button id="editor-cancel" class="secondary-button" type="button">Cancel</button>
@@ -405,7 +405,7 @@
           </div>
 
           <section class="tab-panel active" data-provenance-panel="belief">
-            <form id="why-form" class="inline-form">
+            <form id="why-form" class="inline-form" novalidate>
               <label>Claim or topic<input id="why-input" required placeholder="Why do we believe…?"></label>
               <button class="primary-button" type="submit">Trace belief</button>
             </form>
@@ -413,7 +413,7 @@
           </section>
 
           <section class="tab-panel" data-provenance-panel="timeline">
-            <form id="timeline-form" class="inline-form">
+            <form id="timeline-form" class="inline-form" novalidate>
               <label>Topic<input id="timeline-input" required placeholder="Database choice"></label>
               <button class="primary-button" type="submit">Show history</button>
             </form>
@@ -432,7 +432,7 @@
           </section>
 
           <section class="tab-panel" data-provenance-panel="supersessions">
-            <form id="supersession-form" class="inline-form">
+            <form id="supersession-form" class="inline-form" novalidate>
               <label>Topic<input id="supersession-input" required placeholder="What changed?"></label>
               <button class="primary-button" type="submit">Find supersessions</button>
             </form>
@@ -464,7 +464,7 @@
               <div><h2>Workspaces</h2><p>Each workspace is an independent visibility boundary.</p></div>
               <button id="create-workspace-toggle" class="primary-button" type="button">New workspace</button>
             </div>
-            <form id="create-workspace-form" class="inline-form" hidden>
+            <form id="create-workspace-form" class="inline-form" novalidate hidden>
               <label>Name<input id="new-workspace-name" required maxlength="200" placeholder="research"></label>
               <label>Description<input id="new-workspace-description" maxlength="500" placeholder="What belongs here"></label>
               <button class="primary-button" type="submit">Create</button>
@@ -495,7 +495,7 @@
               <h2>Portfolio analytics without moving secret memory</h2>
               <p>Aggregate health, growth and reinforcement trends are computed through the connected Engraphis Cloud account.</p>
               <div id="analytics-result" class="stat-grid"><p class="empty-state">Open this tab to check availability.</p></div>
-              <button class="primary-button" type="button" data-manage="plans">Compare Pro</button>
+              <a id="analytics-pro-cta" class="primary-button" data-pro-cta="analytics" href="#" target="_blank" rel="noopener">Subscribe to Pro</a>
             </div>
           </section>
 
@@ -505,7 +505,7 @@
               <h2>Schedule consolidation with an explicit upload boundary</h2>
               <p>Hosted automation receives a bounded workspace snapshot. Secret and session-scoped memory stays local.</p>
               <div id="automation-result" class="result-card"><p class="empty-state">Open this tab to check availability.</p></div>
-              <button class="primary-button" type="button" data-manage="plans">Compare Pro</button>
+              <a id="automation-pro-cta" class="primary-button" data-pro-cta="automation" href="#" target="_blank" rel="noopener">Subscribe to Pro</a>
             </div>
           </section>
 
@@ -515,7 +515,7 @@
               <h2>Shared workspaces, member roles and named seats</h2>
               <p>The local dashboard stays single-user. Team authorization and remote-agent access live in the hosted service.</p>
               <div id="team-result" class="result-card"><p class="empty-state">Checking local connection state…</p></div>
-              <button class="primary-button" type="button" data-manage="plans">Compare Team</button>
+              <a id="team-cloud-cta" class="primary-button" data-pro-cta="team" href="#" target="_blank" rel="noopener">Compare Team</a>
             </div>
           </section>
 
@@ -558,6 +558,12 @@
                 <h2>Theme</h2>
                 <p>The preference stays on this device and is shared with Classic.</p>
                 <label>Theme<select id="theme-select"><option value="slate">Slate (dark)</option><option value="midnight">Midnight</option><option value="paper">Paper (light)</option><option value="matrix">Matrix</option></select></label>
+              </section>
+              <section class="setting-card">
+                <p class="eyebrow">Pro · hosted account</p>
+                <h2>Engraphis Cloud</h2>
+                <p>Manage your subscription, connected devices, and hosted account settings in Engraphis Cloud.</p>
+                <div id="cloud-account-settings" class="cloud-account-settings"><p class="empty-state">Checking hosted account access…</p></div>
               </section>
               <section class="setting-card llm-setting-card">
                 <div>

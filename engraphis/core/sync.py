@@ -56,7 +56,8 @@ logger = logging.getLogger("engraphis.sync")
 
 # ── bundle format ─────────────────────────────────────────────────────────────
 SYNC_FORMAT = "engraphis-sync"
-SYNC_VERSION = 1
+SYNC_VERSION = 2
+SYNC_ACCEPTED_VERSIONS = frozenset({1, 2})
 
 # ── validation caps (untrusted bundle → clamp, don't trust) ───────────────────
 MAX_MEMORIES = 200_000
@@ -90,7 +91,7 @@ _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _LWW_FIELDS = (
     "title", "content", "summary", "keywords", "metadata", "mtype", "scope",
     "importance", "surprise", "sensitivity", "valid_from", "ingested_at",
-    "session_id", "provenance",
+    "session_id", "provenance", "subject_key", "claim_kind",
 )
 
 
@@ -135,6 +136,7 @@ def _label_tuple(rec: MemoryRecord) -> list:
         rec.title, rec.content, rec.summary, sorted(rec.keywords or []),
         _enum(rec.mtype), _enum(rec.scope), rec.importance, rec.surprise,
         rec.sensitivity, rec.valid_from, rec.session_id,
+        rec.subject_key, rec.claim_kind,
         json.dumps(rec.metadata or {}, sort_keys=True, default=str),
         json.dumps(rec.provenance or {}, sort_keys=True, default=str),
     ]
@@ -156,6 +158,7 @@ def merge_record(local: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
     are taken from ``local`` here and never LWW-merged, so re-homing is never undone.
     """
     winner = local if _version_key(local) >= _version_key(incoming) else incoming
+    valid_to, valid_to_recorded_at = _merge_closure(local, incoming)
     return MemoryRecord(
         id=local.id,
         # scope pointers are always local — never merged from the remote
@@ -167,6 +170,7 @@ def merge_record(local: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
         mtype=winner.mtype, scope=winner.scope, importance=winner.importance,
         surprise=winner.surprise, sensitivity=winner.sensitivity,
         session_id=winner.session_id, provenance=dict(winner.provenance or {}),
+        subject_key=winner.subject_key, claim_kind=winner.claim_kind,
         valid_from=winner.valid_from,
         # ``ingested_at`` is a LWW field (_LWW_FIELDS), NOT a lattice field, and it is the
         # SECOND component of _version_key. Merging it as a min-lattice made
@@ -180,12 +184,40 @@ def merge_record(local: MemoryRecord, incoming: MemoryRecord) -> MemoryRecord:
         # entirely from the winner.
         ingested_at=winner.ingested_at,
         # lattice fields: commutative joins (independent of the LWW winner)
-        valid_to=_min_nonnull(local.valid_to, incoming.valid_to),
+        valid_to=valid_to,
         expired_at=_min_nonnull(local.expired_at, incoming.expired_at),
         stability=max(local.stability, incoming.stability),
         access_count=max(local.access_count, incoming.access_count),
         last_access=_max_nonnull(local.last_access, incoming.last_access),
         pinned=bool(local.pinned or incoming.pinned),
+        valid_to_recorded_at=valid_to_recorded_at,
+    )
+
+
+def _merge_closure(
+    local: MemoryRecord, incoming: MemoryRecord,
+) -> tuple[Optional[float], Optional[float]]:
+    """Join a world-time closure with the system-time at which it was learned.
+
+    The earliest world-time closure wins. Its knowledge timestamp must travel
+    with it; independently learned equal closures use the earliest timestamp.
+    A missing timestamp is legacy v1 state whose closure was always visible, so
+    it remains ``None`` rather than being silently assigned a later time.
+    """
+    if local.valid_to is None:
+        return incoming.valid_to, (
+            incoming.valid_to_recorded_at if incoming.valid_to is not None else None
+        )
+    if incoming.valid_to is None:
+        return local.valid_to, local.valid_to_recorded_at
+    if local.valid_to < incoming.valid_to:
+        return local.valid_to, local.valid_to_recorded_at
+    if incoming.valid_to < local.valid_to:
+        return incoming.valid_to, incoming.valid_to_recorded_at
+    if local.valid_to_recorded_at is None or incoming.valid_to_recorded_at is None:
+        return local.valid_to, None
+    return local.valid_to, min(
+        local.valid_to_recorded_at, incoming.valid_to_recorded_at
     )
 
 
@@ -228,7 +260,8 @@ def inherit_store_defaults(existing: MemoryRecord, incoming: MemoryRecord) -> Me
 def _signature(rec: MemoryRecord) -> str:
     """Fingerprint of everything sync persists — to tell 'changed' from 'no-op'."""
     return _stable_hash(_label_tuple(rec) + [
-        rec.valid_to, rec.expired_at, rec.ingested_at, rec.stability,
+        rec.valid_to, rec.valid_to_recorded_at, rec.expired_at,
+        rec.ingested_at, rec.stability,
         rec.access_count, rec.last_access, bool(rec.pinned),
     ])
 
@@ -244,8 +277,10 @@ def record_to_dict(rec: MemoryRecord) -> dict:
         "importance": rec.importance, "surprise": rec.surprise, "stability": rec.stability,
         "access_count": rec.access_count, "last_access": rec.last_access,
         "valid_from": rec.valid_from, "valid_to": rec.valid_to,
+        "valid_to_recorded_at": rec.valid_to_recorded_at,
         "ingested_at": rec.ingested_at, "expired_at": rec.expired_at,
         "pinned": bool(rec.pinned), "sensitivity": rec.sensitivity,
+        "subject_key": rec.subject_key, "claim_kind": rec.claim_kind,
         "provenance": rec.provenance or {},
     }
 
@@ -424,9 +459,12 @@ def dict_to_record(d: dict) -> Optional[MemoryRecord]:
         # (they are the version key's primary ordering / anti-poison defense).
         valid_from=_clamp_world_ts(d.get("valid_from")),
         valid_to=_clamp_world_ts(d.get("valid_to")),
+        valid_to_recorded_at=_clamp_ts(d.get("valid_to_recorded_at"), now),
         ingested_at=_clamp_ts(d.get("ingested_at"), now),
         expired_at=_clamp_ts(d.get("expired_at"), now),
         pinned=bool(d.get("pinned")), sensitivity=sens,
+        subject_key=_clamp_str(d.get("subject_key"), 512),
+        claim_kind=_clamp_str(d.get("claim_kind"), 256),
         provenance=_safe_json_obj(d.get("provenance")),
     )
 
@@ -483,7 +521,7 @@ class SyncEngine:
             repo_rows = self.store.conn.execute(
                 "SELECT id, name FROM repos WHERE workspace_id=?", (workspace_id,)).fetchall()
         ids_in = [m.id for m in mems]
-        links = self.store.links_among(ids_in) if ids_in else []
+        links = self.store.links_among(ids_in, include_invalid=True) if ids_in else []
         return {
             "format": SYNC_FORMAT, "version": SYNC_VERSION,
             "device_id": self.device_id, "created_at": now_ts(),
@@ -495,6 +533,11 @@ class SyncEngine:
                     "a": ln["a"], "b": ln["b"], "relation": ln["relation"],
                     "layer": ln.get("layer") or "semantic",
                     "reason": ln.get("reason") or "",
+                    "valid_from": ln.get("valid_from"),
+                    "valid_to": ln.get("valid_to"),
+                    "valid_to_recorded_at": ln.get("valid_to_recorded_at"),
+                    "ingested_at": ln.get("ingested_at"),
+                    "expired_at": ln.get("expired_at"),
                 }
                 for ln in links
             ],
@@ -514,7 +557,7 @@ class SyncEngine:
             raise SyncError("bundle is not an object")
         if bundle.get("format") != SYNC_FORMAT:
             raise SyncError("not an %s bundle" % SYNC_FORMAT)
-        if _as_int(bundle.get("version"), 0) != SYNC_VERSION:
+        if _as_int(bundle.get("version"), 0) not in SYNC_ACCEPTED_VERSIONS:
             raise SyncError("unsupported bundle version %r" % bundle.get("version"))
         src_device = bundle.get("device_id")
 
@@ -664,6 +707,15 @@ class SyncEngine:
             # overwrite the local private row with a non-session scope either.
             report["rejected"] += 1
             return
+        if existing is not None:
+            # Sync v1 bundles predate durable claim identity. Omission means
+            # "unknown to this peer", not an instruction to erase local keys.
+            if "subject_key" not in d:
+                rec.subject_key = existing.subject_key
+            if "claim_kind" not in d:
+                rec.claim_kind = existing.claim_kind
+            if "valid_to_recorded_at" not in d and rec.valid_to == existing.valid_to:
+                rec.valid_to_recorded_at = existing.valid_to_recorded_at
         if (existing is not None and only_repo_id is not None
                 and existing.repo_id != only_repo_id):
             # The incoming row's claimed repo cannot re-home an existing memory from
@@ -733,9 +785,51 @@ class SyncEngine:
                 if not dry_run:
                     self.store.conn.commit()
                 pending = 0
+            # v2 bundles carry a complete bi-temporal link version. Preserve it
+            # verbatim (after the normal untrusted-input clamps), including closed
+            # intervals. v1 omitted these fields, so it retains the established
+            # grow-only/current-link merge below.
+            if ("valid_from" in ln and "ingested_at" in ln
+                    and _clamp_world_ts(ln.get("valid_from")) is not None
+                    and _clamp_ts(ln.get("ingested_at"), now_ts()) is not None):
+                valid_from = _clamp_world_ts(ln.get("valid_from"))
+                valid_to = _clamp_world_ts(ln.get("valid_to"))
+                valid_to_recorded_at = _clamp_ts(ln.get("valid_to_recorded_at"), now_ts())
+                ingested_at = _clamp_ts(ln.get("ingested_at"), now_ts())
+                expired_at = _clamp_ts(ln.get("expired_at"), now_ts())
+                existing_version = self.store.conn.execute(
+                    "SELECT 1 FROM mem_links "
+                    "WHERE ((a=? AND b=?) OR (a=? AND b=?)) AND relation=? "
+                    "AND layer=? AND reason=? AND valid_from IS ? AND valid_to IS ? "
+                    "AND valid_to_recorded_at IS ? AND ingested_at IS ? AND expired_at IS ? "
+                    "LIMIT 1",
+                    (
+                        a, b, b, a, rel, layer, reason,
+                        valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at,
+                    ),
+                ).fetchone()
+                if existing_version:
+                    continue
+                if not dry_run:
+                    inserted = self.store.add_link_version(
+                        a, b, rel, layer=layer, reason=reason,
+                        valid_from=valid_from, valid_to=valid_to,
+                        valid_to_recorded_at=valid_to_recorded_at,
+                        ingested_at=ingested_at, expired_at=expired_at,
+                        commit=False,
+                    )
+                    if inserted:
+                        self.store.audit(
+                            "sync:%s" % _clamp_str(src_device or "peer", 128),
+                            "sync_link", a,
+                            f"linked to {b} with relation {rel}", commit=False)
+                report["links_added"] += 1
+                continue
             existing_link = self.store.conn.execute(
                 "SELECT layer, reason FROM mem_links "
-                "WHERE ((a=? AND b=?) OR (a=? AND b=?)) AND relation=? LIMIT 1",
+                "WHERE ((a=? AND b=?) OR (a=? AND b=?)) AND relation=? "
+                "AND valid_to IS NULL AND expired_at IS NULL "
+                "ORDER BY rowid DESC LIMIT 1",
                 (a, b, b, a, rel),
             ).fetchone()
             if existing_link:

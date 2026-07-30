@@ -28,6 +28,12 @@ def test_published_image_and_railway_template_fail_safe_to_customer_mode():
     assert local_api["value"] == "${{ secret(48) }}"
     assert local_api["secret"] is True
     assert local_api["required"] is True
+    # Railway supplies this system variable for the service's generated/custom public
+    # domain.  Feeding it into the fixed dashboard URL lets MCP-over-HTTP accept the
+    # real public Origin/Host without weakening its DNS-rebinding guard to a wildcard.
+    dashboard_url = template["variables"]["ENGRAPHIS_DASHBOARD_URL"]
+    assert dashboard_url["value"] == "https://${{RAILWAY_PUBLIC_DOMAIN}}"
+    assert dashboard_url["required"] is False
     # Managed-compute consent travels with the cloud account. A template that shipped a
     # hard-coded value would override that for every deployment made from it -- "0" would
     # silently opt a connected deployment back out -- so the default must stay blank.
@@ -38,6 +44,7 @@ def test_published_image_and_railway_template_fail_safe_to_customer_mode():
         "ENGRAPHIS_DEPLOYMENT_TOKEN",
         "ENGRAPHIS_LICENSE_KEY",
         "ENGRAPHIS_TEAM_MODE",
+        "RESEND_API_KEY",
     ):
         assert removed not in template["variables"]
 
@@ -55,6 +62,14 @@ def test_compose_api_profile_requires_a_token_for_its_non_loopback_bind():
 def test_ci_and_release_audit_production_image_dependencies():
     ci = _text(".github/workflows/ci.yml")
     release = _text(".github/workflows/release.yml")
+    release_build = release.split("  build:\n", 1)[1].split("  python-matrix:\n", 1)[0]
+    release_docker = release.split("  docker-smoke:\n", 1)[1].split(
+        "  release-evidence:\n", 1
+    )[0]
+    release_evidence = release.split("  release-evidence:\n", 1)[1].split(
+        "  publish:\n", 1
+    )[0]
+    publish = release.split("  publish:\n", 1)[1].split("  github-release:\n", 1)[0]
 
     assert "Audit the exact production image dependency set" in ci
     assert "docker run --rm --entrypoint sh engraphis:ci" in ci
@@ -65,8 +80,14 @@ def test_ci_and_release_audit_production_image_dependencies():
     assert "docker-entrypoint\\.sh" in ci
     assert "railway\\.json" in ci
     assert "deploy/" in ci
-    assert '".[all,test]"' in release
-    assert "Audit production image dependencies" in release
+    assert 'build twine pip-audit ".[all,test]"' in release_build
+    assert "python -m pip_audit --local" in release_build
+    assert "docker build -t engraphis:release ." in release_docker
+    assert "Audit production image dependencies" in release_docker
+    assert "python -m pip install --no-cache-dir pip-audit" in release_docker
+    assert "python -m pip_audit --local" in release_docker
+    assert "needs: [build, python-matrix, browser-accessibility, docker-smoke]" in release_evidence
+    assert "needs: release-evidence" in publish
     assert "Browser accessibility release gate" in release
     assert "Require release tag commit to be on protected main" in release
     for version in ('"3.9"', '"3.10"', '"3.11"', '"3.12"'):
@@ -95,10 +116,13 @@ def test_release_builds_one_portable_open_core_wheel():
     assert not (ROOT / ".github/workflows/build-compiled-wheels.yml").exists()
     assert "cython" not in pyproject.lower()
     assert "cibuildwheel" not in release
-    assert "run: python -m build\n" in release
+    assert release.count("python -m build") == 1
+    assert "python scripts/verify_distribution_contents.py dist/*" in release
     assert "Build compiled wheels" not in release
     assert "name: Assemble distributions" not in release
     assert "needs: [build, python-matrix, browser-accessibility, docker-smoke]" in release
+    assert "  release-evidence:\n" in release
+    assert "needs: release-evidence" in release
     assert "name: python-package-distributions" in release
 
 
@@ -168,9 +192,16 @@ def test_release_repair_requires_tag_sha_successful_build_publish_and_pypi_ident
     assert "sort_by(.createdAt)" in repair
     assert '.name == "Build distributions"' in repair
     assert '.name == "Publish to PyPI"' in repair
+    assert '.name == "Generate public release evidence"' in repair
     assert '.name == "Assemble distributions"' not in repair
     assert repair.count('.conclusion == "success"') >= 2
     assert 'gh run download "$run_id"' in repair
+    assert 'open("release-evidence/release-evidence.json", encoding="utf-8")' in repair
+    assert 'assert evidence.get("tag") == tag' in repair
+    assert 'assert evidence.get("commit") == commit' in repair
+    assert 'assert evidence.get("package", {}).get("version") == tag.removeprefix("v")' in repair
+    assert 'hashlib.sha256(path.read_bytes()).hexdigest()' in repair
+    assert 'assert expected == actual' in repair
     assert '--repo "$GH_REPO"' in repair
     assert '.conclusion == "failure"' in repair
     assert repair.count("scripts/verify_release_artifacts.py") == 2
@@ -203,7 +234,7 @@ def test_primary_github_release_targets_repository_without_checkout():
 def test_public_capability_and_support_docs_match_the_shipped_tree():
     server = _text("engraphis/mcp_server.py")
     tools = re.findall(r'@mcp\.tool\(\s*name="(engraphis_[^"]+)"', server)
-    assert len(tools) == len(set(tools)) == 29
+    assert len(tools) == len(set(tools)) == 30
 
     readme = _text("README.md")
     architecture = _text("docs/ARCHITECTURE_V3.md")
@@ -214,8 +245,10 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         assert "28 MCP tools" not in content
         assert "28-tool" not in content
         assert "(28 of them)" not in content
-    assert "29 MCP tools" in architecture
-    assert "(29 of them)" in skill
+    assert "30 MCP tools" in architecture
+    assert "(30 of them)" in skill
+    assert "recall_context (compact)" in architecture
+    assert "engraphis_recall_context" in readme
     assert "`engraphis_check_update`" in readme
     for content in (skill, skill_tools, skill_scoping):
         assert "force_new" in content
