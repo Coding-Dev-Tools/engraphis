@@ -249,7 +249,7 @@ def test_existing_v5_database_with_legacy_memory_links_is_upgraded_safely(tmp_pa
             "FROM mem_links WHERE a='mem_a'"
         ).fetchone()
         assert upgraded.schema_version == 6
-        assert Path(f"{db}.pre-migration-v5.bak").is_file()
+        assert Path(f"{db}.pre-migration-v6.bak").is_file()
         assert {"valid_from", "valid_to", "valid_to_recorded_at", "ingested_at", "expired_at"} <= columns
         assert row["valid_from"] == row["ingested_at"] == 123
         assert row["valid_to"] is None and row["expired_at"] is None
@@ -272,13 +272,35 @@ def test_v5_upgrade_seeds_temporal_code_file_manifest(tmp_path):
     store.conn.commit()
     store.close()
 
+    # A v5 database may retain its immutable v4→v5 recovery artifact.  A later v5
+    # write makes its contents intentionally differ from the current v5 database.
+    legacy_backup = Path(f"{db}.pre-migration-v5.bak")
+    shutil.copyfile(db, legacy_backup)
+    legacy_conn = sqlite3.connect(legacy_backup)
+    try:
+        legacy_conn.execute("DELETE FROM schema_migrations")
+        legacy_conn.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (4, 0)"
+        )
+        legacy_conn.commit()
+    finally:
+        legacy_conn.close()
+    legacy_digest = hashlib.sha256(legacy_backup.read_bytes()).hexdigest()
+    current = sqlite3.connect(db)
+    try:
+        current.execute("UPDATE code_files SET mtime_ns=35 WHERE file='api.py'")
+        current.commit()
+    finally:
+        current.close()
+
     upgraded = Store(str(db))
     try:
         history = upgraded.conn.execute(
             "SELECT file, content_hash, valid_from, ingested_at FROM code_file_history"
         ).fetchone()
         assert upgraded.schema_version == 6
-        assert Path(f"{db}.pre-migration-v5.bak").is_file()
+        assert Path(f"{db}.pre-migration-v6.bak").is_file()
+        assert hashlib.sha256(legacy_backup.read_bytes()).hexdigest() == legacy_digest
         assert history["file"] == "api.py"
         assert history["content_hash"] == "v5-hash"
         assert history["valid_from"] == history["ingested_at"]

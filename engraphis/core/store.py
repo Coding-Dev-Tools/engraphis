@@ -811,15 +811,16 @@ class Store:
         snapshot and the migration commit. Only a quick-checked temporary backup may
         atomically replace the stable backup path; every failure aborts the migration.
 
-        The v3→v4 release established ``.pre-migration-v4.bak`` as a durable recovery
-        artifact.  A database that subsequently upgrades from v4 to v5 can legitimately
-        still have that older snapshot. Reusing the same filename would compare the v3
-        snapshot with the current v4 source and abort every v5 upgrade. Preserve the
-        legacy name for pre-v4 sources and use a version-specific v5 name for v4.
+        Each migration target needs its own durable recovery artifact.  For example, a
+        v5 database can legitimately retain the immutable ``.pre-migration-v5.bak``
+        created during its v4→v5 upgrade.  Reusing that name for a v5→v6 upgrade would
+        compare the older v4 snapshot with the later v5 source and abort the upgrade.
+        Preserve the legacy v4/v5 names and use the target schema version for newer
+        backups.
         """
         if self.path in (":memory:", "") or self.path.startswith("file::memory:"):
             raise RuntimeError("schema migration requires a durable pre-migration backup")
-        backup_version = 5 if previous_version >= 4 else 4
+        backup_version = max(4, min(SCHEMA_VERSION, previous_version + 1))
         backup_path = f"{self.path}.pre-migration-v{backup_version}.bak"
         self._cleanup_v4_backup_temps(backup_path)
         temp_path = (
