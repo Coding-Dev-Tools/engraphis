@@ -196,7 +196,6 @@ def _check_website(manifest: dict, website: Path, errors: list[str]) -> None:
     )
     lower = public_text.lower()
     for unsupported in (
-        "end-to-end encrypted",
         "no phone-home",
         "sso/rbac",
         "it never leaves your machine",

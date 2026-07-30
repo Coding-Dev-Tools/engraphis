@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from eval import metrics
+from eval import grounded as grounded_eval
 from eval.benchmark import (
     SCHEMA,
     CANONICAL_TOKEN_BUDGETS,
@@ -20,9 +21,27 @@ from eval.benchmark import (
     validate_report,
     write_canonical_artifact,
 )
+from eval.chunking_eval import compare as compare_chunking, load as load_chunking
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_public_facing_docs_do_not_use_em_dashes():
+    """Published prose uses straightforward punctuation that renders consistently."""
+    public_files = [
+        *(ROOT / name for name in ("README.md", "BENCHMARKS.md", "CHANGELOG.md", "SECURITY.md")),
+        *(ROOT / "docs").rglob("*.md"),
+        *(ROOT / "docs" / "images").glob("*.svg"),
+        *(ROOT / "skills" / "engraphis-memory").rglob("*.md"),
+    ]
+    offenders = [
+        path.relative_to(ROOT).as_posix()
+        for path in public_files
+        if "—" in path.read_text(encoding="utf-8")
+    ]
+
+    assert not offenders, f"Public-facing files still contain em dashes: {offenders}"
 
 
 class CharacterTokenizer:
@@ -36,12 +55,12 @@ def test_readme_distinguishes_every_current_token_context_measurement():
 
     for evidence in (
         "### Proof at a glance",
-        "72.9% less retrieved context",
+        "73.0% less retrieved context",
         "3.8× smaller evidence record",
         "55.38% smaller MCP response",
         "### Measurement details and reproducibility",
-        "808.8** tokens → structure-aware chunks: **219.0** tokens",
-        "72.9% lower",
+        "808.8** tokens → structure-aware chunks: **218.4** tokens",
+        "73.0% lower",
         "162.2** tokens → chunks: **42.4** tokens",
         "73.9% lower",
         "17,172** `engraphis.regex.v1` tokens → compact result: **7,663** tokens",
@@ -51,6 +70,61 @@ def test_readme_distinguishes_every_current_token_context_measurement():
         "not a storage-reduction claim",
     ):
         assert evidence in readme
+
+
+def test_readme_makes_agent_benefits_and_visual_evidence_scannable():
+    """The public overview and its visual evidence must stay wired to real assets."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    for evidence in (
+        "## What Engraphis gives an agent",
+        "Remember a project across sessions",
+        "Avoid confident guesses",
+        "Avoid dragging the whole project into every prompt",
+        "docs/images/engraphis-benefit-flow.png",
+        "docs/images/context-efficiency.png",
+        "### See the behavior in reproducible fixtures",
+        "docs/images/evidence-backed-agent-examples.png",
+        "Run `python -m eval.chunking_eval` and `python -m eval.grounded`",
+        "Each row uses a separate 100% baseline",
+    ):
+        assert evidence in readme
+
+    for filename in (
+        "engraphis-benefit-flow.svg",
+        "engraphis-benefit-flow.png",
+        "context-efficiency.svg",
+        "context-efficiency.png",
+        "evidence-backed-agent-examples.svg",
+        "evidence-backed-agent-examples.png",
+    ):
+        assert (ROOT / "docs" / "images" / filename).is_file()
+
+
+def test_example_visual_uses_the_checked_in_offline_fixture_results():
+    """The new examples must not drift away from the commands readers can run."""
+    longdoc = ROOT / "eval" / "datasets" / "longdoc.jsonl"
+    chunking = compare_chunking(load_chunking(str(longdoc)), k=5, embed_model=None)
+    whole = chunking["reports"]["whole"]
+    chunked = chunking["reports"]["chunked"]
+    grounded = grounded_eval.run()
+    visual = (ROOT / "docs" / "images" / "evidence-backed-agent-examples.svg").read_text(
+        encoding="utf-8"
+    )
+
+    assert chunking["context_reduction_pct"] == 73.0
+    assert f"{whole['mean_context_tokens']:.1f} → {chunked['mean_context_tokens']:.1f} tokens" in visual
+    assert grounded == {
+        "answer_rate": 1.0,
+        "abstain_rate": 1.0,
+        "accuracy": 1.0,
+        "grounded_hits": 5,
+        "abstain_hits": 5,
+        "n_answerable": 5,
+        "n_unanswerable": 5,
+    }
+    assert "5/5 answerable questions grounded" in visual
+    assert "5/5 off-topic questions abstained" in visual
 
 
 def _complete_canonical_report(dataset, config):

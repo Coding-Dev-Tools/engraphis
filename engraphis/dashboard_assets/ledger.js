@@ -46,7 +46,8 @@
   const all = selector => [...document.querySelectorAll(selector)];
   const text = value => value == null ? '' : String(value);
   const number = value => Number.isFinite(Number(value)) ? Number(value) : 0;
-  const CLOUD_PRIVACY_NOTICE = 'Engraphis Cloud must read the bounded snapshot you submit to produce results. It travels over HTTPS but is not end-to-end encrypted; secret and session-scoped memories stay local.';
+  const CLOUD_SYNC_PRIVACY_NOTICE = 'Cloud Sync encrypts eligible shared-workspace changes end-to-end before they leave this device. Engraphis Cloud cannot read their contents; secret and session-scoped memories stay local.';
+  const MANAGED_COMPUTE_PRIVACY_NOTICE = 'For managed compute, Engraphis Cloud must read the bounded snapshot you submit to produce results. It travels over HTTPS; secret and session-scoped memories stay local.';
   const EXTERNAL_LLM_PRIVACY_NOTICE = 'Memory text is sent to your configured LLM provider for processing under that provider’s terms. The provider must read that text to return extracted facts.';
   const truncate = (value, length = 260) => {
     const source = text(value).trim();
@@ -2328,7 +2329,7 @@
       automationNumber('automation-dream-min', 'Minimum new memories', Math.max(1, Number(policy.dream_min_new) || 25), 1, 100000),
       automationNumber('automation-dream-idle', 'Idle minutes before Dreaming', Math.max(0, Number(policy.dream_idle_minutes) || 0), 0, 10080),
       automationCheckbox('automation-infer', 'Allow hosted relationship inference proposals', policy.infer),
-      node('p', 'automation-policy-note', `Saving an enabled policy uploads this workspace’s normal and sensitive memory content to Engraphis Cloud; secret and session-scoped rows stay local. ${CLOUD_PRIVACY_NOTICE} Cloud work returns proposals and never silently changes the local database.`),
+      node('p', 'automation-policy-note', `Cloud Sync: ${CLOUD_SYNC_PRIVACY_NOTICE} Managed compute: saving an enabled policy submits a bounded snapshot of this workspace’s normal and sensitive memory content to Engraphis Cloud. ${MANAGED_COMPUTE_PRIVACY_NOTICE} Cloud work returns proposals and never silently changes the local database.`),
     );
     const actions = node('div', 'automation-policy-actions');
     const save = node('button', 'primary-button', enabled ? 'Save & send policy to Cloud' : 'Save hosted policy');
@@ -2351,7 +2352,7 @@
       infer: byId('automation-infer').checked,
     };
     if (policy.enabled && !window.confirm(
-      `Save this hosted policy for ${state.workspace}? Engraphis will upload that workspace’s normal and sensitive memory content to Cloud; secret and session-scoped rows stay local.\n\nPrivacy: ${CLOUD_PRIVACY_NOTICE}`,
+      `Save this hosted policy for ${state.workspace}? Engraphis will submit a bounded snapshot of that workspace’s normal and sensitive memory content to Cloud for managed compute.\n\nCloud Sync: ${CLOUD_SYNC_PRIVACY_NOTICE}\n\nManaged compute: ${MANAGED_COMPUTE_PRIVACY_NOTICE}`,
     )) return;
     const save = form.querySelector('button[type="submit"]');
     if (save) {

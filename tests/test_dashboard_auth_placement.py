@@ -101,12 +101,15 @@ def test_hosted_views_delegate_entitlement_to_cloud_proxy_responses():
     assert "Subscribe to ${name}" in script
 
 
-def test_hosted_transfer_and_llm_consents_state_the_real_privacy_boundary():
-    """Every local consent states which processor can read submitted content."""
+def test_hosted_transfer_and_llm_consents_distinguish_sync_from_readable_compute():
+    """Cloud Sync is E2EE; compute and LLM consents name their readable inputs."""
 
     legacy_scripts = (SCRIPT, CLASSIC_SCRIPT)
     for path in legacy_scripts:
         script = path.read_text(encoding="utf-8")
+        assert "Cloud Sync encrypts eligible shared-workspace changes end-to-end" in script
+        assert "Engraphis Cloud cannot read their contents" in script
+        assert "secret and session-scoped memories stay local" in script
         assert "Engraphis Cloud must read the bounded snapshot" in script
         assert "not end-to-end encrypted" in script
         assert "configured LLM provider" in script
@@ -119,9 +122,12 @@ def test_hosted_transfer_and_llm_consents_state_the_real_privacy_boundary():
         assert "Turn on LLM extraction" in script
 
     ledger = (Path(__file__).resolve().parents[1] / "engraphis" / "dashboard_assets"
-              / "ledger.js").read_text(encoding="utf-8")
+               / "ledger.js").read_text(encoding="utf-8")
+    assert "Cloud Sync encrypts eligible shared-workspace changes end-to-end" in ledger
+    assert "Engraphis Cloud cannot read their contents" in ledger
+    assert "secret and session-scoped memories stay local" in ledger
+    assert "For managed compute" in ledger
     assert "Engraphis Cloud must read the bounded snapshot" in ledger
-    assert "not end-to-end encrypted" in ledger
     assert "configured LLM provider" in ledger
     assert "provider must read that text" in ledger
     assert "Retention supervision is ON" in ledger
@@ -138,14 +144,32 @@ def test_hosted_transfer_and_llm_consents_state_the_real_privacy_boundary():
     assert "this is not end-to-end-encrypted processing" in normalized_readme
     assert "Local-only installations send nothing" in normalized_readme
     assert "ENGRAPHIS_RETENTION_SUPERVISOR=none" in normalized_readme
+
     assert "will never see, read, or access your data" not in normalized_readme
 
     sync_doc = (Path(__file__).resolve().parents[1] / "docs" / "SYNC.md").read_text(
         encoding="utf-8"
     )
-    assert "Local-only installations send no memory content" in sync_doc
-    assert "hosted service can read that submitted content" in sync_doc
-    assert "will never see, read, or access it" not in sync_doc
+    normalized_sync_doc = " ".join(sync_doc.split())
+    assert "Local-only installations send no memory content" in normalized_sync_doc
+    assert "Cloud Sync encrypts eligible shared-workspace changes end-to-end" in normalized_sync_doc
+    assert "Engraphis Cloud cannot read their contents" in normalized_sync_doc
+    assert "Engraphis Cloud must process that snapshot to produce results" in normalized_sync_doc
+    assert "hosted service can read that submitted content" not in normalized_sync_doc
+    assert "Engraphis does not claim end-to-end encryption" not in normalized_sync_doc
+    assert "will never see, read, or access it" not in normalized_sync_doc
+
+    hosting_doc = (Path(__file__).resolve().parents[1] / "docs" / "HOSTING_RAILWAY.md").read_text(
+        encoding="utf-8"
+    )
+    security_doc = (Path(__file__).resolve().parents[1] / "SECURITY.md").read_text(
+        encoding="utf-8"
+    )
+    for document in (hosting_doc, security_doc):
+        normalized = " ".join(document.split())
+        assert "Cloud Sync encrypts eligible shared-workspace changes end-to-end" in normalized
+        assert "Engraphis Cloud cannot read their contents" in normalized
+        assert "Managed compute is separate" in normalized
 
 
 # ── a paying customer must never be sold the plan they already own ────────────

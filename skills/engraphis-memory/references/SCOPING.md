@@ -1,10 +1,10 @@
-# Scoping — `workspace → repo → session → memory`
+# Scoping: `workspace → repo → session → memory`
 
 Scoping is the highest-leverage decision in Engraphis. Every write sets a scope; every read is
 filtered by one. Get it right and memories surface exactly when useful; get it wrong and they
 either leak everywhere or never come back.
 
-## Two orthogonal axes — don't conflate them
+## Two orthogonal axes: don't conflate them
 
 | Axis | Question it answers | Values | Set by |
 |---|---|---|---|
@@ -18,30 +18,30 @@ A convention is `mtype="semantic"` and probably `scope="repo"`. A user's editor 
 ## The hierarchy
 
 ```
-workspace            org or product        ("acme")           — always required on a write
-  └─ repo            a repository          ("backend")        — omit only for workspace-wide facts
-       └─ session    one unit of work      (session_id)       — from engraphis_start_session
-            └─ memory                                          — the fact itself
+workspace            org or product        ("acme")          : always required on a write
+  └─ repo            a repository          ("backend")       : omit only for workspace-wide facts
+       └─ session    one unit of work      (session_id)      : from engraphis_start_session
+            └─ memory                                         : the fact itself
 ```
 
 Names are **stable identifiers**, not prose. Reuse the exact same `workspace`/`repo` strings every
-time — recall filters match on them literally. Pick the repository's canonical name for `repo`
+time: recall filters match on them literally. Pick the repository's canonical name for `repo`
 (what you'd `git clone`), and a durable org/product name for `workspace`.
 
 ## What each scope means
 
-- **`session`** — visible only within one session. Transient working state ("currently editing the
+- **`session`**: visible only within one session. Transient working state ("currently editing the
   auth refactor on branch X"). Ends with the session.
-- **`repo`** — the default, and the right answer most of the time. Facts true for one repository:
+- **`repo`**: the default, and the right answer most of the time. Facts true for one repository:
   conventions, decisions, bug fixes. Requires a `repo`.
-- **`workspace`** — true across every repo in the org/product: shared standards, cross-repo
+- **`workspace`**: true across every repo in the org/product: shared standards, cross-repo
   architecture, team norms. Set `repo=None`.
-- **`user`** — follows the human across everything: their preferences and working style, regardless
+- **`user`**: follows the human across everything: their preferences and working style, regardless
   of workspace or repo.
 
 ## Choose the narrowest scope that stays reusable
 
-Ask: *where would I want this to resurface?* Then scope there — no wider.
+Ask: *where would I want this to resurface?* Then scope there, no wider.
 
 - A fix for a quirk in `backend` only → `scope="repo"`.
 - "The whole org uses trunk-based dev" → `scope="workspace"`.
@@ -50,7 +50,7 @@ Ask: *where would I want this to resurface?* Then scope there — no wider.
 
 Over-scoping (everything `workspace`) pollutes recall in unrelated repos. Under-scoping (everything
 `session`) means nothing survives the task. When unsure between `repo` and `workspace`, start at
-`repo` — promoting later is cheap; retracting a leaked fact is not.
+`repo`. Promoting later is cheap; retracting a leaked fact is not.
 
 ## Sessions and handoff
 
@@ -60,7 +60,7 @@ A session groups a task's memories and enables resume:
    `bootstrap` carrying the previous same-user/agent session's `summary` + `open_threads` for this
    repo.
 2. Pass `session_id` to `engraphis_remember` / `engraphis_record_event` during the task.
-3. `engraphis_end_session(session_id, summary, outcome, open_threads)` — `open_threads` are the
+3. `engraphis_end_session(session_id, summary, outcome, open_threads)`: `open_threads` are the
    unresolved items; they auto-surface for the next same-user/agent session in this repo.
 
 Starting is idempotent per exact `(workspace, repo, authenticated user, agent, goal)` identity.
@@ -86,7 +86,7 @@ memory with `engraphis_promote(memory_id, target_scope, workspace, repo?, reason
 
 Promotion must be strictly wider. Engraphis writes/deduplicates the wider record first, then
 bi-temporally closes the narrow source and links them with `promotes`; pinning, sensitivity,
-provenance, and learned stability are inherited. Automatic promotion is not assumed — promote
+provenance, and learned stability are inherited. Automatic promotion is not assumed: promote
 deliberately when evidence shows the learning applies more broadly.
 
 Promotion to `user` is not yet supported: current records remain workspace-bound, so calling it

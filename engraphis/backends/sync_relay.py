@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import hmac
 import ipaddress
 import json
 import math
@@ -45,6 +46,14 @@ MAX_PULL_FAILURE_CHARS = 200
 FATAL_PULL_STATUSES = frozenset({401, 402, 403, 429})
 MAX_SYNC_TOKEN_BYTES = 8192
 MAX_SYNC_POLICY_BYTES = 64
+SYNC_E2EE_PROTOCOL = "v1"
+# Wire framing is intentionally binary.  The relay stays a blind byte store and can never
+# mistake an encrypted bundle for its old JSON payload format.
+SYNC_E2EE_MAGIC = b"engraphis-sync-e2ee-v1\x00"
+SYNC_E2EE_KEY_BYTES = 32
+SYNC_E2EE_NONCE_BYTES = 12
+SYNC_E2EE_TAG_BYTES = 16
+SYNC_E2EE_KEY_ENV = "ENGRAPHIS_SYNC_E2EE_KEY"
 
 
 class RelayError(RuntimeError):
@@ -61,6 +70,48 @@ class RelayUnreachable(RelayError):
     Distinct from a per-bundle failure: if the host is unreachable for one bundle it is
     unreachable for all of them, so ``pull`` aborts the round instead of isolating it.
     """
+
+
+def decode_sync_e2ee_key(value: object) -> bytes:
+    """Decode the user-held Cloud Sync key without ever accepting a weak variant.
+
+    It is deliberately a URL-safe, unpadded base64 value for exactly 32 random bytes.
+    The Cloud service never receives this value: operators provision the same value to
+    each authorized device through their own trusted channel.
+    """
+    raw = str(value or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9_-]{43}", raw) is None:
+        raise RelayError(
+            "Cloud Sync needs a 32-byte end-to-end encryption key in "
+            + SYNC_E2EE_KEY_ENV,
+            status=409,
+        )
+    try:
+        key = base64.b64decode(raw + "=", altchars=b"-_", validate=True)
+    except (ValueError, binascii.Error):
+        raise RelayError("Cloud Sync end-to-end encryption key is malformed", status=409) from None
+    if len(key) != SYNC_E2EE_KEY_BYTES:
+        raise RelayError("Cloud Sync end-to-end encryption key is malformed", status=409)
+    return key
+
+
+def configured_sync_e2ee_key(value: object = None) -> bytes:
+    """Return an explicit key or fail closed before a Cloud upload can begin."""
+    configured = os.environ.get(SYNC_E2EE_KEY_ENV) if value is None else value
+    return decode_sync_e2ee_key(configured)
+
+
+def _new_e2ee_cipher(key: bytes):
+    """Construct the optional cryptography backend lazily, preserving a NumPy-only core."""
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+        from cryptography.exceptions import InvalidTag
+    except ImportError:
+        raise RelayError(
+            "Cloud Sync encryption requires the cryptography package (Python 3.10+)",
+            status=409,
+        ) from None
+    return ChaCha20Poly1305(key), InvalidTag
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -306,6 +357,83 @@ def _safe_bundle_name(name: object) -> str:
     ):
         return ""
     return value
+
+
+class EncryptedRelayTransport:
+    """Client-side AEAD wrapper for the managed Cloud Sync byte relay.
+
+    The wrapped relay receives only an opaque deterministic bundle name and a framed
+    ChaCha20-Poly1305 ciphertext.  The key stays on authorized devices; authentication
+    data binds each ciphertext to both its Cloud workspace and stored name, so moving,
+    renaming, modifying, or downgrading a bundle fails closed before sync parses it.
+    """
+
+    def __init__(self, relay, key: bytes) -> None:
+        workspace_id = str(getattr(relay, "workspace_id", "") or "")
+        if not workspace_id:
+            raise ValueError("encrypted relay transport requires a workspace-bound relay")
+        if not isinstance(key, (bytes, bytearray)) or len(key) != SYNC_E2EE_KEY_BYTES:
+            raise ValueError("Cloud Sync encryption key must contain exactly 32 bytes")
+        self.relay = relay
+        self.workspace_id = workspace_id
+        self._key = bytes(key)
+        self._cipher, self._invalid_tag = _new_e2ee_cipher(self._key)
+
+    def _opaque_name(self, name: object) -> str:
+        safe = _safe_bundle_name(name)
+        if not safe:
+            raise RelayError("relay bundle name is invalid")
+        digest = hmac.new(
+            self._key,
+            b"engraphis-cloud-sync-e2ee-name-v1\x00"
+            + self.workspace_id.encode("utf-8")
+            + b"\x00"
+            + safe.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return "e2ee-" + digest + ".json"
+
+    def _aad(self, stored_name: str) -> bytes:
+        return (
+            b"engraphis-cloud-sync-e2ee-v1\x00"
+            + self.workspace_id.encode("utf-8")
+            + b"\x00"
+            + stored_name.encode("ascii")
+        )
+
+    def push(self, name: str, data: bytes) -> None:
+        if not isinstance(data, (bytes, bytearray)):
+            raise RelayError("relay bundle data must be bytes")
+        # The relay cap applies to ciphertext too.  Refuse before allocating a large
+        # encrypted copy rather than relying on the wrapped transport to reject it later.
+        overhead = len(SYNC_E2EE_MAGIC) + SYNC_E2EE_NONCE_BYTES + SYNC_E2EE_TAG_BYTES
+        if len(data) > MAX_RELAY_BUNDLE_BYTES - overhead:
+            raise RelayError("relay bundle exceeded the encrypted upload safety limit")
+        stored_name = self._opaque_name(name)
+        nonce = os.urandom(SYNC_E2EE_NONCE_BYTES)
+        ciphertext = self._cipher.encrypt(nonce, bytes(data), self._aad(stored_name))
+        self.relay.push(stored_name, SYNC_E2EE_MAGIC + nonce + ciphertext)
+
+    def pull(self) -> Iterable[Tuple[str, bytes]]:
+        for name, data in self.relay.pull():
+            safe = _safe_bundle_name(name)
+            if not safe or not isinstance(data, (bytes, bytearray)):
+                raise RelayError("relay returned an invalid encrypted bundle")
+            raw = bytes(data)
+            if not raw.startswith(SYNC_E2EE_MAGIC):
+                raise RelayError("relay bundle requires end-to-end encryption")
+            payload = raw[len(SYNC_E2EE_MAGIC):]
+            if len(payload) < SYNC_E2EE_NONCE_BYTES + SYNC_E2EE_TAG_BYTES:
+                raise RelayError("bundle could not be authenticated")
+            nonce, ciphertext = payload[:SYNC_E2EE_NONCE_BYTES], payload[SYNC_E2EE_NONCE_BYTES:]
+            try:
+                plaintext = self._cipher.decrypt(nonce, ciphertext, self._aad(safe))
+            except self._invalid_tag:
+                raise RelayError("bundle could not be authenticated") from None
+            yield safe, plaintext
+
+    def list_names(self) -> List[str]:
+        return self.relay.list_names()
 
 
 class RelayTransport:
