@@ -17,10 +17,21 @@ Engraphis turns local project knowledge into scoped, time-aware memory; retrieve
 that supports the current question; and returns a bounded, attributable context packet.
 
 <p align="center">
+  <img src="docs/images/knowledge-graph.png" alt="Engraphis Knowledge Graph tab: force-directed entity-relation network" width="100%">
+  <br>
+  <sup>Knowledge Graph · run <code>engraphis-dashboard</code> to see it live</sup>
+</p>
+
+<p align="center">
   <img src="docs/images/engraphis-benefit-flow.png" alt="Diagram: project history becomes scoped and temporal Engraphis memory, hybrid recall, then bounded cited context for an agent" width="100%">
   <br>
   <sup>Store durable project knowledge · retrieve supporting evidence · give the agent only what it needs</sup>
 </p>
+
+The flow is the essential path. See [measured context savings](#measured-quality-and-token-efficiency)
+for reproducible fixture-level evidence of less returned content at the same tested retrieval
+scores, without billing or latency claims. The sections below cover the dashboard, code graph,
+local installation, governance controls, and hosted services in detail.
 
 | Agent need | What Engraphis changes |
 |---|---|
@@ -38,7 +49,7 @@ contracts: retrieving focused evidence, returning an answer only with support, a
 abstaining when no support exists.
 
 <p align="center">
-  <img src="docs/images/evidence-backed-agent-examples.png" alt="Three evidence-backed examples: focused context holds Recall at 5 while reducing retrieved tokens, answerable questions return supported evidence, and off-topic questions abstain" width="100%">
+  <img src="docs/images/evidence-backed-agent-examples.png" alt="Three evidence-backed examples: focused context keeps Recall at 5 while reducing returned content, answerable questions return cited support, and unsupported questions explicitly abstain" width="100%">
   <br>
   <sup>Each card names its deterministic offline fixture and test scope. The examples are illustrative; they are not customer data or external benchmark results.</sup>
 </p>
@@ -46,21 +57,6 @@ abstaining when no support exists.
 Run `python -m eval.chunking_eval` and `python -m eval.grounded` to reproduce the behavior;
 the former measures evidence retrieval and context size, while the latter measures the
 answer-versus-abstain decision.
-
-The diagram is the essential path. See [measured context savings](#measured-quality-and-token-efficiency)
-for reproducible fixture-level evidence of less returned content at the same tested retrieval
-scores, without billing or latency claims. The sections below cover the dashboard, code graph,
-local installation, governance controls, and hosted services in detail.
-
-<br>
-
-<p align="center">
-  <img src="docs/images/knowledge-graph.png" alt="Engraphis Knowledge Graph tab: force-directed entity-relation network" width="100%">
-  <br>
-  <sup>Knowledge Graph · run <code>engraphis-dashboard</code> to see it live</sup>
-</p>
-
-<br>
 
 ---
 
