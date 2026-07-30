@@ -33,8 +33,9 @@ def test_entity_clustering_uses_connected_components_not_first_link_assignment()
     ]
 
     class IncidenceStore:
-        def list_memory_entities(self, _flt):
+        def list_memory_entities(self, _flt, *, memory_ids=None):
             # A bridges X and Y. A first-link implementation splits C away.
+            assert memory_ids == ["mem_a", "mem_b", "mem_c"]
             return [
                 {"memory_id": "mem_a", "entity_id": "ent_x"},
                 {"memory_id": "mem_a", "entity_id": "ent_y"},
@@ -78,6 +79,35 @@ def test_consolidate_is_idempotent():
     assert len(first["digests_created"]) == 1
     assert len(second["digests_created"]) == 0
     assert second["skipped_already_consolidated"] >= 1
+
+
+def test_subject_clustering_limits_entity_lookup_to_the_scanned_memories(monkeypatch):
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    scanned = eng.remember(
+        "The scanned episodic memory has entity evidence.",
+        workspace_id=wid, mtype=MemoryType.EPISODIC, resolve_conflicts=False,
+    )
+    eng.remember(
+        "An unrelated episodic memory also has entity evidence.",
+        workspace_id=wid, mtype=MemoryType.EPISODIC, resolve_conflicts=False,
+    )
+    calls = []
+    original = eng.store.list_memory_entities
+
+    def limited_lookup(flt, *, entity_ids=None, memory_ids=None, limit=None):
+        calls.append(memory_ids)
+        return original(
+            flt, entity_ids=entity_ids, memory_ids=memory_ids, limit=limit,
+        )
+
+    monkeypatch.setattr(eng.store, "list_memory_entities", limited_lookup)
+    _cluster_by_subject(
+        [eng.store.get_memory(scanned)], threshold=0.5, store=eng.store,
+        flt=SearchFilter(workspace_id=wid),
+    )
+
+    assert calls == [[scanned]]
 
 
 def test_consolidate_processes_new_members_of_an_existing_cluster():

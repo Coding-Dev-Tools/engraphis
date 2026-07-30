@@ -648,6 +648,31 @@ def test_memory_entity_incidence_is_scoped_and_temporal(store):
             for row in rows] == [(mid, entity_id, "text_mention")]
 
 
+def test_memory_entity_lookup_chunks_large_memory_id_filters(store, monkeypatch):
+    from engraphis.core import store as store_mod
+
+    wid = store.get_or_create_workspace("w")
+    entity_id = store.upsert_entity(Node(
+        id="", name="Alice", ntype="person", workspace_id=wid,
+    ))
+    memory_ids = [
+        store.add_memory(MemoryRecord(id="", content=f"Memory {index}", workspace_id=wid))
+        for index in range(5)
+    ]
+    for memory_id in memory_ids:
+        store.link_memory_entity(
+            memory_id=memory_id, entity_id=entity_id, workspace_id=wid, repo_id=None,
+            source_kind="test", confidence=1.0,
+        )
+    monkeypatch.setattr(store_mod, "IN_CLAUSE_CHUNK", 2)
+
+    rows = store.list_memory_entities(
+        SearchFilter(workspace_id=wid), memory_ids=memory_ids,
+    )
+
+    assert {row["memory_id"] for row in rows} == set(memory_ids)
+
+
 def test_memory_entity_incidence_keeps_valid_and_known_coordinates_paired(store):
     wid = store.get_or_create_workspace("w")
     rid = store.get_or_create_repo(wid, "r")

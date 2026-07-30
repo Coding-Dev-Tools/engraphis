@@ -71,7 +71,6 @@ def _complete_canonical_report(dataset, config):
             "token_counter": tokenizer_identity,
         },
     )
-    record["question_sha256"] = "a" * 64
     record["context_token_method"] = "pinned_reader_content_tokenizer"
     record["context_tokenizer_identity"] = tokenizer_identity
     rank_metrics = {
@@ -261,7 +260,7 @@ def test_default_canonical_profile_is_pinned_and_rejects_mutable_revisions(tmp_p
     assert any("reader.revision" in error and "immutable" in error for error in errors)
 
 
-def test_canonical_validator_rejects_unpinned_commit_raw_queries_and_unlabeled_measurements(tmp_path):
+def test_canonical_validator_rejects_unpinned_commit_private_prompts_and_unlabeled_measurements(tmp_path):
     dataset = tmp_path / "fixture.jsonl"
     dataset.write_text('{"id":"one"}\n', encoding="utf-8")
     config = canonical_benchmark_config(
@@ -270,6 +269,7 @@ def test_canonical_validator_rejects_unpinned_commit_raw_queries_and_unlabeled_m
     report = _complete_canonical_report(dataset, config)
     report["system"]["git_commit"] = "not-a-commit"
     report["records"][0]["q"] = "private source question"
+    report["records"][0]["question_sha256"] = "a" * 64
     report["records"][0].pop("context_token_method")
     report["metrics"].pop("recall_at_10")
 
@@ -277,6 +277,7 @@ def test_canonical_validator_rejects_unpinned_commit_raw_queries_and_unlabeled_m
 
     assert any("git_commit" in error for error in errors)
     assert "canonical records must not contain raw query text" in errors
+    assert "canonical records must not contain question-derived hashes" in errors
     assert any("context_token_method" in error for error in errors)
     assert any("metrics.recall_at_10" in error for error in errors)
 

@@ -289,7 +289,10 @@ def _cluster_by_subject(
                 left_root, right_root = right_root, left_root
             parent[right_root] = left_root
 
-        for link in store.list_memory_entities(flt):
+        # Only the bounded consolidation scan can participate in these clusters.
+        # Restrict the database query too, rather than materializing all workspace
+        # incidence rows and discarding the unrelated majority in Python.
+        for link in store.list_memory_entities(flt, memory_ids=list(by_id)):
             memory = by_id.get(link.get("memory_id"))
             entity_id = str(link.get("entity_id") or "")
             if memory is None or not entity_id:

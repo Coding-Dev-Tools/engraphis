@@ -150,7 +150,7 @@ def test_canonical_harness_requires_pinned_profile_and_complete_artifact(monkeyp
     assert all(len(row["records"]) == len(report["records"]) for row in curve["rows"])
     assert len(report["models"]["embedder"]["sha256"]) == 64
     assert "q" not in report["records"][0]
-    assert len(report["records"][0]["question_sha256"]) == 64
+    assert "question_sha256" not in report["records"][0]
     assert (
         report["records"][0]["context_token_method"]
         == "pinned_reader_content_tokenizer"

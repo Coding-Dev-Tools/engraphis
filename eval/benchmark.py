@@ -364,8 +364,8 @@ def _validate_canonical_measurement_contract(
             continue
         if "q" in record:
             errors.append("canonical records must not contain raw query text")
-        query_hash = record.get("question_sha256")
-        _sha256_error(query_hash, "canonical record.question_sha256", errors)
+        if "question_sha256" in record:
+            errors.append("canonical records must not contain question-derived hashes")
         latency = record.get("latency_ms")
         if not _is_finite_number(latency) or float(latency) < 0:
             errors.append("canonical records require non-negative latency_ms")

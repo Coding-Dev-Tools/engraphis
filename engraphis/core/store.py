@@ -2330,8 +2330,35 @@ class Store:
 
     def list_memory_entities(self, flt: Optional[SearchFilter] = None, *,
                              entity_ids: Optional[list[str]] = None,
+                             memory_ids: Optional[list[str]] = None,
                              limit: Optional[int] = None) -> list[dict]:
         """Return bounded scoped/temporal incidence rows for graph retrieval."""
+        # Consolidation scans up to 2,000 memories, while portable SQLite builds may
+        # allow only 999 bind variables. Partition ID filters before building the SQL
+        # predicate; each pair of chunks is disjoint, so merging preserves results.
+        entity_chunks = (
+            [entity_ids[start:start + IN_CLAUSE_CHUNK]
+             for start in range(0, len(entity_ids), IN_CLAUSE_CHUNK)]
+            if entity_ids is not None else [None]
+        )
+        memory_chunks = (
+            [memory_ids[start:start + IN_CLAUSE_CHUNK]
+             for start in range(0, len(memory_ids), IN_CLAUSE_CHUNK)]
+            if memory_ids is not None else [None]
+        )
+        if not entity_chunks or not memory_chunks:
+            return []
+        if len(entity_chunks) > 1 or len(memory_chunks) > 1:
+            rows = [
+                row
+                for entity_chunk in entity_chunks
+                for memory_chunk in memory_chunks
+                for row in self.list_memory_entities(
+                    flt, entity_ids=entity_chunk, memory_ids=memory_chunk,
+                )
+            ]
+            rows.sort(key=lambda row: (-float(row.get("confidence") or 0.0), row["id"]))
+            return rows if limit is None else rows[:max(0, int(limit))]
         valid_at, known_at = _temporal_anchors(flt)
         sql = (
             "SELECT me.* FROM memory_entities me "
@@ -2367,6 +2394,12 @@ class Store:
             marks = ",".join("?" for _ in entity_ids)
             sql += f" AND me.entity_id IN ({marks})"
             params.extend(entity_ids)
+        if memory_ids is not None:
+            if not memory_ids:
+                return []
+            marks = ",".join("?" for _ in memory_ids)
+            sql += f" AND me.memory_id IN ({marks})"
+            params.extend(memory_ids)
         sql += " ORDER BY me.confidence DESC, me.id"
         if limit is not None:
             sql += " LIMIT ?"

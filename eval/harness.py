@@ -640,11 +640,9 @@ def run(dataset: list[dict], *, k: int = 5, dim: int = 256,
                 usage=usage,
                 **depth_metrics,
             )
-            # Legacy terminal reports retain their query text for local
-            # debugging.  Public v2 artifacts receive only this irreversible
-            # fingerprint, preventing a report from exporting a private prompt
-            # merely because it records per-question measurements.
-            record["question_sha256"] = sha256_text(str(q["q"]))
+            # Public artifacts omit prompt-derived identifiers entirely.  An
+            # unsalted question hash still permits offline membership testing
+            # against a private or proprietary prompt corpus.
             record["context_token_method"] = context_token_method
             if context_tokenizer_identity is not None:
                 record["context_tokenizer_identity"] = context_tokenizer_identity
