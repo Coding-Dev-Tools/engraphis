@@ -61,6 +61,9 @@ PROFILE_SCAN_LIMIT = 5000
 TRANSIENT_TYPES = [MemoryType.WORKING, MemoryType.EPISODIC]
 # Types the optional local profile pass rolls up.
 DURABLE_TYPES = [MemoryType.EPISODIC, MemoryType.SEMANTIC]
+# Session memories are private to the active task.  A workspace/repo maintenance sweep has no
+# session write context, so it must neither distill nor archive them.
+MAINTENANCE_SCOPES = [Scope.REPO, Scope.WORKSPACE, Scope.USER]
 
 _DIGEST_SYSTEM_PROMPT = (
     "You consolidate recurring episodic agent memories into one durable semantic fact. "
@@ -123,13 +126,21 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
         raise ValueError("supersede_sources requires structured=True")
     store = engine.store
     now = time.time() if now is None else now
-    flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id)
+    flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id,
+                       scopes=MAINTENANCE_SCOPES)
 
     episodic = store.list_memories(
         _replace(flt, mtypes=[MemoryType.EPISODIC]), limit=DISTILL_SCAN_LIMIT)
-    clusters = _cluster_by_subject(
-        episodic, threshold=subject_jaccard, store=store, flt=flt,
-    )
+    # A digest inherits its owner from its first source.  Cluster only records that have
+    # the exact same owner, otherwise a workspace sweep could write one repo's digest with
+    # another repo's content (or mix scope visibility).
+    clusters = [
+        cluster
+        for owner_memories in _partition_by_visibility_owner(episodic)
+        for cluster in _cluster_by_subject(
+            owner_memories, threshold=subject_jaccard, store=store, flt=flt,
+        )
+    ]
 
     report: dict = {"workspace_id": workspace_id, "repo_id": repo_id, "dry_run": dry_run,
                     "clusters_found": 0, "digests_created": [], "archived": [],
@@ -247,6 +258,19 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
 
 
 # ── internals ─────────────────────────────────────────────────────────────────
+
+def _visibility_owner(memory: MemoryRecord) -> tuple[str, Optional[str], Optional[str]]:
+    """Exact visibility identity a derived memory is allowed to inherit."""
+    return (Scope(memory.scope).value, memory.repo_id, memory.session_id)
+
+
+def _partition_by_visibility_owner(memories: list[MemoryRecord]) -> list[list[MemoryRecord]]:
+    """Keep source sets from distinct scope/repo/session owners disjoint."""
+    partitions: dict[tuple[str, Optional[str], Optional[str]], list[MemoryRecord]] = {}
+    for memory in memories:
+        partitions.setdefault(_visibility_owner(memory), []).append(memory)
+    return list(partitions.values())
+
 
 def _cluster_by_subject(
     memories: list[MemoryRecord], *, threshold: float, store=None,
@@ -738,7 +762,8 @@ def consolidate_profiles(engine, *, workspace_id: str, repo_id: Optional[str] = 
     """
     store = engine.store
     now = time.time() if now is None else now
-    flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id)
+    flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id,
+                       scopes=MAINTENANCE_SCOPES)
     report: dict = {"workspace_id": workspace_id, "repo_id": repo_id, "dry_run": dry_run,
                     "entities_considered": 0, "profiles_created": [], "skipped_existing": 0}
 
@@ -752,26 +777,27 @@ def consolidate_profiles(engine, *, workspace_id: str, repo_id: Optional[str] = 
         if len(name) < PROFILE_MIN_NAME_LEN:
             continue
         pattern = _entity_pattern(name)
-        sources = [m for m in live if pattern.search(f"{m.title} {m.content}")]
-        if len(sources) < min_mentions:
-            continue
-        report["entities_considered"] += 1
-        if any(_in_profile(store, m.id) for m in sources):
-            report["skipped_existing"] += 1
-            continue
-        content = _build_profile_content(name, ent.ntype, sources, llm=llm)
-        t_before = sum(_mem_tokens(m) for m in sources)
-        t_after = estimate_tokens(content)
-        p_before += t_before
-        p_after += t_after
-        entry = {"entity": name, "etype": ent.ntype, "mentions": len(sources),
-                 **_compaction(t_before, t_after, len(sources))}
-        if dry_run:
-            entry["would_profile"] = [m.id for m in sources]
-        else:
-            entry["id"] = _write_profile(engine, name, ent.ntype, sources,
-                                         content=content, now=now)
-        report["profiles_created"].append(entry)
+        matching = [m for m in live if pattern.search(f"{m.title} {m.content}")]
+        for sources in _partition_by_visibility_owner(matching):
+            if len(sources) < min_mentions:
+                continue
+            report["entities_considered"] += 1
+            if any(_in_profile(store, m.id) for m in sources):
+                report["skipped_existing"] += 1
+                continue
+            content = _build_profile_content(name, ent.ntype, sources, llm=llm)
+            t_before = sum(_mem_tokens(m) for m in sources)
+            t_after = estimate_tokens(content)
+            p_before += t_before
+            p_after += t_after
+            entry = {"entity": name, "etype": ent.ntype, "mentions": len(sources),
+                     **_compaction(t_before, t_after, len(sources))}
+            if dry_run:
+                entry["would_profile"] = [m.id for m in sources]
+            else:
+                entry["id"] = _write_profile(engine, name, ent.ntype, sources,
+                                              content=content, now=now)
+            report["profiles_created"].append(entry)
 
     report["compaction"] = _compaction(p_before, p_after, len(report["profiles_created"]))
     return report

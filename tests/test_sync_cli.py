@@ -205,6 +205,23 @@ def test_cli_selects_folder(db_with_workspace, _capture_transport, tmp_path):
     assert rc == 0
     assert _capture_transport["kind"] == "folder"
     assert _capture_transport["kw"]["root"] == share
+    assert _capture_transport["kw"]["create"] is True
+
+
+def test_cli_folder_dry_run_does_not_create_missing_remote(db_with_workspace, tmp_path):
+    share = tmp_path / "missing-share"
+
+    rc = sync_main([
+        "--db", db_with_workspace,
+        "--workspace", "acme",
+        "--remote", str(share),
+        "--dry-run",
+    ])
+
+    assert rc == 0
+    assert not share.exists()
+    engine = MemoryEngine.create(db_with_workspace)
+    assert engine.store.get_sync_state("device_id") is None
 
 
 def test_cli_bare_relay_falls_back_to_config(db_with_workspace, _capture_transport, monkeypatch):

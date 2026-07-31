@@ -278,7 +278,7 @@ def test_sync_v2_preserves_closed_memory_link_history():
     for memory_id in ("mem_a", "mem_b"):
         source.add_memory(MemoryRecord(
             id=memory_id, content=memory_id, workspace_id=source_ws,
-            valid_from=1.0, ingested_at=1.0,
+            scope=Scope.WORKSPACE, valid_from=1.0, ingested_at=1.0,
         ))
     source.add_link(
         "mem_a", "mem_b", relation="related", layer="semantic", reason="old",
@@ -321,7 +321,7 @@ def test_sync_v2_converges_concurrent_live_link_intervals():
         for memory_id in ("mem_a", "mem_b"):
             store.add_memory(MemoryRecord(
                 id=memory_id, content=memory_id, workspace_id=workspace_id,
-                valid_from=1.0, ingested_at=1.0,
+                scope=Scope.WORKSPACE, valid_from=1.0, ingested_at=1.0,
             ))
         store.add_link(
             "mem_a", "mem_b", relation="related", layer="semantic", reason="peer",
@@ -911,6 +911,172 @@ def test_remote_bundle_cannot_overwrite_existing_row_across_session_boundary(
     assert existing.scope == local_scope
 
 
+def test_remote_bundle_rejects_global_scope_with_repo_pointer():
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    repo_b = store.get_or_create_repo(workspace, "repo-b")
+    bundle = {
+        "format": SYNC_FORMAT,
+        "version": 1,
+        "workspace_name": "w",
+        "repos": {"remote-a": "repo-a"},
+        "memories": [{
+            "id": "mem_malformed",
+            "content": "repo-a-only sentinel",
+            "scope": "workspace",
+            "repo_id": "remote-a",
+        }],
+        "mem_links": [],
+    }
+
+    report = SyncEngine(store).apply_bundle(bundle)
+
+    assert report["rejected"] == 1 and report["added"] == 0
+    assert store.get_memory("mem_malformed") is None
+    visible_in_repo_b = store.list_memories(SearchFilter(
+        workspace_id=workspace, repo_id=repo_b, include_ancestors=True,
+    ))
+    assert all(memory.id != "mem_malformed" for memory in visible_in_repo_b)
+
+
+def test_remote_bundle_rejects_repo_scope_without_repo_pointer():
+    store = Store(":memory:")
+    bundle = {
+        "format": SYNC_FORMAT,
+        "version": 1,
+        "workspace_name": "w",
+        "repos": {},
+        "memories": [{
+            "id": "mem_orphaned_repo",
+            "content": "repo fact with no owner",
+            "scope": "repo",
+        }],
+        "mem_links": [],
+    }
+
+    report = SyncEngine(store).apply_bundle(bundle)
+
+    assert report["rejected"] == 1 and report["added"] == 0
+    assert store.get_memory("mem_orphaned_repo") is None
+
+
+def test_remote_bundle_rejects_invalid_scope_change_on_existing_repo_memory():
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    repo_a = store.get_or_create_repo(workspace, "repo-a")
+    store.add_memory(MemoryRecord(
+        id="mem_existing_repo",
+        content="local repo fact",
+        workspace_id=workspace,
+        repo_id=repo_a,
+        scope=Scope.REPO,
+        last_access=1.0,
+    ))
+    bundle = {
+        "format": SYNC_FORMAT,
+        "version": 1,
+        "workspace_name": "w",
+        "repos": {"remote-a": "repo-a"},
+        "memories": [{
+            "id": "mem_existing_repo",
+            "content": "malformed global overwrite",
+            "scope": "workspace",
+            "repo_id": "remote-a",
+            "last_access": time.time() + 86_400,
+        }],
+        "mem_links": [],
+    }
+
+    report = SyncEngine(store).apply_bundle(bundle)
+
+    assert report["rejected"] == 1 and report["updated"] == 0
+    existing = store.get_memory("mem_existing_repo")
+    assert existing.content == "local repo fact"
+    assert existing.scope == Scope.REPO
+    assert existing.repo_id == repo_a
+
+
+@pytest.mark.parametrize(
+    ("local_scope", "incoming_scope", "include_remote_repo"),
+    [
+        (Scope.REPO, "workspace", False),
+        (Scope.WORKSPACE, "repo", True),
+    ],
+)
+def test_remote_bundle_cannot_change_existing_memory_visibility(
+        local_scope, incoming_scope, include_remote_repo):
+    """A valid incoming row must still not re-scope an existing local identity."""
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    repo_a = store.get_or_create_repo(workspace, "repo-a")
+    store.add_memory(MemoryRecord(
+        id="mem_scope_stable",
+        content="local visibility sentinel",
+        workspace_id=workspace,
+        repo_id=repo_a if local_scope == Scope.REPO else None,
+        scope=local_scope,
+        last_access=1.0,
+    ))
+    remote_repo_id = "remote-a" if include_remote_repo else None
+    memory = {
+        "id": "mem_scope_stable",
+        "content": "remote scope rewrite",
+        "scope": incoming_scope,
+        "last_access": time.time() + 86_400,
+    }
+    if remote_repo_id is not None:
+        memory["repo_id"] = remote_repo_id
+    bundle = {
+        "format": SYNC_FORMAT,
+        "version": 1,
+        "workspace_name": "w",
+        "repos": {"remote-a": "repo-a"} if include_remote_repo else {},
+        "memories": [memory],
+        "mem_links": [],
+    }
+
+    report = SyncEngine(store).apply_bundle(bundle)
+
+    assert report["rejected"] == 1 and report["updated"] == 0
+    existing = store.get_memory("mem_scope_stable")
+    assert existing.scope == local_scope
+    assert existing.repo_id == (repo_a if local_scope == Scope.REPO else None)
+
+
+def test_remote_bundle_cannot_choose_visibility_for_legacy_orphaned_memory():
+    store = Store(":memory:")
+    workspace = store.get_or_create_workspace("w")
+    store.add_memory(MemoryRecord(
+        id="mem_legacy_orphan",
+        content="legacy local value",
+        workspace_id=workspace,
+        repo_id=None,
+        scope=Scope.REPO,
+        last_access=1.0,
+    ))
+    bundle = {
+        "format": SYNC_FORMAT,
+        "version": 1,
+        "workspace_name": "w",
+        "repos": {},
+        "memories": [{
+            "id": "mem_legacy_orphan",
+            "content": "remote elevation attempt",
+            "scope": "workspace",
+            "last_access": time.time() + 86_400,
+        }],
+        "mem_links": [],
+    }
+
+    report = SyncEngine(store).apply_bundle(bundle)
+
+    assert report["rejected"] == 1 and report["updated"] == 0
+    existing = store.get_memory("mem_legacy_orphan")
+    assert existing.content == "legacy local value"
+    assert existing.scope == Scope.REPO
+    assert existing.repo_id is None
+
+
 def test_remote_bundle_cannot_overwrite_or_downgrade_local_secret():
     store = Store(":memory:")
     workspace = store.get_or_create_workspace("w")
@@ -1126,7 +1292,8 @@ def test_replaying_a_bundle_reports_all_unchanged(remote_content):
     wid = store.get_or_create_workspace("w")
     syncer = SyncEngine(store)
     store.add_memory(MemoryRecord(id="mem_a", content="local", workspace_id=wid,
-                                  last_access=100.0, ingested_at=90.0, valid_from=1.0))
+                                  scope=Scope.WORKSPACE, last_access=100.0,
+                                  ingested_at=90.0, valid_from=1.0))
     # valid_from is set explicitly here, exactly as export_bundle/record_to_dict emit it.
     # A bundle that OMITS it converges too, but only because apply_bundle inherits
     # store-defaulted fields from the existing row — see the dedicated test below.
@@ -1164,7 +1331,7 @@ def _valid_from_less_bundle(content):
     the content-hash tiebreak — the only place the omission can decide anything."""
     return {
         "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
-        "memories": [{"id": "mem_a", "content": content,
+        "memories": [{"id": "mem_a", "content": content, "scope": "workspace",
                       "last_access": 100.0, "ingested_at": 90.0}],
         "mem_links": [],
     }
@@ -1195,7 +1362,8 @@ def test_bundle_omitting_valid_from_never_rewrites_the_stored_default(content):
     wid = store.get_or_create_workspace("w")
     syncer = SyncEngine(store)
     store.add_memory(MemoryRecord(id="mem_a", content=content, workspace_id=wid,
-                                  last_access=100.0, ingested_at=90.0, valid_from=1000.0))
+                                  scope=Scope.WORKSPACE, last_access=100.0,
+                                  ingested_at=90.0, valid_from=1000.0))
     bundle = _valid_from_less_bundle(content)
 
     for _ in range(6):
@@ -1246,7 +1414,8 @@ def test_incoming_valid_from_still_wins_when_genuinely_supplied():
     wid = store.get_or_create_workspace("w")
     syncer = SyncEngine(store)
     store.add_memory(MemoryRecord(id="mem_a", content="local", workspace_id=wid,
-                                  last_access=100.0, ingested_at=90.0, valid_from=1.0))
+                                  scope=Scope.WORKSPACE, last_access=100.0,
+                                  ingested_at=90.0, valid_from=1.0))
     bundle = {
         "format": SYNC_FORMAT, "version": 1, "workspace_name": "w", "repos": {},
         "memories": [{"id": "mem_a", "content": "remote", "valid_from": 5000.0,

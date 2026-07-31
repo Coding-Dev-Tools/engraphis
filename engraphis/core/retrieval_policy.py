@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 
 RETRIEVAL_PROFILES = frozenset({"balanced", "auto", "lexical", "graph", "code"})
+CANDIDATE_DEPTH_MODES = frozenset({"fixed", "adaptive"})
 
 _CODE_RE = re.compile(
     r"(?:\w+[./\\])+\w+|::|->|\b(?:class|def|function|import|module)\b|"
@@ -90,3 +91,41 @@ class DeterministicRetrievalPolicy:
             raise ValueError(f"retrieval_profile must be one of: {choices}")
         selected = self.profile(query) if normalized == "auto" else normalized
         return profile_config(selected)
+
+    def candidate_depth(
+        self,
+        query: str,
+        *,
+        k: int,
+        ceiling: int,
+        profile: str,
+        mode: str,
+    ) -> tuple[int, str]:
+        """Return a deterministic bounded candidate depth and its explanation.
+
+        ``fixed`` preserves the historical depth exactly.  The explicit ``adaptive``
+        mode reduces routine lexical/balanced recalls but deliberately retains a
+        wider pool when the selected profile depends on graph traversal or code
+        bridges.  It is a per-arm cap, not a result-count change.
+        """
+        del query  # The selected profile already captures the stable query signals.
+        limit = max(1, int(ceiling))
+        requested_mode = str(mode or "fixed").strip().casefold()
+        if requested_mode not in CANDIDATE_DEPTH_MODES:
+            choices = ", ".join(sorted(CANDIDATE_DEPTH_MODES))
+            raise ValueError(f"candidate_depth must be one of: {choices}")
+        if requested_mode == "fixed":
+            return limit, "fixed requested depth"
+
+        # Lower bounds are intentionally tied to output k. The graph/code floors
+        # remain larger because their useful evidence may enter through a bridge
+        # that is not top-ranked by the first retrieval arm.
+        floors = {
+            "lexical": max(8, k * 2),
+            "balanced": max(12, k * 3),
+            "graph": max(30, k * 6),
+            "code": max(30, k * 6),
+        }
+        selected = str(profile or "balanced").strip().casefold()
+        depth = min(limit, floors.get(selected, max(12, k * 3)))
+        return depth, f"adaptive {selected} floor"

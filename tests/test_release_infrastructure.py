@@ -49,13 +49,16 @@ def test_published_image_and_railway_template_fail_safe_to_customer_mode():
         assert removed not in template["variables"]
 
 
-def test_compose_api_profile_requires_a_token_for_its_non_loopback_bind():
+def test_compose_api_profile_defers_token_gate_until_profile_startup():
     compose = _text("docker-compose.yml")
     api_profile = compose.split("  engraphis-api:\n", 1)[1].split("\nvolumes:", 1)[0]
     readme = _text("README.md")
+    launcher = _text("scripts/start_server.py")
 
     assert "ENGRAPHIS_HOST: 0.0.0.0" in api_profile
-    assert "ENGRAPHIS_API_TOKEN: ${ENGRAPHIS_API_TOKEN:?" in api_profile
+    assert "ENGRAPHIS_API_TOKEN: ${ENGRAPHIS_API_TOKEN:-}" in api_profile
+    assert 'not os.environ.get("ENGRAPHIS_API_TOKEN", "").strip()' in launcher
+    assert 'ap.error("non-loopback serving requires ENGRAPHIS_API_TOKEN")' in launcher
     assert "ENGRAPHIS_API_TOKEN='generate-a-strong-unique-value'" in readme
 
 
@@ -234,7 +237,7 @@ def test_primary_github_release_targets_repository_without_checkout():
 def test_public_capability_and_support_docs_match_the_shipped_tree():
     server = _text("engraphis/mcp_server.py")
     tools = re.findall(r'@mcp\.tool\(\s*name="(engraphis_[^"]+)"', server)
-    assert len(tools) == len(set(tools)) == 30
+    assert len(tools) == len(set(tools)) == 31
 
     readme = _text("README.md")
     architecture = _text("docs/ARCHITECTURE_V3.md")
@@ -245,8 +248,8 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
         assert "28 MCP tools" not in content
         assert "28-tool" not in content
         assert "(28 of them)" not in content
-    assert "30 MCP tools" in architecture
-    assert "(30 of them)" in skill
+    assert "31 MCP tools" in architecture
+    assert "(31 of them)" in skill
     assert "recall_context (compact)" in architecture
     assert "engraphis_recall_context" in readme
     assert "`engraphis_check_update`" in readme

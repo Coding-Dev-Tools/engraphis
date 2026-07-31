@@ -24,6 +24,21 @@ def test_inline_asset_parser_resumes_after_malformed_closing_tag():
     assert [asset.content for asset in scripts] == ["first()", "second()"]
 
 
+def test_inline_asset_parser_preserves_offsets_for_multiline_malformed_close():
+    html = (
+        "<script>first()</script\n data-error=\"yes\">\n"
+        "<script>second()</script>"
+    )
+
+    _styles, scripts = assets._inline_assets(html)
+
+    assert [asset.content for asset in scripts] == ["first()", "second()"]
+    assert [html[asset.start:asset.end] for asset in scripts] == [
+        '<script>first()</script\n data-error="yes">',
+        "<script>second()</script>",
+    ]
+
+
 def test_migrate_uses_parsed_asset_boundaries(tmp_path, monkeypatch):
     index = tmp_path / "index.html"
     css = tmp_path / "dashboard.css"
