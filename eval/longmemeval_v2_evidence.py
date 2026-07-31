@@ -171,6 +171,10 @@ def build_evidence_report(
     per_question = Path(per_question_path)
     if re.fullmatch(r"[0-9a-f]{40}", reader_revision) is None:
         raise ValueError("reader_revision must be an immutable lowercase 40-character commit")
+    if bool(evaluator_model) != bool(evaluator_revision):
+        raise ValueError("evaluator_model and evaluator_revision must be used together")
+    if evaluator_revision and re.fullmatch(r"[0-9a-f]{40}", evaluator_revision) is None:
+        raise ValueError("evaluator_revision must be an immutable lowercase 40-character commit")
     source_paths = [
         per_question,
         Path(haystack_path),

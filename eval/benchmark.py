@@ -256,7 +256,9 @@ def _redact_url(value: str) -> str:
     try:
         parsed = urlsplit(value)
     except ValueError:
-        return value
+        # An invalid authority can still contain credentials. Without a trustworthy parse,
+        # preserve neither the authority nor the rest of the URL in public evidence.
+        return "<redacted>"
     if not parsed.scheme or not parsed.netloc:
         return value
 
