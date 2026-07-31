@@ -20,6 +20,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
   analyzer compares full-history and Engraphis runs using identical tasks and success oracles.
 - Public benchmark evidence can carry source hashes, repository state, environment and model
   provenance, secret-redacted commands, content digests, and adjacent immutable SHA-256 files.
+- `MemoryEngine` and `MemoryService` now provide adaptive context routing: bypass retrieval when
+  supplied prompt history fits, use compact recall when support is strong, and widen to bounded
+  recent history when absolute retrieval support is weak.
+- `eval.productivity` runs full task attempts plus corrections and reports completion, errors,
+  corrections, agent turns, memory calls, latency, and total model-facing tokens.
 
 ### Changed
 

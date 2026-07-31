@@ -1839,6 +1839,163 @@ class MemoryService:
             )
         return out
 
+    def adaptive_context(
+        self,
+        query: str,
+        history: str,
+        *,
+        workspace: str,
+        repo: Optional[str] = None,
+        session_id: Optional[str] = None,
+        mtypes: Optional[list] = None,
+        as_of: Optional[float] = None,
+        valid_at: Optional[float] = None,
+        known_at: Optional[float] = None,
+        k: int = 8,
+        max_context_tokens: int = 4096,
+        retrieval_token_budget: Optional[int] = None,
+        confidence_floor: float = 0.25,
+        retrieval_profile: str = "balanced",
+        candidate_depth: str = "adaptive",
+        diagnostics: bool = False,
+    ) -> dict:
+        """Return prompt context without retrieving when supplied history fits.
+
+        This host-facing API receives the exact history the caller already owns.
+        It returns that history directly when it fits, compact recall when evidence
+        is strong, or a bounded recent-history fallback when support is weak.
+        Source bodies are not duplicated in routing telemetry.
+        """
+        clean_query = _clean_text(
+            query,
+            field="query",
+            max_chars=MAX_CONTENT_CHARS,
+        )
+        clean_history = _clean_text(
+            history,
+            field="history",
+            max_chars=MAX_CONTENT_CHARS,
+            required=False,
+        )
+        if isinstance(k, bool):
+            raise ValidationError("k must be an integer")
+        try:
+            k = int(k)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("k must be an integer") from exc
+        k = max(1, min(MAX_K, k))
+        if isinstance(max_context_tokens, bool):
+            raise ValidationError("max_context_tokens must be an integer")
+        try:
+            max_context_tokens = int(max_context_tokens)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("max_context_tokens must be an integer") from exc
+        if not 0 <= max_context_tokens <= MAX_TOKEN_BUDGET:
+            raise ValidationError(
+                f"max_context_tokens must be between 0 and {MAX_TOKEN_BUDGET}"
+            )
+        if retrieval_token_budget is not None:
+            if isinstance(retrieval_token_budget, bool):
+                raise ValidationError("retrieval_token_budget must be an integer")
+            try:
+                retrieval_token_budget = int(retrieval_token_budget)
+            except (TypeError, ValueError) as exc:
+                raise ValidationError("retrieval_token_budget must be an integer") from exc
+            if not 0 <= retrieval_token_budget <= max_context_tokens:
+                raise ValidationError(
+                    "retrieval_token_budget must be between 0 and max_context_tokens"
+                )
+        mts = [_enum(m, MemoryType, "mtype") for m in mtypes] if mtypes else None
+        as_of = _optional_timestamp(as_of, field="as_of")
+        valid_at = _optional_timestamp(valid_at, field="valid_at")
+        known_at = _optional_timestamp(known_at, field="known_at")
+        if as_of is not None and valid_at is not None and as_of != valid_at:
+            raise ValidationError("as_of and valid_at must match when both are supplied")
+        valid_at = valid_at if valid_at is not None else as_of
+        wid, rid = self._require_scope(workspace, repo)
+        sid = None
+        if session_id:
+            sid = _clean_text(session_id, field="session_id", max_chars=MAX_NAME_CHARS)
+            session = self.store.get_session(sid)
+            if session is None:
+                raise ValidationError(f"no session with id '{sid}'")
+            if session["workspace_id"] != wid or (
+                rid is not None and session.get("repo_id") != rid
+            ):
+                raise ValidationError("session_id does not belong to that workspace/repo")
+            self._authorize_session(session)
+            rid = rid or session.get("repo_id")
+        result = self.engine.adaptive_context(
+            clean_query,
+            clean_history,
+            workspace_id=wid,
+            repo_id=rid,
+            session_id=sid,
+            mtypes=mts,
+            as_of=as_of,
+            valid_at=valid_at,
+            known_at=known_at,
+            k=k,
+            max_context_tokens=max_context_tokens,
+            retrieval_token_budget=retrieval_token_budget,
+            confidence_floor=confidence_floor,
+            retrieval_profile=retrieval_profile,
+            candidate_depth=candidate_depth,
+            diagnostics=diagnostics,
+            reinforce=False,
+        )
+        sources = []
+        if result.mode == "retrieval" and result.recall is not None:
+            packed_ids = {chunk.id for chunk in result.recall.packed_chunks}
+            sources = [
+                {
+                    "id": chunk.get("id"),
+                    "title": chunk.get("title"),
+                    "scope": chunk.get("scope"),
+                    "mtype": chunk.get("mtype"),
+                }
+                for chunk in result.recall.chunks
+                if chunk.get("id") in packed_ids
+            ]
+        recall_usage = result.recall.usage if result.recall is not None else None
+        source_tokens = result.history_tokens
+        context_tokens = result.context_tokens
+        usage = {
+            "budget_tokens": result.max_context_tokens,
+            "context_tokens": context_tokens,
+            "source_tokens": source_tokens,
+            "saved_tokens": max(0, source_tokens - context_tokens),
+            "savings_ratio": (
+                max(0, source_tokens - context_tokens) / source_tokens
+                if source_tokens else 0.0
+            ),
+            "packed_count": len(result.recall.packed_chunks) if result.recall else 0,
+            "omitted_count": int(getattr(recall_usage, "omitted_count", 0) or 0),
+            "token_counter": result.token_counter,
+        }
+        out = {
+            "query": clean_query,
+            "context": result.context,
+            "decision": result.to_dict(),
+            "sources": sources,
+        }
+        out["receipt"] = self.store.record_receipt(
+            "adaptive_context", workspace_id=wid, repo_id=rid or "", actor="agent",
+            target_count=len(sources), status="ok",
+            metadata={
+                "adaptive_mode": result.mode,
+                "k": k,
+                "result_count": len(sources),
+                "retrieval_profile": retrieval_profile,
+                "candidate_depth": candidate_depth,
+                "historical": any(
+                    anchor is not None for anchor in (as_of, valid_at, known_at)
+                ),
+                "token_usage": usage,
+            },
+        )
+        return out
+
     def grounded_recall(self, query: str, *, workspace: Optional[str] = None,
                         repo: Optional[str] = None, session_id: Optional[str] = None,
                         mtypes: Optional[list] = None,

@@ -6,8 +6,9 @@ been written; when this and the code disagree, the code wins (CLAUDE.md).
 
 ## What we measure today (all offline, no API key)
 
-Engraphis's eval harness scores **retrieval**, not end-to-end QA. That distinction is deliberate
-and stated everywhere the numbers appear (`eval/external.py`).
+Most Engraphis evals score **retrieval**, not end-to-end QA. The separate productivity benchmark
+runs a complete offline agent attempt and correction loop, but it is not an official
+frontier-model QA score.
 
 - **Correctness gate**: `eval/harness.py` over `eval/datasets/sample.jsonl` and
   `codemem.jsonl` (conflict resolution) and `graph_multihop.jsonl` (multi-hop graph recall).
@@ -47,6 +48,13 @@ and stated everywhere the numbers appear (`eval/external.py`).
   complete source-token pass to indexing, and the query-count break-even point. The default is
   deterministic/offline; `--embed-model` enables a real retrieval model, while
   `--format locomo|longmemeval` reuses the established external loaders.
+- **Agent productivity**: `eval/productivity.py` compares full history, always-on retrieval, and
+  adaptive context through a complete answer-and-correction loop. It reports completed tasks,
+  first-attempt errors, abstentions, corrections, agent turns, memory calls, wall-clock latency,
+  and all question/context/output tokens. The bundled agent is deterministic, receives no gold
+  answer, and is identified in every report; inject a real agent callable for model-specific
+  results. Optional provider telemetry is reported separately from the deterministic token
+  counter and is not a provider billing estimate.
 
 The workload benchmark is also allowed to say “this workload is too small for a memory layer.”
 On the 44-memory / 26-question CodeMem regression fixture, every case already fits inside a
@@ -55,6 +63,12 @@ tokens at perfect evidence/answer-token quality, while Engraphis uses 1,375–1,
 plus a conservative 631-token indexing pass. That is an honest no-break-even boundary result:
 the benefit being measured begins when history is long or reused enough to outweigh retrieval
 framing and indexing.
+
+The adaptive policy removes that small-workload penalty. On the same 26 CodeMem tasks, every
+history fit the 512-token prompt allowance, so adaptive routing bypassed all 26 memory calls.
+It used **1,942** total agent-facing tokens versus **2,194** for always-on retrieval
+(**11.5% lower**) while both strategies completed **24/26** tasks with the bundled deterministic
+agent. This demonstrates the bypass behavior and token accounting, not general LLM intelligence.
 
 The complementary real-model LoCoMo workload diagnostic covers 10 conversations and 1,986
 questions with `all-MiniLM-L6-v2`, `k=10`, a 512-token reader budget, and conflict resolution
@@ -89,6 +103,8 @@ python -m eval.performance --dataset eval/datasets/codemem.jsonl --k 5 \
   --candidate-k 25 --candidate-depth adaptive --retrieval-profile auto --iterations 10
 python -m eval.context_economy --dataset eval/datasets/codemem.jsonl \
   --token-budget 512 --k 5
+python -m eval.productivity --dataset eval/datasets/codemem.jsonl \
+  --max-context-tokens 512 --retrieval-token-budget 256
 python -m eval.performance --dataset eval/datasets/codemem.jsonl --k 5 \
   --iterations 5 --filler-memories 1000
 # Canonical latency/resource protocol: requires >=1,000 queries and five processes.
@@ -103,7 +119,9 @@ python -m eval.context_economy --dataset locomo10.json --format locomo \
 
 ## What we do NOT yet claim
 
-- **No end-to-end QA accuracy.** Official LoCoMo / LongMemEval QA scores depend on an answering model and evaluator. Engraphis isolates retrieval and does not present that result as end-to-end answer accuracy.
+- **No official end-to-end LLM QA accuracy.** The deterministic productivity agent measures the
+  complete local control loop, not a frontier answering model. Official LoCoMo / LongMemEval QA
+  still requires a pinned answering model and evaluator.
 - **No hosted-service latency comparison.** The in-repo p50/p95/p99 benchmark covers the local
   reference pipeline and records its environment; unlike environments are not compared.
 - **No neutral third-party ranking.** We have not run an external eval platform.

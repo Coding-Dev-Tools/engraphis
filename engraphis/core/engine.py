@@ -29,6 +29,7 @@ from engraphis.backends.embedder_st import get_embedder
 from engraphis.backends.reranker import IdentityReranker, get_reranker
 from engraphis.backends.vector_sqlitevec import get_vector_index
 from engraphis.core import scoring
+from engraphis.core.adaptive_context import AdaptiveContextResult, fit_recent_history
 from engraphis.core.interfaces import (
     MemoryRecord,
     MemoryType,
@@ -37,6 +38,10 @@ from engraphis.core.interfaces import (
     SearchFilter,
 )
 from engraphis.core.recall import RecallEngine, RecallResult
+from engraphis.core.retrieval_policy import (
+    CANDIDATE_DEPTH_MODES,
+    RETRIEVAL_PROFILES,
+)
 from engraphis.core.resolve import RELATED_SIM_FLOOR, Resolution, ResolutionOp, resolve
 from engraphis.core.store import Store, memory_matches_filter, now_ts
 from engraphis.core.textutil import estimate_tokens, jaccard, tokenize
@@ -986,6 +991,202 @@ class MemoryEngine:
             token_budget=token_budget, retrieval_profile=retrieval_profile,
             candidate_depth=candidate_depth,
             diagnostics=diagnostics,
+        )
+
+    def adaptive_context(
+        self,
+        query: str,
+        history: str,
+        *,
+        workspace_id: Optional[str] = None,
+        repo_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        scopes: Optional[list] = None,
+        mtypes: Optional[list] = None,
+        as_of: Optional[float] = None,
+        valid_at: Optional[float] = None,
+        known_at: Optional[float] = None,
+        k: int = 8,
+        max_context_tokens: int = 4096,
+        retrieval_token_budget: Optional[int] = None,
+        confidence_floor: float = 0.25,
+        retrieval_profile: str = "balanced",
+        candidate_depth: str = "adaptive",
+        diagnostics: bool = False,
+        reinforce: bool = False,
+    ) -> AdaptiveContextResult:
+        """Choose raw history, compact recall, or a wider raw-history fallback.
+
+        The host supplies the exact history text it is considering for the next
+        model prompt.  If that text already fits ``max_context_tokens``, Engraphis
+        performs no embedding, search, or retrieval.  Otherwise it first attempts
+        a smaller packed recall.  Absolute query-to-source support (the same
+        calibrated signal used by grounded recall) decides whether to trust that
+        compact result; weak support widens back to the most recent raw history
+        that fits the overall budget.
+
+        This method never reinforces bypassed or weak retrievals.  Strong packed
+        evidence is reinforced only when the caller supplies an explicit use
+        signal through ``reinforce=True``.
+        """
+        from engraphis.core.grounded import support_scores
+
+        if isinstance(max_context_tokens, bool):
+            raise ValueError("max_context_tokens must be a non-negative integer")
+        try:
+            max_budget = int(max_context_tokens)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("max_context_tokens must be a non-negative integer") from exc
+        if max_budget < 0:
+            raise ValueError("max_context_tokens must be a non-negative integer")
+        try:
+            floor = float(confidence_floor)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("confidence_floor must be between 0 and 1") from exc
+        if not math.isfinite(floor) or not 0.0 <= floor <= 1.0:
+            raise ValueError("confidence_floor must be between 0 and 1")
+        if isinstance(k, bool):
+            raise ValueError("k must be a positive integer")
+        try:
+            k = int(k)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("k must be a positive integer") from exc
+        if k <= 0:
+            raise ValueError("k must be a positive integer")
+        retrieval_profile = str(retrieval_profile or "balanced").strip().casefold()
+        if retrieval_profile not in RETRIEVAL_PROFILES:
+            choices = ", ".join(sorted(RETRIEVAL_PROFILES))
+            raise ValueError(f"retrieval_profile must be one of: {choices}")
+        candidate_depth = str(candidate_depth or "adaptive").strip().casefold()
+        if candidate_depth not in CANDIDATE_DEPTH_MODES:
+            choices = ", ".join(sorted(CANDIDATE_DEPTH_MODES))
+            raise ValueError(f"candidate_depth must be one of: {choices}")
+
+        counter = getattr(self.recall_engine.context_packer, "count_tokens", None)
+        if not callable(counter):
+            raise ValueError("adaptive context requires a context packer token counter")
+        counter_name = str(
+            getattr(self.recall_engine.context_packer, "token_counter_identity", None)
+            or getattr(counter, "identity", None)
+            or getattr(counter, "__name__", None)
+            or type(counter).__name__
+        )
+        source_history = str(history or "")
+        history_tokens = int(counter(source_history))
+
+        if retrieval_token_budget is None:
+            retrieval_budget = min(max_budget, max(1, max_budget // 2)) if max_budget else 0
+        else:
+            if isinstance(retrieval_token_budget, bool):
+                raise ValueError(
+                    "retrieval_token_budget must be between 0 and max_context_tokens"
+                )
+            try:
+                retrieval_budget = int(retrieval_token_budget)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "retrieval_token_budget must be between 0 and max_context_tokens"
+                ) from exc
+            if not 0 <= retrieval_budget <= max_budget:
+                raise ValueError(
+                    "retrieval_token_budget must be between 0 and max_context_tokens"
+                )
+
+        if history_tokens <= max_budget:
+            return AdaptiveContextResult(
+                context=source_history,
+                mode="history_bypass",
+                reason="provided history already fits the prompt budget",
+                history_tokens=history_tokens,
+                context_tokens=history_tokens,
+                max_context_tokens=max_budget,
+                retrieval_budget_tokens=retrieval_budget,
+                token_counter=counter_name,
+            )
+
+        result = self.recall(
+            query,
+            workspace_id=workspace_id,
+            repo_id=repo_id,
+            session_id=session_id,
+            scopes=scopes,
+            mtypes=mtypes,
+            as_of=as_of,
+            valid_at=valid_at,
+            known_at=known_at,
+            k=k,
+            token_budget=retrieval_budget,
+            retrieval_profile=retrieval_profile,
+            candidate_depth=candidate_depth,
+            diagnostics=diagnostics,
+            reinforce=False,
+        )
+        # Confidence must describe evidence the agent will actually see, not a
+        # high-scoring candidate that the hard-budget packer omitted.
+        per_source_support = support_scores(
+            query,
+            [packed.excerpt for packed in result.packed_chunks],
+            self.embedder,
+        )
+        support = max(per_source_support, default=0.0)
+        if support < floor:
+            wider, truncated = fit_recent_history(
+                source_history,
+                token_budget=max_budget,
+                count_tokens=counter,
+            )
+            if wider:
+                return AdaptiveContextResult(
+                    context=wider,
+                    mode="history_fallback",
+                    reason="retrieval support was weak, so raw recent history was widened",
+                    history_tokens=history_tokens,
+                    context_tokens=int(counter(wider)),
+                    max_context_tokens=max_budget,
+                    retrieval_budget_tokens=retrieval_budget,
+                    retrieval_support=support,
+                    retrieved=True,
+                    widened=True,
+                    truncated_history=truncated,
+                    token_counter=counter_name,
+                    recall=result,
+                )
+            return AdaptiveContextResult(
+                context="",
+                mode="low_confidence_abstain",
+                reason="retrieval support was weak and no raw history fit the prompt budget",
+                history_tokens=history_tokens,
+                context_tokens=0,
+                max_context_tokens=max_budget,
+                retrieval_budget_tokens=retrieval_budget,
+                retrieval_support=support,
+                retrieved=True,
+                truncated_history=truncated,
+                token_counter=counter_name,
+                recall=result,
+            )
+
+        historical = any(
+            anchor is not None for anchor in (as_of, valid_at, known_at)
+        )
+        if reinforce and not historical:
+            for packed in result.packed_chunks:
+                self.store.reinforce(
+                    packed.id,
+                    boost=scoring.INTERACTION_BOOST["recall"],
+                )
+        return AdaptiveContextResult(
+            context=result.context,
+            mode="retrieval",
+            reason="history exceeded the prompt budget and retrieved evidence was strong",
+            history_tokens=history_tokens,
+            context_tokens=int(counter(result.context)),
+            max_context_tokens=max_budget,
+            retrieval_budget_tokens=retrieval_budget,
+            retrieval_support=support,
+            retrieved=True,
+            token_counter=counter_name,
+            recall=result,
         )
 
     def grounded_recall(self, query: str, *, workspace_id: Optional[str] = None,

@@ -149,7 +149,7 @@ def _related_term_count(query_tokens: set[str], content_tokens: set[str]) -> int
     return matched
 
 
-def _support_scores(query: str, contents: list[str], embedder) -> list[float]:
+def support_scores(query: str, contents: list[str], embedder) -> list[float]:
     """Absolute per-source support from semantic, lexical, and predicate agreement.
 
     Both arms are query-independent in scale — unlike the recall score, which is min-max
@@ -279,7 +279,7 @@ def build_grounded_answer(query: str, result: RecallResult, embedder, *,
             continue
         chunks.append({**raw, "content": packed.excerpt})
     contents = [str(c.get("content", "")) for c in chunks]
-    per = _support_scores(query, contents, embedder)
+    per = support_scores(query, contents, embedder)
     support = max(per) if per else 0.0
     count_answer_tokens = result.token_counter or RegexTokenCounter()
     budget_tokens = result.usage.budget_tokens if result.usage is not None else 0

@@ -210,6 +210,9 @@ _PUBLIC_RECEIPT_LABELS_BY_KEY = {
     "retrieval_profile": {"balanced", "auto", "lexical", "graph", "code"},
     "candidate_depth": {"fixed", "adaptive"},
     "response_mode": {"full", "compact"},
+    "adaptive_mode": {
+        "history_bypass", "retrieval", "history_fallback", "low_confidence_abstain",
+    },
 }
 
 
@@ -223,6 +226,7 @@ def _receipt_metadata(metadata: dict) -> dict:
         "entities_added", "relations_added",
         "retrieval_profile", "candidate_depth", "candidate_k_requested",
         "candidate_k_used", "response_mode", "historical", "token_usage",
+        "adaptive_mode",
     }
     def content_free_label(key: str, value: str) -> str:
         normalized = value.strip().casefold().replace(" ", "_")
@@ -283,11 +287,11 @@ _PUBLIC_RECEIPT_METADATA_KEYS = {
     "entities", "relations", "tables", "dry_run", "error_count",
     "entities_added", "relations_added", "retrieval_profile", "candidate_depth",
     "candidate_k_requested", "candidate_k_used", "response_mode", "historical",
-    "token_usage",
+    "token_usage", "adaptive_mode",
 }
 _PUBLIC_RECEIPT_OPERATIONS = {
     "remember", "recall", "promote", "link", "index_repo",
-    "graph_index", "grounded_recall", "consolidate", "sync",
+    "graph_index", "grounded_recall", "adaptive_context", "consolidate", "sync",
 }
 _PUBLIC_RECEIPT_STATUSES = {
     "ok", "add", "noop", "invalidate", "relate", "ingested",

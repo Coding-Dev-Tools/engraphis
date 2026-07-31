@@ -63,6 +63,7 @@ boundary.
 | Smallest returned memory that contains the reference evidence | Whole documents: **162.2** tokens → chunks: **42.4** tokens | **119.8 fewer tokens to evidence** (**73.9% lower**, about **3.8× smaller**) | The same 18 questions had a returned evidence-holding memory in both modes |
 | Serialized MCP recall response across 260 timed CodeMem recalls | Full result: **17,172** `engraphis.regex.v1` tokens → compact result: **7,663** tokens | **9,509 response tokens avoided** (**55.38% lower**) | Recall@5, hit@5, and answer-token recall all **1.000** |
 | Repeated-memory consolidation fixture | 12 related episodic memories: **230** tokens → one digest: **120** tokens | **110 tokens removed from the active digest** (**47.8% lower**) | Original memories remain available for provenance and audit |
+| Small histories across 26 CodeMem agent tasks | Always retrieve: **2,194** total agent-facing tokens and **26** memory calls → adaptive: **1,942** tokens and **0** memory calls | **252 tokens avoided** (**11.5% lower**) and all 26 unnecessary searches skipped | Both completed **24/26** tasks with the same deterministic offline task agent |
 | Packed prompt-context usage in the same CodeMem performance fixture | Hard budget: **1,500** tokens; observed mean: **87.73**; observed maximum: **106** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
 
 The compact MCP response avoids duplicating full memory bodies when the packed context and source
@@ -83,6 +84,7 @@ python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5
 python -m eval.grounded
 python -m eval.chunking_eval
 python -m eval.performance --dataset eval/datasets/codemem.jsonl --k 5 --iterations 10 --json
+python -m eval.productivity --dataset eval/datasets/codemem.jsonl
 ```
 
 These are small deterministic correctness and efficiency fixtures, not official LoCoMo /
@@ -337,6 +339,23 @@ print(hit["context"])
 ```
 
 The same `MemoryService` backs the dashboard and the MCP server.
+
+Agent hosts can avoid retrieval when their existing history already fits:
+
+```python
+decision = mem.adaptive_context(
+    "what should the agent do next?",
+    current_history,
+    workspace="acme",
+    repo="api",
+    max_context_tokens=8_192,
+    retrieval_token_budget=1_024,
+)
+prompt_context = decision["context"]
+```
+
+The decision is `history_bypass` when the history fits, `retrieval` when compact evidence is
+strong, and `history_fallback` when weak retrieval should widen back to recent raw history.
 
 For an agent prompt, prefer `engraphis_recall_context`: it returns one hard-budget packed
 `context` plus compact `sources`, deterministic `usage` accounting (`budget_tokens`, `context_tokens`,
