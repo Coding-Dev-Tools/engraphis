@@ -398,6 +398,20 @@ def test_command_provenance_redacts_assignment_header_and_url_credentials():
     ]
 
 
+def test_command_provenance_redacts_compound_credential_assignments():
+    assert redact_command([
+        "AWS_SECRET_ACCESS_KEY=do-not-publish",
+        "AWS_ACCESS_KEY_ID=also-private",
+        "HTTP_AUTHORIZATION=Bearer another-secret",
+        "--token-budget", "512",
+    ]) == [
+        "AWS_SECRET_ACCESS_KEY=<redacted>",
+        "AWS_ACCESS_KEY_ID=<redacted>",
+        "HTTP_AUTHORIZATION=<redacted>",
+        "--token-budget", "512",
+    ]
+
+
 def test_command_provenance_redacts_fragment_credentials_without_hiding_normal_options():
     assert redact_command([
         "--token-budget", "512", "--tokenizer-model", "reader-v1",
@@ -417,6 +431,14 @@ def test_command_provenance_redacts_embedded_and_signed_url_credentials():
         "DATASET_URL=https://example.test/data?access_token=%3Credacted%3E",
         "--dataset-url=https://example.test/data?X-Amz-Signature=%3Credacted%3E&sig=%3Credacted%3E",
         "https://example.test/data?signature=%3Credacted%3E",
+    ]
+
+
+def test_command_provenance_redacts_userinfo_when_a_url_port_is_malformed():
+    assert redact_command([
+        "https://alice:password@example.test:notaport/path?access_token=do-not-publish",
+    ]) == [
+        "https://<redacted>@example.test:notaport/path?access_token=%3Credacted%3E",
     ]
 
 
