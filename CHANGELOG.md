@@ -5,6 +5,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.2.5] - 2026-07-31
+
 ### Added
 
 - `engraphis_context_savings` aggregates validated, content-free recall receipts by workspace,
