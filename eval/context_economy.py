@@ -351,14 +351,14 @@ def run(
     }
 
 
-def _console_report(report: dict) -> dict:
+def _console_report(evaluation: dict) -> dict:
     """Return the aggregate-only report that the command-line interface may print.
 
     ``run`` intentionally retains per-question source tags for in-process evaluation.  Those
     identifiers can be private dataset content, so command-line output is restricted to the
     reproducible aggregate evidence rather than logging the detailed rows.
     """
-    benchmark = report["benchmark"]
+    benchmark = evaluation["benchmark"]
     return {
         "benchmark": {
             "name": benchmark["name"],
@@ -373,10 +373,10 @@ def _console_report(report: dict) -> dict:
             "dataset_format": benchmark["dataset_format"],
         },
         "workload": {
-            "cases": report["workload"]["cases"],
-            "queries": report["workload"]["queries"],
-            "scored_queries": report["workload"]["scored_queries"],
-            "one_time_indexing_tokens": report["workload"]["one_time_indexing_tokens"],
+            "cases": evaluation["workload"]["cases"],
+            "queries": evaluation["workload"]["queries"],
+            "scored_queries": evaluation["workload"]["scored_queries"],
+            "one_time_indexing_tokens": evaluation["workload"]["one_time_indexing_tokens"],
         },
         "methods": {
             name: {
@@ -386,9 +386,9 @@ def _console_report(report: dict) -> dict:
                 "mean_query_context_tokens": result["mean_query_context_tokens"],
                 "quality": result["quality"],
             }
-            for name, result in report["methods"].items()
+            for name, result in evaluation["methods"].items()
         },
-        "engraphis_vs_full_history": report["engraphis_vs_full_history"],
+        "engraphis_vs_full_history": evaluation["engraphis_vs_full_history"],
     }
 
 
@@ -422,17 +422,17 @@ def main(argv: Optional[list[str]] = None) -> None:
             if args.format == "harness"
             else LOADERS[args.format](args.dataset)
         )
-        report = run(
+        evaluation = run(
             dataset, k=args.k, token_budget=args.token_budget, dim=args.dim,
             embedder=embedder, resolve_conflicts=not args.no_resolve,
         )
-        report["benchmark"]["dataset_format"] = args.format
+        evaluation["benchmark"]["dataset_format"] = args.format
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         # Keep stdout machine-readable even for automation failures.  argparse
         # still owns malformed flag syntax, which is its conventional contract.
         print(json.dumps({"error": str(exc)}, sort_keys=True))
         raise SystemExit(2)
-    print(json.dumps(_console_report(report), sort_keys=True))
+    print(json.dumps(_console_report(evaluation), sort_keys=True))
 
 
 if __name__ == "__main__":
