@@ -2170,7 +2170,9 @@ def test_manual_drag_controller_detaches_with_the_graph() -> None:
     assert "el.removeEventListener('pointerdown', beginManualDrag, true);" in source
     assert "window.removeEventListener('pointermove', moveManualDrag, true);" in source
     assert "event.type !== 'pointercancel'" in source
-    assert "suppressNodeClick();\n          handleNodeClick(current.node);" in source
+    direct_click = source[source.index("} else if (event.type !== 'pointercancel') {"):]
+    direct_click = direct_click[:direct_click.index("      };", 1)]
+    assert direct_click.index("handleNodeClick(current.node);") < direct_click.index("suppressNodeClick();")
     teardown = source[source.index("api.destroy = () => {"):]
     assert "if (detachManualDrag) { detachManualDrag(); detachManualDrag = null; }" in teardown
 
