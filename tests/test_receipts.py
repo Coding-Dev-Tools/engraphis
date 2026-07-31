@@ -582,6 +582,39 @@ def test_context_savings_is_scoped_content_free_and_groups_token_counters():
     assert "PURPLE-FOX-177" not in json.dumps(poisoned_summary)
 
 
+def test_context_savings_excludes_receipts_with_reassigned_repo_ids():
+    store = Store(":memory:")
+    workspace_id = store.get_or_create_workspace("acme")
+    original_repo = store.get_or_create_repo(workspace_id, "api")
+    reassigned_repo = store.get_or_create_repo(workspace_id, "other")
+    receipt = store.record_receipt(
+        "recall",
+        workspace_id=workspace_id,
+        repo_id=original_repo,
+        metadata={"token_usage": {
+            "source_tokens": 100,
+            "context_tokens": 20,
+            "saved_tokens": 80,
+            "token_counter": "estimate_tokens",
+        }},
+    )
+
+    # The signed payload remains valid, but the relational repo column is not its scope.
+    store.conn.execute(
+        "UPDATE operation_receipts SET repo_id=? WHERE id=?",
+        (reassigned_repo, receipt["id"]),
+    )
+    store.conn.commit()
+
+    assert store.verify_receipts(workspace_id=workspace_id)["valid"] is True
+    summary = store.context_savings(workspace_id=workspace_id, repo_id=reassigned_repo)
+    assert summary["receipt_count"] == 1
+    assert summary["invalid_receipt_count"] == 1
+    assert summary["usage_receipt_count"] == 0
+    assert summary["savings_receipt_count"] == 0
+    assert summary["by_token_counter"] == []
+
+
 def test_service_records_and_exports_operation_receipts():
     service = MemoryService.create(":memory:")
     stored = service.remember(
