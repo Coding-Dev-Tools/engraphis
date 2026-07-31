@@ -49,6 +49,29 @@ def test_codeql_gate_reports_and_rejects_findings(tmp_path, capsys) -> None:
     assert "py/example at engraphis/example.py:12" in captured.err
 
 
+def test_codeql_gate_reports_path_problem_endpoints(tmp_path) -> None:
+    path = _write_sarif(
+        tmp_path,
+        [{
+            "ruleId": "py/example",
+            "message": {"text": "unsafe example"},
+            "locations": [],
+            "codeFlows": [{"threadFlows": [{"locations": [
+                {"location": {"physicalLocation": {
+                    "artifactLocation": {"uri": "source.py"}, "region": {"startLine": 4},
+                }}},
+                {"location": {"physicalLocation": {
+                    "artifactLocation": {"uri": "sink.py"}, "region": {"startLine": 9},
+                }}},
+            ]}]}],
+        }],
+    )
+
+    assert findings_in(path) == [
+        "py/example at <unknown>: unsafe example [flow: source.py:4 -> sink.py:9]"
+    ]
+
+
 def test_codeql_gate_rejects_baselined_and_source_suppressed_findings(tmp_path, capsys) -> None:
     _write_sarif(
         tmp_path,
