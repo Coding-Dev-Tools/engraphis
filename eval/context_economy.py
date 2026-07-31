@@ -368,7 +368,6 @@ def _console_report(evaluation: dict) -> dict:
             "token_budget": benchmark["token_budget"],
             "k": benchmark["k"],
             "resolve_conflicts": benchmark["resolve_conflicts"],
-            "non_billing_scope": benchmark["non_billing_scope"],
             "indexing_assumption": benchmark["indexing_assumption"],
             "dataset_format": benchmark["dataset_format"],
         },
