@@ -217,6 +217,17 @@ class DeterministicContextPacker:
         if summary and self._summary_is_useful(summary, full, query_terms):
             if self._count(summary) <= max_tokens:
                 return summary, summary != full, "summary"
+            # A summary can still be more evidence-dense than the source even
+            # when it does not fit in full.  Prefer a sentence-aligned subset
+            # only when it retains the same safeguards required for replacing
+            # the source at all: query evidence and every source qualifier.
+            summary_excerpt = self._sentence_excerpt(
+                summary, query_terms, max_tokens
+            )
+            if summary_excerpt and self._summary_is_useful(
+                summary_excerpt, full, query_terms
+            ):
+                return summary_excerpt, True, "summary_excerpt"
 
         if full and self._count(full) <= max_tokens:
             return full, False, (

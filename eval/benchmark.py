@@ -8,14 +8,18 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import math
 import platform
 import random
+import re
+import subprocess
 import sys
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Protocol, Sequence, Union
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from engraphis.core.textutil import estimate_tokens
 from eval import metrics as retrieval_metrics
@@ -73,7 +77,12 @@ class Tokenizer(Protocol):
 
 def canonical_json(value: Any) -> str:
     """Serialize config deterministically so its hash is portable."""
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    # JSON has no representation for NaN or infinities.  Rejecting them here
+    # keeps a checksummed artifact valid for strict JSON readers instead of
+    # silently emitting Python's non-standard ``NaN``/``Infinity`` literals.
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+    )
 
 
 def sha256_text(value: str) -> str:
@@ -86,6 +95,217 @@ def sha256_file(path: Union[str, Path]) -> str:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def source_digest(path: Union[str, Path]) -> dict[str, Union[str, int]]:
+    """Return content-only provenance for one benchmark input.
+
+    Paths deliberately reduce to their basename: public evidence needs to prove
+    the bytes used, not disclose an operator's directory layout.
+    """
+    resolved = Path(path)
+    return {
+        "name": resolved.name,
+        "sha256": sha256_file(resolved),
+        "bytes": resolved.stat().st_size,
+    }
+
+
+def git_provenance(cwd: Optional[Union[str, Path]] = None) -> dict[str, Union[str, bool]]:
+    """Capture commit and dirty state without exposing changed filenames."""
+    root = str(cwd or Path.cwd())
+    try:
+        commit = subprocess.check_output(
+            ["git", "-C", root, "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        status = subprocess.check_output(
+            ["git", "-C", root, "status", "--porcelain=v1"], text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return {"commit": "unknown", "dirty": True, "dirty_state_sha256": sha256_text("unavailable")}
+    return {
+        "commit": commit or "unknown",
+        "dirty": bool(status.strip()),
+        "dirty_state_sha256": sha256_text(status),
+    }
+
+
+def environment_provenance() -> dict[str, Any]:
+    """Return a compact, JSON-safe execution environment fingerprint."""
+    packages = {}
+    for distribution in ("engraphis", "numpy", "sentence-transformers", "transformers", "torch"):
+        try:
+            packages[distribution] = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+    return {
+        "python": sys.version.split()[0],
+        "implementation": platform.python_implementation(),
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "packages": packages,
+    }
+
+
+_PUBLIC_RECORD_FIELDS = frozenset({
+    "question_id", "category", "retrieved_ids", "supporting_ids", "context_tokens",
+    "latency_ms", "abstained", "excluded", "answerable", "grounded",
+    "grounded_support", "answer_token_recall", "context_token_method",
+    "context_tokenizer_identity", "qa_score", "qa_correct", "retrieval_excluded", "usage",
+})
+_PUBLIC_METRIC_PREFIXES = ("recall_at_", "hit_at_", "mrr_at_", "ndcg_at_")
+_PUBLIC_USAGE_FIELDS = frozenset({
+    "budget_tokens", "context_tokens", "source_tokens", "saved_tokens", "savings_ratio",
+    "packed_count", "omitted_count", "answer_tokens", "token_counter",
+    "memory_context_tokens", "memory_context_original_tokens", "reader_prompt_tokens",
+    "reader_completion_tokens", "adapter_reported_context_tokens",
+})
+_RAW_QUERY_FIELDS = ("q", "query", "question", "question_text")
+_RAW_ANSWER_FIELDS = (
+    "answer", "answer_gold", "answer_variants", "response", "response_raw",
+    "response_parsed_boxed", "output", "completion", "model_output", "assistant_response",
+)
+_RAW_CONTEXT_FIELDS = (
+    "context", "memory_context", "messages", "prompt_messages", "retrieved_context",
+)
+_SECRET_NAME_RE = re.compile(
+    r"(?:api[-_]?key|access[-_]?token|auth(?:orization)?|bearer|credential|"
+    r"password|passwd|secret|token|private[-_]?key)",
+    re.IGNORECASE,
+)
+_HEADER_OPTIONS = frozenset({"--header", "--headers"})
+_USERINFO_OPTIONS = frozenset({"-u", "--user", "--user-name", "--password", "-p"})
+
+
+def _is_secret_name(value: str) -> bool:
+    return bool(_SECRET_NAME_RE.search(value))
+
+
+def _public_exclusion(value: Any) -> Optional[dict[str, Any]]:
+    """Keep an exclusion's reason but never allow a free-form detail to leak content."""
+    if not isinstance(value, dict):
+        return None
+    public = {
+        key: deepcopy(value[key])
+        for key in ("question_id", "reason")
+        if key in value
+    }
+    detail = value.get("detail")
+    if detail == "":
+        public["detail"] = ""
+    elif detail is not None:
+        public["detail_sha256"] = sha256_text(canonical_json(detail))
+    return public
+
+
+def _public_usage(value: Any) -> Optional[dict[str, Any]]:
+    if not isinstance(value, dict):
+        return None
+    return {
+        key: deepcopy(item)
+        for key, item in value.items()
+        if key in _PUBLIC_USAGE_FIELDS
+    }
+
+
+def redact_public_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Project a private evaluation row onto the audited public evidence schema.
+
+    Public artifacts are evidence, not a lossless export. An allowlist prevents a new
+    adapter field from accidentally publishing prompts, contexts, model output, tool calls,
+    or other raw payloads before this boundary is reviewed.
+    """
+    public: dict[str, Any] = {}
+    groups = (
+        (_RAW_QUERY_FIELDS, "query_sha256"),
+        (_RAW_ANSWER_FIELDS, "answer_or_response_sha256"),
+        (_RAW_CONTEXT_FIELDS, "context_or_prompt_sha256"),
+    )
+    for fields, digest_field in groups:
+        values = [
+            {"field": field, "value": record[field]}
+            for field in fields
+            if field in record
+        ]
+        if values:
+            public[digest_field] = sha256_text(canonical_json(values))
+    for key, value in record.items():
+        if key == "excluded":
+            redacted = _public_exclusion(value)
+            if redacted is not None:
+                public[key] = redacted
+        elif key == "usage":
+            redacted = _public_usage(value)
+            if redacted is not None:
+                public[key] = redacted
+        elif key in _PUBLIC_RECORD_FIELDS or key.startswith(_PUBLIC_METRIC_PREFIXES):
+            public[key] = deepcopy(value)
+    return public
+
+
+def _redact_url(value: str) -> str:
+    """Remove URL userinfo and credential-like query values without hiding the endpoint."""
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return value
+    if not parsed.scheme or not parsed.netloc:
+        return value
+    host = parsed.hostname or ""
+    try:
+        port = parsed.port
+    except ValueError:
+        return value
+    if port is not None:
+        host = f"{host}:{parsed.port}"
+    netloc = f"<redacted>@{host}" if parsed.username is not None else parsed.netloc
+    query = urlencode([
+        (key, "<redacted>" if _is_secret_name(key) else item)
+        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+    ])
+    return urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
+
+
+def redact_command(command: Sequence[str]) -> list[str]:
+    """Preserve a reproducible command shape without retaining credentials or raw headers."""
+    public: list[str] = []
+    redact_next = False
+    for item in command:
+        value = str(item)
+        lowered = value.casefold()
+        if redact_next:
+            public.append("<redacted>")
+            redact_next = False
+        elif "://" in value:
+            public.append(_redact_url(value))
+        elif "=" in value and not value.startswith("-"):
+            key, assigned = value.split("=", 1)
+            public.append(f"{key}=<redacted>" if _is_secret_name(key) else _redact_url(value))
+        elif any(lowered.startswith(option + "=") for option in _HEADER_OPTIONS):
+            public.extend([value.split("=", 1)[0], "<redacted>"])
+        elif lowered.startswith("--user="):
+            public.extend([value.split("=", 1)[0], "<redacted>"])
+        elif value == "-H" or lowered in _HEADER_OPTIONS or lowered in _USERINFO_OPTIONS:
+            public.append(value)
+            redact_next = True
+        elif value.startswith("-H") and len(value) > 2:
+            public.extend([value[:2], "<redacted>"])
+        elif lowered.startswith("-u") and len(value) > 2:
+            public.extend([value[:2], "<redacted>"])
+        elif lowered.startswith("-p") and len(value) > 2:
+            public.extend([value[:2], "<redacted>"])
+        elif lowered.startswith("--") and _is_secret_name(lowered):
+            public.append(value.split("=", 1)[0] if "=" in value else value)
+            if "=" in value:
+                public.append("<redacted>")
+            else:
+                redact_next = True
+        elif _is_secret_name(value.split(":", 1)[0]) and ":" in value:
+            public.append(value.split(":", 1)[0] + ": <redacted>")
+        else:
+            public.append(_redact_url(value))
+    return public
 
 
 def canonical_benchmark_config(
@@ -228,6 +448,22 @@ def validate_report(report: Any, *, canonical: bool = False) -> list[str]:
         errors.append("canonical system.git_commit must be an immutable lowercase 40-character commit")
     declared_config_hash = system.get("config_sha256")
     _sha256_error(declared_config_hash, "system.config_sha256", errors)
+    if "git_dirty" in system and not isinstance(system.get("git_dirty"), bool):
+        errors.append("system.git_dirty must be boolean")
+    if "dirty_state_sha256" in system:
+        _sha256_error(system.get("dirty_state_sha256"), "system.dirty_state_sha256", errors)
+    sources = suite.get("sources")
+    if sources is not None:
+        if not isinstance(sources, list):
+            errors.append("suite.sources must be an array when supplied")
+        else:
+            for item in sources:
+                if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                    errors.append("each suite source requires a name")
+                    continue
+                _sha256_error(item.get("sha256"), "suite source sha256", errors)
+                if not _is_nonnegative_integer(item.get("bytes")):
+                    errors.append("each suite source requires non-negative bytes")
     if not isinstance(protocol.get("config"), dict):
         errors.append("protocol.config must be an object")
     else:
@@ -236,6 +472,25 @@ def validate_report(report: Any, *, canonical: bool = False) -> list[str]:
             errors.append(
                 "system.config_sha256 must match the canonical protocol.config digest"
             )
+    command = protocol.get("command")
+    if command is not None and (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(item, str) and item for item in command)
+    ):
+        errors.append("protocol.command must be a non-empty string array when supplied")
+    accounting = protocol.get("token_accounting")
+    if accounting is not None:
+        required_accounting = ("identity", "revision", "scope", "method")
+        if not isinstance(accounting, dict) or any(field not in accounting for field in required_accounting):
+            errors.append("protocol.token_accounting must name identity, revision, scope, and method")
+        elif (
+            not isinstance(accounting["identity"], str)
+            or not isinstance(accounting["scope"], str)
+            or not isinstance(accounting["method"], str)
+            or not (accounting["revision"] is None or isinstance(accounting["revision"], str))
+        ):
+            errors.append("protocol.token_accounting fields have invalid types")
     record_ids: list[str] = []
     embedded_exclusions: dict[str, dict] = {}
     for record in records:
@@ -288,6 +543,17 @@ def validate_report(report: Any, *, canonical: bool = False) -> list[str]:
         errors.append("protocol.n_scored must equal records minus exclusions")
     if canonical:
         config = protocol.get("config") if isinstance(protocol.get("config"), dict) else {}
+        if not isinstance(system.get("git_dirty"), bool):
+            errors.append("canonical reports require system.git_dirty")
+        elif system["git_dirty"]:
+            errors.append("canonical reports require a clean git worktree")
+        if not isinstance(protocol.get("command"), list) or not protocol.get("command"):
+            errors.append("canonical reports require protocol.command")
+        if not isinstance(protocol.get("token_accounting"), dict):
+            errors.append("canonical reports require protocol.token_accounting")
+        privacy = report.get("privacy")
+        if not isinstance(privacy, dict) or privacy.get("raw_query_policy") != "redacted_sha256":
+            errors.append("canonical reports require raw-query redaction metadata")
         if protocol.get("complete_dataset") is not True:
             errors.append("canonical protocol.complete_dataset must be true")
         source_questions = protocol.get("source_questions")
@@ -982,12 +1248,30 @@ def report_envelope(
     records: Sequence[dict],
     metrics: Optional[dict] = None,
     exclusions: Optional[Sequence[dict]] = None,
-    git_commit: str = "unknown",
+    git_commit: Optional[str] = None,
+    command: Optional[Sequence[str]] = None,
+    source_paths: Optional[Sequence[Union[str, Path]]] = None,
+    models: Optional[dict] = None,
+    token_accounting: Optional[dict] = None,
 ) -> dict:
-    """Build a JSON-safe, provenance-complete public benchmark envelope."""
+    """Build a JSON-safe, provenance-complete public benchmark envelope.
+
+    This is intentionally the one path through which public reports obtain
+    provenance. It redacts raw question/answer/context fields before any caller
+    can persist the returned envelope.
+    """
     path = Path(dataset_path)
-    resolved_exclusions = list(exclusions or [])
-    resolved_exclusions.extend(record["excluded"] for record in records if record.get("excluded"))
+    observed_git = git_provenance()
+    resolved_commit = git_commit if git_commit is not None else str(observed_git["commit"])
+    public_records = [redact_public_record(dict(record)) for record in records]
+    resolved_exclusions = [
+        redacted
+        for item in exclusions or ()
+        if (redacted := _public_exclusion(item)) is not None
+    ]
+    resolved_exclusions.extend(
+        record["excluded"] for record in public_records if record.get("excluded")
+    )
     # An adapter may supply both top-level and per-record exclusions. Retain one
     # canonical representation so ``n_scored`` remains an honest denominator.
     unique_exclusions = []
@@ -999,15 +1283,40 @@ def report_envelope(
             seen_exclusions.add(marker)
     return {
         "schema": SCHEMA,
-        "suite": {"name": suite, "dataset": path.name, "sha256": sha256_file(path)},
-        "system": {"git_commit": git_commit, "config_sha256": sha256_text(canonical_json(config))},
-        "environment": {
-            "python": sys.version.split()[0], "platform": platform.platform(),
+        "suite": {
+            "name": suite,
+            "dataset": path.name,
+            "sha256": sha256_file(path),
+            "sources": [source_digest(item) for item in source_paths or ()],
         },
-        "protocol": {"config": config, "n_total": len(records),
-                     "n_scored": len(records) - len(unique_exclusions)},
+        "system": {
+            "git_commit": resolved_commit,
+            "git_dirty": observed_git["dirty"],
+            "dirty_state_sha256": observed_git["dirty_state_sha256"],
+            "config_sha256": sha256_text(canonical_json(config)),
+        },
+        "environment": environment_provenance(),
+        "protocol": {
+            "command": redact_command(command or ("in_process",)),
+            "config": config,
+            "token_accounting": dict(token_accounting or {
+                "identity": "unspecified",
+                "revision": None,
+                "scope": "unspecified",
+                "method": "unspecified",
+            }),
+            "n_total": len(public_records),
+            "n_scored": len(public_records) - len(unique_exclusions),
+        },
+        "privacy": {
+            "raw_query_policy": "redacted_sha256",
+            "raw_answer_policy": "redacted_sha256",
+            "raw_context_policy": "redacted_sha256",
+            "digest_algorithm": "sha256",
+        },
+        "models": dict(models or {}),
         "metrics": metrics or {}, "exclusions": unique_exclusions,
-        "records": list(records),
+        "records": public_records,
     }
 
 

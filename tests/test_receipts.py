@@ -494,6 +494,94 @@ def test_receipts_are_serialized_across_store_connections(tmp_path):
             store.close()
 
 
+def test_context_savings_is_scoped_content_free_and_groups_token_counters():
+    service = MemoryService.create(":memory:")
+    stored = service.remember(
+        "Receipt saving marker PURPLE-FOX-177.", workspace="acme", repo="api"
+    )
+    wid = service.store.get_or_create_workspace("acme")
+    rid = service._lookup_repo(wid, "api")
+    assert rid is not None
+    service.store.record_receipt(
+        "recall", workspace_id=wid, repo_id=rid, actor="PURPLE-FOX-177",
+        metadata={"token_usage": {
+            "budget_tokens": 80, "source_tokens": 100, "context_tokens": 25,
+            "saved_tokens": 75, "savings_ratio": 0.75, "packed_count": 2,
+            "omitted_count": 3, "token_counter": "engraphis.regex.v1",
+        }},
+    )
+    service.store.record_receipt(
+        "grounded_recall", workspace_id=wid, repo_id=rid,
+        metadata={"token_usage": {
+            "budget_tokens": 40, "source_tokens": 40, "context_tokens": 40,
+            "saved_tokens": 0, "savings_ratio": 0.0, "packed_count": 1,
+            "omitted_count": 0, "token_counter": "engraphis.regex.v1",
+        }},
+    )
+    service.store.record_receipt(
+        "recall", workspace_id=wid,
+        metadata={"token_usage": {
+            "budget_tokens": 20, "source_tokens": 20, "context_tokens": 5,
+            "saved_tokens": 15, "savings_ratio": 0.75, "packed_count": 1,
+            "omitted_count": 1, "token_counter": "estimate_tokens",
+        }},
+    )
+    service.store.record_receipt(
+        "recall", workspace_id=wid, repo_id=rid,
+        metadata={"token_usage": {
+            "budget_tokens": 10, "source_tokens": 10, "context_tokens": 8,
+            "saved_tokens": 9, "token_counter": "engraphis.regex.v1",
+        }},
+    )
+
+    repo_summary = service.context_savings(workspace="acme", repo="api")
+    assert repo_summary["scope"] == {"workspace": "acme", "repo": "api"}
+    assert repo_summary["receipt_chain_valid"] is True
+    assert repo_summary["receipt_chain_error_count"] == 0
+    assert repo_summary["receipt_count"] == 4
+    assert repo_summary["savings_receipt_count"] == 2
+    assert repo_summary["incomplete_usage_receipt_count"] == 1
+    assert repo_summary["by_token_counter"] == [{
+        "token_counter": "engraphis.regex.v1",
+        "receipt_count": 2,
+        "source_tokens": 140,
+        "context_tokens": 65,
+        "saved_tokens": 75,
+        "budget_tokens": 120,
+        "packed_count": 3,
+        "omitted_count": 3,
+        "savings_ratio": 75 / 140,
+        "by_operation": [
+            {"operation": "grounded_recall", "receipt_count": 1,
+             "source_tokens": 40, "context_tokens": 40, "saved_tokens": 0,
+             "budget_tokens": 40, "packed_count": 1, "omitted_count": 0,
+             "savings_ratio": 0.0},
+            {"operation": "recall", "receipt_count": 1,
+             "source_tokens": 100, "context_tokens": 25, "saved_tokens": 75,
+             "budget_tokens": 80, "packed_count": 2, "omitted_count": 3,
+             "savings_ratio": 0.75},
+        ],
+    }]
+    workspace_summary = service.context_savings(workspace="acme")
+    assert [row["token_counter"] for row in workspace_summary["by_token_counter"]] == [
+        "engraphis.regex.v1", "estimate_tokens"
+    ]
+    assert "PURPLE-FOX-177" not in json.dumps(workspace_summary)
+    assert stored["receipt"]["operation"] == "remember"
+
+    poisoned = service.store.record_receipt("recall", workspace_id=wid)
+    service.store.conn.execute(
+        "UPDATE operation_receipts SET payload=? WHERE id=?",
+        ('{"query":"PURPLE-FOX-177"}', poisoned["id"]),
+    )
+    service.store.conn.commit()
+    poisoned_summary = service.context_savings(workspace="acme")
+    assert poisoned_summary["invalid_receipt_count"] == 1
+    assert poisoned_summary["receipt_chain_valid"] is False
+    assert poisoned_summary["receipt_chain_error_count"] > 0
+    assert "PURPLE-FOX-177" not in json.dumps(poisoned_summary)
+
+
 def test_service_records_and_exports_operation_receipts():
     service = MemoryService.create(":memory:")
     stored = service.remember(

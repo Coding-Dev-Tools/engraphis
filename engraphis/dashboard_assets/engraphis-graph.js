@@ -78,6 +78,13 @@
   const FULL_FORCE_NODE_LIMIT = LARGE_NODE_LIMIT;
   const FULL_FORCE_LINK_LIMIT = LARGE_LINK_LIMIT;
 
+  /* `zoomToFit()` derives its bounds from force-graph's default node geometry rather than
+     our custom canvas radius. A compact, nearly-linear graph can therefore produce a 10×+
+     fit zoom even though its rendered nodes already fill the canvas. At that scale a normal
+     drag maps to a tiny world-space movement and reheating makes the rest of the layout look
+     like it is racing away. Keep auto-fit useful without letting its scale become unstable. */
+  const MAX_AUTO_FIT_ZOOM = 4;
+
   /* The classic renderer's *dense* signal (`GPERF.dense`, `links>1500` in dashboard.js). Past
      it the classic path turns off the two per-edge costs that scale with the link count and
      buy nothing at that density: link curvature (a quadratic bezier per relation instead of a
@@ -1443,7 +1450,24 @@
       if (opts.onStats) opts.onStats({ nodes: data.nodes.length, links: data.links.length, total: raw.nodes.length, totalLinks: raw.links.length, preset: (PRESETS[state.settings.mode] || PRESETS.compact).label, collapsed: collapsed, ghosts: data.nodes.filter(n => n.ghost).length, bridges: data.links.filter(l => l.bridge).length, suggested: data.links.filter(l => l.suggested).length });
     }
 
-    fg.backgroundColor('rgba(0,0,0,0)').nodeRelSize(1).autoPauseRedraw(true)
+    function handleNodeClick(node) {
+      if (suppressNodeClickAfterDrag) {
+        suppressNodeClickAfterDrag = false;
+        return;
+      }
+      if (node.cluster) {
+        collapsed = false;
+        state.collapse = false;
+        render(false, true);
+        setTimeout(() => { fg.centerAt(node.x, node.y, 500); fg.zoom(1.6, 500); }, 60);
+        if (opts.onCollapseChange) opts.onCollapseChange(false);
+        return;
+      }
+      if (opts.onNodeClick) opts.onNodeClick(node);
+    }
+
+    fg.backgroundColor('rgba(0,0,0,0)').nodeRelSize(1).maxZoom(MAX_AUTO_FIT_ZOOM)
+      .enableNodeDrag(false).autoPauseRedraw(true)
       /* force-graph's default `nodeLabel`/`linkLabel` is the literal accessor "name", and its
          tooltip renders a string label with innerHTML. Node names here are entity labels
          extracted from ingested memories — untrusted input — so both accessors are set
@@ -1486,14 +1510,9 @@
         el.classList.toggle('engraphis-graph-node-hover', !!node);
         invalidate();
       })
-      .onNodeClick(node => {
-        if (suppressNodeClickAfterDrag) {
-          suppressNodeClickAfterDrag = false;
-          return;
-        }
-        if (node.cluster) { collapsed = false; state.collapse = false; render(false, true); setTimeout(() => { fg.centerAt(node.x, node.y, 500); fg.zoom(1.6, 500); }, 60); if (opts.onCollapseChange) opts.onCollapseChange(false); return; }
-        if (opts.onNodeClick) opts.onNodeClick(node);
-      })
+      .onNodeClick(handleNodeClick)
+      // Kept as the pinning contract for embedders that opt back into vendor dragging;
+      // Ledger itself disables that path and uses the scoped pointer controller below.
       .onNodeDragEnd(node => { node.fx = node.x; node.fy = node.y; suppressNodeClick(); })
       .onBackgroundClick(() => { if (opts.onBackgroundClick) opts.onBackgroundClick(); })
       .onZoom(z => {
@@ -1506,6 +1525,90 @@
           if (opts.onCollapseChange) opts.onCollapseChange(collapsed);
         }
       });
+
+    /* force-graph's built-in drag always reheats the entire simulation. Ledger treats manual
+       placement as a pin, so install a small scoped drag controller and leave global physics
+       changes to the explicit Reheat control. Capturing pointer-down prevents the vendor's
+       drag handler from seeing node gestures while preserving its background pan/zoom path. */
+    let detachManualDrag = null;
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function'
+      && typeof el.addEventListener === 'function' && typeof el.querySelector === 'function') {
+      let manualDrag = null;
+      const graphPoint = event => {
+        const canvas = el.querySelector('canvas');
+        if (!canvas || !canvas.getBoundingClientRect || !fg.screen2GraphCoords) return null;
+        const box = canvas.getBoundingClientRect();
+        return fg.screen2GraphCoords(event.clientX - box.left, event.clientY - box.top);
+      };
+      const endManualDrag = event => {
+        if (!manualDrag || (event.pointerId != null && event.pointerId !== manualDrag.pointerId)) return;
+        const current = manualDrag;
+        manualDrag = null;
+        window.removeEventListener('pointermove', moveManualDrag, true);
+        window.removeEventListener('pointerup', endManualDrag, true);
+        window.removeEventListener('pointercancel', endManualDrag, true);
+        if (current.dragged) {
+          current.node.fx = current.node.x;
+          current.node.fy = current.node.y;
+          current.node.vx = 0;
+          current.node.vy = 0;
+          suppressNodeClick();
+        } else if (event.type !== 'pointercancel') {
+          // Our capture listener owns the direct click. Suppress force-graph's
+          // pointer-up click so selection/cluster expansion happens exactly once.
+          suppressNodeClick();
+          handleNodeClick(current.node);
+        }
+      };
+      const moveManualDrag = event => {
+        if (!manualDrag || event.pointerId !== manualDrag.pointerId) return;
+        const point = graphPoint(event);
+        if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return;
+        const dx = event.clientX - manualDrag.startClientX;
+        const dy = event.clientY - manualDrag.startClientY;
+        if (Math.hypot(dx, dy) >= 3) manualDrag.dragged = true;
+        const node = manualDrag.node;
+        node.x = node.fx = point.x + manualDrag.offsetX;
+        node.y = node.fy = point.y + manualDrag.offsetY;
+        node.vx = 0;
+        node.vy = 0;
+        invalidate();
+        event.preventDefault();
+        event.stopPropagation();
+      };
+      const beginManualDrag = event => {
+        if (event.button !== 0 || event.isPrimary === false) return;
+        const point = graphPoint(event);
+        if (!point) return;
+        let candidate = null;
+        let distance = Infinity;
+        (fg.graphData().nodes || []).forEach(node => {
+          if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return;
+          const d = Math.hypot(node.x - point.x, node.y - point.y);
+          const hitRadius = (node.radius || 1) + 5 / Math.max(zoom, 0.1);
+          if (d <= hitRadius && d < distance) { candidate = node; distance = d; }
+        });
+        if (!candidate) return;
+        manualDrag = {
+          node: candidate, pointerId: event.pointerId, startClientX: event.clientX,
+          startClientY: event.clientY, offsetX: candidate.x - point.x,
+          offsetY: candidate.y - point.y, dragged: false,
+        };
+        window.addEventListener('pointermove', moveManualDrag, true);
+        window.addEventListener('pointerup', endManualDrag, true);
+        window.addEventListener('pointercancel', endManualDrag, true);
+        event.preventDefault();
+        event.stopPropagation();
+      };
+      el.addEventListener('pointerdown', beginManualDrag, true);
+      detachManualDrag = () => {
+        manualDrag = null;
+        el.removeEventListener('pointerdown', beginManualDrag, true);
+        window.removeEventListener('pointermove', moveManualDrag, true);
+        window.removeEventListener('pointerup', endManualDrag, true);
+        window.removeEventListener('pointercancel', endManualDrag, true);
+      };
+    }
 
     api.setData = data => {
       const inputNodes = Array.isArray(data && data.nodes) ? data.nodes : [];
@@ -1802,6 +1905,7 @@
       clearTimeout(fitTimer);
       cancelFrame(dragClickFrame);
       try {
+        if (detachManualDrag) { detachManualDrag(); detachManualDrag = null; }
         if (api._ro) { api._ro.disconnect(); api._ro = null; }
         // `_destructor` pauses the rAF and drops the graph data; it does not detach the
         // canvas, so clear the container too or a re-create leaves the old one attached.

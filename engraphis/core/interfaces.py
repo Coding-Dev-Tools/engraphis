@@ -300,6 +300,13 @@ class RetrievalPolicy(Protocol):
 
 
 @runtime_checkable
+class CandidateDepthPolicy(Protocol):
+    """Select a bounded per-arm candidate depth for one recall request."""
+    def candidate_depth(self, query: str, *, k: int, ceiling: int,
+                        profile: str, mode: str) -> tuple[int, str]: ...
+
+
+@runtime_checkable
 class LLM(Protocol):
     """External or local model for synthesis and structured extraction (§8.2)."""
     def complete(self, messages: list[dict], **kw: Any) -> str: ...

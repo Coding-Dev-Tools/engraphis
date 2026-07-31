@@ -956,7 +956,8 @@ def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
            mtype: Optional[str] = None, as_of: Optional[float] = None,
            valid_at: Optional[float] = None, known_at: Optional[float] = None,
            token_budget: Optional[int] = Query(default=None, ge=0, le=32_768),
-           retrieval_profile: str = "balanced", response_mode: str = "full",
+           retrieval_profile: str = "balanced", candidate_depth: str = "fixed",
+           response_mode: str = "full",
            diagnostics: bool = False):
     ws = workspace or _default_ws()
     mtypes = [mtype] if mtype else None
@@ -965,6 +966,7 @@ def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
             q, workspace=ws, k=k, mtypes=mtypes, as_of=as_of,
             valid_at=valid_at, known_at=known_at, reinforce=False,
             token_budget=token_budget, retrieval_profile=retrieval_profile,
+            candidate_depth=candidate_depth,
             response_mode=response_mode, diagnostics=diagnostics,
         )
     except ValidationError:
@@ -998,6 +1000,9 @@ def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
         return {"query": q, "workspace": ws, "count": len(mems), "context": "",
                 "memories": mems, "mode": "keyword", "response_mode": response_mode,
                 "retrieval_profile": retrieval_profile,
+                "candidate_depth": candidate_depth,
+                "candidate_k_requested": 50, "candidate_k_used": 0,
+                "candidate_depth_reason": "keyword fallback",
                 "valid_at": valid_at if valid_at is not None else as_of,
                 "known_at": known_at, "historical": historical,
                 "packed_sources": [],
@@ -1030,6 +1035,7 @@ class _AnswerReq(BaseModel):
     known_at: Optional[float] = None
     token_budget: Optional[int] = Field(default=None, ge=0, le=32_768)
     retrieval_profile: str = "balanced"
+    candidate_depth: str = "fixed"
     response_mode: str = "full"
     diagnostics: bool = False
 
@@ -1055,6 +1061,7 @@ def answer(req: _AnswerReq):
         known_at=req.known_at,
         token_budget=req.token_budget,
         retrieval_profile=req.retrieval_profile,
+        candidate_depth=req.candidate_depth,
         response_mode=req.response_mode,
         diagnostics=req.diagnostics,
         max_citations=req.max_citations,
@@ -1203,6 +1210,12 @@ def audit(workspace: Optional[str] = None, limit: int = 100):
 def receipts(workspace: Optional[str] = None, limit: int = 100):
     ws = workspace or _require_ws()
     return _run(service().receipt_log, workspace=ws, limit=limit)
+
+
+@router.get("/context-savings")
+def context_savings(workspace: Optional[str] = None, repo: Optional[str] = None):
+    ws = workspace or _require_ws()
+    return _run(service().context_savings, workspace=ws, repo=repo)
 
 
 @router.get("/receipts/verify")
@@ -1380,6 +1393,7 @@ class _IntentRecallReq(BaseModel):
     known_at: Optional[float] = None
     token_budget: Optional[int] = Field(default=None, ge=0, le=32_768)
     retrieval_profile: str = "balanced"
+    candidate_depth: str = "fixed"
     response_mode: str = "compact"
     diagnostics: bool = False
 
@@ -1392,6 +1406,7 @@ def intent_recall(req: _IntentRecallReq):
         mtypes=req.mtypes, k=req.k, as_of=req.as_of,
         valid_at=req.valid_at, known_at=req.known_at,
         token_budget=req.token_budget, retrieval_profile=req.retrieval_profile,
+        candidate_depth=req.candidate_depth,
         response_mode=req.response_mode, diagnostics=req.diagnostics,
     )
 

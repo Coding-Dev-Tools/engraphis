@@ -147,13 +147,21 @@ def main(argv=None) -> int:
             return 2
     else:
         try:
-            transport = get_transport("folder", root=args.remote)
+            # A dry run must not create an absent shared folder merely by opening its
+            # transport.  FolderTransport treats a missing non-creating root as empty.
+            transport = get_transport("folder", root=args.remote, create=not args.dry_run)
         except (ValueError, OSError) as exc:
             print(f"error: could not open sync folder '{args.remote}': {exc}", file=sys.stderr)
             return 2
 
+    sync_device_id = None
+    if args.dry_run:
+        # SyncEngine normally mints and persists the database's stable device id at
+        # construction. A preview must not perform even that local metadata write.
+        from engraphis.core import ids
+        sync_device_id = engine.store.get_sync_state("device_id") or ids.new_id("device")
     engine_sync = SyncEngine(engine.store, embedder=engine.embedder,
-                             vector_index=engine.index,
+                             vector_index=engine.index, device_id=sync_device_id,
                              allowed_workspaces=settings.allowed_workspaces or None)
     # Honor the same durable, fail-closed device policy as dashboard auto-sync. This
     # matters for member/admin tokens too: a device explicitly configured download-only

@@ -42,7 +42,7 @@ from engraphis.core.graph_scene import (
 from engraphis.core.graph_layers import normalize_graph_layer
 from engraphis.core.ids import new_id as make_id
 from engraphis.core.interfaces import Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter
-from engraphis.core.retrieval_policy import RETRIEVAL_PROFILES
+from engraphis.core.retrieval_policy import CANDIDATE_DEPTH_MODES, RETRIEVAL_PROFILES
 from engraphis.core.store import (
     _loads,
     _merge_edge_provenance,
@@ -1160,6 +1160,7 @@ class MemoryService:
                       known_at: Optional[float] = None,
                       token_budget: Optional[int] = None,
                       retrieval_profile: str = "balanced",
+                      candidate_depth: str = "fixed",
                       response_mode: str = "full",
                       diagnostics: bool = False,
                       reinforce: bool = False,
@@ -1182,6 +1183,7 @@ class MemoryService:
             query, workspace=workspace, repo=repo, mtypes=mtypes, k=k,
             as_of=as_of, valid_at=valid_at, known_at=known_at,
             token_budget=token_budget, retrieval_profile=retrieval_profile,
+            candidate_depth=candidate_depth,
             response_mode=response_mode, diagnostics=diagnostics,
             intent=intent_clean, graph_layers=layers,
             reinforce=reinforce, record_receipt=record_receipt,
@@ -1665,6 +1667,7 @@ class MemoryService:
                graph_layers: Optional[list] = None,
                token_budget: Optional[int] = None,
                retrieval_profile: str = "balanced",
+               candidate_depth: str = "fixed",
                response_mode: str = "full",
                diagnostics: bool = False,
                record_receipt: bool = True) -> dict:
@@ -1698,6 +1701,10 @@ class MemoryService:
         if retrieval_profile not in RETRIEVAL_PROFILES:
             choices = ", ".join(sorted(RETRIEVAL_PROFILES))
             raise ValidationError(f"retrieval_profile must be one of: {choices}")
+        candidate_depth = str(candidate_depth or "fixed").strip().casefold()
+        if candidate_depth not in CANDIDATE_DEPTH_MODES:
+            choices = ", ".join(sorted(CANDIDATE_DEPTH_MODES))
+            raise ValidationError(f"candidate_depth must be one of: {choices}")
         response_mode = str(response_mode or "full").strip().casefold()
         if response_mode not in RESPONSE_MODES:
             raise ValidationError("response_mode must be one of: compact, full")
@@ -1716,7 +1723,8 @@ class MemoryService:
             if wid is None:
                 return _empty_recall(
                     query, token_budget=token_budget, response_mode=response_mode,
-                    retrieval_profile=retrieval_profile, valid_at=valid_at,
+                    retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                    valid_at=valid_at,
                     known_at=known_at, note=f"no workspace named '{ws}' yet",
                 )
             if repo:
@@ -1724,8 +1732,9 @@ class MemoryService:
                 rid = self._lookup_repo(wid, rp)
                 if rid is None:
                     return _empty_recall(
-                        query, token_budget=token_budget, response_mode=response_mode,
-                        retrieval_profile=retrieval_profile, valid_at=valid_at,
+                    query, token_budget=token_budget, response_mode=response_mode,
+                    retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                    valid_at=valid_at,
                         known_at=known_at,
                         note=f"no repo named '{rp}' in workspace '{ws}' yet",
                     )
@@ -1737,7 +1746,8 @@ class MemoryService:
                 if session is None:
                     return _empty_recall(
                         query, token_budget=token_budget, response_mode=response_mode,
-                        retrieval_profile=retrieval_profile, valid_at=valid_at,
+                        retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                        valid_at=valid_at,
                         known_at=known_at, note=f"no session with id '{sid}'",
                     )
                 if session["workspace_id"] != wid or (
@@ -1757,6 +1767,7 @@ class MemoryService:
             k=k, reinforce=reinforce,
             token_budget=token_budget,
             retrieval_profile=retrieval_profile,
+            candidate_depth=candidate_depth,
             diagnostics=bool(diagnostics),
         )
         memories = []
@@ -1803,6 +1814,10 @@ class MemoryService:
             "known_at": result.known_at,
             "historical": result.historical,
             "retrieval_profile": result.retrieval_profile,
+            "candidate_depth": result.candidate_depth_mode,
+            "candidate_k_requested": result.candidate_k_requested,
+            "candidate_k_used": result.candidate_k_used,
+            "candidate_depth_reason": result.candidate_depth_reason,
             "response_mode": response_mode,
         }
         if diagnostics:
@@ -1815,6 +1830,9 @@ class MemoryService:
                           "result_count": result.count,
                           "graph_layers": [layer.value for layer in layers] if layers else [],
                           "retrieval_profile": result.retrieval_profile,
+                          "candidate_depth": result.candidate_depth_mode,
+                          "candidate_k_requested": result.candidate_k_requested,
+                          "candidate_k_used": result.candidate_k_used,
                           "response_mode": response_mode,
                           "historical": result.historical,
                           "token_usage": usage},
@@ -1831,6 +1849,7 @@ class MemoryService:
                         max_citations: int = 5, llm=None,
                         token_budget: Optional[int] = None,
                         retrieval_profile: str = "balanced",
+                        candidate_depth: str = "fixed",
                         response_mode: str = "full",
                         diagnostics: bool = False) -> dict:
         """Grounded recall: an answer built strictly from retrieved memories, with
@@ -1869,6 +1888,10 @@ class MemoryService:
         if retrieval_profile not in RETRIEVAL_PROFILES:
             choices = ", ".join(sorted(RETRIEVAL_PROFILES))
             raise ValidationError(f"retrieval_profile must be one of: {choices}")
+        candidate_depth = str(candidate_depth or "fixed").strip().casefold()
+        if candidate_depth not in CANDIDATE_DEPTH_MODES:
+            choices = ", ".join(sorted(CANDIDATE_DEPTH_MODES))
+            raise ValidationError(f"candidate_depth must be one of: {choices}")
         response_mode = str(response_mode or "full").strip().casefold()
         if response_mode not in RESPONSE_MODES:
             raise ValidationError("response_mode must be one of: compact, full")
@@ -1895,7 +1918,8 @@ class MemoryService:
                 return _empty_grounded(
                     query, reason=f"no workspace named '{ws}' yet",
                     token_budget=token_budget, response_mode=response_mode,
-                    retrieval_profile=retrieval_profile, valid_at=valid_at,
+                    retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                    valid_at=valid_at,
                     known_at=known_at,
                 )
             if repo:
@@ -1906,7 +1930,8 @@ class MemoryService:
                         query,
                         reason=f"no repo named '{rp}' in workspace '{ws}' yet",
                         token_budget=token_budget, response_mode=response_mode,
-                        retrieval_profile=retrieval_profile, valid_at=valid_at,
+                        retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                        valid_at=valid_at,
                         known_at=known_at,
                     )
             if session_id:
@@ -1918,7 +1943,8 @@ class MemoryService:
                     return _empty_grounded(
                         query, reason=f"no session with id '{sid}'",
                         token_budget=token_budget, response_mode=response_mode,
-                        retrieval_profile=retrieval_profile, valid_at=valid_at,
+                        retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                        valid_at=valid_at,
                         known_at=known_at,
                     )
                 if session["workspace_id"] != wid or (
@@ -1934,7 +1960,8 @@ class MemoryService:
             as_of=as_of, valid_at=valid_at, known_at=known_at,
             k=k, llm=llm, min_support=min_support,
             max_citations=max_citations, token_budget=token_budget,
-            retrieval_profile=retrieval_profile, diagnostics=bool(diagnostics),
+            retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+            diagnostics=bool(diagnostics),
         )
         out = {"query": query, **ans.to_dict()}
         out["response_mode"] = response_mode
@@ -1953,6 +1980,9 @@ class MemoryService:
             metadata={"intent": "grounded", "grounded": bool(out.get("grounded")),
                       "citations": len(out.get("citations") or []),
                       "retrieval_profile": out.get("retrieval_profile"),
+                      "candidate_depth": out.get("candidate_depth"),
+                      "candidate_k_requested": out.get("candidate_k_requested"),
+                      "candidate_k_used": out.get("candidate_k_used"),
                       "response_mode": response_mode,
                       "historical": bool(out.get("historical")),
                       "token_usage": out.get("usage") or {}},
@@ -3649,6 +3679,17 @@ class MemoryService:
             "format": "engraphis-receipts/1",
             "workspace_digest": hashlib.sha256(wid.encode("utf-8")).hexdigest()[:24],
             "entries": entries,
+        }
+
+    def context_savings(self, *, workspace: str, repo: Optional[str] = None) -> dict:
+        """Return cumulative packed-context savings from content-free operation receipts."""
+        ws = self._clean_ws(workspace)
+        rp = _clean_name(repo, field="repo") if repo else None
+        wid, rid = self._require_scope(ws, rp)
+        return {
+            "format": "engraphis-context-savings/1",
+            "scope": {"workspace": ws, **({"repo": rp} if rp else {})},
+            **self.store.context_savings(workspace_id=wid, repo_id=rid),
         }
 
     def verify_receipts(self, *, workspace: str, expected_head: str = "",
@@ -7056,7 +7097,7 @@ def _compact_provenance(value: Any) -> dict:
 
 
 def _empty_recall(query: str, *, token_budget: int, response_mode: str,
-                  retrieval_profile: str, valid_at: Optional[float],
+                  retrieval_profile: str, candidate_depth: str, valid_at: Optional[float],
                   known_at: Optional[float], note: str) -> dict:
     """Stable empty response for unknown scopes, including additive v2 accounting."""
     return {
@@ -7079,19 +7120,24 @@ def _empty_recall(query: str, *, token_budget: int, response_mode: str,
         "known_at": known_at,
         "historical": valid_at is not None or known_at is not None,
         "retrieval_profile": retrieval_profile,
+        "candidate_depth": candidate_depth,
+        "candidate_k_requested": 50,
+        "candidate_k_used": 50,
+        "candidate_depth_reason": "no retrieval for unknown scope",
         "response_mode": response_mode,
         "note": note,
     }
 
 
 def _empty_grounded(query: str, *, reason: str, token_budget: int,
-                    response_mode: str, retrieval_profile: str,
+                    response_mode: str, retrieval_profile: str, candidate_depth: str,
                     valid_at: Optional[float], known_at: Optional[float]) -> dict:
     payload = _empty_recall(
         query,
         token_budget=token_budget,
         response_mode=response_mode,
         retrieval_profile=retrieval_profile,
+        candidate_depth=candidate_depth,
         valid_at=valid_at,
         known_at=known_at,
         note=reason,

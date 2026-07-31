@@ -8,7 +8,7 @@ description: 'Give the agent durable, scoped, explainable memory across sessions
 Engraphis is a local-first memory engine exposed to agents over MCP. This skill is the
 *discipline* for using it well: what to store, how to scope it, and which tool answers which
 question. It assumes the Engraphis MCP server is connected, so tools are named `engraphis_*`
-(30 of them). If those tools are absent, see [Setup](#setup). Do not fall back to ad-hoc notes.
+(31 of them). If those tools are absent, see [Setup](#setup). Do not fall back to ad-hoc notes.
 
 Memory here is **scoped, typed, bi-temporal, and self-maintaining**: writes are deduplicated and
 contradictions supersede (never silently overwrite), and forgetting lowers priority instead of
@@ -86,6 +86,7 @@ promotion: [SCOPING.md](references/SCOPING.md).
 | Share the repo graph | `engraphis_export_code_graph` | Portable JSON + Markdown + self-contained HTML. |
 | Import a live DB schema | `engraphis_ingest_postgres_schema` | PostgreSQL tables/columns/constraints → memory + graph; DSN not stored. |
 | Privacy-safe audit | `engraphis_receipts` / `engraphis_verify_receipts` | Content-free hash chain; export with `engraphis_export_receipts`. |
+| Verify context savings | `engraphis_context_savings` | Aggregate scoped usage receipts without returning prompts or memory content. |
 | Store health | `engraphis_stats` | Counts by type/workspace; good for onboarding checks. |
 
 Full signatures, parameters, defaults, and return shapes: [TOOLS.md](references/TOOLS.md).
@@ -150,6 +151,6 @@ is needed for the memory layer. Details: the repo `README.md` "Quickstart A: MCP
 
 ## References
 
-- [TOOLS.md](references/TOOLS.md): all 30 tools: parameters, defaults, returns, when to reach for each.
+- [TOOLS.md](references/TOOLS.md): all 31 tools: parameters, defaults, returns, when to reach for each.
 - [SCOPING.md](references/SCOPING.md): the `workspace → repo → session → memory` model, scope vs. type, and promotion.
 - [CONVENTIONS.md](references/CONVENTIONS.md): memory types, provenance, importance, dedup/resolution, governance, and anti-patterns

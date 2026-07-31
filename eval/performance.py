@@ -35,6 +35,7 @@ from engraphis.backends.reranker import IdentityReranker
 from engraphis.core.context import RegexTokenCounter
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import MemoryType, Scope, SearchFilter
+from engraphis.core.retrieval_policy import CANDIDATE_DEPTH_MODES, RETRIEVAL_PROFILES
 from engraphis.core.store import Store
 from eval import metrics
 from eval.harness import load_dataset
@@ -79,6 +80,7 @@ class _Measurements:
     source_tokens: list[int]
     full_payload_tokens: list[int]
     compact_payload_tokens: list[int]
+    candidate_depths: list[int]
     quality: list[dict]
 
 
@@ -178,11 +180,21 @@ def _measure_recall(
     search_filter: SearchFilter,
     *,
     k: int,
+    candidate_k: int,
+    candidate_depth: str,
     token_budget: int,
+    retrieval_profile: str,
 ) -> tuple[dict, float]:
     started = time.perf_counter_ns()
     result = engine.recall_engine.recall(
-        question["q"], search_filter, k=k, reinforce=False, token_budget=token_budget
+        question["q"],
+        search_filter,
+        k=k,
+        candidate_k=candidate_k,
+        candidate_depth=candidate_depth,
+        reinforce=False,
+        token_budget=token_budget,
+        retrieval_profile=retrieval_profile,
     )
     return result, (time.perf_counter_ns() - started) / 1_000_000
 
@@ -193,12 +205,24 @@ def _measure_batch(
     search_filter: SearchFilter,
     *,
     k: int,
+    candidate_k: int,
+    candidate_depth: str,
     token_budget: int,
+    retrieval_profile: str,
     concurrency: int,
 ) -> list[tuple[dict, float]]:
     if concurrency == 1:
         return [
-            _measure_recall(engine, question, search_filter, k=k, token_budget=token_budget)
+            _measure_recall(
+                engine,
+                question,
+                search_filter,
+                k=k,
+                candidate_k=candidate_k,
+                candidate_depth=candidate_depth,
+                token_budget=token_budget,
+                retrieval_profile=retrieval_profile,
+            )
             for question in questions
         ]
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
@@ -209,7 +233,10 @@ def _measure_batch(
                 question,
                 search_filter,
                 k=k,
+                candidate_k=candidate_k,
+                candidate_depth=candidate_depth,
                 token_budget=token_budget,
+                retrieval_profile=retrieval_profile,
             )
             for question in questions
         ]
@@ -220,11 +247,14 @@ def _run_single(
     dataset: list[dict],
     *,
     k: int,
+    candidate_k: int,
+    candidate_depth: str,
     dim: int,
     warmups: int,
     iterations: int,
     filler_memories: int,
     token_budget: int,
+    retrieval_profile: str,
     config: AcceptanceConfig,
     process_number: int,
     embedder: Optional[DeterministicEmbedder] = None,
@@ -283,7 +313,10 @@ def _run_single(
         questions,
         search_filter,
         k=k,
+        candidate_k=candidate_k,
+        candidate_depth=candidate_depth,
         token_budget=token_budget,
+        retrieval_profile=retrieval_profile,
         concurrency=config.concurrency,
     )
     for _ in range(warmups):
@@ -292,11 +325,14 @@ def _run_single(
             questions,
             search_filter,
             k=k,
+            candidate_k=candidate_k,
+            candidate_depth=candidate_depth,
             token_budget=token_budget,
+            retrieval_profile=retrieval_profile,
             concurrency=config.concurrency,
         )
 
-    measurements = _Measurements([], [], [], [], [], [], [])
+    measurements = _Measurements([], [], [], [], [], [], [], [])
     counter = RegexTokenCounter()
     for iteration in range(iterations):
         for question_number, (result, latency_ms) in enumerate(_measure_batch(
@@ -304,7 +340,10 @@ def _run_single(
             questions,
             search_filter,
             k=k,
+            candidate_k=candidate_k,
+            candidate_depth=candidate_depth,
             token_budget=token_budget,
+            retrieval_profile=retrieval_profile,
             concurrency=config.concurrency,
         )):
             measurements.warm_latencies_ms.append(latency_ms)
@@ -324,6 +363,7 @@ def _run_single(
             measurements.compact_payload_tokens.append(
                 _serialized_tokens(compact_payload, counter)
             )
+            measurements.candidate_depths.append(result.candidate_k_used)
             question = questions[question_number]
             measurements.quality.append({
                 "question": question_number,
@@ -362,9 +402,12 @@ def _build_report(
     measurements: list[_Measurements],
     *,
     k: int,
+    candidate_k: int,
+    candidate_depth: str,
     warmups: int,
     iterations: int,
     token_budget: int,
+    retrieval_profile: str,
     config: AcceptanceConfig,
     question_count: int,
     resources: list[dict],
@@ -375,6 +418,7 @@ def _build_report(
     source_tokens = [value for item in measurements for value in item.source_tokens]
     full_payload_tokens = [value for item in measurements for value in item.full_payload_tokens]
     compact_payload_tokens = [value for item in measurements for value in item.compact_payload_tokens]
+    candidate_depths = [value for item in measurements for value in item.candidate_depths]
     quality = [value for item in measurements for value in item.quality]
     full_total = sum(full_payload_tokens)
     compact_total = sum(compact_payload_tokens)
@@ -396,6 +440,13 @@ def _build_report(
         "corpus": base["corpus"],
         "run": {
             "k": k,
+            "candidate_k": candidate_k,
+            "candidate_depth": candidate_depth,
+            "actual_candidate_k": {
+                "min": min(candidate_depths, default=0),
+                "max": max(candidate_depths, default=0),
+                "mean": round(sum(candidate_depths) / max(len(candidate_depths), 1), 2),
+            },
             "warmups": warmups,
             "iterations": iterations,
             # Kept for compatibility: these are the warm, steady-state timed recalls.
@@ -403,6 +454,7 @@ def _build_report(
             "cold_timed_recalls": len(cold_latencies),
             "warm_timed_recalls": len(warm_latencies),
             "token_budget": token_budget,
+            "retrieval_profile": retrieval_profile,
         },
         "acceptance": {
             "concurrency": config.concurrency,
@@ -455,11 +507,14 @@ def run(
     dataset: list[dict],
     *,
     k: int = 5,
+    candidate_k: int = 50,
+    candidate_depth: str = "fixed",
     dim: int = 256,
     warmups: int = 1,
     iterations: int = 5,
     filler_memories: int = 0,
     token_budget: int = 1500,
+    retrieval_profile: str = "balanced",
     embedder: Optional[DeterministicEmbedder] = None,
     concurrency: int = 1,
     processes: int = 1,
@@ -473,10 +528,19 @@ def run(
     intentionally limited to the established single-process API.
     """
     k = max(1, int(k))
+    candidate_k = max(1, int(candidate_k))
+    candidate_depth = str(candidate_depth or "").strip().casefold()
+    if candidate_depth not in CANDIDATE_DEPTH_MODES:
+        choices = ", ".join(sorted(CANDIDATE_DEPTH_MODES))
+        raise ValueError(f"candidate_depth must be one of: {choices}")
     warmups = max(0, int(warmups))
     iterations = max(1, int(iterations))
     filler_memories = max(0, int(filler_memories))
     token_budget = max(0, int(token_budget))
+    retrieval_profile = str(retrieval_profile or "").strip().casefold()
+    if retrieval_profile not in RETRIEVAL_PROFILES:
+        choices = ", ".join(sorted(RETRIEVAL_PROFILES))
+        raise ValueError(f"retrieval_profile must be one of: {choices}")
     if canonical:
         raise ValueError("canonical acceptance requires run_acceptance_matrix")
     config = AcceptanceConfig(
@@ -494,11 +558,14 @@ def run(
         base, measurement = _run_single(
             dataset,
             k=k,
+            candidate_k=candidate_k,
+            candidate_depth=candidate_depth,
             dim=dim,
             warmups=warmups,
             iterations=iterations,
             filler_memories=filler_memories,
             token_budget=token_budget,
+            retrieval_profile=retrieval_profile,
             config=config,
             process_number=0,
             embedder=embedder,
@@ -507,9 +574,12 @@ def run(
             base,
             [measurement],
             k=k,
+            candidate_k=candidate_k,
+            candidate_depth=candidate_depth,
             warmups=warmups,
             iterations=iterations,
             token_budget=token_budget,
+            retrieval_profile=retrieval_profile,
             config=config,
             question_count=question_count,
             resources=[base["resources"]],
@@ -517,11 +587,14 @@ def run(
 
     worker_args = {
         "k": k,
+        "candidate_k": candidate_k,
+        "candidate_depth": candidate_depth,
         "dim": dim,
         "warmups": warmups,
         "iterations": iterations,
         "filler_memories": filler_memories,
         "token_budget": token_budget,
+        "retrieval_profile": retrieval_profile,
         "config": config,
     }
     with ProcessPoolExecutor(max_workers=config.processes) as executor:
@@ -535,9 +608,12 @@ def run(
         base,
         [measurement for _, measurement in process_results],
         k=k,
+        candidate_k=candidate_k,
+        candidate_depth=candidate_depth,
         warmups=warmups,
         iterations=iterations,
         token_budget=token_budget,
+        retrieval_profile=retrieval_profile,
         config=config,
         question_count=question_count,
         resources=[result["resources"] for result, _ in process_results],
@@ -558,11 +634,14 @@ def run_acceptance_matrix(
     dataset: list[dict],
     *,
     k: int = 5,
+    candidate_k: int = 50,
+    candidate_depth: str = "fixed",
     dim: int = 256,
     warmups: int = 1,
     iterations: int = 5,
     filler_memories: int = 0,
     token_budget: int = 1500,
+    retrieval_profile: str = "balanced",
     processes: int = 5,
     minimum_queries: int = 1000,
     concurrencies: Optional[list[int]] = None,
@@ -588,11 +667,14 @@ def run_acceptance_matrix(
         slices[str(concurrency)] = run(
             dataset,
             k=k,
+            candidate_k=candidate_k,
+            candidate_depth=candidate_depth,
             dim=dim,
             warmups=warmups,
             iterations=iterations,
             filler_memories=filler_memories,
             token_budget=token_budget,
+            retrieval_profile=retrieval_profile,
             concurrency=concurrency,
             processes=processes,
             minimum_queries=effective_minimum,
@@ -623,7 +705,11 @@ def _print(report: dict) -> None:
     print(
         "Engraphis performance — "
         f"{corpus['memories']} memories · {corpus['questions']} questions · "
-        f"{run_info['timed_recalls']} warm timed recalls @ k={run_info['k']}"
+        f"{run_info['timed_recalls']} warm timed recalls @ k={run_info['k']} "
+        f"(candidates={run_info['candidate_k']}, "
+        f"actual={run_info['actual_candidate_k']['mean']:.1f}, "
+        f"depth={run_info['candidate_depth']}, "
+        f"profile={run_info['retrieval_profile']})"
     )
     print(
         "  environment          : "
@@ -684,11 +770,29 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--dataset",
         default=str(Path(__file__).resolve().parent / "datasets" / "codemem.jsonl"),
     )
+    parser.add_argument(
+        "--candidate-depth",
+        choices=sorted(CANDIDATE_DEPTH_MODES),
+        default="fixed",
+        help="fixed preserves the requested depth; adaptive uses a profile-aware bounded pool",
+    )
     parser.add_argument("--k", type=int, default=5)
+    parser.add_argument(
+        "--candidate-k",
+        type=int,
+        default=50,
+        help="per-arm candidate depth; sweep this to measure quality/latency tradeoffs",
+    )
     parser.add_argument("--dim", type=int, default=256)
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--iterations", type=int, default=5)
     parser.add_argument("--token-budget", type=int, default=1500)
+    parser.add_argument(
+        "--retrieval-profile",
+        choices=sorted(RETRIEVAL_PROFILES),
+        default="balanced",
+        help="retrieval policy to benchmark (default: balanced)",
+    )
     parser.add_argument(
         "--filler-memories",
         type=int,
@@ -731,11 +835,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         report = run_acceptance_matrix(
             dataset,
             k=args.k,
+            candidate_k=args.candidate_k,
+            candidate_depth=args.candidate_depth,
             dim=args.dim,
             warmups=args.warmups,
             iterations=args.iterations,
             filler_memories=args.filler_memories,
             token_budget=args.token_budget,
+            retrieval_profile=args.retrieval_profile,
             processes=args.processes,
             minimum_queries=args.minimum_queries,
         )
@@ -743,11 +850,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         report = run(
             dataset,
             k=args.k,
+            candidate_k=args.candidate_k,
+            candidate_depth=args.candidate_depth,
             dim=args.dim,
             warmups=args.warmups,
             iterations=args.iterations,
             filler_memories=args.filler_memories,
             token_budget=args.token_budget,
+            retrieval_profile=args.retrieval_profile,
             concurrency=args.concurrency,
             processes=args.processes,
             minimum_queries=args.minimum_queries,

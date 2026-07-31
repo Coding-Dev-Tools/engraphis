@@ -970,7 +970,8 @@ class MemoryEngine:
                mtypes: Optional[list] = None, as_of: Optional[float] = None,
                valid_at: Optional[float] = None, known_at: Optional[float] = None,
                k: int = 8, token_budget: Optional[int] = None,
-               retrieval_profile: str = "balanced", diagnostics: bool = False,
+               retrieval_profile: str = "balanced", candidate_depth: str = "fixed",
+               diagnostics: bool = False,
                reinforce: bool = False) -> RecallResult:
         flt = self._recall_filter(
             workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
@@ -983,6 +984,7 @@ class MemoryEngine:
         return self.recall_engine.recall(
             query, flt, k=k, reinforce=bool(reinforce) and not flt.historical,
             token_budget=token_budget, retrieval_profile=retrieval_profile,
+            candidate_depth=candidate_depth,
             diagnostics=diagnostics,
         )
 
@@ -993,7 +995,8 @@ class MemoryEngine:
                         valid_at: Optional[float] = None, known_at: Optional[float] = None,
                         k: int = 8, llm=None, min_support: Optional[float] = None,
                         token_budget: Optional[int] = None,
-                        retrieval_profile: str = "balanced", diagnostics: bool = False,
+                        retrieval_profile: str = "balanced", candidate_depth: str = "fixed",
+                        diagnostics: bool = False,
                         max_citations: int = 5, reinforce: bool = True):
         """Recall, then answer *strictly from* what was recalled — with citations and an
         explicit abstain when the evidence is too weak (``core.grounded``). Offline and
@@ -1015,7 +1018,8 @@ class MemoryEngine:
         # irrelevant nearest-neighbours an off-topic query happened to surface.
         result = self.recall_engine.recall(
             query, flt, k=k, reinforce=False, token_budget=token_budget,
-            retrieval_profile=retrieval_profile, diagnostics=diagnostics,
+            retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+            diagnostics=diagnostics,
         )
         floor = _grounded.GROUNDED_SUPPORT_FLOOR if min_support is None else min_support
         answer = _grounded.build_grounded_answer(query, result, self.embedder, llm=llm,
