@@ -449,6 +449,7 @@ def public_artifact(
     dataset: str,
     conversations: Optional[str],
     k: int,
+    limit: Optional[int],
     embedder: Optional[object],
     resolve_conflicts: bool,
 ) -> dict:
@@ -476,6 +477,8 @@ def public_artifact(
         "--format", fmt,
         "--k", str(k),
     ]
+    if limit is not None:
+        command.extend(["--limit", str(limit)])
     if conversations:
         command.extend(["--conversations", "<conversations>"])
     selected_embedder = embedder or DeterministicEmbedder()
@@ -488,6 +491,7 @@ def public_artifact(
         config={
             "format": fmt,
             "k": k,
+            "limit": limit,
             "embed_model": model_id,
             "embedder_revision": revision,
             "resolve_conflicts": resolve_conflicts,
@@ -567,6 +571,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "implementation": type(embedder).__name__ if embedder is not None else "DeterministicEmbedder",
         },
         "include_original_locomo": bool(args.include_original_locomo),
+        "limit": args.limit,
         "measures": _claim_boundary(args.format),
     })
     _separate_unlabeled_retrieval(report)
@@ -581,6 +586,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             dataset=args.dataset,
             conversations=args.conversations,
             k=args.k,
+            limit=args.limit,
             embedder=embedder,
             resolve_conflicts=not args.no_resolve,
         )
