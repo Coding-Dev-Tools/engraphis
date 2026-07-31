@@ -2173,6 +2173,10 @@ def test_manual_drag_controller_detaches_with_the_graph() -> None:
     direct_click = source[source.index("} else if (event.type !== 'pointercancel') {"):]
     direct_click = direct_click[:direct_click.index("      };", 1)]
     assert direct_click.index("handleNodeClick(current.node);") < direct_click.index("suppressNodeClick();")
+    move = source[source.index("const moveManualDrag = event => {"):]
+    move = move[:move.index("      const beginManualDrag", 1)]
+    assert "if (!manualDrag.dragged)" in move
+    assert move.index("if (Math.hypot(dx, dy) < 3)") < move.index("const node = manualDrag.node;")
     teardown = source[source.index("api.destroy = () => {"):]
     assert "if (detachManualDrag) { detachManualDrag(); detachManualDrag = null; }" in teardown
 
