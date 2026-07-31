@@ -174,13 +174,19 @@ _SECRET_NAME_RE = re.compile(
     r"password|passwd|secret|token|signature|sig|private[-_]?key)$",
     re.IGNORECASE,
 )
+_COMPOUND_SECRET_NAME_RE = re.compile(
+    r"(?:^|[-_])(?:api[-_]?key|access[-_]?key|secret[-_]?(?:access[-_]?)?key|"
+    r"authorization)(?:[-_]|$)",
+    re.IGNORECASE,
+)
 _HEADER_OPTIONS = frozenset({"--header", "--headers"})
 _USERINFO_OPTIONS = frozenset({"-u", "--user", "--user-name", "--password", "-p"})
 
 
 def _is_secret_name(value: str) -> bool:
     """Recognise credential-bearing parameter names, without masking normal options."""
-    return bool(_SECRET_NAME_RE.search(value.strip().lstrip("-")))
+    name = value.strip().lstrip("-")
+    return bool(_SECRET_NAME_RE.search(name) or _COMPOUND_SECRET_NAME_RE.search(name))
 
 
 def _public_exclusion(value: Any) -> Optional[dict[str, Any]]:
@@ -253,14 +259,7 @@ def _redact_url(value: str) -> str:
         return value
     if not parsed.scheme or not parsed.netloc:
         return value
-    host = parsed.hostname or ""
-    try:
-        port = parsed.port
-    except ValueError:
-        return value
-    if port is not None:
-        host = f"{host}:{parsed.port}"
-    netloc = f"<redacted>@{host}" if parsed.username is not None else parsed.netloc
+
     def redact_parameters(component: str) -> str:
         # Fragments are often ordinary anchors. Only treat a fragment as a parameter list when
         # it contains an assignment, preserving links such as ``#methodology`` verbatim.
@@ -270,6 +269,19 @@ def _redact_url(value: str) -> str:
             (key, "<redacted>" if _is_secret_name(key) else item)
             for key, item in parse_qsl(component, keep_blank_values=True)
         ])
+
+    try:
+        host = parsed.hostname or ""
+        port = parsed.port
+    except ValueError:
+        # A malformed port must not make a credential-bearing authority pass through unchanged.
+        # Keep the malformed host:port for diagnostics, but remove anything before its final @.
+        authority = parsed.netloc.rsplit("@", 1)[-1]
+        netloc = f"<redacted>@{authority}" if "@" in parsed.netloc else authority
+    else:
+        if port is not None:
+            host = f"{host}:{port}"
+        netloc = f"<redacted>@{host}" if parsed.username is not None else parsed.netloc
 
     return urlunsplit((
         parsed.scheme,
