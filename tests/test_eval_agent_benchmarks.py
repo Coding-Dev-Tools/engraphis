@@ -283,6 +283,31 @@ def test_cli_records_a_selected_limit_in_its_public_artifact(tmp_path, capsys):
     assert artifact["protocol"]["command"][-2:] == ["--limit", "1"]
 
 
+def test_cli_records_selected_modes_in_its_public_artifact(tmp_path, capsys, monkeypatch):
+    path = _write_json(tmp_path / "plus.json", [{
+        "id": "cognitive-1",
+        "input_prompt": "Earlier cue.",
+        "trigger": "What happened?",
+        "evidence": "Earlier cue.",
+        "category": "Cognitive",
+    }])
+    artifact_path = tmp_path / "modes-artifact.json"
+    monkeypatch.setattr(
+        "eval.agent_benchmarks.get_embedder", lambda _name: DeterministicEmbedder()
+    )
+
+    assert main([
+        "--dataset", path, "--format", "locomo_plus", "--embed-model", "test/model",
+        "--no-resolve", "--include-original-locomo", "--artifact", str(artifact_path),
+    ]) == 0
+    capsys.readouterr()
+
+    command = json.loads(artifact_path.read_text(encoding="utf-8"))["protocol"]["command"]
+    assert ["--embed-model", "test/model"] == command[command.index("--embed-model"):][:2]
+    assert "--no-resolve" in command
+    assert "--include-original-locomo" in command
+
+
 def test_cli_reports_embedder_factory_fallback_honestly(tmp_path, capsys, monkeypatch):
     path = _write_json(tmp_path / "plus.json", [{
         "input_prompt": "Morgan previously said oat milk is required.",
