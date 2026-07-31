@@ -7,6 +7,7 @@ deterministic embedder, so the assertions are on the robust, non-flaky signal
 """
 from pathlib import Path
 
+from engraphis.backends.extractor import ChunkingExtractor
 from eval.chunking_eval import compare, load, run_eval
 
 INLINE = [
@@ -40,3 +41,29 @@ def test_shipped_longdoc_dataset_shows_material_reduction():
     chunked = result["reports"]["chunked"]
     assert chunked["recall_at_k"] >= whole["recall_at_k"] - 1e-9
     assert result["context_reduction_pct"] > 40.0   # deterministic ~73% at time of writing
+    assert whole["token_counter"] == chunked["token_counter"] == "engraphis.chars4.v1"
+
+
+def test_eval_uses_injected_reader_counter_for_ingest_and_measurement():
+    class WordCounter:
+        identity = "test.words.v1"
+
+        def __call__(self, text):
+            return len(text.split())
+
+    counter = WordCounter()
+    chunker = ChunkingExtractor(
+        target_tokens=16,
+        overlap_tokens=4,
+        token_counter=counter,
+    )
+
+    report = run_eval(
+        INLINE,
+        mode="chunked",
+        k=5,
+        chunk_extractor=chunker,
+    )
+
+    assert report["token_counter"] == "test.words.v1"
+    assert report["max_stored_tokens"] <= chunker.target_tokens

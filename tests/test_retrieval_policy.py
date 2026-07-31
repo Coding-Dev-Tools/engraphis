@@ -83,6 +83,62 @@ def test_empty_requested_profile_defaults_to_balanced() -> None:
     assert DeterministicRetrievalPolicy().resolve("", "src/api.py -> Handler.handle()").name == "balanced"
 
 
+@pytest.mark.parametrize(
+    ("profile", "expected"),
+    [
+        ("lexical", 10),
+        ("balanced", 15),
+        ("graph", 30),
+        ("code", 30),
+    ],
+)
+def test_adaptive_candidate_depth_is_profile_aware_and_bounded(
+    profile: str, expected: int
+) -> None:
+    depth, reason = DeterministicRetrievalPolicy().candidate_depth(
+        "ordinary query", k=5, ceiling=50, profile=profile, mode="adaptive"
+    )
+
+    assert depth == expected
+    assert profile in reason
+
+
+def test_fixed_candidate_depth_preserves_the_requested_ceiling() -> None:
+    depth, reason = DeterministicRetrievalPolicy().candidate_depth(
+        "ordinary query", k=5, ceiling=7, profile="balanced", mode="fixed"
+    )
+
+    assert depth == 7
+    assert reason == "fixed requested depth"
+
+
+def test_recall_exposes_the_adaptive_candidate_depth_used():
+    engine = MemoryEngine.create(":memory:")
+    workspace_id = engine.store.get_or_create_workspace("eval")
+    repo_id = engine.store.get_or_create_repo(workspace_id, "candidate-depth")
+    engine.remember(
+        "The API authenticates with PASETO v4 tokens.",
+        workspace_id=workspace_id,
+        repo_id=repo_id,
+        mtype=MemoryType.SEMANTIC,
+        scope=Scope.REPO,
+        resolve_conflicts=False,
+    )
+
+    result = engine.recall(
+        "Which token format authenticates the API?",
+        workspace_id=workspace_id,
+        repo_id=repo_id,
+        k=5,
+        candidate_depth="adaptive",
+    )
+
+    assert result.candidate_depth_mode == "adaptive"
+    assert result.candidate_k_requested == 50
+    assert result.candidate_k_used == 15
+    assert result.candidate_depth_reason == "adaptive balanced floor"
+
+
 @pytest.mark.parametrize("name", ["auto", "", "unknown"])
 def test_profile_config_requires_a_concrete_profile(name: str) -> None:
     with pytest.raises(ValueError, match="resolve to one of"):

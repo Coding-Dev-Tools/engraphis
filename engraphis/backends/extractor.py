@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Callable
 from typing import Any, Optional, Type
 
 from engraphis.core.interfaces import ExtractedFact, MemoryType, LLM
@@ -53,6 +54,7 @@ MAX_FACTS = 12
 CHUNK_TARGET_TOKENS = 256   # target tokens per prose chunk
 CHUNK_OVERLAP_TOKENS = 32   # sentence-level overlap carried between adjacent chunks
 CHUNK_MAX = 200             # hard cap on chunks per document (amplification guard)
+DEFAULT_CHUNK_TOKEN_COUNTER = "engraphis.chars4.v1"
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*$")
 _FENCE_RE = re.compile(r"^(```+|~~~+)")
@@ -354,10 +356,22 @@ class ChunkingExtractor:
 
     def __init__(self, *, target_tokens: int = CHUNK_TARGET_TOKENS,
                  overlap_tokens: int = CHUNK_OVERLAP_TOKENS,
-                 max_chunks: int = CHUNK_MAX) -> None:
+                 max_chunks: int = CHUNK_MAX,
+                 token_counter: Optional[Callable[[str], int]] = None,
+                 token_counter_identity: Optional[str] = None) -> None:
         self.target_tokens = max(16, int(target_tokens))
         self.overlap_tokens = max(0, min(int(overlap_tokens), self.target_tokens // 2))
         self.max_chunks = max(1, int(max_chunks))
+        self._count = token_counter or estimate_tokens
+        self.token_counter_identity = (
+            token_counter_identity
+            or getattr(self._count, "identity", None)
+            or (
+                DEFAULT_CHUNK_TOKEN_COUNTER
+                if self._count is estimate_tokens
+                else getattr(self._count, "__name__", type(self._count).__name__)
+            )
+        )
 
     def extract(self, text: str, *, context: str = "") -> list[ExtractedFact]:
         text = text or ""
@@ -370,13 +384,27 @@ class ChunkingExtractor:
                 continue
             leaf = heading_path.split(" > ")[-1] if heading_path else ""
             title = _defang(leaf or _first_line(content), 1_000)
-            facts.append(ExtractedFact(content=content, title=title[:200],
-                                       keywords=_keywords(content)))
+            facts.append(ExtractedFact(
+                content=content,
+                title=title[:200],
+                keywords=_keywords(content),
+                metadata={
+                    "chunking": {
+                        "target_tokens": self.target_tokens,
+                        "overlap_tokens": self.overlap_tokens,
+                        "token_counter": self.token_counter_identity,
+                    },
+                },
+            ))
             if len(facts) >= self.max_chunks:
                 break
         # Never lose the write: an all-whitespace/degenerate parse falls back to the
         # whole text, exactly like PassthroughExtractor.
         return facts or [ExtractedFact(content=_defang(text, 100_000))]
+
+    def count_tokens(self, text: str) -> int:
+        """Expose the exact configured counter for eval and composition boundaries."""
+        return self._tokens(text)
 
     # ── internals ────────────────────────────────────────────────────────────
     def _chunks(self, text: str) -> list[tuple[str, str]]:
@@ -449,22 +477,27 @@ class ChunkingExtractor:
         paras = [p.strip() for p in _PARA_SPLIT_RE.split(body) if p.strip()]
         chunks: list[str] = []
         cur: list[str] = []
-        cur_tokens = 0
         for para in paras:
-            ptokens = estimate_tokens(para)
-            if cur and cur_tokens + ptokens > self.target_tokens:
+            ptokens = self._tokens(para)
+            proposed = "\n\n".join([*cur, para])
+            if cur and self._tokens(proposed) > self.target_tokens:
                 joined = "\n\n".join(cur)
                 chunks.append(joined)
                 tail = self._overlap_tail(joined)
                 cur = [tail] if tail else []
-                cur_tokens = estimate_tokens(tail) if tail else 0
             if ptokens > self.target_tokens:
+                # A tail here is overlap from the chunk just emitted above.
+                # The oversized paragraph is split independently; emitting the
+                # tail alone would create a duplicate evidence-only memory.
+                cur = []
                 for group in self._split_paragraph(para):
                     chunks.append(group)
-                cur, cur_tokens = [], 0
                 continue
+            if cur and self._tokens("\n\n".join([*cur, para])) > self.target_tokens:
+                # Overlap is best-effort. It must never make the next otherwise
+                # admissible paragraph violate the configured reader budget.
+                cur = []
             cur.append(para)
-            cur_tokens += ptokens
         if cur:
             chunks.append("\n\n".join(cur))
         return chunks
@@ -474,24 +507,23 @@ class ChunkingExtractor:
         sentences = [s for s in _SENTENCE_RE.split(para.strip()) if s]
         groups: list[str] = []
         cur: list[str] = []
-        cur_tokens = 0
         for sent in sentences:
-            stokens = estimate_tokens(sent)
+            stokens = self._tokens(sent)
             if stokens > self.target_tokens:
                 if cur:
                     joined = " ".join(cur)
                     groups.append(joined)
-                    cur, cur_tokens = [], 0
+                    cur = []
                 groups.extend(self._split_oversized_sentence(sent))
                 continue
-            if cur and cur_tokens + stokens > self.target_tokens:
+            if cur and self._tokens(" ".join([*cur, sent])) > self.target_tokens:
                 joined = " ".join(cur)
                 groups.append(joined)
                 tail = self._overlap_tail(joined)
                 cur = [tail] if tail else []
-                cur_tokens = estimate_tokens(tail) if tail else 0
+            if cur and self._tokens(" ".join([*cur, sent])) > self.target_tokens:
+                cur = []
             cur.append(sent)
-            cur_tokens += stokens
         if cur:
             groups.append(" ".join(cur))
         return groups
@@ -503,16 +535,13 @@ class ChunkingExtractor:
         memory limit cannot be stored whole, so split near whitespace (or hard-cut a
         single giant token) instead of silently truncating it in ``_defang``.
         """
-        max_chars = max(64, self.target_tokens * 4)
         remaining = sentence.strip()
         parts: list[str] = []
         while remaining:
-            if len(remaining) <= max_chars:
+            if self._tokens(remaining) <= self.target_tokens:
                 parts.append(remaining)
                 break
-            cut = remaining.rfind(" ", max_chars // 2, max_chars + 1)
-            if cut < 0:
-                cut = max_chars
+            cut = self._largest_fitting_prefix(remaining)
             part = remaining[:cut].strip()
             if part:
                 parts.append(part)
@@ -525,15 +554,55 @@ class ChunkingExtractor:
             return ""
         sentences = [s for s in _SENTENCE_RE.split(text.strip()) if s]
         tail: list[str] = []
-        tokens = 0
         for sent in reversed(sentences):
-            if tail and tokens + estimate_tokens(sent) > self.overlap_tokens:
+            proposed = " ".join([sent, *tail])
+            if tail and self._tokens(proposed) > self.overlap_tokens:
                 break
             tail.insert(0, sent)
-            tokens += estimate_tokens(sent)
-            if tokens >= self.overlap_tokens:
+            if self._tokens(" ".join(tail)) >= self.overlap_tokens:
                 break
         return " ".join(tail).strip()
+
+    def _tokens(self, text: str) -> int:
+        """Count with the configured reader counter and reject invalid adapters."""
+        value = self._count(text or "")
+        if type(value) is not int:
+            raise TypeError("chunk token counter must return a non-negative integer")
+        if value < 0:
+            raise ValueError("chunk token counter must return a non-negative integer")
+        return value
+
+    def _largest_fitting_prefix(self, text: str) -> int:
+        """Find a whitespace-aligned prefix within the declared token budget.
+
+        Tokenizers need not expose token offsets. A bounded binary search keeps the
+        chunker backend-agnostic; the final verification loop handles merge-sensitive
+        tokenizers whose count is not perfectly monotonic at every character boundary.
+        """
+        low, high = 1, len(text)
+        best = 0
+        while low <= high:
+            middle = (low + high) // 2
+            if self._tokens(text[:middle]) <= self.target_tokens:
+                best = middle
+                low = middle + 1
+            else:
+                high = middle - 1
+        if best <= 0:
+            if self._tokens(text[:1]) <= self.target_tokens:
+                return 1
+            raise ValueError(
+                "chunk token counter cannot fit one character within target_tokens"
+            )
+        whitespace = text.rfind(" ", max(0, best // 2), best + 1)
+        cut = whitespace if whitespace > 0 else best
+        while cut > 0 and self._tokens(text[:cut].strip()) > self.target_tokens:
+            cut -= 1
+        if cut <= 0:
+            raise ValueError(
+                "chunk token counter cannot fit one character within target_tokens"
+            )
+        return cut
 
 
 def _first_line(text: str) -> str:
@@ -574,22 +643,65 @@ def _loads_lenient(raw: str) -> dict:
     return {}
 
 
-def get_extractor(kind: str = "none", llm: Any = None):
+def _load_chunk_token_counter(
+    model: str, revision: Optional[str] = None,
+) -> tuple[Callable[[str], int], str]:
+    """Load an explicitly configured Hugging Face tokenizer at the backend edge."""
+    try:
+        from transformers import AutoTokenizer
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "ENGRAPHIS_CHUNK_TOKENIZER_MODEL requires the optional transformers package"
+        ) from exc
+    kwargs: dict[str, Any] = {"trust_remote_code": False}
+    if revision:
+        kwargs["revision"] = revision
+    tokenizer = AutoTokenizer.from_pretrained(model, **kwargs)
+
+    def count(text: str) -> int:
+        return len(tokenizer.encode(text or "", add_special_tokens=False))
+
+    identity = f"hf:{model}@{revision or 'unversioned'}"
+    count.identity = identity  # type: ignore[attr-defined]
+    return count, identity
+
+
+def get_extractor(
+    kind: str = "none",
+    llm: Any = None,
+    *,
+    token_counter: Optional[Callable[[str], int]] = None,
+    token_counter_identity: Optional[str] = None,
+):
     """Factory mirroring ``get_embedder``/``get_vector_index``: config in, backend out.
 
     ``kind='chunk'`` returns the deterministic, offline ``ChunkingExtractor`` (knobs from
-    ``ENGRAPHIS_CHUNK_TOKENS``/``_OVERLAP``/``_MAX``). ``kind='llm'`` with no ``llm``
-    builds the v1 multi-provider ``LLMClient`` from settings (heavy import gated here,
-    never in ``core/``). ``kind='llm_structured'`` returns a schema-validated extractor
-    with entity/relation extraction. Anything else — including an LLM kind with no usable
+    ``ENGRAPHIS_CHUNK_TOKENS``/``_OVERLAP``/``_MAX``). A caller can inject the reader's
+    token counter, or explicitly configure ``ENGRAPHIS_CHUNK_TOKENIZER_MODEL`` and an
+    optional immutable ``ENGRAPHIS_CHUNK_TOKENIZER_REVISION``. Heavy tokenizer imports
+    stay behind this backend factory and the default remains dependency-free.
+    ``kind='llm'`` with no ``llm`` builds the v1 multi-provider ``LLMClient`` from
+    settings. ``kind='llm_structured'`` returns a schema-validated extractor with
+    entity/relation extraction. Anything else — including an LLM kind with no usable
     client — returns the offline passthrough.
     """
     kind = (kind or "none").lower()
     if kind == "chunk":
+        if token_counter is None:
+            tokenizer_model = os.environ.get("ENGRAPHIS_CHUNK_TOKENIZER_MODEL", "").strip()
+            tokenizer_revision = os.environ.get(
+                "ENGRAPHIS_CHUNK_TOKENIZER_REVISION", ""
+            ).strip()
+            if tokenizer_model:
+                token_counter, token_counter_identity = _load_chunk_token_counter(
+                    tokenizer_model, tokenizer_revision or None,
+                )
         return ChunkingExtractor(
             target_tokens=_env_int("ENGRAPHIS_CHUNK_TOKENS", CHUNK_TARGET_TOKENS),
             overlap_tokens=_env_int("ENGRAPHIS_CHUNK_OVERLAP", CHUNK_OVERLAP_TOKENS),
             max_chunks=_env_int("ENGRAPHIS_CHUNK_MAX", CHUNK_MAX),
+            token_counter=token_counter,
+            token_counter_identity=token_counter_identity,
         )
     if kind == "llm_structured":
         if llm is None:

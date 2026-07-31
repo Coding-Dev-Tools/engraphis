@@ -111,6 +111,41 @@ def test_qualifier_preserving_summary_is_preferred_when_it_fits() -> None:
     assert chunks[0].truncated is True
 
 
+def test_sentence_aligned_summary_excerpt_leaves_room_for_more_evidence() -> None:
+    packer = DeterministicContextPacker()
+    candidates = [
+        _candidate(
+            "mem_rollout",
+            "The release ledger records extensive historical rollout details. "
+            "Platform Reliability owns deployment evidence and maintains the signed "
+            "release ledger with the complete verification record for every rollout.",
+            score=1.0,
+            title="",
+            summary=(
+                "Platform Reliability owns deployment evidence. "
+                "The signed release ledger keeps the complete verification record for "
+                "every production rollout and post-release review, including approvals, "
+                "rollbacks, and independently signed audit receipts."
+            ),
+        ),
+        _candidate(
+            "mem_owner",
+            "The service owner is Platform Reliability.",
+            score=0.9,
+            title="",
+        ),
+    ]
+
+    _, chunks, usage = packer.pack(
+        "deployment evidence owner", candidates, token_budget=28
+    )
+
+    assert [chunk.id for chunk in chunks] == ["mem_rollout", "mem_owner"]
+    assert chunks[0].reason == "summary_excerpt"
+    assert chunks[0].excerpt == "Platform Reliability owns deployment evidence. […]"
+    assert usage.context_tokens <= usage.budget_tokens == 28
+
+
 def test_summary_must_preserve_every_qualifier_before_it_can_replace_source() -> None:
     packer = DeterministicContextPacker()
     candidate = _candidate(

@@ -1,45 +1,106 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="600" viewBox="0 0 1200 600" role="img" aria-labelledby="title desc">
-  <title id="title">Engraphis context efficiency in deterministic offline fixtures</title>
-  <desc id="desc">Three normalized comparisons show retained token payload after using Engraphis: 27.0 percent for retrieved content, 26.1 percent for an evidence-holding record, and 44.6 percent for a compact MCP response. Every label has a separate line above its corresponding bar. Each row has a separate baseline.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="980" viewBox="0 0 1200 980" role="img" aria-labelledby="title desc">
+  <title id="title">Engraphis measured token and context savings</title>
+  <desc id="desc">A dark-mode chart with five measured comparisons. Engraphis used 98.21 percent less context over a long-history workload, 73.0 percent less retrieved context per question, 73.9 percent fewer tokens in the smallest useful memory, returned a 55.38 percent smaller memory-tool response, and reduced a repeated-memory cluster by 47.8 percent through consolidation. Supporting measurements show 53 times more evidence than recency-only retrieval at the same budget, 97.72 percent less total context after including the complete indexing pass with break-even by question 10, and an observed maximum of 106 context tokens under a 1500-token cap.</desc>
   <defs>
-    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#0f172a" flood-opacity=".09"/></filter>
+    <linearGradient id="page" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#070b16"/>
+      <stop offset="1" stop-color="#0d1426"/>
+    </linearGradient>
+    <linearGradient id="engraphis" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000" flood-opacity=".28"/>
+    </filter>
   </defs>
-  <rect width="1200" height="600" rx="28" fill="#f8fafc"/>
-  <rect x="24" y="22" width="1152" height="556" rx="22" fill="#fff" stroke="#e2e8f0"/>
-  <text x="72" y="75" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a">Less history in context; the same fixture-level retrieval quality</text>
-  <text x="72" y="105" font-family="Inter, Arial, sans-serif" font-size="16" fill="#475569">Each row is normalized to its own 100% baseline. The measures count different boundaries and are not additive.</text>
-  <rect x="746" y="126" width="15" height="15" rx="3" fill="#64748b"/><text x="770" y="139" font-family="Inter, Arial, sans-serif" font-size="13" fill="#475569">baseline payload (100%)</text>
-  <rect x="948" y="126" width="15" height="15" rx="3" fill="#2563eb"/><text x="972" y="139" font-family="Inter, Arial, sans-serif" font-size="13" fill="#475569">Engraphis payload retained</text>
+
+  <rect width="1200" height="980" rx="30" fill="url(#page)"/>
+  <rect x="24" y="22" width="1152" height="936" rx="24" fill="#0b1220" stroke="#263247"/>
+
+  <text x="70" y="72" font-family="Inter, Arial, sans-serif" font-size="33" font-weight="700" fill="#f8fafc">Give your agent more room to think</text>
+  <text x="70" y="104" font-family="Inter, Arial, sans-serif" font-size="17.6" fill="#a8b4c7">Measured savings across long histories, retrieval, responses, and memory cleanup.</text>
+
+  <rect x="70" y="130" width="18" height="8" rx="4" fill="#64748b"/>
+  <text x="98" y="140" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#a8b4c7">Without Engraphis</text>
+  <rect x="245" y="130" width="18" height="8" rx="4" fill="url(#engraphis)"/>
+  <text x="273" y="140" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#a8b4c7">With Engraphis</text>
+  <text x="1128" y="140" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="13.2" fill="#7f8da3">Each row has its own baseline</text>
 
   <g filter="url(#shadow)">
-    <rect x="72" y="162" width="1056" height="110" rx="15" fill="#f8fafc" stroke="#e2e8f0"/>
-    <text x="96" y="194" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700" fill="#0f172a">Retrieved memory content</text>
-    <text x="96" y="217" font-family="Inter, Arial, sans-serif" font-size="13" fill="#475569">Long-document fixture · top-5 memory content</text>
-    <text x="500" y="190" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#334155">Baseline · whole documents · 808.8 tokens</text>
-    <rect x="500" y="199" width="440" height="12" rx="6" fill="#64748b"/>
-    <text x="500" y="237" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#1d4ed8">Engraphis · structure-aware chunks · 218.4 tokens · 73.0% lower</text>
-    <rect x="500" y="246" width="119" height="12" rx="6" fill="#2563eb"/>
+    <rect x="70" y="164" width="1058" height="112" rx="16" fill="#111a2b" stroke="#27344a"/>
+    <text x="94" y="194" font-family="Inter, Arial, sans-serif" font-size="18.7" font-weight="700" fill="#f8fafc">Long project history sent to the model</text>
+    <text x="94" y="219" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#9eabc0">LoCoMo diagnostic · 10 conversations · 1,986 questions</text>
+    <text x="94" y="249" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#fbbf24">Focused context; full-history recall was higher</text>
+    <text x="462" y="190" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#cbd5e1">Replay everything · 49,915,394 tokens</text>
+    <rect x="462" y="201" width="440" height="12" rx="6" fill="#64748b"/>
+    <text x="462" y="239" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#67e8f9">Engraphis · 891,857 tokens</text>
+    <rect x="462" y="250" width="8" height="12" rx="4" fill="url(#engraphis)"/>
+    <text x="1098" y="226" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="29.7" font-weight="700" fill="#5eead4">98.21% less</text>
   </g>
 
   <g filter="url(#shadow)">
-    <rect x="72" y="288" width="1056" height="110" rx="15" fill="#f8fafc" stroke="#e2e8f0"/>
-    <text x="96" y="320" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700" fill="#0f172a">Smallest evidence-holding record</text>
-    <text x="96" y="343" font-family="Inter, Arial, sans-serif" font-size="13" fill="#475569">Long-document fixture · evidence returned for the same 18 questions</text>
-    <text x="500" y="316" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#334155">Baseline · whole documents · 162.2 tokens</text>
-    <rect x="500" y="325" width="440" height="12" rx="6" fill="#64748b"/>
-    <text x="500" y="363" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#1d4ed8">Engraphis · structure-aware chunks · 42.4 tokens · 73.9% lower</text>
-    <rect x="500" y="372" width="115" height="12" rx="6" fill="#2563eb"/>
+    <rect x="70" y="290" width="1058" height="112" rx="16" fill="#111a2b" stroke="#27344a"/>
+    <text x="94" y="320" font-family="Inter, Arial, sans-serif" font-size="18.7" font-weight="700" fill="#f8fafc">Retrieved memory content per question</text>
+    <text x="94" y="345" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#9eabc0">Long-document test · 18 questions · Recall@5 1.000</text>
+    <text x="462" y="316" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#cbd5e1">Whole documents · 808.8 tokens</text>
+    <rect x="462" y="327" width="440" height="12" rx="6" fill="#64748b"/>
+    <text x="462" y="365" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#67e8f9">Focused chunks · 218.4 tokens</text>
+    <rect x="462" y="376" width="119" height="12" rx="6" fill="url(#engraphis)"/>
+    <text x="1098" y="352" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="29.7" font-weight="700" fill="#5eead4">73.0% less</text>
   </g>
 
   <g filter="url(#shadow)">
-    <rect x="72" y="414" width="1056" height="110" rx="15" fill="#f8fafc" stroke="#e2e8f0"/>
-    <text x="96" y="446" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700" fill="#0f172a">Serialized MCP recall response</text>
-    <text x="96" y="469" font-family="Inter, Arial, sans-serif" font-size="13" fill="#475569">CodeMem fixture · retrieval scores unchanged across 260 timed recalls</text>
-    <text x="500" y="442" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#334155">Baseline · full response · 17,172 tokens</text>
-    <rect x="500" y="451" width="440" height="12" rx="6" fill="#64748b"/>
-    <text x="500" y="489" font-family="Inter, Arial, sans-serif" font-size="13" font-weight="700" fill="#1d4ed8">Engraphis · compact response · 7,663 tokens · 55.38% lower</text>
-    <rect x="500" y="498" width="196" height="12" rx="6" fill="#2563eb"/>
+    <rect x="70" y="416" width="1058" height="112" rx="16" fill="#111a2b" stroke="#27344a"/>
+    <text x="94" y="446" font-family="Inter, Arial, sans-serif" font-size="18.7" font-weight="700" fill="#f8fafc">Smallest useful memory returned</text>
+    <text x="94" y="471" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#9eabc0">The same 18 questions found supporting evidence</text>
+    <text x="462" y="442" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#cbd5e1">Whole document · 162.2 tokens</text>
+    <rect x="462" y="453" width="440" height="12" rx="6" fill="#64748b"/>
+    <text x="462" y="491" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#67e8f9">Useful chunk · 42.4 tokens</text>
+    <rect x="462" y="502" width="115" height="12" rx="6" fill="url(#engraphis)"/>
+    <text x="1098" y="478" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="29.7" font-weight="700" fill="#5eead4">73.9% less</text>
   </g>
 
-  <text x="72" y="558" font-family="Inter, Arial, sans-serif" font-size="13" fill="#64748b">Controlled deterministic offline regression fixtures, not model-billing, task-time, customer-cost, or external benchmark claims.</text>
+  <g filter="url(#shadow)">
+    <rect x="70" y="542" width="1058" height="112" rx="16" fill="#111a2b" stroke="#27344a"/>
+    <text x="94" y="572" font-family="Inter, Arial, sans-serif" font-size="18.7" font-weight="700" fill="#f8fafc">Complete memory-tool response</text>
+    <text x="94" y="595" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#9eabc0">CodeMem test · 260 recalls</text>
+    <text x="94" y="617" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#9eabc0">Retrieval scores unchanged</text>
+    <text x="462" y="568" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#cbd5e1">Full response · 17,172 tokens</text>
+    <rect x="462" y="579" width="440" height="12" rx="6" fill="#64748b"/>
+    <text x="462" y="617" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#67e8f9">Compact response · 7,663 tokens</text>
+    <rect x="462" y="628" width="196" height="12" rx="6" fill="url(#engraphis)"/>
+    <text x="1098" y="604" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="29.7" font-weight="700" fill="#5eead4">55.38% less</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="70" y="668" width="1058" height="112" rx="16" fill="#111a2b" stroke="#27344a"/>
+    <text x="94" y="698" font-family="Inter, Arial, sans-serif" font-size="18.7" font-weight="700" fill="#f8fafc">Repeated memories after consolidation</text>
+    <text x="94" y="720" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#9eabc0">12 related events condensed into one digest</text>
+    <text x="94" y="742" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#9eabc0">Originals remain auditable</text>
+    <text x="462" y="694" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#cbd5e1">Repeated memories · 230 tokens</text>
+    <rect x="462" y="705" width="440" height="12" rx="6" fill="#64748b"/>
+    <text x="462" y="743" font-family="Inter, Arial, sans-serif" font-size="14.3" font-weight="700" fill="#67e8f9">Consolidated digest · 120 tokens</text>
+    <rect x="462" y="754" width="230" height="12" rx="6" fill="url(#engraphis)"/>
+    <text x="1098" y="730" text-anchor="end" font-family="Inter, Arial, sans-serif" font-size="29.7" font-weight="700" fill="#5eead4">47.8% less</text>
+  </g>
+
+  <g>
+    <rect x="70" y="800" width="330" height="96" rx="14" fill="#0f1c31" stroke="#254061"/>
+    <text x="92" y="828" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#9eabc0">SAME 512-TOKEN BUDGET</text>
+    <text x="92" y="859" font-family="Inter, Arial, sans-serif" font-size="25.3" font-weight="700" fill="#f8fafc">53× more evidence</text>
+    <text x="92" y="884" font-family="Inter, Arial, sans-serif" font-size="13.2" fill="#7f8da3">than recency-only retrieval</text>
+
+    <rect x="414" y="800" width="330" height="96" rx="14" fill="#0f1c31" stroke="#254061"/>
+    <text x="436" y="828" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#9eabc0">INCLUDING INDEXING</text>
+    <text x="436" y="859" font-family="Inter, Arial, sans-serif" font-size="25.3" font-weight="700" fill="#f8fafc">97.72% less total</text>
+    <text x="436" y="884" font-family="Inter, Arial, sans-serif" font-size="13.2" fill="#7f8da3">paid back by question 10</text>
+
+    <rect x="758" y="800" width="370" height="96" rx="14" fill="#0f1c31" stroke="#254061"/>
+    <text x="780" y="828" font-family="Inter, Arial, sans-serif" font-size="14.3" fill="#9eabc0">HARD CONTEXT CAP: 1,500</text>
+    <text x="780" y="859" font-family="Inter, Arial, sans-serif" font-size="25.3" font-weight="700" fill="#f8fafc">87.7 average · 106 max</text>
+    <text x="780" y="884" font-family="Inter, Arial, sans-serif" font-size="13.2" fill="#7f8da3">observed context tokens in CodeMem</text>
+  </g>
+
+  <text x="70" y="942" font-family="Inter, Arial, sans-serif" font-size="13.2" fill="#7f8da3">Separate measured tests; percentages are not additive. Token/context measurements, not provider billing or customer-cost claims. Full methods: BENCHMARKS.md</text>
 </svg>

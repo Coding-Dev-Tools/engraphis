@@ -1,6 +1,6 @@
 # Engraphis MCP tools: reference
 
-All 30 tools, grouped by job. Parameters are `name (type, default)`: no default means required.
+All 31 tools, grouped by job. Parameters are `name (type, default)`: no default means required.
 Every tool returns a JSON string; on failure it returns `"Error: <reason>"` instead of raising.
 Governance tools (`forget`/`pin`/`correct`/`link`) verify the memory actually belongs to the
 `workspace`/`repo` you pass **before** changing anything, so you can't touch memories outside a
@@ -72,6 +72,9 @@ bodies already represented in `context`.
   explicit opt-in, with `lexical`, `graph`, and `code` available for deliberate routing. The
   specialized graph/code profiles prioritize their named evidence while retaining supporting
   arms; diagnostics preserves both normalized and profile-adjusted scores.
+- `candidate_depth (str, "fixed")`: `fixed` preserves the historical 50-candidate pool;
+  opt-in `adaptive` uses a deterministic profile-aware smaller pool for routine lexical/balanced
+  queries while retaining wider graph/code pools. Responses report the requested and used depth.
 - `valid_at (float, None)`: what was true in world time; `known_at (float, None)`: what
   Engraphis had learned in system time; `as_of (float, None)` is the `valid_at` compatibility
   alias and must match when both are supplied.
@@ -96,6 +99,9 @@ It is the full-response compatibility surface; prefer `engraphis_recall_context`
 - `token_budget (int, None)`: hard packed-context budget; omitted uses the engine default.
 - `retrieval_profile (str, "balanced")`: `balanced` default; `auto` only when explicitly set;
   `lexical`, `graph`, and `code` are deliberate alternatives whose named arm is prioritized.
+- `candidate_depth (str, "fixed")`: `fixed` preserves the historical candidate pool; opt-in
+  `adaptive` is a deterministic profile-aware depth experiment. The response records the
+  requested mode, actual depth, and reason.
 - `response_mode (str, "full")`: `full` preserves legacy memory bodies; `compact` omits bodies
   already represented in `context`.
 - `valid_at (float, None)`, `known_at (float, None)`; `as_of (float, None)` is the compatible
@@ -121,8 +127,9 @@ extractive; optional LLM synthesis is accepted only when its claims remain cited
   `mtypes (list[str], None)`, `k (int, 8)`.
 - `valid_at (float, None)`, `known_at (float, None)`; `as_of (float, None)` remains the
   compatibility `valid_at` alias and must match if both are supplied.
-- `token_budget (int, None)`; `retrieval_profile (str, "balanced")`; `response_mode (str,
-  "full" | "compact")`; `diagnostics (bool, false)`.
+- `token_budget (int, None)`; `retrieval_profile (str, "balanced")`; `candidate_depth (str,
+  "fixed" | "adaptive")`; `response_mode (str, "full" | "compact")`; `diagnostics (bool,
+  false)`.
 - `min_support (float, None)`: absolute support floor `0..1`; raise it to demand stronger
   evidence before answering.
 - `synthesize (bool, false)`: ask a configured LLM for cited prose; falls back safely.
@@ -371,6 +378,17 @@ The `compaction` field is the context tokens the sweep saved (before → after).
 List content-free, SHA-256-chained operation receipts for a workspace.
 
 - `workspace (str)`, `limit (int, 100)`.
+
+### `engraphis_context_savings`
+Aggregate the content-free token-usage fields already stored in operation receipts. Results are
+scoped to a workspace and optional repo, and are kept separate by token-counter identity so
+unlike tokenizers are never added together. No prompt, answer, or memory content is returned.
+
+- `workspace (str)`; `repo (str, None)`.
+
+Returns receipt coverage counts plus `by_token_counter` totals for source, context, saved, budget,
+packed, and omitted tokens, with savings ratios, per-operation breakdowns, and receipt-chain
+validity. Treat an invalid-chain aggregate as local diagnostics, not auditable evidence.
 
 ### `engraphis_verify_receipts`
 Recompute hashes and validate chain order plus the independently stored local head/count anchor.

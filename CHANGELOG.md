@@ -3,6 +3,43 @@
 All notable changes to Engraphis are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions use SemVer.
 
+## [Unreleased]
+
+### Added
+
+- `engraphis_context_savings` aggregates validated, content-free recall receipts by workspace,
+  repo, operation, and token-counter identity. The same read-only view is available through the
+  service, Inspector, v2/read-only APIs, and dashboard receipt panel.
+- Recall supports an explicit adaptive candidate-depth experiment while retaining the historical
+  fixed depth by default. Performance reports record requested and actual candidate depths.
+- Chunk ingestion can enforce budgets with an injected or explicitly configured Hugging Face
+  tokenizer and records the counter identity, target, and overlap in each chunk's metadata.
+- Offline adapters now cover MemoryAgentBench, LoCoMo-Plus, and Mem2ActBench. A paired code-agent
+  analyzer compares full-history and Engraphis runs using identical tasks and success oracles.
+- Public benchmark evidence can carry source hashes, repository state, environment and model
+  provenance, secret-redacted commands, content digests, and adjacent immutable SHA-256 files.
+
+### Changed
+
+- Context-economy evaluation now compares uncapped full history, a same-budget recency window,
+  and shipped hybrid recall while charging an explicit one-time indexing token proxy.
+- Official LongMemEval-V2 output has a dedicated redacted evidence exporter that retains the
+  official QA/token/latency measures without publishing prompts, answers, model output, or
+  retrieved context.
+- Folder-sync dry runs no longer create a remote directory or persist a local device identity.
+
+### Fixed
+
+- Sync rejects malformed scope/repo combinations and every peer-driven visibility change for an
+  existing memory, including malformed legacy rows. Scope promotion or repair remains a local,
+  explicit governance operation.
+- Workspace consolidation excludes session-private memories and partitions digests and entity
+  profiles by their exact visibility owner, preventing cross-repo or cross-scope summaries.
+- Tokenizer-aware chunk overlap can no longer exceed the configured prose budget or emit a
+  duplicate overlap-only record before an oversized paragraph. Invalid token counters fail
+  closed instead of silently producing mis-sized chunks.
+- The new evidence guide is included in wheel and source distributions.
+
 ## [1.2.2] - 2026-07-30
 
 ### Fixed

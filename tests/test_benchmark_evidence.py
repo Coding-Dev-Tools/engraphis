@@ -1,4 +1,6 @@
+import hashlib
 import json
+import re
 import struct
 from copy import deepcopy
 from pathlib import Path
@@ -16,6 +18,8 @@ from eval.benchmark import (
     count_tokens,
     fixed_budget_curve,
     paired_bootstrap_ci,
+    redact_command,
+    redact_public_record,
     main,
     question_record,
     report_envelope,
@@ -51,22 +55,54 @@ class CharacterTokenizer:
         return list(text)
 
 
+def test_public_record_redaction_uses_an_allowlist_for_raw_payload_aliases():
+    record = redact_public_record({
+        "question_id": "q1",
+        "query": "private query",
+        "answer_variants": ["private answer"],
+        "model_output": "private completion",
+        "context": "private context",
+        "retrieved_context": "private retrieved context",
+        "prompt": "private prompt",
+        "input": "private input",
+        "conversation": ["private conversation"],
+        "history": ["private history"],
+        "tool_calls": [{"arguments": "private tool input"}],
+    })
+
+    for field in (
+        "query", "answer_variants", "model_output", "context", "retrieved_context",
+    ):
+        assert field not in record
+    assert record["question_id"] == "q1"
+    assert len(record["query_sha256"]) == 64
+    assert len(record["answer_or_response_sha256"]) == 64
+    assert len(record["context_or_prompt_sha256"]) == 64
+
+
 def test_readme_distinguishes_every_current_token_context_measurement():
     """Public token-efficiency copy must preserve each metric's counting boundary."""
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     for evidence in (
-        "### Proof at a glance",
-        "73.0% less retrieved context",
-        "3.8× smaller evidence record",
-        "55.38% smaller MCP response",
+        "## Measured token and context savings",
+        "98.21 percent less long-history context",
+        "73.0 percent less retrieved content per question",
+        "73.9 percent fewer tokens in the smallest useful memory",
+        "55.38 percent smaller memory response",
+        "47.8 percent less repeated-memory context after consolidation",
+        "<summary>See benchmark details and reproduce the results</summary>",
         "### Measurement details and reproducibility",
+        "49,915,394** tokens → Engraphis: **891,857** tokens",
+        "98.2133% lower",
         "808.8** tokens → structure-aware chunks: **218.4** tokens",
         "73.0% lower",
         "162.2** tokens → chunks: **42.4** tokens",
         "73.9% lower",
         "17,172** `engraphis.regex.v1` tokens → compact result: **7,663** tokens",
         "55.38% lower",
+        "230** tokens → one digest: **120** tokens",
+        "47.8% lower",
         "1,500** tokens; observed mean: **87.73**; observed maximum: **106**",
         "must not be added together",
         "not a storage-reduction claim",
@@ -88,7 +124,7 @@ def test_readme_makes_agent_benefits_and_visual_evidence_scannable():
         "### See the behavior in reproducible fixtures",
         "docs/images/evidence-backed-agent-examples.png",
         "Run `python -m eval.chunking_eval` and `python -m eval.grounded`",
-        "Each row uses a separate 100% baseline",
+        "Less repeated history means more room for the task, tools, and useful evidence",
     ):
         assert evidence in readme
 
@@ -144,6 +180,46 @@ def test_example_visual_uses_the_checked_in_offline_fixture_results():
     }
     assert "5/5 answerable questions grounded" in visual
     assert "5/5 off-topic questions abstained" in visual
+
+
+def test_context_savings_visual_is_plain_language_and_uses_measured_results():
+    """The headline chart must stay simple and tied to the documented measurements."""
+    visual = (ROOT / "docs" / "images" / "context-efficiency.svg").read_text(
+        encoding="utf-8"
+    )
+
+    for evidence in (
+        "Give your agent more room to think",
+        "Replay everything · 49,915,394 tokens",
+        "Engraphis · 891,857 tokens",
+        "98.21% less",
+        "Focused context; full-history recall was higher",
+        "Whole documents · 808.8 tokens",
+        "Focused chunks · 218.4 tokens",
+        "73.0% less",
+        "Whole document · 162.2 tokens",
+        "Useful chunk · 42.4 tokens",
+        "73.9% less",
+        "Full response · 17,172 tokens",
+        "Compact response · 7,663 tokens",
+        "55.38% less",
+        "Repeated memories · 230 tokens",
+        "Consolidated digest · 120 tokens",
+        "47.8% less",
+        "53× more evidence",
+        "INCLUDING INDEXING",
+        "97.72% less total",
+        "paid back by question 10",
+        "87.7 average · 106 max",
+        "percentages are not additive",
+    ):
+        assert evidence in visual
+
+    text_sizes = {
+        float(value)
+        for value in re.findall(r'font-size="([^"]+)"', visual)
+    }
+    assert text_sizes == {13.2, 14.3, 17.6, 18.7, 25.3, 29.7, 33.0}
 
 
 def _complete_canonical_report(dataset, config):
@@ -222,6 +298,7 @@ def _complete_canonical_report(dataset, config):
         },
         git_commit="a" * 40,
     )
+    report["system"]["git_dirty"] = False
     report["models"] = {"embedder": {
         "name": "FixtureEmbedder",
         "model_id": profile["embedding"]["model"],
@@ -261,9 +338,64 @@ def test_envelope_hashes_dataset_config_and_retains_exclusions(tmp_path):
     assert report["schema"] == SCHEMA
     assert report["suite"]["sha256"]
     assert report["system"]["config_sha256"]
-    assert report["protocol"] == {"config": {"k": 5}, "n_total": 2, "n_scored": 1}
+    assert report["protocol"] == {
+        "command": ["in_process"],
+        "config": {"k": 5},
+        "token_accounting": {
+            "identity": "unspecified",
+            "revision": None,
+            "scope": "unspecified",
+            "method": "unspecified",
+        },
+        "n_total": 2,
+        "n_scored": 1,
+    }
     assert report["exclusions"] == [excluded]
     assert json.loads(json.dumps(report))["schema"] == SCHEMA
+
+
+def test_envelope_redacts_top_level_exclusion_detail(tmp_path):
+    dataset = tmp_path / "fixture.jsonl"
+    dataset.write_text('{"id":"one"}\n', encoding="utf-8")
+
+    report = report_envelope(
+        suite="fixture", dataset_path=dataset, config={"k": 5}, records=[],
+        exclusions=[{
+            "question_id": "q1", "reason": "invalid", "detail": "private prompt text",
+        }],
+    )
+
+    assert report["exclusions"] == [{
+        "question_id": "q1", "reason": "invalid",
+        "detail_sha256": hashlib.sha256(b'"private prompt text"').hexdigest(),
+    }]
+
+
+def test_command_provenance_redacts_explicit_credential_arguments():
+    assert redact_command([
+        "python", "-m", "runner", "--api-key", "do-not-publish", "--token=value",
+    ]) == [
+        "python", "-m", "runner", "--api-key", "<redacted>", "--token", "<redacted>",
+    ]
+
+
+def test_command_provenance_redacts_assignment_header_and_url_credentials():
+    assert redact_command([
+        "API_KEY=super-secret", "--api_key", "also-secret",
+        "-H", "Authorization: Bearer another-secret",
+        "https://alice:password@example.test/run?access_token=last-secret&format=json",
+    ]) == [
+        "API_KEY=<redacted>", "--api_key", "<redacted>",
+        "-H", "<redacted>",
+        "https://<redacted>@example.test/run?access_token=%3Credacted%3E&format=json",
+    ]
+    assert redact_command([
+        "-ualice:password", "-psecret", "--user=alice:password",
+        "--header=Authorization: Bearer secret",
+    ]) == [
+        "-u", "<redacted>", "-p", "<redacted>", "--user", "<redacted>",
+        "--header", "<redacted>",
+    ]
 
 
 def test_canonical_profile_validator_and_immutable_artifact_writer(tmp_path):
@@ -280,6 +412,11 @@ def test_canonical_profile_validator_and_immutable_artifact_writer(tmp_path):
     )
     report = _complete_canonical_report(dataset, config)
     assert validate_report(report, canonical=True) == []
+    dirty = deepcopy(report)
+    dirty["system"]["git_dirty"] = True
+    assert "canonical reports require a clean git worktree" in validate_report(
+        dirty, canonical=True
+    )
     artifact = tmp_path / "artifacts" / "run.json"
     written = write_canonical_artifact(report, artifact, canonical=True)
     assert written["sha256"] in artifact.with_name("run.json.sha256").read_text("ascii")
