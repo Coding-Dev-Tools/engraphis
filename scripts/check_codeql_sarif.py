@@ -11,16 +11,45 @@ from typing import Any
 MAX_REPORTED_FINDINGS = 50
 
 
-def _location(result: dict[str, Any]) -> str:
-    locations = result.get("locations")
-    if not isinstance(locations, list) or not locations:
+def _physical_location(physical: Any) -> str:
+    if not isinstance(physical, dict):
         return "<unknown>"
-    physical = locations[0].get("physicalLocation", {})
     artifact = physical.get("artifactLocation", {})
     region = physical.get("region", {})
     path = artifact.get("uri", "<unknown>")
     line = region.get("startLine")
     return f"{path}:{line}" if isinstance(line, int) else str(path)
+
+
+def _location(result: dict[str, Any]) -> str:
+    locations = result.get("locations")
+    if not isinstance(locations, list) or not locations:
+        return "<unknown>"
+    return _physical_location(locations[0].get("physicalLocation"))
+
+
+def _code_flows(result: dict[str, Any]) -> list[str]:
+    """Return compact source-to-sink paths from a SARIF path-problem result."""
+    flows: list[str] = []
+    for code_flow in result.get("codeFlows", []):
+        if not isinstance(code_flow, dict):
+            continue
+        for thread_flow in code_flow.get("threadFlows", []):
+            if not isinstance(thread_flow, dict):
+                continue
+            locations = thread_flow.get("locations", [])
+            if not isinstance(locations, list) or not locations:
+                continue
+            endpoints = []
+            for location in (locations[0], locations[-1]):
+                if not isinstance(location, dict):
+                    continue
+                entry = location.get("location", location)
+                if isinstance(entry, dict):
+                    endpoints.append(_physical_location(entry.get("physicalLocation")))
+            if endpoints:
+                flows.append(" -> ".join(endpoints))
+    return flows
 
 
 def findings_in(path: Path) -> list[str]:
@@ -32,7 +61,9 @@ def findings_in(path: Path) -> list[str]:
         for result in run.get("results", []):
             rule = result.get("ruleId", "<unknown-rule>")
             message = result.get("message", {}).get("text", "<no message>")
-            findings.append(f"{rule} at {_location(result)}: {message}")
+            flow = _code_flows(result)
+            suffix = f" [flow: {'; '.join(flow)}]" if flow else ""
+            findings.append(f"{rule} at {_location(result)}: {message}{suffix}")
     return findings
 
 
