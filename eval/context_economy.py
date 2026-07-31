@@ -432,9 +432,6 @@ def main(argv: Optional[list[str]] = None) -> None:
         # still owns malformed flag syntax, which is its conventional contract.
         print(json.dumps({"error": str(exc)}, sort_keys=True))
         raise SystemExit(2)
-    # ``_console_report`` is an allowlisted aggregate projection: it never contains source
-    # text, question IDs, or retrieval tags. CodeQL cannot prove that dictionary boundary.
-    # codeql[py/clear-text-logging-sensitive-data]
     print(json.dumps(_console_report(evaluation), sort_keys=True))
 
 
