@@ -106,6 +106,28 @@ def test_official_v2_evidence_export_rejects_unpinned_reader_metadata(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    ("evaluator_model", "evaluator_revision", "message"),
+    [
+        ("example/evaluator", None, "must be used together"),
+        ("example/evaluator", "main", "immutable lowercase 40-character commit"),
+    ],
+)
+def test_official_v2_evidence_export_requires_a_pinned_evaluator(
+    evaluator_model, evaluator_revision, message,
+):
+    with pytest.raises(ValueError, match=message):
+        build_evidence_report(
+            per_question_path="unused.jsonl",
+            questions_path="unused-questions.json",
+            haystack_path="unused-haystack.json",
+            trajectories_path="unused-trajectories.json",
+            memory_config_path="unused-memory.json",
+            evaluator_model=evaluator_model,
+            evaluator_revision=evaluator_revision,
+        )
+
+
 def test_official_v2_evidence_export_rejects_malformed_measured_fields(tmp_path):
     source_paths = [
         _write_json(tmp_path / name, {} if name != "questions.json" else [])
