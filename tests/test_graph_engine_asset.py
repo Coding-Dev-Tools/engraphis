@@ -401,6 +401,21 @@ def test_node_geometry_stays_compact_for_small_overviews_and_is_style_neutral() 
     assert "if(sun)r*=1.7;" not in DASHBOARD.read_text(encoding="utf-8")
 
 
+@requires_node
+def test_auto_fit_cap_does_not_limit_manual_graph_inspection() -> None:
+    """The auto-fit guard must not become a global force-graph zoom limit."""
+    report = _run_engine(
+        """
+        G.create(el, {});
+        emit({ maxZoom: store.maxZoom === undefined ? null : store.maxZoom });
+        """
+    )
+    assert report["maxZoom"] is None
+    source = ASSET.read_text(encoding="utf-8")
+    assert "function autoFit(" in source
+    assert "api.fit = () => { if (!destroyed) fg.zoomToFit" in source
+
+
 def test_dashboard_falls_back_to_the_classic_renderer_when_the_engine_throws() -> None:
     source = DASHBOARD.read_text(encoding="utf-8")
     # The opt-in flag must be latched off after a failure, and the render path must catch.
