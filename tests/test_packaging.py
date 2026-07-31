@@ -123,11 +123,15 @@ def test_distribution_configuration_includes_public_evidence_tools():
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
     assert 'include = ["engraphis*", "scripts*", "eval*"]' in pyproject
-    assert '"eval" = ["BASELINES.md", "configs/*.json", "datasets/*.jsonl"]' in pyproject
+    assert (
+        '"eval" = ["BASELINES.md", "EVIDENCE.md", "configs/*.json", "datasets/*.jsonl"]'
+        in pyproject
+    )
     for rule in (
         "include LICENSE NOTICE README.md CHANGELOG.md BENCHMARKS.md",
         "recursive-include eval *.py",
         "include eval/BASELINES.md",
+        "include eval/EVIDENCE.md",
         "recursive-include eval/configs *.json",
         "recursive-include eval/datasets *.jsonl",
     ):

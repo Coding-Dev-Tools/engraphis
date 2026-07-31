@@ -50,13 +50,16 @@ def _safe_name(name: object) -> str:
 class FolderTransport:
     """A ``SyncTransport`` backed by a shared filesystem directory.
 
-    ``root`` is created if missing. Only ``*.json`` files are treated as bundles, so
-    dropping a README or other files in the folder is harmless.
+    ``root`` is created if missing unless ``create`` is false.  The latter is for
+    dry-run callers: a missing remote then behaves as an empty transport rather than
+    being created by an operation advertised as read-only.  Only ``*.json`` files are
+    treated as bundles, so dropping a README or other files in the folder is harmless.
     """
 
-    def __init__(self, root: str) -> None:
+    def __init__(self, root: str, *, create: bool = True) -> None:
         self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
+        if create:
+            self.root.mkdir(parents=True, exist_ok=True)
 
     def push(self, name: str, data: bytes) -> None:
         """Atomically write ``data`` to ``root/<name>`` (temp + fsync + os.replace).
@@ -175,7 +178,8 @@ def get_transport(kind: str = "folder", **kw):
     """Factory mirroring ``get_embedder``/``get_vector_index`` — select a transport by
     name so swapping the folder backend for the managed relay is a config change.
 
-    - ``folder`` (default): shared-directory sync. Requires ``root=<shared directory>``.
+    - ``folder`` (default): shared-directory sync. Requires ``root=<shared directory>``;
+      pass ``create=False`` for a read-only probe of a possibly missing folder.
     - ``relay``: the managed Cloud Sync transport (``EncryptedRelayTransport``). Requires
       ``base_url=<relay root>`` and ``workspace_id=<namespace>`` (use the workspace
       *name*, so every authorized device on the account shares one namespace);
@@ -192,7 +196,7 @@ def get_transport(kind: str = "folder", **kw):
         root = kw.get("root")
         if not root:
             raise ValueError("folder transport requires root=<shared directory>")
-        return FolderTransport(root)
+        return FolderTransport(root, create=bool(kw.get("create", True)))
     if kind == "relay":
         base_url = kw.get("base_url")
         workspace_id = kw.get("workspace_id")

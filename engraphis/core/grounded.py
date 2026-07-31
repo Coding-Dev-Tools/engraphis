@@ -81,6 +81,10 @@ class GroundedAnswer:
     known_at: Optional[float] = None
     historical: bool = False
     retrieval_profile: str = "balanced"
+    candidate_depth: str = "fixed"
+    candidate_k_requested: int = 50
+    candidate_k_used: int = 50
+    candidate_depth_reason: str = "fixed requested depth"
     retrieval_trace: Optional[list[dict]] = None
 
     def to_dict(self) -> dict:
@@ -98,6 +102,10 @@ class GroundedAnswer:
             "known_at": self.known_at,
             "historical": self.historical,
             "retrieval_profile": self.retrieval_profile,
+            "candidate_depth": self.candidate_depth,
+            "candidate_k_requested": self.candidate_k_requested,
+            "candidate_k_used": self.candidate_k_used,
+            "candidate_depth_reason": self.candidate_depth_reason,
         }
         if self.retrieval_trace is not None:
             payload["retrieval_trace"] = self.retrieval_trace
@@ -287,6 +295,10 @@ def build_grounded_answer(query: str, result: RecallResult, embedder, *,
         "known_at": result.known_at,
         "historical": result.historical,
         "retrieval_profile": result.retrieval_profile,
+        "candidate_depth": result.candidate_depth_mode,
+        "candidate_k_requested": result.candidate_k_requested,
+        "candidate_k_used": result.candidate_k_used,
+        "candidate_depth_reason": result.candidate_depth_reason,
         "retrieval_trace": result.retrieval_trace,
     }
     recall_metadata["usage"]["answer_tokens"] = 0

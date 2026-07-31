@@ -38,6 +38,10 @@ def test_performance_report_covers_quality_context_and_latency():
         "filler_memories": 3,
     }
     assert report["run"]["timed_recalls"] == 2
+    assert report["run"]["candidate_k"] == 50
+    assert report["run"]["candidate_depth"] == "fixed"
+    assert report["run"]["actual_candidate_k"] == {"min": 50, "max": 50, "mean": 50.0}
+    assert report["run"]["retrieval_profile"] == "balanced"
     assert report["quality"]["hit_at_k"] == 1.0
     assert report["context"]["mean_tokens"] > 0
     assert report["context"]["token_counter"] == "engraphis.regex.v1"
@@ -49,6 +53,45 @@ def test_performance_report_covers_quality_context_and_latency():
     assert 0 <= report["latency_ms"]["min"] <= report["latency_ms"]["p50"]
     assert report["latency_ms"]["p50"] <= report["latency_ms"]["p95"]
     assert report["latency_ms"]["p95"] <= report["latency_ms"]["max"]
+
+
+def test_performance_report_records_normalized_candidate_depth_and_profile():
+    report = run(
+        DATASET,
+        k=2,
+        candidate_k=9,
+        retrieval_profile=" GRAPH ",
+        warmups=0,
+        iterations=1,
+    )
+
+    assert report["run"]["k"] == 2
+    assert report["run"]["candidate_k"] == 9
+    assert report["run"]["retrieval_profile"] == "graph"
+
+
+def test_performance_report_records_adaptive_candidate_depth_used():
+    report = run(
+        DATASET,
+        k=2,
+        candidate_k=50,
+        candidate_depth="adaptive",
+        warmups=0,
+        iterations=1,
+    )
+
+    assert report["run"]["candidate_depth"] == "adaptive"
+    assert report["run"]["actual_candidate_k"] == {"min": 12, "max": 12, "mean": 12.0}
+
+
+def test_performance_run_rejects_unknown_candidate_depth():
+    with pytest.raises(ValueError, match="candidate_depth"):
+        run(DATASET, candidate_depth="unbounded", warmups=0, iterations=1)
+
+
+def test_performance_run_rejects_unknown_retrieval_profile():
+    with pytest.raises(ValueError, match="retrieval_profile"):
+        run(DATASET, retrieval_profile="unsupported", warmups=0, iterations=1)
 
 
 def test_codemem_median_compact_payload_savings_clears_release_gate():
@@ -180,15 +223,24 @@ def test_cli_acceptance_matrix_uses_matrix_runner(tmp_path, capsys, monkeypatch)
 
     monkeypatch.setattr(performance, "run_acceptance_matrix", fake_matrix)
 
-    assert main(["--dataset", str(dataset), "--acceptance-matrix", "--json"]) == 0
+    assert main([
+        "--dataset", str(dataset),
+        "--acceptance-matrix",
+        "--candidate-k", "11",
+        "--retrieval-profile", "graph",
+        "--json",
+    ]) == 0
 
     assert calls == [{
         "k": 5,
+        "candidate_k": 11,
+        "candidate_depth": "fixed",
         "dim": 256,
         "warmups": 1,
         "iterations": 5,
         "filler_memories": 0,
         "token_budget": 1500,
+        "retrieval_profile": "graph",
         "processes": 1,
         "minimum_queries": 0,
     }]

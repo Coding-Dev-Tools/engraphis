@@ -208,6 +208,7 @@ _PUBLIC_RECEIPT_LABELS_BY_KEY = {
     },
     "layer": {"temporal", "entity", "causal", "semantic"},
     "retrieval_profile": {"balanced", "auto", "lexical", "graph", "code"},
+    "candidate_depth": {"fixed", "adaptive"},
     "response_mode": {"full", "compact"},
 }
 
@@ -220,7 +221,8 @@ def _receipt_metadata(metadata: dict) -> dict:
         "files_scanned", "files_indexed", "files_removed", "symbols", "edges",
         "entities", "relations", "tables", "dry_run", "error_count",
         "entities_added", "relations_added",
-        "retrieval_profile", "response_mode", "historical", "token_usage",
+        "retrieval_profile", "candidate_depth", "candidate_k_requested",
+        "candidate_k_used", "response_mode", "historical", "token_usage",
     }
     def content_free_label(key: str, value: str) -> str:
         normalized = value.strip().casefold().replace(" ", "_")
@@ -279,8 +281,9 @@ _PUBLIC_RECEIPT_METADATA_KEYS = {
     "result_count", "grounded", "citations", "relation", "layer", "graph_layers",
     "files_scanned", "files_indexed", "files_removed", "symbols", "edges",
     "entities", "relations", "tables", "dry_run", "error_count",
-    "entities_added", "relations_added", "retrieval_profile", "response_mode",
-    "historical", "token_usage",
+    "entities_added", "relations_added", "retrieval_profile", "candidate_depth",
+    "candidate_k_requested", "candidate_k_used", "response_mode", "historical",
+    "token_usage",
 }
 _PUBLIC_RECEIPT_OPERATIONS = {
     "remember", "recall", "promote", "link", "index_repo",
@@ -4144,6 +4147,128 @@ class Store:
             (workspace_id, safe_limit),
         ).fetchall()
         return [_public_receipt_row(dict(row)) for row in rows]
+
+    def context_savings(self, *, workspace_id: str, repo_id: Optional[str] = None) -> dict:
+        """Aggregate validated, content-free context usage from scoped receipts.
+
+        Token counts are kept separate by counter identity: a tokenizer change must not turn
+        into a misleading cumulative total. Invalid, missing, and incomplete receipts remain
+        visible only as counts; their payload is never reflected into this summary. The
+        workspace-wide receipt-chain validity is returned alongside any repo-scoped aggregate
+        so callers can distinguish useful local accounting from evidence eligible for audit.
+        """
+        verification = self.verify_receipts(workspace_id=workspace_id)
+        where = "workspace_id=?"
+        params: list[str] = [workspace_id]
+        if repo_id is not None:
+            where += " AND repo_id=?"
+            params.append(repo_id)
+        rows = self.conn.execute(
+            "SELECT id, payload, prev_hash, receipt_hash FROM operation_receipts WHERE " + where,
+            params,
+        ).fetchall()
+        totals = {
+            "receipt_count": len(rows),
+            "usage_receipt_count": 0,
+            "savings_receipt_count": 0,
+            "invalid_receipt_count": 0,
+            "incomplete_usage_receipt_count": 0,
+        }
+        buckets: dict[str, dict] = {}
+
+        def bucket(counter: str) -> dict:
+            return buckets.setdefault(counter, {
+                "token_counter": counter,
+                "receipt_count": 0,
+                "source_tokens": 0,
+                "context_tokens": 0,
+                "saved_tokens": 0,
+                "budget_tokens": 0,
+                "packed_count": 0,
+                "omitted_count": 0,
+                "_operations": {},
+            })
+
+        def add(target: dict, usage: dict, operation: str) -> None:
+            target["receipt_count"] += 1
+            for key in (
+                "source_tokens", "context_tokens", "saved_tokens", "budget_tokens",
+                "packed_count", "omitted_count",
+            ):
+                value = usage.get(key)
+                if type(value) in (int, float) and value >= 0:
+                    target[key] += value
+            operation_totals = target["_operations"].setdefault(operation, {
+                "operation": operation,
+                "receipt_count": 0,
+                "source_tokens": 0,
+                "context_tokens": 0,
+                "saved_tokens": 0,
+                "budget_tokens": 0,
+                "packed_count": 0,
+                "omitted_count": 0,
+            })
+            operation_totals["receipt_count"] += 1
+            for key in (
+                "source_tokens", "context_tokens", "saved_tokens", "budget_tokens",
+                "packed_count", "omitted_count",
+            ):
+                value = usage.get(key)
+                if type(value) in (int, float) and value >= 0:
+                    operation_totals[key] += value
+
+        def finished(target: dict) -> dict:
+            operations = target.pop("_operations")
+            target["savings_ratio"] = (
+                target["saved_tokens"] / target["source_tokens"]
+                if target["source_tokens"] else 0.0
+            )
+            target["by_operation"] = [
+                {**value, "savings_ratio": (
+                    value["saved_tokens"] / value["source_tokens"]
+                    if value["source_tokens"] else 0.0
+                )}
+                for _, value in sorted(operations.items())
+            ]
+            return target
+
+        for raw_row in rows:
+            receipt = _public_receipt_row(dict(raw_row))
+            if receipt.get("invalid_payload"):
+                totals["invalid_receipt_count"] += 1
+                continue
+            metadata = receipt.get("metadata")
+            usage = metadata.get("token_usage") if isinstance(metadata, dict) else None
+            if not isinstance(usage, dict):
+                continue
+            totals["usage_receipt_count"] += 1
+            required = ("source_tokens", "context_tokens", "saved_tokens")
+            if not all(
+                type(usage.get(key)) in (int, float) and usage[key] >= 0
+                for key in required
+            ):
+                totals["incomplete_usage_receipt_count"] += 1
+                continue
+            expected_saved = max(
+                0.0, float(usage["source_tokens"]) - float(usage["context_tokens"])
+            )
+            if not math.isclose(
+                float(usage["saved_tokens"]), expected_saved, rel_tol=0.0, abs_tol=1e-9
+            ):
+                totals["incomplete_usage_receipt_count"] += 1
+                continue
+            totals["savings_receipt_count"] += 1
+            add(
+                bucket(str(usage.get("token_counter") or "unknown")),
+                usage,
+                str(receipt["operation"]),
+            )
+        return {
+            **totals,
+            "receipt_chain_valid": bool(verification["valid"]),
+            "receipt_chain_error_count": len(verification["errors"]),
+            "by_token_counter": [finished(value) for _, value in sorted(buckets.items())],
+        }
 
     def verify_receipts(self, *, workspace_id: str, expected_head: str = "",
                         expected_count: Optional[int] = None) -> dict:

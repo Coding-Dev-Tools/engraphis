@@ -76,24 +76,27 @@ def test_dashboard_serves_and_bootstraps_local_core(monkeypatch, tmp_path):
         ledger_js = client.get("/v2-assets/ledger.js")
         assert ledger_js.status_code == 200
         assert "'/v2-assets/vendor/force-graph.min.js?v=20260727-final'" in ledger_js.text
-        assert "'/v2-assets/engraphis-graph.js?v=20260728-connected-memories'" in ledger_js.text
+        assert "'/v2-assets/engraphis-graph.js?v=20260730-drag-stability'" in ledger_js.text
         assert "/v2-assets/ledger.css?v=20260728-connected-memories" in page.text
         assert "/v2-assets/ledger.js?v=20260728-connected-memories" in page.text
         classic_js = client.get("/classic-assets/dashboard.js")
         assert classic_js.status_code == 200
         assert "/static/vendor/force-graph.min.js" in classic_js.text
-        assert "/v2-assets/engraphis-graph.js?v=20260728-reference-materials" in classic_js.text
+        assert "/v2-assets/engraphis-graph.js?v=20260730-drag-stability" in classic_js.text
         assert "graphLimit=GRAPH_FULL?20000:320" in classic_js.text
         assert "graphScope=GRAPH_FULL?'&full=true':(showUnlinked?'':'&connected_only=true')" in classic_js.text
         bootstrap = client.get("/api/bootstrap")
         assert bootstrap.status_code == 200
         assert bootstrap.json()["stats"]["memories"] >= 1
+        savings = client.get("/api/context-savings", params={"workspace": "demo"})
+        assert savings.status_code == 200
+        assert savings.json()["format"] == "engraphis-context-savings/1"
 
 
 def test_dashboard_assets_revalidate_instead_of_pinning_old_visuals(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         for path in (
-            "/v2-assets/engraphis-graph.js?v=20260728-connected-memories",
+            "/v2-assets/engraphis-graph.js?v=20260730-drag-stability",
             "/v2-assets/ledger.js?v=20260728-connected-memories",
             "/v2-assets/ledger.css?v=20260728-connected-memories",
             "/classic-assets/dashboard.js?v=20260728-reference-materials",
@@ -101,6 +104,13 @@ def test_dashboard_assets_revalidate_instead_of_pinning_old_visuals(monkeypatch,
             response = client.get(path)
             assert response.status_code == 200
             assert response.headers["cache-control"] == "no-cache, must-revalidate"
+
+
+def test_classic_dashboard_script_mirrors_the_static_compatibility_asset():
+    root = Path(__file__).parents[1] / "engraphis"
+    assert (root / "classic_assets" / "dashboard.js").read_bytes() == (
+        root / "static" / "dashboard.js"
+    ).read_bytes()
 
 
 def test_dashboard_serves_the_graph_engine_from_its_v2_asset_surface(monkeypatch, tmp_path):
@@ -244,6 +254,7 @@ def test_dashboard_grounded_answer_route_cites_or_abstains(monkeypatch, tmp_path
                 "workspace": "demo",
                 "k": 8,
                 "max_citations": 5,
+                "candidate_depth": "adaptive",
             },
         )
         assert grounded.status_code == 200
@@ -254,6 +265,8 @@ def test_dashboard_grounded_answer_route_cites_or_abstains(monkeypatch, tmp_path
         assert body["citations"]
         assert body["sources"] == body["citations"]
         assert "[1]" in body["answer"]
+        assert body["candidate_depth"] == "adaptive"
+        assert body["candidate_k_used"] < body["candidate_k_requested"]
 
         abstained = client.post(
             "/api/answer",

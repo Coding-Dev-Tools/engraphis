@@ -125,6 +125,10 @@ def test_canonical_harness_requires_pinned_profile_and_complete_artifact(monkeyp
         "eval.harness._load_pinned_reader_token_counter",
         lambda model, revision: FakePinnedReaderCounter(model, revision),
     )
+    monkeypatch.setattr(
+        "eval.benchmark.git_provenance",
+        lambda: {"commit": "a" * 40, "dirty": False, "dirty_state_sha256": "b" * 64},
+    )
     canonical_embedder = DeterministicEmbedder(dim=256)
     canonical_embedder.model_name = "example/embedder"
     canonical_embedder.revision = "d" * 40
