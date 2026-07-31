@@ -34,7 +34,7 @@ task is ambiguous, decide which side it belongs to *before* editing.
 ```bash
 # ── Install ──────────────────────────────────────────────────────────────────
 pip install numpy pytest            # v2 core + tests, fully OFFLINE (this is what CI does)
-pip install -e ".[dev]"             # full stack: FastAPI server, ST embeddings, ruff
+pip install -e ".[all,dev]"         # full stack: FastAPI server, ST embeddings, ruff
 cp .env.example .env                # only needed for the v1 server / LLM features
 
 # ── Quality gate (offline, no API key — KEEP THIS GREEN; mirrors .github/workflows/ci.yml) ──

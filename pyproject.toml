@@ -199,7 +199,7 @@ include = ["engraphis*", "scripts*", "eval*"]
 "engraphis.classic_assets" = ["*.html", "*.css", "*.js", "*.png", "*.ico", "vendor/*", "vendor/**/*"]
 "engraphis.dashboard_assets" = ["*.html", "*.css", "*.js", "*.png", "*.ico", "vendor/*", "vendor/**/*"]
 "engraphis" = ["commercial_manifest.json"]
-"eval" = ["BASELINES.md", "configs/*.json", "datasets/*.jsonl"]
+"eval" = ["BASELINES.md", "EVIDENCE.md", "configs/*.json", "datasets/*.jsonl"]
 
 [tool.setuptools.exclude-package-data]
 "*" = ["*.pyc", "*.pyo", "__pycache__/*"]

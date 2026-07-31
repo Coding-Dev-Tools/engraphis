@@ -16,6 +16,18 @@ https://discord.com/invite/Wfr2ejBmY
   <sup>Knowledge Graph · run <code>engraphis-dashboard</code> to see it live</sup>
 </p>
 
+---
+
+> Update regularly for the latest fixes and improvements.
+>
+> **Open-core boundary:** this repository contains the free local engine, dashboard, MCP server,
+> and customer-side clients. Hosted sync, analytics, automation, and team services run on the
+> official hosted service; their server implementations are not distributed here.
+
+> **Support continued Engraphis development with Pro.** [Start a 3-day Pro trial](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro&trial=pro#billing)
+> or [subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro#billing).
+
+
 ## What Engraphis gives an agent
 
 An agent should not have to reconstruct a project from scattered chat history on every task.
@@ -28,10 +40,8 @@ that supports the current question; and returns a bounded, attributable context 
   <sup>Store durable project knowledge · retrieve supporting evidence · give the agent only what it needs</sup>
 </p>
 
-The flow is the essential path. See [measured context savings](#measured-quality-and-token-efficiency)
-for reproducible fixture-level evidence of less returned content at the same tested retrieval
-scores, without billing or latency claims. The sections below cover the dashboard, code graph,
-local installation, governance controls, and hosted services in detail.
+The flow is the essential path. See [measured token and context savings](#measured-token-and-context-savings)
+for the short version of how much less history an agent has to carry.
 
 | Agent need | What Engraphis changes |
 |---|---|
@@ -57,17 +67,6 @@ abstaining when no support exists.
 Run `python -m eval.chunking_eval` and `python -m eval.grounded` to reproduce the behavior;
 the former measures evidence retrieval and context size, while the latter measures the
 answer-versus-abstain decision.
-
----
-
-> Open-source users: update regularly for the latest fixes and improvements.
->
-> **Open-core boundary:** this repository contains the free local engine, dashboard, MCP server,
-> and customer-side clients. Hosted sync, analytics, automation, and team services run on the
-> official hosted service; their server implementations are not distributed here.
-
-> **Support continued Engraphis development with Pro.** [Start a 3-day Pro trial](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro&trial=pro#billing)
-> or [subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro#billing).
 
 ## Full Engraphis install: pip install "engraphis[all]"
 
@@ -131,35 +130,18 @@ chunking. The activity view records outcomes, never keys, prompts, or raw provid
 
 ---
 
-## Measured quality and token efficiency
-
-Engraphis ships typed and scoped memory, bi-temporal history, grounded recall, hybrid
-vector/lexical/graph retrieval, deterministic context packing, and MCP-native agent tools.
-The current deterministic offline regression fixtures reproduce these quality results:
-
-| Fixture | Reproduced result |
-|---|---|
-| CodeMem retrieval: 44 memories, 26 questions | **Recall@5 1.000**, hit@5 1.000, answer-token recall 1.000 |
-| Grounded-answer decisions: 10 cases | **10/10 correct**: 5/5 answerable questions cited evidence and 5/5 off-topic questions abstained |
-
-### Proof at a glance
-
-| **73.0% less retrieved context** | **3.8× smaller evidence record** | **55.38% smaller MCP response** |
-|---|---|
-| **808.8 → 218.4** tokens per question | **162.2 → 42.4** tokens to supporting evidence | **17,172 → 7,663** serialized tokens |
-| Same Recall@5 **1.000** in the long-document fixture | Same 18 fixture questions returned an evidence-holding memory | Same CodeMem retrieval scores across 260 timed recalls |
-
-**What it means:** agents carry less irrelevant history, leaving more room for the current task
-and cited evidence. These controlled, deterministic fixtures measure context, not model billing,
-task time, customer savings, or external-benchmark performance.
+## Measured token and context savings
 
 <p align="center">
-  <img src="docs/images/context-efficiency.png" alt="Normalized chart: Engraphis retains 27.0 percent of retrieved content, 26.1 percent of the evidence-holding record, and 44.6 percent of the compact MCP response in separate controlled fixtures" width="100%">
+  <img src="docs/images/context-efficiency.png" alt="Dark chart showing Engraphis using 98.21 percent less long-history context, 73.0 percent less retrieved content per question, 73.9 percent fewer tokens in the smallest useful memory, a 55.38 percent smaller memory response, and 47.8 percent less repeated-memory context after consolidation" width="100%">
   <br>
-  <sup>Each row uses a separate 100% baseline. The measurements have different counting boundaries and are not additive.</sup>
+  <sup>Less repeated history means more room for the task, tools, and useful evidence.</sup>
 </p>
 
-#### A controlled before-and-after example
+<details>
+<summary>See benchmark details and reproduce the results</summary>
+
+### Controlled before-and-after example
 
 | Retrieval mode | Mean returned memory content | Recall@5 |
 |---|---:|---:|
@@ -177,9 +159,11 @@ boundary.
 
 | What is counted | Comparison | Measured reduction | Quality held constant |
 |---|---|---|---|
+| Cumulative reader context across a 1,986-question LoCoMo diagnostic | Full-history replay: **49,915,394** tokens → Engraphis: **891,857** tokens | **49,023,537 fewer context tokens** (**98.2133% lower**) | Focused retrieval used far less context; uncapped full history retained higher retrieval recall |
 | Retrieved top-5 memory content, averaged per question | Whole documents: **808.8** tokens → structure-aware chunks: **218.4** tokens | **590.4 fewer tokens per question** (**73.0% lower**, about **3.7× smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
 | Smallest returned memory that contains the reference evidence | Whole documents: **162.2** tokens → chunks: **42.4** tokens | **119.8 fewer tokens to evidence** (**73.9% lower**, about **3.8× smaller**) | The same 18 questions had a returned evidence-holding memory in both modes |
 | Serialized MCP recall response across 260 timed CodeMem recalls | Full result: **17,172** `engraphis.regex.v1` tokens → compact result: **7,663** tokens | **9,509 response tokens avoided** (**55.38% lower**) | Recall@5, hit@5, and answer-token recall all **1.000** |
+| Repeated-memory consolidation fixture | 12 related episodic memories: **230** tokens → one digest: **120** tokens | **110 tokens removed from the active digest** (**47.8% lower**) | Original memories remain available for provenance and audit |
 | Packed prompt-context usage in the same CodeMem performance fixture | Hard budget: **1,500** tokens; observed mean: **87.73**; observed maximum: **106** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
 
 The compact MCP response avoids duplicating full memory bodies when the packed context and source
@@ -208,6 +192,8 @@ LongMemEval QA scores or a third-party leaderboard result. Compact-response coun
 normalized-character estimator. Chunking measures retrieved memory content, while compact recall
 measures serialized MCP response size. See [`BENCHMARKS.md`](BENCHMARKS.md) for definitions,
 limitations, canonical external-evaluation requirements, and the no-unsupported-claims policy.
+
+</details>
 
 ---
 
@@ -289,7 +275,7 @@ claude mcp add engraphis -- engraphis-mcp
 cmd mcp add engraphis -- engraphis-mcp  # Command Code CLI
 ```
 
-Your agent now has 30 tools: remember, recall context (plus full, grounded, and proactive recall),
+Your agent now has 31 tools: remember, recall context (plus full, grounded, and proactive recall),
 proactive context,
 grounded answer alias, why, timeline, forget, pin, correct, promote, ingest, consolidate, index_repo,
 search/code path/impact/export, privacy receipts, PostgreSQL schema ingestion, link,
@@ -426,7 +412,7 @@ to support the project and add hosted services.
 | | Free (available now) | Pro: $10/mo or $100/yr | Team: $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
 | Dashboard WebUI (with built-in inspector) | ✓ | ✓ | ✓ |
-| Memory engine + 30 MCP tools | ✓ | ✓ | ✓ |
+| Memory engine + 31 MCP tools | ✓ | ✓ | ✓ |
 | Version-chain diffs, offline knowledge graph | ✓ | ✓ | ✓ |
 | Manual local consolidation (dry-run by default) | ✓ | ✓ | ✓ |
 | Local workspace export (JSON: memories, sessions, audit) | ✓ | ✓ | ✓ |
@@ -466,6 +452,7 @@ to support the project and add hosted services.
 | Code | `engraphis_code_impact` | Rank changed files by symbols, dependents, communities, memories, and hotspots |
 | Code | `engraphis_export_code_graph` | Portable graph JSON + Markdown + HTML report |
 | Audit | `engraphis_receipts` | List content-free hashed operation receipts |
+| Audit | `engraphis_context_savings` | Sum privacy-safe context usage by workspace/repo and token-counter identity |
 | Audit | `engraphis_verify_receipts` | Verify the receipt chain, local tail anchor, and optional externally saved head/count |
 | Audit | `engraphis_export_receipts` | Export the shareable receipt-only audit bundle |
 | Governance | `engraphis_forget` | Retire a memory: bi-temporal close, never deleted; every request is audited |
@@ -496,9 +483,12 @@ repository is supplied.
 The operation-receipt chain is deliberately content-free. It records bounded operation metadata
 and chained hashes, while excluding raw memory/query text, workspace names, memory IDs, and actor
 identities from exported receipt payloads. Use `engraphis_receipts`,
-`engraphis_verify_receipts`, and `engraphis_export_receipts` to inspect the chain or compare it
-with a previously saved head/count anchor. A separately maintained local count/head anchor and
-persistent integrity marker make interior edits, reordering, and tail truncation detectable.
+`engraphis_context_savings`, `engraphis_verify_receipts`, and `engraphis_export_receipts` to
+inspect the chain, aggregate retrieved-source versus packed-context tokens, or compare it with a
+previously saved head/count anchor. Savings stay separated by token-counter identity and are
+reported with chain validity; they are packing measurements, not provider bills. A separately
+maintained local count/head anchor and persistent integrity marker make interior edits, reordering,
+and tail truncation detectable.
 
 See [the v3 architecture document](docs/ARCHITECTURE_V3.md) for the data flow and
 [SECURITY.md](SECURITY.md) for the trust boundaries.
@@ -613,7 +603,11 @@ Drag-and-drop or server-side import, access-controlled and bounded:
   a big context-reduction win on long docs. Works across all three ingest paths
   (dashboard upload, `import_folder`, and `engraphis_ingest`). Measure the payoff with
   the bundled eval: `python -m eval.chunking_eval --dataset eval/datasets/longdoc.jsonl --k 5`
-  (whole-file vs. chunked, same recall pipeline, offline).
+  (whole-file vs. chunked, same recall pipeline, offline). The dependency-free default
+  uses the named `engraphis.chars4.v1` estimate. Set
+  `ENGRAPHIS_CHUNK_TOKENIZER_MODEL` and, for reproducible runs,
+  `ENGRAPHIS_CHUNK_TOKENIZER_REVISION` to size prose chunks with the actual reader
+  tokenizer; the chosen counter identity is preserved in each chunk's metadata.
 - **Structured LLM extraction**: `ENGRAPHIS_EXTRACTOR=llm_structured` validates typed
   facts, entities, relations, and keywords before storage. Its preserved entity/relation
   metadata feeds the knowledge graph automatically. A successful dashboard connection test
@@ -673,6 +667,8 @@ All via environment (or `.env`):
 | `ENGRAPHIS_DB_KEY` | Not set | Encrypt the database at rest (SQLCipher). Or use `ENGRAPHIS_DB_KEY_FILE` |
 | `ENGRAPHIS_EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | sentence-transformers model |
 | `ENGRAPHIS_EXTRACTOR` | `none` | `none` = verbatim; `chunk` = offline structure-aware chunks; `llm` = free-form LLM facts; `llm_structured` = schema-validated facts + graph metadata |
+| `ENGRAPHIS_CHUNK_TOKENIZER_MODEL` | Not set | Optional Hugging Face tokenizer used to enforce chunk budgets with the downstream reader's real tokenization; requires the optional `transformers` package |
+| `ENGRAPHIS_CHUNK_TOKENIZER_REVISION` | Not set | Optional immutable tokenizer/model revision recorded in the chunk-counter identity; pin this for reproducible benchmark artifacts |
 | `ENGRAPHIS_GRAPH_EXTRACTOR` | `regex` | `regex` = offline heuristic NER; `none` = disable heuristic text extraction (validated `llm_structured` metadata still feeds the graph) |
 | `ENGRAPHIS_RETENTION_SUPERVISOR` | `none` | `none` = deterministic only; `llm` = sends a bounded excerpt to the configured provider for advisory ephemeral/normal/critical classification |
 | `ENGRAPHIS_WHISPER_MODEL` | Not set | Enables local faster-whisper audio/video transcription |
@@ -708,7 +704,7 @@ engraphis/
 │   ├── core/                # v2 engine: interfaces, store, recall, scoring, schema, sync
 │   ├── backends/            # pluggable embedder / vector index / reranker / codegraph / sync transports / encryption
 │   ├── service.py           # validated MemoryService facade
-│   ├── mcp_server.py        # MCP server: 30 tools
+│   ├── mcp_server.py        # MCP server: 31 tools
 │   ├── dashboard_app.py     # dashboard WebUI (FastAPI)
 │   ├── dashboard_assets/    # primary Ledger interface + graph engine
 │   ├── classic_assets/      # selectable full operator dashboard backup
@@ -748,8 +744,11 @@ ruff check .
 ```
 
 Numbers, not assertions: the offline harness is a **correctness floor** (deterministic embedder).
-LoCoMo / LongMemEval adapters and the pinned LongMemEval-V2 reader profile are available for
-approved official evaluation runs: see
+LoCoMo, LongMemEval, MemoryAgentBench, LoCoMo-Plus, and Mem2ActBench adapters are available,
+along with a pinned LongMemEval-V2 reader profile, redacted evidence exporter, and paired
+full-history versus Engraphis code-agent analyzer. External adapters measure only the layer they
+declare; retrieval or tool-argument context coverage is not presented as end-to-end answer,
+action, or task success. Reproduction commands and remaining official-run requirements are in
 [`BENCHMARKS.md`](BENCHMARKS.md).
 
 ---

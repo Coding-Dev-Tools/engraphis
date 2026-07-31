@@ -39,6 +39,10 @@ DEFERRED_SCRIPTS = ("/static/vendor/force-graph.min.js", "/v2-assets/engraphis-g
 #: script moves it out of the parsed ``<script src>`` set, so without this the "referenced
 #: scripts exist" rule would quietly stop covering the assets whose breakage is hardest to notice.
 LAZY_SCRIPT_SRC = re.compile(r'\.src\s*=\s*["\'](/(?:static|v2-assets)/[^"\']+)["\']')
+# Browsers close raw-text script/style elements even when a malformed end tag carries
+# attributes. ``HTMLParser`` only gained matching behavior in newer Python releases, so
+# canonicalize those end tags for the parser while preserving every source offset.
+MALFORMED_ASSET_END = re.compile(r"</(script|style)(?=\s)[^>]*>", re.IGNORECASE)
 
 STYLE_ATTR = re.compile(r"\sstyle=(?:\"([^\"]*)\"|'([^']*)')")
 EVENT_ATTR = re.compile(r"\s(on[a-z]+)=(?:\"([^\"]*)\"|'([^']*)')")
@@ -121,7 +125,16 @@ class _InlineAssetParser(HTMLParser):
 
 def _parse_page(html: str) -> _InlineAssetParser:
     parser = _InlineAssetParser(html)
-    parser.feed(html)
+
+    def canonical_end_tag(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        prefix = f"</{match.group(1)}"
+        # Keep total length and newline positions stable: parser offsets must continue
+        # to address the original source used for mechanical extraction.
+        middle = raw[len(prefix):-1]
+        return prefix + "".join("\n" if char == "\n" else " " for char in middle) + ">"
+
+    parser.feed(MALFORMED_ASSET_END.sub(canonical_end_tag, html))
     parser.close()
     parser.finish_unclosed()
     return parser

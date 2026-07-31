@@ -158,7 +158,7 @@ def test_opt_in_graph_asset_is_lazily_loaded_after_its_dependencies() -> None:
     source = DASHBOARD.read_text(encoding="utf-8")
     assert "script.src='/static/vendor/force-graph.min.js'" in source
     assert (
-        "script.src='/v2-assets/engraphis-graph.js?v=20260728-reference-materials'"
+        "script.src='/v2-assets/engraphis-graph.js?v=20260730-drag-stability'"
         in source
     )
     render = source[source.index("function graphRender("):]
@@ -279,7 +279,7 @@ def test_graph_engine_deep_link_reaches_the_next_engine_after_a_lazy_load() -> N
     report = _run_routing("loads")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260728-reference-materials"
+        "/v2-assets/engraphis-graph.js?v=20260730-drag-stability"
     ]
     # It waits rather than rendering something wrong in the meantime.
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
@@ -294,7 +294,7 @@ def test_classic_route_reaches_the_canonical_engine_without_a_query_flag() -> No
     report = _run_routing("classic")
 
     assert report["appended"] == [
-        "/v2-assets/engraphis-graph.js?v=20260728-reference-materials"
+        "/v2-assets/engraphis-graph.js?v=20260730-drag-stability"
     ]
     assert report["beforeSettle"] == {"engine": 0, "classic": 0}
     assert report["engine"] == 1
@@ -2145,6 +2145,19 @@ def test_engine_exposes_a_teardown_and_the_dashboard_drives_it() -> None:
     # force-graph keeps a rAF alive while resumed; leaving the view must park it.
     assert "if(v==='graph')graphEngineResume();else graphEnginePause()" in dashboard
     assert "GRAPH_ENGINE.destroy()" in dashboard
+
+
+def test_manual_drag_controller_detaches_with_the_graph() -> None:
+    """Reopening Ledger must not leave stale pointer controllers on the shared pane."""
+    source = ASSET.read_text(encoding="utf-8")
+    assert "let detachManualDrag = null;" in source
+    assert "el.addEventListener('pointerdown', beginManualDrag, true);" in source
+    assert "el.removeEventListener('pointerdown', beginManualDrag, true);" in source
+    assert "window.removeEventListener('pointermove', moveManualDrag, true);" in source
+    assert "event.type !== 'pointercancel'" in source
+    assert "suppressNodeClick();\n          handleNodeClick(current.node);" in source
+    teardown = source[source.index("api.destroy = () => {"):]
+    assert "if (detachManualDrag) { detachManualDrag(); detachManualDrag = null; }" in teardown
 
 
 def test_reduced_motion_is_honoured_by_the_opt_in_renderer() -> None:

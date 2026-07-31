@@ -252,6 +252,10 @@ def create_app(
     async def receipts(workspace: str, limit: int = 100):
         return svc().receipt_log(workspace=workspace, limit=limit)
 
+    @app.get("/api/context-savings")
+    async def context_savings(workspace: str, repo: Optional[str] = None):
+        return svc().context_savings(workspace=workspace, repo=repo)
+
     @app.get("/api/receipts/verify")
     async def receipts_verify(workspace: str):
         return svc().verify_receipts(workspace=workspace)

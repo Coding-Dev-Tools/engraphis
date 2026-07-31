@@ -79,6 +79,7 @@ MAX_WORKSPACE_NAME_CHARS = 200
 MAX_REPO_NAME_CHARS = 200
 TS_FUTURE_SKEW = 2 * 86400         # tolerate 2 days of cross-device clock skew, no more
 _VALID_SENSITIVITY = ("normal", "sensitive", "secret")
+_VALID_SCOPES = frozenset(scope.value for scope in Scope)
 
 # Strip C0/C1 control + ANSI-escape bytes (keep \t\n\r) — the same defense the rest of
 # the ingest surface applies (service.py) against hidden-instruction / terminal-injection
@@ -668,10 +669,31 @@ class SyncEngine:
             report["rejected"] += 1
             return
         rec.session_id = None
+        remote_repo_id = d.get("repo_id")
+        raw_scope = d.get("scope")
+        if raw_scope is None:
+            # Sync v1 allowed callers to omit scope. Preserve that compatibility while
+            # canonicalizing the row: a repo pointer means repo scope; otherwise the row
+            # belongs to the workspace. Never persist the old invalid repo-without-owner
+            # default produced by ``_scope(None)``.
+            rec.scope = Scope.REPO if remote_repo_id is not None else Scope.WORKSPACE
+        elif not isinstance(raw_scope, str) or raw_scope not in _VALID_SCOPES:
+            report["rejected"] += 1
+            return
+        # Scope pointers are an untrusted trust-boundary input, not merely metadata.
+        # A repo-scoped row must name one of the bundle's repos; workspace/user rows
+        # must not carry a repo pointer.  Accepting an invalid combination and then
+        # re-homing it would turn a repo-owned row into an ancestor-visible global row.
+        if rec.scope == Scope.REPO:
+            if not isinstance(remote_repo_id, str) or not remote_repo_id:
+                report["rejected"] += 1
+                return
+        elif remote_repo_id is not None:
+            report["rejected"] += 1
+            return
         # Re-home into local scope, and tag provenance with the origin device so a
         # synced-in memory stays auditable ("why is this known?" — AGENTS.md §3.6).
         rec.workspace_id = local_ws
-        remote_repo_id = d.get("repo_id")
         if remote_repo_id:
             if remote_repo_id not in repo_remap:
                 report["rejected"] += 1
@@ -705,6 +727,18 @@ class SyncEngine:
         if existing is not None and existing.scope == Scope.SESSION:
             # A peer that learned an id before this boundary was enforced cannot relabel or
             # overwrite the local private row with a non-session scope either.
+            report["rejected"] += 1
+            return
+        if (existing is not None
+                and (existing.scope != rec.scope or existing.repo_id != rec.repo_id)):
+            # ``merge_record`` deliberately keeps scope pointers local.  Letting the
+            # descriptive LWW winner change ``scope`` while retaining the existing local
+            # pointer would therefore create an impossible row (for example a
+            # workspace-scoped memory still attached to a repo), and could make a
+            # repo-owned fact ancestor-visible.  Scope promotion is a local, explicit
+            # operation; a sync peer may merge a record only at its existing visibility.
+            # This also fails closed for malformed legacy rows: repairing an orphaned
+            # scope is a local migration decision, never authority delegated to a peer.
             report["rejected"] += 1
             return
         if existing is not None:

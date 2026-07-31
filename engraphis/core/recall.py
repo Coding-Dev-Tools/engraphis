@@ -24,6 +24,7 @@ from engraphis.core.interfaces import (
     Candidate,
     ContextPacker,
     ContextUsage,
+    CandidateDepthPolicy,
     MemoryRecord,
     PackedChunk,
     Reranker,
@@ -31,6 +32,7 @@ from engraphis.core.interfaces import (
     SearchFilter,
 )
 from engraphis.core.retrieval_policy import (
+    CANDIDATE_DEPTH_MODES,
     DeterministicRetrievalPolicy,
     ProfileConfig,
     RETRIEVAL_PROFILES,
@@ -50,6 +52,10 @@ class RecallResult:
     known_at: Optional[float] = None
     historical: bool = False
     retrieval_profile: str = "balanced"
+    candidate_depth_mode: str = "fixed"
+    candidate_k_requested: int = 50
+    candidate_k_used: int = 50
+    candidate_depth_reason: str = "fixed requested depth"
     retrieval_trace: Optional[list[dict[str, Any]]] = None
     token_counter: Optional[Callable[[str], int]] = field(default=None, repr=False)
 
@@ -59,7 +65,8 @@ class RecallEngine:
                  *, weights: Optional[dict] = None, recency_tau_days: float = 30.0,
                  token_budget: int = 1500, graph_mode: str = "ppr",
                  context_packer: Optional[ContextPacker] = None,
-                 retrieval_policy: Optional[RetrievalPolicy] = None) -> None:
+                 retrieval_policy: Optional[RetrievalPolicy] = None,
+                 candidate_depth_policy: Optional[CandidateDepthPolicy] = None) -> None:
         self.store = store
         self.embedder = embedder
         self.index = vector_index
@@ -69,6 +76,7 @@ class RecallEngine:
         self.token_budget = token_budget
         self.context_packer = context_packer or DeterministicContextPacker()
         self.retrieval_policy = retrieval_policy or DeterministicRetrievalPolicy()
+        self.candidate_depth_policy = candidate_depth_policy or DeterministicRetrievalPolicy()
         # "ppr" (default) = Personalized PageRank over entities+links (multi-hop);
         # "1hop" = the Phase-1 entity expansion, kept for fallback and ablation.
         self.graph_mode = graph_mode
@@ -77,6 +85,7 @@ class RecallEngine:
                candidate_k: int = 50, reinforce: bool = False,
                token_budget: Optional[int] = None,
                retrieval_profile: str = "balanced",
+               candidate_depth: str = "fixed",
                diagnostics: bool = False,
                arm_config: Optional[ProfileConfig] = None) -> RecallResult:
         flt = flt or SearchFilter()
@@ -105,6 +114,19 @@ class RecallEngine:
             if requested_profile == "auto"
             else requested_profile
         )
+        requested_depth_mode = str(candidate_depth or "fixed").strip().casefold()
+        if requested_depth_mode not in CANDIDATE_DEPTH_MODES:
+            choices = ", ".join(sorted(CANDIDATE_DEPTH_MODES))
+            raise ValueError(f"candidate_depth must be one of: {choices}")
+        requested_candidate_k = max(1, int(candidate_k))
+        candidate_k, candidate_depth_reason = self.candidate_depth_policy.candidate_depth(
+            query,
+            k=max(1, int(k)),
+            ceiling=requested_candidate_k,
+            profile=selected_profile,
+            mode=requested_depth_mode,
+        )
+        candidate_k = max(1, min(requested_candidate_k, int(candidate_k)))
         # ``arm_config`` is a composition-time override for controlled offline
         # ablations. Normal callers still use only named RetrievalPolicy profiles,
         # so benchmark labels do not expand the public routing contract.
@@ -150,6 +172,10 @@ class RecallEngine:
                 known_at=flt.known_at,
                 historical=requested_historical,
                 retrieval_profile=selected_profile,
+                candidate_depth_mode=requested_depth_mode,
+                candidate_k_requested=requested_candidate_k,
+                candidate_k_used=candidate_k,
+                candidate_depth_reason=candidate_depth_reason,
                 retrieval_trace=[] if diagnostics else None,
                 token_counter=getattr(self.context_packer, "count_tokens", None),
             )
@@ -296,6 +322,10 @@ class RecallEngine:
             known_at=flt.known_at,
             historical=requested_historical,
             retrieval_profile=selected_profile,
+            candidate_depth_mode=requested_depth_mode,
+            candidate_k_requested=requested_candidate_k,
+            candidate_k_used=candidate_k,
+            candidate_depth_reason=candidate_depth_reason,
             retrieval_trace=trace,
             token_counter=getattr(self.context_packer, "count_tokens", None),
         )

@@ -7,6 +7,7 @@ control-character defanging.
 """
 import pytest
 
+import engraphis.backends.extractor as extractor_module
 from engraphis.backends.extractor import (
     ChunkingExtractor,
     PassthroughExtractor,
@@ -30,6 +31,23 @@ def test_factory_selects_chunker_and_reads_env(monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_CHUNK_MAX", "5")
     ex = get_extractor("chunk")
     assert ex.target_tokens == 77 and ex.overlap_tokens == 9 and ex.max_chunks == 5
+
+
+def test_factory_loads_explicit_pinned_reader_tokenizer(monkeypatch):
+    requests = []
+
+    def fake_loader(model, revision):
+        requests.append((model, revision))
+        return len, f"test:{model}@{revision}"
+
+    monkeypatch.setattr(extractor_module, "_load_chunk_token_counter", fake_loader)
+    monkeypatch.setenv("ENGRAPHIS_CHUNK_TOKENIZER_MODEL", "reader/model")
+    monkeypatch.setenv("ENGRAPHIS_CHUNK_TOKENIZER_REVISION", "a" * 40)
+
+    extractor = get_extractor("chunk")
+
+    assert requests == [("reader/model", "a" * 40)]
+    assert extractor.token_counter_identity == f"test:reader/model@{'a' * 40}"
 
 
 def test_empty_or_whitespace_returns_nothing():
@@ -92,11 +110,114 @@ def test_long_prose_splits_into_multiple_budgeted_chunks():
         assert estimate_tokens(f.content) <= ex.target_tokens * 2
 
 
+def test_custom_reader_counter_enforces_exact_prose_budget_and_records_identity():
+    class WordCounter:
+        identity = "test.words.v1"
+
+        def __call__(self, text):
+            return len(text.split())
+
+    counter = WordCounter()
+    text = "\n\n".join(
+        f"Paragraph {number} has six exact reader words"
+        for number in range(8)
+    )
+    extractor = ChunkingExtractor(
+        target_tokens=16,
+        overlap_tokens=4,
+        token_counter=counter,
+    )
+
+    facts = extractor.extract(text)
+
+    assert len(facts) > 1
+    assert all(counter(fact.content) <= extractor.target_tokens for fact in facts)
+    assert all(
+        fact.metadata["chunking"]["token_counter"] == "test.words.v1"
+        for fact in facts
+    )
+
+
+@pytest.mark.parametrize("invalid_count", [True, 1.5, "2", None])
+def test_custom_reader_counter_rejects_non_integer_counts(invalid_count):
+    extractor = ChunkingExtractor(token_counter=lambda _text: invalid_count)
+
+    with pytest.raises(TypeError, match="non-negative integer"):
+        extractor.extract("A short sentence.")
+
+
+def test_custom_reader_counter_rejects_negative_counts():
+    extractor = ChunkingExtractor(token_counter=lambda _text: -1)
+
+    with pytest.raises(ValueError, match="non-negative integer"):
+        extractor.extract("A short sentence.")
+
+
+def test_custom_reader_counter_fails_instead_of_emitting_an_oversized_character():
+    def impossible_counter(text):
+        return 17 if text else 0
+
+    extractor = ChunkingExtractor(
+        target_tokens=16,
+        token_counter=impossible_counter,
+    )
+
+    with pytest.raises(ValueError, match="cannot fit one character"):
+        extractor.extract("One oversized sentence.")
+
+
+def test_overlap_is_dropped_when_it_would_overflow_reader_budget():
+    class WordCounter:
+        identity = "test.words.v1"
+
+        def __call__(self, text):
+            return len(text.split())
+
+    counter = WordCounter()
+    text = (
+        "Alpha one two three four five six seven eight nine. "
+        "Beta one two three four five six seven eight nine. "
+        "Gamma one two three four five six seven eight nine."
+    )
+    extractor = ChunkingExtractor(
+        target_tokens=16,
+        overlap_tokens=8,
+        token_counter=counter,
+    )
+
+    facts = extractor.extract(text)
+
+    assert len(facts) == 3
+    assert all(counter(fact.content) <= extractor.target_tokens for fact in facts)
+
+
+def test_overlap_tail_is_not_emitted_as_duplicate_before_oversized_paragraph():
+    class WordCounter:
+        identity = "test.words.v1"
+
+        def __call__(self, text):
+            return len(text.split())
+
+    text = (
+        "UNIQUE first paragraph has six words.\n\n"
+        + " ".join(f"word{number}" for number in range(60))
+    )
+    facts = ChunkingExtractor(
+        target_tokens=16,
+        overlap_tokens=8,
+        token_counter=WordCounter(),
+    ).extract(text)
+
+    assert sum("UNIQUE" in fact.content for fact in facts) == 1
+
+
 def test_overlap_carries_a_sentence_between_chunks():
     # Unique markers per sentence let us detect the carried-over overlap unambiguously.
     text = (". ".join(f"MARKER{i} alpha bravo charlie delta echo" for i in range(8)) + ".")
-    with_overlap = ChunkingExtractor(target_tokens=16, overlap_tokens=12).extract(text)
-    no_overlap = ChunkingExtractor(target_tokens=16, overlap_tokens=0).extract(text)
+    # The budget can hold one carried sentence plus one new sentence. Overlap is
+    # best-effort and must not exceed the reader budget merely to duplicate evidence.
+    with_overlap = ChunkingExtractor(target_tokens=24, overlap_tokens=12).extract(text)
+    no_overlap = ChunkingExtractor(target_tokens=24, overlap_tokens=0).extract(text)
     assert len(with_overlap) > 1
 
     def markers_in(facts):
