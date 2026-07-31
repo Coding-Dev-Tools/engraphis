@@ -776,9 +776,11 @@ test('Ledger gives active Pro members direct Cloud access and saves hosted polic
       'Cloud Sync encrypts eligible shared-workspace changes end-to-end',
     );
     expect(dialog.message()).toContain('Engraphis Cloud cannot read their contents');
-    expect(dialog.message()).toContain('Managed compute: For managed compute');
-    expect(dialog.message()).toContain('Engraphis Cloud must read the bounded snapshot');
-    expect(dialog.message()).toContain('It travels over HTTPS');
+    expect(dialog.message()).toContain('Engraphis will submit a bounded snapshot');
+    expect(dialog.message()).toContain(
+      'normal and sensitive memory content to Cloud for managed compute',
+    );
+    expect(dialog.message()).not.toContain('Privacy, by design.');
     return dialog.accept();
   });
   await page.getByRole('button', { name: 'Save & send policy to Cloud' }).click();
