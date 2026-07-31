@@ -27,6 +27,74 @@ https://discord.com/invite/Wfr2ejBmY
 > **Support continued Engraphis development with Pro.** [Start a 3-day Pro trial](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro&trial=pro#billing)
 > or [subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro#billing).
 
+---
+
+## Measured token and context savings
+
+<p align="center">
+  <img src="docs/images/context-efficiency.png" alt="Dark chart showing Engraphis using 98.21 percent less long-history context, 73.0 percent less retrieved content per question, 73.9 percent fewer tokens in the smallest useful memory, a 55.38 percent smaller memory response, and 47.8 percent less repeated-memory context after consolidation" width="100%">
+  <br>
+  <sup>Less repeated history means more room for the task, tools, and useful evidence.</sup>
+</p>
+
+<details>
+<summary>See benchmark details and reproduce the results</summary>
+
+### Controlled before-and-after example
+
+| Retrieval mode | Mean returned memory content | Recall@5 |
+|---|---:|---:|
+| Whole documents | 808.8 tokens | 1.000 |
+| Engraphis structure-aware chunks | 218.4 tokens | 1.000 |
+
+The chunked mode returns the relevant passage instead of the whole document: **590.4 fewer tokens
+per question**. Under the same model-context budget, that leaves roughly **590 tokens** for task
+instructions or other relevant evidence.
+
+### Measurement details and reproducibility
+
+The table below records every current token/context efficiency measurement and its counting
+boundary.
+
+| What is counted | Comparison | Measured reduction | Quality held constant |
+|---|---|---|---|
+| Cumulative reader context across a 1,986-question LoCoMo diagnostic | Full-history replay: **49,915,394** tokens → Engraphis: **891,857** tokens | **49,023,537 fewer context tokens** (**98.2133% lower**) | Focused retrieval used far less context; uncapped full history retained higher retrieval recall |
+| Retrieved top-5 memory content, averaged per question | Whole documents: **808.8** tokens → structure-aware chunks: **218.4** tokens | **590.4 fewer tokens per question** (**73.0% lower**, about **3.7× smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
+| Smallest returned memory that contains the reference evidence | Whole documents: **162.2** tokens → chunks: **42.4** tokens | **119.8 fewer tokens to evidence** (**73.9% lower**, about **3.8× smaller**) | The same 18 questions had a returned evidence-holding memory in both modes |
+| Serialized MCP recall response across 260 timed CodeMem recalls | Full result: **17,172** `engraphis.regex.v1` tokens → compact result: **7,663** tokens | **9,509 response tokens avoided** (**55.38% lower**) | Recall@5, hit@5, and answer-token recall all **1.000** |
+| Repeated-memory consolidation fixture | 12 related episodic memories: **230** tokens → one digest: **120** tokens | **110 tokens removed from the active digest** (**47.8% lower**) | Original memories remain available for provenance and audit |
+| Packed prompt-context usage in the same CodeMem performance fixture | Hard budget: **1,500** tokens; observed mean: **87.73**; observed maximum: **106** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
+
+The compact MCP response avoids duplicating full memory bodies when the packed context and source
+list are enough. That can reduce what an agent must inspect or pass onward, but the fixtures do
+**not** measure model-provider charges, end-to-end task time, or customer cost savings.
+
+The measures are deliberately separate and **must not be added together**: chunking counts the
+content of retrieved memory records before `ContextPacker`, whereas compact recall counts the
+serialized MCP response returned to a client. “Tokens to evidence” is the size of the smallest
+retrieved memory record holding the reference evidence; it is not latency or end-to-end answer
+accuracy. Chunking creates more focused stored records (24 chunks rather than 6 whole-document
+memories in this fixture), so this is a context-efficiency result, not a storage-reduction claim.
+
+Reproduce the quality and token/context measurements without a network connection or API key:
+
+```bash
+python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5
+python -m eval.grounded
+python -m eval.chunking_eval
+python -m eval.performance --dataset eval/datasets/codemem.jsonl --k 5 --iterations 10 --json
+```
+
+These are small deterministic correctness and efficiency fixtures, not official LoCoMo /
+LongMemEval QA scores or a third-party leaderboard result. Compact-response counts use the exact
+`engraphis.regex.v1` counter; the chunking evaluation uses its documented deterministic
+normalized-character estimator. Chunking measures retrieved memory content, while compact recall
+measures serialized MCP response size. See [`BENCHMARKS.md`](BENCHMARKS.md) for definitions,
+limitations, canonical external-evaluation requirements, and the no-unsupported-claims policy.
+
+</details>
+
+---
 
 ## What Engraphis gives an agent
 
@@ -127,73 +195,6 @@ chunking. The activity view records outcomes, never keys, prompts, or raw provid
 > Privacy boundary: text sent to an explicitly selected provider leaves the local process under
 > that provider's terms. Use `ENGRAPHIS_RETENTION_SUPERVISOR=none` (the default) and the offline
 > `chunk` extractor when ingestion must remain entirely local.
-
----
-
-## Measured token and context savings
-
-<p align="center">
-  <img src="docs/images/context-efficiency.png" alt="Dark chart showing Engraphis using 98.21 percent less long-history context, 73.0 percent less retrieved content per question, 73.9 percent fewer tokens in the smallest useful memory, a 55.38 percent smaller memory response, and 47.8 percent less repeated-memory context after consolidation" width="100%">
-  <br>
-  <sup>Less repeated history means more room for the task, tools, and useful evidence.</sup>
-</p>
-
-<details>
-<summary>See benchmark details and reproduce the results</summary>
-
-### Controlled before-and-after example
-
-| Retrieval mode | Mean returned memory content | Recall@5 |
-|---|---:|---:|
-| Whole documents | 808.8 tokens | 1.000 |
-| Engraphis structure-aware chunks | 218.4 tokens | 1.000 |
-
-The chunked mode returns the relevant passage instead of the whole document: **590.4 fewer tokens
-per question**. Under the same model-context budget, that leaves roughly **590 tokens** for task
-instructions or other relevant evidence.
-
-### Measurement details and reproducibility
-
-The table below records every current token/context efficiency measurement and its counting
-boundary.
-
-| What is counted | Comparison | Measured reduction | Quality held constant |
-|---|---|---|---|
-| Cumulative reader context across a 1,986-question LoCoMo diagnostic | Full-history replay: **49,915,394** tokens → Engraphis: **891,857** tokens | **49,023,537 fewer context tokens** (**98.2133% lower**) | Focused retrieval used far less context; uncapped full history retained higher retrieval recall |
-| Retrieved top-5 memory content, averaged per question | Whole documents: **808.8** tokens → structure-aware chunks: **218.4** tokens | **590.4 fewer tokens per question** (**73.0% lower**, about **3.7× smaller**) | Recall@5 **1.000** in both modes across 6 documents and 18 questions |
-| Smallest returned memory that contains the reference evidence | Whole documents: **162.2** tokens → chunks: **42.4** tokens | **119.8 fewer tokens to evidence** (**73.9% lower**, about **3.8× smaller**) | The same 18 questions had a returned evidence-holding memory in both modes |
-| Serialized MCP recall response across 260 timed CodeMem recalls | Full result: **17,172** `engraphis.regex.v1` tokens → compact result: **7,663** tokens | **9,509 response tokens avoided** (**55.38% lower**) | Recall@5, hit@5, and answer-token recall all **1.000** |
-| Repeated-memory consolidation fixture | 12 related episodic memories: **230** tokens → one digest: **120** tokens | **110 tokens removed from the active digest** (**47.8% lower**) | Original memories remain available for provenance and audit |
-| Packed prompt-context usage in the same CodeMem performance fixture | Hard budget: **1,500** tokens; observed mean: **87.73**; observed maximum: **106** | A hard cap prevents a recall from exceeding its configured context budget | This is usage accounting, not a before/after savings comparison |
-
-The compact MCP response avoids duplicating full memory bodies when the packed context and source
-list are enough. That can reduce what an agent must inspect or pass onward, but the fixtures do
-**not** measure model-provider charges, end-to-end task time, or customer cost savings.
-
-The measures are deliberately separate and **must not be added together**: chunking counts the
-content of retrieved memory records before `ContextPacker`, whereas compact recall counts the
-serialized MCP response returned to a client. “Tokens to evidence” is the size of the smallest
-retrieved memory record holding the reference evidence; it is not latency or end-to-end answer
-accuracy. Chunking creates more focused stored records (24 chunks rather than 6 whole-document
-memories in this fixture), so this is a context-efficiency result, not a storage-reduction claim.
-
-Reproduce the quality and token/context measurements without a network connection or API key:
-
-```bash
-python -m eval.harness --dataset eval/datasets/codemem.jsonl --k 5
-python -m eval.grounded
-python -m eval.chunking_eval
-python -m eval.performance --dataset eval/datasets/codemem.jsonl --k 5 --iterations 10 --json
-```
-
-These are small deterministic correctness and efficiency fixtures, not official LoCoMo /
-LongMemEval QA scores or a third-party leaderboard result. Compact-response counts use the exact
-`engraphis.regex.v1` counter; the chunking evaluation uses its documented deterministic
-normalized-character estimator. Chunking measures retrieved memory content, while compact recall
-measures serialized MCP response size. See [`BENCHMARKS.md`](BENCHMARKS.md) for definitions,
-limitations, canonical external-evaluation requirements, and the no-unsupported-claims policy.
-
-</details>
 
 ---
 
