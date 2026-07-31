@@ -1569,9 +1569,9 @@
           suppressNodeClick();
         } else if (event.type !== 'pointercancel') {
           // Our capture listener owns the direct click. Suppress force-graph's
-          // pointer-up click so selection/cluster expansion happens exactly once.
-          suppressNodeClick();
+          // later pointer-up callback only after dispatching this click ourselves.
           handleNodeClick(current.node);
+          suppressNodeClick();
         }
       };
       const moveManualDrag = event => {
