@@ -170,8 +170,8 @@ _RAW_CONTEXT_FIELDS = (
     "context", "memory_context", "messages", "prompt_messages", "retrieved_context",
 )
 _SECRET_NAME_RE = re.compile(
-    r"(?:api[-_]?key|access[-_]?token|auth(?:orization)?|bearer|credential|"
-    r"password|passwd|secret|token|private[-_]?key)",
+    r"(?:^|[-_])(?:api[-_]?key|access[-_]?token|auth(?:orization)?|bearer|credential|"
+    r"password|passwd|secret|token|private[-_]?key)$",
     re.IGNORECASE,
 )
 _HEADER_OPTIONS = frozenset({"--header", "--headers"})
@@ -179,7 +179,8 @@ _USERINFO_OPTIONS = frozenset({"-u", "--user", "--user-name", "--password", "-p"
 
 
 def _is_secret_name(value: str) -> bool:
-    return bool(_SECRET_NAME_RE.search(value))
+    """Recognise credential-bearing parameter names, without masking normal options."""
+    return bool(_SECRET_NAME_RE.search(value.strip().lstrip("-")))
 
 
 def _public_exclusion(value: Any) -> Optional[dict[str, Any]]:
@@ -260,11 +261,23 @@ def _redact_url(value: str) -> str:
     if port is not None:
         host = f"{host}:{parsed.port}"
     netloc = f"<redacted>@{host}" if parsed.username is not None else parsed.netloc
-    query = urlencode([
-        (key, "<redacted>" if _is_secret_name(key) else item)
-        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
-    ])
-    return urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
+    def redact_parameters(component: str) -> str:
+        # Fragments are often ordinary anchors. Only treat a fragment as a parameter list when
+        # it contains an assignment, preserving links such as ``#methodology`` verbatim.
+        if "=" not in component:
+            return component
+        return urlencode([
+            (key, "<redacted>" if _is_secret_name(key) else item)
+            for key, item in parse_qsl(component, keep_blank_values=True)
+        ])
+
+    return urlunsplit((
+        parsed.scheme,
+        netloc,
+        parsed.path,
+        redact_parameters(parsed.query),
+        redact_parameters(parsed.fragment),
+    ))
 
 
 def redact_command(command: Sequence[str]) -> list[str]:
@@ -295,7 +308,7 @@ def redact_command(command: Sequence[str]) -> list[str]:
             public.extend([value[:2], "<redacted>"])
         elif lowered.startswith("-p") and len(value) > 2:
             public.extend([value[:2], "<redacted>"])
-        elif lowered.startswith("--") and _is_secret_name(lowered):
+        elif lowered.startswith("--") and _is_secret_name(lowered.split("=", 1)[0]):
             public.append(value.split("=", 1)[0] if "=" in value else value)
             if "=" in value:
                 public.append("<redacted>")

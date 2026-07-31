@@ -883,6 +883,20 @@
     const fg = ForceGraph()(el);
     const api = {};
 
+    function autoFit(duration, padding) {
+      const bbox = fg.getGraphBbox && fg.getGraphBbox();
+      const width = el.clientWidth, height = el.clientHeight;
+      if (!bbox || !bbox.x || !bbox.y || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
+      const xSpan = bbox.x[1] - bbox.x[0], ySpan = bbox.y[1] - bbox.y[0];
+      if (!Number.isFinite(xSpan) || !Number.isFinite(ySpan)) return;
+      const zoom = Math.min(MAX_AUTO_FIT_ZOOM, Math.max(
+        1e-12,
+        Math.min((width - 2 * padding) / Math.max(xSpan, 1e-12), (height - 2 * padding) / Math.max(ySpan, 1e-12)),
+      ));
+      fg.centerAt((bbox.x[0] + bbox.x[1]) / 2, (bbox.y[0] + bbox.y[1]) / 2, duration);
+      fg.zoom(zoom, duration);
+    }
+
     function suppressNodeClick() {
       suppressNodeClickAfterDrag = true;
       cancelFrame(dragClickFrame);
@@ -1445,7 +1459,7 @@
       if (reused) invalidate();
       if (fit) {
         clearTimeout(fitTimer);
-        fitTimer = setTimeout(() => { if (!destroyed) fg.zoomToFit(motion ? 600 : 0, 40); }, motion ? 320 : 0);
+        fitTimer = setTimeout(() => { if (!destroyed) autoFit(motion ? 600 : 0, 40); }, motion ? 320 : 0);
       }
       if (opts.onStats) opts.onStats({ nodes: data.nodes.length, links: data.links.length, total: raw.nodes.length, totalLinks: raw.links.length, preset: (PRESETS[state.settings.mode] || PRESETS.compact).label, collapsed: collapsed, ghosts: data.nodes.filter(n => n.ghost).length, bridges: data.links.filter(l => l.bridge).length, suggested: data.links.filter(l => l.suggested).length });
     }
@@ -1466,7 +1480,7 @@
       if (opts.onNodeClick) opts.onNodeClick(node);
     }
 
-    fg.backgroundColor('rgba(0,0,0,0)').nodeRelSize(1).maxZoom(MAX_AUTO_FIT_ZOOM)
+    fg.backgroundColor('rgba(0,0,0,0)').nodeRelSize(1)
       .enableNodeDrag(false).autoPauseRedraw(true)
       /* force-graph's default `nodeLabel`/`linkLabel` is the literal accessor "name", and its
          tooltip renders a string label with innerHTML. Node names here are entity labels
@@ -1929,7 +1943,7 @@
       if (w > 0 && h > 0) fg.width(w).height(h);
     };
     measure();
-    requestAnimationFrame(() => { if (destroyed) return; measure(); fg.zoomToFit(reduced() ? 0 : 400, 40); });
+    requestAnimationFrame(() => { if (destroyed) return; measure(); autoFit(reduced() ? 0 : 400, 40); });
     if (typeof ResizeObserver !== 'undefined') {
       api._ro = new ResizeObserver(() => measure());
       api._ro.observe(el);

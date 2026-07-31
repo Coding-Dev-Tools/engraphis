@@ -143,6 +143,27 @@ def test_cli_emits_one_json_document(tmp_path, capsys) -> None:
     assert output["benchmark"]["name"] == "engraphis-context-economy/v1"
     assert output["benchmark"]["dataset_format"] == "harness"
     assert output["workload"]["queries"] == 3
+    assert "detail" not in output
+
+
+def test_cli_never_prints_dataset_identifiers_or_source_text(tmp_path, capsys) -> None:
+    private = {
+        "id": "private-case",
+        "memories": [{"tag": "private-tag", "text": "private source text"}],
+        "questions": [{
+            "id": "private-question", "q": "private question", "answer": "private answer",
+            "supporting": ["private-tag"],
+        }],
+    }
+    path = tmp_path / "dataset.jsonl"
+    path.write_text(json.dumps(private) + "\n", encoding="utf-8")
+
+    main(["--dataset", str(path)])
+
+    output = capsys.readouterr().out
+    assert "private-case" not in output
+    assert "private-tag" not in output
+    assert "private source text" not in output
 
 
 @pytest.mark.parametrize(
