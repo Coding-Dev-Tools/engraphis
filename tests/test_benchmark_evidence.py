@@ -398,6 +398,16 @@ def test_command_provenance_redacts_assignment_header_and_url_credentials():
     ]
 
 
+def test_command_provenance_redacts_fragment_credentials_without_hiding_normal_options():
+    assert redact_command([
+        "--token-budget", "512", "--tokenizer-model", "reader-v1",
+        "https://example.test/callback#access_token=do-not-publish&state=visible",
+    ]) == [
+        "--token-budget", "512", "--tokenizer-model", "reader-v1",
+        "https://example.test/callback#access_token=%3Credacted%3E&state=visible",
+    ]
+
+
 def test_canonical_profile_validator_and_immutable_artifact_writer(tmp_path):
     dataset = tmp_path / "fixture.jsonl"
     dataset.write_text('{"id":"one"}\n', encoding="utf-8")

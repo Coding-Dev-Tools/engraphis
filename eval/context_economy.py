@@ -351,6 +351,47 @@ def run(
     }
 
 
+def _console_report(report: dict) -> dict:
+    """Return the aggregate-only report that the command-line interface may print.
+
+    ``run`` intentionally retains per-question source tags for in-process evaluation.  Those
+    identifiers can be private dataset content, so command-line output is restricted to the
+    reproducible aggregate evidence rather than logging the detailed rows.
+    """
+    benchmark = report["benchmark"]
+    return {
+        "benchmark": {
+            "name": benchmark["name"],
+            "offline": benchmark["offline"],
+            "embedder": benchmark["embedder"],
+            "token_counter": benchmark["token_counter"],
+            "token_budget": benchmark["token_budget"],
+            "k": benchmark["k"],
+            "resolve_conflicts": benchmark["resolve_conflicts"],
+            "non_billing_scope": benchmark["non_billing_scope"],
+            "indexing_assumption": benchmark["indexing_assumption"],
+            "dataset_format": benchmark["dataset_format"],
+        },
+        "workload": {
+            "cases": report["workload"]["cases"],
+            "queries": report["workload"]["queries"],
+            "scored_queries": report["workload"]["scored_queries"],
+            "one_time_indexing_tokens": report["workload"]["one_time_indexing_tokens"],
+        },
+        "methods": {
+            name: {
+                "queries": result["queries"],
+                "scored_queries": result["scored_queries"],
+                "cumulative_query_context_tokens": result["cumulative_query_context_tokens"],
+                "mean_query_context_tokens": result["mean_query_context_tokens"],
+                "quality": result["quality"],
+            }
+            for name, result in report["methods"].items()
+        },
+        "engraphis_vs_full_history": report["engraphis_vs_full_history"],
+    }
+
+
 def main(argv: Optional[list[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Run the offline Engraphis context economy benchmark.")
     parser.add_argument(
@@ -391,7 +432,7 @@ def main(argv: Optional[list[str]] = None) -> None:
         # still owns malformed flag syntax, which is its conventional contract.
         print(json.dumps({"error": str(exc)}, sort_keys=True))
         raise SystemExit(2)
-    print(json.dumps(report, sort_keys=True))
+    print(json.dumps(_console_report(report), sort_keys=True))
 
 
 if __name__ == "__main__":
