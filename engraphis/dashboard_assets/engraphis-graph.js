@@ -1580,7 +1580,14 @@
         if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return;
         const dx = event.clientX - manualDrag.startClientX;
         const dy = event.clientY - manualDrag.startClientY;
-        if (Math.hypot(dx, dy) >= 3) manualDrag.dragged = true;
+        if (!manualDrag.dragged) {
+          if (Math.hypot(dx, dy) < 3) {
+            event.preventDefault();
+            event.stopPropagation();
+            return;
+          }
+          manualDrag.dragged = true;
+        }
         const node = manualDrag.node;
         node.x = node.fx = point.x + manualDrag.offsetX;
         node.y = node.fy = point.y + manualDrag.offsetY;

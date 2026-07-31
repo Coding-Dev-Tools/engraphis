@@ -101,8 +101,8 @@ def test_hosted_views_delegate_entitlement_to_cloud_proxy_responses():
     assert "Subscribe to ${name}" in script
 
 
-def test_hosted_transfer_and_llm_consents_distinguish_sync_from_readable_compute():
-    """Cloud Sync is E2EE; compute and LLM consents name their readable inputs."""
+def test_hosted_transfer_and_llm_consents_distinguish_sync_from_compute():
+    """Cloud Sync is E2EE; compute and LLM consents identify transferred inputs."""
 
     legacy_scripts = (SCRIPT, CLASSIC_SCRIPT)
     for path in legacy_scripts:
@@ -110,8 +110,9 @@ def test_hosted_transfer_and_llm_consents_distinguish_sync_from_readable_compute
         assert "Cloud Sync encrypts eligible shared-workspace changes end-to-end" in script
         assert "Engraphis Cloud cannot read their contents" in script
         assert "secret and session-scoped memories stay local" in script
-        assert "Engraphis Cloud must read the bounded snapshot" in script
-        assert "not end-to-end encrypted" in script
+        assert "uploads the selected workspace’s normal and sensitive memory content" in script
+        assert "over HTTPS without end-to-end encryption" in script
+        assert "Privacy, by design." not in script
         assert "configured LLM provider" in script
         assert "provider must read that text" in script
         assert "retention supervision is configured separately" in script
@@ -126,8 +127,7 @@ def test_hosted_transfer_and_llm_consents_distinguish_sync_from_readable_compute
     assert "Cloud Sync encrypts eligible shared-workspace changes end-to-end" in ledger
     assert "Engraphis Cloud cannot read their contents" in ledger
     assert "secret and session-scoped memories stay local" in ledger
-    assert "For managed compute" in ledger
-    assert "Engraphis Cloud must read the bounded snapshot" in ledger
+    assert "submits a bounded snapshot of this workspace’s normal and sensitive memory content" in ledger
     assert "configured LLM provider" in ledger
     assert "provider must read that text" in ledger
     assert "Retention supervision is ON" in ledger

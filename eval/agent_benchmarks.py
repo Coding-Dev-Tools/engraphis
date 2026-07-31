@@ -450,6 +450,8 @@ def public_artifact(
     conversations: Optional[str],
     k: int,
     limit: Optional[int],
+    embed_model: Optional[str],
+    include_original_locomo: bool,
     embedder: Optional[object],
     resolve_conflicts: bool,
 ) -> dict:
@@ -479,6 +481,12 @@ def public_artifact(
     ]
     if limit is not None:
         command.extend(["--limit", str(limit)])
+    if embed_model:
+        command.extend(["--embed-model", embed_model])
+    if not resolve_conflicts:
+        command.append("--no-resolve")
+    if include_original_locomo:
+        command.append("--include-original-locomo")
     if conversations:
         command.extend(["--conversations", "<conversations>"])
     selected_embedder = embedder or DeterministicEmbedder()
@@ -587,6 +595,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             conversations=args.conversations,
             k=args.k,
             limit=args.limit,
+            embed_model=args.embed_model,
+            include_original_locomo=bool(args.include_original_locomo),
             embedder=embedder,
             resolve_conflicts=not args.no_resolve,
         )
