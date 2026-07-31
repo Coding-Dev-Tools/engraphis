@@ -408,6 +408,18 @@ def test_command_provenance_redacts_fragment_credentials_without_hiding_normal_o
     ]
 
 
+def test_command_provenance_redacts_embedded_and_signed_url_credentials():
+    assert redact_command([
+        "DATASET_URL=https://example.test/data?access_token=do-not-publish",
+        "--dataset-url=https://example.test/data?X-Amz-Signature=signed&sig=azure",
+        "https://example.test/data?signature=generic",
+    ]) == [
+        "DATASET_URL=https://example.test/data?access_token=%3Credacted%3E",
+        "--dataset-url=https://example.test/data?X-Amz-Signature=%3Credacted%3E&sig=%3Credacted%3E",
+        "https://example.test/data?signature=%3Credacted%3E",
+    ]
+
+
 def test_canonical_profile_validator_and_immutable_artifact_writer(tmp_path):
     dataset = tmp_path / "fixture.jsonl"
     dataset.write_text('{"id":"one"}\n', encoding="utf-8")

@@ -171,7 +171,7 @@ _RAW_CONTEXT_FIELDS = (
 )
 _SECRET_NAME_RE = re.compile(
     r"(?:^|[-_])(?:api[-_]?key|access[-_]?token|auth(?:orization)?|bearer|credential|"
-    r"password|passwd|secret|token|private[-_]?key)$",
+    r"password|passwd|secret|token|signature|sig|private[-_]?key)$",
     re.IGNORECASE,
 )
 _HEADER_OPTIONS = frozenset({"--header", "--headers"})
@@ -280,6 +280,14 @@ def _redact_url(value: str) -> str:
     ))
 
 
+def _command_assignment(value: str) -> Optional[tuple[str, str]]:
+    """Return a shell-style assignment without mistaking URL query parameters for one."""
+    separator = value.find("=")
+    if separator <= 0 or "://" in value[:separator]:
+        return None
+    return value[:separator], value[separator + 1:]
+
+
 def redact_command(command: Sequence[str]) -> list[str]:
     """Preserve a reproducible command shape without retaining credentials or raw headers."""
     public: list[str] = []
@@ -287,14 +295,10 @@ def redact_command(command: Sequence[str]) -> list[str]:
     for item in command:
         value = str(item)
         lowered = value.casefold()
+        assignment = _command_assignment(value)
         if redact_next:
             public.append("<redacted>")
             redact_next = False
-        elif "://" in value:
-            public.append(_redact_url(value))
-        elif "=" in value and not value.startswith("-"):
-            key, assigned = value.split("=", 1)
-            public.append(f"{key}=<redacted>" if _is_secret_name(key) else _redact_url(value))
         elif any(lowered.startswith(option + "=") for option in _HEADER_OPTIONS):
             public.extend([value.split("=", 1)[0], "<redacted>"])
         elif lowered.startswith("--user="):
@@ -314,6 +318,13 @@ def redact_command(command: Sequence[str]) -> list[str]:
                 public.append("<redacted>")
             else:
                 redact_next = True
+        elif assignment:
+            key, assigned = assignment
+            public.append(
+                f"{key}=<redacted>" if _is_secret_name(key) else f"{key}={_redact_url(assigned)}"
+            )
+        elif "://" in value:
+            public.append(_redact_url(value))
         elif _is_secret_name(value.split(":", 1)[0]) and ":" in value:
             public.append(value.split(":", 1)[0] + ": <redacted>")
         else:
