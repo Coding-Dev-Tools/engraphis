@@ -37,6 +37,9 @@ from eval.benchmark import report_envelope, write_canonical_artifact
 from eval.harness import run
 
 
+_PINNED_EMBED_REVISION = re.compile(r"[0-9a-f]{40}\Z")
+
+
 def _read_records(path: str) -> list[dict[str, Any]]:
     """Read a JSON list/object or JSONL file, rejecting non-object rows."""
     source = Path(path)
@@ -449,10 +452,18 @@ def public_artifact(
     dataset: str,
     conversations: Optional[str],
     k: int,
+    limit: Optional[int],
+    embed_model: Optional[str],
+    embed_revision: Optional[str],
+    include_original_locomo: bool,
     embedder: Optional[object],
     resolve_conflicts: bool,
 ) -> dict:
     """Build a redacted immutable envelope from a private adapter report."""
+    if bool(embed_model) != bool(embed_revision):
+        raise ValueError("embed_model and embed_revision must be used together")
+    if embed_revision and _PINNED_EMBED_REVISION.fullmatch(embed_revision) is None:
+        raise ValueError("embed_revision must be an immutable lowercase 40-character commit")
     detail = list(report.get("detail") or [])
     first_usage = detail[0].get("usage") if detail else {}
     first_usage = first_usage if isinstance(first_usage, dict) else {}
@@ -476,6 +487,15 @@ def public_artifact(
         "--format", fmt,
         "--k", str(k),
     ]
+    if limit is not None:
+        command.extend(["--limit", str(limit)])
+    if embed_model:
+        command.extend(["--embed-model", embed_model])
+        command.extend(["--embed-revision", str(embed_revision)])
+    if not resolve_conflicts:
+        command.append("--no-resolve")
+    if include_original_locomo:
+        command.append("--include-original-locomo")
     if conversations:
         command.extend(["--conversations", "<conversations>"])
     selected_embedder = embedder or DeterministicEmbedder()
@@ -488,6 +508,7 @@ def public_artifact(
         config={
             "format": fmt,
             "k": k,
+            "limit": limit,
             "embed_model": model_id,
             "embedder_revision": revision,
             "resolve_conflicts": resolve_conflicts,
@@ -524,6 +545,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--embed-model", default=None, help="Optional sentence-transformers model.")
+    parser.add_argument(
+        "--embed-revision",
+        default=None,
+        help="Required immutable 40-character commit when --embed-model is selected.",
+    )
     parser.add_argument("--no-resolve", action="store_true", help="Disable write-path resolution.")
     parser.add_argument(
         "--include-original-locomo",
@@ -540,6 +566,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         if args.k <= 0:
             raise ValueError("k must be a positive integer")
+        if bool(args.embed_model) != bool(args.embed_revision):
+            raise ValueError("--embed-model and --embed-revision must be used together")
+        if args.embed_revision and _PINNED_EMBED_REVISION.fullmatch(args.embed_revision) is None:
+            raise ValueError("--embed-revision must be an immutable lowercase 40-character commit")
         if args.format == "mem2actbench":
             if not args.conversations:
                 raise ValueError("--conversations is required for mem2actbench")
@@ -552,7 +582,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
         else:
             cases = LOADERS[args.format](args.dataset, limit=args.limit)
-        embedder = get_embedder(args.embed_model) if args.embed_model else None
+        embedder = (
+            get_embedder(args.embed_model, revision=args.embed_revision)
+            if args.embed_model else None
+        )
         report = run(cases, k=args.k, embedder=embedder, resolve_conflicts=not args.no_resolve)
     except ValueError as exc:
         parser.error(str(exc))
@@ -567,6 +600,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "implementation": type(embedder).__name__ if embedder is not None else "DeterministicEmbedder",
         },
         "include_original_locomo": bool(args.include_original_locomo),
+        "limit": args.limit,
         "measures": _claim_boundary(args.format),
     })
     _separate_unlabeled_retrieval(report)
@@ -581,6 +615,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             dataset=args.dataset,
             conversations=args.conversations,
             k=args.k,
+            limit=args.limit,
+            embed_model=args.embed_model,
+            embed_revision=args.embed_revision,
+            include_original_locomo=bool(args.include_original_locomo),
             embedder=embedder,
             resolve_conflicts=not args.no_resolve,
         )

@@ -170,8 +170,13 @@ _RAW_CONTEXT_FIELDS = (
     "context", "memory_context", "messages", "prompt_messages", "retrieved_context",
 )
 _SECRET_NAME_RE = re.compile(
-    r"(?:api[-_]?key|access[-_]?token|auth(?:orization)?|bearer|credential|"
-    r"password|passwd|secret|token|private[-_]?key)",
+    r"(?:^|[-_])(?:api[-_]?key|access[-_]?token|auth(?:orization)?|bearer|credential|"
+    r"password|passwd|secret|token|signature|sig|private[-_]?key)$",
+    re.IGNORECASE,
+)
+_COMPOUND_SECRET_NAME_RE = re.compile(
+    r"(?:^|[-_])(?:api[-_]?key|access[-_]?key|secret[-_]?(?:access[-_]?)?key|"
+    r"authorization)(?:[-_]|$)",
     re.IGNORECASE,
 )
 _HEADER_OPTIONS = frozenset({"--header", "--headers"})
@@ -179,7 +184,9 @@ _USERINFO_OPTIONS = frozenset({"-u", "--user", "--user-name", "--password", "-p"
 
 
 def _is_secret_name(value: str) -> bool:
-    return bool(_SECRET_NAME_RE.search(value))
+    """Recognise credential-bearing parameter names, without masking normal options."""
+    name = value.strip().lstrip("-")
+    return bool(_SECRET_NAME_RE.search(name) or _COMPOUND_SECRET_NAME_RE.search(name))
 
 
 def _public_exclusion(value: Any) -> Optional[dict[str, Any]]:
@@ -249,22 +256,50 @@ def _redact_url(value: str) -> str:
     try:
         parsed = urlsplit(value)
     except ValueError:
-        return value
+        # An invalid authority can still contain credentials. Without a trustworthy parse,
+        # preserve neither the authority nor the rest of the URL in public evidence.
+        return "<redacted>"
     if not parsed.scheme or not parsed.netloc:
         return value
-    host = parsed.hostname or ""
+
+    def redact_parameters(component: str) -> str:
+        # Fragments are often ordinary anchors. Only treat a fragment as a parameter list when
+        # it contains an assignment, preserving links such as ``#methodology`` verbatim.
+        if "=" not in component:
+            return component
+        return urlencode([
+            (key, "<redacted>" if _is_secret_name(key) else item)
+            for key, item in parse_qsl(component, keep_blank_values=True)
+        ])
+
     try:
+        host = parsed.hostname or ""
         port = parsed.port
     except ValueError:
-        return value
-    if port is not None:
-        host = f"{host}:{parsed.port}"
-    netloc = f"<redacted>@{host}" if parsed.username is not None else parsed.netloc
-    query = urlencode([
-        (key, "<redacted>" if _is_secret_name(key) else item)
-        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
-    ])
-    return urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
+        # A malformed port must not make a credential-bearing authority pass through unchanged.
+        # Keep the malformed host:port for diagnostics, but remove anything before its final @.
+        authority = parsed.netloc.rsplit("@", 1)[-1]
+        netloc = f"<redacted>@{authority}" if "@" in parsed.netloc else authority
+    else:
+        if port is not None:
+            host = f"{host}:{port}"
+        netloc = f"<redacted>@{host}" if parsed.username is not None else parsed.netloc
+
+    return urlunsplit((
+        parsed.scheme,
+        netloc,
+        parsed.path,
+        redact_parameters(parsed.query),
+        redact_parameters(parsed.fragment),
+    ))
+
+
+def _command_assignment(value: str) -> Optional[tuple[str, str]]:
+    """Return a shell-style assignment without mistaking URL query parameters for one."""
+    separator = value.find("=")
+    if separator <= 0 or "://" in value[:separator]:
+        return None
+    return value[:separator], value[separator + 1:]
 
 
 def redact_command(command: Sequence[str]) -> list[str]:
@@ -274,14 +309,10 @@ def redact_command(command: Sequence[str]) -> list[str]:
     for item in command:
         value = str(item)
         lowered = value.casefold()
+        assignment = _command_assignment(value)
         if redact_next:
             public.append("<redacted>")
             redact_next = False
-        elif "://" in value:
-            public.append(_redact_url(value))
-        elif "=" in value and not value.startswith("-"):
-            key, assigned = value.split("=", 1)
-            public.append(f"{key}=<redacted>" if _is_secret_name(key) else _redact_url(value))
         elif any(lowered.startswith(option + "=") for option in _HEADER_OPTIONS):
             public.extend([value.split("=", 1)[0], "<redacted>"])
         elif lowered.startswith("--user="):
@@ -295,12 +326,19 @@ def redact_command(command: Sequence[str]) -> list[str]:
             public.extend([value[:2], "<redacted>"])
         elif lowered.startswith("-p") and len(value) > 2:
             public.extend([value[:2], "<redacted>"])
-        elif lowered.startswith("--") and _is_secret_name(lowered):
+        elif lowered.startswith("--") and _is_secret_name(lowered.split("=", 1)[0]):
             public.append(value.split("=", 1)[0] if "=" in value else value)
             if "=" in value:
                 public.append("<redacted>")
             else:
                 redact_next = True
+        elif assignment:
+            key, assigned = assignment
+            public.append(
+                f"{key}=<redacted>" if _is_secret_name(key) else f"{key}={_redact_url(assigned)}"
+            )
+        elif "://" in value:
+            public.append(_redact_url(value))
         elif _is_secret_name(value.split(":", 1)[0]) and ":" in value:
             public.append(value.split(":", 1)[0] + ": <redacted>")
         else:

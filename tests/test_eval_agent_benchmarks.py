@@ -257,7 +257,68 @@ def test_cli_writes_redacted_immutable_artifact(tmp_path, capsys):
     assert len(artifact["records"][0]["query_sha256"]) == 64
     assert artifact["suite"]["sources"][0]["name"] == "plus.json"
     assert artifact["metrics"]["claim_boundary"].startswith("Cue-evidence retrieval")
+    assert artifact["protocol"]["config"]["limit"] is None
+    assert "--limit" not in artifact["protocol"]["command"]
     assert artifact_path.with_name("artifact.json.sha256").is_file()
+
+
+def test_cli_records_a_selected_limit_in_its_public_artifact(tmp_path, capsys):
+    path = _write_json(tmp_path / "plus.json", [{
+        "id": f"cognitive-{index}",
+        "input_prompt": f"Earlier cue {index}.",
+        "trigger": f"What happened at {index}?",
+        "evidence": f"Earlier cue {index}.",
+        "category": "Cognitive",
+    } for index in range(2)])
+    artifact_path = tmp_path / "limited-artifact.json"
+
+    assert main([
+        "--dataset", path, "--format", "locomo_plus", "--limit", "1",
+        "--artifact", str(artifact_path),
+    ]) == 0
+    capsys.readouterr()
+
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert artifact["protocol"]["config"]["limit"] == 1
+    assert artifact["protocol"]["command"][-2:] == ["--limit", "1"]
+
+
+def test_cli_records_selected_modes_in_its_public_artifact(tmp_path, capsys, monkeypatch):
+    path = _write_json(tmp_path / "plus.json", [{
+        "id": "cognitive-1",
+        "input_prompt": "Earlier cue.",
+        "trigger": "What happened?",
+        "evidence": "Earlier cue.",
+        "category": "Cognitive",
+    }])
+    artifact_path = tmp_path / "modes-artifact.json"
+    selected_revision = "a" * 40
+    loaded = {}
+
+    def factory(model, *, revision):
+        loaded.update(model=model, revision=revision)
+        return DeterministicEmbedder()
+
+    monkeypatch.setattr(
+        "eval.agent_benchmarks.get_embedder",
+        factory,
+    )
+
+    assert main([
+        "--dataset", path, "--format", "locomo_plus", "--embed-model", "test/model",
+        "--embed-revision", selected_revision,
+        "--no-resolve", "--include-original-locomo", "--artifact", str(artifact_path),
+    ]) == 0
+    capsys.readouterr()
+
+    assert loaded == {"model": "test/model", "revision": selected_revision}
+    command = json.loads(artifact_path.read_text(encoding="utf-8"))["protocol"]["command"]
+    assert ["--embed-model", "test/model"] == command[command.index("--embed-model"):][:2]
+    assert ["--embed-revision", selected_revision] == (
+        command[command.index("--embed-revision"):][:2]
+    )
+    assert "--no-resolve" in command
+    assert "--include-original-locomo" in command
 
 
 def test_cli_reports_embedder_factory_fallback_honestly(tmp_path, capsys, monkeypatch):
@@ -268,13 +329,29 @@ def test_cli_reports_embedder_factory_fallback_honestly(tmp_path, capsys, monkey
         "category": "Cognitive",
     }])
     monkeypatch.setattr(
-        "eval.agent_benchmarks.get_embedder", lambda _model: DeterministicEmbedder()
+        "eval.agent_benchmarks.get_embedder",
+        lambda _model, *, revision: DeterministicEmbedder(),
     )
 
     assert main([
         "--dataset", path, "--format", "locomo_plus", "--embed-model", "unavailable/model",
+        "--embed-revision", "b" * 40,
     ]) == 0
     report = json.loads(capsys.readouterr().out)
 
     assert report["offline"] is True
     assert report["embedder"]["implementation"] == "DeterministicEmbedder"
+
+
+def test_cli_requires_a_pinned_embedder_revision(tmp_path):
+    path = _write_json(tmp_path / "plus.json", [{
+        "input_prompt": "Earlier cue.",
+        "trigger": "What happened?",
+        "evidence": "Earlier cue.",
+        "category": "Cognitive",
+    }])
+
+    with pytest.raises(SystemExit) as error:
+        main(["--dataset", path, "--format", "locomo_plus", "--embed-model", "test/model"])
+
+    assert error.value.code == 2

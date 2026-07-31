@@ -29,6 +29,26 @@ def _icon_path(base: str) -> str:
     return str(Path(base) / "engraphis" / "static" / "engraphis.ico")
 
 
+def _desktop_path(system: str, home: Path) -> Path:
+    """Locate the Desktop folder using the same Windows known-folder API as installation."""
+    if system != "Windows":
+        return home / "Desktop"
+    try:
+        result = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                "[Environment]::GetFolderPath([Environment+SpecialFolder]::Desktop)",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return home / "Desktop"
+    desktop = result.stdout.strip()
+    return Path(desktop) if desktop else home / "Desktop"
+
+
 def _shortcut_paths(system: str, desktop: Path, start_menu: Path, *, home: Path) -> list[Path]:
     """Return only the exact launcher artifacts this installer owns."""
     if system == "Windows":
@@ -215,7 +235,7 @@ def main() -> None:
 
     system = platform.system()
     home = Path.home()
-    desktop = home / "Desktop"
+    desktop = _desktop_path(system, home)
     start_menu = (Path(os.environ.get("APPDATA", ""))
                   / "Microsoft" / "Windows" / "Start Menu" / "Programs")
 

@@ -5,7 +5,43 @@ import sys
 import pytest
 
 from scripts import install_shortcuts
-from scripts.install_shortcuts import _remove_shortcuts, _shortcut_paths
+from scripts.install_shortcuts import _desktop_path, _remove_shortcuts, _shortcut_paths
+
+
+def test_windows_desktop_path_uses_the_known_folder(monkeypatch, tmp_path):
+    home = tmp_path / "Home"
+    redirected = tmp_path / "OneDrive" / "Desktop"
+
+    class Result:
+        stdout = str(redirected) + "\n"
+
+    monkeypatch.setattr(install_shortcuts.subprocess, "run", lambda *args, **kwargs: Result())
+
+    assert _desktop_path("Windows", home) == redirected
+
+
+def test_windows_uninstall_uses_the_same_known_desktop_folder(monkeypatch, tmp_path):
+    home = tmp_path / "Home"
+    redirected = tmp_path / "OneDrive" / "Desktop"
+    captured = {}
+
+    monkeypatch.setattr(sys, "argv", ["install-shortcuts", "--uninstall"])
+    monkeypatch.setattr(install_shortcuts.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(install_shortcuts.Path, "home", lambda: home)
+    monkeypatch.setattr(install_shortcuts, "_desktop_path", lambda system, received_home: redirected)
+    monkeypatch.setattr(
+        install_shortcuts,
+        "_remove_shortcuts",
+        lambda system, desktop, start_menu, *, home: captured.update(
+            system=system, desktop=desktop, start_menu=start_menu, home=home
+        ) or [],
+    )
+
+    install_shortcuts.main()
+
+    assert captured["system"] == "Windows"
+    assert captured["desktop"] == redirected
+    assert captured["home"] == home
 
 
 @pytest.mark.parametrize("system", ["Windows", "Darwin", "Linux"])
