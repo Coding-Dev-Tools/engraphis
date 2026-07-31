@@ -144,6 +144,7 @@ def test_cli_emits_one_json_document(tmp_path, capsys) -> None:
     assert output["benchmark"]["dataset_format"] == "harness"
     assert output["workload"]["queries"] == 3
     assert "detail" not in output
+    assert "non_billing_scope" not in output["benchmark"]
 
 
 def test_cli_never_prints_dataset_identifiers_or_source_text(tmp_path, capsys) -> None:
