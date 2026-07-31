@@ -442,6 +442,10 @@ def test_command_provenance_redacts_userinfo_when_a_url_port_is_malformed():
     ]
 
 
+def test_command_provenance_fails_closed_when_url_splitting_rejects_userinfo():
+    assert redact_command(["https://user:password@[invalid/path"]) == ["<redacted>"]
+
+
 def test_canonical_profile_validator_and_immutable_artifact_writer(tmp_path):
     dataset = tmp_path / "fixture.jsonl"
     dataset.write_text('{"id":"one"}\n', encoding="utf-8")
