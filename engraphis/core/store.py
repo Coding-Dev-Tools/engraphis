@@ -296,6 +296,13 @@ _PUBLIC_RECEIPT_STATUSES = {
 }
 
 
+def _receipt_scope_digest(workspace_id: str, repo_id: Optional[str]) -> str:
+    """Return the signed scope binding for an operation receipt."""
+    return hashlib.sha256(
+        f"{workspace_id}\0{repo_id or ''}".encode("utf-8")
+    ).hexdigest()[:24]
+
+
 def _redacted_receipt_value(value: Any) -> str:
     raw = value if isinstance(value, str) else str(value or "")
     return "redacted_sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -4012,9 +4019,7 @@ class Store:
                 transaction_started = True
                 ts = now_ts()
                 receipt_id = ids.new_id("receipt")
-                scope_digest = hashlib.sha256(
-                    f"{workspace_id}\0{repo_id}".encode("utf-8")
-                ).hexdigest()[:24]
+                scope_digest = _receipt_scope_digest(workspace_id, repo_id)
                 actor_digest = hashlib.sha256(actor.encode("utf-8")).hexdigest()[:16]
                 anchor = self.conn.execute(
                     "SELECT receipt_count, head_hash, integrity_error "
@@ -4164,7 +4169,7 @@ class Store:
             where += " AND repo_id=?"
             params.append(repo_id)
         rows = self.conn.execute(
-            "SELECT id, payload, prev_hash, receipt_hash FROM operation_receipts WHERE " + where,
+            "SELECT id, repo_id, payload, prev_hash, receipt_hash FROM operation_receipts WHERE " + where,
             params,
         ).fetchall()
         totals = {
@@ -4234,7 +4239,11 @@ class Store:
 
         for raw_row in rows:
             receipt = _public_receipt_row(dict(raw_row))
-            if receipt.get("invalid_payload"):
+            if (
+                receipt.get("invalid_payload")
+                or receipt.get("scope_digest")
+                != _receipt_scope_digest(workspace_id, raw_row["repo_id"])
+            ):
                 totals["invalid_receipt_count"] += 1
                 continue
             metadata = receipt.get("metadata")
