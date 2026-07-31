@@ -81,6 +81,50 @@ def test_consolidate_is_idempotent():
     assert second["skipped_already_consolidated"] >= 1
 
 
+def test_workspace_consolidation_excludes_session_memories():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    sid = eng.store.start_session(wid, rid)
+    source_ids = [
+        eng.remember(
+            f"Session-only deployment incident repeat {n}.",
+            workspace_id=wid, repo_id=rid, session_id=sid, scope="session",
+            mtype=MemoryType.EPISODIC, resolve_conflicts=False,
+        )
+        for n in range(3)
+    ]
+
+    report = consolidate(eng, workspace_id=wid)
+
+    assert report["digests_created"] == []
+    assert all(eng.store.get_memory(mid).valid_to is None for mid in source_ids)
+
+
+def test_workspace_consolidation_partitions_repo_owned_sources():
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    repo_a = eng.store.get_or_create_repo(wid, "a")
+    repo_b = eng.store.get_or_create_repo(wid, "b")
+    for repo_id, marker in ((repo_a, "REPO_A"), (repo_b, "REPO_B")):
+        for n in range(3):
+            eng.remember(
+                f"Shared deployment incident {marker} run {n}.",
+                workspace_id=wid, repo_id=repo_id, mtype=MemoryType.EPISODIC,
+                resolve_conflicts=False,
+            )
+
+    report = consolidate(eng, workspace_id=wid)
+
+    assert len(report["digests_created"]) == 2
+    for entry in report["digests_created"]:
+        digest = eng.store.get_memory(entry["id"])
+        source_repos = {
+            eng.store.get_memory(source_id).repo_id for source_id in entry["consolidates"]
+        }
+        assert source_repos == {digest.repo_id}
+
+
 def test_subject_clustering_limits_entity_lookup_to_the_scanned_memories(monkeypatch):
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")
@@ -286,6 +330,34 @@ def test_structured_consolidation_failure_falls_back_to_deterministic_digest():
     assert digest.metadata["provenance"]["source"] == "consolidation"
 
 
+def test_structured_workspace_consolidation_partitions_repo_owned_sources():
+    pytest.importorskip("pydantic")
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    repo_a = eng.store.get_or_create_repo(wid, "a")
+    repo_b = eng.store.get_or_create_repo(wid, "b")
+    for repo_id, marker in ((repo_a, "REPO_A"), (repo_b, "REPO_B")):
+        for n in range(3):
+            eng.remember(
+                f"Auth incident {marker} PASETO outage run {n}.",
+                workspace_id=wid, repo_id=repo_id, mtype=MemoryType.EPISODIC,
+                resolve_conflicts=False,
+            )
+
+    report = consolidate(
+        eng, workspace_id=wid, structured=True, llm=_StructuredConsolidationLLM(),
+    )
+
+    assert len(report["digests_created"]) == 2
+    for entry in report["digests_created"]:
+        digest = eng.store.get_memory(entry["id"])
+        source_repos = {
+            eng.store.get_memory(source_id).repo_id
+            for source_id in digest.metadata["structured_consolidation"]["source_ids"]
+        }
+        assert source_repos == {digest.repo_id}
+
+
 def test_structured_consolidation_rejects_facts_without_prompt_sources():
     class HallucinatedSourceLLM:
         def extract_json(self, prompt, schema):
@@ -332,6 +404,13 @@ def test_consolidate_reports_compaction_savings_on_a_real_cluster():
     eng, wid, rid = _engine_with_large_cluster()
     report = consolidate(eng, workspace_id=wid, repo_id=rid)
     comp = report["compaction"]["distilled"]
+    assert comp == {
+        "tokens_before": 230,
+        "tokens_after": 120,
+        "tokens_saved": 110,
+        "reduction_pct": 47.8,
+        "units": 1,
+    }
     assert comp["tokens_before"] > comp["tokens_after"] > 0
     assert comp["tokens_saved"] == comp["tokens_before"] - comp["tokens_after"]
     assert 0 < comp["reduction_pct"] <= 100
@@ -421,6 +500,38 @@ def test_profiles_pass_respects_min_mentions():
     eng, wid, rid, _ = _engine_with_entity_mentions(name="Rare", n=2)
     report = consolidate_profiles(eng, workspace_id=wid, repo_id=rid, min_mentions=3)
     assert report["profiles_created"] == []
+
+
+def test_workspace_profiles_partition_repo_owned_sources():
+    from engraphis.core.consolidate import consolidate_profiles
+    from engraphis.core.interfaces import Node
+
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    repo_a = eng.store.get_or_create_repo(wid, "a")
+    repo_b = eng.store.get_or_create_repo(wid, "b")
+    for repo_id, marker in ((repo_a, "REPO_A"), (repo_b, "REPO_B")):
+        for n in range(3):
+            eng.remember(
+                f"Aurora {marker} architectural decision {n}.",
+                workspace_id=wid, repo_id=repo_id, mtype=MemoryType.SEMANTIC,
+                resolve_conflicts=False,
+            )
+    eng.store.upsert_entity(Node(id="", name="Aurora", workspace_id=wid))
+
+    report = consolidate_profiles(eng, workspace_id=wid)
+
+    assert len(report["profiles_created"]) == 2
+    for entry in report["profiles_created"]:
+        profile = eng.store.get_memory(entry["id"])
+        source_repos = {
+            eng.store.get_memory(
+                link["b"] if link["a"] == profile.id else link["a"]
+            ).repo_id
+            for link in eng.store.get_links(profile.id)
+            if link["relation"] == "profiles"
+        }
+        assert source_repos == {profile.repo_id}
 
 
 def test_profiles_dry_run_changes_nothing():

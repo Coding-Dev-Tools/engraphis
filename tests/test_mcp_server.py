@@ -62,7 +62,8 @@ _ALL_TOOLS = {
     "engraphis_stats", "engraphis_proactive_context", "engraphis_recall_grounded",
     "engraphis_answer", "engraphis_ingest", "engraphis_consolidate",
     "engraphis_ingest_postgres_schema",
-    "engraphis_receipts", "engraphis_verify_receipts", "engraphis_export_receipts",
+    "engraphis_receipts", "engraphis_context_savings", "engraphis_verify_receipts",
+    "engraphis_export_receipts",
     "engraphis_check_update",
 }
 
@@ -79,17 +80,18 @@ def test_server_identity_and_tools_registered():
     assert "engraphis_end_session" in srv.mcp.instructions
     assert "open_threads=[]" in srv.mcp.instructions
     tools = {t.name: t for t in asyncio.run(srv.mcp.list_tools())}
-    assert len(_ALL_TOOLS) == 30
+    assert len(_ALL_TOOLS) == 31
     assert set(tools) == _ALL_TOOLS
+    assert srv.minimum_role("engraphis_context_savings") == "viewer"
     kilo = (ROOT / "docs" / "KILO_CODE_INTEGRATION.md").read_text(encoding="utf-8")
-    full_surface = kilo.split("## 4. The 30 tools", 1)[1].split("\n---", 1)[0]
+    full_surface = kilo.split("## 4. The 31 tools", 1)[1].split("\n---", 1)[0]
     assert set(re.findall(r"`(engraphis_[a-z_]+)`", full_surface)) == _ALL_TOOLS
     # Flat schema (not a nested "params" object) so agents can call fields directly.
     props = tools["engraphis_remember"].inputSchema.get("properties", {})
     assert "content" in props and "workspace" in props and "params" not in props
     assert {"valid_from", "subject_key", "claim_kind"} <= set(props)
     assert "as_of" in tools["engraphis_recall"].inputSchema.get("properties", {})
-    assert {"valid_at", "known_at", "token_budget", "retrieval_profile",
+    assert {"valid_at", "known_at", "token_budget", "retrieval_profile", "candidate_depth",
             "response_mode", "diagnostics"} <= set(
         tools["engraphis_recall"].inputSchema.get("properties", {})
     )
@@ -97,7 +99,7 @@ def test_server_identity_and_tools_registered():
         "token_budget"
     ]["default"] == 1024
     assert "as_of" in tools["engraphis_recall_grounded"].inputSchema.get("properties", {})
-    assert {"valid_at", "known_at", "token_budget", "retrieval_profile", "response_mode"} <= set(
+    assert {"valid_at", "known_at", "token_budget", "retrieval_profile", "candidate_depth", "response_mode"} <= set(
         tools["engraphis_answer"].inputSchema.get("properties", {})
     )
     assert {"as_of", "valid_at", "known_at"} <= set(
@@ -558,6 +560,9 @@ def test_receipt_tools(monkeypatch):
     )
     listed = json.loads(srv.engraphis_receipts(workspace="acme"))
     assert listed["entries"][0]["operation"] == "remember"
+    savings = json.loads(srv.engraphis_context_savings(workspace="acme"))
+    assert savings["receipt_count"] == 1
+    assert savings["savings_receipt_count"] == 0
     verified = json.loads(srv.engraphis_verify_receipts(workspace="acme"))
     assert verified["valid"] is True
     exported = json.loads(srv.engraphis_export_receipts(workspace="acme"))

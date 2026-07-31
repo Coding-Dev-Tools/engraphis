@@ -54,8 +54,10 @@ services:
       ENGRAPHIS_HOST: 0.0.0.0
       # This process binds all container interfaces. Even though the published host port is
       # loopback-only, require an explicit bearer so a changed port mapping cannot silently
-      # expose the legacy v1 API. Compose fails before creating the container if it is absent.
-      ENGRAPHIS_API_TOKEN: ${ENGRAPHIS_API_TOKEN:?Set ENGRAPHIS_API_TOKEN before starting the api profile}
+      # expose the legacy v1 API. Keep interpolation optional so the inactive profile does
+      # not break a fresh ``docker compose up``; engraphis-server fails closed at startup
+      # when this profile is actually launched without a token.
+      ENGRAPHIS_API_TOKEN: ${ENGRAPHIS_API_TOKEN:-}
       # The v1 server uses a DIFFERENT, incompatible memory schema from the v2 dashboard,
       # so it MUST NOT share the dashboard's engraphis.db (doing so corrupts both). Give it
       # its own file on the shared volume.

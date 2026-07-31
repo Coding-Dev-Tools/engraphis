@@ -118,6 +118,7 @@ _READ_ONLY_TOOLS = frozenset({
     "engraphis_code_impact",
     "engraphis_export_code_graph",
     "engraphis_receipts",
+    "engraphis_context_savings",
     "engraphis_verify_receipts",
     "engraphis_export_receipts",
     "engraphis_stats",
@@ -264,6 +265,9 @@ def engraphis_recall(
     retrieval_profile: Annotated[str, Field(
         description="Retrieval profile: balanced (legacy hybrid), auto, lexical, graph, "
                     "or code. Auto is opt-in until benchmarks demonstrate a win.")] = "balanced",
+    candidate_depth: Annotated[str, Field(
+        description="Candidate depth: fixed preserves the legacy pool; adaptive is an opt-in "
+                    "profile-aware performance experiment.")] = "fixed",
     response_mode: Annotated[str, Field(
         description="full preserves legacy memory bodies; compact omits bodies already "
                     "represented in the packed context.")] = "full",
@@ -289,7 +293,8 @@ def engraphis_recall(
             query, workspace=workspace, repo=repo, session_id=session_id,
             mtypes=mtypes, k=k, as_of=as_of, valid_at=valid_at,
             known_at=known_at, token_budget=token_budget,
-            retrieval_profile=retrieval_profile, response_mode=response_mode,
+            retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+            response_mode=response_mode,
             diagnostics=diagnostics,
         ))
     except Exception as exc:  # noqa: BLE001
@@ -319,6 +324,8 @@ def engraphis_recall_context(
         ge=0, le=32_768)] = 1024,
     retrieval_profile: Annotated[str, Field(
         description="balanced, auto, lexical, graph, or code.")] = "balanced",
+    candidate_depth: Annotated[str, Field(
+        description="fixed preserves the legacy pool; adaptive is profile-aware and opt-in.")] = "fixed",
     as_of: Annotated[Optional[float], Field(
         description="Compatibility alias for valid_at.")] = None,
     valid_at: Annotated[Optional[float], Field(
@@ -348,6 +355,7 @@ def engraphis_recall_context(
             known_at=known_at,
             token_budget=token_budget,
             retrieval_profile=retrieval_profile,
+            candidate_depth=candidate_depth,
             response_mode="compact",
             diagnostics=diagnostics,
             intent="recall_context",
@@ -421,6 +429,8 @@ def engraphis_recall_grounded(
         description="Hard packed-context budget (0-32768).", ge=0, le=32_768)] = None,
     retrieval_profile: Annotated[str, Field(
         description="balanced, auto, lexical, graph, or code.")] = "balanced",
+    candidate_depth: Annotated[str, Field(
+        description="fixed preserves the legacy pool; adaptive is profile-aware and opt-in.")] = "fixed",
     response_mode: Annotated[str, Field(
         description="full includes citation bodies; compact omits bodies already present "
                     "in the cited answer.")] = "full",
@@ -457,7 +467,8 @@ def engraphis_recall_grounded(
             query, workspace=workspace, repo=repo, session_id=session_id,
             mtypes=mtypes, k=k, as_of=as_of, valid_at=valid_at,
             known_at=known_at, token_budget=token_budget,
-            retrieval_profile=retrieval_profile, response_mode=response_mode,
+            retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+            response_mode=response_mode,
             diagnostics=diagnostics, min_support=min_support, llm=llm,
         ))
     except Exception as exc:  # noqa: BLE001
@@ -497,6 +508,8 @@ def engraphis_answer(
         description="Hard packed-context budget (0-32768).", ge=0, le=32_768)] = None,
     retrieval_profile: Annotated[str, Field(
         description="balanced, auto, lexical, graph, or code.")] = "balanced",
+    candidate_depth: Annotated[str, Field(
+        description="fixed preserves the legacy pool; adaptive is profile-aware and opt-in.")] = "fixed",
     response_mode: Annotated[str, Field(
         description="full includes citation bodies; compact omits them.")] = "full",
     diagnostics: Annotated[bool, Field(
@@ -511,6 +524,7 @@ def engraphis_answer(
         query=query, workspace=workspace, repo=repo, session_id=None, mtypes=None, k=k,
         as_of=as_of, valid_at=valid_at, known_at=known_at,
         token_budget=token_budget, retrieval_profile=retrieval_profile,
+        candidate_depth=candidate_depth,
         response_mode=response_mode, diagnostics=diagnostics,
         min_support=min_support, synthesize=synthesize,
     )
@@ -1145,6 +1159,24 @@ def engraphis_receipts(
     """List content-free, hash-chained remember/recall/link/index receipts."""
     try:
         return _ok(service().receipt_log(workspace=workspace, limit=limit))
+    except Exception as exc:  # noqa: BLE001
+        return _err(exc)
+
+
+@mcp.tool(
+    name="engraphis_context_savings",
+    annotations={"title": "Summarize context savings", "readOnlyHint": True,
+                 "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def engraphis_context_savings(
+    workspace: Annotated[str, Field(description="Workspace whose receipt usage to summarize.",
+                                    min_length=1, max_length=200)],
+    repo: Annotated[Optional[str], Field(description="Optional repo scope within the workspace.",
+                                         max_length=200)] = None,
+) -> str:
+    """Summarize content-free context savings, separated by token-counter identity."""
+    try:
+        return _ok(service().context_savings(workspace=workspace, repo=repo))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
 

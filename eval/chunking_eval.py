@@ -30,7 +30,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from engraphis.core.textutil import estimate_tokens
+from engraphis.backends.extractor import ChunkingExtractor, get_extractor
 from engraphis.service import MemoryService
 
 MODES = ("whole", "chunked")
@@ -46,14 +46,28 @@ def load(path: str) -> list[dict]:
 
 
 def run_eval(cases: list[dict], *, mode: str, k: int = 5,
-             embed_model: Optional[str] = None, embed_dim: int = 256) -> dict:
+             embed_model: Optional[str] = None, embed_dim: int = 256,
+             chunk_extractor: Optional[ChunkingExtractor] = None) -> dict:
     """Ingest the corpus in one workspace under ``mode`` and score its questions."""
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of: {', '.join(MODES)}")
+    selected_chunker = chunk_extractor or get_extractor("chunk")
+    if not isinstance(selected_chunker, ChunkingExtractor):
+        raise TypeError("chunk_extractor must be a ChunkingExtractor")
+    count_tokens = selected_chunker.count_tokens
     svc = MemoryService.create(":memory:", embed_model=embed_model, embed_dim=embed_dim,
                                extractor=("chunk" if mode == "chunked" else "none"))
+    if mode == "chunked":
+        svc.engine.extractor = selected_chunker
     memories = 0
+    stored_tokens: list[int] = []
     for c in cases:
         out = svc.ingest(c["document"], workspace="corpus", mtype="semantic")
         memories += out["count"]
+        for fact in out["facts"]:
+            record = svc.store.get_memory(fact["id"])
+            if record is not None:
+                stored_tokens.append(count_tokens(record.content))
 
     nq = hits = 0
     ctx_tokens = evidence_tokens = 0
@@ -61,21 +75,33 @@ def run_eval(cases: list[dict], *, mode: str, k: int = 5,
         for q in c["questions"]:
             nq += 1
             results = svc.recall(q["q"], workspace="corpus", k=k).get("memories") or []
-            ctx_tokens += sum(estimate_tokens(m.get("content") or "") for m in results)
+            ctx_tokens += sum(count_tokens(m.get("content") or "") for m in results)
             holding = [m for m in results if q["evidence"] in (m.get("content") or "")]
             if holding:
                 hits += 1
-                evidence_tokens += min(estimate_tokens(m["content"]) for m in holding)
+                evidence_tokens += min(count_tokens(m["content"]) for m in holding)
     return {
         "mode": mode, "memories_stored": memories, "questions": nq,
         "recall_at_k": round(hits / nq, 3) if nq else 0.0,
         "mean_context_tokens": round(ctx_tokens / nq, 1) if nq else 0.0,
         "mean_evidence_tokens": round(evidence_tokens / hits, 1) if hits else 0.0,
+        "max_stored_tokens": max(stored_tokens, default=0),
+        "token_counter": selected_chunker.token_counter_identity,
     }
 
 
 def compare(cases: list[dict], *, k: int, embed_model: Optional[str]) -> dict:
-    reports = {m: run_eval(cases, mode=m, k=k, embed_model=embed_model) for m in MODES}
+    chunker = get_extractor("chunk")
+    reports = {
+        mode: run_eval(
+            cases,
+            mode=mode,
+            k=k,
+            embed_model=embed_model,
+            chunk_extractor=chunker,
+        )
+        for mode in MODES
+    }
     whole, chunked = reports["whole"], reports["chunked"]
     reduction = 0.0
     if whole["mean_context_tokens"]:
@@ -99,9 +125,11 @@ def main() -> int:
     print(f"chunking eval — {len(cases)} docs · {result['reports']['whole']['questions']} "
           f"questions @ k={args.k} · embedder={embedder}\n")
     row = "  {mode:<8} recall@k={recall_at_k:<6} ctx_tokens={mean_context_tokens:<8} " \
-          "evidence_tokens={mean_evidence_tokens:<7} (memories={memories_stored})"
+          "evidence_tokens={mean_evidence_tokens:<7} max_stored={max_stored_tokens:<6} " \
+          "(memories={memories_stored})"
     for mode in MODES:
         print(row.format(**result["reports"][mode]))
+    print(f"  token counter: {result['reports']['chunked']['token_counter']}")
     print(f"\n  context reduction (chunked vs whole): {result['context_reduction_pct']}%")
     return 0
 

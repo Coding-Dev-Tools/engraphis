@@ -41,10 +41,11 @@ Classic navigation/mobile-nav controls.
 
 ## Environment notes
 
-- One parallel lane could not start against the repository's default database because that
-  existing database is schema version 5 while this checkout supports schema version 4.
-  This is an environment/data compatibility issue, not a dashboard button failure. The
-  isolated schema-4 fixture started and exercised the UI successfully.
+- At the time of this manual pass, one parallel lane could not start against the repository's
+  default database because the checkout then supported schema version 4 while that existing
+  database was schema version 5. This historical environment/data compatibility issue was not a
+  dashboard button failure. The isolated schema-4 fixture started and exercised the UI
+  successfully.
 - The browser harness did not expose programmatic download events for the PNG/JSON export
   anchors, but the dashboard status confirmed both exports completed. No application
   console errors were observed during the manual pass.

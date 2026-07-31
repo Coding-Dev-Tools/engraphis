@@ -24,6 +24,7 @@ class IntentRecallRequest(BaseModel):
     known_at: Optional[float] = None
     token_budget: Optional[int] = None
     retrieval_profile: str = "balanced"
+    candidate_depth: str = "fixed"
     response_mode: str = "compact"
     diagnostics: bool = False
 
@@ -90,12 +91,14 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
                known_at: Optional[float] = None,
                token_budget: Optional[int] = None,
                retrieval_profile: str = "balanced",
+               candidate_depth: str = "fixed",
                response_mode: str = "compact",
                diagnostics: bool = False):
         return run(
             svc.recall, query, workspace=workspace, repo=repo, k=k,
             as_of=as_of, valid_at=valid_at, known_at=known_at,
             token_budget=token_budget, retrieval_profile=retrieval_profile,
+            candidate_depth=candidate_depth,
             response_mode=response_mode, diagnostics=diagnostics,
             reinforce=False, intent="http_read_only", record_receipt=False,
         )
@@ -108,6 +111,7 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
             k=req.k, as_of=req.as_of, valid_at=req.valid_at,
             known_at=req.known_at, token_budget=req.token_budget,
             retrieval_profile=req.retrieval_profile,
+            candidate_depth=req.candidate_depth,
             response_mode=req.response_mode, diagnostics=req.diagnostics,
             reinforce=False, record_receipt=False,
         )
@@ -166,6 +170,10 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
     @app.get("/receipts")
     def receipts(workspace: str, limit: int = 100):
         return run(svc.receipt_log, workspace=workspace, limit=limit)
+
+    @app.get("/context-savings")
+    def context_savings(workspace: str, repo: Optional[str] = None):
+        return run(svc.context_savings, workspace=workspace, repo=repo)
 
     @app.get("/receipts/verify")
     def verify_receipts(workspace: str, expected_head: str = "",
