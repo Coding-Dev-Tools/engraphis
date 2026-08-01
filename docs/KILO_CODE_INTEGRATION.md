@@ -1,20 +1,20 @@
-# Engraphis + Kilo Code: Technical User Manual
+# Engraphis with Kilo Code
 
-**How Engraphis works, how to set up Kilo Code, and how to wire the two together so your coding agent stops forgetting.**
-
-This manual is written for someone who wants the full technical picture: what Engraphis actually is, how its memory engine behaves, how Kilo Code talks to it over MCP, and the exact configuration to make the connection reliable and optimal. It deliberately covers both layers: the *transport* (getting the pipe connected) and the *orchestration* (how to use it well once it's connected), because those are two different problems and most confusion comes from mixing them up.
+This guide explains how to connect Kilo Code to Engraphis, confirm the connection, and use the
+memory tools well in day-to-day coding work. It covers both setup and the workflow that follows.
 
 ---
 
-## 0. The two-layer mental model (read this first)
+## 0. Setup and workflow
 
-There are two separate questions hiding inside "connect Kilo Code to Engraphis," and they are usually where people talk past each other:
+Connecting Kilo Code to Engraphis has two parts:
 
-1. **Transport layer: "get the pipes connected."** This is: install the Engraphis MCP server, tell Kilo Code how to launch it, confirm the tools show up. It's a plumbing task. When it's done, Kilo Code can *see* 31 `engraphis_*` tools. Success here is binary: either the tools appear or they don't.
+1. **Setup:** install the MCP server, tell Kilo Code how to start it, and check that the tools
+   appear.
+2. **Workflow:** decide when to remember, recall, and maintain memory. Use stable
+   `workspace → repo → session` scopes so memories remain useful.
 
-2. **Orchestration layer: "use the memory well."** This is: *when* should the agent remember vs. recall, how should memories be scoped (`workspace → repo → session`), which of the 31 tools answers which question, and how to keep the store clean over time. This is where the actual value is, and it's a discipline, not a config.
-
-You need both. A perfect config with no discipline gives you an agent that has memory tools and never uses them correctly. Good discipline with a broken config gives you an agent that wants to remember and can't. **Section 3 is the transport layer. Sections 4–6 are the orchestration layer.** Do them in order.
+Complete setup first, then follow the workflow in Sections 4 to 6.
 
 ---
 
@@ -33,7 +33,8 @@ Kilo Code stores MCP configuration in a JSON-with-comments file (`kilo.jsonc`) a
 
 ## 2. What Engraphis is (the engine Kilo Code will be talking to)
 
-Engraphis is a **local-first, open memory engine for AI agents.** The problem it solves: your coding agent forgets everything between sessions. Every new session it re-asks which package manager you use, re-learns the codebase, forgets why you chose one library over another. Engraphis gives the agent durable, scoped, *explainable* memory that persists across sessions and repositories.
+Engraphis is a local memory engine for AI agents. It stores durable, scoped project knowledge so an
+agent can reuse decisions, conventions, and codebase context across sessions and repositories.
 
 Everything runs on your machine. The whole store is a single SQLite file. Local embeddings mean no API key is required for the memory layer itself (an external LLM is optional and only used for chat/synthesis). It's Apache-2.0 licensed and self-hostable.
 

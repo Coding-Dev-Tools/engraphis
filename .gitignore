@@ -27,6 +27,7 @@ build/
 # Extracted sdist directory (e.g. engraphis-0.1.0/) — regenerable build artifact
 /engraphis-[0-9]*/
 .pytest_cache/
+/.pytest-*-tmp/
 .ruff_cache/
 node_modules/
 .playwright/
@@ -35,6 +36,12 @@ test-results/
 models_cache/
 .secrets/
 internal/
+.private-eval/
+.hosted-eval-results/
+# Repo-local test base directories are the only private-ledger exception outside
+# .private-eval.  They are transient and must never be considered release inputs.
+/.tmp[-_]*/
+/.release-full-tmp/
 
 # Private product research. Public releases may include reproducible benchmark artifacts,
 # never narrative commercial/competitive audits or market-analysis working papers.

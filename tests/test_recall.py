@@ -2,6 +2,7 @@ from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
 from engraphis.backends.reranker import IdentityReranker
 from engraphis.core.interfaces import MemoryRecord, Scope, SearchFilter
 from engraphis.core.recall import RecallEngine
+from engraphis.core.retrieval_policy import ProfileConfig
 from engraphis.core.store import Store
 
 
@@ -17,6 +18,29 @@ def _add(store, emb, wid, rid, text, **kw):
                                          embedding=emb.embed([text])[0], **kw))
 
 
+class _OrderedIndex:
+    """Minimal index double which keeps untrusted candidates ahead of trusted ones."""
+
+    def __init__(self, ids):
+        self.ids = ids
+
+    def search(self, query, k, *, filter=None):
+        return [
+            (memory_id, float(len(self.ids) - position))
+            for position, memory_id in enumerate(self.ids[:k])
+        ]
+
+
+class _RecordingOrderedIndex(_OrderedIndex):
+    def __init__(self, ids):
+        super().__init__(ids)
+        self.requested: list[int] = []
+
+    def search(self, query, k, *, filter=None):
+        self.requested.append(k)
+        return super().search(query, k, filter=filter)
+
+
 def test_recall_returns_relevant_first():
     store, emb, eng = _engine()
     wid = store.get_or_create_workspace("w")
@@ -26,6 +50,59 @@ def test_recall_returns_relevant_first():
     res = eng.recall("which package manager do we use?", SearchFilter(workspace_id=wid), k=2)
     assert res.count >= 1
     assert "pnpm" in res.context.lower()
+
+
+def test_lexical_absolute_support_includes_title_text():
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    memory_id = _add(
+        store,
+        emb,
+        wid,
+        rid,
+        "Rotate it every 30 days.",
+        title="OAUTH_TOKEN_ROTATION",
+    )
+
+    result = eng.recall(
+        "OAUTH_TOKEN_ROTATION",
+        SearchFilter(workspace_id=wid, repo_id=rid),
+        k=1,
+        retrieval_profile="lexical",
+    )
+
+    assert [chunk["id"] for chunk in result.chunks] == [memory_id]
+    assert result.chunks[0]["absolute_support"] > 0.0
+
+
+def test_prompt_only_recall_continues_past_untrusted_arm_candidates():
+    store = Store(":memory:")
+    emb = DeterministicEmbedder(256)
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    untrusted_ids = [
+        _add(
+            store, emb, wid, rid, f"Untrusted candidate {index}.",
+            provenance={"source": "import", "trusted": False},
+        )
+        for index in range(201)
+    ]
+    trusted_id = _add(
+        store, emb, wid, rid, "Trusted project evidence.",
+        provenance={"source": "agent", "trusted": True},
+    )
+    eng = RecallEngine(
+        store, emb, _OrderedIndex([*untrusted_ids, trusted_id]), IdentityReranker(),
+    )
+
+    result = eng.recall(
+        "project evidence", SearchFilter(workspace_id=wid, repo_id=rid), k=1,
+        prompt_only=True,
+        arm_config=ProfileConfig("vector_only", True, False, False, False),
+    )
+
+    assert [chunk["id"] for chunk in result.chunks] == [trusted_id]
 
 
 def test_recall_scope_isolation():
@@ -312,6 +389,63 @@ def test_lexical_recall_is_filtered_before_candidate_limit():
 
     res = eng.recall("needle", SearchFilter(workspace_id=target), k=3, candidate_k=10)
     assert [c["id"] for c in res.chunks] == [wanted]
+
+
+def test_prompt_overfetch_never_reduces_the_requested_candidate_depth():
+    store = Store(":memory:")
+    emb = DeterministicEmbedder(256)
+    index = NumpyVectorIndex(store)
+    requested: list[int] = []
+    original_search = index.search
+
+    def recording_search(query, k, filter=None):
+        requested.append(k)
+        return original_search(query, k, filter=filter)
+
+    index.search = recording_search
+    eng = RecallEngine(store, emb, index, IdentityReranker())
+    wid = store.get_or_create_workspace("w")
+    _add(store, emb, wid, None, "A sufficiently deep candidate set remains available.")
+
+    result = eng.recall(
+        "candidate depth", SearchFilter(workspace_id=wid), k=1, candidate_k=500,
+    )
+
+    assert result.candidate_k_requested == 500
+    assert result.candidate_k_used == 500
+    assert requested[0] == 750
+
+
+def test_prompt_only_overfetch_stays_bounded_for_large_untrusted_scopes():
+    store = Store(":memory:")
+    emb = DeterministicEmbedder(256)
+    wid = store.get_or_create_workspace("w")
+    untrusted_ids = [
+        _add(
+            store,
+            emb,
+            wid,
+            None,
+            f"untrusted imported evidence {index}",
+            metadata={"provenance": {"source": "web", "trusted": False}},
+        )
+        for index in range(300)
+    ]
+    index = _RecordingOrderedIndex(untrusted_ids)
+    eng = RecallEngine(store, emb, index, IdentityReranker())
+
+    result = eng.recall(
+        "project evidence",
+        SearchFilter(workspace_id=wid),
+        k=1,
+        candidate_k=1,
+        prompt_only=True,
+        arm_config=ProfileConfig("vector_only", True, False, False, False),
+    )
+
+    assert result.chunks == []
+    assert index.requested == [4, 256]
+    assert max(index.requested) < len(untrusted_ids)
 
 
 def test_graph_arm_does_not_match_entity_names_inside_other_words():

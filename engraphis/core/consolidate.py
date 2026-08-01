@@ -31,6 +31,7 @@ from typing import Any, Optional
 
 from engraphis.core import scoring
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
+from engraphis.core.poisoning import provenance_is_trusted
 from engraphis.core.textutil import estimate_tokens, jaccard, tokenize
 
 logger = logging.getLogger(__name__)
@@ -388,8 +389,7 @@ def _inherit_safety(engine, memory_id: str, sources: list[MemoryRecord]) -> tupl
         [record.sensitivity or "normal"] + [(m.sensitivity or "normal") for m in sources],
         key=lambda value: _SENSITIVITY_RANK.get(value, len(_SENSITIVITY_RANK)),
     )
-    trusted = (bool((record.provenance or {}).get("trusted", True))
-               and all(bool((m.provenance or {}).get("trusted", True)) for m in sources))
+    trusted = provenance_is_trusted(record.provenance) and _sources_are_trusted(sources)
     provenance = dict(record.provenance or {})
     provenance["trusted"] = trusted
     metadata = dict(record.metadata or {})
@@ -403,6 +403,11 @@ def _inherit_safety(engine, memory_id: str, sources: list[MemoryRecord]) -> tupl
     )
     engine.store.conn.commit()
     return sensitivity, trusted
+
+
+def _sources_are_trusted(sources: list[MemoryRecord]) -> bool:
+    """Require every consolidated source to carry an explicit trust approval."""
+    return all(provenance_is_trusted(source.provenance) for source in sources)
 
 
 def _already_consolidated(store, memory_id: str) -> bool:
@@ -647,13 +652,14 @@ def _write_digest(engine, cluster: list[MemoryRecord], *, content: str, subject:
                   now: float) -> str:
     first = cluster[0]
     importance = max([m.importance or 0.0 for m in cluster] + [0.5])
+    trusted = _sources_are_trusted(cluster)
     digest_id = engine.remember(
         content,
         workspace_id=first.workspace_id, repo_id=first.repo_id,
         mtype=MemoryType.SEMANTIC, scope=Scope(first.scope),
         title=f"Consolidated: {subject}"[:200], importance=importance,
         keywords=_common_tokens(cluster, k=8),
-        metadata={"provenance": {"source": "consolidation",
+        metadata={"provenance": {"source": "consolidation", "trusted": trusted,
                                  "consolidates": [m.id for m in cluster]}},
         resolve_conflicts=False,   # the digest is new by construction
     )
@@ -682,12 +688,14 @@ def _write_structured_digests(engine, cluster: list[MemoryRecord], facts: list[d
             continue
         sources = [source_by_id[source_id] for source_id in fact_source_ids]
         first = sources[0]
+        trusted = _sources_are_trusted(sources)
         cited_sources.update(fact_source_ids)
         base_importance = max([memory.importance or 0.0 for memory in sources] + [0.5])
         importance = max(base_importance, float(fact.get("importance") or 0.0))
         metadata = {
             "provenance": {
                 "source": "structured_consolidation",
+                "trusted": trusted,
                 "consolidates": fact_source_ids,
                 "source_ids": fact_source_ids,
                 "confidence": fact.get("confidence", 0.0),
@@ -826,13 +834,15 @@ def _write_profile(engine, name: str, etype: str, sources: list[MemoryRecord],
                    *, content: str, now: float) -> str:
     first = sources[0]
     importance = max([m.importance or 0.0 for m in sources] + [0.6])
+    trusted = _sources_are_trusted(sources)
     profile_id = engine.remember(
         content,
         workspace_id=first.workspace_id, repo_id=first.repo_id,
         mtype=MemoryType.SEMANTIC, scope=Scope(first.scope),
         title=f"Profile: {name}"[:200], importance=importance,
         keywords=[name] + _common_tokens(sources, k=6),
-        metadata={"provenance": {"source": "profile_consolidation", "entity": name,
+        metadata={"provenance": {"source": "profile_consolidation", "trusted": trusted,
+                                 "entity": name,
                                  "etype": etype, "profiles": [m.id for m in sources]}},
         resolve_conflicts=False,   # a profile is new by construction
     )

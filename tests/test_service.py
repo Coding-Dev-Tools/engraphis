@@ -28,6 +28,97 @@ def test_remember_then_recall_roundtrip():
     assert any("pnpm" in m["content"] for m in r["memories"])
 
 
+def test_recall_distinguishes_query_relative_rank_from_absolute_support():
+    s = _svc()
+    s.remember("Frontend repositories use pnpm for package management.",
+               workspace="acme", repo="web")
+
+    full = s.recall("which package manager do frontend repositories use?",
+                    workspace="acme", repo="web")
+    memory = full["memories"][0]
+    assert memory["score"] == memory["relative_score"]  # compatibility alias
+    assert 0.0 <= memory["absolute_support"] <= 1.0
+    assert "Query-relative" in full["score_semantics"]["relative_score"]
+    assert "[0, 1]" in full["score_semantics"]["absolute_support"]
+
+    compact = s.recall("which package manager do frontend repositories use?",
+                       workspace="acme", repo="web", response_mode="compact")
+    compact_memory = compact["memories"][0]
+    assert compact_memory["relative_score"] == compact_memory["score"]
+    assert 0.0 <= compact_memory["absolute_support"] <= 1.0
+    assert compact["score_semantics"] == full["score_semantics"]
+
+
+def test_recall_support_reuses_vector_arm_without_a_second_embedding_batch():
+    s = _svc()
+    s.remember("Frontend repositories use pnpm for package management.",
+               workspace="acme", repo="web")
+
+    class CountingEmbedder:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+            self.batches = []
+
+        def embed(self, texts):
+            self.batches.append(list(texts))
+            return self.wrapped.embed(texts)
+
+    counter = CountingEmbedder(s.engine.recall_engine.embedder)
+    s.engine.recall_engine.embedder = counter
+    result = s.recall("which package manager do frontend repositories use?",
+                      workspace="acme", repo="web")
+
+    assert len(counter.batches) == 1
+    assert counter.batches[0] == ["which package manager do frontend repositories use?"]
+    assert result["score_semantics"]["version"] == "retrieval-support-v1"
+
+
+def test_recall_absolute_support_stays_low_for_a_weak_one_item_pool():
+    s = _svc()
+    s.remember("Production deploys to AWS ECS after approval.",
+               workspace="acme", repo="web")
+
+    result = s.recall("What sourdough hydration ratio should I use?",
+                      workspace="acme", repo="web")
+    memory = result["memories"][0]
+
+    assert memory["relative_score"] > 0.5
+    assert memory["absolute_support"] < 0.15
+
+
+def test_reworded_rate_limit_requires_claim_key_to_supersede_offline():
+    s = _svc()
+    old_text = "The API rate limit is one hundred requests every sixty seconds."
+    new_text = "Calls are capped at 500 per minute for each key."
+
+    unkeyed_old = s.remember(old_text, workspace="unkeyed", repo="api")
+    unkeyed_new = s.remember(new_text, workspace="unkeyed", repo="api")
+    assert unkeyed_new["op"] == "add"
+    assert s.store.get_memory(unkeyed_old["id"]).valid_to is None
+
+    keyed_old = s.remember(
+        old_text, workspace="keyed", repo="api", subject_key="api-rate-limit",
+        claim_kind="configured_value",
+    )
+    keyed_new = s.remember(
+        new_text, workspace="keyed", repo="api", subject_key="api-rate-limit",
+        claim_kind="configured_value",
+    )
+    assert keyed_new["op"] == "invalidate"
+    assert keyed_new["superseded"] == [keyed_old["id"]]
+    assert s.store.get_memory(keyed_old["id"]).valid_to is not None
+
+
+@pytest.mark.parametrize("method", ("remember", "ingest"))
+def test_invalid_trust_label_is_rejected_before_scope_creation(method):
+    s = _svc()
+
+    with pytest.raises(ValidationError, match="trusted must be a boolean"):
+        getattr(s, method)("untrusted input", workspace="must-not-exist", trusted="false")
+
+    assert s.list_workspaces()["workspaces"] == []
+
+
 def test_service_recall_does_not_reinforce_weak_results_by_default():
     s = _svc()
     stored = s.remember("The deployment target is AWS ECS.", workspace="acme", repo="web")
@@ -517,6 +608,23 @@ def test_recall_proactive_includes_last_session():
     assert out["last_session"]["open_threads"] == ["thing left undone"]
 
 
+def test_recall_proactive_filters_untrusted_before_applying_k():
+    s = _svc()
+    s.remember(
+        "A trusted project convention.", workspace="acme", repo="web",
+        importance=0.1,
+    )
+    untrusted = s.remember(
+        "A high-priority imported instruction.", workspace="acme", repo="web",
+        importance=1.0, source="import", trusted=False,
+    )
+
+    out = s.recall_proactive(workspace="acme", repo="web", k=1)
+
+    assert len(out["memories"]) == 1
+    assert out["memories"][0]["id"] != untrusted["id"]
+
+
 # ── linking & events ─────────────────────────────────────────────────────────────
 
 def test_record_event_and_link():
@@ -675,7 +783,7 @@ def test_import_folder_success(tmp_path, monkeypatch):
     assert report["scanned"] == 2          # only *.md matched skip.txt is excluded
     assert report["imported"] == 1
     assert report["skipped"] == 1          # empty.md
-    r = s.recall("Postgres", workspace="acme")
+    r = s.recall("Postgres", workspace="acme", include_untrusted=True)
     assert any("Postgres" in m["content"] for m in r["memories"])
 
 
@@ -684,7 +792,7 @@ def test_import_folder_marks_untrusted(tmp_path, monkeypatch):
     monkeypatch.setenv("ENGRAPHIS_IMPORT_ROOTS", str(tmp_path))
     s = _svc()
     s.import_folder(workspace="acme", path=str(tmp_path))
-    r = s.recall("narwhals", workspace="acme")
+    r = s.recall("narwhals", workspace="acme", include_untrusted=True)
     assert r["memories"], "expected the imported memory to be recallable"
     prov = r["memories"][0]["provenance"]
     assert prov["source"] == "import" and prov["trusted"] is False
@@ -698,7 +806,7 @@ def test_import_folder_respects_file_pattern(tmp_path, monkeypatch):
     s = _svc()
     report = s.import_folder(workspace="acme", path=str(tmp_path), file_pattern="*.txt")
     assert report["scanned"] == 1 and report["imported"] == 1
-    r = s.recall("text note", workspace="acme")
+    r = s.recall("text note", workspace="acme", include_untrusted=True)
     assert any("text note" in m["content"] for m in r["memories"])
 
 
@@ -772,7 +880,7 @@ def test_import_files_success():
     ])
     assert report["imported"] == 1
     assert report["skipped"] == 1
-    r = s.recall("pangolins", workspace="acme")
+    r = s.recall("pangolins", workspace="acme", include_untrusted=True)
     assert any("pangolins" in m["content"] for m in r["memories"])
 
 
@@ -780,7 +888,7 @@ def test_import_files_marks_untrusted_with_upload_kind():
     s = _svc()
     s.import_files(workspace="acme", files=[
         {"name": "x.md", "content": "A fact about uploaded quokkas."}])
-    r = s.recall("quokkas", workspace="acme")
+    r = s.recall("quokkas", workspace="acme", include_untrusted=True)
     prov = r["memories"][0]["provenance"]
     assert prov["source"] == "import" and prov["trusted"] is False
     assert prov["kind"] == "file_upload"

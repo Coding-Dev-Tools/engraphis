@@ -9,7 +9,7 @@ import uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,6 +40,58 @@ _UPLOAD_LIMIT_PATHS = frozenset({
     "/memory/vaults/upload-folder",
     "/memory/vaults/upload-folder-smart",
 })
+
+
+class LegacyReferenceConfigurationError(RuntimeError):
+    """The retired v1 server was not given a safely isolated database."""
+
+
+def _canonical_db_path(value: Union[str, Path]) -> Path:
+    """Return a comparison-safe database path without requiring it to exist."""
+    return Path(value).expanduser().resolve(strict=False)
+
+
+def _activate_legacy_reference_db(legacy_db_path: Union[str, Path]) -> str:
+    """Point the v1-only store at an explicitly separate compatibility database.
+
+    The legacy routes use the process-global v1 ``settings.db_path``.  They are safe
+    only in their own process, and only after this guard has rejected the active v2
+    database.  Dropping any thread-local v1 connection also prevents a prior test or
+    embedder call from keeping the old database open after the switch.
+    """
+    if not str(legacy_db_path).strip():
+        raise LegacyReferenceConfigurationError(
+            "the v1 reference requires an explicit --legacy-db path"
+        )
+    legacy_path = _canonical_db_path(legacy_db_path)
+    current_v2_path = _canonical_db_path(settings.db_path)
+    if legacy_path == current_v2_path:
+        raise LegacyReferenceConfigurationError(
+            "the v1 reference database must differ from the current v2 database "
+            "(%s)" % current_v2_path
+        )
+
+    # The v1 store is intentionally process-global.  This factory is therefore an
+    # internal compatibility boundary, not a way to mount v1 beside v2 in one server.
+    from engraphis import stores as legacy_stores
+
+    connection = getattr(legacy_stores._local, "conn", None)
+    if connection is not None:
+        connection.close()
+        del legacy_stores._local.conn
+    settings.db_path = str(legacy_path)
+    return settings.db_path
+
+
+def create_legacy_reference_app(*, legacy_db_path: Union[str, Path]) -> FastAPI:
+    """Build the internal v1 compatibility application on an isolated database.
+
+    This is deliberately distinct from the public v2 server and dashboard launchers.
+    Callers must supply the legacy database explicitly; using the configured v2
+    database is rejected before any schema initialization can occur.
+    """
+    _activate_legacy_reference_db(legacy_db_path)
+    return _build_legacy_reference_app()
 
 
 class _RequestBodyTooLarge(Exception):
@@ -179,8 +231,8 @@ async def _lifespan(app: FastAPI):
                 pass
 
 
-def create_app() -> FastAPI:
-    """Build and configure the FastAPI application."""
+def _build_legacy_reference_app() -> FastAPI:
+    """Build the v1 compatibility/reference FastAPI application."""
     configure_logging()
     # Hosted JSON logging is credential-redacting. Keep this after the legacy logging
     # setup so it replaces that formatter, and pair it with the launcher's log_config=None
@@ -216,16 +268,25 @@ def create_app() -> FastAPI:
 
     # Bearer-token auth when ENGRAPHIS_API_TOKEN is set; loopback-only otherwise.
     # Health-type probes (liveness + readiness) stay unauthenticated by convention.
-    _PUBLIC_PREFIXES = ("/memory/health", "/api/health", "/api/ready",
-                        "/openapi.json", "/static")
+    _PUBLIC_PROBES = frozenset({
+        "/memory/health",
+        "/api/health",
+        "/api/ready",
+        "/openapi.json",
+    })
+
+    def _public_path(path: str) -> bool:
+        # ``/memory/health/*`` contains owner data such as titles and content previews;
+        # only the exact liveness probe is public. Static files remain prefix-matched.
+        return path in _PUBLIC_PROBES or path == "/static" or path.startswith("/static/")
 
     from engraphis.netutil import is_local_request
 
     @app.middleware("http")
     async def _require_token(request: Request, call_next):
         token = settings.api_token
-        if request.method == "OPTIONS" or request.url.path == "/" \
-                or request.url.path.startswith(_PUBLIC_PREFIXES):
+        if (request.method == "OPTIONS" or request.url.path == "/"
+                or _public_path(request.url.path)):
             return await call_next(request)
         if token:
             if not bearer_ok(request.headers.get("authorization"), token):
@@ -258,7 +319,7 @@ def create_app() -> FastAPI:
         @app.middleware("http")
         async def _rate_limit(request: Request, call_next):
             nonlocal _last_prune
-            if request.method == "OPTIONS" or request.url.path.startswith(_PUBLIC_PREFIXES):
+            if request.method == "OPTIONS" or _public_path(request.url.path):
                 return await call_next(request)
             client = client_ip(request)
             now = time.monotonic()
@@ -309,7 +370,7 @@ def create_app() -> FastAPI:
     app.include_router(memory_router)
     app.include_router(vault_router)
 
-    # ── probes (unauthenticated; see _PUBLIC_PREFIXES) ──────────────────────────
+    # ── probes (unauthenticated; see _PUBLIC_PROBES) ────────────────────────────
     @app.get("/api/health")
     async def api_health():
         """Liveness: the process is up and serving. No dependency checks."""
@@ -376,4 +437,36 @@ async def _consciousness_loop() -> None:
             await asyncio.sleep(backoff)
 
 
-app = create_app()
+def _create_retired_direct_app() -> FastAPI:
+    """Retire the old ``uvicorn engraphis.app:app`` deployment target safely."""
+    retired = FastAPI(
+        title="Engraphis v1 reference retired",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
+
+    @retired.api_route(
+        "/{path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+        include_in_schema=False,
+    )
+    async def legacy_reference_retired(path: str):
+        return JSONResponse(
+            {
+                "error": "legacy v1 reference application is retired",
+                "detail": (
+                    "Use engraphis-dashboard or engraphis-server for v2. "
+                    "The internal v1 reference requires "
+                    "python -m scripts.legacy_reference --legacy-db <separate-path>."
+                ),
+            },
+            status_code=410,
+        )
+
+    return retired
+
+
+# Keep the historical ASGI import target inert.  A direct ``engraphis.app:app`` launch
+# must never initialize the v1 schema in the configured (normally v2) database.
+app = _create_retired_direct_app()

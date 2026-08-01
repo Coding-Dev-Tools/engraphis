@@ -108,7 +108,6 @@ class DeterministicRetrievalPolicy:
         wider pool when the selected profile depends on graph traversal or code
         bridges.  It is a per-arm cap, not a result-count change.
         """
-        del query  # The selected profile already captures the stable query signals.
         limit = max(1, int(ceiling))
         requested_mode = str(mode or "fixed").strip().casefold()
         if requested_mode not in CANDIDATE_DEPTH_MODES:
@@ -127,5 +126,16 @@ class DeterministicRetrievalPolicy:
             "code": max(30, k * 6),
         }
         selected = str(profile or "balanced").strip().casefold()
+        # ``balanced`` is the backwards-compatible default, but adaptive depth
+        # can still use a high-confidence query signal.  This matters when a
+        # caller intentionally keeps the balanced scoring profile while opting
+        # into candidate-depth control: relationship and code queries often need
+        # a wider first-stage pool for graph/code bridge evidence.  Do not let
+        # query text override an explicitly specialized profile.
+        if selected == "balanced":
+            query_profile = self.profile(query)
+            if query_profile in {"graph", "code"}:
+                selected = query_profile
+                return min(limit, floors[selected]), f"adaptive {selected} intent floor"
         depth = min(limit, floors.get(selected, max(12, k * 3)))
         return depth, f"adaptive {selected} floor"

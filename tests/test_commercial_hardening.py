@@ -261,10 +261,11 @@ def test_the_checkout_catalog_reads_a_broken_manifest_without_raising(monkeypatc
 
 
 def test_the_published_prices_match_the_manifest_everywhere_they_appear() -> None:
-    """README and the upgrade panel restate the prices; nothing compared them."""
+    """README, hosted-plans, and upgrade panels restate manifest prices."""
 
     manifest = commercial.manifest()
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    hosted_plans = (ROOT / "docs" / "HOSTED_PLANS.md").read_text(encoding="utf-8")
     dashboard = (ROOT / "engraphis" / "static" / "dashboard.js").read_text(encoding="utf-8")
     ledger = (ROOT / "engraphis" / "dashboard_assets" / "ledger.js").read_text(
         encoding="utf-8"
@@ -273,6 +274,7 @@ def test_the_published_prices_match_the_manifest_everywhere_they_appear() -> Non
         monthly = "$%d" % manifest["plans"][plan]["monthly_usd"]
         annual = "$%d" % manifest["plans"][plan]["annual_usd"]
         assert monthly in readme and annual in readme, plan
+        assert monthly in hosted_plans and annual in hosted_plans, plan
         assert monthly in dashboard and annual in dashboard, plan
         assert monthly in ledger and annual in ledger, plan
         unit = manifest["plans"][plan]["billing_unit"]

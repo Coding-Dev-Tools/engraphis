@@ -176,13 +176,12 @@ def engraphis_remember(
                       "related without discarding either fact. Set "
                       "false to force a plain insert (e.g. for recurring episodic log "
                       "entries where repeats are meaningful).")] = True,
-    source: Annotated[str, Field(description="Provenance: who/what produced this memory — "
-                      "e.g. 'agent:<role>', 'tool:<name>', 'human', or 'web'.",
-                      max_length=200)] = "agent",
-    trusted: Annotated[bool, Field(description="Set false for content originating from "
-                       "untrusted input (web pages, third-party docs, tool output echoing "
-                       "external text). Untrusted memories carry provenance.trusted=false "
-                       "at recall so prompts can label them (memory-poisoning guard).")] = True,
+    source: Annotated[str, Field(description="Origin of the content. Web, import, sync, and "
+                      "other external origins are always untrusted even if trusted=true; "
+                      "use the default agent only for a fact the connected local agent "
+                      "authored or independently verified.", max_length=200)] = "agent",
+    trusted: Annotated[bool, Field(description="Local-agent confidence label. External origins "
+                       "cannot elevate themselves with this field.")] = True,
     kind: Annotated[Optional[str], Field(description="Optional artifact kind for filtering: "
                     "'plan', 'diff', 'review', 'task_summary', 'council_verdict', ...",
                     max_length=100)] = None,
@@ -214,13 +213,19 @@ def engraphis_remember(
         ``op`` is ``"add"`` (new), ``"noop"`` (matched an existing memory almost exactly —
         that one was reinforced, ``id`` points to it), or ``"invalidate"`` (superseded an
         existing memory on the same subject — see ``superseded`` for the old id(s); history
-        is preserved, never deleted), or ``"relate"`` (kept both uncertain neighboring claims
-        and linked them). Returns ``"Error: <reason>"`` if validation fails.
+        is preserved, never deleted), ``"relate"`` (kept both uncertain neighboring claims and
+        linked them), or ``"quarantined"`` (a suspicious explicitly untrusted payload was
+        retained for governance inspection but excluded from normal recall). Quarantine returns
+        content-free ``policy`` and ``reasons`` codes. Returns ``"Error: <reason>"`` if
+        validation fails.
     """
     try:
         return _ok(service().remember(
             content, workspace=workspace, repo=repo, session_id=session_id,
             mtype=mtype, scope=scope, title=title, importance=importance, keywords=keywords,
+            # MemoryService canonicalizes this pair at ingress: recognized external
+            # origins cannot self-label as trusted, while local MCP agent assertions
+            # retain the longstanding deliberate-memory workflow.
             source=source, trusted=trusted, kind=kind,
             retention_class=retention_class, retention_reason=retention_reason,
             valid_from=valid_from,
@@ -284,9 +289,11 @@ def engraphis_recall(
     Because the receipt is stateful, this surface is neither read-only nor idempotent.
 
     Returns:
-        str: JSON with ``{"query","count","context","memories":[{"id","title","content",
-        "scope","mtype","repo_id","score","arm","retention","provenance"}]}``. Returns
-        count 0 with a "note" if the workspace/repo isn't known yet.
+        str: JSON with ``{"query","count","context","score_semantics","memories":[{"id",
+        "title","content","scope","mtype","repo_id","score","relative_score",
+        "absolute_support","arm","retention","provenance"}]}``. ``score`` is a compatibility
+        alias for the query-relative rank; use ``absolute_support`` (0..1) for an evidence floor.
+        Returns count 0 with a "note" if the workspace/repo isn't known yet.
     """
     try:
         return _ok(service().recall(
@@ -374,6 +381,12 @@ def engraphis_recall_context(
             }
             if detail.get("title"):
                 source["title"] = detail["title"]
+            # Compact recall omits source bodies, but keeps both scoring contracts so
+            # callers can rank locally without mistaking rank for absolute evidence.
+            if "relative_score" in detail:
+                source["relative_score"] = detail["relative_score"]
+            if "absolute_support" in detail:
+                source["absolute_support"] = detail["absolute_support"]
             provenance = detail.get("provenance")
             if provenance:
                 source["provenance"] = provenance
@@ -1315,7 +1328,7 @@ def engraphis_ingest(
     try:
         return _ok(service().ingest(
             content, workspace=workspace, repo=repo, session_id=session_id,
-            mtype=mtype, scope=scope,
+            mtype=mtype, scope=scope, source="mcp", trusted=False,
         ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
