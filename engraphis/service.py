@@ -2450,7 +2450,7 @@ class MemoryService:
         principal = _authenticated_principal()
         user_id = principal["id"] if principal is not None else None
         out = self.engine.recall_proactive(
-            workspace_id=wid, repo_id=rid, k=k, user_id=user_id,
+            workspace_id=wid, repo_id=rid, k=k, user_id=user_id, prompt_only=True,
         )
         return {"memories": [_mem_to_dict(r) for r in out["memories"]],
                "last_session": out["last_session"]}

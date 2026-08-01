@@ -26,6 +26,7 @@ def test_rescan_dry_run_then_quarantines_existing_untrusted_payload(tmp_path):
         workspace_id=workspace_id,
         scope=Scope.WORKSPACE,
         provenance={"source": "web", "trusted": False},
+        valid_from=1_700_000_000.0,
     ))
     store.close()
 
@@ -44,7 +45,9 @@ def test_rescan_dry_run_then_quarantines_existing_untrusted_payload(tmp_path):
     record = after.get_memory("mem_legacy")
     assert record.provenance["trusted"] is False
     assert record.provenance["quarantined"] is True
-    assert record.valid_from == record.valid_to
+    assert record.valid_from == 1_700_000_000.0
+    assert record.valid_to is not None
+    assert record.valid_to_recorded_at is not None
     audit = after.conn.execute(
         "SELECT detail FROM audit WHERE action='quarantine' AND target='mem_legacy'"
     ).fetchone()

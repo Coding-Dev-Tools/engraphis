@@ -2,6 +2,7 @@ from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
 from engraphis.backends.reranker import IdentityReranker
 from engraphis.core.interfaces import MemoryRecord, Scope, SearchFilter
 from engraphis.core.recall import RecallEngine
+from engraphis.core.retrieval_policy import ProfileConfig
 from engraphis.core.store import Store
 
 
@@ -17,6 +18,19 @@ def _add(store, emb, wid, rid, text, **kw):
                                          embedding=emb.embed([text])[0], **kw))
 
 
+class _OrderedIndex:
+    """Minimal index double which keeps untrusted candidates ahead of trusted ones."""
+
+    def __init__(self, ids):
+        self.ids = ids
+
+    def search(self, query, k, *, filter=None):
+        return [
+            (memory_id, float(len(self.ids) - position))
+            for position, memory_id in enumerate(self.ids[:k])
+        ]
+
+
 def test_recall_returns_relevant_first():
     store, emb, eng = _engine()
     wid = store.get_or_create_workspace("w")
@@ -26,6 +40,35 @@ def test_recall_returns_relevant_first():
     res = eng.recall("which package manager do we use?", SearchFilter(workspace_id=wid), k=2)
     assert res.count >= 1
     assert "pnpm" in res.context.lower()
+
+
+def test_prompt_only_recall_continues_past_untrusted_arm_candidates():
+    store = Store(":memory:")
+    emb = DeterministicEmbedder(256)
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    untrusted_ids = [
+        _add(
+            store, emb, wid, rid, f"Untrusted candidate {index}.",
+            provenance={"source": "import", "trusted": False},
+        )
+        for index in range(201)
+    ]
+    trusted_id = _add(
+        store, emb, wid, rid, "Trusted project evidence.",
+        provenance={"source": "agent", "trusted": True},
+    )
+    eng = RecallEngine(
+        store, emb, _OrderedIndex([*untrusted_ids, trusted_id]), IdentityReranker(),
+    )
+
+    result = eng.recall(
+        "project evidence", SearchFilter(workspace_id=wid, repo_id=rid), k=1,
+        prompt_only=True,
+        arm_config=ProfileConfig("vector_only", True, False, False, False),
+    )
+
+    assert [chunk["id"] for chunk in result.chunks] == [trusted_id]
 
 
 def test_recall_scope_isolation():

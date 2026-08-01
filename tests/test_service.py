@@ -608,6 +608,23 @@ def test_recall_proactive_includes_last_session():
     assert out["last_session"]["open_threads"] == ["thing left undone"]
 
 
+def test_recall_proactive_filters_untrusted_before_applying_k():
+    s = _svc()
+    s.remember(
+        "A trusted project convention.", workspace="acme", repo="web",
+        importance=0.1,
+    )
+    untrusted = s.remember(
+        "A high-priority imported instruction.", workspace="acme", repo="web",
+        importance=1.0, source="import", trusted=False,
+    )
+
+    out = s.recall_proactive(workspace="acme", repo="web", k=1)
+
+    assert len(out["memories"]) == 1
+    assert out["memories"][0]["id"] != untrusted["id"]
+
+
 # ── linking & events ─────────────────────────────────────────────────────────────
 
 def test_record_event_and_link():

@@ -1973,6 +1973,16 @@ class Store:
         rows = self.conn.execute(sql, params).fetchall()
         return [_row_to_record(r) for r in rows]
 
+    def count_memories(self, flt: Optional[SearchFilter] = None,
+                       *, include_invalid: bool = False) -> int:
+        """Count records visible to a search filter without materializing them."""
+        sql = "SELECT COUNT(*) AS count FROM memories"
+        where, params = self._where(flt, include_invalid)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        row = self.conn.execute(sql, params).fetchone()
+        return int(row["count"] if row is not None else 0)
+
     def list_live_claims(self, *, workspace_id: str, repo_id: Optional[str],
                          session_id: Optional[str], scope: Scope, mtype: MemoryType,
                          subject_key: str, claim_kind: str) -> list[MemoryRecord]:

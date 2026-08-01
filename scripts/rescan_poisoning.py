@@ -112,18 +112,17 @@ def rescan(db_path: str, *, apply: bool = False,
                 continue
             if decision.quarantined and not already_quarantined:
                 metadata = apply_quarantine_metadata(metadata, decision)
-                # Zero validity keeps the quarantined payload out of both present
-                # and historical normal recall, while the immutable record/audit
-                # remains available to governed inspection.
+                # Preserve the original valid-time start for governed history, then
+                # close the record now so normal present-day recall excludes it.
                 quarantined_at = now_ts()
                 store.conn.execute(
-                    "UPDATE memories SET metadata=?, provenance=?, valid_from=?, valid_to=?, "
+                    "UPDATE memories SET metadata=?, provenance=?, valid_to=?, "
                     "valid_to_recorded_at=? WHERE id=?",
                     (
                         json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
                         json.dumps(metadata["provenance"], ensure_ascii=False,
                                    separators=(",", ":")),
-                        quarantined_at, quarantined_at, quarantined_at, record.id,
+                        quarantined_at, quarantined_at, record.id,
                     ),
                 )
                 store.conn.execute("DELETE FROM mem_vectors WHERE id=?", (record.id,))

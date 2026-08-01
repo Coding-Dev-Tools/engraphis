@@ -141,50 +141,76 @@ class RecallEngine:
         config = arm_config or profile_config(selected_profile)
 
         # ── arms ─────────────────────────────────────────────────────────────
-        # Prompt-facing consumers filter untrusted records after fusion because
-        # vector indexes do not carry provenance. Over-fetch so external records cannot
-        # crowd trusted evidence out of a grounded/adaptive context candidate set.
+        # Prompt-facing consumers filter untrusted records after retrieval because
+        # vector indexes do not carry provenance. Keep widening the arm depth until
+        # enough trusted records survive or the scoped candidate population is
+        # exhausted; a fixed over-fetch can otherwise return nothing when untrusted
+        # records occupy the first page of an arm.
         prompt_only = bool(prompt_only or not include_untrusted)
-        arm_candidate_k = candidate_k if not prompt_only else (
-            candidate_k + min(250, candidate_k * 3)
-        )
-        if config.vector:
-            qvec = self.embedder.embed([query])[0]
-            vec = dict(self.index.search(qvec, arm_candidate_k, filter=flt))
-        else:
-            vec = {}
-        lex = (
-            dict(self.store.fts_search(query, arm_candidate_k, filter=flt))
-            if config.lexical else {}
-        )
-        graph = self._graph_arm(query, flt, now, candidate_k=arm_candidate_k) if config.graph else {}
-        code = (
-            self._code_arm(
-                query, flt, arm_candidate_k, historical=requested_historical
-            )
-            if config.code else {}
-        )
+        prompt_target = max(1, int(k))
+        candidate_ceiling = candidate_k
+        arm_candidate_k = candidate_k
+        if prompt_only:
+            arm_candidate_k = candidate_k + min(250, candidate_k * 3)
+            candidate_ceiling = max(arm_candidate_k, self.store.count_memories(flt))
+        qvec = self.embedder.embed([query])[0] if config.vector else None
 
-        # ── gather candidates and enforce visibility defensively ─────────────
-        # Sorted, not raw set order: a set of ids iterates in hash order, which varies with
-        # PYTHONHASHSEED, so equal-scored results used to come back in a different order in
-        # every process. Sorting here (and on the final sort below) makes recall reproducible.
-        # One batched lookup replaces ~150 single-row get_memory() calls per recall.
-        candidate_ids = sorted(set(vec) | set(lex) | set(graph) | set(code))
-        fetched = self.store.get_memories(candidate_ids)
-        recs: dict[str, MemoryRecord] = {}
-        for mid in candidate_ids:
-            rec = fetched.get(mid)
-            if (
-                rec
-                and memory_matches_filter(rec, flt, at=now)
-                and (
-                    prompt_eligible(rec.provenance, rec.metadata)
-                    if prompt_only
-                    else inspection_eligible(rec.provenance, rec.metadata)
+        while True:
+            if qvec is not None:
+                vec = dict(self.index.search(qvec, arm_candidate_k, filter=flt))
+            else:
+                vec = {}
+            lex = (
+                dict(self.store.fts_search(query, arm_candidate_k, filter=flt))
+                if config.lexical else {}
+            )
+            graph = (
+                self._graph_arm(query, flt, now, candidate_k=arm_candidate_k)
+                if config.graph else {}
+            )
+            code = (
+                self._code_arm(
+                    query, flt, arm_candidate_k, historical=requested_historical
                 )
+                if config.code else {}
+            )
+
+            # Sorted, not raw set order: a set of ids iterates in hash order, which varies
+            # with PYTHONHASHSEED, so equal-scored results used to come back in a different
+            # order in every process. One batched lookup replaces per-id lookups.
+            candidate_ids = sorted(set(vec) | set(lex) | set(graph) | set(code))
+            fetched = self.store.get_memories(candidate_ids)
+            recs: dict[str, MemoryRecord] = {}
+            for mid in candidate_ids:
+                rec = fetched.get(mid)
+                if (
+                    rec
+                    and memory_matches_filter(rec, flt, at=now)
+                    and (
+                        prompt_eligible(rec.provenance, rec.metadata)
+                        if prompt_only
+                        else inspection_eligible(rec.provenance, rec.metadata)
+                    )
+                ):
+                    recs[mid] = rec
+
+            can_expand = any(
+                enabled and len(values) >= arm_candidate_k
+                for enabled, values in (
+                    (config.vector, vec),
+                    (config.lexical, lex),
+                    (config.graph, graph),
+                    (config.code, code),
+                )
+            )
+            if (
+                not prompt_only
+                or len(recs) >= prompt_target
+                or arm_candidate_k >= candidate_ceiling
+                or not can_expand
             ):
-                recs[mid] = rec
+                break
+            arm_candidate_k = min(candidate_ceiling, arm_candidate_k * 2)
         if not recs:
             context, packed, usage = self.context_packer.pack(query, [], budget)
             return RecallResult(
