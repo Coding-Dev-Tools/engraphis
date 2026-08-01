@@ -23,6 +23,10 @@ on:
         description: "Lowercase SHA-256 of the mounted environment lock"
         required: true
         type: string
+      claims_path:
+        description: "Mounted pre-reviewed public claims JSON under the protected benchmark volume"
+        required: true
+        type: string
       execution_authorized:
         description: "I authorize this offline benchmark point within the fixed 24-hour compute ceiling"
         required: true
@@ -62,6 +66,7 @@ jobs:
           SERIES_PATH: ${{ inputs.series_path }}
           ENVIRONMENT_LOCK_PATH: ${{ inputs.environment_lock_path }}
           ENVIRONMENT_LOCK_SHA256: ${{ inputs.environment_lock_sha256 }}
+          CLAIMS_PATH: ${{ inputs.claims_path }}
           EXECUTION_AUTHORIZED: ${{ inputs.execution_authorized }}
           BENCHMARK_PYTHON_CONFIG: ${{ vars.ENGRAPHIS_BENCHMARK_PYTHON }}
           STATE_ROOT: ${{ vars.ENGRAPHIS_BENCHMARK_STATE_ROOT }}
@@ -70,7 +75,7 @@ jobs:
           [[ "$RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
           test "$EXECUTION_AUTHORIZED" = "true"
           [[ "$ENVIRONMENT_LOCK_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          for value in "$MANIFEST_PATH" "$SERIES_PATH" "$ENVIRONMENT_LOCK_PATH" \
+          for value in "$MANIFEST_PATH" "$SERIES_PATH" "$ENVIRONMENT_LOCK_PATH" "$CLAIMS_PATH" \
                        "$BENCHMARK_PYTHON_CONFIG" "$STATE_ROOT"; do
             test -n "$value"
             [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]]
@@ -103,6 +108,8 @@ jobs:
             /opt/engraphis-benchmarks/series json series_path)"
           environment_lock_real="$(resolve_protected_file "$ENVIRONMENT_LOCK_PATH" \
             /opt/engraphis-benchmarks/environments lock environment_lock_path)"
+          claims_real="$(resolve_protected_file "$CLAIMS_PATH" \
+            /opt/engraphis-benchmarks/claims json claims_path)"
           python_real="$(realpath "$BENCHMARK_PYTHON_CONFIG")"
           environment_root_real="$(realpath /opt/engraphis-benchmarks/environments)"
           test -x "$python_real"
@@ -130,6 +137,7 @@ jobs:
             printf 'SERIES_PATH=%s\n' "$series_real"
             printf 'ENVIRONMENT_LOCK_PATH=%s\n' "$environment_lock_real"
             printf 'ENVIRONMENT_LOCK_SHA256=%s\n' "$ENVIRONMENT_LOCK_SHA256"
+            printf 'CLAIMS_PATH=%s\n' "$claims_real"
           } >> "$GITHUB_ENV"
 
       - name: Verify the locked offline environment
@@ -211,7 +219,8 @@ jobs:
       - name: Execute the locked retrieval point
         shell: bash
         run: |
-          "$BENCHMARK_PYTHON" -m scripts.run_public_benchmark --manifest "$MANIFEST_PATH" --execute
+          "$BENCHMARK_PYTHON" -m scripts.run_public_benchmark --manifest "$MANIFEST_PATH" \
+            --execute --claims-input "$CLAIMS_PATH"
 
       - name: Export validated redacted artifacts only
         shell: bash

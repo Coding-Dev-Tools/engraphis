@@ -313,7 +313,38 @@ def _verify_execute_inputs(config: Mapping[str, Any]) -> None:
         raise ManifestError("repo.root must be a clean worktree")
 
 
+def _stage_claims_input(source: Path, destination: Path) -> None:
+    """Snapshot a pre-reviewed claims file without replacing prior run state."""
+    if source.is_symlink() or not source.is_file():
+        raise ManifestError("claims_input must be a regular non-symlink JSON file")
+    try:
+        payload = source.read_bytes()
+        value = json.loads(payload)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ManifestError(f"could not read claims_input: {exc}") from exc
+    if not isinstance(value, list) and not (
+        isinstance(value, Mapping) and isinstance(value.get("claims"), list)
+    ):
+        raise ManifestError("claims_input must be a JSON array or an object with a claims array")
+    try:
+        if source.resolve() == destination.resolve():
+            raise ManifestError("claims_input must not be the claims output")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.is_symlink():
+            raise ManifestError("claims output must not be a symlink")
+        if destination.exists():
+            if not destination.is_file() or destination.read_bytes() != payload:
+                raise ManifestError(f"refusing to replace staged claims: {destination}")
+            return
+        fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as exc:
+        raise ManifestError(f"could not stage claims_input: {exc}") from exc
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(payload)
+
+
 def execute_plan(plan: Mapping[str, Any], manifest: Mapping[str, Any], *,
+                 claims_input: Path | None = None,
                  runner: Callable[..., Any] = subprocess.run) -> None:
     """Execute only a previously built plan after explicit input verification."""
     config = validate_manifest(manifest)
@@ -323,6 +354,9 @@ def execute_plan(plan: Mapping[str, Any], manifest: Mapping[str, Any], *,
     if plan.get("commands") != expected["commands"]:
         raise ManifestError("plan commands do not match the locked manifest")
     _verify_execute_inputs(config)
+    if claims_input is None:
+        raise ManifestError("claims_input is required for execution")
+    _stage_claims_input(claims_input, Path(expected["outputs"]["claims"]))
     environment = os.environ.copy()
     environment.update({"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
     for item in plan.get("commands", []):
@@ -345,6 +379,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--manifest", required=True, help="locked JSON manifest")
     parser.add_argument("--plan-output", help="write the command plan to this JSON path")
     parser.add_argument("--execute", action="store_true", help="explicitly permit subprocesses")
+    parser.add_argument(
+        "--claims-input",
+        help="protected pre-reviewed public claims JSON staged before benchmark execution",
+    )
     args = parser.parse_args(argv)
     try:
         manifest = load_manifest(args.manifest)
@@ -352,7 +390,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.plan_output:
             _write_immutable_json(Path(args.plan_output), plan)
         if args.execute:
-            execute_plan(plan, manifest)
+            if not args.claims_input:
+                raise ManifestError("--execute requires --claims-input")
+            execute_plan(plan, manifest, claims_input=Path(args.claims_input))
+        elif args.claims_input:
+            raise ManifestError("--claims-input requires --execute")
         else:
             print(json.dumps(plan, sort_keys=True, indent=2))
             print("dry-run only: pass --execute to run the allowlisted subprocess plan", file=sys.stderr)

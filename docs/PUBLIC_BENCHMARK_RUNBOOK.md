@@ -176,10 +176,12 @@ The retrieval job:
 3. binds the point run ID, checkout root and commit, model/dataset revisions, token budgets, and
    baseline to the approved comparison-series manifest;
 4. requires the point output directory to equal its owner-only run state directory;
-5. validates the declared series contract, emits a redacted dry-run plan, and only then executes the
+5. resolves a pre-reviewed claims JSON only from the protected claims mount, then snapshots it
+   immutably into the owner-only run state before the benchmark begins;
+6. validates the declared series contract, emits a redacted dry-run plan, and only then executes the
    allowlisted offline command;
-6. validates the public artifact and exact claims through `eval.public_readiness`; and
-7. copies only regular, non-symlink public artifact and claims files into the upload directory.
+7. validates the public artifact and that exact staged claims file through `eval.public_readiness`; and
+8. copies only regular, non-symlink public artifact and claims files into the upload directory.
 
 The workflows may prepare artifacts, but publication, release tags, leaderboard submission, and
 external messages remain explicit human actions.

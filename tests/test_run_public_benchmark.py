@@ -95,6 +95,8 @@ def test_runner_rejects_the_diagnostic_external_adapter(tmp_path: Path) -> None:
 
 def test_execute_requires_local_hash_and_runs_only_with_explicit_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     value = manifest(tmp_path)
+    claims_input = tmp_path / "reviewed-claims.json"
+    claims_input.write_text("[]\n", encoding="utf-8")
     calls: list[tuple[list[str], dict]] = []
     def check_output(command, *args, **kwargs):
         return "" if "status" in command else COMMIT + "\n"
@@ -102,22 +104,45 @@ def test_execute_requires_local_hash_and_runs_only_with_explicit_call(tmp_path: 
     monkeypatch.setattr(runner.subprocess, "check_output", check_output)
 
     def fake_run(command: list[str], **kwargs: object) -> None:
+        if command[2] == "eval.public_readiness":
+            assert Path(command[-1]).read_text(encoding="utf-8") == "[]\n"
         calls.append((command, kwargs))
 
     plan = runner.build_plan(value)
-    runner.execute_plan(plan, value, runner=fake_run)
+    runner.execute_plan(plan, value, claims_input=claims_input, runner=fake_run)
     assert len(calls) == 2
     assert calls[0][1]["check"] is True
     assert calls[0][1]["env"]["HF_HUB_OFFLINE"] == "1"
 
     value["dataset"]["sha256"] = "f" * 64
     with pytest.raises(runner.ManifestError, match="does not match local dataset"):
-        runner.execute_plan(plan, value, runner=fake_run)
+        runner.execute_plan(plan, value, claims_input=claims_input, runner=fake_run)
 
     altered = dict(plan)
     altered["commands"] = []
     with pytest.raises(runner.ManifestError, match="plan commands do not match"):
-        runner.execute_plan(altered, manifest(tmp_path), runner=fake_run)
+        runner.execute_plan(altered, manifest(tmp_path), claims_input=claims_input, runner=fake_run)
+
+
+def test_claims_input_is_required_and_cannot_replace_staged_claims(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    value = manifest(tmp_path)
+    claims_input = tmp_path / "reviewed-claims.json"
+    claims_input.write_text("[]\n", encoding="utf-8")
+    monkeypatch.setattr(
+        runner.subprocess,
+        "check_output",
+        lambda command, **kwargs: "" if "status" in command else COMMIT + "\n",
+    )
+    plan = runner.build_plan(value)
+
+    with pytest.raises(runner.ManifestError, match="claims_input is required"):
+        runner.execute_plan(plan, value)
+
+    claims_output = Path(plan["outputs"]["claims"])
+    claims_output.parent.mkdir(parents=True)
+    claims_output.write_text('[{"text":"different"}]\n', encoding="utf-8")
+    with pytest.raises(runner.ManifestError, match="refusing to replace staged claims"):
+        runner.execute_plan(plan, value, claims_input=claims_input)
 
 
 def test_execute_rejects_profile_drift_and_dirty_source(

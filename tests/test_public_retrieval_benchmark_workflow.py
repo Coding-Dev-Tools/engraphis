@@ -23,6 +23,7 @@ def test_retrieval_workflow_is_manual_protected_and_pinned() -> None:
     assert "series_path:" in text
     assert "environment_lock_path:" in text
     assert "environment_lock_sha256:" in text
+    assert "claims_path:" in text
     assert "execution_authorized:" in text
     assert "locked comparison-series contract" in text
     assert "Validate the declared comparative series contract" in text
@@ -36,12 +37,14 @@ def test_retrieval_workflow_plans_before_execute_and_validates_the_series() -> N
 
     series = text.index("-m eval.public_readiness --series")
     dry_run = text.index("-m scripts.run_public_benchmark --manifest \"$MANIFEST_PATH\" \\")
-    execute = text.index("-m scripts.run_public_benchmark --manifest \"$MANIFEST_PATH\" --execute")
+    execute = text.index('--execute --claims-input "$CLAIMS_PATH"')
     upload = text.index("actions/upload-artifact@")
     assert series < dry_run < execute < upload
     assert "--plan-output \"$BENCHMARK_STATE_DIR/plan.json\"" in text
     assert "/opt/engraphis-benchmarks/manifests" in text
     assert "/opt/engraphis-benchmarks/series" in text
+    assert "/opt/engraphis-benchmarks/claims" in text
+    assert '--execute --claims-input "$CLAIMS_PATH"' in text
 
 
 def test_retrieval_workflow_binds_immutable_inputs_and_offline_environment() -> None:
