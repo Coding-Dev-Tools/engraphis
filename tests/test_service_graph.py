@@ -913,9 +913,20 @@ def test_structured_extractor_metadata_still_populates_graph_when_genuine():
     pytest.importorskip("pydantic")
     svc = MemoryService.create(":memory:", graph_extractor="none")
     svc.engine.extractor = StructuredLLMExtractor(_StructuredGraphLLM())
-    svc.ingest("raw transcript blob", workspace="acme", scope="workspace")
-
     wid = svc.store.get_or_create_workspace("acme")
+    svc.engine.ingest(
+        "raw transcript blob",
+        workspace_id=wid,
+        scope=Scope.WORKSPACE,
+        default_mtype=MemoryType.SEMANTIC,
+        metadata={
+            "provenance": {
+                "source": "eval:structured-extractor",
+                "trusted": True,
+            }
+        },
+    )
+
     edges = svc.store.edges_in_scope(SearchFilter(workspace_id=wid), limit=100)
     assert edges and all(e.provenance.get("source") == "structured_extractor"
                          for e in edges)

@@ -24,11 +24,32 @@ Memories may originate from web pages, tool output, or other untrusted sources.
 - Provenance on every memory (`provenance.source`)
 - No destructive overwrite: contradictions resolved by bi-temporal invalidation
 - Governance is explicit, scope-checked, and audited
+- **Deterministic quarantine for explicitly untrusted payloads:** a narrow, offline policy
+  recognizes instruction override, deferred-trigger, impersonation, concealment, and secret-
+  exfiltration shapes. A match is retained with content-free reason codes and an audit event,
+  but receives no vector/index/graph/evolution/retention side effects and is invisible to
+  normal recall. It remains available to governed historical inspection; it is never deleted.
+- **Grounded-answer trust boundary:** memories marked untrusted or quarantined cannot supply
+  support, citations, extractive answer text, LLM synthesis sources, or recall reinforcement.
+  This is independent of write-time quarantine, protecting legacy/imported records too. Grounded
+  recall also applies normalized instruction-signal checks independently of the caller's trust
+  label, providing defense in depth for an accidentally or maliciously mislabeled import.
+- **Prompt-safe recall by default:** ordinary engine, service, HTTP, and MCP recall excludes
+  every record lacking explicit trusted provenance. `include_untrusted=True` is an explicit
+  Python/service inspection path, not an agent prompt surface; quarantined payloads stay out of
+  both paths except governed historical inspection.
+- **Legacy rescan:** run `python -m scripts.rescan_poisoning --db engraphis.db` to report
+  unlabelled/external rows, then add `--apply` to fail them closed and quarantine matching
+  payloads. The operation preserves the immutable record and writes content-free audit evidence.
 - Optional LLM extraction and retention supervision send bounded content to the configured
   provider only when explicitly enabled. Keep both disabled for a fully local write path.
 
-> Note: input validation reduces blast radius but cannot judge truthfulness. Treat recalled
-> memories as untrusted context, and prefer scoping to limit what any one agent sees.
+> Scope: the policy is an explainable containment control, not a general-purpose detector of
+> truthfulness or every prompt-injection variant. Explicit inspection can expose non-quarantined
+> input with provenance; it must not be fed to an agent or model. The deterministic delayed-trigger fixture is
+> reproducible with `python -m eval.redteam_poisoning`; it covers obvious untrusted payloads, a
+> detector bypass through ingest, and a mislabeled trusted case. Its metrics apply only to those
+> declared synthetic cases.
 
 **Dashboard XSS (fixed):** Memory content rendered as markdown is now sanitized via
 DOMPurify at all render sites. Verified against payloads with `onerror` handlers.

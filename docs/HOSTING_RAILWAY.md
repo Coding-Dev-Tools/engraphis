@@ -4,9 +4,8 @@ This repository can deploy the local memory engine and single-user customer dash
 **not** contain the official license issuer, billing fulfillment, Team identity, hosted relay,
 managed compute, Auto Dreaming, Auto Consolidation worker, or transactional-email services.
 
-A public deployment is therefore a remote **free customer node**, not a self-hosted Pro or Team
-backend. Premium status/CTA surfaces connect authorized customers to the official private cloud.
-No service-mode or environment switch adds the missing server implementations.
+A public deployment is a remote free customer node, not a self-hosted Pro or Team backend. No
+service-mode or environment switch adds the missing hosted server implementations.
 
 ## Deploy
 

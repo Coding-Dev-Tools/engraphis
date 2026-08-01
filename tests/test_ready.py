@@ -30,8 +30,8 @@ def app(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "loop_interval", 0)
     monkeypatch.setattr(settings, "embed_model", "")   # deterministic offline embedder
 
-    from engraphis.app import create_app
-    return create_app()
+    from engraphis.app import create_legacy_reference_app
+    return create_legacy_reference_app(legacy_db_path=tmp_path / "ready-v1.db")
 
 
 def test_api_ready_reports_checks_and_version(app):
@@ -62,8 +62,8 @@ def test_probes_are_public_even_with_token(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "loop_interval", 0)
     monkeypatch.setattr(settings, "embed_model", "")
 
-    from engraphis.app import create_app
-    app = create_app()
+    from engraphis.app import create_legacy_reference_app
+    app = create_legacy_reference_app(legacy_db_path=tmp_path / "tok-v1.db")
     assert _get(app, "/api/health").status_code == 200          # no 401
     assert _get(app, "/api/ready").status_code in (200, 503)    # no 401
 

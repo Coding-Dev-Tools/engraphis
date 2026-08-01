@@ -187,6 +187,21 @@ def test_new_claim_identity_replaces_instead_of_nooping_unkeyed_duplicate():
     assert res.target_id == "mem_unkeyed_duplicate"
 
 
+def test_new_claim_identity_preserves_a_reworded_unkeyed_memory():
+    neighbor = MemoryRecord(
+        id="mem_unkeyed",
+        content="The API timeout is 30 seconds.",
+    )
+    res = resolve(
+        "The API timeout is 30 seconds!",
+        [(0.99, neighbor)],
+        subject_key="api-timeout",
+        claim_kind="configured_value",
+    )
+    assert res.op == ResolutionOp.RELATE
+    assert res.target_id == "mem_unkeyed"
+
+
 def test_resolve_add_when_related_but_distinct_topic():
     # Cause vs. fix: related (both about the checkout race condition) but complementary,
     # not contradictory — both should be kept.
@@ -207,18 +222,29 @@ def test_resolve_picks_best_overlap_among_multiple_neighbors():
     assert res.target_id == "mem_limit"
 
 
-# ── paraphrase detection via the embedding-cosine second signal ──────────────────
+# ── explicit claim identity is the low-overlap resolution contract ─────────────
 
-def test_resolve_paraphrase_relates_on_high_cosine_low_overlap():
-    # High cosine alone is topical/paraphrase evidence, not a safe reason to hide
-    # a live fact.  Without a claim key or strong joint evidence it stays related.
+def test_low_similarity_unkeyed_rewrite_remains_distinct_without_claim_identity():
     neighbor = _rec("The API rate limit is one hundred requests every sixty seconds.",
                     id="mem_old_phrasing")
-    candidate = "Calls are capped at 500 per minute for each key."
-    res = resolve(candidate, [(0.95, neighbor)])
-    assert res.op == ResolutionOp.RELATE
-    assert res.target_id == "mem_old_phrasing"
-    assert "paraphrase" in res.reason
+    res = resolve("Calls are capped at 500 per minute for each key.", [(0.01, neighbor)])
+    assert res.op == ResolutionOp.ADD
+
+
+def test_low_similarity_rewrite_supersedes_with_shared_claim_identity():
+    old = MemoryRecord(
+        id="mem_old_limit",
+        content="The API rate limit is one hundred requests every sixty seconds.",
+        subject_key="api-rate-limit",
+        claim_kind="configured_value",
+    )
+    new = "Calls are capped at 500 per minute for each key."
+    res = resolve(
+        new, [(0.01, old)],
+        subject_key="api-rate-limit", claim_kind="configured_value",
+    )
+    assert res.op == ResolutionOp.INVALIDATE
+    assert res.target_id == "mem_old_limit"
 
 
 def test_resolve_exact_restatement_still_noops_despite_high_cosine():
@@ -228,7 +254,8 @@ def test_resolve_exact_restatement_still_noops_despite_high_cosine():
 
 
 def test_resolve_moderate_cosine_low_overlap_still_adds():
-    # Related-but-complementary stays ADD when cosine is below PARAPHRASE_EMBED_SIM.
+    # Related-but-complementary stays ADD without claim identity or enough
+    # lexical evidence, regardless of a candidate-discovery cosine.
     neighbor = _rec("The bug in checkout was caused by a race condition in the inventory "
                     "service.", id="mem_cause")
     candidate = ("We fixed the checkout race condition by adding a Redis lock around the "

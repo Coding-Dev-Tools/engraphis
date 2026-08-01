@@ -8,7 +8,7 @@ with a plain-table fallback so the schema initializes on any SQLite build).
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -118,6 +118,14 @@ CREATE TABLE IF NOT EXISTS mem_vectors (
     dim    INTEGER NOT NULL,
     vector BLOB    NOT NULL,
     model  TEXT
+);
+
+-- Versioned embedding mappings. A mapping change requires a one-time rebuild of
+-- persisted vectors before mixed old/new cosine scores can be trusted.
+CREATE TABLE IF NOT EXISTS embedding_state (
+    identity   TEXT PRIMARY KEY,
+    version    TEXT NOT NULL,
+    updated_at REAL NOT NULL
 );
 
 -- ── Knowledge graph (bi-temporal) ──────────────────────────────────────────

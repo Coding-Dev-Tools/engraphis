@@ -30,21 +30,11 @@ RELATED_SIM_FLOOR = 0.15
 DUP_TOKEN_JACCARD = 0.85
 # Token Jaccard: at/above this (but below DUP) it's the same subject with new content.
 SUBJECT_TOKEN_JACCARD = 0.40
-# Embedding cosine at/above which two texts are treated as the *same fact in different
-# words* (paraphrase), even when token overlap is low. Token Jaccard alone misses reworded
-# contradictions ("limit is 100 rpm" vs "capped at five hundred requests each minute") —
-# this reuses the embedding similarity the write path has already computed, so it stays
-# deterministic and offline (no LLM call on untrusted input). Kept conservative, and the
-# op is INVALIDATE (supersede), never NOOP: a wrongly-NOOP'd contradiction would discard
-# the new fact and reinforce the stale one, while a wrongly-INVALIDATE'd restatement just
-# refreshes the phrasing and keeps the old version readable in history.
-PARAPHRASE_EMBED_SIM = 0.90
 # Supersession without an explicit claim key is intentionally stricter than a
 # generic "related" judgment.  Both independent signals must agree before a
 # write hides a currently-live fact from ordinary recall.
 STRONG_SUBJECT_TOKEN_JACCARD = 0.55
 STRONG_JOINT_EMBED_SIM = 0.45
-
 
 class ResolutionOp(str, Enum):
     ADD = "add"                # genuinely new -> insert
@@ -69,8 +59,9 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
     already scoped to the same workspace/repo/scope/mtype as the candidate (conflict
     resolution must not silently cross a scope boundary — promotion is explicit, §5.1)
     and filtered to currently-visible memories. Order doesn't matter; every neighbor
-    above ``RELATED_SIM_FLOOR`` is checked and the best token-overlap match wins, with
-    the embedding cosine as a second signal for paraphrased restatements/contradictions.
+    above ``RELATED_SIM_FLOOR`` is checked and the best token-overlap match wins. Cosine
+    is candidate-discovery and *joint* evidence only: the dependency-free hashing
+    embedder is lexical, not a sound paraphrase/contradiction classifier.
     """
     cand_tokens = tokenize(candidate_text)
     candidate_subject = str(subject_key or "").strip()
@@ -94,13 +85,10 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
 
     considered = exact_claim_neighbors or fallback_neighbors
     best: Optional[tuple[float, MemoryRecord, float]] = None      # (overlap, rec, sim)
-    best_sim: Optional[tuple[float, MemoryRecord]] = None         # highest-cosine neighbor
     for sim, rec in considered:
         overlap = jaccard(cand_tokens, tokenize(f"{rec.title} {rec.content}"))
         if best is None or overlap > best[0]:
             best = (overlap, rec, sim)
-        if best_sim is None or sim > best_sim[0]:
-            best_sim = (sim, rec)
 
     if best is None:
         return Resolution(ResolutionOp.ADD, reason="no related memory in scope")
@@ -128,27 +116,36 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
                                  f"token overlap={overlap:.2f}, similarity={sim:.2f})")
     if overlap >= DUP_TOKEN_JACCARD:
         if candidate_subject:
+            # A new explicit claim identity must not retire a merely similar unkeyed
+            # note. Promote only an exact restatement; a reworded match needs either a
+            # shared key or an explicit human correction because offline hashing cannot
+            # prove that the two claims have the same predicate.
+            duplicate_text = candidate_content if candidate_content is not None else candidate_text
+            candidate_normalized = " ".join(duplicate_text.split()).casefold()
+            record_normalized = " ".join(rec.content.split()).casefold()
+            if candidate_normalized == record_normalized:
+                return Resolution(
+                    ResolutionOp.INVALIDATE,
+                    target_id=rec.id,
+                    reason=f"replaces exact unkeyed duplicate {rec.id} with durable claim "
+                           f"identity (token overlap={overlap:.2f})",
+                )
             return Resolution(
-                ResolutionOp.INVALIDATE,
+                ResolutionOp.RELATE,
                 target_id=rec.id,
-                reason=f"replaces unkeyed duplicate {rec.id} with durable claim identity "
+                reason=f"related unkeyed memory {rec.id}; explicit claim identity differs "
                        f"(token overlap={overlap:.2f})",
             )
         return Resolution(ResolutionOp.NOOP, target_id=rec.id,
                           reason=f"near-duplicate of {rec.id} (token overlap={overlap:.2f})")
     # Without an explicit claim key, invalidation needs strong agreement from
-    # lexical and semantic signals.  A high cosine alone can be a topical
-    # paraphrase rather than a contradiction, so it becomes a relation instead.
-    if overlap >= STRONG_SUBJECT_TOKEN_JACCARD and sim >= STRONG_JOINT_EMBED_SIM:
+    # lexical and semantic signals. A high cosine alone can be a topical
+    # neighbor rather than a contradiction, so it does not change either fact.
+    if (not candidate_subject and overlap >= STRONG_SUBJECT_TOKEN_JACCARD
+            and sim >= STRONG_JOINT_EMBED_SIM):
         return Resolution(ResolutionOp.INVALIDATE, target_id=rec.id,
                           reason=f"supersedes {rec.id} (strong joint evidence: "
                                  f"token overlap={overlap:.2f}, similarity={sim:.2f})")
-    if best_sim is not None and best_sim[0] >= PARAPHRASE_EMBED_SIM:
-        psim, prec = best_sim
-        povl = jaccard(cand_tokens, tokenize(f"{prec.title} {prec.content}"))
-        return Resolution(ResolutionOp.RELATE, target_id=prec.id,
-                          reason=f"related to {prec.id} (paraphrase-like: cosine={psim:.2f}, "
-                                 f"token overlap={povl:.2f})")
     if overlap >= SUBJECT_TOKEN_JACCARD:
         return Resolution(ResolutionOp.RELATE, target_id=rec.id,
                           reason=f"related to {rec.id} (same topic, "

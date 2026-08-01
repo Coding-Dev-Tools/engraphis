@@ -83,6 +83,22 @@ def test_launcher_preserves_socket_peer_for_forwarded_header_validation(monkeypa
     assert "forwarded_allow_ips" not in captured
 
 
+def test_reload_uses_an_asgi_import_string(monkeypatch):
+    uvicorn = pytest.importorskip("uvicorn")
+
+    captured = {}
+    monkeypatch.setattr(start_dashboard, "_port_is_available", lambda *_args: True)
+    monkeypatch.setattr(
+        uvicorn, "run", lambda app, **kwargs: captured.update(app=app, **kwargs),
+    )
+
+    start_dashboard.main(["--no-open", "--reload"])
+
+    assert captured["app"] == "engraphis.dashboard_app:app"
+    assert captured["reload"] is True
+    assert captured["proxy_headers"] is False
+
+
 def test_json_launcher_preserves_redacted_uvicorn_access_formatter(monkeypatch):
     uvicorn = pytest.importorskip("uvicorn")
     stream = io.StringIO()

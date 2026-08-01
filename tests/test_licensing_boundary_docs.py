@@ -81,21 +81,22 @@ def test_manifest_uses_stripe_as_the_only_launch_billing_authority():
 
 def test_public_docs_state_the_license_and_lapse_boundaries():
     readme = _text("README.md")
+    hosted_plans = _text("docs/HOSTED_PLANS.md")
     licensing = _text("docs/LICENSING.md")
-    combined = readme + "\n" + licensing
-    plain_readme = " ".join(readme.replace("**", "").split())
+    combined = readme + "\n" + hosted_plans + "\n" + licensing
+    plain_hosted_plans = " ".join(hosted_plans.replace("**", "").split())
     plain_licensing = " ".join(licensing.replace("**", "").split())
 
     assert "exactly 3 active days" in combined
-    assert "at most 24 hours" in plain_readme or "up to 24 hours" in plain_readme
+    assert "at most 24 hours" in plain_hosted_plans or "up to 24 hours" in plain_hosted_plans
     assert "up to 24 hours" in plain_licensing
-    assert "workspace_write_grace" in readme and "workspace_write_grace" in licensing
-    assert "recovery_read_only" in readme and "recovery_read_only" in licensing
-    assert "private control plane" in plain_readme.lower()
-    assert "local dashboard, MCP tools, or local writes" in readme
+    assert "workspace_write_grace" in hosted_plans and "workspace_write_grace" in licensing
+    assert "recovery_read_only" in hosted_plans and "recovery_read_only" in licensing
+    assert "private control plane" in plain_hosted_plans.lower()
+    assert "local dashboard, MCP server, local writes" in licensing
     assert "not controlled by either hosted lifecycle state" in licensing
     assert "data export" in combined
-    assert "never extends trial or subscription expiry" in readme
+    assert "does not extend a trial or subscription" in hosted_plans
     assert "enable a new installation or activation" in licensing
     assert "add hosted users, seats, invitations, devices, or credentials" in licensing
     assert "cannot retroactively withdraw" in licensing
@@ -148,3 +149,21 @@ def test_container_examples_do_not_describe_private_license_or_relay_state_as_lo
     assert "ENGRAPHIS_RELAY_DB" not in combined
     assert "cloud session" in combined
     assert "Issuance, trial state, leases, and revocations stay private." in compose
+
+
+def test_readme_describes_only_customer_side_cloud_state_as_persisted():
+    """The Docker quickstart must not imply that the public image owns licenses.
+
+    The mounted state directory holds a customer-side connection plus a display cache;
+    issuance and entitlement authority stay in the private control plane.  Calling that
+    state "license state" made the open-core boundary ambiguous for self-hosters.
+    """
+
+    readme = _text("README.md")
+
+    assert "database plus license state" not in readme
+    assert "customer-side cloud session and non-authoritative entitlement display" in readme
+    assert (
+        "License issuance, trials, leases, and revocations remain on the private control plane."
+        in readme
+    )

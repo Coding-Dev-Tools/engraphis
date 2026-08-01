@@ -5,28 +5,76 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- The optional `hosted-eval` extra adds guarded hosted-Luna productivity evaluation with a
+  redacted public evidence exporter.
+- Protected public benchmark workflows now support redacted hosted and retrieval evidence runs.
+
+### Security
+
+- Untrusted ingress now fails closed: provenance and extractor metadata are allowlisted, suspicious
+  records are quarantined before embedding, linking, graph extraction, resolution, recall, or
+  grounding, and `scripts/rescan_poisoning.py` can retroactively label or quarantine old records.
+- Trust is preserved across resolution, structured graph writes, consolidation, entity profiles,
+  and review paths. Untrusted records cannot mutate or promote trusted memory, and derived outputs
+  remain trusted only when every source is explicitly trusted.
+
+### Documentation
+
+- README and release guidance now match the current install extras, public entry points, product
+  boundaries, and focused MCP/provider documentation.
+
+### Fixed
+
+- Public server entry points now share the v2 service, keeping recall behavior consistent across
+  the dashboard, server, Compose, Classic, and MCP-over-HTTP.
+- Keyed mutable-fact replacements now load their live predecessor directly, so reworded updates
+  preserve history without relying on vector top-K recall.
+- Versioned deterministic embeddings now rebuild persisted vectors after a mapping change, keeping
+  existing databases searchable after an upgrade.
+- Prompt-facing recall now widens candidate search when untrusted results crowd out trusted
+  evidence, while keeping expansion bounded. Title text now contributes to absolute support floors
+  for grounded and hosted recall.
+- Hosted productivity evaluation now scores canonical, acceptable, or supporting-evidence answers
+  with strict natural-language framing instead of token containment or raw JSON text.
+- Hosted-Luna workers on Windows now establish kill-on-close containment before sending input; a
+  failure refuses the request, and timeouts clean up the full worker tree.
+- Poisoning rescans preserve existing temporal validity boundaries and invalidate affected edges
+  without overwriting governed history.
+
+### Changed
+
+- CI and release/install metadata now cover Python 3.13 and 3.14.
+
 ## [1.2.5] - 2026-07-31
 
 ### Added
 
 - `engraphis_context_savings` aggregates validated, content-free recall receipts by workspace,
-  repo, operation, and token-counter identity. The same read-only view is available through the
-  service, Inspector, v2/read-only APIs, and dashboard receipt panel.
+  repo, operation, and token-counter identity. The view is available through the service,
+  dashboard, and read-only APIs.
 - Recall supports an explicit adaptive candidate-depth experiment while retaining the historical
   fixed depth by default. Performance reports record requested and actual candidate depths.
-- Chunk ingestion can enforce budgets with an injected or explicitly configured Hugging Face
-  tokenizer and records the counter identity, target, and overlap in each chunk's metadata.
-- Offline adapters now cover MemoryAgentBench, LoCoMo-Plus, and Mem2ActBench. A paired code-agent
-  analyzer compares full-history and Engraphis runs using identical tasks and success oracles.
+- `MemoryEngine` and `MemoryService` now provide adaptive context routing: bypass retrieval when
+  prompt history fits, use compact recall when support is strong, and fall back to bounded recent
+  history when support is weak.
+- `eval.productivity` measures task completion, corrections, agent turns, memory calls, latency,
+  and model-facing tokens.
+- Chunk ingestion can enforce budgets with a configured Hugging Face tokenizer and records the
+  counter identity, target, and overlap in chunk metadata.
+- Offline adapters now cover MemoryAgentBench, LoCoMo-Plus, and Mem2ActBench, with a paired
+  full-history versus Engraphis code-agent analyzer.
 - Public benchmark evidence can carry source hashes, repository state, environment and model
-  provenance, secret-redacted commands, content digests, and adjacent immutable SHA-256 files.
+  provenance, secret-redacted commands and URLs, content digests, and adjacent immutable SHA-256
+  files.
 
 ### Changed
 
-- Context-economy evaluation now compares uncapped full history, a same-budget recency window,
-  and shipped hybrid recall while charging an explicit one-time indexing token proxy.
+- Context-economy evaluation now compares full history, a same-budget recency window, and hybrid
+  recall while accounting for indexing cost.
 - Official LongMemEval-V2 output has a dedicated redacted evidence exporter that retains the
-  official QA/token/latency measures without publishing prompts, answers, model output, or
+  official QA, token, and latency measures without publishing prompts, answers, model output, or
   retrieved context.
 - Folder-sync dry runs no longer create a remote directory or persist a local device identity.
 
@@ -40,6 +88,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Tokenizer-aware chunk overlap can no longer exceed the configured prose budget or emit a
   duplicate overlap-only record before an oversized paragraph. Invalid token counters fail
   closed instead of silently producing mis-sized chunks.
+- Ledger graph interactions preserve manually selected nodes during refreshes.
 - The new evidence guide is included in wheel and source distributions.
 
 ## [1.2.2] - 2026-07-30

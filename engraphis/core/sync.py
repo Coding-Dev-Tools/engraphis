@@ -49,6 +49,12 @@ from typing import Any, Optional
 
 from engraphis.core.graph_layers import merge_graph_layers, normalize_graph_layer
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
+from engraphis.core.poisoning import (
+    apply_quarantine_metadata,
+    assess_untrusted_payload,
+    metadata_is_quarantined,
+    provenance_is_trusted,
+)
 from engraphis.core.store import Store, now_ts
 
 
@@ -256,6 +262,32 @@ def inherit_store_defaults(existing: MemoryRecord, incoming: MemoryRecord) -> Me
         if getattr(incoming, field_name) is None:
             setattr(incoming, field_name, getattr(existing, field_name))
     return incoming
+
+
+def _same_sync_payload(left: MemoryRecord, right: MemoryRecord) -> bool:
+    """Compare the synced record payload while excluding local policy envelopes.
+
+    ``metadata`` and ``provenance`` are sanitized on every external ingress.  They
+    therefore cannot decide whether a peer replay represents a new memory version.
+    The caller uses this only when the bundle omitted both fields, so an explicit
+    metadata or provenance update still flows through normal LWW resolution.
+    """
+    return (
+        left.title == right.title
+        and left.content == right.content
+        and left.summary == right.summary
+        and list(left.keywords or []) == list(right.keywords or [])
+        and left.mtype == right.mtype
+        and left.scope == right.scope
+        and left.importance == right.importance
+        and left.surprise == right.surprise
+        and left.sensitivity == right.sensitivity
+        and left.valid_from == right.valid_from
+        and left.ingested_at == right.ingested_at
+        and left.session_id == right.session_id
+        and left.subject_key == right.subject_key
+        and left.claim_kind == right.claim_kind
+    )
 
 
 def _signature(rec: MemoryRecord) -> str:
@@ -707,10 +739,6 @@ class SyncEngine:
         if only_repo_id is not None and rec.repo_id != only_repo_id:
             report["rejected"] += 1
             return
-        if src_device:
-            prov = dict(rec.provenance or {})
-            prov.setdefault("synced_from_device", _clamp_str(src_device, 128))
-            rec.provenance = prov
         existing = known.get(rec.id)
         if existing is not None and existing.workspace_id != local_ws:
             # This id already lives in a DIFFERENT workspace: never let a bundle reach
@@ -756,6 +784,42 @@ class SyncEngine:
             # another repo during a repo-restricted sync.
             report["rejected"] += 1
             return
+        # A peer has no authority to revise a locally approved record. Keep the
+        # local trusted fact as the safe winner; the peer's payload is never merged
+        # into its provenance, graph state, or temporal validity. This runs after
+        # all scope checks above so malformed remote rows are still rejected rather
+        # than being disguised as harmless trust conflicts.
+        if existing is not None and provenance_is_trusted(existing.provenance):
+            if not dry_run and rec.content != existing.content:
+                self.store.audit(
+                    "sync:%s" % _clamp_str(src_device or "peer", 128),
+                    "sync_trust_conflict",
+                    existing.id,
+                    "peer content ignored because local record is explicitly trusted",
+                    commit=False,
+                )
+            accepted[rec.id] = existing
+            report["unchanged"] += 1
+            return
+        # A bundle is untrusted even when it originated on a known device.  Preserve
+        # only bounded diagnostic identity and re-home all payload provenance under
+        # the local policy; a peer cannot make content trusted by serialising that
+        # bit in the bundle.  This path bypasses MemoryEngine, so it performs the
+        # same quarantine decision before it can be indexed.
+        #
+        # An idempotent replay may omit both policy-managed blobs.  Re-homing such a
+        # no-op would manufacture a provenance/metadata difference, let the hash
+        # tiebreak select it, and rewrite the otherwise identical row forever.  Keep
+        # the already-local policy envelope only when every sync-owned descriptive
+        # value is the same and the peer supplied neither blob.  Any actual content,
+        # timestamp, or metadata/provenance change still receives a fresh untrusted
+        # envelope below.
+        if (existing is not None and "metadata" not in d and "provenance" not in d
+                and _same_sync_payload(existing, inherit_store_defaults(existing, rec))):
+            rec.metadata = dict(existing.metadata or {})
+            rec.provenance = dict(existing.provenance or {})
+        else:
+            self._rehome_external_record(rec, src_device=src_device)
         if existing is None:
             if not dry_run:
                 self._write(rec, commit=False)
@@ -764,6 +828,12 @@ class SyncEngine:
                     "sync_add", rec.id,
                     f"new memory created from synced bundle (device: {src_device or 'peer'})",
                     commit=False)
+                if metadata_is_quarantined(rec.metadata):
+                    self.store.audit(
+                        "poisoning_policy", "sync_quarantine", rec.id,
+                        "synced record quarantined by deterministic policy",
+                        commit=False,
+                    )
                 known[rec.id] = rec      # write-through: a duplicate id later in this
                                          # batch must see what we just persisted
             report["added"] += 1
@@ -813,6 +883,13 @@ class SyncEngine:
                 continue
             if (only_repo_id is not None
                     and (ma.repo_id != only_repo_id or mb.repo_id != only_repo_id)):
+                continue
+            # Link records carry no independent authenticated provenance. A peer
+            # therefore cannot attach an arbitrary graph edge to a locally approved
+            # memory, where it could influence graph recall despite the peer payload
+            # itself being untrusted. Links wholly inside the untrusted replica stay
+            # inspectable, but only a local trusted write may connect trusted nodes.
+            if provenance_is_trusted(ma.provenance) or provenance_is_trusted(mb.provenance):
                 continue
             pending += 1
             if pending >= APPLY_BATCH:
@@ -900,7 +977,8 @@ class SyncEngine:
         derived state coherent: re-embed for the vector arm when an embedder is wired.
 
         ``commit=False`` leaves the transaction open for the caller's batch (apply_bundle)."""
-        if self.embedder is not None:
+        quarantined = metadata_is_quarantined(rec.metadata)
+        if self.embedder is not None and not quarantined:
             try:
                 text = f"{rec.title}\n{rec.content}" if rec.title else rec.content
                 rec.embedding = self.embedder.embed([text])[0]
@@ -908,11 +986,67 @@ class SyncEngine:
                 rec.embedding = None
         # sync logs its own semantic audit (sync_add/sync_overwrite), hence audit=False
         self.store.add_memory(rec, audit=False, commit=commit)
-        if rec.embedding is not None and self.index is not None:
+        if quarantined:
+            # ``add_memory(..., embedding=None)`` deliberately leaves an existing
+            # vector untouched for ordinary metadata updates. A sync overwrite that
+            # becomes quarantined is different: retaining the prior vector leaves
+            # stale derived state for a payload the policy has removed from retrieval.
+            self.store.conn.execute("DELETE FROM mem_vectors WHERE id=?", (rec.id,))
+            if self.index is not None:
+                try:
+                    self.index.delete([rec.id])
+                except Exception:
+                    pass
+            if commit:
+                self.store.conn.commit()
+            return
+        if rec.embedding is not None and not quarantined and self.index is not None:
             try:
                 self.index.upsert([rec.id], rec.embedding.reshape(1, -1))
             except Exception:
                 pass
+
+    @staticmethod
+    def _rehome_external_record(rec: MemoryRecord, *, src_device: object) -> None:
+        """Replace peer-controlled provenance with a local untrusted envelope."""
+        upstream = rec.provenance if isinstance(rec.provenance, dict) else {}
+        upstream_source = _clamp_str(upstream.get("source"), 128)
+        device = _clamp_str(src_device, 128) if src_device else ""
+        provenance = {
+            "source": "sync",
+            "trusted": False,
+            "trust_origin": "sync_untrusted",
+        }
+        if device:
+            provenance["synced_from_device"] = device
+        metadata = dict(rec.metadata or {})
+        # Incoming control-plane keys must never survive as if this process had
+        # produced them.  Record only a bounded diagnostic summary of the upstream
+        # claim; raw source metadata remains in the peer's bundle, not local policy.
+        for key in (
+            "provenance", "quarantine", "retention_supervision", "entities",
+            "relations", "structured_extraction", "llm_extraction",
+            "structured_consolidation",
+        ):
+            metadata.pop(key, None)
+        metadata["provenance"] = dict(provenance)
+        metadata["sync_ingress"] = {
+            "source": upstream_source or "unknown",
+            "claimed_trusted": upstream.get("trusted") is True,
+            "device": device or "peer",
+        }
+        decision = assess_untrusted_payload(
+            rec.content, title=rec.title, metadata=metadata
+        )
+        if decision.quarantined:
+            metadata = apply_quarantine_metadata(metadata, decision)
+            at = rec.valid_from if rec.valid_from is not None else now_ts()
+            rec.valid_from = at
+            rec.valid_to = at
+            rec.valid_to_recorded_at = now_ts()
+            rec.embedding = None
+        rec.metadata = metadata
+        rec.provenance = dict(metadata["provenance"])
 
     # ── one round-trip over a transport ─────────────────────────────────────────
     def sync(self, transport, workspace_id: str, *, repo_id: Optional[str] = None,
