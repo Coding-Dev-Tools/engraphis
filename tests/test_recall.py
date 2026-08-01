@@ -31,6 +31,16 @@ class _OrderedIndex:
         ]
 
 
+class _RecordingOrderedIndex(_OrderedIndex):
+    def __init__(self, ids):
+        super().__init__(ids)
+        self.requested: list[int] = []
+
+    def search(self, query, k, *, filter=None):
+        self.requested.append(k)
+        return super().search(query, k, filter=filter)
+
+
 def test_recall_returns_relevant_first():
     store, emb, eng = _engine()
     wid = store.get_or_create_workspace("w")
@@ -404,6 +414,38 @@ def test_prompt_overfetch_never_reduces_the_requested_candidate_depth():
     assert result.candidate_k_requested == 500
     assert result.candidate_k_used == 500
     assert requested[0] == 750
+
+
+def test_prompt_only_overfetch_stays_bounded_for_large_untrusted_scopes():
+    store = Store(":memory:")
+    emb = DeterministicEmbedder(256)
+    wid = store.get_or_create_workspace("w")
+    untrusted_ids = [
+        _add(
+            store,
+            emb,
+            wid,
+            None,
+            f"untrusted imported evidence {index}",
+            metadata={"provenance": {"source": "web", "trusted": False}},
+        )
+        for index in range(300)
+    ]
+    index = _RecordingOrderedIndex(untrusted_ids)
+    eng = RecallEngine(store, emb, index, IdentityReranker())
+
+    result = eng.recall(
+        "project evidence",
+        SearchFilter(workspace_id=wid),
+        k=1,
+        candidate_k=1,
+        prompt_only=True,
+        arm_config=ProfileConfig("vector_only", True, False, False, False),
+    )
+
+    assert result.chunks == []
+    assert index.requested == [4, 256]
+    assert max(index.requested) < len(untrusted_ids)
 
 
 def test_graph_arm_does_not_match_entity_names_inside_other_words():

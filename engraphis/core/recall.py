@@ -43,6 +43,13 @@ from engraphis.core.store import Store, memory_matches_filter, now_ts
 from engraphis.core.textutil import jaccard, tokenize
 
 
+# Prompt-safe recall may search farther than ordinary recall because backends cannot
+# filter provenance. Keep the second page bounded so a mostly untrusted import never
+# turns one prompt build into a full-scope scan.
+PROMPT_ONLY_MIN_CANDIDATES = 256
+PROMPT_ONLY_MAX_CANDIDATES = 1024
+
+
 @dataclass
 class RecallResult:
     chunks: list[dict] = field(default_factory=list)
@@ -142,17 +149,22 @@ class RecallEngine:
 
         # ── arms ─────────────────────────────────────────────────────────────
         # Prompt-facing consumers filter untrusted records after retrieval because
-        # vector indexes do not carry provenance. Keep widening the arm depth until
-        # enough trusted records survive or the scoped candidate population is
-        # exhausted; a fixed over-fetch can otherwise return nothing when untrusted
-        # records occupy the first page of an arm.
+        # vector indexes do not carry provenance. A bounded second page gives trusted
+        # evidence a fair chance to survive without turning one prompt-safe recall
+        # into repeated full-scope scans when a large import is untrusted.
         prompt_only = bool(prompt_only or not include_untrusted)
         prompt_target = max(1, int(k))
         candidate_ceiling = candidate_k
         arm_candidate_k = candidate_k
         if prompt_only:
             arm_candidate_k = candidate_k + min(250, candidate_k * 3)
-            candidate_ceiling = max(arm_candidate_k, self.store.count_memories(flt))
+            candidate_ceiling = max(
+                arm_candidate_k,
+                min(
+                    PROMPT_ONLY_MAX_CANDIDATES,
+                    max(PROMPT_ONLY_MIN_CANDIDATES, candidate_k * 16),
+                ),
+            )
         qvec = self.embedder.embed([query])[0] if config.vector else None
 
         while True:
@@ -210,7 +222,7 @@ class RecallEngine:
                 or not can_expand
             ):
                 break
-            arm_candidate_k = min(candidate_ceiling, arm_candidate_k * 2)
+            arm_candidate_k = candidate_ceiling
         if not recs:
             context, packed, usage = self.context_packer.pack(query, [], budget)
             return RecallResult(

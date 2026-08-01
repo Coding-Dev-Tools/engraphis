@@ -205,6 +205,7 @@ def test_untrusted_ingest_keeps_ingress_authority_over_extractor_metadata():
                     "provenance": {"source": "extractor", "trusted": True},
                     "quarantine": {"state": "cleared"},
                     "entities": ["Vendor"],
+                    "relations": [{"source": "Vendor", "target": "Maintenance"}],
                     "llm_extraction": {"provider": "test"},
                     "arbitrary_control_field": "discarded",
                 },
@@ -223,6 +224,8 @@ def test_untrusted_ingest_keeps_ingress_authority_over_extractor_metadata():
     assert record.metadata["llm_extraction"]["fact_index"] == 1
     assert "quarantine" not in record.metadata
     assert "arbitrary_control_field" not in record.metadata
+    workspace_id = service.store.get_or_create_workspace("w")
+    assert service.store.list_memory_entities(SearchFilter(workspace_id=workspace_id)) == []
 
 
 @pytest.mark.parametrize("source", ("tool:calendar", "web:browser", "import:csv"))

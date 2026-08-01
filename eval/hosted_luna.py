@@ -17,7 +17,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional
 
 from eval.harness import load_dataset
 from eval.hosted_evidence import (
@@ -275,6 +275,23 @@ def _contains_tool_use(items: object) -> bool:
     return False
 
 
+def _structured_answer(value: object) -> str:
+    """Extract the schema-validated answer instead of scoring JSON syntax as prose."""
+    parsed = value
+    if isinstance(parsed, str):
+        try:
+            parsed = json.loads(parsed)
+        except json.JSONDecodeError as exc:
+            raise HostedLunaError("Codex did not return a structured answer") from exc
+    if isinstance(parsed, Mapping):
+        answer = parsed.get("answer")
+    else:
+        answer = getattr(parsed, "answer", None)
+    if not isinstance(answer, str):
+        raise HostedLunaError("Codex returned an invalid structured answer")
+    return answer
+
+
 def _worker() -> int:
     """Run exactly one fresh read-only SDK thread; stdout is a private protocol."""
     retryable_error: Callable[[Exception], bool] = _never_retryable
@@ -327,7 +344,7 @@ def _worker() -> int:
             latency_ms = (time.perf_counter() - started) * 1000.0
         if _contains_tool_use(getattr(result, "items", ())):
             raise HostedLunaError("Codex used a prohibited tool")
-        answer = str(getattr(result, "final_response", ""))
+        answer = _structured_answer(getattr(result, "final_response", None))
         usage = _last_usage(result)
         counters = {field: _usage(usage, field) for field in (
             "input_tokens", "cached_input_tokens", "output_tokens",

@@ -59,6 +59,15 @@ def test_hosted_answer_evaluator_accepts_safe_framing_without_loose_matching():
     assert not evaluator("The release manager does not approve deployment", question, ())
 
 
+def test_structured_answer_extracts_the_schema_field_before_scoring():
+    assert hosted_luna._structured_answer('{"answer": "Ada"}') == "Ada"
+    assert hosted_luna._structured_answer({"answer": "Ada"}) == "Ada"
+    with pytest.raises(HostedLunaError, match="structured answer"):
+        hosted_luna._structured_answer("Ada")
+    with pytest.raises(HostedLunaError, match="invalid structured answer"):
+        hosted_luna._structured_answer({"answer": 7})
+
+
 def test_agent_fails_closed_at_call_ceiling_and_wrong_model():
     agent = CodexLunaAgent(max_calls=1, invoke=lambda *_: AgentTurn(answer="Ada", model=MODEL))
     agent("q", "c")

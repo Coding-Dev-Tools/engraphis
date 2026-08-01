@@ -699,7 +699,8 @@ class MemoryEngine:
         # ``meta`` was demoted above, so any hint still under a GRAPH_HINT_KEYS name here
         # was vouched for by ingest() — the "structured_extractor" label below is earned,
         # not merely asserted by whoever built the metadata dict.
-        if scope != Scope.SESSION and self._has_structured_graph_metadata(meta):
+        if (trusted_write and scope != Scope.SESSION
+                and self._has_structured_graph_metadata(meta)):
             try:
                 from engraphis.backends.graph_extractor import (
                     StructuredMetadataGraphExtractor, feed as _graph_feed,
