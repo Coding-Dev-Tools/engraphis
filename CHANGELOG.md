@@ -7,19 +7,18 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Added
 
-- `MemoryEngine` and `MemoryService` now provide adaptive context routing: bypass retrieval when
-  prompt history fits, use compact recall when support is strong, and fall back to bounded recent
-  history when support is weak.
-- `eval.productivity` measures task completion, corrections, agent turns, memory calls, latency,
-  and model-facing tokens.
 - The optional `hosted-eval` extra adds guarded hosted-Luna productivity evaluation with a
   redacted public evidence exporter.
+- Protected public benchmark workflows now support redacted hosted and retrieval evidence runs.
 
 ### Security
 
-- Untrusted ingress is deterministically labeled, and suspicious payloads are quarantined before
-  indexing, prompt recall, resolution, or grounding; `scripts/rescan_poisoning.py` can apply the
-  policy to existing records.
+- Untrusted ingress now fails closed: provenance and extractor metadata are allowlisted, suspicious
+  records are quarantined before embedding, linking, graph extraction, resolution, recall, or
+  grounding, and `scripts/rescan_poisoning.py` can retroactively label or quarantine old records.
+- Trust is preserved across resolution, structured graph writes, consolidation, entity profiles,
+  and review paths. Untrusted records cannot mutate or promote trusted memory, and derived outputs
+  remain trusted only when every source is explicitly trusted.
 
 ### Documentation
 
@@ -34,8 +33,19 @@ All notable changes to Engraphis are documented here. Format loosely follows
   preserve history without relying on vector top-K recall.
 - Versioned deterministic embeddings now rebuild persisted vectors after a mapping change, keeping
   existing databases searchable after an upgrade.
-- Prompt-facing recall now expands its candidate search until enough trusted evidence survives.
-- Hosted-Luna evaluation workers now enforce bounded process-tree cleanup on Windows.
+- Prompt-facing recall now widens candidate search when untrusted results crowd out trusted
+  evidence, while keeping expansion bounded. Title text now contributes to absolute support floors
+  for grounded and hosted recall.
+- Hosted productivity evaluation now scores canonical, acceptable, or supporting-evidence answers
+  with strict natural-language framing instead of token containment or raw JSON text.
+- Hosted-Luna workers on Windows now establish kill-on-close containment before sending input; a
+  failure refuses the request, and timeouts clean up the full worker tree.
+- Poisoning rescans preserve existing temporal validity boundaries and invalidate affected edges
+  without overwriting governed history.
+
+### Changed
+
+- CI and release/install metadata now cover Python 3.13 and 3.14.
 
 ## [1.2.5] - 2026-07-31
 
@@ -46,12 +56,18 @@ All notable changes to Engraphis are documented here. Format loosely follows
   dashboard, and read-only APIs.
 - Recall supports an explicit adaptive candidate-depth experiment while retaining the historical
   fixed depth by default. Performance reports record requested and actual candidate depths.
+- `MemoryEngine` and `MemoryService` now provide adaptive context routing: bypass retrieval when
+  prompt history fits, use compact recall when support is strong, and fall back to bounded recent
+  history when support is weak.
+- `eval.productivity` measures task completion, corrections, agent turns, memory calls, latency,
+  and model-facing tokens.
 - Chunk ingestion can enforce budgets with a configured Hugging Face tokenizer and records the
   counter identity, target, and overlap in chunk metadata.
 - Offline adapters now cover MemoryAgentBench, LoCoMo-Plus, and Mem2ActBench, with a paired
   full-history versus Engraphis code-agent analyzer.
 - Public benchmark evidence can carry source hashes, repository state, environment and model
-  provenance, secret-redacted commands, content digests, and adjacent immutable SHA-256 files.
+  provenance, secret-redacted commands and URLs, content digests, and adjacent immutable SHA-256
+  files.
 
 ### Changed
 
@@ -72,6 +88,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Tokenizer-aware chunk overlap can no longer exceed the configured prose budget or emit a
   duplicate overlap-only record before an oversized paragraph. Invalid token counters fail
   closed instead of silently producing mis-sized chunks.
+- Ledger graph interactions preserve manually selected nodes during refreshes.
 - The new evidence guide is included in wheel and source distributions.
 
 ## [1.2.2] - 2026-07-30
