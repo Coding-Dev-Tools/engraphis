@@ -85,8 +85,8 @@ def _client(monkeypatch, tmp_path):
     _setup_store(monkeypatch, tmp_path)
     monkeypatch.setattr(settings, "loop_interval", 0)
     monkeypatch.setattr(settings, "embed_model", "")
-    from engraphis.app import create_app
-    return TestClient(create_app())
+    from engraphis.app import create_legacy_reference_app
+    return TestClient(create_legacy_reference_app(legacy_db_path=tmp_path / "mem-v1.db"))
 
 
 def test_prune_honors_explicit_zero_threshold(monkeypatch, tmp_path):
@@ -293,7 +293,9 @@ def test_vault_upload_limits_valid_streamed_multipart_in_whole_app(
     async def send(message):
         sent.append(message)
 
-    app = app_module.create_app()
+    app = app_module.create_legacy_reference_app(
+        legacy_db_path=tmp_path / "streamed-upload-v1.db"
+    )
     asyncio.run(app(
         {
             "type": "http",
@@ -478,7 +480,14 @@ def test_duplicate_health_bounds_candidates_results_and_uses_worker(
         return await real_worker(function, *args)
 
     monkeypatch.setattr(vault_routes.asyncio, "to_thread", tracked_worker)
-    with _client(monkeypatch, tmp_path) as client:
+    # The records above intentionally live in the v1 reference database.  Rebind
+    # through the explicit factory only after presenting a distinct v2 database path.
+    monkeypatch.setattr(settings, "db_path", str(tmp_path / "current-v2.db"))
+    monkeypatch.setattr(settings, "loop_interval", 0)
+    monkeypatch.setattr(settings, "embed_model", "")
+    from engraphis.app import create_legacy_reference_app
+
+    with TestClient(create_legacy_reference_app(legacy_db_path=tmp_path / "mem.db")) as client:
         response = client.get("/memory/health/duplicates?namespace=ns")
 
     assert response.status_code == 200

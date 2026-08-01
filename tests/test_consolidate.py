@@ -318,6 +318,25 @@ def test_structured_consolidation_writes_typed_fact_graph_and_can_supersede_sour
     assert sum(memory.valid_to is None for memory in episodes) == 1
 
 
+def test_structured_consolidation_blocks_graph_writes_for_untrusted_sources():
+    pytest.importorskip("pydantic")
+    eng, wid, rid = _engine_with_auth_repeats()
+    eng.store.conn.execute("UPDATE memories SET provenance='{\"trusted\": false}'")
+    eng.store.conn.commit()
+
+    report = consolidate(
+        eng,
+        workspace_id=wid,
+        repo_id=rid,
+        structured=True,
+        llm=_StructuredConsolidationLLM(),
+    )
+
+    digest = eng.store.get_memory(report["digests_created"][0]["id"])
+    assert digest.provenance["trusted"] is False
+    assert eng.store.edges_in_scope(SearchFilter(workspace_id=wid, repo_id=rid)) == []
+
+
 
 def test_structured_consolidation_failure_falls_back_to_deterministic_digest():
     eng, wid, rid = _engine_with_auth_repeats()
@@ -607,6 +626,50 @@ def test_digest_inherits_strictest_sensitivity_and_trust_of_its_sources():
     assert set(digest.metadata["provenance"]["consolidates"]) == set(ids)
 
 
+def test_untrusted_consolidation_never_reaches_graph_extraction():
+    from engraphis.backends.graph_extractor import GraphExtraction
+
+    class RecordingGraphExtractor:
+        def __init__(self):
+            self.calls = []
+
+        def extract(self, content, *, title=""):
+            self.calls.append((content, title))
+            return GraphExtraction()
+
+    eng, wid, rid, _ = _cluster_with_one_secret_untrusted_source()
+    extractor = RecordingGraphExtractor()
+    eng.graph_extractor = extractor
+    evolved = []
+
+    def record_evolution(memory_id, *args, **kwargs):
+        evolved.append(memory_id)
+        return []
+
+    eng._evolve = record_evolution
+
+    report = consolidate(eng, workspace_id=wid, repo_id=rid)
+
+    assert report["digests_created"]
+    assert extractor.calls == []
+    assert evolved == []
+
+
+def test_unlabelled_legacy_sources_fail_closed_during_consolidation():
+    eng, wid, rid, source_ids = _cluster_with_one_secret_untrusted_source()
+    eng.store.conn.executemany(
+        "UPDATE memories SET provenance='{}' WHERE id=?",
+        [(source_id,) for source_id in source_ids],
+    )
+    eng.store.conn.commit()
+
+    report = consolidate(eng, workspace_id=wid, repo_id=rid)
+    digest = eng.store.get_memory(report["digests_created"][0]["id"])
+
+    assert digest.provenance["trusted"] is False
+    assert digest.metadata["provenance"]["trusted"] is False
+
+
 def test_profile_digest_inherits_strictest_sensitivity_and_trust():
     from engraphis.core.consolidate import consolidate_profiles
 
@@ -616,6 +679,13 @@ def test_profile_digest_inherits_strictest_sensitivity_and_trust():
         "UPDATE memories SET sensitivity='sensitive', provenance='{\"trusted\": false}' "
         "WHERE id=?", (source.id,))
     eng.store.conn.commit()
+    evolved = []
+
+    def record_evolution(memory_id, *args, **kwargs):
+        evolved.append(memory_id)
+        return []
+
+    eng._evolve = record_evolution
 
     report = consolidate_profiles(eng, workspace_id=wid, repo_id=rid)
 
@@ -623,6 +693,7 @@ def test_profile_digest_inherits_strictest_sensitivity_and_trust():
     assert profile.sensitivity == "sensitive"
     assert profile.provenance.get("trusted") is False
     assert profile.metadata["provenance"]["source"] == "profile_consolidation"
+    assert evolved == []
 
 
 # ── scan-limit regression: the type filter must run in SQL, not in Python ───────────

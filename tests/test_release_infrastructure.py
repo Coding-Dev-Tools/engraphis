@@ -49,17 +49,17 @@ def test_published_image_and_railway_template_fail_safe_to_customer_mode():
         assert removed not in template["variables"]
 
 
-def test_compose_api_profile_defers_token_gate_until_profile_startup():
+def test_all_public_launchers_converge_on_the_v2_service():
     compose = _text("docker-compose.yml")
-    api_profile = compose.split("  engraphis-api:\n", 1)[1].split("\nvolumes:", 1)[0]
     readme = _text("README.md")
     launcher = _text("scripts/start_server.py")
 
-    assert "ENGRAPHIS_HOST: 0.0.0.0" in api_profile
-    assert "ENGRAPHIS_API_TOKEN: ${ENGRAPHIS_API_TOKEN:-}" in api_profile
-    assert 'not os.environ.get("ENGRAPHIS_API_TOKEN", "").strip()' in launcher
-    assert 'ap.error("non-loopback serving requires ENGRAPHIS_API_TOKEN")' in launcher
-    assert "ENGRAPHIS_API_TOKEN='generate-a-strong-unique-value'" in readme
+    assert "engraphis-api:" not in compose
+    assert "engraphis_v1.db" not in compose
+    assert 'command: ["engraphis-dashboard", "--no-open"]' in compose
+    assert "start_dashboard.main(args)" in launcher
+    assert "engraphis.app" not in launcher
+    assert "same v2 service" in readme
 
 
 def test_ci_and_release_audit_production_image_dependencies():
@@ -110,12 +110,18 @@ def test_ci_and_release_never_hide_skips_or_lose_the_full_stack_silently():
 
 
 def test_release_builds_one_portable_open_core_wheel():
+    ci = _text(".github/workflows/ci.yml")
     release = _text(".github/workflows/release.yml")
     pyproject = _text("pyproject.toml")
 
     assert 'requires-python = ">=3.9"' in pyproject
-    for version in ("3.9", "3.10", "3.11", "3.12"):
+    for version in ("3.9", "3.10", "3.11", "3.12", "3.13", "3.14"):
         assert f'"Programming Language :: Python :: {version}"' in pyproject
+    assert 'python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]' in ci
+    assert (
+        'python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]'
+        in release
+    )
     assert not (ROOT / ".github/workflows/build-compiled-wheels.yml").exists()
     assert "cython" not in pyproject.lower()
     assert "cibuildwheel" not in release

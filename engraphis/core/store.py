@@ -210,6 +210,9 @@ _PUBLIC_RECEIPT_LABELS_BY_KEY = {
     "retrieval_profile": {"balanced", "auto", "lexical", "graph", "code"},
     "candidate_depth": {"fixed", "adaptive"},
     "response_mode": {"full", "compact"},
+    "adaptive_mode": {
+        "history_bypass", "retrieval", "history_fallback", "low_confidence_abstain",
+    },
 }
 
 
@@ -223,6 +226,7 @@ def _receipt_metadata(metadata: dict) -> dict:
         "entities_added", "relations_added",
         "retrieval_profile", "candidate_depth", "candidate_k_requested",
         "candidate_k_used", "response_mode", "historical", "token_usage",
+        "adaptive_mode",
     }
     def content_free_label(key: str, value: str) -> str:
         normalized = value.strip().casefold().replace(" ", "_")
@@ -283,11 +287,11 @@ _PUBLIC_RECEIPT_METADATA_KEYS = {
     "entities", "relations", "tables", "dry_run", "error_count",
     "entities_added", "relations_added", "retrieval_profile", "candidate_depth",
     "candidate_k_requested", "candidate_k_used", "response_mode", "historical",
-    "token_usage",
+    "token_usage", "adaptive_mode",
 }
 _PUBLIC_RECEIPT_OPERATIONS = {
     "remember", "recall", "promote", "link", "index_repo",
-    "graph_index", "grounded_recall", "consolidate", "sync",
+    "graph_index", "grounded_recall", "adaptive_context", "consolidate", "sync",
 }
 _PUBLIC_RECEIPT_STATUSES = {
     "ok", "add", "noop", "invalidate", "relate", "ingested",
@@ -1088,6 +1092,16 @@ class Store:
             self._migrate_mem_link_history_v5()
         if previous_version < 6:
             self._migrate_code_file_history_v6()
+        if previous_version < 7:
+            # v6 deterministic vectors predate aliases and measurement features.
+            # ``MemoryEngine.create`` owns the actual re-embed because only it has
+            # the configured Embedder and VectorIndex; this durable marker keeps a
+            # failed/interrupted rebuild retryable on the next startup.
+            self.conn.execute(
+                "INSERT OR IGNORE INTO embedding_state(identity, version, updated_at) "
+                "VALUES (?,?,?)",
+                ("deterministic_hashing", "v1_legacy", now_ts()),
+            )
         # Classify pre-v3 edges. Existing rows defaulted to semantic during ALTER TABLE;
         # infer their more specific logical layer from the relationship label.
         if previous_version < 3:
@@ -1849,6 +1863,22 @@ class Store:
     # ── memories ──────────────────────────────────────────────────────────────
     def add_memory(self, rec: MemoryRecord, *, audit: bool = True,
                    commit: bool = True) -> str:
+        # ``Store`` is a local-programmatic capability.  Stamp direct new writes
+        # explicitly so prompt-facing recall can fail closed for genuinely legacy
+        # rows without making current low-level integrations silently disappear.
+        # External ingress (service/sync) provides its own stricter provenance.
+        provenance = dict(rec.provenance or {})
+        if "trusted" not in provenance:
+            provenance.update({"source": provenance.get("source", "local_store"),
+                               "trusted": True,
+                               "trust_origin": provenance.get(
+                                   "trust_origin", "local_store"
+                               )})
+        rec.provenance = provenance
+        metadata = dict(rec.metadata or {})
+        if not isinstance(metadata.get("provenance"), dict):
+            metadata["provenance"] = dict(provenance)
+        rec.metadata = metadata
         if not rec.id:
             rec.id = ids.new_id("memory")
         existing = self.conn.execute(
@@ -1953,6 +1983,16 @@ class Store:
         rows = self.conn.execute(sql, params).fetchall()
         return [_row_to_record(r) for r in rows]
 
+    def count_memories(self, flt: Optional[SearchFilter] = None,
+                       *, include_invalid: bool = False) -> int:
+        """Count records visible to a search filter without materializing them."""
+        sql = "SELECT COUNT(*) AS count FROM memories"
+        where, params = self._where(flt, include_invalid)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        row = self.conn.execute(sql, params).fetchone()
+        return int(row["count"] if row is not None else 0)
+
     def list_live_claims(self, *, workspace_id: str, repo_id: Optional[str],
                          session_id: Optional[str], scope: Scope, mtype: MemoryType,
                          subject_key: str, claim_kind: str) -> list[MemoryRecord]:
@@ -2011,10 +2051,11 @@ class Store:
         return [_row_to_record(row) for row in rows]
 
     def list_memories_page(self, flt: Optional[SearchFilter] = None, *,
-                           after_id: str = "", limit: int = 500) -> list[MemoryRecord]:
+                           after_id: str = "", limit: int = 500,
+                           include_invalid: bool = False) -> list[MemoryRecord]:
         """Return one deterministic keyset page without materializing the full scope."""
         sql = "SELECT * FROM memories"
-        where, params = self._where(flt, include_invalid=False)
+        where, params = self._where(flt, include_invalid=include_invalid)
         if after_id:
             where.append("id>?")
             params.append(after_id)
@@ -2076,6 +2117,21 @@ class Store:
             "INSERT OR REPLACE INTO mem_vectors(id, dim, vector, model) VALUES (?,?,?,?)",
             (memory_id, int(v.shape[0]), v.tobytes(), model),
         )
+
+    def embedding_version(self, identity: str) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT version FROM embedding_state WHERE identity=?", (identity,)
+        ).fetchone()
+        return str(row["version"]) if row is not None else None
+
+    def set_embedding_version(self, identity: str, version: str) -> None:
+        self.conn.execute(
+            "INSERT INTO embedding_state(identity, version, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(identity) DO UPDATE SET "
+            "version=excluded.version, updated_at=excluded.updated_at",
+            (identity, version, now_ts()),
+        )
+        self.conn.commit()
 
     def iter_vectors(self, flt: Optional[SearchFilter] = None,
                      *, include_invalid: bool = False,
@@ -2760,16 +2816,20 @@ class Store:
             indexed_sql += " AND (e.workspace_id=? OR e.workspace_id IS NULL)"
             indexed_params.append(workspace_id)
         rows = self.conn.fetchall(indexed_sql, indexed_params)
-        if not rows:
-            # Compatibility fallback for a direct legacy SQL writer. Canonical write
-            # paths populate edge_supports, so normal invalidation is indexed.
-            sql = ("SELECT id, provenance FROM edges "
-                   "WHERE valid_to IS NULL AND provenance LIKE ? ESCAPE '\\'")
-            params: list[Any] = [f"%{_escape_like(memory_id)}%"]
-            if workspace_id is not None:
-                sql += " AND (workspace_id=? OR workspace_id IS NULL)"
-                params.append(workspace_id)
-            rows = self.conn.fetchall(sql, params)
+        # Compatibility fallback for a direct legacy SQL writer. Canonical write
+        # paths populate edge_supports, but a workspace can hold both normalized and
+        # older direct-provenance edges. Query both sources: using the fallback only
+        # when the indexed arm is empty leaves those old edges live after a downgrade.
+        sql = ("SELECT id, provenance FROM edges "
+               "WHERE valid_to IS NULL AND provenance LIKE ? ESCAPE '\\'")
+        params: list[Any] = [f"%{_escape_like(memory_id)}%"]
+        if workspace_id is not None:
+            sql += " AND (workspace_id=? OR workspace_id IS NULL)"
+            params.append(workspace_id)
+        seen = {row["id"] for row in rows}
+        rows.extend(
+            row for row in self.conn.fetchall(sql, params) if row["id"] not in seen
+        )
         ids_to_close: list[str] = []
         for row in rows:
             prov = _loads(row["provenance"], {})
@@ -2808,6 +2868,36 @@ class Store:
                 "AND valid_to IS NULL AND expired_at IS NULL",
                 (ts, recorded_at, *ids_to_close),
             )
+        if commit:
+            self.conn.commit()
+
+    def retire_memory_graph_state(self, memory_id: str, *, at: Optional[float] = None,
+                                  commit: bool = True) -> None:
+        """Close live graph derivatives of one memory without deleting their history.
+
+        A trust downgrade can leave the memory itself valid for inspection while making
+        its previously trusted graph evidence unsafe to traverse. Retire every current
+        support, incidence, and memory/code link at one scan-time boundary so historical
+        reads remain explainable but current graph recall cannot route through it.
+        """
+        recorded_at = now_ts()
+        ts = at if at is not None else recorded_at
+        self.invalidate_edges_for_memory(memory_id, at=ts, commit=False)
+        self.conn.execute(
+            "UPDATE memory_entities SET valid_to=?, valid_to_recorded_at=? "
+            "WHERE memory_id=? AND valid_to IS NULL AND expired_at IS NULL",
+            (ts, recorded_at, memory_id),
+        )
+        self.conn.execute(
+            "UPDATE mem_links SET valid_to=?, valid_to_recorded_at=? "
+            "WHERE (a=? OR b=?) AND valid_to IS NULL AND expired_at IS NULL",
+            (ts, recorded_at, memory_id, memory_id),
+        )
+        self.conn.execute(
+            "UPDATE code_memory_links SET valid_to=?, valid_to_recorded_at=? "
+            "WHERE memory_id=? AND valid_to IS NULL AND expired_at IS NULL",
+            (ts, recorded_at, memory_id),
+        )
         if commit:
             self.conn.commit()
 

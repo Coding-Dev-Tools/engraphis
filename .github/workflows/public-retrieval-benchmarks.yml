@@ -1,0 +1,269 @@
+name: Public retrieval benchmark point
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Unique operator-supplied run identifier"
+        required: true
+        type: string
+      manifest_path:
+        description: "Mounted locked point manifest under the protected benchmark volume"
+        required: true
+        type: string
+      series_path:
+        description: "Mounted locked comparison-series contract under the protected benchmark volume"
+        required: true
+        type: string
+      environment_lock_path:
+        description: "Mounted pip-freeze lock for the pre-provisioned benchmark environment"
+        required: true
+        type: string
+      environment_lock_sha256:
+        description: "Lowercase SHA-256 of the mounted environment lock"
+        required: true
+        type: string
+      claims_path:
+        description: "Mounted pre-reviewed public claims JSON under the protected benchmark volume"
+        required: true
+        type: string
+      execution_authorized:
+        description: "I authorize this offline benchmark point within the fixed 24-hour compute ceiling"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-retrieval-benchmark-${{ inputs.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: retrieval / ${{ inputs.run_id }}
+    environment: public-benchmark-protected
+    runs-on: [self-hosted, benchmark]
+    timeout-minutes: 1440
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify immutable clean source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Bind private state and validate mounted inputs
+        shell: bash
+        env:
+          RUN_ID: ${{ inputs.run_id }}
+          MANIFEST_PATH: ${{ inputs.manifest_path }}
+          SERIES_PATH: ${{ inputs.series_path }}
+          ENVIRONMENT_LOCK_PATH: ${{ inputs.environment_lock_path }}
+          ENVIRONMENT_LOCK_SHA256: ${{ inputs.environment_lock_sha256 }}
+          CLAIMS_PATH: ${{ inputs.claims_path }}
+          EXECUTION_AUTHORIZED: ${{ inputs.execution_authorized }}
+          BENCHMARK_PYTHON_CONFIG: ${{ vars.ENGRAPHIS_BENCHMARK_PYTHON }}
+          STATE_ROOT: ${{ vars.ENGRAPHIS_BENCHMARK_STATE_ROOT }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
+          test "$EXECUTION_AUTHORIZED" = "true"
+          [[ "$ENVIRONMENT_LOCK_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          for value in "$MANIFEST_PATH" "$SERIES_PATH" "$ENVIRONMENT_LOCK_PATH" "$CLAIMS_PATH" \
+                       "$BENCHMARK_PYTHON_CONFIG" "$STATE_ROOT"; do
+            test -n "$value"
+            [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]]
+          done
+
+          resolve_protected_file() {
+            local raw="$1"
+            local root="$2"
+            local suffix="$3"
+            local label="$4"
+            test -f "$raw"
+            local resolved root_real name
+            resolved="$(realpath "$raw")"
+            root_real="$(realpath "$root")"
+            [[ "$resolved" == "$root_real/"* ]] || {
+              echo "$label must resolve inside $root" >&2
+              return 2
+            }
+            name="$(basename "$resolved")"
+            [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.$suffix$ ]] || {
+              echo "$label has an unsafe filename" >&2
+              return 2
+            }
+            printf '%s' "$resolved"
+          }
+
+          manifest_real="$(resolve_protected_file "$MANIFEST_PATH" \
+            /opt/engraphis-benchmarks/manifests json manifest_path)"
+          series_real="$(resolve_protected_file "$SERIES_PATH" \
+            /opt/engraphis-benchmarks/series json series_path)"
+          environment_lock_real="$(resolve_protected_file "$ENVIRONMENT_LOCK_PATH" \
+            /opt/engraphis-benchmarks/environments lock environment_lock_path)"
+          claims_real="$(resolve_protected_file "$CLAIMS_PATH" \
+            /opt/engraphis-benchmarks/claims json claims_path)"
+          python_real="$(realpath "$BENCHMARK_PYTHON_CONFIG")"
+          environment_root_real="$(realpath /opt/engraphis-benchmarks/environments)"
+          test -x "$python_real"
+          [[ "$python_real" == "$environment_root_real/"* ]]
+          [[ "$(basename "$python_real")" =~ ^python(3(\.11)?)?$ ]]
+
+          test -n "$STATE_ROOT"
+          mkdir -p -- "$STATE_ROOT"
+          state_root_real="$(realpath "$STATE_ROOT")"
+          workspace_real="$(realpath "$GITHUB_WORKSPACE")"
+          if [ "$state_root_real" = "/" ] || [ "$state_root_real" = "$workspace_real" ] || \
+             [[ "$state_root_real" == "$workspace_real/"* ]]; then
+            echo "benchmark state must be outside the checkout" >&2
+            exit 2
+          fi
+          state_dir="$state_root_real/$RUN_ID"
+          public_dir="$state_dir/public-upload"
+          mkdir -p -- "$state_dir" "$public_dir"
+          chmod 700 "$state_root_real" "$state_dir" "$public_dir"
+          {
+            printf 'BENCHMARK_STATE_DIR=%s\n' "$state_dir"
+            printf 'PUBLIC_ARTIFACT_DIR=%s\n' "$public_dir"
+            printf 'BENCHMARK_PYTHON=%s\n' "$python_real"
+            printf 'MANIFEST_PATH=%s\n' "$manifest_real"
+            printf 'SERIES_PATH=%s\n' "$series_real"
+            printf 'ENVIRONMENT_LOCK_PATH=%s\n' "$environment_lock_real"
+            printf 'ENVIRONMENT_LOCK_SHA256=%s\n' "$ENVIRONMENT_LOCK_SHA256"
+            printf 'CLAIMS_PATH=%s\n' "$claims_real"
+          } >> "$GITHUB_ENV"
+
+      - name: Verify the locked offline environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' "$ENVIRONMENT_LOCK_SHA256" "$ENVIRONMENT_LOCK_PATH" | sha256sum -c -
+          if grep -Ev '^[A-Za-z0-9_.-]+==[^[:space:]]+$' "$ENVIRONMENT_LOCK_PATH" | grep -q .; then
+            echo "environment lock must contain exact name==version entries only" >&2
+            exit 2
+          fi
+          actual="$(mktemp)"
+          trap 'rm -f "$actual"' EXIT
+          "$BENCHMARK_PYTHON" -m pip freeze --all --exclude-editable | LC_ALL=C sort > "$actual"
+          LC_ALL=C sort "$ENVIRONMENT_LOCK_PATH" | diff -u - "$actual"
+          "$BENCHMARK_PYTHON" -m pip check
+
+      - name: Bind the approved point to this checkout and series
+        shell: bash
+        env:
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          "$BENCHMARK_PYTHON" - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          point = json.loads(Path(os.environ["MANIFEST_PATH"]).read_text(encoding="utf-8"))
+          series = json.loads(Path(os.environ["SERIES_PATH"]).read_text(encoding="utf-8"))
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          point_root = Path(point["repo"]["root"])
+          if not point_root.is_absolute():
+              point_root = workspace / point_root
+          if point_root.resolve() != workspace:
+              raise SystemExit("point manifest repo.root must equal the workflow checkout")
+          if point["run_id"] != os.environ["RUN_ID"]:
+              raise SystemExit("point manifest run_id must match the workflow run_id")
+          if point["repo"]["commit"] != os.environ["GITHUB_SHA"]:
+              raise SystemExit("point manifest commit must match GITHUB_SHA")
+          if series["source"]["git_commit"] != os.environ["GITHUB_SHA"]:
+              raise SystemExit("series commit must match GITHUB_SHA")
+          bindings = (
+              (series["profile"]["benchmark"]["repository_revision"],
+               point["source"]["revision"], "benchmark repository revision"),
+              (series["profile"]["benchmark"]["dataset_revision"],
+               point["dataset"]["revision"], "dataset revision"),
+              (series["profile"]["embedding"]["revision"],
+               point["models"]["embedding"]["revision"], "embedding revision"),
+              (series["profile"]["reader"]["revision"],
+               point["models"]["reader"]["revision"], "reader revision"),
+              (series["profile"]["token_budgets"],
+               point["config"]["token_budgets"], "token budgets"),
+          )
+          for series_value, point_value, label in bindings:
+              if series_value != point_value:
+                  raise SystemExit(f"series and point disagree on {label}")
+          if point["config"]["baseline_label"] not in series["benchmark"]["baselines"]:
+              raise SystemExit("point baseline is absent from the approved series")
+          output_root = Path(point["outputs"]["directory"])
+          if not output_root.is_absolute():
+              output_root = workspace / output_root
+          state = Path(os.environ["BENCHMARK_STATE_DIR"]).resolve()
+          if output_root.resolve() != state:
+              raise SystemExit("point outputs.directory must equal the private run state directory")
+          PY
+
+      - name: Validate the declared comparative series contract
+        shell: bash
+        run: |
+          "$BENCHMARK_PYTHON" -m eval.public_readiness --series "$SERIES_PATH"
+
+      - name: Plan the locked retrieval point without running it
+        shell: bash
+        run: |
+          "$BENCHMARK_PYTHON" -m scripts.run_public_benchmark --manifest "$MANIFEST_PATH" \
+            --plan-output "$BENCHMARK_STATE_DIR/plan.json"
+
+      - name: Execute the locked retrieval point
+        shell: bash
+        run: |
+          "$BENCHMARK_PYTHON" -m scripts.run_public_benchmark --manifest "$MANIFEST_PATH" \
+            --execute --claims-input "$CLAIMS_PATH"
+
+      - name: Export validated redacted artifacts only
+        shell: bash
+        env:
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          "$BENCHMARK_PYTHON" - <<'PY'
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          plan = json.loads(
+              (Path(os.environ["BENCHMARK_STATE_DIR"]) / "plan.json").read_text(encoding="utf-8")
+          )
+          outputs = plan["outputs"]
+          destination = Path(os.environ["PUBLIC_ARTIFACT_DIR"])
+          run_id = os.environ["RUN_ID"]
+          state = Path(os.environ["BENCHMARK_STATE_DIR"]).resolve()
+          for key, suffix in (("artifact", ".json"), ("claims", ".claims.json")):
+              source = Path(outputs[key])
+              if source.is_symlink() or not source.is_file():
+                  raise SystemExit(f"validated public {key} is missing")
+              resolved = source.resolve()
+              if state not in resolved.parents:
+                  raise SystemExit(f"validated public {key} escaped private run state")
+              target = destination / f"{run_id}{suffix}"
+              shutil.copy2(resolved, target)
+          PY
+          (
+            cd "$PUBLIC_ARTIFACT_DIR"
+            sha256sum "$RUN_ID.json" "$RUN_ID.claims.json" > SHA256SUMS
+          )
+
+      - name: Upload redacted public artifacts only
+        if: ${{ success() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: public-retrieval-benchmark-${{ inputs.run_id }}
+          path: |
+            ${{ env.PUBLIC_ARTIFACT_DIR }}/${{ inputs.run_id }}.json
+            ${{ env.PUBLIC_ARTIFACT_DIR }}/${{ inputs.run_id }}.claims.json
+            ${{ env.PUBLIC_ARTIFACT_DIR }}/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

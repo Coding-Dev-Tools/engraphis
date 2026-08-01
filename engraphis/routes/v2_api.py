@@ -27,6 +27,8 @@ from pydantic import BaseModel, Field
 
 from engraphis import licensing
 from engraphis.config import DEFAULT_RELAY_URL, canonicalize_relay_url, settings
+from engraphis.core.poisoning import prompt_eligible
+from engraphis.core.scoring import normalize
 from engraphis.service import (
     GraphIndexRebuilding,
     GraphSceneCapacityExceeded,
@@ -34,6 +36,7 @@ from engraphis.service import (
     ValidationError,
 )
 from engraphis.core.store import _escape_like
+from engraphis.core.textutil import jaccard, tokenize
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 logger = logging.getLogger("engraphis.api")
@@ -41,6 +44,16 @@ logger = logging.getLogger("engraphis.api")
 _service: Optional[MemoryService] = None
 _AUTOMATION_BOOTSTRAP_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _AUTOMATION_BOOTSTRAP_LOCKS_GUARD = threading.Lock()
+_KEYWORD_SCORE_SEMANTICS = {
+    "relative_score": (
+        "Query-relative lexical Jaccard score, min-max normalized among the returned "
+        "keyword-fallback memories. It is not a confidence value or threshold."
+    ),
+    "absolute_support": (
+        "Absolute lexical Jaccard support in [0, 1]. Semantic support is unavailable "
+        "while the dashboard is using keyword fallback."
+    ),
+}
 
 
 def _automation_bootstrap_lock(organization_id: str, workspace_id: str) -> threading.Lock:
@@ -247,6 +260,9 @@ def _mem(m: dict) -> dict:
         "scope": m.get("scope") or "",
         "namespace": m.get("workspace") or m.get("scope") or "",
         "score": m.get("score"),
+        "relative_score": m.get("relative_score"),
+        "absolute_support": m.get("absolute_support"),
+        "arm": m.get("arm"),
         "retention": m.get("retention"),
         "pinned": bool(m.get("pinned", False)),
         "importance": m.get("importance"),
@@ -292,7 +308,8 @@ def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
         system_anchor = float(known_at) if known_at is not None else time.time()
         sql = ("SELECT id, scope, mtype, title, content, summary, pinned, importance, "
                "valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at, "
-               "subject_key, claim_kind, provenance FROM memories WHERE workspace_id=? "
+               "subject_key, claim_kind, provenance, metadata FROM memories "
+               "WHERE workspace_id=? "
                "AND COALESCE(scope, 'workspace')!='session' "
                "AND (valid_from IS NULL OR valid_from<=?) "
                "AND (valid_to IS NULL OR ?<valid_to "
@@ -308,8 +325,7 @@ def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
             sql += " AND (" + " OR ".join(["title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'" for _ in terms]) + ")"
             for t in terms:
                 args += ["%" + _escape_like(t) + "%", "%" + _escape_like(t) + "%"]
-        sql += " ORDER BY COALESCE(last_access, valid_from) DESC LIMIT ?"
-        args.append(int(limit))
+        sql += " ORDER BY COALESCE(last_access, valid_from) DESC"
         rows = conn.execute(sql, args).fetchall()
     finally:
         conn.close()
@@ -319,15 +335,57 @@ def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
             return _json.loads(pp) if isinstance(pp, str) and pp else {}
         except Exception:  # noqa: BLE001
             return {}
-    return [{"id": r["id"], "document_id": r["id"], "title": r["title"] or "",
-             "content": r["content"] or r["summary"] or "", "memory_type": r["mtype"] or "semantic",
-             "scope": r["scope"] or "", "pinned": bool(r["pinned"]),
-             "importance": r["importance"], "valid_from": r["valid_from"],
-             "valid_to": r["valid_to"],
-             "valid_to_recorded_at": r["valid_to_recorded_at"],
-             "ingested_at": r["ingested_at"], "expired_at": r["expired_at"],
-             "subject_key": r["subject_key"] or "", "claim_kind": r["claim_kind"] or "",
-             "provenance": _prov(r["provenance"])} for r in rows]
+    eligible = []
+    for row in rows:
+        provenance = _prov(row["provenance"])
+        metadata = _prov(row["metadata"])
+        if not prompt_eligible(provenance, metadata):
+            continue
+        eligible.append({
+            "id": row["id"], "document_id": row["id"], "title": row["title"] or "",
+            "content": row["content"] or row["summary"] or "",
+            "memory_type": row["mtype"] or "semantic", "scope": row["scope"] or "",
+            "pinned": bool(row["pinned"]), "importance": row["importance"],
+            "valid_from": row["valid_from"], "valid_to": row["valid_to"],
+            "valid_to_recorded_at": row["valid_to_recorded_at"],
+            "ingested_at": row["ingested_at"], "expired_at": row["expired_at"],
+            "subject_key": row["subject_key"] or "", "claim_kind": row["claim_kind"] or "",
+            "provenance": provenance,
+        })
+    # Do not cap the SQL candidates first: untrusted recent rows must not consume
+    # the caller's result budget and hide eligible fallback evidence.
+    requested = int(limit)
+    return eligible if requested < 0 else eligible[:requested]
+
+
+def _score_keyword_recall(query: str, memories: list[dict]) -> list[dict]:
+    """Attach truthful lexical-only scores to degraded recall results.
+
+    The fallback has no usable semantic embedder, so its absolute evidence signal is
+    lexical Jaccard only. The relative compatibility score follows the normal recall
+    contract by min-max normalizing within this response; ties retain the SQL fallback's
+    recency order.
+    """
+    query_tokens = tokenize(query)
+    absolute = {
+        str(memory.get("id") or index): jaccard(
+            query_tokens,
+            tokenize(f"{memory.get('title') or ''}\n{memory.get('content') or ''}"),
+        )
+        for index, memory in enumerate(memories)
+    }
+    relative = normalize(absolute)
+    scored = []
+    for index, memory in enumerate(memories):
+        key = str(memory.get("id") or index)
+        item = dict(memory)
+        item["score"] = round(relative.get(key, 0.0), 4)
+        item["relative_score"] = item["score"]
+        item["absolute_support"] = round(absolute.get(key, 0.0), 4)
+        item["arm"] = "lexical"
+        scored.append((index, item))
+    scored.sort(key=lambda pair: (-pair[1]["relative_score"], pair[0]))
+    return [item for _index, item in scored]
 
 
 # ── health / bootstrap ────────────────────────────────────────────────────────
@@ -979,6 +1037,7 @@ def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
         mems = _keyword_search(
             ws, q, k, as_of=as_of, valid_at=valid_at, known_at=known_at,
         )
+        mems = _score_keyword_recall(q, mems)
         if response_mode == "compact":
             # Preserve the public compact-response contract even when semantic recall
             # degrades to the keyword path during an embedding migration.
@@ -987,6 +1046,7 @@ def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
                     key: memory.get(key)
                     for key in (
                         "id", "document_id", "title", "memory_type", "scope", "pinned",
+                        "score", "relative_score", "absolute_support", "arm",
                         "importance", "valid_from", "valid_to", "valid_to_recorded_at",
                         "ingested_at", "expired_at", "subject_key", "claim_kind", "provenance",
                     )
@@ -1003,6 +1063,7 @@ def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
                 "candidate_depth": candidate_depth,
                 "candidate_k_requested": 50, "candidate_k_used": 0,
                 "candidate_depth_reason": "keyword fallback",
+                "score_semantics": dict(_KEYWORD_SCORE_SEMANTICS),
                 "valid_at": valid_at if valid_at is not None else as_of,
                 "known_at": known_at, "historical": historical,
                 "packed_sources": [],
@@ -1328,6 +1389,10 @@ def remember(req: _RememberReq):
     return _run(service().remember, req.content, workspace=req.workspace,
                 repo=req.repo, mtype=req.mtype, scope=req.scope, title=req.title,
                 importance=req.importance, keywords=req.keywords, metadata=req.metadata,
+                # This authenticated local API is the customer node's normal write
+                # surface. Callers can explicitly mark imported/external material
+                # untrusted; that path remains quarantined and ineligible for
+                # grounded answers without disabling ordinary local memory writes.
                 source=req.source, trusted=req.trusted, resolve_conflicts=req.dedupe,
                 retention_class=req.retention_class,
                 retention_reason=req.retention_reason,
@@ -1347,6 +1412,8 @@ class _IntentRememberReq(BaseModel):
     retention_class: Optional[str] = None
     retention_reason: str = ""
     valid_from: Optional[float] = None
+    subject_key: str = ""
+    claim_kind: str = ""
 
 
 @router.post("/intent/remember")
@@ -1359,6 +1426,7 @@ def intent_remember(req: _IntentRememberReq):
         metadata=req.metadata, retention_class=req.retention_class,
         retention_reason=req.retention_reason,
         valid_from=req.valid_from,
+        subject_key=req.subject_key, claim_kind=req.claim_kind,
     )
 
 

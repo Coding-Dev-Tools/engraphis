@@ -39,6 +39,15 @@ def test_server_port_validation(value):
         start_server._port(value)
 
 
+def test_server_alias_starts_the_dashboard_headlessly(monkeypatch):
+    captured = []
+    monkeypatch.setattr(start_server.start_dashboard, "main", captured.append)
+
+    start_server.main(["--reload"])
+
+    assert captured == [["--reload", "--no-open"]]
+
+
 def test_dashboard_missing_server_extra_does_not_print_db_path(monkeypatch, capsys):
     sensitive = "C:/private/operator/memory.db"
     monkeypatch.setenv("ENGRAPHIS_DB_PATH", sensitive)

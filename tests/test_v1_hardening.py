@@ -30,8 +30,8 @@ def test_rest_insert_rejects_oversized_content(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "api_token", "")
     monkeypatch.setattr(settings, "db_path", str(tmp_path / "h.db"))
     monkeypatch.setattr(settings, "loop_interval", 0)
-    from engraphis.app import create_app
-    app = create_app()
+    from engraphis.app import create_legacy_reference_app
+    app = create_legacy_reference_app(legacy_db_path=tmp_path / "h-v1.db")
 
     async def go():
         async with _client(app) as c:
@@ -49,8 +49,8 @@ def test_rate_limit_returns_429(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "loop_interval", 0)
     monkeypatch.setattr(settings, "rate_limit", 2)
     monkeypatch.setattr(settings, "rate_window", 60)
-    from engraphis.app import create_app
-    app = create_app()
+    from engraphis.app import create_legacy_reference_app
+    app = create_legacy_reference_app(legacy_db_path=tmp_path / "r-v1.db")
 
     async def go():
         async with _client(app) as c:
@@ -68,8 +68,8 @@ def test_health_is_exempt_from_rate_limit(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "loop_interval", 0)
     monkeypatch.setattr(settings, "rate_limit", 1)
     monkeypatch.setattr(settings, "rate_window", 60)
-    from engraphis.app import create_app
-    app = create_app()
+    from engraphis.app import create_legacy_reference_app
+    app = create_legacy_reference_app(legacy_db_path=tmp_path / "r2-v1.db")
 
     async def go():
         async with _client(app) as c:

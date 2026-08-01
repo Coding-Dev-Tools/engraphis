@@ -7,6 +7,7 @@ swapped — including Python → Rust hot paths — without rearchitecting.
 """
 from __future__ import annotations
 
+from engraphis.core.adaptive_context import AdaptiveContextResult
 from engraphis.core.ids import new_id, ulid
 from engraphis.core.interfaces import (
     Candidate,
@@ -27,6 +28,7 @@ from engraphis.core.interfaces import (
 __all__ = [
     "new_id",
     "ulid",
+    "AdaptiveContextResult",
     "Candidate",
     "Edge",
     "Embedder",
