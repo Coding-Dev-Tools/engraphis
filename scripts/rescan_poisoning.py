@@ -129,7 +129,7 @@ def rescan(db_path: str, *, apply: bool = False,
                     ),
                 )
                 store.conn.execute("DELETE FROM mem_vectors WHERE id=?", (record.id,))
-                store.invalidate_edges_for_memory(
+                store.retire_memory_graph_state(
                     record.id, at=effective_valid_to, commit=False
                 )
                 store.audit(
@@ -150,6 +150,7 @@ def rescan(db_path: str, *, apply: bool = False,
                         record.id,
                     ),
                 )
+                store.retire_memory_graph_state(record.id, commit=False)
                 store.audit(
                     "poisoning_rescan", "trust_downgrade", record.id,
                     "source=%s" % (source or "legacy_unverified"), commit=False,

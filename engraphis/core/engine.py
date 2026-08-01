@@ -1483,6 +1483,11 @@ class MemoryEngine:
                 and (rec.expired_at is None or flt.known_at < rec.expired_at)
             ]
         for rec in records:
+            # Historical retrieval retains closed facts, not quarantined payloads.
+            # Those remain available only through governed inspection, never a normal
+            # timeline/why query that can return their original content to an agent.
+            if not inspection_eligible(rec.provenance, rec.metadata):
+                continue
             lex = jaccard(q_tokens, tokenize(f"{rec.title} {rec.content}"))
             score = max(sem.get(rec.id, 0.0), lex)
             if score > 0.05:

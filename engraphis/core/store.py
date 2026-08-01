@@ -2816,16 +2816,20 @@ class Store:
             indexed_sql += " AND (e.workspace_id=? OR e.workspace_id IS NULL)"
             indexed_params.append(workspace_id)
         rows = self.conn.fetchall(indexed_sql, indexed_params)
-        if not rows:
-            # Compatibility fallback for a direct legacy SQL writer. Canonical write
-            # paths populate edge_supports, so normal invalidation is indexed.
-            sql = ("SELECT id, provenance FROM edges "
-                   "WHERE valid_to IS NULL AND provenance LIKE ? ESCAPE '\\'")
-            params: list[Any] = [f"%{_escape_like(memory_id)}%"]
-            if workspace_id is not None:
-                sql += " AND (workspace_id=? OR workspace_id IS NULL)"
-                params.append(workspace_id)
-            rows = self.conn.fetchall(sql, params)
+        # Compatibility fallback for a direct legacy SQL writer. Canonical write
+        # paths populate edge_supports, but a workspace can hold both normalized and
+        # older direct-provenance edges. Query both sources: using the fallback only
+        # when the indexed arm is empty leaves those old edges live after a downgrade.
+        sql = ("SELECT id, provenance FROM edges "
+               "WHERE valid_to IS NULL AND provenance LIKE ? ESCAPE '\\'")
+        params: list[Any] = [f"%{_escape_like(memory_id)}%"]
+        if workspace_id is not None:
+            sql += " AND (workspace_id=? OR workspace_id IS NULL)"
+            params.append(workspace_id)
+        seen = {row["id"] for row in rows}
+        rows.extend(
+            row for row in self.conn.fetchall(sql, params) if row["id"] not in seen
+        )
         ids_to_close: list[str] = []
         for row in rows:
             prov = _loads(row["provenance"], {})
@@ -2864,6 +2868,36 @@ class Store:
                 "AND valid_to IS NULL AND expired_at IS NULL",
                 (ts, recorded_at, *ids_to_close),
             )
+        if commit:
+            self.conn.commit()
+
+    def retire_memory_graph_state(self, memory_id: str, *, at: Optional[float] = None,
+                                  commit: bool = True) -> None:
+        """Close live graph derivatives of one memory without deleting their history.
+
+        A trust downgrade can leave the memory itself valid for inspection while making
+        its previously trusted graph evidence unsafe to traverse. Retire every current
+        support, incidence, and memory/code link at one scan-time boundary so historical
+        reads remain explainable but current graph recall cannot route through it.
+        """
+        recorded_at = now_ts()
+        ts = at if at is not None else recorded_at
+        self.invalidate_edges_for_memory(memory_id, at=ts, commit=False)
+        self.conn.execute(
+            "UPDATE memory_entities SET valid_to=?, valid_to_recorded_at=? "
+            "WHERE memory_id=? AND valid_to IS NULL AND expired_at IS NULL",
+            (ts, recorded_at, memory_id),
+        )
+        self.conn.execute(
+            "UPDATE mem_links SET valid_to=?, valid_to_recorded_at=? "
+            "WHERE (a=? OR b=?) AND valid_to IS NULL AND expired_at IS NULL",
+            (ts, recorded_at, memory_id, memory_id),
+        )
+        self.conn.execute(
+            "UPDATE code_memory_links SET valid_to=?, valid_to_recorded_at=? "
+            "WHERE memory_id=? AND valid_to IS NULL AND expired_at IS NULL",
+            (ts, recorded_at, memory_id),
+        )
         if commit:
             self.conn.commit()
 
