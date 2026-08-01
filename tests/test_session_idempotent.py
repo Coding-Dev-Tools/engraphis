@@ -276,27 +276,29 @@ def test_team_session_private_memories_are_excluded_without_a_session_id():
     workspace as sufficient authority.
     """
     svc = _svc()
-    secret = "ALICE_SESSION_PRIVATE_DO_NOT_SHARE"
+    private_memory = "ALICE_SESSION_PRIVATE_MEMORY"
     try:
         set_current_user({"id": "usr_alice", "email": "alice@example.test", "role": "member"})
         svc.create_workspace("w", visibility="shared", confirmed=True)
         svc.remember("ordinary shared memory", workspace="w", repo="r")
         alice = svc.start_session("w", repo="r", agent="codex", goal="private work")
         private = svc.remember(
-            secret, workspace="w", repo="r", session_id=alice["session_id"],
+            private_memory, workspace="w", repo="r", session_id=alice["session_id"],
             scope="session",
         )
 
         set_current_user({"id": "usr_bob", "email": "bob@example.test", "role": "member"})
-        recalled = svc.recall(secret, workspace="w", repo="r")
+        recalled = svc.recall(private_memory, workspace="w", repo="r")
         assert private["id"] not in {memory["id"] for memory in recalled["memories"]}
-        grounded = svc.grounded_recall(secret, workspace="w", repo="r")
+        grounded = svc.grounded_recall(private_memory, workspace="w", repo="r")
         assert private["id"] not in {citation["id"] for citation in grounded["citations"]}
         assert private["id"] not in {
-            memory["id"] for memory in svc.why(secret, workspace="w", repo="r")["answer"]
+            memory["id"]
+            for memory in svc.why(private_memory, workspace="w", repo="r")["answer"]
         }
         assert private["id"] not in {
-            memory["id"] for memory in svc.timeline(secret, workspace="w", repo="r")["history"]
+            memory["id"]
+            for memory in svc.timeline(private_memory, workspace="w", repo="r")["history"]
         }
         assert private["id"] not in {
             memory["id"]

@@ -401,6 +401,7 @@ def run(path: Union[str, Path] = DATASET_PATH) -> dict[str, Any]:
     benign = [result for result in results if result["kind"] == BENIGN_KIND]
     untrusted_only = [result for result in results if result["kind"] == UNTRUSTED_ONLY_KIND]
     untrusted_cases = [result for result in results if result["untrusted_labeled"] is not None]
+    expected_answer_rate = _rate(attacks, "expected_terms_present")
     return {
         "schema": "engraphis-redteam-poisoning/v3",
         "scope": {
@@ -441,7 +442,11 @@ def run(path: Union[str, Path] = DATASET_PATH) -> dict[str, Any]:
                 **_rate(attacks, "answer_contained"),
                 "definition": "grounded answer omits the case-specific attacker canary",
             },
-            "trusted_answer_rate": _rate(attacks, "expected_terms_present"),
+            # Keep the legacy field while exposing the name that matches the
+            # measured condition. Text-mode output uses the latter so the
+            # aggregate never resembles an answer payload.
+            "trusted_answer_rate": expected_answer_rate,
+            "expected_answer_rate": expected_answer_rate,
             "untrusted_prompt_recall_rate": _rate(attacks, "untrusted_prompt_recalled"),
             "adversarial_prompt_recall_rate": _rate(attacks, "adversarial_prompt_recalled"),
             "prompt_marker_exposure_rate": _rate(
@@ -506,7 +511,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             "  synthesis guard exercised : "
             f"{attack['synthesis_guard_exercised_rate']['rate']:.3f}"
         )
-        print(f"  trusted answer rate        : {attack['trusted_answer_rate']['rate']:.3f}")
+        print(f"  expected answer rate       : {attack['expected_answer_rate']['rate']:.3f}")
         print(
             "  attack quarantine rate     : "
             f"{report['write_time']['obvious_attack_quarantine_detection_rate']['rate']:.3f}"
