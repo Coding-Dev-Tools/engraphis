@@ -78,6 +78,7 @@ GRAPH_HINT_KEYS = ("entities", "relations", "structured_extraction")
 
 # code↔memory linking (see _CodeSymbolMatcher / _link_memory_to_code)
 CODE_LINK_MAX_LINKS = 200      # per-memory fan-out cap (unchanged behaviour)
+EMBEDDING_REBUILD_BATCH = 200
 CODE_MATCHER_CACHE_SIZE = 4    # compiled matchers kept in memory, keyed by repo
 # Alternatives per compiled sub-pattern. One giant alternation risks `re`'s internal
 # code-size limit on a big repo, so the alternation is chunked; chunking cannot change
@@ -342,9 +343,54 @@ class MemoryEngine:
             ext = None                       # ingest() treats None as passthrough
         ge = _get_ge(graph_extractor) if graph_extractor and graph_extractor != "none" else None
         supervisor = get_retention_supervisor(retention_supervisor)
-        return cls(store, embedder, index, reranker, auto_evolve=auto_evolve,
-                   extractor=ext, graph_extractor=ge,
-                   retention_supervisor=supervisor)
+        engine = cls(store, embedder, index, reranker, auto_evolve=auto_evolve,
+                     extractor=ext, graph_extractor=ge,
+                     retention_supervisor=supervisor)
+        engine._rebuild_versioned_embeddings()
+        return engine
+
+    def _rebuild_versioned_embeddings(self) -> None:
+        """Re-embed records when an opt-in backend changes its vector mapping.
+
+        Backends advertise a durable ``embedding_identity`` and ``embedding_version``
+        only when their stored vectors need this lifecycle. The marker is committed
+        *after* every eligible record is indexed, so an interrupted rebuild safely
+        repeats on the next startup rather than leaving a mixed mapping marked current.
+        """
+        identity = str(getattr(self.embedder, "embedding_identity", "") or "").strip()
+        version = str(getattr(self.embedder, "embedding_version", "") or "").strip()
+        if not identity or not version or self.store.embedding_version(identity) == version:
+            return
+
+        rebuilt = 0
+        after_id = ""
+        while True:
+            records = self.store.list_memories_page(
+                after_id=after_id, limit=EMBEDDING_REBUILD_BATCH, include_invalid=True,
+            )
+            if not records:
+                break
+            after_id = records[-1].id
+            eligible = [
+                record for record in records
+                if inspection_eligible(record.provenance, record.metadata)
+            ]
+            if not eligible:
+                continue
+            texts = [
+                f"{record.title}\n{record.content}" if record.title else record.content
+                for record in eligible
+            ]
+            vectors = self.embedder.embed(texts)
+            self.index.upsert([record.id for record in eligible], vectors)
+            rebuilt += len(eligible)
+
+        self.store.set_embedding_version(identity, version)
+        if rebuilt:
+            self.store.audit(
+                "system", "embedding_rebuild", identity,
+                f"version={version}; records={rebuilt}",
+            )
 
     # ── write ─────────────────────────────────────────────────────────────────
     def remember(self, content: str, *, workspace_id: str, repo_id: Optional[str] = None,

@@ -1,10 +1,14 @@
 import hashlib
 
+import numpy as np
+
 from engraphis.backends.embedder_deterministic import DeterministicEmbedder
 from engraphis.backends.embedder_st import get_embedder
 from engraphis.backends.reranker import IdentityReranker, get_reranker
 from engraphis.backends.vector_numpy import NumpyVectorIndex
 from engraphis.backends.vector_sqlitevec import get_vector_index
+from engraphis.core.engine import MemoryEngine
+from engraphis.core.interfaces import MemoryRecord, Scope
 from engraphis.core.store import Store
 
 
@@ -62,6 +66,39 @@ def test_deterministic_embedder_preserves_legacy_feature_hash_mapping():
     assert hashlib.sha256(vectors.tobytes()).hexdigest() == (
         "c2378cd31c56863b0c65fe7b0634aa62250af35b94853298bfed34fbb71875df"
     )
+
+
+def test_deterministic_embedder_upgrade_rebuilds_legacy_vectors(tmp_path):
+    db = tmp_path / "legacy-deterministic.db"
+    text = "The API config allows 1 minute between requests."
+    store = Store(str(db))
+    workspace_id = store.get_or_create_workspace("w")
+    memory_id = store.add_memory(MemoryRecord(
+        id="", content=text, workspace_id=workspace_id, scope=Scope.WORKSPACE,
+    ))
+    quarantined_id = store.add_memory(MemoryRecord(
+        id="", content="Quarantined payload.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+        provenance={"source": "import", "trusted": False, "quarantined": True},
+    ))
+    legacy_vector = np.zeros(64, dtype=np.float32)
+    legacy_vector[0] = 1.0
+    store.put_vector(memory_id, legacy_vector)
+    store.conn.execute("DROP TABLE embedding_state")
+    store.conn.execute("DELETE FROM schema_migrations")
+    store.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (6, 0)")
+    store.conn.commit()
+    store.close()
+
+    engine = MemoryEngine.create(str(db), embed_dim=64, vector_backend="numpy")
+    expected = engine.embedder.embed([text])[0]
+    rebuilt = dict(engine.store.iter_vectors(dim=64))
+
+    assert np.allclose(rebuilt[memory_id], expected)
+    assert not np.allclose(legacy_vector, rebuilt[memory_id])
+    assert quarantined_id not in rebuilt
+    assert engine.store.embedding_version("deterministic_hashing") == "v2_aliases_measurements"
+    engine.store.close()
 
 
 def test_vector_index_factory_modes(monkeypatch):

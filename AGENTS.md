@@ -20,7 +20,7 @@ most common mistake here.
 | Status | Primary scoped, bi-temporal, interface-driven implementation. | Compatibility/reference implementation with flat namespaces. |
 | Model | Scoped + bi-temporal + typed; interface-driven. | Single flat `namespace` string per memory. |
 | Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/`, `static/` |
-| Data | new v2 schema (`SCHEMA_VERSION = 6`) | `engraphis_v1.db` |
+| Data | new v2 schema (`SCHEMA_VERSION = 7`) | `engraphis_v1.db` |
 | Entry | `MemoryEngine.create()` → `core/engine.py` | Internal reference only; never a public launcher |
 
 **Rule:** build new capability on **v2** (`core/` + `backends/`) behind the interfaces.
@@ -178,7 +178,7 @@ These are pure, unit-tested functions — change them only with a corresponding 
 
 ---
 
-## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 6`)
+## 5. Data model cheat-sheet (`core/interfaces.py`, `core/schema.py` — `SCHEMA_VERSION = 7`)
 
 - **Scope hierarchy:** `workspace → repo → session → memory`. Scopes: `session|repo|workspace|user`.
 - **Bi-temporal validity on every record:** world-time `valid_from/valid_to` +
@@ -187,7 +187,7 @@ These are pure, unit-tested functions — change them only with a corresponding 
 - **IDs:** ULID, time-sortable, **typed prefixes** (`ws_`, `repo_`, `ses_`, `mem_`, `ent_`,
   `edg_`, `sym_`, `evt_`, `job_`, `aud_`, `dev_`, `rcpt_`) — `core/ids.py`.
   Lexicographic sort == chronological.
-- **Tables:** `workspaces`, `repos`, `sessions`, `memories`, `mem_vectors`,
+- **Tables:** `workspaces`, `repos`, `sessions`, `memories`, `mem_vectors`, `embedding_state`,
   `mem_fts` (FTS5 + plain-table fallback), `entities`, `edges` (bi-temporal), `mem_links`,
   `memory_entities`, `symbols`, `code_edges`, `code_files`, `code_memory_links`,
   `operation_receipts`,

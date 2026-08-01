@@ -18,6 +18,10 @@ from typing import Literal
 import numpy as np
 
 
+DETERMINISTIC_EMBEDDING_IDENTITY = "deterministic_hashing"
+DETERMINISTIC_EMBEDDING_VERSION = "v2_aliases_measurements"
+
+
 class DeterministicEmbedder:
     def __init__(self, dim: int = 384) -> None:
         self._dim = dim
@@ -25,6 +29,16 @@ class DeterministicEmbedder:
     @property
     def dim(self) -> int:
         return self._dim
+
+    @property
+    def embedding_identity(self) -> str:
+        """Stable storage identity for versioned deterministic vectors."""
+        return DETERMINISTIC_EMBEDDING_IDENTITY
+
+    @property
+    def embedding_version(self) -> str:
+        """Bump when emitted hashing features change persisted-vector meaning."""
+        return DETERMINISTIC_EMBEDDING_VERSION
 
     def embed(self, texts: list[str], *, kind: Literal["text", "code"] = "text") -> np.ndarray:
         out = np.zeros((len(texts), self._dim), dtype=np.float32)

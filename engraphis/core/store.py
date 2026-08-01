@@ -1092,6 +1092,16 @@ class Store:
             self._migrate_mem_link_history_v5()
         if previous_version < 6:
             self._migrate_code_file_history_v6()
+        if previous_version < 7:
+            # v6 deterministic vectors predate aliases and measurement features.
+            # ``MemoryEngine.create`` owns the actual re-embed because only it has
+            # the configured Embedder and VectorIndex; this durable marker keeps a
+            # failed/interrupted rebuild retryable on the next startup.
+            self.conn.execute(
+                "INSERT OR IGNORE INTO embedding_state(identity, version, updated_at) "
+                "VALUES (?,?,?)",
+                ("deterministic_hashing", "v1_legacy", now_ts()),
+            )
         # Classify pre-v3 edges. Existing rows defaulted to semantic during ALTER TABLE;
         # infer their more specific logical layer from the relationship label.
         if previous_version < 3:
@@ -2107,6 +2117,21 @@ class Store:
             "INSERT OR REPLACE INTO mem_vectors(id, dim, vector, model) VALUES (?,?,?,?)",
             (memory_id, int(v.shape[0]), v.tobytes(), model),
         )
+
+    def embedding_version(self, identity: str) -> Optional[str]:
+        row = self.conn.execute(
+            "SELECT version FROM embedding_state WHERE identity=?", (identity,)
+        ).fetchone()
+        return str(row["version"]) if row is not None else None
+
+    def set_embedding_version(self, identity: str, version: str) -> None:
+        self.conn.execute(
+            "INSERT INTO embedding_state(identity, version, updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(identity) DO UPDATE SET "
+            "version=excluded.version, updated_at=excluded.updated_at",
+            (identity, version, now_ts()),
+        )
+        self.conn.commit()
 
     def iter_vectors(self, flt: Optional[SearchFilter] = None,
                      *, include_invalid: bool = False,
