@@ -24,6 +24,17 @@ INTERACTION_BOOST = {
     "engage": 0.30, "reply": 0.50, "create": 1.00,
 }
 
+# ``0`` can occur as an "unspecified" value in legacy or synchronized data.  v2
+# treats it as the normal default rather than silently turning an otherwise ordinary
+# memory into a near-instantly forgotten one.  New v2 writes are validated positive.
+DEFAULT_STABILITY_DAYS = 1.0
+
+# Proactive recall is an agenda, not an answer-ranking path.  A memory the caller
+# deliberately marked important remains eligible for that agenda even after its raw
+# Ebbinghaus score has decayed.  This floor affects only the queryless ranking; it
+# never mutates stability or changes normal query recall.
+PROACTIVE_IMPORTANCE_RETENTION_FLOOR = 0.80
+
 
 @dataclass(frozen=True)
 class Weights:
@@ -50,8 +61,17 @@ def weights_for(mtype: MemoryType) -> Weights:
 
 
 def retention(stability: float, last_access: Optional[float], now: float) -> float:
-    """Ebbinghaus R(t) = exp(-Δt_days / S)."""
-    S = max(stability or 1.0, 1e-3)
+    """Ebbinghaus R(t) = exp(-Δt_days / S).
+
+    ``stability=0`` is a v1-import compatibility sentinel for an unspecified
+    value, so it deliberately means the v2 default of one day.  It is *not* a
+    request to hard-forget the record; forgetting only lowers priority.
+    """
+    try:
+        supplied = float(stability)
+    except (TypeError, ValueError):
+        supplied = DEFAULT_STABILITY_DAYS
+    S = supplied if math.isfinite(supplied) and supplied > 0 else DEFAULT_STABILITY_DAYS
     dt_days = max((now - (last_access if last_access is not None else now)) / 86400.0, 0.0)
     return math.exp(-dt_days / S)
 
@@ -108,3 +128,24 @@ def score_memory(rec: MemoryRecord, *, now: float, weights: Weights,
     x = staleness_penalty(rec.valid_to, now)
     return (w.r * r + w.s * semantic + w.l * lexical + w.g * graph
             + w.i * (rec.importance or 0.0) + w.c * c - w.x * x)
+
+
+def score_proactive(rec: MemoryRecord, *, now: float, weights: Optional[Weights] = None,
+                    importance_retention_floor: Optional[float] = None) -> float:
+    """Rank a queryless proactive agenda without turning decay into hard deletion.
+
+    The raw retention curve still governs ordinary memories.  Explicitly important
+    records receive a bounded eligibility floor, so a useful week-old policy is not
+    displaced solely by a newly written zero-importance scratch note.
+    """
+    w = weights or weights_for(rec.mtype)
+    importance = min(max(float(rec.importance or 0.0), 0.0), 1.0)
+    floor = PROACTIVE_IMPORTANCE_RETENTION_FLOOR
+    if importance_retention_floor is not None:
+        floor = min(max(float(importance_retention_floor), 0.0), 1.0)
+    r = max(
+        retention(rec.stability, rec.last_access, now),
+        importance * floor,
+    )
+    rec_ref = rec.valid_from if rec.valid_from is not None else rec.ingested_at
+    return w.i * importance + w.c * recency(rec_ref, now) + w.r * r

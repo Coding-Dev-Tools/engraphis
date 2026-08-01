@@ -1169,9 +1169,10 @@ def test_relation_labels_are_painted_when_the_labels_box_is_ticked() -> None:
 
     ``graphToggleLabels`` forwards the checkbox straight to ``setSettings({labels})``, and the
     classic renderer answers it with *both* entity names and a ``linkCanvasObject`` that paints
-    each ``link.label``.  The opt-in engine configured no link painter at all, so relation names
-    silently disappeared under ``?graph-engine=next`` and could only be read by hovering one
-    edge at a time.
+    each meaningful ``link.label``. Implicit ``co_occurs`` links are structural and deliberately
+    excluded. The opt-in engine configured no link painter at all, so relation names silently
+    disappeared under ``?graph-engine=next`` and could only be read by hovering one edge at a
+    time.
     """
     report = _run_engine(
         LAY_OUT
@@ -1179,7 +1180,10 @@ def test_relation_labels_are_painted_when_the_labels_box_is_ticked() -> None:
         const api = G.create(el, { reducedMotion: () => true });
         api.setData({
           nodes: [{ id: 'a' }, { id: 'b' }],
-          links: [{ source: 'a', target: 'b', layer: 'entity', label: 'mentions' }],
+          links: [
+            { source: 'a', target: 'b', layer: 'entity', label: 'mentions' },
+            { source: 'b', target: 'a', layer: 'semantic', label: 'co_occurs' },
+          ],
         });
         layOut();
         const unticked = paintLinks(4);
@@ -1196,6 +1200,16 @@ def test_relation_labels_are_painted_when_the_labels_box_is_ticked() -> None:
     assert report["ticked"] == ["mentions"], "the Labels checkbox never paints relation names"
     assert report["labelColor"] == "#123456", "relation labels ignore the active theme"
     assert report["zoomedOut"] == []
+
+
+def test_classic_graph_hides_implicit_co_occurrence_edge_labels() -> None:
+    """The Labels toggle keeps meaningful relation names but omits structural co-occurrences."""
+    static = DASHBOARD.read_text(encoding="utf-8")
+    classic = CLASSIC_DASHBOARD.read_text(encoding="utf-8")
+    assert static == classic, "the classic dashboard assets must remain synchronized"
+    label_guard = "function graphShowRelationLabel(label){return !!label&&String(label).toLowerCase()!=='co_occurs'}"
+    assert label_guard in static
+    assert "if(scale<2.4||!graphShowRelationLabel(link.label)||!link.source.x" in static
 
 
 @requires_node

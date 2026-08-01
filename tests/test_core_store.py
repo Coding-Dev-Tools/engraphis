@@ -22,10 +22,10 @@ def store():
 
 
 def test_schema_version(store):
-    assert store.schema_version == 6
+    assert store.schema_version == 7
 
 
-def test_clean_v6_schema_has_temporal_code_and_memory_link_tables(store):
+def test_clean_v7_schema_has_temporal_code_and_memory_link_tables(store):
     tables = {row["name"] for row in store.conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     ).fetchall()}
@@ -44,6 +44,7 @@ def test_clean_v6_schema_has_temporal_code_and_memory_link_tables(store):
 
     assert "memory_entities" in tables
     assert "code_file_history" in tables
+    assert "embedding_state" in tables
     assert {"valid_from", "valid_to", "ingested_at", "expired_at"} <= link_columns
     assert {"valid_from", "valid_to", "valid_to_recorded_at", "ingested_at", "expired_at"} <= file_history_columns
     assert {"memory_id", "entity_id", "source_kind", "confidence"} <= incidence_columns
@@ -174,7 +175,7 @@ def test_v3_migration_classifies_existing_graph_layers_once(tmp_path):
     row = migrated.conn.execute(
         "SELECT layer FROM edges WHERE id='edge_old'"
     ).fetchone()
-    assert migrated.schema_version == 6
+    assert migrated.schema_version == 7
     assert row["layer"] == "entity"
     migrated.conn.execute(
         "UPDATE edges SET layer='causal' WHERE id='edge_old'"

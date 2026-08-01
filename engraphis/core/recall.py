@@ -38,7 +38,16 @@ from engraphis.core.retrieval_policy import (
     RETRIEVAL_PROFILES,
     profile_config,
 )
+from engraphis.core.poisoning import inspection_eligible, prompt_eligible
 from engraphis.core.store import Store, memory_matches_filter, now_ts
+from engraphis.core.textutil import jaccard, tokenize
+
+
+# Prompt-safe recall may search farther than ordinary recall because backends cannot
+# filter provenance. Keep the second page bounded so a mostly untrusted import never
+# turns one prompt build into a full-scope scan.
+PROMPT_ONLY_MIN_CANDIDATES = 256
+PROMPT_ONLY_MAX_CANDIDATES = 1024
 
 
 @dataclass
@@ -58,6 +67,10 @@ class RecallResult:
     candidate_depth_reason: str = "fixed requested depth"
     retrieval_trace: Optional[list[dict[str, Any]]] = None
     token_counter: Optional[Callable[[str], int]] = field(default=None, repr=False)
+    # Safety metadata is kept off the public chunk projection.  Consumers which make
+    # a trust-sensitive decision (grounded recall) can still honour a record's
+    # quarantine state without exposing arbitrary user metadata through recall().
+    source_metadata: dict[str, dict] = field(default_factory=dict, repr=False)
 
 
 class RecallEngine:
@@ -87,6 +100,8 @@ class RecallEngine:
                retrieval_profile: str = "balanced",
                candidate_depth: str = "fixed",
                diagnostics: bool = False,
+               include_untrusted: bool = False,
+               prompt_only: bool = False,
                arm_config: Optional[ProfileConfig] = None) -> RecallResult:
         flt = flt or SearchFilter()
         requested_historical = flt.historical
@@ -133,35 +148,81 @@ class RecallEngine:
         config = arm_config or profile_config(selected_profile)
 
         # ── arms ─────────────────────────────────────────────────────────────
-        if config.vector:
-            qvec = self.embedder.embed([query])[0]
-            vec = dict(self.index.search(qvec, candidate_k, filter=flt))
-        else:
-            vec = {}
-        lex = (
-            dict(self.store.fts_search(query, candidate_k, filter=flt))
-            if config.lexical else {}
-        )
-        graph = self._graph_arm(query, flt, now, candidate_k=candidate_k) if config.graph else {}
-        code = (
-            self._code_arm(
-                query, flt, candidate_k, historical=requested_historical
+        # Prompt-facing consumers filter untrusted records after retrieval because
+        # vector indexes do not carry provenance. A bounded second page gives trusted
+        # evidence a fair chance to survive without turning one prompt-safe recall
+        # into repeated full-scope scans when a large import is untrusted.
+        prompt_only = bool(prompt_only or not include_untrusted)
+        prompt_target = max(1, int(k))
+        candidate_ceiling = candidate_k
+        arm_candidate_k = candidate_k
+        if prompt_only:
+            arm_candidate_k = candidate_k + min(250, candidate_k * 3)
+            candidate_ceiling = max(
+                arm_candidate_k,
+                min(
+                    PROMPT_ONLY_MAX_CANDIDATES,
+                    max(PROMPT_ONLY_MIN_CANDIDATES, candidate_k * 16),
+                ),
             )
-            if config.code else {}
-        )
+        qvec = self.embedder.embed([query])[0] if config.vector else None
 
-        # ── gather candidates and enforce visibility defensively ─────────────
-        # Sorted, not raw set order: a set of ids iterates in hash order, which varies with
-        # PYTHONHASHSEED, so equal-scored results used to come back in a different order in
-        # every process. Sorting here (and on the final sort below) makes recall reproducible.
-        # One batched lookup replaces ~150 single-row get_memory() calls per recall.
-        candidate_ids = sorted(set(vec) | set(lex) | set(graph) | set(code))
-        fetched = self.store.get_memories(candidate_ids)
-        recs: dict[str, MemoryRecord] = {}
-        for mid in candidate_ids:
-            rec = fetched.get(mid)
-            if rec and memory_matches_filter(rec, flt, at=now):
-                recs[mid] = rec
+        while True:
+            if qvec is not None:
+                vec = dict(self.index.search(qvec, arm_candidate_k, filter=flt))
+            else:
+                vec = {}
+            lex = (
+                dict(self.store.fts_search(query, arm_candidate_k, filter=flt))
+                if config.lexical else {}
+            )
+            graph = (
+                self._graph_arm(query, flt, now, candidate_k=arm_candidate_k)
+                if config.graph else {}
+            )
+            code = (
+                self._code_arm(
+                    query, flt, arm_candidate_k, historical=requested_historical
+                )
+                if config.code else {}
+            )
+
+            # Sorted, not raw set order: a set of ids iterates in hash order, which varies
+            # with PYTHONHASHSEED, so equal-scored results used to come back in a different
+            # order in every process. One batched lookup replaces per-id lookups.
+            candidate_ids = sorted(set(vec) | set(lex) | set(graph) | set(code))
+            fetched = self.store.get_memories(candidate_ids)
+            recs: dict[str, MemoryRecord] = {}
+            for mid in candidate_ids:
+                rec = fetched.get(mid)
+                if (
+                    rec
+                    and memory_matches_filter(rec, flt, at=now)
+                    and (
+                        prompt_eligible(rec.provenance, rec.metadata)
+                        if prompt_only
+                        else inspection_eligible(rec.provenance, rec.metadata)
+                    )
+                ):
+                    recs[mid] = rec
+
+            can_expand = any(
+                enabled and len(values) >= arm_candidate_k
+                for enabled, values in (
+                    (config.vector, vec),
+                    (config.lexical, lex),
+                    (config.graph, graph),
+                    (config.code, code),
+                )
+            )
+            if (
+                not prompt_only
+                or len(recs) >= prompt_target
+                or arm_candidate_k >= candidate_ceiling
+                or not can_expand
+            ):
+                break
+            arm_candidate_k = candidate_ceiling
         if not recs:
             context, packed, usage = self.context_packer.pack(query, [], budget)
             return RecallResult(
@@ -296,10 +357,27 @@ class RecallEngine:
             for c in final:
                 self.store.reinforce(c.id, boost=scoring.INTERACTION_BOOST["recall"])
 
+        # ``Candidate.score`` is deliberately query-relative: its retrieval arms are
+        # min-max normalised before fusion. Publish a separate absolute signal from the
+        # raw cosine already returned by the vector arm plus lexical Jaccard. Reusing
+        # retrieval evidence avoids a second embedding batch on every ordinary recall.
+        support = {
+            candidate.id: _absolute_retrieval_support(
+                query,
+                candidate.record.content,
+                title=candidate.record.title,
+                semantic_cosine=vec.get(candidate.id, 0.0),
+            )
+            for candidate in final
+        }
         chunks = [{
             "id": c.id, "title": c.record.title, "content": c.record.content,
             "scope": c.record.scope.value, "mtype": c.record.mtype.value,
             "repo_id": c.record.repo_id, "score": round(c.score, 4), "arm": c.arm,
+            # ``score`` stays for compatibility.  ``relative_score`` names its actual
+            # contract: compare it only among candidates from this one response.
+            "relative_score": round(c.score, 4),
+            "absolute_support": round(support[c.id], 4),
             "subject_key": c.record.subject_key,
             "claim_kind": c.record.claim_kind,
             "retention": round(scoring.retention(c.record.stability, c.record.last_access, now), 4),
@@ -328,6 +406,11 @@ class RecallEngine:
             candidate_depth_reason=candidate_depth_reason,
             retrieval_trace=trace,
             token_counter=getattr(self.context_packer, "count_tokens", None),
+            source_metadata={
+                candidate.id: _source_safety_metadata(candidate.record)
+                for candidate in final
+                if candidate.record is not None
+            },
         )
 
     # ── arms / helpers ────────────────────────────────────────────────────────
@@ -775,6 +858,47 @@ class RecallEngine:
         """Compatibility helper for callers that exercised the old private method."""
         context, _, _ = self.context_packer.pack("", cands, self.token_budget)
         return context
+
+
+def _source_safety_metadata(record: MemoryRecord) -> dict:
+    """Project only trust flags needed by grounded recall, never caller metadata."""
+    metadata = record.metadata if isinstance(record.metadata, dict) else {}
+    provenance = metadata.get("provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    quarantine = metadata.get("quarantine")
+    quarantine = quarantine if isinstance(quarantine, dict) else {}
+    out = {}
+    trust = {}
+    if provenance.get("trusted") is False:
+        trust["trusted"] = False
+    if provenance.get("quarantined") is True:
+        trust["quarantined"] = True
+    if trust:
+        out["provenance"] = trust
+    if str(quarantine.get("state", "")).casefold() == "quarantined":
+        out["quarantine"] = {"state": "quarantined"}
+    return out
+
+
+def _absolute_retrieval_support(
+    query: str,
+    content: str,
+    *,
+    title: str = "",
+    semantic_cosine: float,
+) -> float:
+    """Bounded, query-independent support from evidence retrieval already computed.
+
+    Vector backends return raw cosine similarity. Lexical Jaccard supplies a useful
+    absolute fallback when the vector arm is disabled or a lexical candidate fell
+    outside the vector arm's top-k. Unlike fused rank, neither component is min-max
+    normalised against the other candidates in this response.
+    """
+    semantic = max(0.0, min(1.0, float(semantic_cosine)))
+    # FTS indexes title and content together, so its absolute evidence floor
+    # must use the same text rather than rejecting a legitimate title-only hit.
+    lexical = jaccard(tokenize(query), tokenize("\n".join((str(title or ""), content))))
+    return max(semantic, lexical)
 
 
 def _entity_pattern(name: str) -> re.Pattern[str]:

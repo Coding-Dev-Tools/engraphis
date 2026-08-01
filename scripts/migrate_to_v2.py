@@ -25,10 +25,58 @@ from typing import Optional
 import numpy as np
 
 from engraphis.core.interfaces import Edge, MemoryRecord, MemoryType, Node, Scope
+from engraphis.core.poisoning import (
+    PoisoningDecision,
+    apply_quarantine_metadata,
+    assess_untrusted_payload,
+)
 from engraphis.core.store import Store, now_ts
 
 _VALID_TYPES = {t.value for t in MemoryType}
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _untrusted_v1_metadata(metadata: dict, *, source: str, namespace: str,
+                           document_id: object = None) -> tuple[dict, dict]:
+    """Envelope a legacy payload before it reaches any v2 write/index path.
+
+    A v1 database predates v2's trust boundary, so neither its metadata nor a
+    familiar-looking provenance field can vouch for a migrated payload.  The
+    envelope is deliberately written last and retained both in the dedicated
+    provenance column and metadata for compatibility with existing readers.
+    """
+    out = dict(metadata or {})
+    provenance = {
+        "source": source,
+        "trusted": False,
+        "trust_origin": "v1_migration",
+        "v1_namespace": namespace,
+    }
+    if document_id is not None:
+        provenance["v1_document_id"] = document_id
+    out["provenance"] = dict(provenance)
+    return out, provenance
+
+
+def _quarantine_migrated_payload(content: str, *, title: str, metadata: dict,
+                                 provenance: dict, created: float,
+                                 embedding: Optional[np.ndarray]) -> tuple[
+                                     dict, dict, float | None, float | None,
+                                     Optional[np.ndarray], PoisoningDecision,
+                                 ]:
+    """Apply the deterministic policy before a v1 payload is retained/indexed."""
+    decision = assess_untrusted_payload(content, title=title, metadata=metadata)
+    if not decision.quarantined:
+        return metadata, provenance, None, None, embedding, decision
+    metadata = apply_quarantine_metadata(metadata, decision)
+    return (
+        metadata,
+        dict(metadata["provenance"]),
+        created,
+        now_ts(),
+        None,
+        decision,
+    )
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -95,21 +143,37 @@ def migrate(old_path: str, new_path: str, *, workspace: str = "default",
         if "vector" in mcols and r["vector"] is not None:
             emb = np.frombuffer(r["vector"], dtype=np.float32).copy()
         created = r["created_at"] if "created_at" in mcols else now_ts()
+        title = (r["title"] if "title" in mcols else "") or ""
+        document_id = r["document_id"] if "document_id" in mcols else None
+        meta, provenance = _untrusted_v1_metadata(
+            meta, source="v1", namespace=ns, document_id=document_id,
+        )
+        meta, provenance, valid_to, valid_to_recorded_at, emb, decision = (
+            _quarantine_migrated_payload(
+                r["content"], title=title, metadata=meta, provenance=provenance,
+                created=created, embedding=emb,
+            )
+        )
         rec = MemoryRecord(
             id="", content=r["content"], mtype=MemoryType(mtype), scope=Scope.REPO,
             workspace_id=wid, repo_id=rid,
-            title=(r["title"] if "title" in mcols else "") or "",
+            title=title,
             keywords=keywords, metadata=meta,
             stability=(r["stability"] if "stability" in mcols else 1.0) or 1.0,
             surprise=(r["surprise"] if "surprise" in mcols else 1.0) or 1.0,
             access_count=(r["access_count"] if "access_count" in mcols else 0) or 0,
             last_access=(r["last_access"] if "last_access" in mcols else created),
-            valid_from=created, ingested_at=created,
-            provenance={"source": "v1", "v1_namespace": ns,
-                        "v1_document_id": r["document_id"] if "document_id" in mcols else None},
+            valid_from=created, valid_to=valid_to,
+            valid_to_recorded_at=valid_to_recorded_at, ingested_at=created,
+            provenance=provenance,
             embedding=emb,
         )
-        store.add_memory(rec)
+        memory_id = store.add_memory(rec)
+        if decision.quarantined:
+            store.audit(
+                "v1_migration", "quarantine", memory_id,
+                "policy=%s; reasons=%s" % (decision.policy, ",".join(decision.reasons)),
+            )
 
     # ── entities ──────────────────────────────────────────────────────────────
     if _has_table(src, "entities"):
@@ -164,12 +228,28 @@ def migrate(old_path: str, new_path: str, *, workspace: str = "default",
                 continue
             ns = r["namespace"] if "namespace" in tcols else "default"
             created = r["created_at"] if "created_at" in tcols else now_ts()
-            store.add_memory(MemoryRecord(
+            title = "synthesized thought"
+            meta, provenance = _untrusted_v1_metadata(
+                {}, source="v1:thought", namespace=ns,
+            )
+            meta, provenance, valid_to, valid_to_recorded_at, _, decision = (
+                _quarantine_migrated_payload(
+                    r["content"], title=title, metadata=meta, provenance=provenance,
+                    created=created, embedding=None,
+                )
+            )
+            memory_id = store.add_memory(MemoryRecord(
                 id="", content=r["content"], mtype=MemoryType.SEMANTIC, scope=Scope.REPO,
-                workspace_id=wid, repo_id=repo_for(ns), title="synthesized thought",
-                valid_from=created, ingested_at=created,
-                provenance={"source": "v1:thought"},
+                workspace_id=wid, repo_id=repo_for(ns), title=title, metadata=meta,
+                valid_from=created, valid_to=valid_to,
+                valid_to_recorded_at=valid_to_recorded_at, ingested_at=created,
+                provenance=provenance,
             ))
+            if decision.quarantined:
+                store.audit(
+                    "v1_migration", "quarantine", memory_id,
+                    "policy=%s; reasons=%s" % (decision.policy, ",".join(decision.reasons)),
+                )
 
     src.close()
     if store is not None:

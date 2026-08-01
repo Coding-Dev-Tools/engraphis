@@ -20,18 +20,20 @@ def test_bearer_auth_blocks_unauthenticated_and_allows_health(monkeypatch, tmp_p
     monkeypatch.setattr(settings, "db_path", str(tmp_path / "auth.db"))
     monkeypatch.setattr(settings, "loop_interval", 0)
 
-    from engraphis.app import create_app
-    app = create_app()
+    from engraphis.app import create_legacy_reference_app
+    app = create_legacy_reference_app(legacy_db_path=tmp_path / "auth-v1.db")
 
     async def go():
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
             health = await c.get("/memory/health")
+            memory_health = await c.get("/memory/health/stale")
             blocked = await c.post("/memory/query", json={"namespace": "x", "query": "y"})
-        return health.status_code, blocked.status_code
+        return health.status_code, memory_health.status_code, blocked.status_code
 
-    health_status, blocked_status = anyio.run(go)
+    health_status, memory_health_status, blocked_status = anyio.run(go)
     assert health_status == 200       # health is public
+    assert memory_health_status == 401  # owner-data diagnostics are not probes
     assert blocked_status == 401      # protected route, no token -> blocked in middleware
 
 
@@ -44,8 +46,8 @@ def test_no_token_means_open_api(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "db_path", str(tmp_path / "open.db"))
     monkeypatch.setattr(settings, "loop_interval", 0)
 
-    from engraphis.app import create_app
-    app = create_app()
+    from engraphis.app import create_legacy_reference_app
+    app = create_legacy_reference_app(legacy_db_path=tmp_path / "open-v1.db")
 
     async def go():
         transport = httpx.ASGITransport(app=app)
@@ -75,8 +77,8 @@ def test_a_remote_peer_is_refused_until_a_token_is_configured(monkeypatch, tmp_p
     monkeypatch.setattr(settings, "db_path", str(tmp_path / "remote.db"))
     monkeypatch.setattr(settings, "loop_interval", 0)
 
-    from engraphis.app import create_app
-    app = create_app()
+    from engraphis.app import create_legacy_reference_app
+    app = create_legacy_reference_app(legacy_db_path=tmp_path / "remote-v1.db")
 
     async def go():
         transport = httpx.ASGITransport(app=app, client=("203.0.113.77", 51234))
@@ -104,8 +106,8 @@ def test_a_configured_token_still_authorizes_a_remote_peer(monkeypatch, tmp_path
     monkeypatch.setattr(settings, "db_path", str(tmp_path / "remote-token.db"))
     monkeypatch.setattr(settings, "loop_interval", 0)
 
-    from engraphis.app import create_app
-    app = create_app()
+    from engraphis.app import create_legacy_reference_app
+    app = create_legacy_reference_app(legacy_db_path=tmp_path / "remote-token-v1.db")
 
     async def go():
         transport = httpx.ASGITransport(app=app, client=("203.0.113.77", 51234))

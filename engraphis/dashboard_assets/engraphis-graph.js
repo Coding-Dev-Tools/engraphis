@@ -99,6 +99,9 @@
 
   function idOf(value) { return value && typeof value === 'object' ? value.id : value; }
   function nodeName(node) { return String(node.name || node.label || node.id || ''); }
+  function showRelationLabel(label) {
+    return Boolean(label) && String(label).toLowerCase() !== 'co_occurs';
+  }
   /* Replace force-graph's round flow particles with a small directional glyph. The vendor
      callback supplies the particle's current position and its link; the context already has
      the resolved particle colour, so this only changes the silhouette and orientation. */
@@ -1327,15 +1330,16 @@
        'after' the line so it sits on top of it). Without this second half the checkbox silently
        did half its job under `?graph-engine=next` and a relation name could only be read by
        hovering one edge at a time. Same gates as classic graphRender(): zoomed in past
-       LINK_LABEL_MIN_SCALE, the relation actually carries a label, and — on a dense graph —
-       only while something is highlighted, so thousands of overlapping strings are never
+       LINK_LABEL_MIN_SCALE, the relation carries a meaningful label (implicit co-occurrences
+       are graph structure, not canvas text), and — on a dense graph — only while something is
+       highlighted, so thousands of overlapping strings are never
        painted at once. Canvas text is not an HTML sink, so the raw label is drawn here; the
        escaped copy is for `linkLabel`, whose tooltip *is* one. */
     function applyLinkLabels() {
       if (!fg.linkCanvasObject || !fg.linkCanvasObjectMode) return;
       if (!state.settings.labels) { fg.linkCanvasObjectMode(() => undefined); return; }
       fg.linkCanvasObjectMode(() => 'after').linkCanvasObject((link, ctx, scale) => {
-        if (!link || !link.label || scale < LINK_LABEL_MIN_SCALE) return;
+        if (!link || !showRelationLabel(link.label) || scale < LINK_LABEL_MIN_SCALE) return;
         if (dense && !hilite) return;
         const source = link.source, target = link.target;
         if (!source || !target || typeof source !== 'object' || typeof target !== 'object') return;
