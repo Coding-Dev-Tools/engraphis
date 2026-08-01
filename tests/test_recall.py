@@ -42,6 +42,30 @@ def test_recall_returns_relevant_first():
     assert "pnpm" in res.context.lower()
 
 
+def test_lexical_absolute_support_includes_title_text():
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    memory_id = _add(
+        store,
+        emb,
+        wid,
+        rid,
+        "Rotate it every 30 days.",
+        title="OAUTH_TOKEN_ROTATION",
+    )
+
+    result = eng.recall(
+        "OAUTH_TOKEN_ROTATION",
+        SearchFilter(workspace_id=wid, repo_id=rid),
+        k=1,
+        retrieval_profile="lexical",
+    )
+
+    assert [chunk["id"] for chunk in result.chunks] == [memory_id]
+    assert result.chunks[0]["absolute_support"] > 0.0
+
+
 def test_prompt_only_recall_continues_past_untrusted_arm_candidates():
     store = Store(":memory:")
     emb = DeterministicEmbedder(256)

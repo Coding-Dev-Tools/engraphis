@@ -51,6 +51,14 @@ def test_fake_client_spends_no_quota_and_provider_usage_is_separate(tmp_path):
         assert usage["latency_ms"] == 12.5
 
 
+def test_hosted_answer_evaluator_accepts_safe_framing_without_loose_matching():
+    question = {"answer": "release manager"}
+    evaluator = hosted_luna._hosted_answer_evaluator
+    assert evaluator("The release manager", question, ())
+    assert evaluator("The answer is the release manager", question, ())
+    assert not evaluator("The release manager does not approve deployment", question, ())
+
+
 def test_agent_fails_closed_at_call_ceiling_and_wrong_model():
     agent = CodexLunaAgent(max_calls=1, invoke=lambda *_: AgentTurn(answer="Ada", model=MODEL))
     agent("q", "c")
@@ -296,7 +304,7 @@ def test_hosted_cli_writes_public_evidence_and_resumes_without_new_calls(
     def fake(prompt, timeout):
         calls.append((prompt, timeout))
         return AgentTurn(
-            answer="Ada",
+            answer="The Ada",
             input_tokens=9,
             cached_input_tokens=0,
             output_tokens=3,

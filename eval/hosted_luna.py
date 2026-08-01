@@ -9,6 +9,7 @@ import argparse
 import json
 import math
 import os
+import re
 import signal
 import shutil
 import subprocess
@@ -42,6 +43,55 @@ from eval.productivity import AgentTurn, STRATEGIES, run
 MODEL = "gpt-5.6-luna"
 REASONING_EFFORT = "medium"
 _WORKER_TERMINATION_SECONDS = 2.0
+_HOSTED_ANSWER_PREFIXES = (
+    ("the", "answer", "is"),
+    ("answer", "is"),
+    ("it", "is"),
+    ("the",),
+    ("a",),
+    ("an",),
+)
+
+
+def _hosted_answer_evaluator(
+    response: str,
+    question: dict,
+    supporting_evidence: tuple[str, ...],
+) -> bool:
+    """Accept exact hosted answers with harmless natural-language framing.
+
+    Hosted models commonly answer a short gold string with a leading article or
+    a small answer introducer.  Keep this deliberately stricter than substring
+    matching: extra claims (including a negation) remain incomplete, so a
+    correction attempt is still meaningful.
+    """
+    response_tokens = tuple(re.findall(r"[\w-]+", str(response or "").casefold()))
+    expected = str(question.get("answer", question.get("evidence", "")))
+    if not expected:
+        return bool(response_tokens)
+    acceptable = [expected, *supporting_evidence]
+    configured = question.get("acceptable_answers", ())
+    if isinstance(configured, (list, tuple)):
+        acceptable.extend(str(value) for value in configured)
+    for candidate in acceptable:
+        candidate_tokens = tuple(re.findall(r"[\w-]+", candidate.casefold()))
+        if not candidate_tokens:
+            continue
+        normalized_response = response_tokens
+        while True:
+            if normalized_response == candidate_tokens:
+                return True
+            prefix = next(
+                (
+                    item for item in _HOSTED_ANSWER_PREFIXES
+                    if normalized_response[:len(item)] == item
+                ),
+                None,
+            )
+            if prefix is None:
+                break
+            normalized_response = normalized_response[len(prefix):]
+    return False
 
 
 class HostedLunaError(RuntimeError):
@@ -636,7 +686,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         reports = []
         for repetition, strategy_order in enumerate(schedules):
             agent.set_repetition(repetition)
-            report = run(dataset, agent=agent, strategy_order=strategy_order)
+            report = run(
+                dataset,
+                agent=agent,
+                strategy_order=strategy_order,
+                answer_evaluator=_hosted_answer_evaluator,
+            )
             report["benchmark"]["hosted"] = {
                 **config, "repetition": repetition + 1, "calls_started": agent.calls,
                 "provider_usage_scope": "SDK reported per-turn counters; all are required.",

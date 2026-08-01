@@ -353,6 +353,7 @@ class RecallEngine:
             candidate.id: _absolute_retrieval_support(
                 query,
                 candidate.record.content,
+                title=candidate.record.title,
                 semantic_cosine=vec.get(candidate.id, 0.0),
             )
             for candidate in final
@@ -867,7 +868,13 @@ def _source_safety_metadata(record: MemoryRecord) -> dict:
     return out
 
 
-def _absolute_retrieval_support(query: str, content: str, *, semantic_cosine: float) -> float:
+def _absolute_retrieval_support(
+    query: str,
+    content: str,
+    *,
+    title: str = "",
+    semantic_cosine: float,
+) -> float:
     """Bounded, query-independent support from evidence retrieval already computed.
 
     Vector backends return raw cosine similarity. Lexical Jaccard supplies a useful
@@ -876,7 +883,9 @@ def _absolute_retrieval_support(query: str, content: str, *, semantic_cosine: fl
     normalised against the other candidates in this response.
     """
     semantic = max(0.0, min(1.0, float(semantic_cosine)))
-    lexical = jaccard(tokenize(query), tokenize(content))
+    # FTS indexes title and content together, so its absolute evidence floor
+    # must use the same text rather than rejecting a legitimate title-only hit.
+    lexical = jaccard(tokenize(query), tokenize("\n".join((str(title or ""), content))))
     return max(semantic, lexical)
 
 
