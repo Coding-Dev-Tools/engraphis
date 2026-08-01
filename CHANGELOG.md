@@ -5,6 +5,22 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- `MemoryEngine` and `MemoryService` now provide adaptive context routing: bypass retrieval when
+  prompt history fits, use compact recall when support is strong, and fall back to bounded recent
+  history when support is weak.
+- `eval.productivity` measures task completion, corrections, agent turns, memory calls, latency,
+  and model-facing tokens.
+- The optional `hosted-eval` extra adds guarded hosted-Luna productivity evaluation with a
+  redacted public evidence exporter.
+
+### Security
+
+- Untrusted ingress is deterministically labeled, and suspicious payloads are quarantined before
+  indexing, prompt recall, resolution, or grounding; `scripts/rescan_poisoning.py` can apply the
+  policy to existing records.
+
 ### Fixed
 
 - Public server entry points now share the v2 service, keeping recall behavior consistent across
@@ -28,11 +44,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
   counter identity, target, and overlap in chunk metadata.
 - Offline adapters now cover MemoryAgentBench, LoCoMo-Plus, and Mem2ActBench, with a paired
   full-history versus Engraphis code-agent analyzer.
-- `MemoryEngine` and `MemoryService` now provide adaptive context routing: bypass retrieval when
-  prompt history fits, use compact recall when support is strong, and fall back to bounded recent
-  history when support is weak.
-- `eval.productivity` measures task completion, corrections, agent turns, memory calls, latency,
-  and model-facing tokens.
+- Public benchmark evidence can carry source hashes, repository state, environment and model
+  provenance, secret-redacted commands, content digests, and adjacent immutable SHA-256 files.
 
 ### Changed
 
@@ -53,6 +66,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Tokenizer-aware chunk overlap can no longer exceed the configured prose budget or emit a
   duplicate overlap-only record before an oversized paragraph. Invalid token counters fail
   closed instead of silently producing mis-sized chunks.
+- The new evidence guide is included in wheel and source distributions.
 
 ## [1.2.2] - 2026-07-30
 

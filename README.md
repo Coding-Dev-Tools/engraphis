@@ -210,7 +210,7 @@ compatible endpoints.
 ## Install
 
 ```bash
-pip install "engraphis[all]"        # dashboard + MCP server + code graph + available platform extras
+pip install "engraphis[all]"        # self-hosted dashboard, MCP, code graph, documents, transcription, PostgreSQL, and Cloud Sync
 pip install "engraphis[server]"     # dashboard + REST API
 pip install "engraphis[mcp]"        # MCP server only
 pip install "engraphis[documents]"  # PDF + image OCR bindings
@@ -478,7 +478,7 @@ the full inventory and parameters.
 
 Memory relationships, extracted entities, and code structure stay normalized in one SQLite
 database. Edges are tagged as `temporal`, `entity`, `causal`, or `semantic`, so callers can
-select a logical overlay without maintaining separate graphs. Schema-v3 migration is additive
+select a logical overlay without maintaining separate graphs. Schema migrations are additive
 and idempotent: existing memories and bi-temporal history remain in place, while legacy edge
 layers are inferred once.
 
