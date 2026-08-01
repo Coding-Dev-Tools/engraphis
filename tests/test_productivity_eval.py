@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from engraphis.core.context import RegexTokenCounter
 from eval.productivity import (
     AgentTurn,
     DeterministicTaskAgent,
@@ -111,6 +112,33 @@ def test_large_history_routes_between_strong_retrieval_and_weak_widening() -> No
     assert strong["methods"]["adaptive"]["context_modes"] == {"retrieval": 1}
     assert weak["methods"]["adaptive"]["context_modes"] == {"history_fallback": 1}
     assert weak["methods"]["adaptive"]["memory_calls"] == 1
+
+
+def test_productivity_caps_full_history_and_correction_attempt_contexts() -> None:
+    dataset = [{
+        "id": "large-history",
+        "memories": [{"text": " ".join(["background"] * 80)}],
+        "questions": [{"q": "Who owns deployment?", "answer": "release manager"}],
+    }]
+    attempts = []
+
+    class AbstainingAgent:
+        def __call__(self, question, context):
+            attempts.append((question, context))
+            return ""
+
+    budget = 8
+    run(
+        dataset,
+        agent=AbstainingAgent(),
+        max_context_tokens=budget,
+        retrieval_token_budget=budget,
+    )
+
+    counter = RegexTokenCounter()
+    assert attempts
+    assert any(question.startswith("Correct the answer") for question, _ in attempts)
+    assert all(counter(context) <= budget for _, context in attempts)
 
 
 def test_latency_uses_injected_clock_and_agent_identity_is_explicit() -> None:

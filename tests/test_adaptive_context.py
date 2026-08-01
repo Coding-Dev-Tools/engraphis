@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import pytest
 
+from engraphis.core.adaptive_context import AdaptiveContextResult
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.interfaces import MemoryType, Scope
+from engraphis.core.interfaces import MemoryType, PackedChunk, Scope
+from engraphis.core.recall import RecallResult
 from engraphis.service import MemoryService, ValidationError
 
 
@@ -226,6 +228,48 @@ def test_service_does_not_label_rejected_weak_memories_as_fallback_sources() -> 
 
     assert result["decision"]["mode"] == "history_fallback"
     assert result["sources"] == []
+
+
+def test_service_adaptive_context_keeps_sources_in_packed_citation_order(monkeypatch) -> None:
+    service = MemoryService.create(":memory:")
+    service.remember("Bootstrap fact.", workspace="adaptive", repo="context")
+    recall = RecallResult(
+        chunks=[
+            {"id": "mem_first", "title": "First", "scope": "repo", "mtype": "episodic"},
+            {"id": "mem_second", "title": "Second", "scope": "repo", "mtype": "semantic"},
+        ],
+        packed_chunks=[
+            PackedChunk("mem_second", "second evidence", 2),
+            PackedChunk("mem_first", "first evidence", 2),
+        ],
+    )
+    decision = AdaptiveContextResult(
+        context="[1] second evidence\n[2] first evidence",
+        mode="retrieval",
+        reason="strong support",
+        history_tokens=20,
+        context_tokens=4,
+        max_context_tokens=16,
+        retrieval_budget_tokens=8,
+        retrieval_support=1.0,
+        retrieved=True,
+        token_counter="engraphis.regex.v1",
+        recall=recall,
+    )
+    monkeypatch.setattr(service.engine, "adaptive_context", lambda *args, **kwargs: decision)
+
+    result = service.adaptive_context(
+        "question",
+        "long history that triggers routing",
+        workspace="adaptive",
+        repo="context",
+        max_context_tokens=16,
+        retrieval_token_budget=8,
+    )
+
+    assert [source["id"] for source in result["sources"]] == [
+        "mem_second", "mem_first",
+    ]
 
 
 def test_service_bounds_adaptive_prompt_budgets() -> None:

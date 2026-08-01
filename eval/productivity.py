@@ -27,6 +27,7 @@ from typing import Callable, Optional, Union
 
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
 from engraphis.backends.reranker import IdentityReranker
+from engraphis.core.adaptive_context import fit_recent_history
 from engraphis.core.context import DeterministicContextPacker, RegexTokenCounter
 from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import MemoryType, Scope
@@ -225,9 +226,20 @@ def _attempt(
     max_context_tokens: int,
     retrieval_token_budget: int,
     confidence_floor: float,
+    count_tokens: Callable[[str], int],
 ) -> tuple[str, str, int, str]:
     if method == "full_history":
-        return history, "full_history", 0, ""
+        context, truncated = fit_recent_history(
+            history,
+            token_budget=max_context_tokens,
+            count_tokens=count_tokens,
+        )
+        return (
+            context,
+            "full_history",
+            0,
+            "full history was capped to the prompt budget" if truncated else "",
+        )
     if method == "retrieval":
         recalled = engine.recall(
             question,
@@ -392,6 +404,7 @@ def run(
                         max_context_tokens=max_context_tokens,
                         retrieval_token_budget=retrieval_token_budget,
                         confidence_floor=confidence_floor,
+                        count_tokens=counter,
                     )
                     task_ordinal = task_offset + number
                     _prepare_agent_attempt(
@@ -412,18 +425,25 @@ def run(
                     final_response = first_response
                     if correction_attempted:
                         corrected_question = f"{_CORRECTION_PROMPT}\n{question}"
+                        correction_history, _ = fit_recent_history(
+                            history,
+                            token_budget=max_context_tokens,
+                            count_tokens=counter,
+                        )
                         _prepare_agent_attempt(
                             selected_agent,
                             strategy=method,
                             task_ordinal=task_ordinal,
                             turn_ordinal=1,
                         )
-                        corrected_turn = _turn(selected_agent(corrected_question, history))
+                        corrected_turn = _turn(
+                            selected_agent(corrected_question, correction_history)
+                        )
                         corrected_response = corrected_turn.answer
                         successful_correction = _completed(corrected_response, expected)
                         final_response = corrected_response
                         agent_turns += 1
-                        input_tokens += counter(corrected_question) + counter(history)
+                        input_tokens += counter(corrected_question) + counter(correction_history)
                         output_tokens += counter(corrected_response)
                     completed = _completed(final_response, expected)
                     elapsed_ms = max(0.0, (clock() - started) * 1000.0)

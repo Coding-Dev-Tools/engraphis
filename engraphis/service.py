@@ -1946,7 +1946,10 @@ class MemoryService:
         )
         sources = []
         if result.mode == "retrieval" and result.recall is not None:
-            packed_ids = {chunk.id for chunk in result.recall.packed_chunks}
+            chunks_by_id = {
+                chunk.get("id"): chunk
+                for chunk in result.recall.chunks
+            }
             sources = [
                 {
                     "id": chunk.get("id"),
@@ -1954,8 +1957,8 @@ class MemoryService:
                     "scope": chunk.get("scope"),
                     "mtype": chunk.get("mtype"),
                 }
-                for chunk in result.recall.chunks
-                if chunk.get("id") in packed_ids
+                for packed in result.recall.packed_chunks
+                if (chunk := chunks_by_id.get(packed.id)) is not None
             ]
         recall_usage = result.recall.usage if result.recall is not None else None
         source_tokens = result.history_tokens

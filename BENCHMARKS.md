@@ -48,7 +48,8 @@ frontier-model QA score.
   complete source-token pass to indexing, and the query-count break-even point. The default is
   deterministic/offline; `--embed-model` enables a real retrieval model, while
   `--format locomo|longmemeval` reuses the established external loaders.
-- **Agent productivity**: `eval/productivity.py` compares full history, always-on retrieval, and
+- **Agent productivity**: `eval/productivity.py` compares a capped full-history baseline,
+  always-on retrieval, and
   adaptive context through a complete answer-and-correction loop. It reports completed tasks,
   first-attempt errors, abstentions, corrections, agent turns, memory calls, wall-clock latency,
   and all question/context/output tokens. The bundled agent is deterministic, receives no gold
