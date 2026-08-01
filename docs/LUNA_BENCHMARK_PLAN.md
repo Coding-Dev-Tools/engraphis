@@ -61,10 +61,11 @@ First-attempt completion is the clean strategy comparison. If that attempt fails
 also measures whether one identical full-history correction can recover the task; final completion
 therefore measures recoverability, not the purity of the original context strategy.
 
-Report paired differences by task, not only overall averages. For repeated full runs, publish
-the paired mean difference with a bootstrap 95% confidence interval and the descriptive median
-difference for token, latency, mistake, and completion measurements. Keep missing token fields
-explicitly missing; never infer or substitute them.
+Report paired differences by task, not only overall averages. For repeated full runs, first
+aggregate each task's paired repetitions, then bootstrap-resample those task clusters (not the
+flattened run/task rows) for the paired mean difference and 95% confidence interval. Publish the
+descriptive median task difference for token, latency, mistake, and completion measurements. Keep
+missing token fields explicitly missing; never infer or substitute them.
 
 ## Predeclared success criteria
 

@@ -18,7 +18,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional, Sequence, Union
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, Union
 
 
 SCHEMA = "engraphis-hosted-evidence/v1"
@@ -175,6 +175,23 @@ def paired_bootstrap_95(
     }
 
 
+def paired_cluster_bootstrap_95(
+    clusters: Mapping[str, Sequence[tuple[float, float]]], *, iterations: int = 5000,
+    seed: int = 20260731,
+) -> dict[str, Union[int, float]]:
+    """Bootstrap task-level paired means so repetitions stay within their task cluster."""
+    means: list[tuple[float, float]] = []
+    for task_id in sorted(clusters):
+        pairs = clusters[task_id]
+        if not pairs:
+            raise ValueError("every task cluster requires one or more paired observations")
+        means.append((
+            _mean(candidate for candidate, _ in pairs),
+            _mean(baseline for _, baseline in pairs),
+        ))
+    return paired_bootstrap_95(means, iterations=iterations, seed=seed)
+
+
 def _private_report(report: Mapping[str, Any]) -> Mapping[str, Any]:
     """Accept a direct private report or a ``{private, public}`` repetition envelope."""
     candidate = report.get("private", report)
@@ -201,6 +218,7 @@ def _normalize_reports(
 
     output: dict[str, list[dict[str, Any]]] = {}
     expected_strategies: Optional[set[str]] = None
+    expected_task_ids: Optional[set[str]] = None
     for repetition, report in enumerate(reports):
         detail = _private_report(report)["detail"]
         strategies = set(detail)
@@ -255,6 +273,10 @@ def _normalize_reports(
         reference = set(by_strategy[baseline])
         if any(set(indexed) != reference for indexed in by_strategy.values()):
             raise ValueError("strategies must have exactly matched task IDs in every repetition")
+        if expected_task_ids is None:
+            expected_task_ids = reference
+        elif reference != expected_task_ids:
+            raise ValueError("every repetition must contain the same task IDs")
         for strategy, indexed in by_strategy.items():
             output.setdefault(strategy, []).extend(
                 {"repetition": repetition, "task_id": task_id, **row}
@@ -312,6 +334,18 @@ def _strategy_summary(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _task_cluster_bootstrap(
+    candidate: Mapping[tuple[int, str], Mapping[str, Any]],
+    reference: Mapping[tuple[int, str], Mapping[str, Any]],
+    ordered: Sequence[tuple[int, str]], value: Callable[[Mapping[str, Any]], float], *,
+    iterations: int, seed: int,
+) -> dict[str, Union[int, float]]:
+    clusters: dict[str, list[tuple[float, float]]] = {}
+    for key in ordered:
+        clusters.setdefault(key[1], []).append((value(candidate[key]), value(reference[key])))
+    return paired_cluster_bootstrap_95(clusters, iterations=iterations, seed=seed)
+
+
 def aggregate_reports(
     reports: Sequence[Mapping[str, Any]], *, baseline: str = "full_history",
     required_usage: Sequence[str] = DEFAULT_REQUIRED_USAGE, iterations: int = 5000,
@@ -332,34 +366,31 @@ def aggregate_reports(
         comparisons[strategy] = {
             "baseline": baseline,
             "delta_direction": f"{strategy}_minus_{baseline}",
-            "completion_rate": paired_bootstrap_95(
-                [(candidate[key]["completed"], reference[key]["completed"]) for key in ordered],
+            "completion_rate": _task_cluster_bootstrap(
+                candidate, reference, ordered, lambda row: row["completed"],
                 iterations=iterations, seed=seed,
             ),
-            "first_attempt_completion_rate": paired_bootstrap_95(
-                [
-                    (candidate[key]["first_completed"], reference[key]["first_completed"])
-                    for key in ordered
-                ],
+            "first_attempt_completion_rate": _task_cluster_bootstrap(
+                candidate, reference, ordered, lambda row: row["first_completed"],
                 iterations=iterations,
                 seed=seed,
             ),
-            "mistake_rate": paired_bootstrap_95(
-                [(candidate[key]["mistake"], reference[key]["mistake"]) for key in ordered],
+            "mistake_rate": _task_cluster_bootstrap(
+                candidate, reference, ordered, lambda row: row["mistake"],
                 iterations=iterations, seed=seed,
             ),
-            "correction_rate": paired_bootstrap_95(
-                [(candidate[key]["correction"], reference[key]["correction"]) for key in ordered],
+            "correction_rate": _task_cluster_bootstrap(
+                candidate, reference, ordered, lambda row: row["correction"],
                 iterations=iterations,
                 seed=seed,
             ),
-            "total_tokens": paired_bootstrap_95(
-                [(candidate[key]["usage"]["total_tokens"], reference[key]["usage"]["total_tokens"])
-                 for key in ordered], iterations=iterations, seed=seed,
+            "total_tokens": _task_cluster_bootstrap(
+                candidate, reference, ordered, lambda row: row["usage"]["total_tokens"],
+                iterations=iterations, seed=seed,
             ),
-            "latency_ms": paired_bootstrap_95(
-                [(candidate[key]["usage"]["latency_ms"], reference[key]["usage"]["latency_ms"])
-                 for key in ordered], iterations=iterations, seed=seed,
+            "latency_ms": _task_cluster_bootstrap(
+                candidate, reference, ordered, lambda row: row["usage"]["latency_ms"],
+                iterations=iterations, seed=seed,
             ),
         }
     return {

@@ -71,6 +71,7 @@ def test_aggregate_is_paired_deterministic_and_content_free():
     assert report["strategies"]["retrieval"]["usage_coverage"]["total_tokens"]["rate"] == 1.0
     delta = report["paired_bootstrap"]["retrieval"]
     assert delta["completion_rate"]["delta"] == 0.5
+    assert delta["completion_rate"]["n"] == 2
     assert "median_delta" in delta["completion_rate"]
     assert delta["total_tokens"]["delta"] < 0
     assert delta["latency_ms"]["delta"] < 0
@@ -106,6 +107,25 @@ def test_bootstrap_is_deterministic_and_is_a_95_percent_interval():
     assert first == second
     assert first["confidence_level"] == 0.95
     assert first["low"] <= first["delta"] <= first["high"]
+
+
+def test_repeated_tasks_are_resampled_as_clusters():
+    report = aggregate_reports([_report(0), _report(1), _report(2)], iterations=80, seed=4)
+
+    interval = report["paired_bootstrap"]["retrieval"]["completion_rate"]
+    assert interval["n"] == 2
+    assert interval["delta"] == 0.5
+    assert interval["low"] == 0.0
+    assert interval["high"] == 1.0
+
+
+def test_repetitions_require_the_same_task_clusters():
+    later = _report(1)
+    for rows in later["detail"].values():
+        rows.pop()
+
+    with pytest.raises(ValueError, match="same task IDs"):
+        aggregate_reports([_report(), later], iterations=10)
 
 
 def test_public_artifact_has_provenance_checksum_and_no_private_content(tmp_path, monkeypatch):
