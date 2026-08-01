@@ -1,6 +1,7 @@
 import hashlib
 
 import numpy as np
+import pytest
 
 from engraphis.backends.embedder_deterministic import DeterministicEmbedder
 from engraphis.backends.embedder_st import get_embedder
@@ -99,6 +100,45 @@ def test_deterministic_embedder_upgrade_rebuilds_legacy_vectors(tmp_path):
     assert quarantined_id not in rebuilt
     assert engine.store.embedding_version("deterministic_hashing") == "v2_aliases_measurements"
     engine.store.close()
+
+
+def test_deterministic_embedder_upgrade_refreshes_sqlitevec_and_store_mirrors(tmp_path):
+    """A later NumPy fallback must see the vector rebuilt through sqlite-vec."""
+    pytest.importorskip("sqlite_vec", reason="sqlite-vec extra not installed")
+    db = tmp_path / "legacy-deterministic-sqlitevec.db"
+    text = "The API config allows 1 minute between requests."
+    store = Store(str(db))
+    workspace_id = store.get_or_create_workspace("w")
+    memory_id = store.add_memory(MemoryRecord(
+        id="", content=text, workspace_id=workspace_id, scope=Scope.WORKSPACE,
+    ))
+    legacy_vector = np.zeros(64, dtype=np.float32)
+    legacy_vector[0] = 1.0
+    store.put_vector(memory_id, legacy_vector)
+    store.conn.execute("DROP TABLE embedding_state")
+    store.conn.execute("DELETE FROM schema_migrations")
+    store.conn.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (6, 0)")
+    store.conn.commit()
+    store.close()
+
+    sqlitevec_engine = MemoryEngine.create(str(db), embed_dim=64, vector_backend="sqlite-vec")
+    expected = sqlitevec_engine.embedder.embed([text])[0]
+    stored = dict(sqlitevec_engine.store.iter_vectors(dim=64))
+    ann_row = sqlitevec_engine.store.conn.execute(
+        "SELECT embedding FROM mem_vec_ann WHERE id=?", (memory_id,)
+    ).fetchone()
+
+    assert np.allclose(stored[memory_id], expected)
+    assert ann_row is not None
+    assert np.allclose(np.frombuffer(ann_row["embedding"], dtype=np.float32), expected)
+    assert sqlitevec_engine.store.embedding_version("deterministic_hashing") == (
+        "v2_aliases_measurements"
+    )
+    sqlitevec_engine.store.close()
+
+    numpy_engine = MemoryEngine.create(str(db), embed_dim=64, vector_backend="numpy")
+    assert np.allclose(dict(numpy_engine.store.iter_vectors(dim=64))[memory_id], expected)
+    numpy_engine.store.close()
 
 
 def test_vector_index_factory_modes(monkeypatch):

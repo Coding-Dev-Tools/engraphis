@@ -386,6 +386,12 @@ class MemoryEngine:
                 for record in eligible
             ]
             vectors = self.embedder.embed(texts)
+            # Keep the portable store-backed mirror current even when the active
+            # index is sqlite-vec, whose upsert writes only its ANN table.  A later
+            # fallback to NumPy must not compare v2 queries with stale vectors.
+            for record, vector in zip(eligible, vectors):
+                self.store.put_vector(record.id, vector)
+            self.store.conn.commit()
             self.index.upsert([record.id for record in eligible], vectors)
             rebuilt += len(eligible)
 
