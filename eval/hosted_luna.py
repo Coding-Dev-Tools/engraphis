@@ -10,6 +10,7 @@ import json
 import math
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,6 +50,125 @@ class HostedLunaError(RuntimeError):
 
 class HostedTransportError(HostedLunaError):
     """The sole retryable failure class: no model response was available."""
+
+
+def _start_windows_job(process: subprocess.Popen):
+    """Contain a Windows worker and its descendants in a kill-on-close Job Object.
+
+    ``taskkill /T`` is retained as a fallback, but it can fail after a worker has
+    started an SDK descendant.  A Job Object makes the timeout limit apply to the
+    whole worker tree even in that case.  Assignment is deliberately performed
+    immediately after :class:`~subprocess.Popen` returns: CPython does not retain
+    the primary-thread handle needed to safely resume a ``CREATE_SUSPENDED`` child.
+    """
+    if sys.platform != "win32" or not hasattr(process, "_handle"):
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _BasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class _IoCounters(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_ulonglong) for name in (
+                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+            )]
+
+        class _ExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _BasicLimitInformation),
+                ("IoInfo", _IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = (
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+        )
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        job = kernel32.CreateJobObjectW(None, None)
+        if job:
+            limits = _ExtendedLimitInformation()
+            limits.BasicLimitInformation.LimitFlags = 0x00002000  # KILL_ON_JOB_CLOSE
+            configured = kernel32.SetInformationJobObject(
+                job, 9, ctypes.byref(limits), ctypes.sizeof(limits),
+            )
+            assigned = configured and kernel32.AssignProcessToJobObject(job, process._handle)
+        else:
+            assigned = False
+        if not assigned:
+            if job:
+                kernel32.CloseHandle(job)
+            return None
+        return kernel32, job
+    except (AttributeError, OSError):
+        return None
+
+
+def _terminate_windows_job(job) -> None:
+    """Synchronously terminate a contained worker tree without closing its handle."""
+    if job is None:
+        return
+    kernel32, handle = job
+    try:
+        kernel32.TerminateJobObject(handle, 1)
+    except (AttributeError, OSError):
+        pass
+
+
+def _close_windows_job(job) -> None:
+    if job is None:
+        return
+    kernel32, handle = job
+    try:
+        kernel32.CloseHandle(handle)
+    except (AttributeError, OSError):
+        pass
+
+
+def _kill_windows_process_tree(process: subprocess.Popen) -> None:
+    """Best-effort fallback for a denied Job Object assignment or its small race."""
+    taskkill = shutil.which("taskkill")
+    if taskkill:
+        try:
+            result = subprocess.run(
+                [taskkill, "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, check=False,
+                timeout=_WORKER_TERMINATION_SECONDS,
+            )
+            if result.returncode == 0:
+                return
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
 
 
 def _never_retryable(_exc: Exception) -> bool:
@@ -321,20 +441,31 @@ class CodexLunaAgent:
             [sys.executable, "-m", "eval.hosted_luna", "--_worker"],
             **popen_kwargs,
         )
+        job = _start_windows_job(process)
+        if sys.platform == "win32" and job is None:
+            # The worker cannot import or invoke the SDK until it has received this
+            # request on stdin. Refuse the call before writing that request when we
+            # cannot establish a containment boundary: taskkill is only best-effort
+            # cleanup when Job Object assignment was denied.
+            _kill_windows_process_tree(process)
+            try:
+                process.communicate(timeout=_WORKER_TERMINATION_SECONDS)
+            except subprocess.TimeoutExpired:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+            raise HostedTransportError("could not establish Windows worker containment")
         try:
             stdout, _ = process.communicate(
                 json.dumps({"model": MODEL, "prompt": prompt}), timeout=timeout_seconds,
             )
         except subprocess.TimeoutExpired as exc:
             if sys.platform == "win32":
-                try:
-                    subprocess.run(
-                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-                        timeout=_WORKER_TERMINATION_SECONDS,
-                    )
-                except (OSError, subprocess.SubprocessError):
-                    process.kill()
+                # The Job Object is the containment boundary; taskkill remains a
+                # fallback for denied assignment and the pre-assignment race.
+                _terminate_windows_job(job)
+                _kill_windows_process_tree(process)
             else:
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
@@ -352,6 +483,8 @@ class CodexLunaAgent:
                 # unbounded.  Cleanup remains best-effort and the call still fails.
                 process.kill()
             raise HostedTransportError("hosted Codex call timed out") from exc
+        finally:
+            _close_windows_job(job)
         try:
             payload = json.loads(stdout)
         except json.JSONDecodeError as exc:

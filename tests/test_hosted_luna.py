@@ -95,6 +95,102 @@ def test_worker_timeout_terminates_sdk_descendants(tmp_path, monkeypatch):
     assert not survived.exists()
 
 
+def test_windows_timeout_terminates_job_and_keeps_tree_kill_fallback(monkeypatch):
+    """A failed ``taskkill`` cannot let a hosted worker outlive its call budget."""
+    class FakeProcess:
+        pid = 123
+
+        def __init__(self):
+            self.communicate_calls = 0
+
+        def communicate(self, *_args, **_kwargs):
+            self.communicate_calls += 1
+            if self.communicate_calls == 1:
+                raise subprocess.TimeoutExpired("worker", 0.01)
+            return "", ""
+
+        def kill(self):
+            pytest.fail("Job Object containment should terminate the worker tree first")
+
+    process = FakeProcess()
+    job = object()
+    started = []
+    terminated = []
+    tree_kills = []
+    closed = []
+    monkeypatch.setattr(hosted_luna.sys, "platform", "win32")
+    monkeypatch.setattr(hosted_luna.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(
+        hosted_luna,
+        "_start_windows_job",
+        lambda actual: started.append(actual) or job,
+    )
+    monkeypatch.setattr(hosted_luna, "_terminate_windows_job", terminated.append)
+    monkeypatch.setattr(hosted_luna, "_kill_windows_process_tree", tree_kills.append)
+    monkeypatch.setattr(hosted_luna, "_close_windows_job", closed.append)
+
+    with pytest.raises(hosted_luna.HostedTransportError, match="timed out"):
+        hosted_luna.CodexLunaAgent._invoke("prompt", 0.01)
+
+    assert started == [process]
+    assert terminated == [job]
+    assert tree_kills == [process]
+    assert closed == [job]
+
+
+def test_windows_refuses_request_when_job_containment_is_unavailable(monkeypatch):
+    """Never give the worker billable input until its tree is contained."""
+    class FakeProcess:
+        pid = 123
+
+        def __init__(self):
+            self.drain_calls = 0
+
+        def communicate(self, *args, **_kwargs):
+            assert not args, "the hosted request must not be sent without containment"
+            self.drain_calls += 1
+            return "", ""
+
+        def kill(self):
+            pytest.fail("tree cleanup should have terminated the worker")
+
+    process = FakeProcess()
+    tree_kills = []
+    monkeypatch.setattr(hosted_luna.sys, "platform", "win32")
+    monkeypatch.setattr(hosted_luna.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(hosted_luna, "_start_windows_job", lambda _actual: None)
+    monkeypatch.setattr(hosted_luna, "_kill_windows_process_tree", tree_kills.append)
+
+    with pytest.raises(hosted_luna.HostedTransportError, match="containment"):
+        hosted_luna.CodexLunaAgent._invoke("prompt", 0.01)
+
+    assert tree_kills == [process]
+    assert process.drain_calls == 1
+
+
+def test_windows_tree_kill_falls_back_when_taskkill_reports_failure(monkeypatch):
+    class FakeProcess:
+        pid = 123
+
+        def __init__(self):
+            self.killed = False
+
+        def kill(self):
+            self.killed = True
+
+    process = FakeProcess()
+    monkeypatch.setattr(hosted_luna.shutil, "which", lambda _name: "taskkill")
+    monkeypatch.setattr(
+        hosted_luna.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 1),
+    )
+
+    hosted_luna._kill_windows_process_tree(process)
+
+    assert process.killed
+
+
 def test_private_checkpoint_replays_the_same_invocation_without_a_fake_call(tmp_path):
     path = tmp_path / "private" / "records.jsonl"
     binding = RunBinding(
