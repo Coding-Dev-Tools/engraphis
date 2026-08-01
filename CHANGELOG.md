@@ -5,6 +5,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-01
+
 ### Added
 
 - The optional `hosted-eval` extra adds guarded hosted-Luna productivity evaluation with a
