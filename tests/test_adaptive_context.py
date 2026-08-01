@@ -124,6 +124,27 @@ def test_adaptive_context_abstains_when_weak_and_no_history_fits() -> None:
     assert result.truncated_history is True
 
 
+def test_empty_retrieval_widens_history_even_with_a_zero_confidence_floor() -> None:
+    engine = MemoryEngine.create(":memory:")
+    workspace_id = engine.store.get_or_create_workspace("adaptive")
+    repo_id = engine.store.get_or_create_repo(workspace_id, "context")
+    history = " ".join(f"recent-{number}" for number in range(20))
+
+    result = engine.adaptive_context(
+        "Who approves deployment?",
+        history,
+        workspace_id=workspace_id,
+        repo_id=repo_id,
+        max_context_tokens=6,
+        retrieval_token_budget=0,
+        confidence_floor=0,
+    )
+
+    assert result.mode == "history_fallback"
+    assert result.retrieval_support == 0.0
+    assert result.context
+
+
 def test_fit_recent_history_preserves_suffix_after_unicode_whitespace_boundary() -> None:
     from engraphis.core.adaptive_context import fit_recent_history
 

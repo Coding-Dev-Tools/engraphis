@@ -75,6 +75,10 @@ EVOLVE_MAX_LINKS = 3
 # provenance.source="structured_extractor" label — i.e. "a configured Extractor produced
 # this". See _has_structured_graph_metadata / _trusted_graph_hints.
 GRAPH_HINT_KEYS = ("entities", "relations", "structured_extraction")
+# Extractors produce these bounded metadata shapes.  Everything else in an
+# ``ExtractedFact.metadata`` mapping is untrusted extension data and must not
+# override the service-owned ingress envelope (notably provenance/quarantine).
+EXTRACTOR_METADATA_KEYS = frozenset((*GRAPH_HINT_KEYS, "chunking", "llm_extraction"))
 
 # code↔memory linking (see _CodeSymbolMatcher / _link_memory_to_code)
 CODE_LINK_MAX_LINKS = 200      # per-memory fan-out cap (unchanged behaviour)
@@ -1051,27 +1055,31 @@ class MemoryEngine:
         source_sha256 = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
         for fact_index, f in enumerate(facts, start=1):
             fact_own = dict(getattr(f, "metadata", {}) or {})
-            if isinstance(fact_own.get("llm_extraction"), dict):
+            extracted_metadata = {
+                key: value for key, value in fact_own.items()
+                if key in EXTRACTOR_METADATA_KEYS
+            }
+            if isinstance(extracted_metadata.get("llm_extraction"), dict):
                 # Group all facts derived from one source without retaining the raw
                 # source or prompt. The dashboard activity viewer can therefore explain
                 # one input -> N memories while keeping provider payloads private.
-                fact_own["llm_extraction"] = {
-                    **fact_own["llm_extraction"],
+                extracted_metadata["llm_extraction"] = {
+                    **extracted_metadata["llm_extraction"],
                     "source_sha256": source_sha256,
                     "fact_index": fact_index,
                     "fact_count": len(facts),
                 }
             # This is the one place that can tell the two apart: ``fact_own`` is computed
             # fresh from the Extractor's real output, while ``base_metadata`` is the
-            # caller's argument. The extractor's keys win the merge, so vouching by name
-            # is exact — and a hint key present only in ``base_metadata`` stays untrusted
-            # even though it shares a name with one the extractor could have produced.
-            trusted = frozenset(k for k in GRAPH_HINT_KEYS if k in fact_own)
+            # caller's ingress envelope. Only documented extraction fields may cross
+            # that boundary, so provenance/quarantine and other authority fields remain
+            # service-owned even when an extractor returns arbitrary metadata.
+            trusted = frozenset(k for k in GRAPH_HINT_KEYS if k in extracted_metadata)
             results.append(self.remember_with_resolution(
                 f.content, workspace_id=workspace_id, repo_id=repo_id,
                 session_id=session_id, mtype=f.mtype or default_mtype, scope=scope,
                 title=f.title, importance=f.importance, keywords=f.keywords,
-                metadata={**base_metadata, **fact_own},
+                metadata={**base_metadata, **extracted_metadata},
                 resolve_conflicts=resolve_conflicts, _trusted_graph_keys=trusted,
             ))
         return {"facts": results, "count": len(results), "extracted": extracted}
@@ -1290,7 +1298,7 @@ class MemoryEngine:
             self.embedder,
         )
         support = max(per_source_support, default=0.0)
-        if support < floor:
+        if not result.packed_chunks or support < floor:
             wider, truncated = fit_recent_history(
                 source_history,
                 token_budget=max_budget,

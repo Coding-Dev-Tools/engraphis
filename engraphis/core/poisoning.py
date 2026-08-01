@@ -176,8 +176,10 @@ def prompt_eligible(provenance: object, metadata: object = None) -> bool:
 
 
 def source_is_external(source: object) -> bool:
-    """Recognize canonical external producer labels at the server-owned boundary."""
-    return str(source or "").strip().casefold() in EXTERNAL_SOURCES
+    """Recognize external producers, including namespaced adapter instances."""
+    label = str(source or "").strip().casefold()
+    base = label.split(":", 1)[0].split("/", 1)[0]
+    return base in EXTERNAL_SOURCES
 
 
 def _is_explicitly_untrusted(provenance: Mapping[str, Any]) -> bool:
