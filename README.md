@@ -18,8 +18,6 @@ https://discord.com/invite/Wfr2ejBmY
 
 ---
 
-> Update regularly for the latest fixes and improvements.
->
 > **Open-core boundary:** this repository contains the free local engine, dashboard, MCP server,
 > and customer-side clients. Hosted sync, analytics, automation, and team services run on the
 > official hosted service; their server implementations are not distributed here.
@@ -179,7 +177,7 @@ navigable with light and dark themes.
 
 ---
 
-## What's under the UI
+## How it works
 
 Engraphis gives agents durable, scoped, *explainable* project knowledge. The local engine combines
 Ebbinghaus decay, bi-temporal facts, and hybrid vector/lexical/graph recall; it runs offline with
@@ -191,13 +189,13 @@ SQLite, local embeddings, and `numpy` only.
 - **Auditable:** content-free receipt chains, provenance, and temporal/entity/code relationships.
 - **Practical:** local file and code ingest, optional PDF/OCR/transcription, and SQLCipher at rest.
 
-### Connect an LLM and inspect exactly what it changed
+### Optional LLM providers
 
 The memory engine, embeddings, conflict resolution, and recall stay local without an LLM. An
 explicitly configured provider adds structured extraction, cited synthesis, consolidation, and
-retention supervision. Configure it in **Settings → Connect an LLM**; `llm_structured` validates
-facts, entities, relations, and keywords before storage, while failures fall back to local
-chunking. The activity view records outcomes, never keys, prompts, or raw provider responses.
+retention supervision. Configure it in **Settings → Connect an LLM**. The activity view records
+outcomes, never keys, prompts, or raw provider responses. See the
+[LLM provider guide](docs/LLM_PROVIDERS.md) for setup and privacy choices.
 
 > Privacy boundary: text sent to an explicitly selected provider leaves the local process under
 > that provider's terms. Use `ENGRAPHIS_RETENTION_SUPERVISOR=none` (the default) and the offline
@@ -218,6 +216,8 @@ pip install "engraphis[mcp]"        # MCP server only
 pip install "engraphis[documents]"  # PDF + image OCR bindings
 pip install "engraphis[transcription]" # faster-whisper audio/video
 pip install "engraphis[postgres]"   # PostgreSQL schema introspection
+pip install "engraphis[code]"       # tree-sitter code graph indexing
+pip install "engraphis[cloud-sync]" # Cloud Sync client crypto/runtime
 pip install "engraphis[encryption]" # SQLCipher encryption-at-rest extra
 pip install engraphis               # core library: numpy only, fully offline
 ```
@@ -227,8 +227,8 @@ Docker, the `documents` extra installs its Python bindings; install Tesseract th
 operating system as well if you enable image OCR.
 
 The NumPy-only core library supports Python 3.9+. Current patched releases of the WebUI
-stack, MCP SDK, and image parser require Python 3.10+, so use Python 3.10 or newer for
-the `server`, `mcp`, `documents`, or `all` installation paths.
+stack, MCP SDK, image parser, and Cloud Sync client require Python 3.10+, so use Python 3.10
+or newer for the `server`, `mcp`, `documents`, `cloud-sync`, or `all` installation paths.
 
 The default `NumpyVectorIndex` performs an exact full scan. There is no universal memory-count
 cutoff because latency depends on vector size, hardware, filters, and the rest of the recall
@@ -295,11 +295,9 @@ cmd mcp add engraphis -- engraphis-mcp  # Command Code CLI
 For Command Code scopes, verification, and its optional Provider API setup, see the
 [Command Code section of the LLM provider guide](docs/LLM_PROVIDERS.md#command-code).
 
-Your agent now has 31 tools: remember, recall context (plus full, grounded, and proactive recall),
-proactive context,
-grounded answer alias, why, timeline, forget, pin, correct, promote, ingest, consolidate, index_repo,
-search/code path/impact/export, privacy receipts, PostgreSQL schema ingestion, link,
-record_event, start/end_session, stats, and check_update. See the [MCP tools table](#mcp-tools) below.
+Your agent now has 31 tools for memory, recall, grounded answers, timelines, consolidation, code
+graph work, and privacy-safe receipts. The full inventory, including `engraphis_check_update`, is
+in the [MCP tool reference](docs/MCP_TOOLS.md).
 
 For unattended jobs, `engraphis_start_session`, `engraphis_remember`, and
 `engraphis_record_event` use workspace `default` when `workspace` is omitted.
@@ -470,41 +468,9 @@ to support the project and add hosted services.
 
 ## MCP tools
 
-| Category | Tool | What it does |
-|---|---|---|
-| Write | `engraphis_remember` | Store a fact; deterministically resolved (add/reinforce/supersede) |
-| Write | `engraphis_record_event` | Append a lightweight episodic log entry |
-| Write | `engraphis_link` | Explicitly connect two related memories |
-| Write | `engraphis_ingest` | Apply the configured extractor (`chunk`, `llm`, or `llm_structured`); `none` stores one verbatim memory |
-| Write | `engraphis_ingest_postgres_schema` | Store a new PostgreSQL schema snapshot + typed graph per call; DSN is never stored |
-| Write | `engraphis_consolidate` | Pure dry-run or live sleep-time sweep; a live call can write multiple resolved facts and receipts |
-| Stateful read | `engraphis_recall_context` | Recommended prompt context: hard-budget packed text, compact sources, strict token usage, and optional diagnostics |
-| Stateful read | `engraphis_recall` | Hybrid vector + lexical + graph recall; records a receipt without strengthening weak matches |
-| Stateful read | `engraphis_recall_grounded` | Cited answer or abstention; records a receipt and reinforces cited memories |
-| Stateful read | `engraphis_answer` | Backward-compatible grounded-answer alias with the same effects |
-| Pure read | `engraphis_recall_proactive` | "What should I know right now": no query, reinforcement, or receipt |
-| Stateful read | `engraphis_proactive_context` | Task-aware cited context + handoff; records a receipt without reinforcement |
-| Read | `engraphis_why` | Current answer + what it superseded |
-| Read | `engraphis_timeline` | Full bi-temporal history, oldest first |
-| Code | `engraphis_index_repo` | Incrementally parse a repo into the code/memory graph; each run records its own receipt |
-| Code | `engraphis_search_code` | Find symbols by name, callers, and linked memories |
-| Code | `engraphis_code_path` | Shortest path across definitions, calls, imports, and memories |
-| Code | `engraphis_code_impact` | Rank changed files by symbols, dependents, communities, memories, and hotspots |
-| Code | `engraphis_export_code_graph` | Portable graph JSON + Markdown + HTML report |
-| Audit | `engraphis_receipts` | List content-free hashed operation receipts |
-| Audit | `engraphis_context_savings` | Sum privacy-safe context usage by workspace/repo and token-counter identity |
-| Audit | `engraphis_verify_receipts` | Verify the receipt chain, local tail anchor, and optional externally saved head/count |
-| Audit | `engraphis_export_receipts` | Export the shareable receipt-only audit bundle |
-| Governance | `engraphis_forget` | Retire a memory: bi-temporal close, never deleted; every request is audited |
-| Governance | `engraphis_pin` | Exempt from future automatic decay/pruning; every request is audited |
-| Governance | `engraphis_correct` | Replace content without losing history |
-| Governance | `engraphis_promote` | Widen scope while preserving and linking narrow-scope history |
-| Session | `engraphis_start_session` / `engraphis_end_session` | Separate lifecycle operations; exact retries report `reused`, `force_new=true` creates another session, and end is idempotent |
-| Ops | `engraphis_stats` | Memory counts for health checks |
-| Ops | `engraphis_check_update` | Refresh the persistent release cache and report whether a newer version exists |
-
-The focused [MCP tool reference](docs/MCP_TOOLS.md) provides the same inventory as a standalone
-integration guide.
+Engraphis exposes 31 MCP tools across memory, recall, code graphs, governance, sessions, and
+privacy-safe audit receipts. The focused [MCP tool reference](docs/MCP_TOOLS.md) is the source for
+the full inventory and parameters.
 
 ---
 
@@ -757,8 +723,8 @@ engraphis/
 │   └── static/              # compatibility dashboard asset paths
 ├── eval/                    # offline retrieval eval harness + datasets
 ├── tests/                   # pytest suite (300+ tests, offline numpy-only core)
-├── scripts/                 # start_dashboard, inspector, cli, init, consolidate, sync
-├── docs/                    # SYNC.md, KILO_CODE_INTEGRATION.md
+├── scripts/                 # dashboard, server, graph, CLI, connect, update, consolidation, sync
+├── docs/                    # product, API, hosting, sync, and provider guides
 ├── Dockerfile / docker-compose.yml
 └── pyproject.toml
 ```

@@ -5,44 +5,46 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Public server entry points now share the v2 service, keeping recall behavior consistent across
+  the dashboard, server, Compose, Classic, and MCP-over-HTTP.
+- Keyed mutable-fact replacements now load their live predecessor directly, so reworded updates
+  preserve history without relying on vector top-K recall.
+- Versioned deterministic embeddings now rebuild persisted vectors after a mapping change, keeping
+  existing databases searchable after an upgrade.
+- Prompt-facing recall now expands its candidate search until enough trusted evidence survives.
+
 ## [1.2.5] - 2026-07-31
 
 ### Added
 
 - `engraphis_context_savings` aggregates validated, content-free recall receipts by workspace,
-  repo, operation, and token-counter identity. The same read-only view is available through the
-  service, Inspector, v2/read-only APIs, and dashboard receipt panel.
+  repo, operation, and token-counter identity. The view is available through the service,
+  dashboard, and read-only APIs.
 - Recall supports an explicit adaptive candidate-depth experiment while retaining the historical
   fixed depth by default. Performance reports record requested and actual candidate depths.
-- Chunk ingestion can enforce budgets with an injected or explicitly configured Hugging Face
-  tokenizer and records the counter identity, target, and overlap in each chunk's metadata.
-- Offline adapters now cover MemoryAgentBench, LoCoMo-Plus, and Mem2ActBench. A paired code-agent
-  analyzer compares full-history and Engraphis runs using identical tasks and success oracles.
-- Public benchmark evidence can carry source hashes, repository state, environment and model
-  provenance, secret-redacted commands, content digests, and adjacent immutable SHA-256 files.
+- Chunk ingestion can enforce budgets with a configured Hugging Face tokenizer and records the
+  counter identity, target, and overlap in chunk metadata.
+- Offline adapters now cover MemoryAgentBench, LoCoMo-Plus, and Mem2ActBench, with a paired
+  full-history versus Engraphis code-agent analyzer.
 - `MemoryEngine` and `MemoryService` now provide adaptive context routing: bypass retrieval when
-  supplied prompt history fits, use compact recall when support is strong, and widen to bounded
-  recent history when absolute retrieval support is weak.
-- `eval.productivity` runs full task attempts plus corrections and reports completion, errors,
-  corrections, agent turns, memory calls, latency, and total model-facing tokens.
+  prompt history fits, use compact recall when support is strong, and fall back to bounded recent
+  history when support is weak.
+- `eval.productivity` measures task completion, corrections, agent turns, memory calls, latency,
+  and model-facing tokens.
 
 ### Changed
 
-- Context-economy evaluation now compares uncapped full history, a same-budget recency window,
-  and shipped hybrid recall while charging an explicit one-time indexing token proxy.
+- Context-economy evaluation now compares full history, a same-budget recency window, and hybrid
+  recall while accounting for indexing cost.
 - Official LongMemEval-V2 output has a dedicated redacted evidence exporter that retains the
-  official QA/token/latency measures without publishing prompts, answers, model output, or
+  official QA, token, and latency measures without publishing prompts, answers, model output, or
   retrieved context.
 - Folder-sync dry runs no longer create a remote directory or persist a local device identity.
 
 ### Fixed
 
-- `engraphis-server`, `engraphis server`, Compose, Classic, and MCP-over-HTTP now converge on
-  the v2 service, removing the legacy v1 launch path whose background stability mutation could
-  make the two public recall surfaces disagree by orders of magnitude.
-- Deterministic offline conflict resolution no longer claims that a hash-vector cosine detects
-  paraphrases. Reworded mutable facts use stable claim identities; keyed writes now always load
-  their live predecessor rather than depending on a bounded vector top-K result.
 - Sync rejects malformed scope/repo combinations and every peer-driven visibility change for an
   existing memory, including malformed legacy rows. Scope promotion or repair remains a local,
   explicit governance operation.
@@ -51,7 +53,6 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Tokenizer-aware chunk overlap can no longer exceed the configured prose budget or emit a
   duplicate overlap-only record before an oversized paragraph. Invalid token counters fail
   closed instead of silently producing mis-sized chunks.
-- The new evidence guide is included in wheel and source distributions.
 
 ## [1.2.2] - 2026-07-30
 
