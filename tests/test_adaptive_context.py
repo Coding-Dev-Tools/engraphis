@@ -71,6 +71,37 @@ def test_large_history_uses_compact_retrieval_when_absolute_support_is_strong() 
     assert "release manager" in result.context
 
 
+def test_adaptive_support_includes_the_packed_source_title() -> None:
+    engine = MemoryEngine.create(":memory:")
+    workspace_id = engine.store.get_or_create_workspace("adaptive")
+    repo_id = engine.store.get_or_create_repo(workspace_id, "context")
+    engine.remember(
+        "Every 30 days.",
+        workspace_id=workspace_id,
+        repo_id=repo_id,
+        title="OAUTH_TOKEN_ROTATION",
+        mtype=MemoryType.SEMANTIC,
+        scope=Scope.REPO,
+        resolve_conflicts=False,
+    )
+    history = " ".join(f"unrelated note {number}" for number in range(50))
+
+    result = engine.adaptive_context(
+        "OAUTH_TOKEN_ROTATION",
+        history,
+        workspace_id=workspace_id,
+        repo_id=repo_id,
+        max_context_tokens=40,
+        retrieval_token_budget=16,
+        retrieval_profile="lexical",
+    )
+
+    assert result.mode == "retrieval"
+    assert result.retrieval_support >= 0.25
+    assert "OAUTH_TOKEN_ROTATION" in result.context
+    assert "Every 30 days" in result.context
+
+
 def test_weak_retrieval_widens_to_recent_raw_history_without_reinforcing() -> None:
     engine, workspace_id, repo_id = _seed_engine()
     memory_id = engine.store.conn.execute(

@@ -563,7 +563,7 @@ class CodexLunaAgent:
         if payload.get("status") != "ok":
             raise HostedLunaError("hosted Codex model, authentication, or runtime error")
         try:
-            answer = json.loads(payload["answer"])["answer"]
+            answer = payload["answer"]
             if not isinstance(answer, str):
                 raise ValueError
             usage = payload["usage"]

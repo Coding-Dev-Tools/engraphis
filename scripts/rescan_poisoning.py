@@ -112,12 +112,15 @@ def rescan(db_path: str, *, apply: bool = False,
                 continue
             if decision.quarantined and not already_quarantined:
                 metadata = apply_quarantine_metadata(metadata, decision)
-                # Preserve the original valid-time start for governed history, then
-                # close the record now so normal present-day recall excludes it.
+                # Close a live record now, but retain a prior governed closure instead
+                # of rewriting historical validity to the scan time.
                 quarantined_at = now_ts()
+                effective_valid_to = record.valid_to or quarantined_at
                 store.conn.execute(
-                    "UPDATE memories SET metadata=?, provenance=?, valid_to=?, "
-                    "valid_to_recorded_at=? WHERE id=?",
+                    "UPDATE memories SET metadata=?, provenance=?, "
+                    "valid_to=COALESCE(valid_to, ?), "
+                    "valid_to_recorded_at=CASE WHEN valid_to IS NULL THEN ? "
+                    "ELSE valid_to_recorded_at END WHERE id=?",
                     (
                         json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
                         json.dumps(metadata["provenance"], ensure_ascii=False,
@@ -126,7 +129,9 @@ def rescan(db_path: str, *, apply: bool = False,
                     ),
                 )
                 store.conn.execute("DELETE FROM mem_vectors WHERE id=?", (record.id,))
-                store.invalidate_edges_for_memory(record.id, at=quarantined_at, commit=False)
+                store.invalidate_edges_for_memory(
+                    record.id, at=effective_valid_to, commit=False
+                )
                 store.audit(
                     "poisoning_rescan", "quarantine", record.id,
                     "policy=%s; reasons=%s" % (

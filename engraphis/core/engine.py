@@ -1293,9 +1293,18 @@ class MemoryEngine:
         )
         # Confidence must describe evidence the agent will actually see, not a
         # high-scoring candidate that the hard-budget packer omitted.
+        packed_titles = {
+            str(chunk.get("id") or ""): " ".join(
+                str(chunk.get("title") or "").split()
+            )[:120]
+            for chunk in result.chunks
+        }
         per_source_support = support_scores(
             query,
-            [packed.excerpt for packed in result.packed_chunks],
+            [
+                f"{packed_titles.get(str(packed.id), '')}\n{packed.excerpt}".strip()
+                for packed in result.packed_chunks
+            ],
             self.embedder,
         )
         support = max(per_source_support, default=0.0)

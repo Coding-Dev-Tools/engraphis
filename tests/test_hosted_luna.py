@@ -68,6 +68,36 @@ def test_structured_answer_extracts_the_schema_field_before_scoring():
         hosted_luna._structured_answer({"answer": 7})
 
 
+def test_invoke_uses_the_already_validated_worker_answer(monkeypatch):
+    class FakeProcess:
+        returncode = 0
+
+        def communicate(self, _request, timeout):
+            return json.dumps({
+                "status": "ok",
+                "answer": "Ada",
+                "worker_wall_latency_ms": 12.5,
+                "preflight_verified_model": MODEL,
+                "usage": {
+                    "input_tokens": 8,
+                    "cached_input_tokens": 1,
+                    "output_tokens": 2,
+                    "reasoning_output_tokens": 3,
+                    "total_tokens": 13,
+                },
+            }), ""
+
+    monkeypatch.setattr(hosted_luna.sys, "platform", "linux")
+    monkeypatch.setattr(hosted_luna.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+
+    turn = CodexLunaAgent._invoke("prompt", 1.0)
+
+    assert turn.answer == "Ada"
+    assert turn.latency_ms == 12.5
+    assert turn.model == MODEL
+    assert turn.total_tokens == 13
+
+
 def test_agent_fails_closed_at_call_ceiling_and_wrong_model():
     agent = CodexLunaAgent(max_calls=1, invoke=lambda *_: AgentTurn(answer="Ada", model=MODEL))
     agent("q", "c")
