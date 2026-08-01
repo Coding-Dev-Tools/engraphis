@@ -495,6 +495,40 @@ def test_keyword_recall_fallback_keeps_bitemporal_visibility(monkeypatch, tmp_pa
         assert payload["memories"] and "content" not in payload["memories"][0]
 
 
+def test_keyword_recall_fallback_excludes_untrusted_memories(monkeypatch, tmp_path):
+    """A degraded HTTP recall must enforce the same prompt eligibility boundary."""
+    with _client(monkeypatch, tmp_path) as client:
+        svc = v2_api.service()
+        trusted = svc.remember(
+            "Fallback visibility trusted candidate.",
+            workspace="demo",
+            source="human",
+            trusted=True,
+        )
+        untrusted = svc.remember(
+            "Fallback visibility untrusted candidate.",
+            workspace="demo",
+            source="sync",
+            trusted=False,
+        )
+
+        def incompatible_embedder(*_args, **_kwargs):
+            raise ValueError("shapes (256,) and (384,) not aligned")
+
+        monkeypatch.setattr(svc, "recall", incompatible_embedder)
+        response = client.get(
+            "/api/recall",
+            params={"workspace": "demo", "q": "fallback visibility candidate", "k": 1},
+        )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["mode"] == "keyword"
+    assert [memory["id"] for memory in payload["memories"]] == [trusted["id"]]
+    assert untrusted["id"] not in {memory["id"] for memory in payload["memories"]}
+    assert "untrusted candidate" not in repr(payload)
+
+
 def test_http_memory_api_rejects_backdated_supersession_without_partial_write(
     monkeypatch, tmp_path
 ):

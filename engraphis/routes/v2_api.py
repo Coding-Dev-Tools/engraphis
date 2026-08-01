@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 
 from engraphis import licensing
 from engraphis.config import DEFAULT_RELAY_URL, canonicalize_relay_url, settings
+from engraphis.core.poisoning import prompt_eligible
 from engraphis.core.scoring import normalize
 from engraphis.service import (
     GraphIndexRebuilding,
@@ -307,7 +308,8 @@ def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
         system_anchor = float(known_at) if known_at is not None else time.time()
         sql = ("SELECT id, scope, mtype, title, content, summary, pinned, importance, "
                "valid_from, valid_to, valid_to_recorded_at, ingested_at, expired_at, "
-               "subject_key, claim_kind, provenance FROM memories WHERE workspace_id=? "
+               "subject_key, claim_kind, provenance, metadata FROM memories "
+               "WHERE workspace_id=? "
                "AND COALESCE(scope, 'workspace')!='session' "
                "AND (valid_from IS NULL OR valid_from<=?) "
                "AND (valid_to IS NULL OR ?<valid_to "
@@ -323,8 +325,7 @@ def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
             sql += " AND (" + " OR ".join(["title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\'" for _ in terms]) + ")"
             for t in terms:
                 args += ["%" + _escape_like(t) + "%", "%" + _escape_like(t) + "%"]
-        sql += " ORDER BY COALESCE(last_access, valid_from) DESC LIMIT ?"
-        args.append(int(limit))
+        sql += " ORDER BY COALESCE(last_access, valid_from) DESC"
         rows = conn.execute(sql, args).fetchall()
     finally:
         conn.close()
@@ -334,15 +335,27 @@ def _keyword_search(ws, q, limit=20, *, as_of: Optional[float] = None,
             return _json.loads(pp) if isinstance(pp, str) and pp else {}
         except Exception:  # noqa: BLE001
             return {}
-    return [{"id": r["id"], "document_id": r["id"], "title": r["title"] or "",
-             "content": r["content"] or r["summary"] or "", "memory_type": r["mtype"] or "semantic",
-             "scope": r["scope"] or "", "pinned": bool(r["pinned"]),
-             "importance": r["importance"], "valid_from": r["valid_from"],
-             "valid_to": r["valid_to"],
-             "valid_to_recorded_at": r["valid_to_recorded_at"],
-             "ingested_at": r["ingested_at"], "expired_at": r["expired_at"],
-             "subject_key": r["subject_key"] or "", "claim_kind": r["claim_kind"] or "",
-             "provenance": _prov(r["provenance"])} for r in rows]
+    eligible = []
+    for row in rows:
+        provenance = _prov(row["provenance"])
+        metadata = _prov(row["metadata"])
+        if not prompt_eligible(provenance, metadata):
+            continue
+        eligible.append({
+            "id": row["id"], "document_id": row["id"], "title": row["title"] or "",
+            "content": row["content"] or row["summary"] or "",
+            "memory_type": row["mtype"] or "semantic", "scope": row["scope"] or "",
+            "pinned": bool(row["pinned"]), "importance": row["importance"],
+            "valid_from": row["valid_from"], "valid_to": row["valid_to"],
+            "valid_to_recorded_at": row["valid_to_recorded_at"],
+            "ingested_at": row["ingested_at"], "expired_at": row["expired_at"],
+            "subject_key": row["subject_key"] or "", "claim_kind": row["claim_kind"] or "",
+            "provenance": provenance,
+        })
+    # Do not cap the SQL candidates first: untrusted recent rows must not consume
+    # the caller's result budget and hide eligible fallback evidence.
+    requested = int(limit)
+    return eligible if requested < 0 else eligible[:requested]
 
 
 def _score_keyword_recall(query: str, memories: list[dict]) -> list[dict]:

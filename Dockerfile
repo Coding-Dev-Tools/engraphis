@@ -39,7 +39,7 @@ COPY scripts ./scripts
 # MCP, transcription, PostgreSQL, and code graph remain opt-in deployment baggage.
 RUN pip install --upgrade pip "setuptools>=83" \
     && pip install --index-url https://download.pytorch.org/whl/cpu torch \
-    && pip install ".[server,documents]"
+    && pip install ".[server,documents,cloud-sync]"
 
 # Create the non-root app user and pre-own /data. NOTE: the container starts as root so
 # docker-entrypoint.sh can chown a freshly-mounted (root-owned) persistent volume, then
