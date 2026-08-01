@@ -252,7 +252,17 @@ def test_service_adaptive_context_keeps_sources_in_packed_citation_order(monkeyp
     recall = RecallResult(
         chunks=[
             {"id": "mem_first", "title": "First", "scope": "repo", "mtype": "episodic"},
-            {"id": "mem_second", "title": "Second", "scope": "repo", "mtype": "semantic"},
+            {
+                "id": "mem_second",
+                "title": "Second",
+                "scope": "repo",
+                "mtype": "semantic",
+                "provenance": {
+                    "source": "agent:review",
+                    "trusted": True,
+                    "secret": "must not be forwarded",
+                },
+            },
         ],
         packed_chunks=[
             PackedChunk("mem_second", "second evidence", 2),
@@ -286,6 +296,11 @@ def test_service_adaptive_context_keeps_sources_in_packed_citation_order(monkeyp
     assert [source["id"] for source in result["sources"]] == [
         "mem_second", "mem_first",
     ]
+    assert result["sources"][0]["provenance"] == {
+        "source": "agent:review",
+        "trusted": True,
+    }
+    assert result["sources"][1]["provenance"] == {}
 
 
 def test_service_bounds_adaptive_prompt_budgets() -> None:

@@ -73,6 +73,37 @@ def test_productivity_report_measures_outcomes_corrections_turns_and_all_tokens(
     assert adaptive["context_modes"] == {"history_bypass": 1}
 
 
+def test_productivity_completion_oracle_rejects_a_negated_answer() -> None:
+    class NegatingAgent:
+        def __call__(self, question, context):
+            del question, context
+            return "The release manager does not own deployment approval."
+
+    report = run(_small_dataset(), agent=NegatingAgent())
+
+    for method in report["methods"].values():
+        assert method["completion_rate"] == 0.0
+        assert method["wrong_answers"] == 1
+        assert method["corrections"] == 1
+        assert method["successful_corrections"] == 0
+
+
+def test_productivity_accepts_an_injected_case_aware_answer_evaluator() -> None:
+    def evaluator(response, question, supporting_evidence):
+        return response == question["answer"].upper() and not supporting_evidence
+
+    data = _small_dataset()
+    data[0]["questions"][0].pop("supporting")
+
+    report = run(
+        data,
+        agent=lambda _question, _context: "RELEASE MANAGER",
+        answer_evaluator=evaluator,
+    )
+
+    assert all(method["completion_rate"] == 1.0 for method in report["methods"].values())
+
+
 def test_large_history_routes_between_strong_retrieval_and_weak_widening() -> None:
     memories = [
         {

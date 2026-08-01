@@ -33,7 +33,6 @@ from engraphis.core.engine import MemoryEngine
 from engraphis.core.interfaces import MemoryType, Scope
 from engraphis.core.store import Store
 from engraphis.core.textutil import tokenize
-from eval import metrics
 from eval.harness import _seed_case_graph, load_dataset
 
 
@@ -169,10 +168,35 @@ def _percentile(values: list[float], percentile: float) -> float:
     return ordered[index]
 
 
-def _completed(response: str, expected: str) -> bool:
-    if not str(expected or "").strip():
-        return bool(str(response or "").strip())
-    return metrics.answer_token_recall([str(response or "")], str(expected)) >= 1.0
+AnswerEvaluator = Callable[[str, dict, tuple[str, ...]], bool]
+
+
+def _normalized_answer(value: object) -> str:
+    """Return a punctuation-insensitive canonical answer for fixture comparison."""
+    return " ".join(re.findall(r"[\w-]+", str(value or "").casefold()))
+
+
+def _completed(response: str, question: dict, supporting_evidence: tuple[str, ...]) -> bool:
+    """Evaluate task success against a case's explicit answer and source evidence.
+
+    Productivity completion is a correctness metric, not a retrieval metric: token
+    containment lets statements such as ``the release manager does not approve``
+    count as a successful answer to ``release manager``. The offline oracle accepts
+    only a case's canonical answer, an explicitly listed acceptable answer, or an
+    exact supporting evidence sentence. Hosted or paraphrasing benchmarks can
+    inject an ``answer_evaluator`` into :func:`run` with richer semantics.
+    """
+    normalized_response = _normalized_answer(response)
+    expected = str(question.get("answer", question.get("evidence", "")))
+    if not _normalized_answer(expected):
+        return bool(normalized_response)
+    acceptable = [expected, *supporting_evidence]
+    configured = question.get("acceptable_answers", ())
+    if isinstance(configured, (list, tuple)):
+        acceptable.extend(str(value) for value in configured)
+    return normalized_response in {
+        candidate for value in acceptable if (candidate := _normalized_answer(value))
+    }
 
 
 def _seed_case(
@@ -326,6 +350,7 @@ def run(
     dim: int = 256,
     embedder: Optional[object] = None,
     agent: Optional[Callable[[str, str], Union[str, AgentTurn]]] = None,
+    answer_evaluator: Optional[AnswerEvaluator] = None,
     clock: Callable[[], float] = time.perf_counter,
     strategy_order: tuple[str, ...] = STRATEGIES,
 ) -> dict:
@@ -370,10 +395,15 @@ def run(
     counter = RegexTokenCounter()
     selected_embedder = embedder or DeterministicEmbedder(dim=dim)
     selected_agent = agent or DeterministicTaskAgent()
+    selected_answer_evaluator = answer_evaluator or _completed
     rows = {name: [] for name in STRATEGIES}
     task_offset = 0
 
     for case in dataset:
+        evidence_by_tag = {
+            str(memory.get("tag")): str(memory.get("text", ""))
+            for memory in case.get("memories", [])
+        }
         # Each strategy gets an independently seeded engine. This keeps recall
         # caches, reinforcement bugs, or future mutable read state from making a
         # later strategy look artificially faster or more accurate.
@@ -386,8 +416,10 @@ def run(
             try:
                 for number, question_row in enumerate(case.get("questions", [])):
                     question = str(question_row.get("q", ""))
-                    expected = str(
-                        question_row.get("answer", question_row.get("evidence", ""))
+                    supporting_evidence = tuple(
+                        evidence_by_tag[str(tag)]
+                        for tag in question_row.get("supporting", [])
+                        if str(tag) in evidence_by_tag
                     )
                     task_id = str(
                         question_row.get("id") or f"{case.get('id', 'case')}:{number}"
@@ -415,7 +447,9 @@ def run(
                     )
                     first_turn = _turn(selected_agent(question, context))
                     first_response = first_turn.answer
-                    first_completed = _completed(first_response, expected)
+                    first_completed = selected_answer_evaluator(
+                        first_response, question_row, supporting_evidence
+                    )
                     first_abstained = not first_response.strip()
                     agent_turns = 1
                     input_tokens = counter(question) + counter(context)
@@ -440,12 +474,16 @@ def run(
                             selected_agent(corrected_question, correction_history)
                         )
                         corrected_response = corrected_turn.answer
-                        successful_correction = _completed(corrected_response, expected)
+                        successful_correction = selected_answer_evaluator(
+                            corrected_response, question_row, supporting_evidence
+                        )
                         final_response = corrected_response
                         agent_turns += 1
                         input_tokens += counter(corrected_question) + counter(correction_history)
                         output_tokens += counter(corrected_response)
-                    completed = _completed(final_response, expected)
+                    completed = selected_answer_evaluator(
+                        final_response, question_row, supporting_evidence
+                    )
                     elapsed_ms = max(0.0, (clock() - started) * 1000.0)
                     provider_turns = [first_turn]
                     if correction_attempted:

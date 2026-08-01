@@ -2035,6 +2035,7 @@ class MemoryService:
                     "title": chunk.get("title"),
                     "scope": chunk.get("scope"),
                     "mtype": chunk.get("mtype"),
+                    "provenance": _compact_provenance(chunk.get("provenance")),
                 }
                 for packed in result.recall.packed_chunks
                 if (chunk := chunks_by_id.get(packed.id)) is not None
