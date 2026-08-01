@@ -21,6 +21,11 @@ All notable changes to Engraphis are documented here. Format loosely follows
   indexing, prompt recall, resolution, or grounding; `scripts/rescan_poisoning.py` can apply the
   policy to existing records.
 
+### Documentation
+
+- README and release guidance now match the current install extras, public entry points, product
+  boundaries, and focused MCP/provider documentation.
+
 ### Fixed
 
 - Public server entry points now share the v2 service, keeping recall behavior consistent across
@@ -30,6 +35,7 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Versioned deterministic embeddings now rebuild persisted vectors after a mapping change, keeping
   existing databases searchable after an upgrade.
 - Prompt-facing recall now expands its candidate search until enough trusted evidence survives.
+- Hosted-Luna evaluation workers now enforce bounded process-tree cleanup on Windows.
 
 ## [1.2.5] - 2026-07-31
 
