@@ -226,6 +226,7 @@ def test_untrusted_ingest_keeps_ingress_authority_over_extractor_metadata():
     assert "arbitrary_control_field" not in record.metadata
     workspace_id = service.store.get_or_create_workspace("w")
     assert service.store.list_memory_entities(SearchFilter(workspace_id=workspace_id)) == []
+    assert service.store.edges_in_scope(SearchFilter(workspace_id=workspace_id)) == []
 
 
 @pytest.mark.parametrize("source", ("tool:calendar", "web:browser", "import:csv"))
