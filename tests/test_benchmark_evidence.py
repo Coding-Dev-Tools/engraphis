@@ -106,8 +106,37 @@ def test_readme_distinguishes_every_current_token_context_measurement():
         "1,500** tokens; observed mean: **87.73**; observed maximum: **106**",
         "must not be added together",
         "not a storage-reduction claim",
+        "There is no universal memory-count",
+        "python -m eval.vector_scale",
+        "vector_backend=\"sqlite-vec\"",
     ):
         assert evidence in readme
+
+
+def test_readme_puts_external_evidence_boundary_beside_the_chart():
+    """The external-result caveat must remain visible before collapsed details."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    benchmarks = (ROOT / "BENCHMARKS.md").read_text(encoding="utf-8")
+    security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+
+    boundary = "External LoCoMo-derived figures are not canonical."
+    assert boundary in readme
+    assert readme.index("</p>") < readme.index(boundary) < readme.index("<details>")
+    assert "immutable rerun produces a validated" in readme
+    assert "public artifact and checksum" in readme
+
+    for detail in (
+        "Unpinned, noncanonical workload diagnostic",
+        "not answer quality or leaderboard accuracy",
+        "### Choose a vector backend for your corpus",
+        "python -m eval.redteam_poisoning",
+        "[local and hosted plans]",
+    ):
+        assert detail not in readme
+
+    assert "unpinned, noncanonical workload diagnostic" in benchmarks.lower()
+    assert "NumPy vector scale envelope" in benchmarks
+    assert "python -m eval.redteam_poisoning" in security
 
 
 def test_readme_makes_agent_benefits_and_visual_evidence_scannable():

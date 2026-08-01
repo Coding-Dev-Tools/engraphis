@@ -26,6 +26,8 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Libraries",
 ]
@@ -34,6 +36,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Hosted productivity experiments only.  The Codex SDK requires Python 3.10+;
+# this extra never becomes a dependency of the Python 3.9-compatible core.
+hosted-eval = [
+    "openai-codex==0.144.4; python_version >= '3.10'",
+]
 # Managed Cloud Sync encrypts every bundle client-side with ChaCha20-Poly1305.  Keep this
 # outside the NumPy-only core so local/offline users do not acquire a crypto runtime.
 cloud-sync = [

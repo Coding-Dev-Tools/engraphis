@@ -319,6 +319,36 @@ def test_the_bounded_reader_pipes_only_stdout_and_never_prompts(monkeypatch):
     assert captured["kwargs"]["env"]["GCM_INTERACTIVE"] == "never"
 
 
+def test_windows_job_handle_stays_open_through_communicate(monkeypatch):
+    """Closing KILL_ON_JOB_CLOSE before the drain finishes kills a healthy child."""
+
+    events = []
+
+    class _Process:
+        pid = 4321
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            events.append(("communicate", timeout))
+            return "done\n", None
+
+    job = object()
+    monkeypatch.setattr(update.subprocess, "Popen", lambda *args, **kwargs: _Process())
+    monkeypatch.setattr(
+        update, "_start_windows_job",
+        lambda process: events.append(("start", process.pid)) or job,
+    )
+    monkeypatch.setattr(
+        update, "_close_windows_job",
+        lambda handle: events.append(("close", handle)),
+    )
+
+    result = update._run_captured(["git", "fetch"], "Fetching", 7)
+
+    assert result.stdout == "done\n"
+    assert events == [("start", 4321), ("communicate", 7), ("close", job)]
+
+
 # A child that outlives its parent and inherits the same stdout pipe — exactly the shape of
 # ``git`` forking ``git-remote-https``. ``subprocess.run(capture_output=True, timeout=N)``
 # waits for this grandchild to exit no matter what ``N`` says.
@@ -429,6 +459,30 @@ def real_clone(tmp_path, monkeypatch):
     run("tag", "v9.9.9", cwd=upstream)
 
     return SimpleNamespace(git=git, clone=clone)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object regression")
+def test_windows_job_does_not_suspend_a_real_local_fetch(real_clone):
+    """A local fetch spawns ``git-upload-pack`` and must finish inside its budget.
+
+    ``CREATE_SUSPENDED`` is not safe through ``subprocess.Popen`` because CPython closes
+    the primary-thread handle before returning. The old Job Object attempt therefore
+    stranded this exact command with its only thread suspended.
+    """
+
+    started = time.monotonic()
+    update._run(
+        [real_clone.git, "-C", str(real_clone.clone), "fetch", "--tags", "origin"],
+        "Fetching release tags", 15, env=update._git_env(),
+    )
+    elapsed = time.monotonic() - started
+
+    tags = subprocess.run(
+        [real_clone.git, "-C", str(real_clone.clone), "tag", "--list", "v9.9.9"],
+        capture_output=True, text=True, check=True, timeout=5, env=update._git_env(),
+    )
+    assert tags.stdout.strip() == "v9.9.9"
+    assert elapsed < 15, "local git fetch was stranded for %.1fs" % elapsed
 
 
 def _branch_of(git, project):

@@ -12,13 +12,13 @@
 # that already dropped privileges) this is a no-op passthrough.
 set -e
 
-# Default bind host, decided at RUNTIME (not baked into the image): `::` binds dual-stack
-# (IPv6 + IPv4) on Linux, which is what Railway's IPv6 private-network healthchecks need —
-# an IPv4-only 0.0.0.0 bind was half of the 2026-07-16 deploy outage. Fall back to
-# 0.0.0.0 on the rare IPv6-disabled kernel. An operator-provided ENGRAPHIS_HOST (e.g.
-# docker-compose.yml) always wins — this only fills in the unset case.
+# Default bind host, decided at runtime (not baked into the image). Uvicorn's `::`
+# listener is IPv6-only on some container kernels, so plain Docker port forwarding cannot
+# reach it over IPv4. Railway injects RAILWAY_SERVICE_NAME into every deployment and needs
+# IPv6 for its private-network healthchecks; ordinary Docker runs bind 0.0.0.0 instead.
+# An operator-provided ENGRAPHIS_HOST always wins.
 if [ -z "${ENGRAPHIS_HOST:-}" ]; then
-    if [ -f /proc/net/if_inet6 ]; then
+    if [ -n "${RAILWAY_SERVICE_NAME:-}" ] && [ -f /proc/net/if_inet6 ]; then
         ENGRAPHIS_HOST="::"
     else
         ENGRAPHIS_HOST="0.0.0.0"

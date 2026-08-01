@@ -621,6 +621,8 @@ function graphTypeColor(type){if(GCOLOR_OVERRIDES[type])return GCOLOR_OVERRIDES[
    the controls do. Resolve the active theme's values here and hand them over; without this the
    opt-in canvas keeps dark-theme node colours after a switch to Light/Solarized/Sepia. */
 function graphThemeTypeColors(){const colors={},fallback=cssvar('--color-accent','#8c83e8');Object.keys(ETYPE_TOKEN).forEach(type=>{colors[type]=cssvar(ETYPE_TOKEN[type],fallback)});colors.accent=fallback;colors.surface=cssvar('--color-panel','#15181e');colors.canvas=cssvar('--color-canvas','#0e1014');colors.relation_label=cssvar('--color-text-dim','#7e8795');colors.label=cssvar('--color-text','#e7e9ee');return colors}
+/* Co-occurrence is implicit graph structure, not useful canvas text. */
+function graphShowRelationLabel(label){return !!label&&String(label).toLowerCase()!=='co_occurs'}
 function graphContrastColor(color){if(!graphValidColor(color))return cssvar('--color-canvas','#0e1014');const n=parseInt(color.slice(1),16),lum=.2126*(n>>16)+.7152*((n>>8)&255)+.0722*(n&255);return lum>150?'#111827':'#f8fafc'}
 const ETYPE_COLOR=new Proxy({},{get:(_,type)=>graphTypeColor(type)});
 graphLoadColorPreferences();
@@ -1269,7 +1271,7 @@ function graphRender(fit=true,reheat=true){
  if(FG.linkDirectionalParticles){FG.linkDirectionalParticles((reduced||data.links.length>800||window.GSET.flow===false)?0:(GSTYLE==='cyber'?2:(mode.particles||2))).linkDirectionalParticleWidth(.85).linkDirectionalParticleCanvasObject(graphPaintFlowArrow).linkDirectionalParticleSpeed(.004)}
  if(settings.labels){
   FG.linkCanvasObjectMode(()=>'after').linkCanvasObject((link,ctx,scale)=>{
-   if(scale<2.4||!link.label||!link.source.x||(GPERF.dense&&!GHILITE))return;
+   if(scale<2.4||!graphShowRelationLabel(link.label)||!link.source.x||(GPERF.dense&&!GHILITE))return;
    const fontSize=(settings.font*.82)/scale;ctx.font=fontSize+'px sans-serif';ctx.fillStyle=window.GCOL.dim;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(link.label,(link.source.x+link.target.x)/2,(link.source.y+link.target.y)/2);
   });
  }else{FG.linkCanvasObjectMode(()=>undefined)}
@@ -1545,7 +1547,7 @@ function renderSemBanner(eb){
  if(!eb||eb.semantic){showAs(sb,false);return}
  showAs(sb,true,'block');
  var reason=eb.error?('<div class="system-notice-reason">Why the model did not load: '+esc(eb.error)+'</div>'):'';
- sb.innerHTML='<div class="system-notice"><details><summary><strong>Semantic search is off</strong><span class="system-notice-brief">Keyword fallback is active for Recall, Why and Timeline.</span></summary><div class="system-notice-detail">The embedder loaded at '+(eb.dim||'?')+'-dim but your memories are 384-dim. To enable meaning-based search, close the dashboard window and re-launch <code>scripts/launch_dashboard.ps1</code> (Windows) or <code>python -m scripts.start_server</code> &mdash; it installs the model automatically (one-time), then hard-refresh this page.'+reason+'</div></details><button class="btn btn-ghost btn-sm" data-onclick="h145">Recheck</button></div>';
+ sb.innerHTML='<div class="system-notice"><details><summary><strong>Semantic search is off</strong><span class="system-notice-brief">Keyword fallback is active for Recall, Why and Timeline.</span></summary><div class="system-notice-detail">The embedder loaded at '+(eb.dim||'?')+'-dim but your memories are 384-dim. To enable meaning-based search, close the dashboard window and re-launch <code>scripts/launch_dashboard.ps1</code> (Windows) or <code>engraphis-dashboard</code> &mdash; it installs the model automatically (one-time), then hard-refresh this page.'+reason+'</div></details><button class="btn btn-ghost btn-sm" data-onclick="h145">Recheck</button></div>';
 }
 /* Update reminder banner. Fed by /bootstrap's `update` snapshot (fail-silent server side).
    Dismissing hides it until a newer version than the dismissed one ships. Handlers are

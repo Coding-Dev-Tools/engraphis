@@ -267,6 +267,47 @@ def test_team_users_get_distinct_owned_sessions_and_cannot_cross_access():
         set_current_user(None)
 
 
+def test_team_session_private_memories_are_excluded_without_a_session_id():
+    """A shared-workspace query must not surface another member's working memory.
+
+    Passing Alice's session id is rejected separately.  This regression covers the
+    more subtle case where Bob makes an ordinary workspace/repo request: the read
+    filters must exclude every session-scoped row rather than treating the shared
+    workspace as sufficient authority.
+    """
+    svc = _svc()
+    private_memory = "ALICE_SESSION_PRIVATE_MEMORY"
+    try:
+        set_current_user({"id": "usr_alice", "email": "alice@example.test", "role": "member"})
+        svc.create_workspace("w", visibility="shared", confirmed=True)
+        svc.remember("ordinary shared memory", workspace="w", repo="r")
+        alice = svc.start_session("w", repo="r", agent="codex", goal="private work")
+        private = svc.remember(
+            private_memory, workspace="w", repo="r", session_id=alice["session_id"],
+            scope="session",
+        )
+
+        set_current_user({"id": "usr_bob", "email": "bob@example.test", "role": "member"})
+        recalled = svc.recall(private_memory, workspace="w", repo="r")
+        assert private["id"] not in {memory["id"] for memory in recalled["memories"]}
+        grounded = svc.grounded_recall(private_memory, workspace="w", repo="r")
+        assert private["id"] not in {citation["id"] for citation in grounded["citations"]}
+        assert private["id"] not in {
+            memory["id"]
+            for memory in svc.why(private_memory, workspace="w", repo="r")["answer"]
+        }
+        assert private["id"] not in {
+            memory["id"]
+            for memory in svc.timeline(private_memory, workspace="w", repo="r")["history"]
+        }
+        assert private["id"] not in {
+            memory["id"]
+            for memory in svc.recall_proactive(workspace="w", repo="r")["memories"]
+        }
+    finally:
+        set_current_user(None)
+
+
 def test_stable_id_scopes_sessions_even_when_ownership_email_matches():
     svc = _svc()
     svc.remember("shared workspace seed", workspace="w", repo="r")

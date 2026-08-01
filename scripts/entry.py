@@ -40,7 +40,7 @@ commands:
   init           write a project .env and print agent setup snippets
   cli            store and recall memories from the terminal
   mcp            run the MCP server (Claude Code, Cursor, Cline, Zed)
-  server         run the REST server
+  server         run the v2 REST server without opening a browser (compatibility alias)
   dashboard      run the product dashboard
   inspector      inspect the local database
   consolidate    run consolidation over stored memories

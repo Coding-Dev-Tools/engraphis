@@ -1,8 +1,5 @@
 # Default `docker compose up` runs the local customer dashboard and its hosted-service clients.
 # Team identity, roles, seats, and organization management remain in the private account portal.
-# The raw single-user v1 API server is available under the "api" profile after setting a strong
-# ENGRAPHIS_API_TOKEN in .env or the shell:
-#     docker compose --profile api up engraphis-api
 #
 # NOTE: the `env_file:` object form below (`- path: .env` + `required: false`, which makes
 # .env OPTIONAL so a fresh clone with no .env still boots) needs Docker Compose v2.24+
@@ -34,34 +31,6 @@ services:
       ENGRAPHIS_DB_PATH: /data/engraphis.db
       # Persist the customer-side cloud session and non-authoritative entitlement display
       # cache on the volume. Issuance, trial state, leases, and revocations stay private.
-      ENGRAPHIS_STATE_DIR: /data/.engraphis
-    volumes:
-      - engraphis-data:/data
-    restart: unless-stopped
-
-  # Raw v1 API server (single-user). Opt in with:  docker compose --profile api up
-  engraphis-api:
-    build: .
-    image: engraphis:latest
-    command: ["engraphis-server"]
-    profiles: ["api"]
-    ports:
-      - "127.0.0.1:8701:8700"
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      ENGRAPHIS_HOST: 0.0.0.0
-      # This process binds all container interfaces. Even though the published host port is
-      # loopback-only, require an explicit bearer so a changed port mapping cannot silently
-      # expose the legacy v1 API. Keep interpolation optional so the inactive profile does
-      # not break a fresh ``docker compose up``; engraphis-server fails closed at startup
-      # when this profile is actually launched without a token.
-      ENGRAPHIS_API_TOKEN: ${ENGRAPHIS_API_TOKEN:-}
-      # The v1 server uses a DIFFERENT, incompatible memory schema from the v2 dashboard,
-      # so it MUST NOT share the dashboard's engraphis.db (doing so corrupts both). Give it
-      # its own file on the shared volume.
-      ENGRAPHIS_DB_PATH: /data/engraphis_v1.db
       ENGRAPHIS_STATE_DIR: /data/.engraphis
     volumes:
       - engraphis-data:/data

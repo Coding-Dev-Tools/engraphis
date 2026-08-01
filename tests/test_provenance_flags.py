@@ -57,7 +57,7 @@ def test_recall_surfaces_provenance():
     s = _svc()
     s.remember("Untrusted note about pelicans from the web.", workspace="acme",
                source="web", trusted=False)
-    r = s.recall("pelicans", workspace="acme")
+    r = s.recall("pelicans", workspace="acme", include_untrusted=True)
     assert r["count"] >= 1
     mems = [m for m in r["memories"] if "pelicans" in m["content"]]
     assert mems, "expected the pelican memory in recall results"
