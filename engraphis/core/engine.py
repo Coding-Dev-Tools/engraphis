@@ -518,7 +518,7 @@ class MemoryEngine:
                 record for record in claim_history
                 if record.valid_from is not None and record.valid_from <= valid_from
                 and (record.valid_to is None or valid_from < record.valid_to)
-                and (trusted_write or not provenance_is_trusted(record.provenance))
+                and provenance_is_trusted(record.provenance) == trusted_write
             ]
             if predecessors:
                 predecessor = max(
@@ -914,7 +914,7 @@ class MemoryEngine:
             if (nrec and nrec.workspace_id == workspace_id and nrec.repo_id == repo_id
                     and nrec.scope == scope and nrec.mtype == mtype
                     and (scope != Scope.SESSION or nrec.session_id == session_id)
-                    and (trusted_write or not provenance_is_trusted(nrec.provenance))
+                    and provenance_is_trusted(nrec.provenance) == trusted_write
                     and (memory_matches_filter(nrec, flt)
                          or (current_fallback and nrec.expired_at is None
                              and nrec.valid_to is None))):
@@ -945,7 +945,7 @@ class MemoryEngine:
             authoritative = [
                 record for record in claim_history
                 if memory_matches_filter(record, flt, at=valid_at)
-                and (trusted_write or not provenance_is_trusted(record.provenance))
+                and provenance_is_trusted(record.provenance) == trusted_write
             ]
             if not authoritative and valid_at is not None:
                 # A backfill before the first recorded version has no visible
@@ -957,7 +957,7 @@ class MemoryEngine:
                     if record.expired_at is None
                     and record.valid_from is not None
                     and record.valid_from > valid_at
-                    and (trusted_write or not provenance_is_trusted(record.provenance))
+                    and provenance_is_trusted(record.provenance) == trusted_write
                 ]
                 if later:
                     authoritative = [min(

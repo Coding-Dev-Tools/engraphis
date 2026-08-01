@@ -338,3 +338,31 @@ def test_untrusted_write_cannot_resolve_or_link_to_trusted_memory():
     assert trusted["id"] in ordinary_ids
     assert external["id"] not in ordinary_ids
     assert {trusted["id"], external["id"]} <= inspection_ids
+
+
+def test_trusted_write_creates_an_approved_record_for_an_untrusted_duplicate():
+    eng, wid, rid = _engine()
+    external = eng.remember_with_resolution(
+        "Production releases deploy to the blue environment.",
+        workspace_id=wid,
+        repo_id=rid,
+        metadata={"provenance": {"source": "web", "trusted": False}},
+    )
+
+    approved = eng.remember_with_resolution(
+        "Production releases deploy to the blue environment.",
+        workspace_id=wid,
+        repo_id=rid,
+        metadata={"provenance": {"source": "human", "trusted": True}},
+    )
+
+    assert approved["op"] == "add"
+    assert approved["id"] != external["id"]
+    assert eng.store.get_memory(approved["id"]).provenance["trusted"] is True
+    ordinary_ids = {
+        chunk["id"] for chunk in eng.recall(
+            "Where do production releases deploy?", workspace_id=wid, repo_id=rid, k=10,
+        ).chunks
+    }
+    assert approved["id"] in ordinary_ids
+    assert external["id"] not in ordinary_ids

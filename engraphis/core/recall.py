@@ -145,8 +145,8 @@ class RecallEngine:
         # vector indexes do not carry provenance. Over-fetch so external records cannot
         # crowd trusted evidence out of a grounded/adaptive context candidate set.
         prompt_only = bool(prompt_only or not include_untrusted)
-        arm_candidate_k = candidate_k if not prompt_only else min(
-            250, max(candidate_k, candidate_k * 4)
+        arm_candidate_k = candidate_k if not prompt_only else (
+            candidate_k + min(250, candidate_k * 3)
         )
         if config.vector:
             qvec = self.embedder.embed([query])[0]

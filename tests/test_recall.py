@@ -314,6 +314,31 @@ def test_lexical_recall_is_filtered_before_candidate_limit():
     assert [c["id"] for c in res.chunks] == [wanted]
 
 
+def test_prompt_overfetch_never_reduces_the_requested_candidate_depth():
+    store = Store(":memory:")
+    emb = DeterministicEmbedder(256)
+    index = NumpyVectorIndex(store)
+    requested: list[int] = []
+    original_search = index.search
+
+    def recording_search(query, k, filter=None):
+        requested.append(k)
+        return original_search(query, k, filter=filter)
+
+    index.search = recording_search
+    eng = RecallEngine(store, emb, index, IdentityReranker())
+    wid = store.get_or_create_workspace("w")
+    _add(store, emb, wid, None, "A sufficiently deep candidate set remains available.")
+
+    result = eng.recall(
+        "candidate depth", SearchFilter(workspace_id=wid), k=1, candidate_k=500,
+    )
+
+    assert result.candidate_k_requested == 500
+    assert result.candidate_k_used == 500
+    assert requested[0] == 750
+
+
 def test_graph_arm_does_not_match_entity_names_inside_other_words():
     from engraphis.core.interfaces import Edge, Node
 
