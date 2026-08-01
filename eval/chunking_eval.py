@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Optional
 
 from engraphis.backends.extractor import ChunkingExtractor, get_extractor
+from engraphis.core.interfaces import MemoryType
 from engraphis.service import MemoryService
 
 MODES = ("whole", "chunked")
@@ -59,10 +60,27 @@ def run_eval(cases: list[dict], *, mode: str, k: int = 5,
                                extractor=("chunk" if mode == "chunked" else "none"))
     if mode == "chunked":
         svc.engine.extractor = selected_chunker
+    # The checked-in fixture is trusted test data. Raw service ingest correctly marks
+    # arbitrary imports untrusted, which normal recall excludes from agent context; use
+    # the core ingest path with explicit eval provenance so this benchmark isolates the
+    # chunking/retrieval effect instead of measuring the trust gate.
+    workspace_id = svc.store.get_or_create_workspace("corpus")
+    fixture_metadata = {
+        "provenance": {
+            "source": "eval:checked-in-fixture",
+            "trusted": True,
+            "trust_origin": "offline_eval",
+        }
+    }
     memories = 0
     stored_tokens: list[int] = []
     for c in cases:
-        out = svc.ingest(c["document"], workspace="corpus", mtype="semantic")
+        out = svc.engine.ingest(
+            c["document"],
+            workspace_id=workspace_id,
+            default_mtype=MemoryType.SEMANTIC,
+            metadata=fixture_metadata,
+        )
         memories += out["count"]
         for fact in out["facts"]:
             record = svc.store.get_memory(fact["id"])

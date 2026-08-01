@@ -103,6 +103,25 @@ def test_adaptive_candidate_depth_is_profile_aware_and_bounded(
     assert profile in reason
 
 
+@pytest.mark.parametrize(
+    ("query", "expected", "reason"),
+    [
+        ("Why does checkout depend on auth?", 30, "adaptive graph intent floor"),
+        ("Where is Handler.handle() defined?", 30, "adaptive code intent floor"),
+        ("What did we decide for the launch?", 15, "adaptive balanced floor"),
+    ],
+)
+def test_adaptive_balanced_depth_uses_high_confidence_query_intent(
+    query: str, expected: int, reason: str
+) -> None:
+    depth, actual_reason = DeterministicRetrievalPolicy().candidate_depth(
+        query, k=5, ceiling=50, profile="balanced", mode="adaptive"
+    )
+
+    assert depth == expected
+    assert actual_reason == reason
+
+
 def test_fixed_candidate_depth_preserves_the_requested_ceiling() -> None:
     depth, reason = DeterministicRetrievalPolicy().candidate_depth(
         "ordinary query", k=5, ceiling=7, profile="balanced", mode="fixed"

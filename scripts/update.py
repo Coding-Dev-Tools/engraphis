@@ -55,11 +55,10 @@ _TREE_KILL_TIMEOUT_S = 10        # bounding the kill itself; `taskkill` is local
 _DRAIN_AFTER_KILL_S = 5          # reading a pipe whose writers were just destroyed
 
 # ``os.killpg`` must target *our* tree, never the shell that launched the updater, so the
-# POSIX child gets its own session. Windows has no equivalent at spawn time — the tree is
-# walked by ``taskkill /T`` instead — and the keyword's Windows meaning changed in 3.13,
-# so it is not passed there at all. Every step is spawned this way, not just the captured
-# ones: a session is the only handle POSIX gives us on a *descendant*, and it has to exist
-# before the child runs, not after the budget has already expired.
+# POSIX children get their own session. Windows children are assigned to a Job Object
+# immediately after ``Popen`` returns; they must not be created suspended because CPython
+# closes the primary-thread handle before returning the ``Popen`` object. The established
+# ``taskkill /T`` fallback covers assignment failures and the small pre-assignment race.
 _OWN_PROCESS_GROUP = {} if os.name == "nt" else {"start_new_session": True}
 
 
@@ -93,6 +92,108 @@ def _git_env() -> dict:
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "never"
     return env
+
+
+def _start_windows_job(process: subprocess.Popen):
+    """Contain a running Windows child and its future descendants in a Job Object.
+
+    Returning the raw job handle keeps ``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`` in force
+    until :func:`_bounded_call` has either observed normal completion or timed out.  The
+    helpers deliberately fail open to the established ``taskkill`` fallback when a host
+    denies Job Object assignment (for example, a restrictive outer sandbox). Assignment
+    happens without suspension: ``subprocess.Popen`` does not retain the primary-thread
+    handle required to resume a ``CREATE_SUSPENDED`` child.
+    """
+    if os.name != "nt":
+        return None
+    # A fake Popen used by the offline unit tests has no Windows process handle.
+    if not hasattr(process, "_handle"):
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _BasicLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class _IoCounters(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_ulonglong) for name in (
+                "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
+                "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+            )]
+
+        class _ExtendedLimitInformation(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _BasicLimitInformation),
+                ("IoInfo", _IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = (
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+        )
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        job = kernel32.CreateJobObjectW(None, None)
+        if job:
+            limits = _ExtendedLimitInformation()
+            limits.BasicLimitInformation.LimitFlags = 0x00002000  # KILL_ON_JOB_CLOSE
+            configured = kernel32.SetInformationJobObject(
+                job, 9, ctypes.byref(limits), ctypes.sizeof(limits),  # ExtendedLimitInformation
+            )
+            assigned = configured and kernel32.AssignProcessToJobObject(job, process._handle)
+        else:
+            assigned = False
+        if not assigned:
+            if job:
+                kernel32.CloseHandle(job)
+            return None
+        return (kernel32, job)
+    except (AttributeError, OSError):
+        return None
+
+
+def _terminate_windows_job(job) -> None:
+    """Synchronously terminate a contained tree without releasing its job handle."""
+    if job is None:
+        return
+    kernel32, handle = job
+    try:
+        kernel32.TerminateJobObject(handle, 1)
+    except (AttributeError, OSError):
+        pass
+
+
+def _close_windows_job(job) -> None:
+    if job is None:
+        return
+    kernel32, handle = job
+    try:
+        kernel32.CloseHandle(handle)
+    except (AttributeError, OSError):
+        pass
 
 
 def _kill_process_tree(process: subprocess.Popen) -> None:
@@ -154,15 +255,22 @@ def _bounded_call(cmd: list[str], what: str, timeout: int, capture: bool,
         cmd, stdout=subprocess.PIPE if capture else None, stdin=subprocess.DEVNULL,
         text=True, env=env, **_OWN_PROCESS_GROUP,
     )
+    job = _start_windows_job(process)
     try:
         stdout, _ = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        # Terminate the Job Object synchronously, but retain its handle until the bounded
+        # pipe drain finishes. Keep taskkill as a fallback for assignment failures and
+        # descendants created in the small interval before assignment.
+        _terminate_windows_job(job)
         _kill_process_tree(process)
         try:
             process.communicate(timeout=_DRAIN_AFTER_KILL_S)
         except subprocess.TimeoutExpired:
             pass
         raise _timed_out(what, timeout) from None
+    finally:
+        _close_windows_job(job)
     return subprocess.CompletedProcess(cmd, process.returncode, stdout or "", None)
 
 

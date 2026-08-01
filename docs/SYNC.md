@@ -25,9 +25,8 @@ The split is deliberate. Local checks in Apache-licensed code are not DRM and ca
 a fork. The paid boundary is authorization to use the official private service and its operated
 infrastructure.
 
-If you want hosted sync across your installations while helping fund continued Engraphis
-development, [start a 3-day Pro trial](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=sync_doc&trial=pro#billing)
-or [subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=sync_doc#billing).
+Cloud Sync is available with hosted Pro and Team plans. See [local and hosted plans](HOSTED_PLANS.md)
+for pricing and included services.
 
 ## Trial and grace
 
@@ -121,8 +120,18 @@ compatibility but exports v2. Older clients reject v2 instead of silently forwar
 downgraded bundle that loses those fields.
 
 Bundle input is untrusted. The client validates schema and size limits before applying records,
-rechecks workspace scope, and retains provenance/audit evidence. A relay cannot inject a record
-outside the authorized workspace merely by changing bundle fields.
+rechecks workspace scope, and retains provenance/audit evidence. Every inbound memory is re-homed
+under local `source: sync, trusted: false` provenance; a peer's serialized trust label, graph
+metadata, retention hints, or extractor output has no authority. Suspicious payloads are
+quarantined before indexing. A relay cannot inject a record outside the authorized workspace
+merely by changing bundle fields.
+
+An inbound bundle also cannot overwrite a locally approved memory with the same id. The local
+record remains the safe winner and a content-free `sync_trust_conflict` audit event records a
+competing peer payload. This intentionally favors integrity over automatic last-writer-wins for
+cross-trust collisions; promote/approve a fresh local record if the peer's information is verified.
+Likewise, unauthenticated bundle links may connect only records that remain in the untrusted
+replica; a peer cannot attach graph edges to locally approved memories.
 
 ## Security and privacy
 

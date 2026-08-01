@@ -22,8 +22,10 @@ Two modes, one contract:
 Security: retrieved memory content is UNTRUSTED — memory poisoning is an explicit
 threat (SECURITY.md). The synthesiser fences sources as data and instructs the model
 to ignore instructions found inside them; the deterministic path never executes source
-text at all. The abstain path means a poisoned-but-irrelevant memory cannot force an
-answer just by being the nearest vector.
+text at all. Grounded answers additionally use only trusted, non-quarantined evidence,
+so an untrusted source cannot be echoed into an extractive answer or an LLM prompt.
+The abstain path means a poisoned-but-irrelevant memory cannot force an answer just by
+being the nearest vector.
 """
 from __future__ import annotations
 
@@ -36,6 +38,7 @@ import numpy as np
 
 from engraphis.core.context import RegexTokenCounter
 from engraphis.core.interfaces import LLM
+from engraphis.core.poisoning import detect_payload_signals, prompt_eligible
 from engraphis.core.recall import RecallResult
 from engraphis.core.textutil import jaccard, tokenize
 
@@ -220,7 +223,7 @@ def _synthesis_is_source_bounded(text: str, citations: list[dict]) -> bool:
     of citation glue words. Legitimate paraphrases that fail this conservative check
     degrade to the deterministic extractive answer instead of being labelled grounded.
     """
-    if not _citations_are_valid(text, len(citations)):
+    if detect_payload_signals(text) or not _citations_are_valid(text, len(citations)):
         return False
     sources = {
         int(citation["n"]): _ordered_tokens(str(citation.get("content", "")))
@@ -244,6 +247,37 @@ def _synthesis_is_source_bounded(text: str, citations: list[dict]) -> bool:
         ):
             return False
     return True
+
+
+def _is_grounding_eligible(chunk: dict, metadata: object) -> bool:
+    """Whether a retrieved source may be exposed as grounded evidence.
+
+    Ordinary legacy records remain eligible unless they carry an explicit safety
+    marker.  A source the write path marked untrusted or quarantined remains useful
+    to non-grounded inspection, but cannot become answer text, an LLM source, or a
+    reinforcement target merely because retrieval surfaced it.  ``metadata`` is
+    private ``RecallResult`` state rather than part of the public recall projection.
+    """
+    # Trust labels remain the primary authority boundary, but are not the sole safety
+    # control. A source that still looks instruction-shaped is excluded from answer
+    # construction even when an importer accidentally marked it trusted.
+    if detect_payload_signals(
+        str(chunk.get("content", "")), title=str(chunk.get("title", ""))
+    ):
+        return False
+
+    source_metadata = metadata if isinstance(metadata, dict) else {}
+    provenance = chunk.get("provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    metadata_provenance = source_metadata.get("provenance")
+    metadata_provenance = (
+        metadata_provenance if isinstance(metadata_provenance, dict) else {}
+    )
+    # Metadata is private recall state for older/synced rows.  Any restrictive
+    # marker wins, and missing provenance is untrusted rather than an implicit
+    # approval to quote the record in an answer.
+    effective_provenance = {**provenance, **metadata_provenance}
+    return prompt_eligible(effective_provenance, source_metadata)
 
 
 def build_grounded_answer(query: str, result: RecallResult, embedder, *,
@@ -272,12 +306,18 @@ def build_grounded_answer(query: str, result: RecallResult, embedder, *,
     # candidates can be omitted or truncated by the caller's token budget and therefore
     # are not evidence available to the answerer.
     raw_by_id = {str(chunk.get("id")): chunk for chunk in result.chunks}
+    source_metadata = getattr(result, "source_metadata", {})
     chunks = []
+    eligible_packed = []
     for packed in result.packed_chunks:
         raw = raw_by_id.get(str(packed.id))
         if raw is None or not packed.excerpt:
             continue
+        metadata = source_metadata.get(str(packed.id), {}) if isinstance(source_metadata, dict) else {}
+        if not _is_grounding_eligible(raw, metadata):
+            continue
         chunks.append({**raw, "content": packed.excerpt})
+        eligible_packed.append(packed)
     contents = [str(c.get("content", "")) for c in chunks]
     per = support_scores(query, contents, embedder)
     support = max(per) if per else 0.0
@@ -290,7 +330,7 @@ def build_grounded_answer(query: str, result: RecallResult, embedder, *,
             "tokens": packed.tokens,
             "truncated": packed.truncated,
             "reason": packed.reason,
-        } for packed in result.packed_chunks],
+        } for packed in eligible_packed],
         "valid_at": result.valid_at,
         "known_at": result.known_at,
         "historical": result.historical,

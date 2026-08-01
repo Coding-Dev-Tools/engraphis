@@ -1853,6 +1853,22 @@ class Store:
     # ── memories ──────────────────────────────────────────────────────────────
     def add_memory(self, rec: MemoryRecord, *, audit: bool = True,
                    commit: bool = True) -> str:
+        # ``Store`` is a local-programmatic capability.  Stamp direct new writes
+        # explicitly so prompt-facing recall can fail closed for genuinely legacy
+        # rows without making current low-level integrations silently disappear.
+        # External ingress (service/sync) provides its own stricter provenance.
+        provenance = dict(rec.provenance or {})
+        if "trusted" not in provenance:
+            provenance.update({"source": provenance.get("source", "local_store"),
+                               "trusted": True,
+                               "trust_origin": provenance.get(
+                                   "trust_origin", "local_store"
+                               )})
+        rec.provenance = provenance
+        metadata = dict(rec.metadata or {})
+        if not isinstance(metadata.get("provenance"), dict):
+            metadata["provenance"] = dict(provenance)
+        rec.metadata = metadata
         if not rec.id:
             rec.id = ids.new_id("memory")
         existing = self.conn.execute(
@@ -2015,10 +2031,11 @@ class Store:
         return [_row_to_record(row) for row in rows]
 
     def list_memories_page(self, flt: Optional[SearchFilter] = None, *,
-                           after_id: str = "", limit: int = 500) -> list[MemoryRecord]:
+                           after_id: str = "", limit: int = 500,
+                           include_invalid: bool = False) -> list[MemoryRecord]:
         """Return one deterministic keyset page without materializing the full scope."""
         sql = "SELECT * FROM memories"
-        where, params = self._where(flt, include_invalid=False)
+        where, params = self._where(flt, include_invalid=include_invalid)
         if after_id:
             where.append("id>?")
             params.append(after_id)

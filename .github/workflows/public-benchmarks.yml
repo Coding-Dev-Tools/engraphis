@@ -1,0 +1,157 @@
+name: Public benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Protected benchmark suite to run"
+        required: true
+        type: choice
+        options:
+          - hosted-luna-full
+      run_id:
+        description: "Unique operator-supplied run identifier"
+        required: true
+        type: string
+      max_hosted_calls:
+        description: "Exact full-run call ceiling reported by the frozen dry-run"
+        required: true
+        type: string
+      prerequisites_reviewed:
+        description: "Smoke and pilot reports were completed and reviewed"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-benchmark-${{ inputs.suite }}-${{ inputs.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: ${{ inputs.suite }} / ${{ inputs.run_id }}
+    environment: public-benchmark-protected
+    runs-on: [self-hosted, benchmark]
+    timeout-minutes: 1440
+    steps:
+      - name: Check out the requested revision
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Verify immutable clean source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install the protected benchmark environment
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[all,test,hosted-eval]"
+
+      - name: Create persistent private working directories
+        shell: bash
+        env:
+          RUN_ID: ${{ inputs.run_id }}
+          AUTHORIZED_CALLS: ${{ inputs.max_hosted_calls }}
+          PREREQUISITES_REVIEWED: ${{ inputs.prerequisites_reviewed }}
+          STATE_ROOT: ${{ vars.ENGRAPHIS_BENCHMARK_STATE_ROOT }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "run_id must start with an alphanumeric and contain at most 128 safe characters" >&2
+            exit 2
+          fi
+          if [[ ! "$AUTHORIZED_CALLS" =~ ^[1-9][0-9]*$ ]]; then
+            echo "max_hosted_calls must be an explicit positive integer" >&2
+            exit 2
+          fi
+          if [ "$PREREQUISITES_REVIEWED" != "true" ]; then
+            echo "smoke and pilot prerequisites must be reviewed before a full run" >&2
+            exit 2
+          fi
+          if [ -z "$STATE_ROOT" ] || [[ "$STATE_ROOT" == *$'\n'* ]]; then
+            echo "ENGRAPHIS_BENCHMARK_STATE_ROOT must be configured on the protected runner" >&2
+            exit 2
+          fi
+          mkdir -p -- "$STATE_ROOT"
+          state_root_real="$(realpath "$STATE_ROOT")"
+          workspace_real="$(realpath "$GITHUB_WORKSPACE")"
+          if [ "$state_root_real" = "/" ] || [ "$state_root_real" = "$workspace_real" ] || \
+             [[ "$state_root_real" == "$workspace_real/"* ]]; then
+            echo "benchmark state must be outside the checkout" >&2
+            exit 2
+          fi
+          state_dir="$state_root_real/$RUN_ID"
+          mkdir -p -- "$state_dir"
+          chmod 700 "$state_root_real" "$state_dir"
+          printf 'BENCHMARK_STATE_DIR=%s\n' "$state_dir" >> "$GITHUB_ENV"
+          mkdir -p public-artifacts
+
+      - name: Safe orchestrator dry-run (zero hosted calls)
+        shell: bash
+        env:
+          AUTHORIZED_CALLS: ${{ inputs.max_hosted_calls }}
+        run: |
+          set -euo pipefail
+          python -m eval.hosted_luna --dry-run --full \
+            > "$BENCHMARK_STATE_DIR/plan.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["BENCHMARK_STATE_DIR"]) / "plan.json"
+          plan = json.loads(path.read_text(encoding="utf-8"))
+          if plan.get("dry_run") is not True:
+              raise SystemExit("orchestrator did not report dry_run=true")
+          if plan.get("config", {}).get("stage") != "full":
+              raise SystemExit("orchestrator dry-run did not bind the full stage")
+          calls = plan.get("config", {}).get("projected_max_hosted_calls")
+          if not isinstance(calls, int) or calls <= 0:
+              raise SystemExit("dry-run did not provide a positive call ceiling")
+          if str(calls) != os.environ["AUTHORIZED_CALLS"]:
+              raise SystemExit("operator ceiling does not exactly match the frozen dry-run")
+          (path.parent / "max-hosted-calls").write_text(str(calls), encoding="ascii")
+          PY
+
+      - name: Execute the frozen benchmark plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          max_calls="$(cat "$BENCHMARK_STATE_DIR/max-hosted-calls")"
+          test "$max_calls" -gt 0
+          python -m eval.hosted_luna --full \
+            --max-hosted-calls "$max_calls" \
+            --private-records "$BENCHMARK_STATE_DIR/records.jsonl" \
+            --public-report "$BENCHMARK_STATE_DIR/public.json"
+
+      - name: Validate the public artifact and its claim boundary
+        shell: bash
+        env:
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+          python -m eval.public_readiness \
+            --artifact "$BENCHMARK_STATE_DIR/public.json"
+          cp "$BENCHMARK_STATE_DIR/public.json" "public-artifacts/$RUN_ID.json"
+          sha256sum "public-artifacts/$RUN_ID.json" > "public-artifacts/$RUN_ID.json.sha256"
+
+      - name: Upload redacted public artifacts only
+        if: ${{ success() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: public-benchmark-${{ inputs.suite }}-${{ inputs.run_id }}
+          path: public-artifacts/
+          if-no-files-found: error
+          retention-days: 14

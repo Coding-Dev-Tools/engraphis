@@ -37,6 +37,15 @@ from engraphis.core.interfaces import (
     Scope,
     SearchFilter,
 )
+from engraphis.core.poisoning import (
+    PoisoningDecision,
+    apply_quarantine_metadata,
+    assess_untrusted_payload,
+    inspection_eligible,
+    metadata_is_trusted,
+    prompt_eligible,
+    provenance_is_trusted,
+)
 from engraphis.core.recall import RecallEngine, RecallResult
 from engraphis.core.retrieval_policy import (
     CANDIDATE_DEPTH_MODES,
@@ -345,9 +354,9 @@ class MemoryEngine:
                  valid_from: Optional[float] = None, resolve_conflicts: bool = True,
                  candidate_k: int = 5, subject_key: str = "", claim_kind: str = "",
                  _trusted_graph_keys: Optional[frozenset] = None) -> str:
-        """Store one memory. Returns the id of the *live* record: a new id for ADD/
-        INVALIDATE, or the existing memory's id if this was resolved as a NOOP
-        (near-duplicate). See ``remember_with_resolution`` for the full decision detail.
+        """Store one memory. Returns the resulting record id: a new id for ADD/
+        INVALIDATE/quarantine, or the existing memory's id if this was resolved as a
+        NOOP (near-duplicate). See ``remember_with_resolution`` for decision detail.
         """
         return self.remember_with_resolution(
             content, workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
@@ -377,6 +386,8 @@ class MemoryEngine:
           lists the closed id(s).
         * ``"relate"``      — evidence shows a nearby claim but not a safe contradiction;
           both remain live and a semantic relation is persisted.
+        * ``"quarantined"`` — an explicitly untrusted payload matched the deterministic
+          poisoning policy; retained only for governed historical inspection.
         """
         if valid_from is not None:
             if isinstance(valid_from, bool):
@@ -411,10 +422,27 @@ class MemoryEngine:
                 raise ValueError("repo scope requires repo_id")
         if scope in (Scope.WORKSPACE, Scope.USER) and repo_id:
             raise ValueError(f"{scope.value} scope requires repo_id to be omitted")
+        # Every new record carries an explicit trust assertion.  The direct engine is
+        # a local, programmatic capability; external entry points set their own
+        # canonical ``trusted: false`` provenance before reaching this layer.  Keeping
+        # the default here preserves the core's offline API while making recall fail
+        # closed for genuinely legacy/unlabelled records.
+        write_metadata = dict(metadata or {})
+        provenance = write_metadata.get("provenance")
+        provenance = dict(provenance) if isinstance(provenance, dict) else {}
+        if "trusted" not in provenance:
+            provenance["trusted"] = True
+            provenance.setdefault("trust_origin", "local_engine")
+        provenance.setdefault("source", "local_engine")
+        write_metadata["provenance"] = provenance
+        poisoning = assess_untrusted_payload(content, title=title, metadata=write_metadata)
+        trusted_write = metadata_is_trusted(write_metadata)
         text = f"{title}\n{content}" if title else content
         # Embedding is the expensive, thread-safe part — compute it BEFORE taking the
         # write lock so concurrent writers only serialize the fast resolve+insert step.
-        vec = self.embedder.embed([text])[0]
+        # Quarantine happens before embedding: payloads retained only for inspection
+        # must never consume a vector slot or become semantic retrieval candidates.
+        vec = None if poisoning.quarantined else self.embedder.embed([text])[0]
 
         # One writer at a time from neighbor-lookup through insert/invalidate: without
         # this, two concurrent near-duplicate remembers can BOTH observe "no neighbor"
@@ -432,10 +460,11 @@ class MemoryEngine:
                 return self._resolve_and_store(
                     content, text=text, vec=vec, workspace_id=workspace_id, repo_id=repo_id,
                     session_id=session_id, mtype=mtype, scope=scope, title=title,
-                    importance=importance, keywords=keywords, metadata=metadata,
+                    importance=importance, keywords=keywords, metadata=write_metadata,
                     valid_from=valid_from, resolve_conflicts=resolve_conflicts,
                     candidate_k=candidate_k, subject_key=subject_key,
                     claim_kind=claim_kind, trusted_graph_keys=_trusted_graph_keys,
+                    poisoning=poisoning, trusted_write=trusted_write,
                 )
             except BaseException:
                 if (owns_session_transaction
@@ -443,29 +472,37 @@ class MemoryEngine:
                     self.store.conn.rollback()
                 raise
 
-    def _resolve_and_store(self, content: str, *, text: str, vec: np.ndarray,
+    def _resolve_and_store(self, content: str, *, text: str, vec: Optional[np.ndarray],
                            workspace_id: str, repo_id: Optional[str],
                            session_id: Optional[str], mtype: MemoryType, scope: Scope,
                            title: str, importance: float, keywords: Optional[list],
                            metadata: Optional[dict], valid_from: Optional[float],
                            resolve_conflicts: bool, candidate_k: int,
                            subject_key: str, claim_kind: str,
-                           trusted_graph_keys: Optional[frozenset] = None) -> dict:
+                           trusted_graph_keys: Optional[frozenset] = None,
+                           poisoning: Optional[PoisoningDecision] = None,
+                           trusted_write: bool = True) -> dict:
         """The resolve→insert body of ``remember_with_resolution``. The caller holds
         ``self._write_lock`` for the whole call (atomicity of the resolve decision).
 
         ``trusted_graph_keys`` names the ``GRAPH_HINT_KEYS`` this write's ``metadata``
         genuinely inherited from an ``Extractor``; everything else is treated as
         caller-supplied — see ``_rehome_untrusted_graph_hints``."""
+        poisoning = poisoning or PoisoningDecision(False)
         decision, neighbors = None, []
-        if resolve_conflicts:
+        # Untrusted records are retained as passive inspection evidence.  They may
+        # not deduplicate into, invalidate, relate to, reinforce, or otherwise
+        # mutate higher-trust memory; that is a trust lattice, not a detector score.
+        if resolve_conflicts and not poisoning.quarantined:
             decision, neighbors = self._resolve_against_neighbors(
                 text, vec, workspace_id=workspace_id, repo_id=repo_id,
                 session_id=session_id, scope=scope, mtype=mtype,
                 candidate_k=candidate_k, subject_key=subject_key,
                 claim_kind=claim_kind, valid_at=valid_from, content=content,
+                trusted_write=trusted_write,
             )
-        if resolve_conflicts and subject_key and valid_from is not None:
+        if (resolve_conflicts and not poisoning.quarantined
+                and subject_key and valid_from is not None):
             # A durable claim has a temporal identity in addition to its text. A
             # scheduled successor can be a better prose match than the version visible
             # at this write's effective time, but it is not the version being replaced.
@@ -481,6 +518,7 @@ class MemoryEngine:
                 record for record in claim_history
                 if record.valid_from is not None and record.valid_from <= valid_from
                 and (record.valid_to is None or valid_from < record.valid_to)
+                and (trusted_write or not provenance_is_trusted(record.provenance))
             ]
             if predecessors:
                 predecessor = max(
@@ -525,29 +563,60 @@ class MemoryEngine:
         if trusted_graph_keys is None and getattr(self._internal_writes, "depth", 0):
             trusted_graph_keys = frozenset(GRAPH_HINT_KEYS)
         meta = _rehome_untrusted_graph_hints(dict(metadata or {}), trusted_graph_keys)
+        if poisoning.quarantined:
+            # Policy values are written after caller-owned metadata. This prevents a
+            # payload from forging a trusted/quarantine-clear provenance flag.
+            meta = apply_quarantine_metadata(meta, poisoning)
         if decision is not None and decision.op == ResolutionOp.INVALIDATE:
             # Persist the supersession pointer on the new record so the chain is
             # queryable later (why/timeline/inspector), not only in the audit log.
             meta["supersedes"] = [decision.target_id]
 
-        importance, stability, retention_signal = self._retention_signal(
-            content, title=title, mtype=mtype, metadata=meta, importance=importance,
-        )
+        if poisoning.quarantined:
+            # Retained only for governance inspection: an untrusted payload must not
+            # elevate itself through caller-supplied retention supervision.
+            importance, stability, retention_signal = 0.0, 0.05, {}
+        else:
+            importance, stability, retention_signal = self._retention_signal(
+                content, title=title, mtype=mtype, metadata=meta, importance=importance,
+            )
         if retention_signal:
             meta["retention_supervision"] = retention_signal
 
+        quarantine_at = valid_from if valid_from is not None else now_ts()
         rec = MemoryRecord(
             id="", content=content, mtype=mtype, scope=scope, workspace_id=workspace_id,
             repo_id=repo_id, session_id=session_id, title=title, importance=importance,
             stability=stability, subject_key=subject_key, claim_kind=claim_kind,
-            keywords=keywords or [], metadata=meta, valid_from=valid_from,
+            keywords=keywords or [], metadata=meta,
+            # A zero-length validity interval retains the record/audit trail while the
+            # existing temporal filters keep it out of every normal recall arm.
+            valid_from=quarantine_at if poisoning.quarantined else valid_from,
+            valid_to=quarantine_at if poisoning.quarantined else None,
+            valid_to_recorded_at=now_ts() if poisoning.quarantined else None,
             # Lift provenance into its dedicated field/column so recall/why/timeline
             # surface it (copied, not popped: consolidate.py still reads
             # metadata["provenance"]).
             provenance=dict(meta.get("provenance") or {}),
-            embedding=vec,
+            embedding=None if poisoning.quarantined else vec,
         )
         mid = self.store.add_memory(rec)
+        if poisoning.quarantined:
+            # Deliberately content-free: a reviewer can inspect the retained record,
+            # while audit exports never reflect prompt-injection text into another UI.
+            self.store.audit(
+                "poisoning_policy", "quarantine", mid,
+                "policy=%s; reasons=%s" % (
+                    poisoning.policy, ",".join(poisoning.reasons),
+                ),
+            )
+            return {
+                "id": mid,
+                "op": "quarantined",
+                "quarantined": True,
+                "policy": poisoning.policy,
+                "reasons": list(poisoning.reasons),
+            }
         if retention_signal:
             self.store.audit(
                 retention_signal.get("source", "retention"),
@@ -570,7 +639,7 @@ class MemoryEngine:
                     "failure_type=%s" % type(exc).__name__)
             except Exception:  # noqa: BLE001
                 pass
-        if repo_id and scope != Scope.SESSION:
+        if trusted_write and repo_id and scope != Scope.SESSION:
             self._link_memory_to_code(mid, content=f"{title}\n{content}", repo_id=repo_id)
 
         # Optional graph population (backends.graph_extractor). Structured fact metadata
@@ -592,7 +661,7 @@ class MemoryEngine:
                             valid_from=rec.valid_from, ingested_at=rec.ingested_at)
             except Exception:
                 pass
-        if scope != Scope.SESSION and self.graph_extractor is not None:
+        if trusted_write and scope != Scope.SESSION and self.graph_extractor is not None:
             try:
                 from engraphis.backends.graph_extractor import feed as _graph_feed
                 _graph_feed(self.store, content, workspace_id=workspace_id,
@@ -601,7 +670,7 @@ class MemoryEngine:
                             valid_from=rec.valid_from, ingested_at=rec.ingested_at)
             except Exception:
                 pass
-        if scope != Scope.SESSION:
+        if trusted_write and scope != Scope.SESSION:
             self._link_memory_entities(
                 mid, f"{title}\n{content}", workspace_id=workspace_id, repo_id=repo_id,
                 valid_from=rec.valid_from,
@@ -638,14 +707,14 @@ class MemoryEngine:
             # but remains available for historical ``as_of`` queries. Deleting it made
             # time travel silently lose the semantic arm.
             self.store.audit("resolver", "invalidate", decision.target_id, decision.reason)
-            linked = self._evolve(mid, neighbors, exclude={decision.target_id})
+            linked = self._evolve(mid, neighbors, exclude={decision.target_id}) if trusted_write else []
             out = {"id": mid, "op": "invalidate", "superseded": [decision.target_id],
                    "reason": decision.reason}
             if linked:
                 out["linked"] = linked
             return out
 
-        linked = self._evolve(mid, neighbors)
+        linked = self._evolve(mid, neighbors) if trusted_write else []
         if decision is not None and decision.op == ResolutionOp.RELATE:
             related_to = decision.target_id
             if related_to and not self.store.has_link(mid, related_to):
@@ -806,7 +875,8 @@ class MemoryEngine:
                                    scope: Scope, mtype: MemoryType, candidate_k: int,
                                    subject_key: str = "", claim_kind: str = "",
                                    valid_at: Optional[float] = None,
-                                   content: Optional[str] = None):
+                                   content: Optional[str] = None,
+                                   trusted_write: bool = True):
         """Fetch same-scope neighbors via the vector index and run the deterministic
         resolver (``core.resolve``). Returns ``(decision, neighbors)`` so the caller can
         also evolve the neighborhood. Never raises — a broken/missing index degrades to
@@ -844,22 +914,57 @@ class MemoryEngine:
             if (nrec and nrec.workspace_id == workspace_id and nrec.repo_id == repo_id
                     and nrec.scope == scope and nrec.mtype == mtype
                     and (scope != Scope.SESSION or nrec.session_id == session_id)
+                    and (trusted_write or not provenance_is_trusted(nrec.provenance))
                     and (memory_matches_filter(nrec, flt)
                          or (current_fallback and nrec.expired_at is None
                              and nrec.valid_to is None))):
                 neighbors.append((sim, nrec))
-        if valid_at is not None and subject_key:
-            # The vector search above is intentionally anchored at the candidate's world
-            # time.  Its top-K may still be non-empty with unrelated facts, so a fallback
-            # conditioned on ``not hits`` is not sufficient for a keyed claim: always add
-            # the exact current identity as a chronology guard.
+        if subject_key:
+            # A claim identity is authoritative, while vector retrieval is only a
+            # bounded candidate-discovery aid.  Always add its visible predecessor(s): a
+            # reworded update can have very low lexical/hash-vector similarity and fall
+            # outside top-K even though it names the exact fact being updated.  Limiting
+            # this lookup to ``valid_at`` made ordinary present-time keyed writes depend
+            # on vector rank and could let an unkeyed distractor win resolution.
+            #
+            # Visibility is essential here: ``valid_to IS NULL`` alone also includes a
+            # scheduled future successor.  An ordinary present-time write must splice
+            # before that successor, not invalidate it merely because its prose is the
+            # closest keyed match.
+            #
+            # ``resolve()`` gives exact claim identities priority over all unkeyed
+            # neighbors, and filters claim_kind there, so this remains scoped and never
+            # makes different predicates of the same subject conflict.
             known_ids = {rec.id for _, rec in neighbors}
-            for record in self.store.list_live_claims(
+            claim_history = self.store.list_claim_history(
                 workspace_id=workspace_id, repo_id=repo_id,
                 session_id=session_id if scope == Scope.SESSION else None,
                 scope=scope, mtype=mtype, subject_key=subject_key,
                 claim_kind=claim_kind,
-            ):
+            )
+            authoritative = [
+                record for record in claim_history
+                if memory_matches_filter(record, flt, at=valid_at)
+                and (trusted_write or not provenance_is_trusted(record.provenance))
+            ]
+            if not authoritative and valid_at is not None:
+                # A backfill before the first recorded version has no visible
+                # predecessor to splice. Preserve the existing chronology guard by
+                # surfacing the earliest later version; the caller then rejects an
+                # impossible supersession instead of creating overlapping history.
+                later = [
+                    record for record in claim_history
+                    if record.expired_at is None
+                    and record.valid_from is not None
+                    and record.valid_from > valid_at
+                    and (trusted_write or not provenance_is_trusted(record.provenance))
+                ]
+                if later:
+                    authoritative = [min(
+                        later,
+                        key=lambda record: (record.valid_from or float("inf"), record.id),
+                    )]
+            for record in authoritative:
                 if record.id not in known_ids:
                     neighbors.append((1.0, record))
         return resolve(
@@ -879,7 +984,12 @@ class MemoryEngine:
         ingest never loses the write."""
         facts = None
         extracted = False
-        if self.extractor is not None:
+        # Quarantine precedes optional extraction. An explicitly untrusted payload that
+        # already matches the deterministic policy must not be sent to an LLM extractor
+        # or transformed into benign-looking derived facts before the write path has a
+        # chance to retain it safely for inspection.
+        input_poisoning = assess_untrusted_payload(text, metadata=metadata)
+        if self.extractor is not None and not input_poisoning.quarantined:
             try:
                 facts = self.extractor.extract(text)
                 extracted = bool(facts)
@@ -977,6 +1087,8 @@ class MemoryEngine:
                k: int = 8, token_budget: Optional[int] = None,
                retrieval_profile: str = "balanced", candidate_depth: str = "fixed",
                diagnostics: bool = False,
+               include_untrusted: bool = False,
+               prompt_only: bool = False,
                reinforce: bool = False) -> RecallResult:
         flt = self._recall_filter(
             workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
@@ -991,6 +1103,8 @@ class MemoryEngine:
             token_budget=token_budget, retrieval_profile=retrieval_profile,
             candidate_depth=candidate_depth,
             diagnostics=diagnostics,
+            include_untrusted=bool(include_untrusted),
+            prompt_only=bool(prompt_only),
         )
 
     def adaptive_context(
@@ -1119,6 +1233,7 @@ class MemoryEngine:
             retrieval_profile=retrieval_profile,
             candidate_depth=candidate_depth,
             diagnostics=diagnostics,
+            prompt_only=True,
             reinforce=False,
         )
         # Confidence must describe evidence the agent will actually see, not a
@@ -1221,6 +1336,7 @@ class MemoryEngine:
             query, flt, k=k, reinforce=False, token_budget=token_budget,
             retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
             diagnostics=diagnostics,
+            prompt_only=True,
         )
         floor = _grounded.GROUNDED_SUPPORT_FLOOR if min_support is None else min_support
         answer = _grounded.build_grounded_answer(query, result, self.embedder, llm=llm,
@@ -1306,7 +1422,8 @@ class MemoryEngine:
 
     def recall_proactive(self, *, workspace_id: str, repo_id: Optional[str] = None,
                          k: int = 10, user_id: Optional[str] = None,
-                         agent: Optional[str] = None) -> dict:
+                         agent: Optional[str] = None,
+                         prompt_only: bool = False) -> dict:
         """"What should I know right now" with no explicit query — conscious/proactive
         recall: importance + recency + retention, no semantic arm,
         plus the repo's last-session handoff (open threads / summary) if there is one.
@@ -1317,11 +1434,14 @@ class MemoryEngine:
         now = now_ts()
         scored = []
         for rec in self.store.list_memories(flt, limit=500):
-            w = scoring.weights_for(rec.mtype)
-            s = (w.i * (rec.importance or 0.0)
-                 + w.c * scoring.recency(rec.valid_from or rec.ingested_at, now)
-                 + w.r * scoring.retention(rec.stability, rec.last_access, now))
-            scored.append((s, rec))
+            eligible = (
+                prompt_eligible(rec.provenance, rec.metadata)
+                if prompt_only
+                else inspection_eligible(rec.provenance, rec.metadata)
+            )
+            if not eligible:
+                continue
+            scored.append((scoring.score_proactive(rec, now=now), rec))
         scored.sort(key=lambda t: t[0], reverse=True)
         top = [r for _, r in scored[:k]]
 
@@ -1406,6 +1526,10 @@ class MemoryEngine:
         old = self.store.get_memory(memory_id)
         if old is None:
             raise KeyError(f"no memory with id '{memory_id}'")
+        if not inspection_eligible(old.provenance, old.metadata):
+            raise ValueError("untrusted memory cannot be promoted: record is quarantined")
+        if not provenance_is_trusted(old.provenance):
+            raise ValueError("untrusted memory cannot be promoted; create a fresh approved local memory")
         now = now_ts()
         if (old.expired_at is not None
                 or (old.valid_from is not None and old.valid_from > now)
@@ -1632,11 +1756,19 @@ class MemoryEngine:
                                if tokens_before else 0.0, "units": len(ids)}}
 
     # ── linking & events (A-MEM-style) ──────────────────────────────────────────
-    def link(self, a: str, b: str, *, relation: str = "related", layer=None,
+    def link(self, a: str, b: str, relation: str = "related", *, layer=None,
              reason: str = "") -> None:
+        records = []
         for mid in (a, b):
-            if self.store.get_memory(mid) is None:
+            record = self.store.get_memory(mid)
+            if record is None:
                 raise KeyError(f"no memory with id '{mid}'")
+            records.append(record)
+        if not all(inspection_eligible(record.provenance, record.metadata)
+                   for record in records):
+            raise ValueError("quarantined memories cannot be linked")
+        if not all(provenance_is_trusted(record.provenance) for record in records):
+            raise ValueError("links require explicitly trusted memories")
         self.store.add_link(a, b, relation, layer=layer, reason=reason)
 
     def record_event(self, kind: str, content: str, *, workspace_id: str = "",

@@ -37,6 +37,11 @@ https://discord.com/invite/Wfr2ejBmY
   <sup>Less repeated history means more room for the task, tools, and useful evidence.</sup>
 </p>
 
+> **Evidence boundary:** External LoCoMo-derived figures are not canonical. The historical
+> workload run used an unpinned model revision and has no checked-in raw dataset artifact.
+> Treat its 98.21% context figure as directional until an immutable rerun produces a validated
+> public artifact and checksum. The checked-in deterministic fixtures below remain reproducible.
+
 <details>
 <summary>See benchmark details and reproduce the results</summary>
 
@@ -198,6 +203,10 @@ chunking. The activity view records outcomes, never keys, prompts, or raw provid
 > that provider's terms. Use `ENGRAPHIS_RETENTION_SUPERVISOR=none` (the default) and the offline
 > `chunk` extractor when ingestion must remain entirely local.
 
+Choose and configure an external LLM with the [LLM provider guide](docs/LLM_PROVIDERS.md),
+including OpenAI, Anthropic, Google, OpenRouter, Ollama, Cohere Command, Command Code, and
+compatible endpoints.
+
 ---
 
 ## Install
@@ -220,6 +229,14 @@ operating system as well if you enable image OCR.
 The NumPy-only core library supports Python 3.9+. Current patched releases of the WebUI
 stack, MCP SDK, and image parser require Python 3.10+, so use Python 3.10 or newer for
 the `server`, `mcp`, `documents`, or `all` installation paths.
+
+The default `NumpyVectorIndex` performs an exact full scan. There is no universal memory-count
+cutoff because latency depends on vector size, hardware, filters, and the rest of the recall
+pipeline. Measure your machine with `python -m eval.vector_scale`, then run
+`python -m eval.performance` on a representative corpus. If exact scans miss your latency target,
+create the engine with `vector_backend="sqlite-vec"` and remeasure. See [BENCHMARKS.md](BENCHMARKS.md)
+for the reproducible commands and reporting limits.
+
 `sqlcipher3-binary` publishes CPython manylinux x86-64 wheels. On that target,
 `engraphis[encryption]` installs the driver. The cross-platform `all` extra deliberately
 omits it so `all` remains resolvable on macOS, Windows, Linux ARM, and musl; on those
@@ -250,18 +267,15 @@ engraphis-dashboard --install-shortcuts   # → Desktop + Start Menu icons
 docker compose up                     # → http://127.0.0.1:8700
 ```
 
-A fresh clone needs no `.env`: the default service runs `engraphis-dashboard --no-open`,
-stores the v2 database plus license state on a named volume mounted at `/data`, and accepts
-overrides from `.env` or the shell. The legacy v1 API is opt-in, requires a strong
-`ENGRAPHIS_API_TOKEN`, and uses a separate database so its incompatible schema cannot collide
-with the dashboard:
+A fresh clone needs no `.env`: the service runs `engraphis-dashboard --no-open`, stores the v2
+database plus the optional customer-side cloud session and non-authoritative entitlement display
+cache on a named volume mounted at `/data`, and accepts overrides from `.env` or the shell.
+License issuance, trials, leases, and revocations remain on the private control plane.
+`engraphis-server` and `engraphis server` are headless compatibility aliases
+for this same v2 service, so every public surface has the same scoped recall and retention model.
 
-```bash
-ENGRAPHIS_API_TOKEN='generate-a-strong-unique-value' docker compose --profile api up engraphis-api
-```
-
-Compose publishes both services on host loopback only. Set a strong `ENGRAPHIS_API_TOKEN`
-before changing either port mapping to a non-loopback host address.
+Compose publishes the service on host loopback only. Set a strong `ENGRAPHIS_API_TOKEN` before
+changing its port mapping to a non-loopback host address.
 
 Set `ENGRAPHIS_API_TOKEN` to require API authentication and `ENGRAPHIS_DB_KEY` to encrypt
 the local database at rest. Hosted-plan credentials configure customer clients; they do not
@@ -277,6 +291,9 @@ engraphis-init                     # writes .env + prints config snippets
 claude mcp add engraphis -- engraphis-mcp
 cmd mcp add engraphis -- engraphis-mcp  # Command Code CLI
 ```
+
+For Command Code scopes, verification, and its optional Provider API setup, see the
+[Command Code section of the LLM provider guide](docs/LLM_PROVIDERS.md#command-code).
 
 Your agent now has 31 tools: remember, recall context (plus full, grounded, and proactive recall),
 proactive context,
@@ -370,9 +387,11 @@ what Engraphis had learned then. `as_of` remains a compatibility alias for `vali
 both is allowed only when they match.
 
 For a mutable claim, pass a stable `subject_key` and optional `claim_kind`, such as
-`subject_key="api.rate_limit", claim_kind="configured_value"`. Matching claim identities make
-supersession deterministic; when similarity suggests a relationship but not a contradiction,
-Engraphis keeps both memories and returns `op="relate"`.
+`subject_key="api.rate_limit", claim_kind="configured_value"`. Offline conflict resolution
+deterministically adds, reinforces, relates, or supersedes records while preserving temporal
+history; it does not need an LLM. Matching claim identities let it supersede substantially
+reworded mutable facts. Without them, the dependency-free lexical embedder cannot reliably infer
+that a paraphrase is a contradiction, so keep both records or use an explicit `correct` operation.
 
 ---
 
@@ -423,7 +442,8 @@ continuity operations for at most **24 hours**. It never extends trial or subscr
 grants Cloud Sync, Analytics, Automation, Auto Dreaming, Auto Consolidation, Team access, seats,
 or credentials. Then `recovery_read_only` provides recovery and data export. Neither state
 restricts local dashboard, MCP tools, or local writes. Cloud Sync encrypts eligible shared-workspace
-changes end-to-end; managed compute is a separate readable-snapshot service. See [`docs/LICENSING.md`](docs/LICENSING.md) and
+changes end-to-end; managed compute is a separate readable-snapshot service. See
+[`docs/HOSTED_PLANS.md`](docs/HOSTED_PLANS.md), [`docs/LICENSING.md`](docs/LICENSING.md), and
 [`docs/SYNC.md`](docs/SYNC.md) for the full boundaries.
 
 [Subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_pricing#billing)
@@ -482,6 +502,9 @@ to support the project and add hosted services.
 | Session | `engraphis_start_session` / `engraphis_end_session` | Separate lifecycle operations; exact retries report `reused`, `force_new=true` creates another session, and end is idempotent |
 | Ops | `engraphis_stats` | Memory counts for health checks |
 | Ops | `engraphis_check_update` | Refresh the persistent release cache and report whether a newer version exists |
+
+The focused [MCP tool reference](docs/MCP_TOOLS.md) provides the same inventory as a standalone
+integration guide.
 
 ---
 
@@ -632,9 +655,6 @@ Drag-and-drop or server-side import, access-controlled and bounded:
   facts, entities, relations, and keywords before storage. Its preserved entity/relation
   metadata feeds the knowledge graph automatically. A successful dashboard connection test
   enables this mode by default; the Settings switch can disable or re-enable it immediately.
-
-Files imported through the dashboard or `import_folder()` are marked **untrusted** by
-default; MCP ingest remains an authenticated agent write.
 
 ---
 

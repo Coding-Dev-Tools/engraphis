@@ -1,8 +1,10 @@
 # Benchmarks
 
-This file is the honest status of what Engraphis measures today, how to reproduce it, and what
-it does **not** yet claim. It exists because the README linked a `BENCHMARKS.md` that had never
-been written; when this and the code disagree, the code wins (CLAUDE.md).
+This guide explains what Engraphis measures, how to reproduce each evaluation, and the limits of
+those results. When this document and the code disagree, the code is the source of truth.
+
+For the locked operator sequence for a public canonical run, see
+[`docs/PUBLIC_BENCHMARK_RUNBOOK.md`](docs/PUBLIC_BENCHMARK_RUNBOOK.md).
 
 ## What we measure today (all offline, no API key)
 
@@ -27,8 +29,11 @@ frontier-model QA score.
 - **Grounded**: `eval/grounded.py`: answerable → cite, off-topic → abstain.
 - **Chunking (quality per token)**: `eval/chunking_eval.py` over `eval/datasets/longdoc.jsonl`
   ingests a multi-topic corpus twice: once as one memory per document (`whole`) and once with
-  sub-file `ChunkingExtractor` (`chunked`), then queries both through the real recall pipeline. This is
-  the first cut of the context-reduction metric (item 3 below). On the deterministic embedder:
+  sub-file `ChunkingExtractor` (`chunked`), then queries both through the real recall pipeline.
+  The checked-in corpus is explicitly marked trusted eval data so the measurement isolates
+  chunking from the production trust gate, which excludes arbitrary raw imports from normal
+  agent context. This is the first cut of the context-reduction metric (item 3 below). On the
+  deterministic embedder:
   **recall@5 1.000 for both, at ~73% fewer context tokens (809 → 219) and ~4× smaller
   tokens-to-evidence (162 → 42).** Pass `--embed-model sentence-transformers/all-MiniLM-L6-v2`
   for a real retrieval number (recall should then favour chunked on larger corpora, not just
@@ -41,6 +46,18 @@ frontier-model QA score.
   embedder, vector backend, corpus size, warmups, and iteration count. `--candidate-k` and
   `--retrieval-profile` make adaptive-depth/routing experiments executable instead of changing
   production defaults from an unmeasured hunch.
+- **NumPy vector scale envelope**: `eval/vector_scale.py` measures the production
+  `NumpyVectorIndex` directly at requested corpus sizes with deterministic normalized vectors and
+  queries. It records a corpus fingerprint, result hashes, environment, and observed
+  p50/p95/p99 search envelopes. It intentionally has no pass/fail latency threshold: the output
+  describes the measured machine and workload, not a universal capacity cutoff. Pair it with
+  `eval/performance.py` before making a deployment decision because direct vector search excludes
+  the rest of the recall pipeline. Its `engraphis-vector-scale/v1` JSON is a local diagnostic, not
+  an `engraphis-benchmark/v2` public evidence artifact.
+- **Proactive ranking calibration**: `eval/proactive_ranking.py` compares the previous and current
+  importance-retention floors on a small deterministic queryless-ranking fixture. It reports
+  top-1 accuracy and minimum expected margins for that fixture only. It is a scoring regression,
+  not evidence of general recall quality or user-task performance.
 - **Workload context economy**: `eval/context_economy.py` compares three executable strategies
   across every question in a workload: uncapped full-history replay, a contiguous recency window
   at the same hard budget, and shipped Engraphis hybrid recall + packing. It reports evidence and
@@ -73,12 +90,14 @@ agent. This demonstrates the bypass behavior and token accounting, not general L
 
 The complementary real-model LoCoMo workload diagnostic covers 10 conversations and 1,986
 questions with `all-MiniLM-L6-v2`, `k=10`, a 512-token reader budget, and conflict resolution
-disabled. Engraphis used **891,857** cumulative reader-context tokens versus **49,915,394** for
-uncapped full history, **98.2133% lower**. Charging one complete 246,539-token corpus pass to
-indexing produces a conservative Engraphis total of **1,138,396**, still **97.7193% lower**, with
-a calculated break-even at query 10. The quality tradeoff is explicit:
+disabled. **This is an unpinned, noncanonical workload diagnostic of reader-context use only, not
+answer quality or leaderboard accuracy.** Engraphis used **891,857** cumulative reader-context
+tokens versus **49,915,394** for uncapped full history, **98.2133% lower**. Charging one complete
+246,539-token corpus pass to indexing produces a conservative Engraphis total of **1,138,396**,
+still **97.7193% lower**, with a calculated break-even at query 10. The quality tradeoff is
+explicit:
 
-| LoCoMo workload method | Retrieval recall | Hit rate | Answer-token recall | Mean reader context |
+| LoCoMo workload method (unpinned, noncanonical context-use diagnostic; not answer quality or leaderboard accuracy) | Retrieval recall | Hit rate | Answer-token recall | Mean reader context |
 |---|---:|---:|---:|---:|
 | Engraphis hybrid recall | **0.600457** | **0.657417** | **0.679614** | **449.07** tokens |
 | Same-budget recency window | 0.011289 | 0.012614 | 0.339941 | 487.87 tokens |
@@ -108,6 +127,10 @@ python -m eval.productivity --dataset eval/datasets/codemem.jsonl \
   --max-context-tokens 512 --retrieval-token-budget 256
 python -m eval.performance --dataset eval/datasets/codemem.jsonl --k 5 \
   --iterations 5 --filler-memories 1000
+# Direct NumPy search envelope at representative corpus sizes; timings are machine-specific.
+python -m eval.vector_scale --sizes 1000,10000,100000 --queries 20 --iterations 3 --json
+# Deterministic queryless-ranking calibration fixture.
+python -m eval.proactive_ranking
 # Canonical latency/resource protocol: requires >=1,000 queries and five processes.
 python -m eval.performance --dataset fixed-1000-plus.jsonl --acceptance-matrix --processes 5
 

@@ -42,6 +42,7 @@ from engraphis.core.graph_scene import (
 from engraphis.core.graph_layers import normalize_graph_layer
 from engraphis.core.ids import new_id as make_id
 from engraphis.core.interfaces import Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter
+from engraphis.core.poisoning import provenance_is_trusted, source_is_external
 from engraphis.core.retrieval_policy import CANDIDATE_DEPTH_MODES, RETRIEVAL_PROFILES
 from engraphis.core.store import (
     _loads,
@@ -63,6 +64,21 @@ MAX_METADATA_BYTES = 16_384
 MAX_K = 50
 MAX_TOKEN_BUDGET = 32_768
 RESPONSE_MODES = frozenset({"full", "compact"})
+# Recall's fused rank is min-max normalized inside each query.  Keep this contract in
+# every response mode so API/MCP clients do not treat a high rank as calibrated truth.
+RECALL_SCORE_SEMANTICS = {
+    "version": "retrieval-support-v1",
+    "relative_score": (
+        "Query-relative fused ranking score; compare only among memories returned by "
+        "this response. It is not a confidence value or threshold."
+    ),
+    "absolute_support": (
+        "Absolute query-to-memory support in [0, 1]: the maximum of raw retrieval "
+        "cosine and lexical Jaccard. It is not min-max normalized and is computed "
+        "without another embedding pass. Grounded recall applies its stricter, "
+        "separately calibrated evidence gate."
+    ),
+}
 MAX_CONTEXT_TASK_CHARS = 10_000
 MAX_AGENT_STATE_CHARS = 20_000
 # import_folder/import_files (SECURITY.md §5 — reads/accepts local-content by path or
@@ -311,6 +327,45 @@ def _clean_text(value: Any, *, field: str, max_chars: int, required: bool = True
     if len(cleaned) > max_chars:
         raise ValidationError(f"{field} exceeds {max_chars} characters (got {len(cleaned)})")
     return cleaned
+
+
+def _strict_bool(value: Any, *, field: str) -> bool:
+    """Accept only real booleans for authority-affecting flags.
+
+    Python's ``bool(\"false\")`` is true. Coercing a caller-supplied provenance flag
+    that way would let an untrusted payload bypass the quarantine policy merely by
+    arriving through a loosely typed integration.
+    """
+    if not isinstance(value, bool):
+        raise ValidationError(f"{field} must be a boolean")
+    return value
+
+
+def _canonical_write_provenance(source: Any, trusted: Any, *, raw_ingest: bool) -> dict:
+    """Create provenance at the service boundary, never from caller metadata.
+
+    Raw blobs and known external transports are untrusted even if a caller asks for
+    ``trusted=True``.  A trusted local service write remains available to embedded
+    applications, but public MCP/HTTP ingress is labelled with an external source by
+    its binding before it arrives here.  This makes the conservative choice without
+    breaking the programmatic local-engine API.
+    """
+    source_name = _clean_text(
+        source, field="source", max_chars=MAX_NAME_CHARS, required=False
+    ) or "agent"
+    requested = _strict_bool(trusted, field="trusted")
+    external = raw_ingest or source_is_external(source_name)
+    provenance = {
+        "source": source_name,
+        "trusted": False if external else requested,
+        "trust_origin": "external_ingress" if external else "local_service",
+    }
+    if external and requested:
+        # An auditable code, not a copy of source content or a caller-controlled
+        # trust assertion.  Operators can see that a downgrade happened without
+        # turning it into prompt-visible metadata.
+        provenance["trust_downgraded"] = True
+    return provenance
 
 
 def _clean_name(value: Any, *, field: str) -> str:
@@ -966,6 +1021,7 @@ class MemoryService:
         """
         content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
         title = _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS, required=False)
+        provenance = _canonical_write_provenance(source, trusted, raw_ingest=False)
         ws = self._clean_ws(workspace)
         rp = _clean_name(repo, field="repo") if repo else None
         mt = _enum(mtype, MemoryType, "mtype")
@@ -1019,9 +1075,6 @@ class MemoryService:
                 sc = Scope.WORKSPACE
             else:
                 raise ValidationError("repo scope requires a repo-backed session_id")
-        provenance = {"source": _clean_text(source, field="source", max_chars=MAX_NAME_CHARS,
-                                            required=False) or "agent",
-                      "trusted": bool(trusted)}
         if kind:
             provenance["kind"] = _clean_name(kind, field="kind")
         try:
@@ -1053,24 +1106,37 @@ class MemoryService:
             out["superseded"] = result["superseded"]
         if result["op"] == "relate":
             out["related_to"] = result.get("related_to")
+        if result["op"] == "quarantined":
+            # These are policy/reason codes only — never copy hostile payload text into
+            # a caller response or receipt merely to explain why it was quarantined.
+            out.update({
+                "quarantined": True,
+                "policy": result.get("policy", ""),
+                "reasons": list(result.get("reasons") or []),
+            })
         out["receipt"] = self.store.record_receipt(
             "remember", workspace_id=wid, repo_id=rid or "", actor=provenance["source"],
             target_count=1, status=result["op"],
             metadata={"mtype": mt.value, "scope": sc.value, "resolution": result["op"],
-                      "retention": (retention or {}).get("label", "")},
+                      "retention": (retention or {}).get("label", ""),
+                      "quarantined": bool(result.get("quarantined")),
+                      "quarantine_policy": result.get("policy", ""),
+                      "quarantine_reasons": list(result.get("reasons") or [])},
         )
         return out
 
     def ingest(self, content: str, *, workspace: str, repo: Optional[str] = None,
                session_id: Optional[str] = None, mtype: str = "semantic",
                scope: Optional[str] = None, metadata: Optional[dict] = None,
-               source: str = "agent", trusted: bool = True,
+               source: str = "agent", trusted: bool = False,
                kind: Optional[str] = None, resolve_conflicts: bool = True) -> dict:
         """Store raw, undistilled text. With an extractor configured (ENGRAPHIS_EXTRACTOR)
         the text is first distilled into discrete typed facts; without one this behaves
-        exactly like ``remember``. Every fact goes through the same validation,
-        resolution, and evolution as any other write."""
+        exactly like ``remember``. Raw ingest is always untrusted at this boundary;
+        every retained fact stays passive until an approved local write records the
+        corresponding trusted claim."""
         content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
+        provenance = _canonical_write_provenance(source, trusted, raw_ingest=True)
         ws = self._clean_ws(workspace)
         rp = _clean_name(repo, field="repo") if repo else None
         mt = _enum(mtype, MemoryType, "mtype")
@@ -1092,9 +1158,6 @@ class MemoryService:
                 sc = Scope.WORKSPACE
             else:
                 raise ValidationError("repo scope requires a repo-backed session_id")
-        provenance = {"source": _clean_text(source, field="source", max_chars=MAX_NAME_CHARS,
-                                            required=False) or "agent",
-                      "trusted": bool(trusted)}
         if kind:
             provenance["kind"] = _clean_name(kind, field="kind")
         try:
@@ -1115,7 +1178,11 @@ class MemoryService:
                   "extracted": out["extracted"],
                   "facts": [{"id": r["id"], "op": r["op"],
                              **({"superseded": r["superseded"]}
-                                if "superseded" in r else {})}
+                                if "superseded" in r else {}),
+                             **({"quarantined": True,
+                                 "policy": r.get("policy", ""),
+                                 "reasons": list(r.get("reasons") or [])}
+                                if r.get("quarantined") else {})}
                             for r in out["facts"]]}
         result["receipt"] = self.store.record_receipt(
             "remember", workspace_id=wid, repo_id=rid or "", actor=provenance["source"],
@@ -1134,13 +1201,18 @@ class MemoryService:
                         importance: float = 0.0,
                         metadata: Optional[dict] = None,
                         retention_class: Optional[str] = None,
-                        retention_reason: str = "",
-                        valid_from: Optional[float] = None) -> dict:
+                         retention_reason: str = "",
+                         valid_from: Optional[float] = None,
+                         subject_key: str = "", claim_kind: str = "") -> dict:
         out = self.remember(
             text, workspace=workspace, repo=repo, title=title, mtype=mtype,
             scope=scope, importance=importance, metadata=metadata,
             retention_class=retention_class, retention_reason=retention_reason,
-            valid_from=valid_from,
+            # Intent actions originate from the authenticated local dashboard, not
+            # imported resource text. They retain normal local-memory semantics;
+            # import and remote-ingestion paths explicitly pass trusted=False.
+            valid_from=valid_from, subject_key=subject_key, claim_kind=claim_kind,
+            source="intent_api", trusted=True,
         )
         return {"operation": "remember", **out}
 
@@ -1670,6 +1742,7 @@ class MemoryService:
                candidate_depth: str = "fixed",
                response_mode: str = "full",
                diagnostics: bool = False,
+               include_untrusted: bool = False,
                record_receipt: bool = True) -> dict:
         """Retrieve the most relevant memories for ``query`` within scope."""
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
@@ -1708,6 +1781,7 @@ class MemoryService:
         response_mode = str(response_mode or "full").strip().casefold()
         if response_mode not in RESPONSE_MODES:
             raise ValidationError("response_mode must be one of: compact, full")
+        include_untrusted = _strict_bool(include_untrusted, field="include_untrusted")
 
         # A configured workspace binding or a bound dashboard user must never do a
         # workspace-less (global) recall — either case represents a tenant boundary.
@@ -1769,6 +1843,7 @@ class MemoryService:
             retrieval_profile=retrieval_profile,
             candidate_depth=candidate_depth,
             diagnostics=bool(diagnostics),
+            include_untrusted=include_untrusted,
         )
         memories = []
         for chunk in result.chunks:
@@ -1776,7 +1851,8 @@ class MemoryService:
                 item = {
                     key: chunk.get(key)
                     for key in (
-                        "id", "title", "scope", "mtype", "repo_id", "score", "arm"
+                        "id", "title", "scope", "mtype", "repo_id", "score",
+                        "relative_score", "absolute_support", "arm"
                     )
                 }
                 item["provenance"] = _compact_provenance(chunk.get("provenance"))
@@ -1784,8 +1860,9 @@ class MemoryService:
                 item = dict(chunk)
                 arm = item.get("arm") or "hybrid"
                 item["why_recalled"] = (
-                    f"Matched by {arm} retrieval; fused score "
-                    f"{float(item.get('score') or 0.0):.3f}, retention "
+                    f"Matched by {arm} retrieval; query-relative fused rank "
+                    f"{float(item.get('relative_score') or 0.0):.3f}, absolute support "
+                    f"{float(item.get('absolute_support') or 0.0):.3f}, retention "
                     f"{float(item.get('retention') or 0.0):.3f}."
                 )
             memories.append(item)
@@ -1819,6 +1896,8 @@ class MemoryService:
             "candidate_k_used": result.candidate_k_used,
             "candidate_depth_reason": result.candidate_depth_reason,
             "response_mode": response_mode,
+            "include_untrusted": include_untrusted,
+            "score_semantics": dict(RECALL_SCORE_SEMANTICS),
         }
         if diagnostics:
             out["retrieval_trace"] = result.retrieval_trace or []
@@ -2223,7 +2302,7 @@ class MemoryService:
         self._check_owns(mid, wid, rid)
         try:
             return self.engine.forget(mid, reason=reason, actor=actor)
-        except KeyError as exc:
+        except (KeyError, ValueError) as exc:
             raise ValidationError(str(exc))
 
     def pin(self, memory_id: str, *, workspace: str, repo: Optional[str] = None,
@@ -2403,6 +2482,14 @@ class MemoryService:
                     "proactive_context recall failed (%s)",
                     type(exc).__name__,
                 )
+        # Raw recall is an inspection surface and includes benign explicitly-untrusted
+        # records. This method builds agent/model context, so enforce the stricter prompt
+        # boundary before deterministic or LLM synthesis. Quarantined records never
+        # reached either raw recall path.
+        memories = [
+            memory for memory in memories
+            if provenance_is_trusted(memory.get("provenance"))
+        ]
         llm = None
         if synthesize:
             try:
@@ -7285,6 +7372,7 @@ def _empty_recall(query: str, *, token_budget: int, response_mode: str,
         "candidate_k_used": 50,
         "candidate_depth_reason": "no retrieval for unknown scope",
         "response_mode": response_mode,
+        "score_semantics": dict(RECALL_SCORE_SEMANTICS),
         "note": note,
     }
 

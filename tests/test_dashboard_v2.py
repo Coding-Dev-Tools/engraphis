@@ -113,6 +113,68 @@ def test_classic_dashboard_script_mirrors_the_static_compatibility_asset():
     ).read_bytes()
 
 
+def test_dashboard_and_mcp_recall_share_the_v2_service(monkeypatch, tmp_path):
+    pytest.importorskip("mcp", reason="MCP extra not installed")
+    import json
+
+    from engraphis import mcp_server
+
+    with _client(monkeypatch, tmp_path) as client:
+        assert mcp_server.service() is client.app.state.service
+        response = client.get(
+            "/api/recall",
+            params={"q": "which database do we use", "workspace": "demo", "k": 3},
+        )
+        assert response.status_code == 200
+        dashboard = response.json()
+        mcp = json.loads(mcp_server.engraphis_recall(
+            query="which database do we use", workspace="demo", k=3,
+        ))
+        assert [memory["id"] for memory in dashboard["memories"]] == [
+            memory["id"] for memory in mcp["memories"]
+        ]
+        assert [memory["retention"] for memory in dashboard["memories"]] == [
+            memory["retention"] for memory in mcp["memories"]
+        ]
+        assert [memory["relative_score"] for memory in dashboard["memories"]] == [
+            memory["relative_score"] for memory in mcp["memories"]
+        ]
+        assert [memory["absolute_support"] for memory in dashboard["memories"]] == [
+            memory["absolute_support"] for memory in mcp["memories"]
+        ]
+        assert dashboard["score_semantics"] == mcp["score_semantics"]
+
+
+def test_dashboard_keyword_fallback_reports_truthful_lexical_scores(monkeypatch, tmp_path):
+    with _client(monkeypatch, tmp_path) as client:
+        def mismatched_embedder(*_args, **_kwargs):
+            raise ValueError("shapes (1,256) and (384,1) not aligned")
+
+        monkeypatch.setattr(client.app.state.service, "recall", mismatched_embedder)
+        response = client.get(
+            "/api/recall",
+            params={
+                "q": "which database do we use",
+                "workspace": "demo",
+                "k": 3,
+                "response_mode": "compact",
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["mode"] == "keyword"
+        assert "lexical Jaccard" in payload["score_semantics"]["relative_score"]
+        assert "Semantic support is unavailable" in (
+            payload["score_semantics"]["absolute_support"]
+        )
+        memory = payload["memories"][0]
+        assert memory["score"] == memory["relative_score"] == 1.0
+        assert 0.0 < memory["absolute_support"] < 1.0
+        assert memory["arm"] == "lexical"
+        assert "content" not in memory
+
+
 def test_dashboard_serves_the_graph_engine_from_its_v2_asset_surface(monkeypatch, tmp_path):
     with _client(monkeypatch, tmp_path) as client:
         asset = client.get("/v2-assets/engraphis-graph.js")
@@ -313,16 +375,20 @@ def test_http_memory_api_round_trips_world_time(monkeypatch, tmp_path):
             "/api/remember",
             json={
                 "workspace": "demo",
-                "content": "The API rate limit is 100 requests per minute.",
-                "valid_from": 1_000.0,
+                    "content": "The API rate limit is 100 requests per minute.",
+                    "valid_from": 1_000.0,
+                    "subject_key": "api.rate_limit",
+                    "claim_kind": "configured_value",
             },
         ).json()
         new = client.post(
             "/api/intent/remember",
             json={
                 "workspace": "demo",
-                "text": "The API rate limit is 500 requests per minute.",
-                "valid_from": 2_000.0,
+                    "text": "The API rate limit is 500 requests per minute.",
+                    "valid_from": 2_000.0,
+                    "subject_key": "api.rate_limit",
+                    "claim_kind": "configured_value",
             },
         ).json()
 

@@ -21,7 +21,7 @@ most common mistake here.
 | Model | Scoped + bi-temporal + typed; interface-driven. | Single flat `namespace` string per memory. |
 | Code | `engraphis/core/`, `engraphis/backends/`, `eval/`, `tests/`, `scripts/migrate_to_v2.py` | `engraphis/app.py`, `config.py`, `models.py`, `routes/`, `stores/`, `engines/`, `llm/`, `static/` |
 | Data | new v2 schema (`SCHEMA_VERSION = 6`) | `engraphis_v1.db` |
-| Entry | `MemoryEngine.create()` → `core/engine.py` | `python -m scripts.start_server` → FastAPI on :8700 |
+| Entry | `MemoryEngine.create()` → `core/engine.py` | Internal reference only; never a public launcher |
 
 **Rule:** build new capability on **v2** (`core/` + `backends/`) behind the interfaces.
 Only touch the v1 server for compatibility fixes or to keep the reference running. When a
@@ -70,9 +70,8 @@ python -m scripts.consolidate --db engraphis.db --workspace acme --dry-run
 python -m scripts.sync --db engraphis.db --workspace acme --remote ~/Dropbox/engraphis --dry-run
 python -m scripts.sync --db engraphis.db --workspace acme --relay https://relay.engraphis.com  # or bare --relay + ENGRAPHIS_RELAY_URL
 
-# ── Run the v1 server (needs the full install) ───────────────────────────────
-python -m scripts.start_server      # http://127.0.0.1:8700  (dashboard at /, schema at /openapi.json)
-python -m scripts.test_routes       # HTTP smoke test — requires a running server + httpx
+# ── Compatibility server alias (v2, headless; needs the full install) ────────
+python -m scripts.start_server      # same v2 app as engraphis-dashboard, without opening a browser
 python -m scripts.cli recall "what do we know about X" -n vault    # CLI: ingest/recall/chat/thoughts/list
 
 # ── v2 data migration (v1 flat namespaces → v2 scoped/bi-temporal) ───────────
@@ -121,8 +120,10 @@ The write path (`MemoryEngine.remember_with_resolution()`) mirrors this: embed �
 same-scope neighbors via the vector index → `core/resolve.py::resolve()` decides
 ADD / NOOP (reinforce, don't duplicate) / INVALIDATE (close old validity, insert new) from
 **two deterministic signals** — token-overlap on the text itself, plus the embedding cosine
-already computed at write time (catches paraphrased restatements/contradictions,
-`PARAPHRASE_EMBED_SIM`) — no LLM call on untrusted input. An INVALIDATE also records
+already computed at write time as joint evidence for strongly overlapping unkeyed text — no LLM
+call on untrusted input. The dependency-free hashing embedder is lexical, so genuinely reworded
+mutable facts need a stable `subject_key`/`claim_kind` (or explicit correction), not a cosine
+threshold. An INVALIDATE also records
 `metadata.supersedes` on the new record so the chain is queryable (why/timeline/Inspector).
 After the decision, **memory evolution** (`MemoryEngine._evolve`, A-MEM-style) auto-links the
 new memory to its closest live neighbors (bounded, idempotent, audited) and gives them a small
@@ -222,6 +223,11 @@ These are pure, unit-tested functions — change them only with a corresponding 
 - **`README.md`** — installation, product surfaces, configuration, and public API usage.
 - **`CHANGELOG.md`** — shipped capability and release history. Keep phase/status ledgers out of
   this operating manual.
+- **`docs/HOSTED_PLANS.md`** — concise pricing, plan contents, trial, and hosted-service boundary.
+- **`docs/MCP_TOOLS.md`** — standalone inventory of the public MCP surface; keep it synchronized
+  with `engraphis/mcp_server.py`.
+- **`docs/OLLAMA.md`** — local Ollama configuration. Keep setup details here instead of
+  duplicating them in the README.
 - **`docs/SYNC.md`** — cloud sync (Pro): architecture, the convergent merge, CLI usage, and the
   untrusted-bundle security model.
 - **`AGENTS.md`** (this file) + **`CLAUDE.md`** — how to work in the repo.

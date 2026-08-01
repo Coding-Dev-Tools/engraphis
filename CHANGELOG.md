@@ -37,6 +37,12 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Fixed
 
+- `engraphis-server`, `engraphis server`, Compose, Classic, and MCP-over-HTTP now converge on
+  the v2 service, removing the legacy v1 launch path whose background stability mutation could
+  make the two public recall surfaces disagree by orders of magnitude.
+- Deterministic offline conflict resolution no longer claims that a hash-vector cosine detects
+  paraphrases. Reworded mutable facts use stable claim identities; keyed writes now always load
+  their live predecessor rather than depending on a bounded vector top-K result.
 - Sync rejects malformed scope/repo combinations and every peer-driven visibility change for an
   existing memory, including malformed legacy rows. Scope promotion or repair remains a local,
   explicit governance operation.

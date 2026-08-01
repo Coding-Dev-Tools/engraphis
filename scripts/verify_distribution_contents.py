@@ -20,12 +20,14 @@ REQUIRED_COMMON = frozenset({
     "eval/longmemeval_v2.py",
     "eval/metrics.py",
     "eval/performance.py",
+    "eval/redteam_poisoning.py",
     "eval/run_longmemeval_v2.py",
     "eval/configs/longmemeval_v2_engraphis.json",
     "eval/datasets/adversarial.jsonl",
     "eval/datasets/codemem.jsonl",
     "eval/datasets/graph_multihop.jsonl",
     "eval/datasets/longdoc.jsonl",
+    "eval/datasets/redteam_poisoning.jsonl",
     "eval/datasets/sample.jsonl",
 })
 REQUIRED_SDIST = REQUIRED_COMMON | frozenset({

@@ -12,7 +12,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from engraphis.config import settings  # noqa: E402
 
-_DB_PATH = str(Path(tempfile.mkdtemp()) / "legacy-boundary.db")
+_DB_PATH = str(Path(tempfile.mkdtemp()) / "current-v2.db")
+_LEGACY_DB_PATH = str(Path(tempfile.mkdtemp()) / "legacy-reference-v1.db")
 
 
 def _client(monkeypatch):
@@ -20,8 +21,8 @@ def _client(monkeypatch):
     monkeypatch.setattr("engraphis.stores._local", threading.local())
     monkeypatch.setattr(settings, "loop_interval", 0)
     monkeypatch.setattr(settings, "embed_model", "")
-    from engraphis.app import create_app
-    return TestClient(create_app())
+    from engraphis.app import create_legacy_reference_app
+    return TestClient(create_legacy_reference_app(legacy_db_path=_LEGACY_DB_PATH))
 
 
 def test_v1_reports_hosted_plan_boundary(monkeypatch):

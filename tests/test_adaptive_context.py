@@ -124,6 +124,22 @@ def test_adaptive_context_abstains_when_weak_and_no_history_fits() -> None:
     assert result.truncated_history is True
 
 
+def test_fit_recent_history_preserves_suffix_after_unicode_whitespace_boundary() -> None:
+    from engraphis.core.adaptive_context import fit_recent_history
+
+    history = "older context\tlatest answer"
+
+    fitted, truncated = fit_recent_history(
+        history,
+        token_budget=2,
+        count_tokens=lambda text: len(text.split()),
+    )
+
+    assert truncated is True
+    assert fitted == "latest answer"
+    assert len(fitted.split()) <= 2
+
+
 def test_confidence_ignores_relevant_candidates_omitted_by_the_packer() -> None:
     engine, workspace_id, repo_id = _seed_engine()
     history = "\n".join(

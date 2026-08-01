@@ -1,0 +1,5 @@
+{"id":"critical_policy_after_week","expected_top":"critical","records":[{"id":"critical","importance":0.9,"age_days":7},{"id":"scratch","importance":0.0,"age_days":0}]}
+{"id":"important_policy_after_fortnight","expected_top":"important","records":[{"id":"important","importance":0.8,"age_days":14},{"id":"scratch","importance":0.0,"age_days":0}]}
+{"id":"important_policy_after_month","expected_top":"important","records":[{"id":"important","importance":0.8,"age_days":30},{"id":"scratch","importance":0.0,"age_days":0}]}
+{"id":"critical_policy_after_quarter","expected_top":"critical","records":[{"id":"critical","importance":0.9,"age_days":90},{"id":"scratch","importance":0.0,"age_days":0}]}
+{"id":"old_low_priority_note_yields","expected_top":"scratch","records":[{"id":"old_note","importance":0.4,"age_days":7},{"id":"scratch","importance":0.0,"age_days":0}]}

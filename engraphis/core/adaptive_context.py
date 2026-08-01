@@ -80,10 +80,15 @@ def fit_recent_history(
     # Avoid beginning in the middle of a word when the character boundary found
     # by the counter falls inside one.
     if low > 0 and low < len(source) and source[low - 1].isalnum() and source[low].isalnum():
-        boundary = fitted.find(" ")
-        newline = fitted.find("\n")
-        candidates = [index for index in (boundary, newline) if index >= 0]
-        fitted = fitted[min(candidates) + 1:].lstrip() if candidates else ""
+        # Use the first Unicode whitespace boundary, not only literal spaces
+        # and newlines.  Hosts may preserve tabs or other separators in raw
+        # transcripts; dropping the whole suffix in that case loses usable
+        # recent history even though a safe word boundary exists.
+        boundary = next(
+            (index for index, character in enumerate(fitted) if character.isspace()),
+            -1,
+        )
+        fitted = fitted[boundary + 1:].lstrip() if boundary >= 0 else ""
 
     # A non-additive custom tokenizer can have unusual boundary behavior.  This
     # final guard preserves the hard-budget contract even for such counters.

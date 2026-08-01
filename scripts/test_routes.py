@@ -1,21 +1,22 @@
-"""Smoke test — exercises the full API surface against a running server.
+"""Smoke test the canonical v2 HTTP API against a running local service.
 
-Usage:
-    # Start server in one terminal:
-    python -m scripts.start_server
-    # Run tests in another:
+Usage::
+
+    python -m scripts.start_server  # or: engraphis-dashboard --no-open
     python -m scripts.test_routes
+
+The smoke fixture is retired through the normal temporal ``/api/forget`` path at
+the end; it never calls legacy v1 routes or deletes a workspace.
 """
 from __future__ import annotations
 
-import sys
 import time
 
 import httpx
 
 from engraphis.config import settings
 
-BASE = settings.base_url
+BASE = settings.base_url.rstrip("/")
 PASS = 0
 FAIL = 0
 
@@ -26,172 +27,77 @@ def _ok(name: str) -> None:
     print(f"  [ok] {name}")
 
 
-def _fail(name: str, err: str) -> None:
+def _fail(name: str, err: Exception | str) -> None:
     global FAIL
     FAIL += 1
     print(f"  [FAIL] {name}: {err}")
 
 
-def run() -> None:
-    print(f"Testing Engraphis at {BASE}")
-    print()
+def _expect(response: httpx.Response) -> dict:
+    response.raise_for_status()
+    body = response.json()
+    if not isinstance(body, dict):
+        raise AssertionError("expected an object response")
+    return body
 
-    with httpx.Client(base_url=BASE, timeout=60) as c:
-        # Health
+
+def run() -> None:
+    print(f"Testing Engraphis v2 at {BASE}")
+    print()
+    workspace = f"smoke-{int(time.time())}"
+    memory_id = ""
+
+    with httpx.Client(base_url=BASE, timeout=30) as client:
         try:
-            r = c.get("/memory/health")
-            assert r.status_code == 200
-            _ok("health")
-        except Exception as e:
-            _fail("health", e)
+            health = _expect(client.get("/api/health"))
+            assert health["engine"] == "v2"
+            _ok("health (v2)")
+        except Exception as exc:  # noqa: BLE001 - CLI should report a useful failed check
+            _fail("health", exc)
             return
 
-        ns = f"test-{int(time.time())}"
-
-        # Insert memory (legacy route)
         try:
-            r = c.post("/memory/insert", json={
-                "key": "pref-theme",
-                "content": "User prefers dark mode and high contrast UI",
-                "namespace": ns,
-                "metadata": {"source": "test"},
-            })
-            assert r.status_code == 200, r.text
-            _ok("insert_memory (legacy)")
-        except Exception as e:
-            _fail("insert_memory", e)
+            stored = _expect(client.post("/api/remember", json={
+                "content": "The v2 HTTP smoke test keeps temporary memories scoped.",
+                "workspace": workspace,
+                "title": "v2 smoke fixture",
+                "source": "scripts.test_routes",
+                "dedupe": False,
+            }))
+            memory_id = str(stored["id"])
+            _ok("remember")
 
-        # Insert document
-        try:
-            r = c.post("/memory/documents", json={
-                "title": "Meeting Notes",
-                "content": "Discussed the Q3 roadmap. Alice will lead the backend refactor. "
-                           "Bob is responsible for the frontend migration to React 19.",
-                "namespace": ns,
-                "document_id": "meeting-q3",
-                "source_type": "doc",
-            })
-            assert r.status_code == 200, r.text
-            _ok("insert_document")
-        except Exception as e:
-            _fail("insert_document", e)
+            recalled = _expect(client.get("/api/recall", params={
+                "q": "what does the HTTP smoke test keep", "workspace": workspace, "k": 5,
+            }))
+            assert any(memory["id"] == memory_id for memory in recalled["memories"])
+            _ok("recall")
 
-        # Batch insert
-        try:
-            r = c.post("/memory/documents/batch", json={"items": [
-                {"title": "Doc A", "content": "Alice prefers Python over JavaScript.", "namespace": ns, "document_id": "doc-a"},
-                {"title": "Doc B", "content": "Bob works remotely from Seattle.", "namespace": ns, "document_id": "doc-b"},
-            ]})
-            assert r.status_code == 200, r.text
-            _ok("insert_documents_batch")
-        except Exception as e:
-            _fail("insert_documents_batch", e)
+            listed = _expect(client.get("/api/memories", params={"workspace": workspace}))
+            assert any(memory["id"] == memory_id for memory in listed["memories"])
+            _ok("list memories")
 
-        # Wait a moment for indexing
-        time.sleep(1)
-
-        # Query memory
-        try:
-            r = c.post("/memory/query", json={
-                "namespace": ns,
-                "query": "What does the user prefer?",
-                "maxChunks": 5,
-            })
-            assert r.status_code == 200, r.text
-            data = r.json()["data"]
-            assert data["count"] > 0, "expected at least 1 chunk"
-            _ok(f"query_memory (count={data['count']})")
-        except Exception as e:
-            _fail("query_memory", e)
-
-        # List documents
-        try:
-            r = c.get("/memory/documents", params={"namespace": ns, "limit": 10})
-            assert r.status_code == 200, r.text
-            data = r.json()["data"]
-            assert data["count"] >= 3, f"expected >=3 docs, got {data['count']}"
-            _ok(f"list_documents (count={data['count']})")
-        except Exception as e:
-            _fail("list_documents", e)
-
-        # Get single document
-        try:
-            r = c.get("/memory/documents/meeting-q3", params={"namespace": ns})
-            assert r.status_code == 200, r.text
-            _ok("get_document")
-        except Exception as e:
-            _fail("get_document", e)
-
-        # Recall master
-        try:
-            r = c.post("/memory/recall", json={"namespace": ns, "maxChunks": 5})
-            assert r.status_code == 200, r.text
-            _ok("recall_master")
-        except Exception as e:
-            _fail("recall_master", e)
-
-        # Recall memories (Ebbinghaus)
-        try:
-            r = c.post("/memory/memories/recall", json={"namespace": ns, "topK": 5})
-            assert r.status_code == 200, r.text
-            _ok("recall_memories")
-        except Exception as e:
-            _fail("recall_memories", e)
-
-        # Record interactions
-        try:
-            r = c.post("/memory/interactions", json={
-                "namespace": ns,
-                "entityNames": ["Alice", "Bob"],
-                "interactionLevel": "engage",
-            })
-            assert r.status_code == 200, r.text
-            _ok("record_interactions")
-        except Exception as e:
-            _fail("record_interactions", e)
-
-        # Graph snapshot
-        try:
-            r = c.get("/memory/admin/graph-snapshot", params={"namespace": ns})
-            assert r.status_code == 200, r.text
-            data = r.json()["data"]
-            _ok(f"graph_snapshot (entities={data['entity_count']}, edges={data['edge_count']})")
-        except Exception as e:
-            _fail("graph_snapshot", e)
-
-        # Queries endpoint
-        try:
-            r = c.post("/memory/queries", json={
-                "query": "Who works on the backend?",
-                "namespace": ns,
-                "maxChunks": 3,
-                "recallOnly": True,
-            })
-            assert r.status_code == 200, r.text
-            _ok("query_memory_context")
-        except Exception as e:
-            _fail("query_memory_context", e)
-
-        # Delete document
-        try:
-            r = c.delete("/memory/documents/doc-a", params={"namespace": ns})
-            assert r.status_code == 200, r.text
-            _ok("delete_document")
-        except Exception as e:
-            _fail("delete_document", e)
-
-        # Delete namespace
-        try:
-            r = c.post("/memory/admin/delete", json={"namespace": ns, "delete_all": True})
-            assert r.status_code == 200, r.text
-            _ok("delete_namespace")
-        except Exception as e:
-            _fail("delete_namespace", e)
+            stats = _expect(client.get("/api/stats", params={"workspace": workspace}))
+            assert int(stats.get("memories", 0)) >= 1
+            _ok("stats")
+        except Exception as exc:  # noqa: BLE001 - continue to cleanup and summarize failures
+            _fail("v2 API", exc)
+        finally:
+            if memory_id:
+                try:
+                    _expect(client.post("/api/forget", json={
+                        "id": memory_id,
+                        "workspace": workspace,
+                        "reason": "v2 HTTP smoke cleanup",
+                    }))
+                    _ok("forget smoke fixture")
+                except Exception as exc:  # noqa: BLE001 - cleanup failure must be visible
+                    _fail("forget smoke fixture", exc)
 
     print()
     print(f"Results: {PASS} passed, {FAIL} failed")
     if FAIL:
-        sys.exit(1)
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

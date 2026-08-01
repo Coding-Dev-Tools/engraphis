@@ -152,6 +152,8 @@ def main(argv=None) -> None:
                     help="Bind port (default: $PORT, else $ENGRAPHIS_PORT, else 8700).")
     ap.add_argument("--no-open", action="store_true",
                     help="Do not open the browser on startup.")
+    ap.add_argument("--reload", action="store_true",
+                    help="Reload the v2 server when source files change (development only).")
     ap.add_argument("--install-shortcuts", action="store_true",
                     help="Install desktop and Start Menu shortcuts, then exit.")
     ap.add_argument("--install-shortcuts-silent", action="store_true",
@@ -187,7 +189,12 @@ def main(argv=None) -> None:
         from engraphis.config import settings
         db = settings.db_path
         import uvicorn
-        from engraphis.dashboard_app import app as dashboard_app
+        # Uvicorn reload mode must receive an import string, not a preconstructed
+        # ASGI object. Avoid importing the app in the parent process in that mode so
+        # it does not create a duplicate service/store before the reloader child starts.
+        dashboard_app = "engraphis.dashboard_app:app" if args.reload else None
+        if dashboard_app is None:
+            from engraphis.dashboard_app import app as dashboard_app
         from engraphis.observability import configure_structured_logging
         structured_logs = configure_structured_logging()
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - convert startup failures to UX
@@ -215,6 +222,8 @@ def main(argv=None) -> None:
             "port": args.port,
             "proxy_headers": False,
         }
+        if args.reload:
+            run_options["reload"] = True
         if structured_logs:
             # Uvicorn's default log_config replaces every uvicorn.access formatter after
             # create_app() installs the redacting JSON formatter. Keeping the existing

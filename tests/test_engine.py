@@ -244,6 +244,96 @@ def test_remember_invalidates_superseded_fact():
     assert old["id"] not in live_ids and new["id"] in live_ids
 
 
+def test_keyed_reworded_update_outranks_vector_top_k_distractors():
+    """Claim identity must not depend on the embedding candidate rank.
+
+    The deterministic embedder scores a substantially reworded update far below
+    lexical neighbors.  Before this regression, an ordinary (no ``valid_from``)
+    keyed write only saw the vector top-K and could supersede an unkeyed distractor
+    instead of its exact claim predecessor.
+    """
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    old = eng.remember_with_resolution(
+        "The API rate limit is one hundred requests every sixty seconds.",
+        workspace_id=wid,
+        repo_id=rid,
+        subject_key="api.rate_limit",
+        claim_kind="configured_value",
+        resolve_conflicts=False,
+    )
+    distractors = [
+        eng.remember_with_resolution(
+            f"Calls are capped at {500 + i} per minute for each key.",
+            workspace_id=wid,
+            repo_id=rid,
+            resolve_conflicts=False,
+        )
+        for i in range(6)
+    ]
+
+    class _TopKDistractors:
+        """Represents a bounded vector search that omits the reworded predecessor."""
+
+        def search(self, _vec, _k, *, filter=None):
+            return [(item["id"], 0.9) for item in distractors[:5]]
+
+        def upsert(self, _ids, _vecs, meta=None):
+            pass
+
+    eng.index = _TopKDistractors()
+    updated = eng.remember_with_resolution(
+        "Every API key is now limited to six hundred calls in a one-minute window.",
+        workspace_id=wid,
+        repo_id=rid,
+        subject_key="api.rate_limit",
+        claim_kind="configured_value",
+    )
+
+    assert updated["op"] == "invalidate"
+    assert updated["superseded"] == [old["id"]]
+    assert eng.store.get_memory(old["id"]).valid_to is not None
+    assert all(eng.store.get_memory(item["id"]).valid_to is None for item in distractors)
+
+
+def test_present_keyed_update_splices_before_scheduled_future_claim():
+    eng = MemoryEngine.create(":memory:", auto_evolve=False)
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    key = {"subject_key": "api.rate_limit", "claim_kind": "configured_value"}
+    current = eng.remember_with_resolution(
+        "The historical throughput cap is 100 calls each sixty seconds.",
+        workspace_id=wid,
+        repo_id=rid,
+        **key,
+    )
+    future_at = time.time() + 3_600.0
+    future = eng.remember_with_resolution(
+        "The API request limit will be 500 requests per minute.",
+        workspace_id=wid,
+        repo_id=rid,
+        valid_from=future_at,
+        **key,
+    )
+
+    replacement = eng.remember_with_resolution(
+        "The API request limit is temporarily 450 requests per minute.",
+        workspace_id=wid,
+        repo_id=rid,
+        **key,
+    )
+
+    assert replacement["op"] == "invalidate"
+    assert replacement["superseded"] == [current["id"]]
+    current_record = eng.store.get_memory(current["id"])
+    replacement_record = eng.store.get_memory(replacement["id"])
+    future_record = eng.store.get_memory(future["id"])
+    assert current_record.valid_to == replacement_record.valid_from
+    assert replacement_record.valid_to == future_at
+    assert future_record.valid_from == future_at and future_record.valid_to is None
+
+
 def test_remember_keeps_related_but_complementary_facts():
     eng = MemoryEngine.create(":memory:")
     wid = eng.store.get_or_create_workspace("w")
@@ -457,7 +547,7 @@ def test_promote_deduplicates_into_existing_wider_memory():
     )
     source = eng.remember(
         text, workspace_id=wid, repo_id=rid, scope=Scope.REPO,
-        metadata={"provenance": {"source": "web", "trusted": False}},
+        metadata={"provenance": {"source": "agent", "trusted": True}},
     )
 
     out = eng.promote(source, Scope.WORKSPACE)
@@ -467,7 +557,7 @@ def test_promote_deduplicates_into_existing_wider_memory():
     assert eng.store.has_link(wider, source, relation="promotes")
     promoted = eng.store.get_memory(wider)
     assert promoted.metadata["promoted_from"] == [source]
-    assert promoted.provenance["trusted"] is False
+    assert promoted.provenance["trusted"] is True
 
 
 def test_promote_rejects_same_or_narrower_scope():
