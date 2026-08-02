@@ -533,19 +533,9 @@ pinned. The full multi-predecessor chain remains visible through inspection, Why
 ## Free forever vs. hosted plans
 
 The core engine, local dashboard, MCP server, and manual consolidation are Apache-2.0 and free.
-**Pro and Team are services**, not hidden modes in this package: a subscription authorizes the
-official hosted service, whose private control plane, relay, compute, billing, and Team identity
-run in a private repository. **Pro is $10/mo ($100/yr); Team is $20/seat/mo ($200/seat/yr).** The
-email-confirmed, no-card trial lasts **exactly 3 active days**.
-
-After a denial, `workspace_write_grace` may retain only private-service-approved hosted-account
-continuity operations for at most **24 hours**. It never extends trial or subscription expiry or
-grants Cloud Sync, Analytics, Automation, Auto Dreaming, Auto Consolidation, Team access, seats,
-or credentials. Then `recovery_read_only` provides recovery and data export. Neither state
-restricts local dashboard, MCP tools, or local writes. Cloud Sync encrypts eligible shared-workspace
-changes end-to-end; managed compute is a separate readable-snapshot service. See
-[`docs/HOSTED_PLANS.md`](docs/HOSTED_PLANS.md), [`docs/LICENSING.md`](docs/LICENSING.md), and
-[`docs/SYNC.md`](docs/SYNC.md) for the full boundaries.
+Pro and Team provide access to optional hosted services; they do not limit the local core. See
+[hosted plans](docs/HOSTED_PLANS.md), [licensing](docs/LICENSING.md), and
+[Cloud Sync](docs/SYNC.md) for service boundaries, lifecycle, and pricing.
 
 [Subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_pricing#billing)
 to support the project and add hosted services.
@@ -580,96 +570,28 @@ the full inventory and parameters.
 
 ---
 
-## Layered graph and privacy receipts
+## Graphs and privacy-safe receipts
 
-Memory relationships, extracted entities, and code structure stay normalized in one SQLite
-database. Edges are tagged as `temporal`, `entity`, `causal`, or `semantic`, so callers can
-select a logical overlay without maintaining separate graphs. Schema migrations are additive
-and idempotent: existing memories and bi-temporal history remain in place, while legacy edge
-layers are inferred once.
-
-`MemoryService.intent_remember()`, `intent_link()`, and `intent_recall()` provide a
-transport-neutral agent protocol while the existing `engraphis_remember`, `engraphis_link`, and
-`engraphis_recall` tools remain the canonical MCP vocabulary. Explicit links can persist both a
-layer and a durable rationale. Intent recall maps `explain`, `summarize_history`, and
-`locate_code` to appropriate layer filters; code intents also return matching symbols when a
-repository is supplied.
-
-The operation-receipt chain is deliberately content-free. It records bounded operation metadata
-and chained hashes, while excluding raw memory/query text, workspace names, memory IDs, and actor
-identities from exported receipt payloads. Use `engraphis_receipts`,
-`engraphis_context_savings`, `engraphis_verify_receipts`, and `engraphis_export_receipts` to
-inspect the chain, aggregate retrieved-source versus packed-context tokens, or compare it with a
-previously saved head/count anchor. Savings stay separated by token-counter identity and are
-reported with chain validity; they are packing measurements, not provider bills. A separately
-maintained local count/head anchor and persistent integrity marker make interior edits, reordering,
-and tail truncation detectable.
-
-See [the v3 architecture document](docs/ARCHITECTURE_V3.md) for the data flow and
-[SECURITY.md](SECURITY.md) for the trust boundaries.
+Memory, entity, and code relationships live in one local graph. Engraphis also provides
+content-free operation receipts for inspectable audit evidence. See the
+[architecture](docs/ARCHITECTURE_V3.md), [MCP tool reference](docs/MCP_TOOLS.md), and
+[security policy](SECURITY.md) for the data model, tools, and guarantees.
 
 ---
 
 ## Cloud sync
 
-**Cloud Sync is a hosted Pro/Team service.** The private service owns relay storage,
-organization authorization, credential rotation, scheduling, isolation, and operations. This
-Apache package contains only the customer protocol, deterministic merge implementation, and
-one-shot client needed to participate after the hosted service authorizes an installation. No
-environment switch turns the public image into an Engraphis relay.
-
-The merge remains a state-based CRDT: every field resolves by a commutative, idempotent rule so
-`merge(A, B) == merge(B, A)`. The current format carries memories and memory-to-memory links;
-entity/code graph reconciliation is not yet part of sync. `secret` memories and all live or
-invalidated session-scoped memories are device-local and excluded from every exported sync
-bundle; links are exported only when both endpoints remain. Inbound bundles cannot create or
-overwrite session state. Cloud Sync encrypts eligible shared-workspace changes end-to-end before
-they leave this device; the relay stores ciphertext and cannot read bundle contents.
-
-Cloud Sync fails closed without its client-held workspace key: install `engraphis[cloud-sync]`
-on Python 3.10+ and set the same 32-byte URL-safe-base64 `ENGRAPHIS_SYNC_E2EE_KEY` on each
-authorized device using a secure out-of-band transfer. The relay and Engraphis Cloud never
-receive that key. [`docs/SYNC.md`](docs/SYNC.md) includes the key-generation command and the
-`--relay-e2ee-key` one-off CLI alternative.
-
-For development, backup interchange, and offline testing, the public client retains an explicit
-one-shot folder exchange. That manual primitive is not the official Cloud Sync product and has
-no hosted identity, seat, managed-storage, availability, or support guarantees. See
-[`docs/SYNC.md`](docs/SYNC.md) for the exact boundary, security model, and client usage.
+Cloud Sync is an optional hosted Pro/Team service. The public package includes the customer client
+and deterministic merge implementation; hosted relay and account operations are separate. See
+[Cloud Sync](docs/SYNC.md) for setup, encryption, merge behavior, and the local folder exchange.
 
 ---
 
-## Security, reliability, and trust boundaries
+## Security and trust boundaries
 
-The public runtime and its hosted-service clients enforce:
-
-- **Single-user local access**: loopback is the default; an optional constant-time-checked
-  bearer protects a remotely exposed customer node. Local Team accounts, invitations, roles,
-  seats, password handling, and organization administration are not shipped here.
-- **Hosted authorization boundary**: Cloud Sync, Analytics, Automation, Team identity, and
-  cost-bearing work require current authorization from the private service. Any bounded
-  `workspace_write_grace` and later `recovery_read_only` state is enforced by that private
-  service for hosted account continuity; neither state grants cloud access or account growth,
-  and neither restricts the free local core.
-- **SQLite transaction safety**: shared v2 connections serialize complete write transactions;
-  a failed statement that opened a transaction rolls it back and releases its lock. Legacy
-  decay is frequency-independent, and sync preserves future bi-temporal validity horizons.
-- **Customer-client isolation**: workspace allow-lists are enforced while applying fetched
-  data, and device-local `secret` memories cannot be uploaded or remotely overwritten,
-  invalidated, or downgraded. Bundle size and record counts are bounded before application;
-  hosted tenant and storage enforcement remains private service responsibility.
-- **Hostile-input handling**: sync-folder peers, graph merge inputs, repository walks,
-  resource files, and PostgreSQL selectors are treated as untrusted; traversal,
-  symlink/replace races, oversized/deep payloads, malformed rows, and non-finite JSON are
-  rejected.
-- **Proxy and network hardening**: default loopback CORS follows `ENGRAPHIS_PORT`;
-  proxy-reported HTTPS produces Secure session cookies, and redirects use the configured
-  dashboard URL rather than a caller-controlled Host header. Managed-service clients reject
-  insecure or malformed endpoints and never forward bearer credentials across HTTP
-  redirects.
-
-See [SECURITY.md](SECURITY.md) for supported versions, deployment requirements, known gaps,
-and the vulnerability-reporting process.
+Engraphis is local-first and binds to loopback by default. Read the
+[security policy](SECURITY.md) before remote deployment or integrating external resources; it
+covers supported versions, data protections, threat model, and vulnerability reporting.
 
 ---
 
@@ -695,69 +617,22 @@ python -c "import secrets; print(secrets.token_hex(32))"
 
 ---
 
-## Import files & folders
+## Import files and folders
 
-Drag-and-drop or server-side import, access-controlled and bounded:
-
-- **Dashboard upload**: accepts text, Markdown, code, JSON/CSV/HTML, DOCX, and exported
-  Google Workspace documents directly; optional adapters add PDF text extraction, image OCR,
-  and audio/video transcription. Native `.gdoc` pointer files contain no document body, so
-  export them as DOCX, PDF, HTML, or plain text before local ingestion.
-- **Server-side folder import**: `MemoryService.import_folder()` reads a directory on the
-  machine running Engraphis. Large resources are chunked deterministically even when the
-  configured extractor is `none`; path-traversal guards still apply.
-- **PostgreSQL**: `engraphis_ingest_postgres_schema`, `POST /api/resources/postgres`, or
-  `engraphis-graph postgres` converts tables, columns, constraints, and foreign keys into a
-  schema memory and entity graph. The DSN is never persisted.
-- **MCP ingest**: `engraphis_ingest` accepts raw text and applies the configured extractor
-  (`chunk`, `llm`, or `llm_structured`); with `none` it stores one verbatim memory.
-- **Sub-file chunking**: set `ENGRAPHIS_EXTRACTOR=chunk` to split long, multi-topic
-  documents into retrieval-sized, structure-aware pieces (headings start new chunks;
-  ~256-token target with sentence-level overlap) *without an LLM*. Each chunk becomes
-  its own memory, so recall returns the relevant **passage** instead of a whole file,
-  a big context-reduction win on long docs. Works across all three ingest paths
-  (dashboard upload, `import_folder`, and `engraphis_ingest`). Measure the payoff with
-  the bundled eval: `python -m eval.chunking_eval --dataset eval/datasets/longdoc.jsonl --k 5`
-  (whole-file vs. chunked, same recall pipeline, offline). The dependency-free default
-  uses the named `engraphis.chars4.v1` estimate. Set
-  `ENGRAPHIS_CHUNK_TOKENIZER_MODEL` and, for reproducible runs,
-  `ENGRAPHIS_CHUNK_TOKENIZER_REVISION` to size prose chunks with the actual reader
-  tokenizer; the chosen counter identity is preserved in each chunk's metadata.
-- **Structured LLM extraction**: `ENGRAPHIS_EXTRACTOR=llm_structured` validates typed
-  facts, entities, relations, and keywords before storage. Its preserved entity/relation
-  metadata feeds the knowledge graph automatically. A successful dashboard connection test
-  enables this mode by default; the Settings switch can disable or re-enable it immediately.
+Import supported documents and code through the dashboard, a local folder, or MCP. Optional
+extractors add offline chunking, structured LLM extraction, document OCR, transcription, and
+PostgreSQL schema ingestion. See the [MCP tool reference](docs/MCP_TOOLS.md),
+[architecture guide](docs/ARCHITECTURE_V3.md), and [security policy](SECURITY.md) for formats,
+configuration, and local-resource safeguards.
 
 ---
 
-## Manual consolidation and hosted automation
+## Consolidation and automation
 
-Manual consolidation is free and remains local. Use the dashboard's **Consolidate** tab,
-`MemoryService.consolidate`, `POST /api/consolidate`, `engraphis_consolidate`, or
-`python -m scripts.consolidate`. Dry-run is the default.
-
-Pro and Team add **hosted** Auto Consolidation and Auto Dreaming. On a connected workspace, the
-first Automation view automatically starts the recommended daily maintenance policy and uploads
-its bounded snapshot; there is no separate enable step. Customers can later pause or tune that
-policy. The public Automation tab displays reviewable jobs or proposals. The scheduling, analytics, dreaming, and
-consolidation automation algorithms run in Engraphis Cloud; this repository ships no premium
-background loop, cron wrapper, or worker.
-
-Secret-class and session-scoped memories are excluded before a managed snapshot is serialized;
-secret-class rows are rejected again by the hosted service. The encoded payload is capped at
-16 MiB. A connected installation sends that bounded, non-secret snapshot to Engraphis Cloud
-over HTTPS, where the hosted service must read it to produce a proposal; this is not
-end-to-end-encrypted processing. Local-only installations send nothing. Managed compute is
-enabled by default once an installation is connected to Engraphis Cloud. Connecting accepts
-the terms that cover it, and it stays off for a local-only installation with no cloud session;
-cloud entitlement is also required. `ENGRAPHIS_MANAGED_COMPUTE_CONSENT=0` opts a connected
-installation back out. A managed proposal never silently rewrites the local database.
-
-Manual consolidation can also use schema-validated LLM output through
-`MemoryService.consolidate`, `POST /api/consolidate`, `engraphis_consolidate`, or
-`python -m scripts.consolidate --structured`. Source memories remain live by default;
-`supersede_sources` / `--supersede-sources` closes them only after validated replacement
-facts are written.
+Manual consolidation is free, local, and dry-run by default; use the dashboard, SDK, CLI, or
+MCP. Hosted Pro and Team automation is optional managed compute that produces reviewable
+proposals rather than silently changing local data. See [hosted plans](docs/HOSTED_PLANS.md),
+[licensing](docs/LICENSING.md), and the [MCP tool reference](docs/MCP_TOOLS.md) for scope and use.
 
 ---
 
