@@ -560,12 +560,11 @@ def test_approval_requires_a_reason_and_cannot_duplicate_an_approved_successor()
         )
 
 
-def test_serialized_local_cli_marker_cannot_self_approve_service_ingress():
-    """A JSON boolean must not emulate the CLI's private object capability."""
+def test_external_trusted_label_cannot_self_approve_service_ingress():
+    """Public ingress cannot claim the CLI's private approval capability."""
     service = MemoryService.create(":memory:", graph_extractor="none", extractor="none")
     pending = service.remember(
         "The deployment name is bluebird.", workspace="w", source="api", trusted=True,
-        _local_cli_capability=True,
     )
 
     record = service.store.get_memory(pending["id"])
