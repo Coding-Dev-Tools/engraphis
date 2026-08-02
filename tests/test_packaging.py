@@ -129,6 +129,7 @@ def test_distribution_configuration_includes_public_evidence_tools():
     )
     for rule in (
         "include LICENSE NOTICE README.md CHANGELOG.md BENCHMARKS.md",
+        "include docker-entrypoint.sh Dockerfile docker-compose.yml docker-compose.lan.yml",
         "recursive-include eval *.py",
         "include eval/BASELINES.md",
         "include eval/EVIDENCE.md",
@@ -136,6 +137,7 @@ def test_distribution_configuration_includes_public_evidence_tools():
         "recursive-include eval/datasets *.jsonl",
     ):
         assert rule in manifest
+    assert "docker-compose.lan.yml" in REQUIRED_SDIST
 
 
 def test_distribution_archive_verifier_requires_evidence_and_rejects_internal_material(

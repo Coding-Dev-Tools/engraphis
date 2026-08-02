@@ -278,13 +278,29 @@ Then open `http://127.0.0.1:8787`. License issuance, trials, leases, and revocat
 `engraphis-server` and `engraphis server` are headless compatibility aliases
 for this same v2 service, so every public surface has the same scoped recall and retention model.
 
-Compose publishes the service on host loopback only. Do not widen the port mapping without first
-setting a strong `ENGRAPHIS_API_TOKEN`; the Compose bridge-peer exception exists only to preserve
-the zero-token local quickstart, not to authorize a LAN deployment.
+Compose publishes only on loopback by default. To expose it on a LAN, set a strong API token and
+the exact URL clients will use:
 
-The streamable HTTP MCP endpoint at `/mcp` is available when the service is installed with the
-optional `mcp` extra. The default Docker Compose image does not install that extra, so use the
-local stdio MCP setup below or build an image with `.[mcp]` before configuring an HTTP client.
+```dotenv
+ENGRAPHIS_API_TOKEN=<a-long-random-secret>
+ENGRAPHIS_DASHBOARD_URL=http://<host-LAN-IP>:8700
+```
+
+Then start the token-required LAN overlay (Docker Compose v2.24.4+):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.lan.yml up -d
+```
+
+The URL variable alone does not expose or secure the service. The LAN overlay refuses to render
+without `ENGRAPHIS_API_TOKEN`; it replaces the loopback port mapping with an all-IPv4-interface mapping.
+After this opt-in, other machines on the LAN can use
+`http://<host-LAN-IP>:8700`.
+
+The Docker image includes the streamable HTTP MCP endpoint at `/mcp/` (the `/mcp` path redirects
+there). Configure `ENGRAPHIS_DASHBOARD_URL` to the exact LAN IP or hostname clients use so MCP's
+DNS-rebinding protection accepts the request. For example, use
+`http://192.168.10.151:8700` for direct LAN access, or `http://engraphis.local` behind Traefik.
 For an HTTP-enabled deployment, use the dashboard port (replace `8700` with your
 `ENGRAPHIS_COMPOSE_PORT` value when you override it):
 
@@ -293,7 +309,7 @@ For an HTTP-enabled deployment, use the dashboard port (replace `8700` with your
   "engraphis": {
     "transport": "http",
     "enabled": true,
-    "url": "http://127.0.0.1:8700/mcp"
+    "url": "http://<host-LAN-IP>:8700/mcp/"
   }
 }
 ```
@@ -780,7 +796,7 @@ All via environment (or `.env`):
 | `ENGRAPHIS_LLM_BASE_URL` | Not set | Base URL for openrouter / custom OpenAI-compatible endpoints |
 | `ENGRAPHIS_LLM_AUTO_EXTRACT` | `0` | Opt in to switching the running engine to `llm_structured` after a successful live connection test; the dashboard's extraction Off button persists `0`, and its On button restores `1` |
 | `ENGRAPHIS_FORWARDED_ALLOW_IPS` | *(none)* | Proxies trusted for forwarded client/TLS headers (`*` only when the service is reachable exclusively through that proxy) |
-| `ENGRAPHIS_LOCAL_TRUSTED_PEERS` | *(none)* | Exact peers/CIDRs treated as local without forwarding headers; intended for the shipped loopback-published Compose bridge, not public deployments |
+| `ENGRAPHIS_LOCAL_TRUSTED_PEERS` | *(none)* | Exact peers/CIDRs treated as local without forwarding headers; use only for trusted Docker/LAN peers, never public deployments |
 | `ENGRAPHIS_CLOUD_CONTROL_URL` | hosted default | Official entitlement, organization, and credential control API |
 | `ENGRAPHIS_CLOUD_COMPUTE_URL` | hosted default | Official Analytics and managed-automation API |
 | `ENGRAPHIS_CLOUD_ORGANIZATION_ID` | Not set | Hosted organization bound to this customer session |

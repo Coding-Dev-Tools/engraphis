@@ -5,13 +5,6 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
-### Fixed
-
-- `engraphis connect` now treats its printed summary as a provider trust boundary: only bounded,
-  printable registration metadata is rendered, preventing malformed control-plane values from
-  being reflected into CLI or JSON output.
-
-## [1.3.0] - 2026-08-01
 ### Added
 
 - Opt-in planned recall adds a bounded deterministic planner, an injectable planner protocol and
@@ -33,6 +26,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
   records and retire their derived bridges.
 
 ### Fixed
+
+- `engraphis connect` now treats its printed summary as a provider trust boundary: only bounded,
+  printable registration metadata is rendered, preventing malformed control-plane values from
+  being reflected into CLI or JSON output.
 
 - Explicit local `engraphis-cli ingest` commands now record local-owner-approved provenance,
   allowing their memories to appear in ordinary subsequent CLI recall. HTTP, MCP, import, and

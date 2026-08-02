@@ -7,16 +7,19 @@ It removes raw questions, answers, returned context, and prompts from every
 record while retaining SHA-256 digests for same-input verification.
 
 After an official LongMemEval-V2 run, keep the upstream `per_question.jsonl`
-private and create a redacted artifact:
+private in an operator-controlled run directory and create a redacted artifact. Set the
+directory once; the public repository never assumes an internal filesystem layout:
 
 ```bash
+export ENGRAPHIS_EVIDENCE_RUN_DIR=/path/to/restricted/longmemeval-v2
+
 python -m eval.longmemeval_v2_evidence \
   --per-question output/per_question.jsonl \
   --questions data/questions.json \
   --haystack data/haystack.json \
   --trajectories data/trajectories.json \
-  --memory-config /private/longmemeval-v2/configs/balanced-1024.json \
-  --matrix-manifest /private/longmemeval-v2/configs/manifest.json \
+  --memory-config "$ENGRAPHIS_EVIDENCE_RUN_DIR/configs/balanced-1024.json" \
+  --matrix-manifest "$ENGRAPHIS_EVIDENCE_RUN_DIR/configs/manifest.json" \
   --ablation balanced --token-budget 1024 --seed 42 \
   --upstream-revision <40-character-official-harness-commit> \
   --output artifacts/longmemeval-v2.json
@@ -50,10 +53,10 @@ paired-bootstrap deltas. This is fixture-scoped regression evidence, not a third
 
 The official LongMemEval-V2 adapter accepts the same `planning` and `mtype_limits` controls. Use the
 four pinned configs in `eval/configs/longmemeval_v2_engraphis*.json`. Materialize the exact 20-run
-matrix in a private output directory with:
+matrix in that restricted run directory with:
 
 ```bash
-python -m eval.longmemeval_v2_matrix --output /private/longmemeval-v2/configs
+python -m eval.longmemeval_v2_matrix --output "$ENGRAPHIS_EVIDENCE_RUN_DIR/configs"
 ```
 
 Run the pinned official harness once per manifest entry. Keep upstream per-question files and any

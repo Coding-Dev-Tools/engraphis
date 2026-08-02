@@ -173,6 +173,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Validate Compose configuration
         run: docker compose config --quiet
+      - name: Reject unauthenticated LAN Compose overlay
+        run: |
+          if env -u ENGRAPHIS_API_TOKEN docker compose -f docker-compose.yml -f docker-compose.lan.yml config --quiet; then
+            echo "LAN overlay must require ENGRAPHIS_API_TOKEN"
+            exit 1
+          fi
+      - name: Validate token-protected LAN Compose overlay
+        env:
+          ENGRAPHIS_API_TOKEN: ci-lan-overlay-token
+        run: docker compose -f docker-compose.yml -f docker-compose.lan.yml config --quiet
       - name: Build production image
         run: docker build -t engraphis:release .
       - name: Verify production image OCR runtime

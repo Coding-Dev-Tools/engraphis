@@ -64,7 +64,7 @@ def test_railway_image_is_cpu_only_and_installs_only_its_runtime_surface():
     dockerfile = _text("Dockerfile")
 
     assert "https://download.pytorch.org/whl/cpu torch" in dockerfile
-    assert 'pip install ".[server,documents,cloud-sync]"' in dockerfile
+    assert 'pip install ".[server,mcp,documents,cloud-sync]"' in dockerfile
     assert 'pip install ".[all]"' not in dockerfile
 
 

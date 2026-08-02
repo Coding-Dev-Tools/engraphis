@@ -58,6 +58,10 @@ def test_sample_operational_config_matches_runtime_contract(monkeypatch):
     assert "http://localhost:<ENGRAPHIS_PORT>" in example
     assert "These settings do not change CORS" in example
     assert "# ENGRAPHIS_DASHBOARD_URL=https://engraphis.example.com" in example
+    assert "# ENGRAPHIS_API_TOKEN=<a-long-random-secret>" in example
+    assert "docker-compose.lan.yml" in example
+    assert "# ENGRAPHIS_DASHBOARD_URL=http://192.168.10.151:8700" in example
+    assert "# ENGRAPHIS_DASHBOARD_URL=http://engraphis.local" in example
 
     monkeypatch.delenv("ENGRAPHIS_LLM_AUTO_EXTRACT", raising=False)
     assert Settings().llm_auto_extract is False

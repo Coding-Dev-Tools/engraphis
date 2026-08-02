@@ -59,10 +59,13 @@ def test_all_public_launchers_converge_on_the_v2_service():
     assert "engraphis_v1.db" not in compose
     assert 'command: ["engraphis-dashboard", "--no-open"]' in compose
     assert '"127.0.0.1:${ENGRAPHIS_COMPOSE_PORT:-8700}:${ENGRAPHIS_COMPOSE_PORT:-8700}"' in compose
-    assert '"0.0.0.0:8700:8700"' not in compose
-    assert '"url": "http://127.0.0.1:8700/mcp"' in readme
-    assert '".[server,documents,cloud-sync]"' in dockerfile
-    assert "The default Docker Compose image does not install that extra" in readme
+    assert '"url": "http://<host-LAN-IP>:8700/mcp/"' in readme
+    assert '".[server,mcp,documents,cloud-sync]"' in dockerfile
+    assert "The Docker image includes the streamable HTTP MCP endpoint" in readme
+    assert "ENGRAPHIS_API_TOKEN=<a-long-random-secret>" in readme
+    assert "docker-compose.lan.yml" in readme
+    assert "LAN overlay refuses to render" in readme
+    assert "ENGRAPHIS_DASHBOARD_URL" in readme
     assert "ENGRAPHIS_COMPOSE_PORT" in readme
     assert "start_dashboard.main(args)" in launcher
     assert "engraphis.app" not in launcher
@@ -75,12 +78,17 @@ def test_compose_keeps_container_safety_defaults_and_has_an_explicit_port_overri
     compose = _text("docker-compose.yml")
     readme = _text("README.md")
 
+    lan_compose = _text("docker-compose.lan.yml")
     assert '"127.0.0.1:${ENGRAPHIS_COMPOSE_PORT:-8700}:${ENGRAPHIS_COMPOSE_PORT:-8700}"' in compose
     assert "ENGRAPHIS_HOST: 0.0.0.0" in compose
+    assert "ENGRAPHIS_COMPOSE_HOST" not in compose
     assert "PORT: ${ENGRAPHIS_COMPOSE_PORT:-8700}" in compose
     assert "ENGRAPHIS_PORT: ${ENGRAPHIS_COMPOSE_PORT:-8700}" in compose
     assert "ENGRAPHIS_DB_PATH: /data/engraphis.db" in compose
     assert "ENGRAPHIS_STATE_DIR: /data/.engraphis" in compose
+    assert "ports: !override" in lan_compose
+    assert '"0.0.0.0:${ENGRAPHIS_COMPOSE_PORT:-8700}:${ENGRAPHIS_COMPOSE_PORT:-8700}"' in lan_compose
+    assert "ENGRAPHIS_API_TOKEN: ${ENGRAPHIS_API_TOKEN:?Set a strong ENGRAPHIS_API_TOKEN for LAN use}" in lan_compose
     assert "ENGRAPHIS_COMPOSE_PORT=8787" in readme
 
 
@@ -105,8 +113,14 @@ def test_ci_and_release_audit_production_image_dependencies():
     assert "Verify production image OCR runtime" in ci
     assert "Verify production image OCR runtime" in release
     assert "docker-entrypoint\\.sh" in ci
+    assert "docker-compose(\\.lan)?\\.yml" in ci
     assert "railway\\.json" in ci
     assert "deploy/" in ci
+    for workflow in (ci, release):
+        assert "Reject unauthenticated LAN Compose overlay" in workflow
+        assert "env -u ENGRAPHIS_API_TOKEN docker compose -f docker-compose.yml -f docker-compose.lan.yml config --quiet" in workflow
+        assert "ENGRAPHIS_API_TOKEN: ci-lan-overlay-token" in workflow
+        assert "Validate token-protected LAN Compose overlay" in workflow
     assert 'build twine pip-audit ".[all,test]"' in release_build
     assert "python -m pip_audit --local" in release_build
     assert "docker build -t engraphis:release ." in release_docker
@@ -315,6 +329,10 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
     assert "(workspace, repo, authenticated user, agent, goal)" in skill_tools
 
     changelog = _text("CHANGELOG.md")
+    evidence = _text("eval/EVIDENCE.md")
+    assert changelog.count("## [1.3.0] - 2026-08-01") == 1
+    assert "ENGRAPHIS_EVIDENCE_RUN_DIR=/path/to/restricted/longmemeval-v2" in evidence
+    assert "/private/longmemeval-v2" not in evidence
     assert "ForceGraph + D3 renderer" in changelog
     assert "## [1.1.0] - 2026-07-26" in changelog
     assert "Public 1.1.0 hosted-connect and graph-experience release." in changelog
