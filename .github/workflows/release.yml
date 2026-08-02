@@ -191,10 +191,22 @@ jobs:
           'python -c "import PIL, pytesseract" && command -v tesseract >/dev/null &&
           tesseract --version | head -n 1'
       - name: Audit production image dependencies
-        run: >-
-          docker run --rm --entrypoint sh engraphis:release -c
-          'python -m pip install --no-cache-dir pip-audit &&
-          python -m pip_audit --local'
+        # The runtime image deliberately has no pip. Audit its exact installed
+        # distributions from the runner instead of reintroducing a build tool to the
+        # production image only for this check.
+        shell: bash
+        run: |
+          audit_dir="$(mktemp -d)"
+          container="engraphis-release-audit-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            docker rm -f "$container" >/dev/null 2>&1 || true
+            rm -rf "$audit_dir"
+          }
+          trap cleanup EXIT
+          python -m pip install --disable-pip-version-check --no-cache-dir pip-audit
+          docker create --name "$container" engraphis:release >/dev/null
+          docker cp "$container":/usr/local/lib/python3.11/site-packages/. "$audit_dir"
+          python -m pip_audit --path "$audit_dir"
       - name: Run customer-mode readiness smoke
         shell: bash
         run: |

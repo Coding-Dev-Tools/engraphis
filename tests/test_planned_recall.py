@@ -38,6 +38,10 @@ class _StaticPlanner:
 
 
 class _MappedEmbedder:
+    # This fixture deliberately models a semantic backend without downloading a model.
+    # Recall requires every non-degraded backend to declare that capability explicitly.
+    supports_semantic_search = True
+    embedding_mode = "semantic"
     dim = 2
 
     def __init__(self, vectors):

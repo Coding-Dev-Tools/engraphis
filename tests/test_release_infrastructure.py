@@ -128,8 +128,10 @@ def test_ci_and_release_audit_production_image_dependencies():
     assert "Validate Compose configuration" in release_docker
     assert "docker compose config --quiet" in release_docker
     assert "Audit production image dependencies" in release_docker
-    assert "python -m pip install --no-cache-dir pip-audit" in release_docker
-    assert "python -m pip_audit --local" in release_docker
+    assert 'python -m pip install --disable-pip-version-check --no-cache-dir pip-audit' in release_docker
+    assert 'docker create --name "$container" engraphis:release' in release_docker
+    assert 'docker cp "$container":/usr/local/lib/python3.11/site-packages/.' in release_docker
+    assert 'python -m pip_audit --path "$audit_dir"' in release_docker
     assert "needs: [build, python-matrix, encryption, browser-accessibility, docker-smoke]" in release_evidence
     assert "needs: release-evidence" in publish
     assert "Browser accessibility release gate" in release
