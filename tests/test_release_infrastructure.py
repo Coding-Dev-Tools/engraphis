@@ -108,7 +108,8 @@ def test_ci_and_release_audit_production_image_dependencies():
     assert "Validate Compose configuration" in ci
     assert "docker compose config --quiet" in ci
     assert "docker run --rm --entrypoint sh engraphis:ci" in ci
-    assert "python -m pip_audit --local" in ci
+    assert 'python -m pip_audit --path "$audit_dir"' in ci
+    assert 'docker cp "$container":/usr/local/lib/python3.11/site-packages/.' in ci
     assert "tesseract-ocr" in _text("Dockerfile")
     assert "Verify production image OCR runtime" in ci
     assert "Verify production image OCR runtime" in release

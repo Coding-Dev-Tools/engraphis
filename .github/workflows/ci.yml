@@ -153,10 +153,22 @@ jobs:
           'python -c "import PIL, pytesseract" && command -v tesseract >/dev/null &&
           tesseract --version | head -n 1'
       - name: Audit the exact production image dependency set
-        run: >-
-          docker run --rm --entrypoint sh engraphis:ci -c
-          'python -m pip install --no-cache-dir pip-audit &&
-          python -m pip_audit --local'
+        # The runtime image intentionally has no pip: it is a build tool whose vendored
+        # dependency snapshot would otherwise remain an unnecessary attack surface. Copy the
+        # exact installed distributions to the runner and audit that set instead of mutating
+        # the production image just to run the audit.
+        run: |
+          audit_dir="$(mktemp -d)"
+          container="engraphis-audit-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cleanup() {
+            docker rm -f "$container" >/dev/null 2>&1 || true
+            rm -rf "$audit_dir"
+          }
+          trap cleanup EXIT
+          python -m pip install --disable-pip-version-check --no-cache-dir pip-audit
+          docker create --name "$container" engraphis:ci >/dev/null
+          docker cp "$container":/usr/local/lib/python3.11/site-packages/. "$audit_dir"
+          python -m pip_audit --path "$audit_dir"
       - name: Run container (offline deterministic embedder — no model downloads)
         run: |
           docker run -d --name engraphis -p 8700:8700 \

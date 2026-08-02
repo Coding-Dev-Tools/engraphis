@@ -72,6 +72,14 @@ def test_railway_image_is_cpu_only_and_installs_only_its_runtime_surface():
     assert "/usr/local/lib/python3.11/site-packages/pip" in dockerfile
 
 
+def test_ci_audits_the_stripped_image_without_mutating_it():
+    workflow = _text(".github/workflows/ci.yml")
+
+    assert 'docker cp "$container":/usr/local/lib/python3.11/site-packages/.' in workflow
+    assert 'python -m pip_audit --path "$audit_dir"' in workflow
+    assert 'python -m pip install --disable-pip-version-check --no-cache-dir pip-audit' in workflow
+
+
 def test_platform_port_precedes_a_fixed_engraphis_port(monkeypatch):
     """Railway routes and probes the port injected as ``PORT``, not 8700."""
     uvicorn = pytest.importorskip("uvicorn")

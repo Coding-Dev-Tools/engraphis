@@ -533,7 +533,9 @@ pinned. The full multi-predecessor chain remains visible through inspection, Why
 ## Free forever vs. hosted plans
 
 The core engine, local dashboard, MCP server, and manual consolidation are Apache-2.0 and free.
-Pro and Team provide access to optional hosted services; they do not limit the local core. See
+**Pro and Team are services** that provide optional access to the official hosted service; its
+control-plane, billing, relay, compute, and Team identity modules live in a private repository.
+They do not limit the local core. See
 [hosted plans](docs/HOSTED_PLANS.md), [licensing](docs/LICENSING.md), and
 [Cloud Sync](docs/SYNC.md) for service boundaries, lifecycle, and pricing.
 
