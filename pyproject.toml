@@ -139,8 +139,11 @@ all = [
     "psycopg[binary]>=3.1",
 ]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.15.22,<0.17"]
-# Everything needed to run the FULL offline gate in CI (lint + all extras-gated tests)
-# WITHOUT pulling torch/sentence-transformers — no test needs the real embedder.
+# Everything needed to run the general offline gate in CI (lint + all safe extras-gated
+# tests) WITHOUT pulling torch/sentence-transformers — no test needs the real embedder.
+# SQLCipher is deliberately excluded: loading its SQLite extension beside the stdlib sqlite
+# extension makes current bundled Linux wheels unsafe in a long-running mixed test process.
+# The ``encryption`` extra is exercised in its own short-lived CI job instead.
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
@@ -167,7 +170,6 @@ test = [
     "faster-whisper>=1.0",
     "onnxruntime<1.24; python_version < '3.11'",
     "psycopg[binary]>=3.1",
-    "sqlcipher3-binary>=0.5.0; platform_python_implementation == 'CPython' and platform_system == 'Linux' and platform_machine == 'x86_64'",
 ]
 
 [project.urls]

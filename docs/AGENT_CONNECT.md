@@ -63,6 +63,10 @@ Useful options:
 | `--compute-url URL` | Set the managed compute endpoint (also `ENGRAPHIS_CLOUD_COMPUTE_URL`). |
 | `--json` | Print a redacted, machine-readable summary. |
 
+The summary accepts only bounded, printable metadata from the documented response shape.
+Credentials, malformed nested values, and terminal-control text are never echoed to terminal or
+JSON output.
+
 The same command is installed as `engraphis-connect`, matching the other `engraphis-*` scripts.
 
 Connect tokens are **single-use and short-lived**. The service answers every refusal, whether expired,

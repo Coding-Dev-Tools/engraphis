@@ -8,8 +8,9 @@ Trust boundary: every MCP write is `pending` review, regardless of a caller-supp
 `trusted` label. The same rule applies to REST/dashboard-intent, import, sync, and extractor
 ingress; detector matches are `quarantined` immediately. Pending and quarantined records are
 available only to explicit inspection workflows and never appear in prompt-ready MCP recall or
-context, nor can they feed resolution, links, graph/code backfill, or derived prompt context.
-`include_untrusted=True` is inspection-only and must never be copied into a model prompt.
+context, `engraphis_why`, or `engraphis_timeline`, nor can they feed resolution, links,
+graph/code backfill, or derived prompt context. `include_untrusted=True` is inspection-only and
+must never be copied into a model prompt.
 
 MCP deliberately has no approval tool. Approval creates a fresh, audited `approved` successor
 while retaining the reviewed source and its provenance. In the local product it is available only

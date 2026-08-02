@@ -217,6 +217,15 @@ def check_manifest(root: Path) -> dict[str, list[dict[str, Any]]]:
                 "inputs": [],
             },
             {
+                "id": "encryption-at-rest",
+                "command": [
+                    "python", "-m", "pytest", "-o", "addopts=",
+                    "tests/test_encrypted_store.py", "-q", "-rs",
+                ],
+                "workflow_job": "encryption",
+                "inputs": [],
+            },
+            {
                 "id": "browser-e2e",
                 "command": ["npm", "run", "test:e2e"],
                 "workflow_job": "browser-accessibility",
@@ -232,6 +241,7 @@ def check_manifest(root: Path) -> dict[str, list[dict[str, Any]]]:
                 "command": ["docker", "build", "-t", "engraphis:release", "."],
                 "workflow_job": "docker-smoke",
                 "workflow_steps": [
+                    "Validate Compose configuration",
                     "Verify production image OCR runtime",
                     "Audit production image dependencies",
                     "Run customer-mode readiness smoke",
@@ -307,7 +317,7 @@ def build_evidence(
                 "workflow": ".github/workflows/release.yml",
                 "job": "release-evidence",
                 "completed_gate_jobs": [
-                    "build", "python-matrix", "browser-accessibility", "docker-smoke",
+                    "build", "python-matrix", "encryption", "browser-accessibility", "docker-smoke",
                 ],
                 "sbom_generator": {
                     "name": "cyclonedx-bom",

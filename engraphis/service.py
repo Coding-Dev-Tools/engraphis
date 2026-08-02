@@ -2521,7 +2521,7 @@ class MemoryService:
         )
         out = self.engine.why(
             query, workspace_id=wid, repo_id=rid, k=k,
-            valid_at=valid_at, known_at=known_at,
+            valid_at=valid_at, known_at=known_at, prompt_only=True,
         )
         return {"query": query, "answer": [_mem_to_dict(r) for r in out["answer"]],
                "supersedes": [_mem_to_dict(r) for r in out["supersedes"]]}
@@ -2538,7 +2538,7 @@ class MemoryService:
         )
         recs = self.engine.timeline(
             query, workspace_id=wid, repo_id=rid, limit=limit,
-            valid_at=valid_at, known_at=known_at,
+            valid_at=valid_at, known_at=known_at, prompt_only=True,
         )
         return {"query": query, "history": [_mem_to_dict(r) for r in recs]}
 

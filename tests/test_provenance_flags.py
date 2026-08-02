@@ -1,8 +1,8 @@
 """Provenance trust flags + artifact kinds (agentic-upgrade handoff §3.3).
 
-`remember` now accepts `source`, `trusted`, and `kind`; all three land in
-`metadata.provenance` and surface through recall/why so prompt builders can
-label untrusted content (memory-poisoning guard) and filter by artifact type.
+`remember` accepts `source`, `trusted`, and `kind`; all three land in
+`metadata.provenance` and surface through explicit inspection recall. Prompt-ready
+recall, why, and timeline must not expose unapproved records to an agent transcript.
 """
 import pytest
 
@@ -14,8 +14,8 @@ def _svc() -> MemoryService:
 
 
 def _first_provenance(svc, query, **scope):
-    r = svc.why(query, **scope)
-    recs = r["answer"] + r.get("supersedes", [])
+    r = svc.recall(query, include_untrusted=True, **scope)
+    recs = r["memories"]
     assert recs, f"no memories found for {query!r}"
     return recs[0]["provenance"]
 

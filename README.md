@@ -263,15 +263,43 @@ engraphis-dashboard --install-shortcuts   # → Desktop + Start Menu icons
 docker compose up                     # → http://127.0.0.1:8700
 ```
 
-A fresh clone needs no `.env`: the service runs `engraphis-dashboard --no-open`, stores the v2
+A fresh clone needs no `.env`: the service runs `engraphis-dashboard --no-open` and stores the v2
 database plus the optional customer-side cloud session and non-authoritative entitlement display
-cache on a named volume mounted at `/data`, and accepts overrides from `.env` or the shell.
-License issuance, trials, leases, and revocations remain on the private control plane.
+cache on a named volume mounted at `/data`. Generic `.env` settings can supply optional runtime
+configuration, but Compose deliberately keeps its container bind address and `/data` paths fixed;
+that prevents a desktop `ENGRAPHIS_HOST` or `ENGRAPHIS_DB_PATH` from breaking container reachability
+or persistence. To use another loopback port, set `ENGRAPHIS_COMPOSE_PORT` in `.env` or the shell:
+
+```dotenv
+ENGRAPHIS_COMPOSE_PORT=8787
+```
+
+Then open `http://127.0.0.1:8787`. License issuance, trials, leases, and revocations remain on the private control plane.
 `engraphis-server` and `engraphis server` are headless compatibility aliases
 for this same v2 service, so every public surface has the same scoped recall and retention model.
 
-Compose publishes the service on host loopback only. Set a strong `ENGRAPHIS_API_TOKEN` before
-changing its port mapping to a non-loopback host address.
+Compose publishes the service on host loopback only. Do not widen the port mapping without first
+setting a strong `ENGRAPHIS_API_TOKEN`; the Compose bridge-peer exception exists only to preserve
+the zero-token local quickstart, not to authorize a LAN deployment.
+
+The streamable HTTP MCP endpoint at `/mcp` is available when the service is installed with the
+optional `mcp` extra. The default Docker Compose image does not install that extra, so use the
+local stdio MCP setup below or build an image with `.[mcp]` before configuring an HTTP client.
+For an HTTP-enabled deployment, use the dashboard port (replace `8700` with your
+`ENGRAPHIS_COMPOSE_PORT` value when you override it):
+
+```json
+{
+  "engraphis": {
+    "transport": "http",
+    "enabled": true,
+    "url": "http://127.0.0.1:8700/mcp"
+  }
+}
+```
+
+When `ENGRAPHIS_API_TOKEN` is set, configure the client to send
+`Authorization: Bearer <ENGRAPHIS_API_TOKEN>`. Remote requests without a token are rejected.
 
 Set `ENGRAPHIS_API_TOKEN` to require API authentication and `ENGRAPHIS_DB_KEY` to encrypt
 the local database at rest. Hosted-plan credentials configure customer clients; they do not
@@ -304,8 +332,8 @@ Every public write enters review as `pending`, regardless of a caller-supplied `
 `trusted` label. That includes MCP, dashboard/REST intent writes, imports, sync, and extractor
 output. Detector matches are instead `quarantined` immediately. Pending and quarantined records
 remain inspectable and auditable, but cannot enter model-ready recall/context, resolution,
-links, graph/code backfill, or derived prompt context. Corrections, promotions, and merges fail
-closed unless every input is explicitly approved.
+links, graph/code backfill, derived prompt context, or public `why`/`timeline` history.
+Corrections, promotions, and merges fail closed unless every input is explicitly approved.
 
 Approval creates a fresh `approved` successor and preserves the reviewed source plus an audit
 link; it never relabels the source in place. There is deliberately no MCP tool or general REST

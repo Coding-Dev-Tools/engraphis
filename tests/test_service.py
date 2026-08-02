@@ -544,7 +544,9 @@ def test_timeline_orders_chronologically():
     s.remember("As of 2026-02 the rate limit was raised to 500 requests per minute per API key.",
               workspace="acme", repo="web")
     out = s.timeline("rate limit", workspace="acme", repo="web")
-    assert len(out["history"]) == 4  # pending evidence + reviewed successor per write
+    # Each fixture write retains a pending source and creates a reviewed successor;
+    # public history is prompt-only, so it exposes the two reviewed records only.
+    assert len(out["history"]) == 2
     assert out["history"][0]["valid_from"] <= out["history"][-1]["valid_from"]
 
 

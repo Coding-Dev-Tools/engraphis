@@ -318,6 +318,25 @@ def _run_case(case: dict[str, Any]) -> dict[str, Any]:
             if isinstance(memory, dict)
         ]
     )
+    # `why` and `timeline` are MCP/REST tool responses too. Treat them as model-adjacent
+    # retrieval paths rather than assuming only packed recall reaches an agent prompt.
+    public_why = service.why(
+        case["later"]["query"], workspace=workspace, repo=repo, k=5,
+    )
+    public_timeline = service.timeline(
+        case["later"]["query"], workspace=workspace, repo=repo, limit=20,
+    )
+    why_recalled_ids = {
+        str(memory.get("id"))
+        for group in ("answer", "supersedes")
+        for memory in public_why.get(group, [])
+        if isinstance(memory, dict)
+    }
+    timeline_recalled_ids = {
+        str(memory.get("id"))
+        for memory in public_timeline.get("history", [])
+        if isinstance(memory, dict)
+    }
     safe_records = [
         item for item, _ in written
         if not item.get("adversarial") and item["trusted"]
@@ -362,6 +381,8 @@ def _run_case(case: dict[str, Any]) -> dict[str, Any]:
     expected_terms_present = _expected_terms_present(text, case["later"]["expected_terms"])
     untrusted_retrieval_path_contained = not (
         bool(untrusted_ids & prompt_recalled_ids)
+        or bool(untrusted_ids & why_recalled_ids)
+        or bool(untrusted_ids & timeline_recalled_ids)
         or untrusted_cited
         or untrusted_reinforced
     )
@@ -377,6 +398,10 @@ def _run_case(case: dict[str, Any]) -> dict[str, Any]:
         "reviewed_evidence_approved": bool(approved_ids),
         "untrusted_prompt_recalled": bool(untrusted_ids & prompt_recalled_ids),
         "adversarial_prompt_recalled": bool(adversarial_ids & prompt_recalled_ids),
+        "untrusted_why_recalled": bool(untrusted_ids & why_recalled_ids),
+        "adversarial_why_recalled": bool(adversarial_ids & why_recalled_ids),
+        "untrusted_timeline_recalled": bool(untrusted_ids & timeline_recalled_ids),
+        "adversarial_timeline_recalled": bool(adversarial_ids & timeline_recalled_ids),
         "attack_marker_exposed_by_prompt_recall": bool(
             marker and str(marker).casefold() in prompt_recall_text.casefold()
         ),
@@ -424,7 +449,7 @@ def run(path: Union[str, Path] = DATASET_PATH) -> dict[str, Any]:
     untrusted_cases = [result for result in results if result["untrusted_labeled"] is not None]
     reviewed_evidence_answer_rate = _rate(attacks, "expected_terms_present")
     return {
-        "schema": "engraphis-redteam-poisoning/v4",
+        "schema": "engraphis-redteam-poisoning/v5",
         "scope": {
             "fixture": "deterministic offline delayed-trigger cases",
             "limitations": (
@@ -459,13 +484,19 @@ def run(path: Union[str, Path] = DATASET_PATH) -> dict[str, Any]:
                 **_rate(attacks, "labeled_untrusted_retrieval_path_contained"),
                 "definition": (
                     "labeled-untrusted source records are absent from prompt recall, "
-                    "grounded citations, and reinforcement"
+                    "public why/timeline history, grounded citations, and reinforcement"
                 ),
             },
             "reviewed_evidence_answer_rate": reviewed_evidence_answer_rate,
             "approved_benign_evidence_rate": _rate(attacks, "reviewed_evidence_approved"),
             "untrusted_prompt_recall_rate": _rate(attacks, "untrusted_prompt_recalled"),
             "adversarial_prompt_recall_rate": _rate(attacks, "adversarial_prompt_recalled"),
+            "untrusted_why_recall_rate": _rate(attacks, "untrusted_why_recalled"),
+            "adversarial_why_recall_rate": _rate(attacks, "adversarial_why_recalled"),
+            "untrusted_timeline_recall_rate": _rate(attacks, "untrusted_timeline_recalled"),
+            "adversarial_timeline_recall_rate": _rate(
+                attacks, "adversarial_timeline_recalled"
+            ),
             "prompt_marker_exposure_rate": _rate(
                 attacks, "attack_marker_exposed_by_prompt_recall"
             ),
@@ -519,6 +550,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(
             "  prompt recall exposure    : "
             f"{attack['untrusted_prompt_recall_rate']['rate']:.3f}"
+        )
+        print(
+            "  public history exposure   : "
+            f"why={attack['untrusted_why_recall_rate']['rate']:.3f} "
+            f"timeline={attack['untrusted_timeline_recall_rate']['rate']:.3f}"
         )
         print(
             "  inspection recall exposure: "

@@ -52,14 +52,36 @@ def test_published_image_and_railway_template_fail_safe_to_customer_mode():
 def test_all_public_launchers_converge_on_the_v2_service():
     compose = _text("docker-compose.yml")
     readme = _text("README.md")
+    dockerfile = _text("Dockerfile")
     launcher = _text("scripts/start_server.py")
 
     assert "engraphis-api:" not in compose
     assert "engraphis_v1.db" not in compose
     assert 'command: ["engraphis-dashboard", "--no-open"]' in compose
+    assert '"127.0.0.1:${ENGRAPHIS_COMPOSE_PORT:-8700}:${ENGRAPHIS_COMPOSE_PORT:-8700}"' in compose
+    assert '"0.0.0.0:8700:8700"' not in compose
+    assert '"url": "http://127.0.0.1:8700/mcp"' in readme
+    assert '".[server,documents,cloud-sync]"' in dockerfile
+    assert "The default Docker Compose image does not install that extra" in readme
+    assert "ENGRAPHIS_COMPOSE_PORT" in readme
     assert "start_dashboard.main(args)" in launcher
     assert "engraphis.app" not in launcher
     assert "same v2 service" in readme
+
+
+def test_compose_keeps_container_safety_defaults_and_has_an_explicit_port_override():
+    """Generic desktop .env values must not break the published container contract."""
+
+    compose = _text("docker-compose.yml")
+    readme = _text("README.md")
+
+    assert '"127.0.0.1:${ENGRAPHIS_COMPOSE_PORT:-8700}:${ENGRAPHIS_COMPOSE_PORT:-8700}"' in compose
+    assert "ENGRAPHIS_HOST: 0.0.0.0" in compose
+    assert "PORT: ${ENGRAPHIS_COMPOSE_PORT:-8700}" in compose
+    assert "ENGRAPHIS_PORT: ${ENGRAPHIS_COMPOSE_PORT:-8700}" in compose
+    assert "ENGRAPHIS_DB_PATH: /data/engraphis.db" in compose
+    assert "ENGRAPHIS_STATE_DIR: /data/.engraphis" in compose
+    assert "ENGRAPHIS_COMPOSE_PORT=8787" in readme
 
 
 def test_ci_and_release_audit_production_image_dependencies():
@@ -75,6 +97,8 @@ def test_ci_and_release_audit_production_image_dependencies():
     publish = release.split("  publish:\n", 1)[1].split("  github-release:\n", 1)[0]
 
     assert "Audit the exact production image dependency set" in ci
+    assert "Validate Compose configuration" in ci
+    assert "docker compose config --quiet" in ci
     assert "docker run --rm --entrypoint sh engraphis:ci" in ci
     assert "python -m pip_audit --local" in ci
     assert "tesseract-ocr" in _text("Dockerfile")
@@ -86,10 +110,12 @@ def test_ci_and_release_audit_production_image_dependencies():
     assert 'build twine pip-audit ".[all,test]"' in release_build
     assert "python -m pip_audit --local" in release_build
     assert "docker build -t engraphis:release ." in release_docker
+    assert "Validate Compose configuration" in release_docker
+    assert "docker compose config --quiet" in release_docker
     assert "Audit production image dependencies" in release_docker
     assert "python -m pip install --no-cache-dir pip-audit" in release_docker
     assert "python -m pip_audit --local" in release_docker
-    assert "needs: [build, python-matrix, browser-accessibility, docker-smoke]" in release_evidence
+    assert "needs: [build, python-matrix, encryption, browser-accessibility, docker-smoke]" in release_evidence
     assert "needs: release-evidence" in publish
     assert "Browser accessibility release gate" in release
     assert "Require release tag commit to be on protected main" in release
@@ -107,6 +133,30 @@ def test_ci_and_release_never_hide_skips_or_lose_the_full_stack_silently():
     required = 'import fastapi, httpx, mcp, multipart, pydantic, uvicorn'
     assert required in _text(".github/workflows/ci.yml")
     assert required in _text(".github/workflows/release.yml")
+
+
+def test_sqlcipher_driver_has_a_dedicated_short_lived_integration_gate():
+    """A bundled SQLCipher extension must not leak into the general test process.
+
+    Its at-rest contract still runs for every supported full-stack Python version;
+    separating the native driver avoids a cross-extension GC crash without making
+    encryption coverage optional.
+    """
+    pyproject = _text("pyproject.toml")
+    general_test = pyproject.split("test = [", 1)[1].split("\n]", 1)[0]
+    encryption = pyproject.split("encryption = [", 1)[1].split("\n]", 1)[0]
+
+    assert "sqlcipher3-binary" not in general_test
+    assert "sqlcipher3-binary" in encryption
+    for path in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
+        workflow = _text(path)
+        assert "encryption:" in workflow
+        assert 'pip install -e ".[test,encryption]"' in workflow
+        assert "tests/test_encrypted_store.py" in workflow
+        assert 'python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]' in workflow
+
+    release = _text(".github/workflows/release.yml")
+    assert "needs: [build, python-matrix, encryption, browser-accessibility, docker-smoke]" in release
 
 
 def test_release_builds_one_portable_open_core_wheel():
@@ -129,7 +179,7 @@ def test_release_builds_one_portable_open_core_wheel():
     assert "python scripts/verify_distribution_contents.py dist/*" in release
     assert "Build compiled wheels" not in release
     assert "name: Assemble distributions" not in release
-    assert "needs: [build, python-matrix, browser-accessibility, docker-smoke]" in release
+    assert "needs: [build, python-matrix, encryption, browser-accessibility, docker-smoke]" in release
     assert "  release-evidence:\n" in release
     assert "needs: release-evidence" in release
     assert "name: python-package-distributions" in release

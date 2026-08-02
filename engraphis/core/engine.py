@@ -1472,7 +1472,7 @@ class MemoryEngine:
 
     def why(self, query: str, *, workspace_id: str, repo_id: Optional[str] = None,
             k: int = 5, valid_at: Optional[float] = None,
-            known_at: Optional[float] = None) -> dict:
+            known_at: Optional[float] = None, prompt_only: bool = False) -> dict:
         """Rationale + history for a decision or fact: the live
         answer, plus whatever it superseded, if anything. This is the bi-temporal "why"
         that a flat-namespace store (or a plain vector store) cannot answer — the
@@ -1482,12 +1482,17 @@ class MemoryEngine:
             workspace_id=workspace_id, repo_id=repo_id, include_ancestors=True,
             valid_at=valid_at, known_at=known_at,
         )
-        live = [r for _, r in self._relatedness(query, flt, include_invalid=False)[:k]]
+        live = [
+            r for _, r in self._relatedness(
+                query, flt, include_invalid=False, prompt_only=prompt_only,
+            )[:k]
+        ]
         history: list[MemoryRecord] = []
         if live:
             seen = {r.id for r in live}
             anchor = f"{live[0].title} {live[0].content}"
-            for _, r in self._relatedness(anchor, flt, include_invalid=True):
+            for _, r in self._relatedness(
+                    anchor, flt, include_invalid=True, prompt_only=prompt_only):
                 if r.id in seen or r.valid_to is None:
                     continue
                 history.append(r)
@@ -1498,7 +1503,7 @@ class MemoryEngine:
 
     def timeline(self, query: str, *, workspace_id: str, repo_id: Optional[str] = None,
                 limit: int = 20, valid_at: Optional[float] = None,
-                known_at: Optional[float] = None) -> list[MemoryRecord]:
+                known_at: Optional[float] = None, prompt_only: bool = False) -> list[MemoryRecord]:
         """Chronological, bi-temporal history of a fact: what we believed and when.
         Includes invalidated versions; sorted by ``valid_from``.
         """
@@ -1506,12 +1511,17 @@ class MemoryEngine:
             workspace_id=workspace_id, repo_id=repo_id, include_ancestors=True,
             valid_at=valid_at, known_at=known_at,
         )
-        recs = [r for _, r in self._relatedness(query, flt, include_invalid=True)[:limit]]
+        recs = [
+            r for _, r in self._relatedness(
+                query, flt, include_invalid=True, prompt_only=prompt_only,
+            )[:limit]
+        ]
         recs.sort(key=lambda r: r.valid_from or r.ingested_at or 0.0)
         return recs
 
     def _relatedness(self, query: str, flt: SearchFilter, *,
-                     include_invalid: bool) -> list[tuple[float, MemoryRecord]]:
+                     include_invalid: bool,
+                     prompt_only: bool = False) -> list[tuple[float, MemoryRecord]]:
         """Score every matching memory — optionally including invalidated ones — by the
         max of semantic similarity and lexical token overlap. ``why``/``timeline`` need to
         search *through* bi-temporal history, which the normal vector index ``search()``
@@ -1536,10 +1546,16 @@ class MemoryEngine:
                 and (rec.expired_at is None or flt.known_at < rec.expired_at)
             ]
         for rec in records:
-            # Historical retrieval retains closed facts, not quarantined payloads.
-            # Those remain available only through governed inspection, never a normal
-            # timeline/why query that can return their original content to an agent.
-            if not inspection_eligible(rec.provenance, rec.metadata):
+            # Public history is model-adjacent just like ordinary recall: tool output
+            # can be inserted into an agent transcript. Pending records therefore stay
+            # in explicit inspection workflows only, while direct core callers retain
+            # an opt-in inspection mode for governed local maintenance.
+            eligible = (
+                prompt_eligible(rec.provenance, rec.metadata)
+                if prompt_only
+                else inspection_eligible(rec.provenance, rec.metadata)
+            )
+            if not eligible:
                 continue
             lex = jaccard(q_tokens, tokenize(f"{rec.title} {rec.content}"))
             score = max(sem.get(rec.id, 0.0), lex)
@@ -1663,47 +1679,82 @@ class MemoryEngine:
         The interactive dashboard/TTY owner ceremony is responsible for choosing a
         reviewer identity before it calls this method.
         """
-        old = self.store.get_memory(memory_id)
-        if old is None:
-            raise KeyError(f"no memory with id '{memory_id}'")
         reviewer = str(reviewer or "").strip()
         if not reviewer:
             raise ValueError("reviewer is required for approval")
-        content = str(replacement_content if replacement_content is not None else old.content)
-        metadata = {
-            "approved_from": old.id,
-            "approval": {
-                "reviewer": reviewer[:200],
-                "reason": str(reason or "")[:500],
-            },
-            "provenance": {
-                "source": "human_review",
-                "trusted": True,
-                "review_state": REVIEW_APPROVED,
-                "trust_origin": "human_approval",
+        reason = str(reason or "").strip()
+        if not reason:
+            raise ValueError("approval reason is required")
+        # Keep lookup and insert in the engine's write critical section. Without it two
+        # retries of the same pending source could each observe no successor and create
+        # duplicate prompt-visible records. The normal remember path re-enters this RLock.
+        with self._write_lock:
+            old = self.store.get_memory(memory_id)
+            if old is None:
+                raise KeyError(f"no memory with id '{memory_id}'")
+            # Approval is a one-way ceremony for pending/quarantined evidence. Repeating it
+            # on an approved successor only duplicates prompt-visible content and weakens the
+            # audit story; a human correction must use the governed correction path instead.
+            if provenance_is_approved(old.provenance):
+                raise ValueError("memory is already approved")
+
+            # ``approved_from`` lives in structured provenance and metadata rather than a
+            # mutable text field. Approval is an owner-driven, infrequent ceremony, so a
+            # bounded exact-scope scan is both portable to SQLite builds without JSON1 and
+            # avoids adding a denormalized trust index solely for retry idempotency.
+            source_scope = SearchFilter(
+                workspace_id=old.workspace_id,
+                repo_id=old.repo_id,
+                session_id=old.session_id if old.scope == Scope.SESSION else None,
+            )
+            for candidate in self.store.list_memories(source_scope, include_invalid=False):
+                approved_from = candidate.provenance.get("approved_from")
+                if approved_from is None:
+                    approved_from = candidate.metadata.get("approved_from")
+                if (approved_from == old.id and provenance_is_approved(candidate.provenance)):
+                    return {
+                        "id": candidate.id,
+                        "approved_from": old.id,
+                        "reviewer": str(candidate.metadata.get("approval", {}).get(
+                            "reviewer", reviewer
+                        )),
+                    }
+
+            content = str(replacement_content if replacement_content is not None else old.content)
+            metadata = {
                 "approved_from": old.id,
-            },
-        }
-        result = self.remember_with_resolution(
-            content,
-            workspace_id=old.workspace_id,
-            repo_id=old.repo_id,
-            session_id=old.session_id,
-            mtype=old.mtype,
-            scope=_writable_scope(old.scope, old.repo_id),
-            title=old.title,
-            importance=old.importance,
-            keywords=old.keywords,
-            metadata=metadata,
-            valid_from=old.valid_from,
-            resolve_conflicts=False,
-            _approval_override=True,
-        )
-        self.store.audit(
-            "human_review", "approve", result["id"],
-            f"from={old.id}; reviewer={reviewer[:200]}; reason={str(reason or '')[:500]}",
-        )
-        return {"id": result["id"], "approved_from": old.id, "reviewer": reviewer}
+                "approval": {
+                    "reviewer": reviewer[:200],
+                    "reason": reason[:500],
+                },
+                "provenance": {
+                    "source": "human_review",
+                    "trusted": True,
+                    "review_state": REVIEW_APPROVED,
+                    "trust_origin": "human_approval",
+                    "approved_from": old.id,
+                },
+            }
+            result = self.remember_with_resolution(
+                content,
+                workspace_id=old.workspace_id,
+                repo_id=old.repo_id,
+                session_id=old.session_id,
+                mtype=old.mtype,
+                scope=_writable_scope(old.scope, old.repo_id),
+                title=old.title,
+                importance=old.importance,
+                keywords=old.keywords,
+                metadata=metadata,
+                valid_from=old.valid_from,
+                resolve_conflicts=False,
+                _approval_override=True,
+            )
+            self.store.audit(
+                "human_review", "approve", result["id"],
+                f"from={old.id}; reviewer={reviewer[:200]}; reason={reason[:500]}",
+            )
+            return {"id": result["id"], "approved_from": old.id, "reviewer": reviewer}
 
     def promote(self, memory_id: str, target_scope: Scope, *, reason: str = "",
                 actor: str = "user") -> dict:

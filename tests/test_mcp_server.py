@@ -466,15 +466,25 @@ def test_tool_returns_actionable_error_on_bad_input(monkeypatch):
 
 def test_why_and_timeline_tools_keep_pre_review_claims_non_superseding(monkeypatch):
     srv = _module_with_memory_db(monkeypatch)
-    srv.engraphis_remember(
+    old = srv.engraphis_remember(
         content="Until 2026-01 the rate limit was 100 requests per minute per API key.",
         workspace="acme", repo="web", subject_key="api.rate_limit",
         claim_kind="configured_value")
-    srv.engraphis_remember(
+    new = srv.engraphis_remember(
         content="As of 2026-02 the rate limit was raised to 500 requests per minute per API key.",
         workspace="acme", repo="web", subject_key="api.rate_limit",
         claim_kind="configured_value")
 
+    # MCP tool responses are agent context: pending writes must not leak through
+    # historical views before a human approval ceremony.
+    why = json.loads(srv.engraphis_why(query="what is the rate limit", workspace="acme", repo="web"))
+    assert why["answer"] == []
+    assert why["supersedes"] == []
+    tl = json.loads(srv.engraphis_timeline(query="rate limit", workspace="acme", repo="web"))
+    assert tl["history"] == []
+
+    _approved_successor(srv, old)
+    _approved_successor(srv, new)
     why = json.loads(srv.engraphis_why(query="what is the rate limit", workspace="acme", repo="web"))
     assert any("500" in m["content"] for m in why["answer"])
     assert any("100" in m["content"] for m in why["answer"])
