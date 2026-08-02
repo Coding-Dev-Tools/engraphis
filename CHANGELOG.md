@@ -23,7 +23,12 @@ All notable changes to Engraphis are documented here. Format loosely follows
   quarantined before they can contribute to prompt context or derived state. Human approval creates
   a fresh audited successor only through the CSRF-bound dashboard action or an interactive TTY
   command, never through MCP or a general REST endpoint. Historical rescans demote non-approved
-  records and retire their derived bridges.
+  records and retire their derived bridges. Public history, graph and code retrieval, and graph
+  indexing apply prompt eligibility before ranking or capacity decisions, so pending or quarantined
+  records cannot influence prompt-visible results through derived bridges.
+- The deterministic detector now uses a pinned Unicode TR39 15.1.0 ASCII projection rather than
+  a short hand-picked table, covering additional Latin, Cyrillic, Greek, mathematical, and legacy
+  glyph substitutions without an online lookup or runtime dependency.
 
 ### Fixed
 
@@ -51,6 +56,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
   display text cannot independently make an answer eligible.
 - Keyed-claim deduplication ignores harmless punctuation, and legacy zero, negative, or non-finite
   stability values use the documented one-day default instead of producing invalid decay scores.
+- Approval requires a non-empty audit reason, accepts only a live pending source, and preserves the
+  reviewed claim's pin, sensitivity, and keyed identity on its approved successor.
+- The zero-config Compose quickstart remains loopback-only; a LAN deployment is an explicit,
+  token-protected operator choice and cannot inherit the local Docker bridge trust exception.
 
 ## [1.3.0] - 2026-08-01
 
@@ -64,17 +73,10 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 - Untrusted ingress now fails closed: provenance and extractor metadata are allowlisted, suspicious
   records are quarantined before embedding, linking, graph extraction, resolution, recall, or
-  grounding; public history (`why`/`timeline`) uses the same prompt-eligibility boundary; and
-  `scripts/rescan_poisoning.py` can retroactively label or quarantine old records.
+  grounding, and `scripts/rescan_poisoning.py` can retroactively label or quarantine old records.
 - Trust is preserved across resolution, structured graph writes, consolidation, entity profiles,
   and review paths. Untrusted records cannot mutate or promote trusted memory, and derived outputs
   remain trusted only when every source is explicitly trusted.
-- The deterministic detector now uses a pinned Unicode TR39 15.1.0 ASCII projection rather than
-  a short hand-picked table, covering additional Latin, Cyrillic, Greek, mathematical, and legacy
-  glyph substitutions without an online lookup or runtime dependency.
-- Authoritative hosted managed-compute authorization denials now immediately settle local
-  entitlement presentation state, so a revoked, lapsed, or de-authorized account is not shown
-  stale paid feature access while awaiting a background refresh.
 
 ### Documentation
 
@@ -98,12 +100,6 @@ All notable changes to Engraphis are documented here. Format loosely follows
   failure refuses the request, and timeouts clean up the full worker tree.
 - Poisoning rescans preserve existing temporal validity boundaries and invalidate affected edges
   without overwriting governed history.
-- Keyed-claim deduplication ignores harmless punctuation, and legacy zero, negative, or non-finite
-  stability values use the documented one-day default instead of producing invalid decay scores.
-- Approval now requires a non-empty audit reason and rejects an already-approved target, preventing
-  accidental duplicate prompt-eligible successors.
-- The zero-config Compose quickstart remains loopback-only; a LAN deployment must be an explicit,
-  token-protected operator choice and cannot inherit the local Docker bridge trust exception.
 
 ### Changed
 
