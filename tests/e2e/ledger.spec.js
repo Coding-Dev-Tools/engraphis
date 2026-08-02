@@ -302,7 +302,7 @@ test('memory listings open the editable Library detail from every dashboard view
   await page.locator('#proactive-list [data-memory-id="mem_database"]').click();
   await expect(page.locator('#memory-detail h2')).toHaveText('Database choice');
   await expect(page.locator('#memory-detail').getByRole('button', { name: 'Edit' })).toBeVisible();
-  await expect(page.locator('#memory-detail').getByRole('button', { name: 'Forget' })).toBeVisible();
+  await expect(page.locator('#memory-detail').getByRole('button', { name: 'Retire' })).toBeVisible();
 
   await page.getByRole('button', { name: 'Ask grounded answers' }).click();
   await page.getByRole('textbox', { name: 'Question' }).fill('Which database?');
