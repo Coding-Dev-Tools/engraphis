@@ -737,22 +737,19 @@ def _preflight_session_storage() -> Path:
         ) from exc
 
 
-def connect(token: object, *, control_url: Optional[str] = None,
-            compute_url: Optional[str] = None, workspace_id: Optional[str] = None,
-            installation_label: Optional[str] = None, device_name: Optional[str] = None,
-            timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict:
-    """Exchange a connect token for a saved cloud session.
+def preflight(*, control_url: Optional[str] = None,
+              compute_url: Optional[str] = None) -> dict:
+    """Validate local setup for a future device connection without redeeming a token.
 
-    Returns the redacted summary -- it is safe to print.  Raises
-    :class:`DeviceConnectError` for every failure, with copy the customer can act on and
-    never containing the token.  Nothing is written unless the exchange succeeded.
+    This is deliberately a configuration and storage preflight, not an unauthenticated
+    health check: the private control plane is the authority for membership, seats,
+    entitlement, token validity, and workspace authorization. It validates the same
+    DNS-rebinding-safe endpoint rules and session-file write path that :func:`connect`
+    will use, but does not create an installation identity, read a credential, or make an
+    HTTP request. That lets an operator correct a bad endpoint or state-directory ACL
+    before presenting a short-lived, single-use connect token.
     """
 
-    # Argument checks first: a bad ``--timeout`` must be reported as a bad timeout, not
-    # masked by whatever the identity or storage pre-flight happens to hit on the way to
-    # the same rejection inside ``post_connect``.
-    timeout = _validated_timeout(timeout)
-    normalized = normalize_connect_token(token)
     resolved_control = _validated_control_url(
         control_url if control_url is not None else default_control_url()
     )
@@ -772,12 +769,40 @@ def connect(token: object, *, control_url: Optional[str] = None,
                 "The Engraphis Cloud compute URL is not a valid HTTPS endpoint.",
                 status=400,
             ) from exc
+    session_path = _preflight_session_storage()
+    return {
+        "control_url": resolved_control,
+        "compute_url": resolved_compute,
+        "session_path": str(session_path),
+        "connect_request_sent": False,
+        "ready_to_connect": True,
+    }
 
-    installation_client_id, device_client_id = client_identity()
+
+def connect(token: object, *, control_url: Optional[str] = None,
+            compute_url: Optional[str] = None, workspace_id: Optional[str] = None,
+            installation_label: Optional[str] = None, device_name: Optional[str] = None,
+            timeout: float = DEFAULT_TIMEOUT_SECONDS) -> dict:
+    """Exchange a connect token for a saved cloud session.
+
+    Returns the redacted summary -- it is safe to print.  Raises
+    :class:`DeviceConnectError` for every failure, with copy the customer can act on and
+    never containing the token.  Nothing is written unless the exchange succeeded.
+    """
+
+    # Argument checks first: a bad ``--timeout`` must be reported as a bad timeout, not
+    # masked by whatever the identity or storage pre-flight happens to hit on the way to
+    # the same rejection inside ``post_connect``.
+    timeout = _validated_timeout(timeout)
+    normalized = normalize_connect_token(token)
     # Last check before the point of no return.  ``client_identity`` may have written its
     # file minutes or months ago, so a writable state directory then is no evidence of one
     # now; prove the session can land *before* the POST spends the token, not after.
-    session_path = _preflight_session_storage()
+    setup = preflight(control_url=control_url, compute_url=compute_url)
+    resolved_control = setup["control_url"]
+    resolved_compute = setup["compute_url"]
+    session_path = Path(setup["session_path"])
+    installation_client_id, device_client_id = client_identity()
     response = post_connect(
         resolved_control,
         normalized,

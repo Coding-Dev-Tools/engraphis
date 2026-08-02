@@ -33,6 +33,7 @@ from engraphis.device_connect import (
     DEFAULT_TIMEOUT_SECONDS,
     DeviceConnectError,
     connect,
+    preflight,
 )
 
 
@@ -93,8 +94,11 @@ def main(argv=None) -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("--token", required=True, metavar="TOKEN",
+    action = ap.add_mutually_exclusive_group(required=True)
+    action.add_argument("--token", metavar="TOKEN",
                     help="the connect token from your account portal, or - for stdin")
+    action.add_argument("--preflight", action="store_true",
+                        help="validate endpoints and session storage without a token or HTTP request")
     ap.add_argument("--control-url", default=None, metavar="URL",
                     help="control plane to connect to (default: the shipped endpoint, "
                          "or ENGRAPHIS_CLOUD_CONTROL_URL)")
@@ -112,6 +116,27 @@ def main(argv=None) -> int:
     ap.add_argument("--json", action="store_true",
                     help="print the redacted summary as JSON instead of a report")
     args = ap.parse_args(argv)
+
+    if args.preflight:
+        try:
+            summary = preflight(
+                control_url=args.control_url,
+                compute_url=args.compute_url,
+            )
+        except DeviceConnectError as exc:
+            print("%s: %s" % (ap.prog, exc), file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(summary, sort_keys=True, indent=2))
+        else:
+            print("Engraphis Cloud connection preflight passed.")
+            print("  control url    %s" % summary["control_url"])
+            print("  compute url    %s" % (summary["compute_url"] or "(not configured)"))
+            print("  session file   %s" % summary["session_path"])
+            print()
+            print("No credential was read or sent. This does not verify private-service "
+                  "membership, billing, token validity, or workspace access.")
+        return 0
 
     try:
         summary = connect(
