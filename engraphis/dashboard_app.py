@@ -310,6 +310,21 @@ def create_app() -> FastAPI:
         reason = req.reason.strip()
         if not reason:
             return JSONResponse({"error": "review reason required"}, status_code=422)
+        source = svc.store.get_memory(req.memory_id)
+        if source is None:
+            return JSONResponse({"error": "memory not found"}, status_code=404)
+        workspace = svc.store.conn.execute(
+            "SELECT name FROM workspaces WHERE id=?", (source.workspace_id,),
+        ).fetchone()
+        if workspace is None:
+            return JSONResponse({"error": "memory not found"}, status_code=404)
+        try:
+            # Approval accepts only an opaque memory id, so recover the authoritative
+            # workspace from the source and run the same allow-list guard as every
+            # service-level workspace operation before the engine creates a successor.
+            svc._authorize_workspace(workspace["name"])
+        except ValueError:
+            return JSONResponse({"error": "workspace approval is not permitted"}, status_code=403)
         try:
             result = svc.engine.approve_for_prompt(
                 req.memory_id,

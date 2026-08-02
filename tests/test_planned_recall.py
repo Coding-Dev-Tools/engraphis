@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 
+import numpy as np
 import pytest
 
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
@@ -34,6 +35,17 @@ class _StaticPlanner:
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
+
+
+class _MappedEmbedder:
+    dim = 2
+
+    def __init__(self, vectors):
+        self.vectors = vectors
+
+    def embed(self, texts, *, kind="text"):
+        del kind
+        return np.asarray([self.vectors[text] for text in texts], dtype=np.float32)
 
 
 class _StructuredPlannerLLM:
@@ -629,6 +641,33 @@ def test_grounded_support_remains_anchored_to_original_query():
     assert recalled.count == 1
     assert answer.abstained is True
     assert answer.grounded is False
+
+
+def test_planner_only_vector_candidate_gets_original_query_support():
+    planner = _StaticPlanner(RetrievalPlan((
+        PlannedQuery("target", 2, "lexical"),
+    )))
+    store = Store(":memory:")
+    embedder = _MappedEmbedder({
+        "original": [1.0, 0.0],
+        "target": [0.95, 0.05],
+        "distractor": [1.0, 0.0],
+    })
+    engine = RecallEngine(
+        store, embedder, NumpyVectorIndex(store), IdentityReranker(), query_planner=planner,
+    )
+    workspace = store.get_or_create_workspace("planned")
+    repo = store.get_or_create_repo(workspace, "recall")
+    target_id = _add(store, embedder, workspace, repo, "target")
+    _add(store, embedder, workspace, repo, "distractor")
+
+    result = engine.recall(
+        "original", SearchFilter(workspace_id=workspace, repo_id=repo),
+        planning="auto", candidate_k=1, k=2,
+    )
+
+    target = next(chunk for chunk in result.chunks if chunk["id"] == target_id)
+    assert target["absolute_support"] > 0.9
 
 
 @pytest.mark.parametrize("value", [True, -1, 1.5, "2"])

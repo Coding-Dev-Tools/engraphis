@@ -22,6 +22,8 @@ import threading
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Optional
 
+import numpy as np
+
 from engraphis.core import scoring
 from engraphis.core.context import DeterministicContextPacker
 from engraphis.core.graph_policy import UniformGraphTraversalPolicy
@@ -479,14 +481,30 @@ class RecallEngine:
 
         # ``Candidate.score`` is deliberately query-relative: its retrieval arms are
         # min-max normalised before fusion. Publish a separate absolute signal from the
-        # raw cosine already returned by the vector arm plus lexical Jaccard. Reusing
-        # retrieval evidence avoids a second embedding batch on every ordinary recall.
+        # raw cosine plus lexical Jaccard. A planner-only candidate may have fallen
+        # outside the original vector arm's bounded result set, so recover its cosine
+        # from the persisted vector rather than publishing a false zero support value.
+        support_cosines = dict(primary_vec)
+        original_query_vector = query_vectors[0]
+        missing_support = [
+            candidate.id for candidate in final
+            if candidate.id not in support_cosines
+        ]
+        if original_query_vector is not None and missing_support:
+            query_norm = float(np.linalg.norm(original_query_vector))
+            if query_norm > 0:
+                for memory_id, vector in self.store.get_vectors(missing_support).items():
+                    vector_norm = float(np.linalg.norm(vector))
+                    if vector_norm > 0 and vector.shape == original_query_vector.shape:
+                        support_cosines[memory_id] = float(
+                            np.dot(original_query_vector, vector) / (query_norm * vector_norm)
+                        )
         support = {
             candidate.id: _absolute_retrieval_support(
                 query,
                 candidate.record.content,
                 title=candidate.record.title,
-                semantic_cosine=primary_vec.get(candidate.id, 0.0),
+                semantic_cosine=support_cosines.get(candidate.id, 0.0),
             )
             for candidate in final
         }

@@ -2188,6 +2188,28 @@ class Store:
             (memory_id, int(v.shape[0]), v.tobytes(), model),
         )
 
+    def get_vectors(self, memory_ids: Iterable[str]) -> dict[str, np.ndarray]:
+        """Return stored, normalized vectors for a bounded set of memory ids.
+
+        Recall uses this to calculate an original-query support score for a final
+        candidate introduced by a planner query but absent from the original vector
+        arm's bounded result set.  Reading the persisted vector preserves the exact
+        vector-space result used by every backend without a fresh embedding call.
+        """
+        unique = list(dict.fromkeys(str(memory_id) for memory_id in memory_ids if memory_id))
+        vectors: dict[str, np.ndarray] = {}
+        for start in range(0, len(unique), IN_CLAUSE_CHUNK):
+            chunk = unique[start:start + IN_CLAUSE_CHUNK]
+            marks = ",".join("?" for _ in chunk)
+            rows = self.conn.execute(
+                f"SELECT id, vector FROM mem_vectors WHERE id IN ({marks})", chunk,
+            ).fetchall()
+            vectors.update({
+                row["id"]: np.frombuffer(row["vector"], dtype=np.float32)
+                for row in rows
+            })
+        return vectors
+
     def embedding_version(self, identity: str) -> Optional[str]:
         row = self.conn.execute(
             "SELECT version FROM embedding_state WHERE identity=?", (identity,)
@@ -3980,6 +4002,8 @@ class Store:
     def memories_mentioning(self, repo_id: str, text: str, *,
                             flt: Optional[SearchFilter] = None,
                             limit: int = 10) -> list[dict]:
+        if limit <= 0:
+            return []
         escaped = str(text).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         sql = (
             "SELECT m.id, m.title, m.mtype, m.provenance, m.metadata FROM memories AS m "
@@ -3992,14 +4016,20 @@ class Store:
         if where:
             sql += " AND " + " AND ".join(where)
             params.extend(visibility_params)
-        sql += " ORDER BY m.ingested_at DESC LIMIT ?"
-        params.append(max(0, int(limit)))
-        return [
-            {key: value for key, value in dict(row).items()
-             if key not in {"provenance", "metadata"}}
-            for row in self.conn.execute(sql, params).fetchall()
-            if _row_is_prompt_eligible(row["provenance"], row["metadata"])
-        ]
+        sql += " ORDER BY m.ingested_at DESC"
+        # This derived bridge feeds impact analysis. Filter sources before counting
+        # them, so a newer pending import cannot consume the bounded public window.
+        out = []
+        for row in self.conn.execute(sql, params):
+            if not _row_is_prompt_eligible(row["provenance"], row["metadata"]):
+                continue
+            out.append({
+                key: value for key, value in dict(row).items()
+                if key not in {"provenance", "metadata"}
+            })
+            if len(out) >= limit:
+                break
+        return out
 
     # ── events & audit ──────────────────────────────────────────────────────
     def append_event(self, *, kind: str, content: str, workspace_id: str = "",

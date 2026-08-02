@@ -691,6 +691,26 @@ def test_code_memory_link_limit_excludes_pending_rows_before_capping(store):
     assert [row["memory_id"] for row in rows] == [approved]
 
 
+def test_memories_mentioning_limit_excludes_pending_rows_before_capping(store):
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    approved = store.add_memory(MemoryRecord(
+        id="", content="Approved deployment guidance.", workspace_id=wid, repo_id=rid,
+        scope=Scope.REPO, ingested_at=1.0,
+        provenance={"source": "human_review", "trusted": True, "review_state": "approved"},
+    ))
+    for stamp in range(2, 13):
+        store.add_memory(MemoryRecord(
+            id="", content="Pending deployment guidance.", workspace_id=wid, repo_id=rid,
+            scope=Scope.REPO, ingested_at=float(stamp),
+            provenance={"source": "import", "trusted": False, "review_state": "pending"},
+        ))
+
+    rows = store.memories_mentioning(rid, "deployment", limit=1)
+
+    assert [row["id"] for row in rows] == [approved]
+
+
 def test_memory_entity_incidence_is_scoped_and_temporal(store):
     wid = store.get_or_create_workspace("w")
     rid = store.get_or_create_repo(wid, "r")
