@@ -2021,16 +2021,37 @@ class Store:
         return out
 
     def list_memories(self, flt: Optional[SearchFilter] = None,
-                      *, include_invalid: bool = False, limit: Optional[int] = None) -> list[MemoryRecord]:
+                      *, include_invalid: bool = False, limit: Optional[int] = None,
+                      prompt_only: bool = False) -> list[MemoryRecord]:
+        """List scoped records, optionally capping only prompt-eligible rows.
+
+        Public callers can opt into ``prompt_only`` when this bounded result will enter
+        model-adjacent output.  Eligibility is deliberately checked while streaming SQL
+        rows, before the result cap: a large pending import must not hide an older
+        approved record simply by consuming the raw ``LIMIT`` window.
+        """
+        if prompt_only and limit is not None and int(limit) <= 0:
+            return []
         sql = "SELECT * FROM memories"
         where, params = self._where(flt, include_invalid)
         if where:
             sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY ingested_at DESC"
-        if limit:
+        if limit and not prompt_only:
             sql += f" LIMIT {int(limit)}"
-        rows = self.conn.execute(sql, params).fetchall()
-        return [_row_to_record(r) for r in rows]
+        if not prompt_only:
+            rows = self.conn.execute(sql, params).fetchall()
+            return [_row_to_record(r) for r in rows]
+
+        eligible_limit = None if limit is None else int(limit)
+        out: list[MemoryRecord] = []
+        for row in self.conn.execute(sql, params):
+            if not _row_is_prompt_eligible(row["provenance"], row["metadata"]):
+                continue
+            out.append(_row_to_record(row))
+            if eligible_limit is not None and len(out) >= eligible_limit:
+                break
+        return out
 
     def count_memories(self, flt: Optional[SearchFilter] = None,
                        *, include_invalid: bool = False) -> int:

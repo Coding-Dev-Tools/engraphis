@@ -130,12 +130,11 @@ def consolidate(engine, *, workspace_id: str, repo_id: Optional[str] = None,
     flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id,
                        scopes=MAINTENANCE_SCOPES)
 
-    episodic = [
-        memory for memory in store.list_memories(
-            _replace(flt, mtypes=[MemoryType.EPISODIC]), limit=DISTILL_SCAN_LIMIT
-        )
-        if prompt_eligible(memory.provenance, memory.metadata)
-    ]
+    episodic = store.list_memories(
+        _replace(flt, mtypes=[MemoryType.EPISODIC]),
+        limit=DISTILL_SCAN_LIMIT,
+        prompt_only=True,
+    )
     # A digest inherits its owner from its first source.  Cluster only records that have
     # the exact same owner, otherwise a workspace sweep could write one repo's digest with
     # another repo's content (or mix scope visibility).
@@ -782,13 +781,12 @@ def consolidate_profiles(engine, *, workspace_id: str, repo_id: Optional[str] = 
 
     live = [
         memory for memory in store.list_memories(
-            _replace(flt, mtypes=DURABLE_TYPES), limit=PROFILE_SCAN_LIMIT
+            _replace(flt, mtypes=DURABLE_TYPES),
+            limit=PROFILE_SCAN_LIMIT,
+            prompt_only=True,
         )
-        if (
-            prompt_eligible(memory.provenance, memory.metadata)
-            and memory.metadata.get("provenance", {}).get("source")
-            != "profile_consolidation"
-        )
+        if memory.metadata.get("provenance", {}).get("source")
+        != "profile_consolidation"
     ]
     p_before = p_after = 0
 

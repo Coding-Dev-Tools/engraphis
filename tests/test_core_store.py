@@ -25,6 +25,24 @@ def test_schema_version(store):
     assert store.schema_version == 7
 
 
+def test_prompt_memory_listing_excludes_pending_rows_before_capping(store):
+    wid = store.get_or_create_workspace("w")
+    approved = store.add_memory(MemoryRecord(
+        id="", content="Approved release history.", workspace_id=wid,
+        provenance={"trusted": True, "review_state": "approved"}, ingested_at=1.0,
+    ))
+    store.add_memory(MemoryRecord(
+        id="", content="Pending release history.", workspace_id=wid,
+        provenance={"trusted": False, "review_state": "pending"}, ingested_at=2.0,
+    ))
+
+    rows = store.list_memories(
+        SearchFilter(workspace_id=wid), limit=1, prompt_only=True,
+    )
+
+    assert [row.id for row in rows] == [approved]
+
+
 def test_clean_v7_schema_has_temporal_code_and_memory_link_tables(store):
     tables = {row["name"] for row in store.conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"

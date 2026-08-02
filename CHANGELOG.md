@@ -24,8 +24,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
   a fresh audited successor only through the CSRF-bound dashboard action or an interactive TTY
   command, never through MCP or a general REST endpoint. Historical rescans demote non-approved
   records and retire their derived bridges. Public history, graph and code retrieval, and graph
-  indexing apply prompt eligibility before ranking or capacity decisions, so pending or quarantined
-  records cannot influence prompt-visible results through derived bridges.
+  indexing, and consolidation apply prompt eligibility before ranking or capacity decisions, so
+  pending or quarantined records cannot influence prompt-visible results through derived bridges.
 - The deterministic detector now uses a pinned Unicode TR39 15.1.0 ASCII projection rather than
   a short hand-picked table, covering additional Latin, Cyrillic, Greek, mathematical, and legacy
   glyph substitutions without an online lookup or runtime dependency.
@@ -35,6 +35,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 - Automatic LLM retention supervision now discards proposed retention values when it
   demotes an unapproved `critical` label; legacy poisoning rescans also honor
   `--keep-unlabelled`, and code-memory exports apply eligibility before their result cap.
+- Scope promotion now preserves an owner-approved detector match and its stable claim identity
+  without re-quarantining the approved derived copy.
 - `engraphis connect` now treats its printed summary as a provider trust boundary: only bounded,
   printable registration metadata is rendered, preventing malformed control-plane values from
   being reflected into CLI or JSON output.

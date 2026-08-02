@@ -1,3 +1,4 @@
+import importlib
 import re
 import time
 
@@ -70,6 +71,33 @@ def test_consolidate_distills_recurring_episodes_into_semantic_digest():
     assert digest.metadata["provenance"]["source"] == "consolidation"
     links = eng.store.get_links(digest_id)
     assert sum(1 for link in links if link["relation"] == "consolidates") == 3
+
+
+def test_consolidate_fills_eligible_episode_cap_after_pending_rows(monkeypatch):
+    module = importlib.import_module("engraphis.core.consolidate")
+    monkeypatch.setattr(module, "DISTILL_SCAN_LIMIT", 3)
+    eng = MemoryEngine.create(":memory:")
+    wid = eng.store.get_or_create_workspace("w")
+    rid = eng.store.get_or_create_repo(wid, "r")
+    approved = [
+        eng.remember(
+            f"Approved deployment recurrence run {index}.", workspace_id=wid,
+            repo_id=rid, mtype=MemoryType.EPISODIC, resolve_conflicts=False,
+        )
+        for index in range(3)
+    ]
+    for index in range(3):
+        eng.remember_with_resolution(
+            f"Pending deployment recurrence run {index}.", workspace_id=wid,
+            repo_id=rid, mtype=MemoryType.EPISODIC, resolve_conflicts=False,
+            metadata={"provenance": {"source": "import", "trusted": False,
+                                      "review_state": "pending"}},
+        )
+
+    report = consolidate(eng, workspace_id=wid, repo_id=rid)
+
+    assert len(report["digests_created"]) == 1
+    assert set(report["digests_created"][0]["consolidates"]) == set(approved)
 
 
 def test_consolidate_is_idempotent():

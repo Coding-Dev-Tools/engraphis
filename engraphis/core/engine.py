@@ -1539,7 +1539,9 @@ class MemoryEngine:
             sem[mid] = float(np.dot(qn, vec))
         q_tokens = tokenize(query)
         out: list[tuple[float, MemoryRecord]] = []
-        records = self.store.list_memories(flt, include_invalid=include_invalid, limit=500)
+        records = self.store.list_memories(
+            flt, include_invalid=include_invalid, limit=500, prompt_only=prompt_only,
+        )
         if include_invalid and flt.known_at is not None:
             # History must retain closed valid-time intervals, but cannot expose a
             # record that was not known at the requested system-time snapshot.
@@ -1580,7 +1582,7 @@ class MemoryEngine:
         )
         now = now_ts()
         scored = []
-        for rec in self.store.list_memories(flt, limit=500):
+        for rec in self.store.list_memories(flt, limit=500, prompt_only=prompt_only):
             eligible = (
                 prompt_eligible(rec.provenance, rec.metadata)
                 if prompt_only
@@ -1852,6 +1854,12 @@ class MemoryEngine:
             metadata=metadata,
             valid_from=old.valid_from,
             resolve_conflicts=True,
+            subject_key=old.subject_key,
+            claim_kind=old.claim_kind,
+            # Promotion copies a record already approved by the owner; it is not new
+            # untrusted ingress. Re-running a newer detector against that exact copy
+            # could quarantine the successor after this method retires the source.
+            _approval_override=True,
         )
         promoted_id = result["id"]
         promoted = self.store.get_memory(promoted_id)

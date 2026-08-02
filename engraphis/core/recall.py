@@ -1016,7 +1016,9 @@ class RecallEngine:
             for link in frontier_links
             for endpoint in (link["a"], link["b"])
         } | {
-            memory.id for memory in self.store.list_memories(flt, limit=12_000)
+            memory.id for memory in self.store.list_memories(
+                flt, limit=12_000, prompt_only=prompt_only,
+            )
         }
         if prompt_only:
             memory_ids = self._prompt_eligible_memory_ids(memory_ids)
