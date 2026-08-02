@@ -80,6 +80,21 @@ def _loads(raw: Any, default: Any) -> Any:
         return default
 
 
+def _row_is_prompt_eligible(provenance: Any, metadata: Any) -> bool:
+    """Use the one trust predicate before exposing a derived bridge.
+
+    Store normally stays independent of policy, but code-memory links are a derived
+    index that otherwise outlives a source's review state.  Keep this tiny adapter
+    here so every store-level bridge read and prune operation applies exactly the
+    same predicate as prompt packing and write-time derivation.
+    """
+    from engraphis.core.poisoning import prompt_eligible
+
+    prov = provenance if isinstance(provenance, dict) else _loads(provenance, {})
+    meta = metadata if isinstance(metadata, dict) else _loads(metadata, {})
+    return prompt_eligible(prov, meta)
+
+
 def _provenance_memory_ids(provenance: Any) -> list[str]:
     if not isinstance(provenance, dict):
         return []
@@ -691,10 +706,29 @@ class Store:
 
     def __init__(self, path: str = ":memory:", *,
                  allowed_workspaces: Optional[set] = None,
-                 connect: Optional[Callable[[str], Any]] = None) -> None:
+                 connect: Optional[Callable[[str], Any]] = None,
+                 read_only: bool = False) -> None:
+        """Open a store.
+
+        ``read_only`` is deliberately stronger than merely promising not to call a
+        writer: it opens a checkpointed SQLite file with ``mode=ro&immutable=1`` and
+        skips schema setup, migrations, backups, and the persistent WAL-mode pragma.
+        It is for inspection tools (notably security dry-runs) whose safety contract
+        includes leaving a database and its sidecar files untouched.  A non-empty WAL
+        is rejected rather than silently scanning an incomplete immutable snapshot.
+        """
         self.path = path
         self._connect = connect
-        if path != ":memory:":
+        self.read_only = bool(read_only)
+        if self.read_only and path == ":memory:":
+            raise ValueError("read-only Store requires an existing database file")
+        if self.read_only and self._connect is None:
+            wal_path = Path(f"{path}-wal")
+            if wal_path.is_file() and wal_path.stat().st_size:
+                raise RuntimeError(
+                    "read-only Store requires a checkpointed database; active WAL found"
+                )
+        if path != ":memory:" and not self.read_only:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         raw_conn = self._open_connection(path)
         # Serialize the shared connection so concurrent threadpool handlers can't interleave
@@ -702,17 +736,30 @@ class Store:
         # goes through self.conn, so wrapping here covers every writer.
         self.conn = _SerializedConnection(raw_conn)
         self.conn.execute("PRAGMA foreign_keys=ON")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
         self.has_fts5 = False
         self._receipt_lock = threading.Lock()
         self.allowed_workspaces: Optional[frozenset] = (
             frozenset(allowed_workspaces) if allowed_workspaces else None
         )
         try:
-            self.init_schema()
-            # journal_mode is persistent state, so set it only after a required backup
-            # and the transactional migration have completed successfully.
-            self.conn.execute("PRAGMA journal_mode=WAL")
+            if self.read_only:
+                # ``query_only`` also protects injected connectors whose implementation
+                # cannot express SQLite's URI ``mode=ro`` option.  Do not probe FTS5 by
+                # creating a temporary table here: a dry-run must not write anything.
+                self.conn.execute("PRAGMA query_only=ON")
+                row = self.conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='mem_fts'"
+                ).fetchone()
+                self.has_fts5 = bool(
+                    row and "virtual table" in str(row["sql"] or "").casefold()
+                    and "fts5" in str(row["sql"] or "").casefold()
+                )
+            else:
+                self.conn.execute("PRAGMA synchronous=NORMAL")
+                self.init_schema()
+                # journal_mode is persistent state, so set it only after a required backup
+                # and the transactional migration have completed successfully.
+                self.conn.execute("PRAGMA journal_mode=WAL")
         except BaseException:
             try:
                 if self.conn.in_transaction:
@@ -727,7 +774,11 @@ class Store:
             # Injected factories own opening, keying, row_factory, and exception
             # translation (notably the SQLCipher backend).
             return self._connect(path)
-        conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
+        if self.read_only:
+            uri = Path(path).resolve().as_uri() + "?mode=ro&immutable=1"
+            conn = sqlite3.connect(uri, uri=True, timeout=30, check_same_thread=False)
+        else:
+            conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -3738,7 +3789,7 @@ class Store:
             self.conn.commit()
 
     def prune_code_memory_links(self, repo_id: str, *, commit: bool = True) -> None:
-        """Remove bridges whose repo-associated memory is no longer live."""
+        """Retire bridges whose source is not live and explicitly approved."""
         t = now_ts()
         self.conn.execute(
             "UPDATE code_memory_links SET valid_to=?, valid_to_recorded_at=? "
@@ -3750,6 +3801,23 @@ class Store:
             ")",
             (t, t, repo_id, repo_id, t, t),
         )
+        unapproved = self.conn.execute(
+            "SELECT l.id, m.provenance, m.metadata FROM code_memory_links l "
+            "JOIN memories m ON m.id=l.memory_id WHERE l.repo_id=? "
+            "AND l.valid_to IS NULL AND l.expired_at IS NULL",
+            (repo_id,),
+        ).fetchall()
+        retire_ids = [
+            row["id"] for row in unapproved
+            if not _row_is_prompt_eligible(row["provenance"], row["metadata"])
+        ]
+        if retire_ids:
+            marks = ",".join("?" for _ in retire_ids)
+            self.conn.execute(
+                f"UPDATE code_memory_links SET valid_to=?, valid_to_recorded_at=? "
+                f"WHERE id IN ({marks}) AND valid_to IS NULL AND expired_at IS NULL",
+                (t, t, *retire_ids),
+            )
         if commit:
             self.conn.commit()
 
@@ -3759,7 +3827,7 @@ class Store:
                                limit: Optional[int] = None) -> list[dict]:
         sql = (
             "SELECT l.*, s.name, s.fqname, s.file, s.kind AS symbol_kind, "
-            "m.title, m.mtype, m.valid_to AS memory_valid_to, "
+            "m.title, m.mtype, m.provenance, m.metadata, m.valid_to AS memory_valid_to, "
             "m.expired_at AS memory_expired_at "
             "FROM code_memory_links l "
             "JOIN symbols s ON s.id=l.symbol_id "
@@ -3782,14 +3850,19 @@ class Store:
             sql += " LIMIT ?"
             params.append(max(0, int(limit)))  # never -1 == SQLite "unlimited"
         rows = self.conn.execute(sql, params).fetchall()
-        return [dict(row) for row in rows]
+        return [
+            {key: value for key, value in dict(row).items()
+             if key not in {"metadata", "provenance"}}
+            for row in rows
+            if _row_is_prompt_eligible(row["provenance"], row["metadata"])
+        ]
 
     def memories_for_symbol(self, repo_id: str, symbol_id: str, *,
                             flt: Optional[SearchFilter] = None,
                             limit: int = 20) -> list[dict]:
         sql = (
             "SELECT m.id, m.title, m.content, m.mtype, m.scope, m.importance, "
-            "m.provenance, l.relation, l.confidence "
+            "m.provenance, m.metadata, l.relation, l.confidence "
             "FROM code_memory_links l JOIN memories m ON m.id=l.memory_id "
             "WHERE l.repo_id=? AND l.symbol_id=?"
         )
@@ -3809,7 +3882,10 @@ class Store:
         out = []
         for row in rows:
             item = dict(row)
+            if not _row_is_prompt_eligible(item.get("provenance"), item.get("metadata")):
+                continue
             item["provenance"] = _loads(item.get("provenance"), {})
+            item.pop("metadata", None)
             out.append(item)
         return out
 
@@ -3827,7 +3903,7 @@ class Store:
         sql = (
             "WITH ranked AS ("
             "SELECT l.symbol_id, m.id, m.title, m.content, m.mtype, m.scope, "
-            "m.importance, m.provenance, l.relation, l.confidence, "
+            "m.importance, m.provenance, m.metadata, l.relation, l.confidence, "
             "ROW_NUMBER() OVER (PARTITION BY l.symbol_id "
             "ORDER BY l.confidence DESC, m.importance DESC, "
             "m.ingested_at DESC, l.id, m.id) AS row_rank "
@@ -3844,20 +3920,26 @@ class Store:
             params.extend(visibility_params)
         sql += (
             ") SELECT symbol_id, id, title, content, mtype, scope, importance, "
-            "provenance, relation, confidence FROM ranked WHERE row_rank<=? "
+            "provenance, metadata, relation, confidence FROM ranked WHERE row_rank<=? "
             "ORDER BY symbol_id, row_rank"
         )
         params.append(per_symbol_limit)
         grouped: dict[str, list[dict]] = {}
         for row in self.conn.execute(sql, params).fetchall():
             item = dict(row)
+            if not _row_is_prompt_eligible(item.get("provenance"), item.get("metadata")):
+                continue
             symbol_id = str(item.pop("symbol_id"))
             item["provenance"] = _loads(item.get("provenance"), {})
+            item.pop("metadata", None)
             grouped.setdefault(symbol_id, []).append(item)
         return grouped
 
     def symbols_for_memory(self, repo_id: str, memory_id: str, *,
                            flt: Optional[SearchFilter] = None) -> list[dict]:
+        memory = self.get_memory(memory_id)
+        if memory is None or not _row_is_prompt_eligible(memory.provenance, memory.metadata):
+            return []
         link_visibility, link_params = _temporal_visibility_sql("l", flt)
         symbol_visibility, symbol_params = _temporal_visibility_sql("s", flt)
         rows = self.conn.execute(
@@ -3875,7 +3957,7 @@ class Store:
                             limit: int = 10) -> list[dict]:
         escaped = str(text).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         sql = (
-            "SELECT m.id, m.title, m.mtype FROM memories AS m "
+            "SELECT m.id, m.title, m.mtype, m.provenance, m.metadata FROM memories AS m "
             "WHERE m.repo_id=? AND (m.title LIKE ? ESCAPE '\\' "
             "OR m.content LIKE ? ESCAPE '\\')"
         )
@@ -3887,7 +3969,12 @@ class Store:
             params.extend(visibility_params)
         sql += " ORDER BY m.ingested_at DESC LIMIT ?"
         params.append(max(0, int(limit)))
-        return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
+        return [
+            {key: value for key, value in dict(row).items()
+             if key not in {"provenance", "metadata"}}
+            for row in self.conn.execute(sql, params).fetchall()
+            if _row_is_prompt_eligible(row["provenance"], row["metadata"])
+        ]
 
     # ── events & audit ──────────────────────────────────────────────────────
     def append_event(self, *, kind: str, content: str, workspace_id: str = "",

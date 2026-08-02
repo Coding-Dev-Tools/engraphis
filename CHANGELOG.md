@@ -5,6 +5,49 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in planned recall adds a bounded deterministic planner, an injectable planner protocol and
+  optional LLM backend, priority-weighted multi-query RRF, post-rerank memory-type maxima, stable
+  context revisions, and diagnostics-only planner traces across Python, service, REST, and MCP
+  recall surfaces. The default remains the existing single-query path on schema 7.
+- A 40-task context-routing stress fixture, four-way five-budget ablation harness, pinned
+  LongMemEval-V2 planner configurations, and evaluation-only imported-resource hierarchy prototype
+  encode local regression gates and matrix tooling. Official benchmark, safety, and hosted-cache
+  artifacts remain mandatory before any default or schema change.
+
+### Security
+
+- Public writes now enter an explicit review gate: MCP, REST/dashboard-intent, import, sync, and
+  extractor ingress are pending regardless of a caller-supplied trust label; detector matches are
+  quarantined before they can contribute to prompt context or derived state. Human approval creates
+  a fresh audited successor only through the CSRF-bound dashboard action or an interactive TTY
+  command, never through MCP or a general REST endpoint. Historical rescans demote non-approved
+  records and retire their derived bridges.
+
+### Fixed
+
+- Explicit local `engraphis-cli ingest` commands now record local-owner-approved provenance,
+  allowing their memories to appear in ordinary subsequent CLI recall. HTTP, MCP, import, and
+  file-ingestion boundaries remain pending review.
+- The standalone v1→v2 migrator now refuses in-place and pre-existing output paths before
+  opening either database, preventing accidental mixing of legacy source history into a v2 target.
+- Cloud Sync now closes failed HTTP response streams without reading their untrusted error bodies,
+  preventing descriptor leaks during repeated relay failures.
+- Hosted customer clients now bind provider credential/session state before persistence and
+  preserve sanitized authorization/billing outcomes when an HTTP error body is truncated, so a
+  one-time connection cannot be stranded by an unreadable state file or retain stale paid badges.
+- Authoritative hosted managed-compute authorization denials now immediately settle local
+  entitlement presentation state, so a revoked, lapsed, or de-authorized account is not shown
+  stale paid feature access while awaiting a background refresh.
+- The production image health probe now follows the active IPv4 or IPv6 loopback listener,
+  preventing a Railway IPv6 deployment from being marked unhealthy while its readiness route
+  is serving traffic.
+- Grounded recall's absolute support floor ignores titles and non-finite semantic scores, so
+  display text cannot independently make an answer eligible.
+- Keyed-claim deduplication ignores harmless punctuation, and legacy zero, negative, or non-finite
+  stability values use the documented one-day default instead of producing invalid decay scores.
+
 ## [1.3.0] - 2026-08-01
 
 ### Added

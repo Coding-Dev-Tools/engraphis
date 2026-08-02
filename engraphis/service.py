@@ -42,7 +42,13 @@ from engraphis.core.graph_scene import (
 from engraphis.core.graph_layers import normalize_graph_layer
 from engraphis.core.ids import new_id as make_id
 from engraphis.core.interfaces import Edge, GraphLayer, MemoryType, Node, Scope, SearchFilter
-from engraphis.core.poisoning import provenance_is_trusted, source_is_external
+from engraphis.core.poisoning import (
+    REVIEW_APPROVED,
+    REVIEW_PENDING,
+    prompt_eligible,
+    source_is_external,
+)
+from engraphis.core.query_planner import PLANNING_MODES
 from engraphis.core.retrieval_policy import CANDIDATE_DEPTH_MODES, RETRIEVAL_PROFILES
 from engraphis.core.store import (
     _loads,
@@ -344,11 +350,10 @@ def _strict_bool(value: Any, *, field: str) -> bool:
 def _canonical_write_provenance(source: Any, trusted: Any, *, raw_ingest: bool) -> dict:
     """Create provenance at the service boundary, never from caller metadata.
 
-    Raw blobs and known external transports are untrusted even if a caller asks for
-    ``trusted=True``.  A trusted local service write remains available to embedded
-    applications, but public MCP/HTTP ingress is labelled with an external source by
-    its binding before it arrives here.  This makes the conservative choice without
-    breaking the programmatic local-engine API.
+    The service is a transport boundary: callers may describe an origin but cannot
+    grant model-context authority.  Every service write is held for review, including
+    an asserted local-agent write.  In-process callers that are intentionally trusted
+    use ``MemoryEngine`` directly; that is an explicit local-code capability.
     """
     source_name = _clean_text(
         source, field="source", max_chars=MAX_NAME_CHARS, required=False
@@ -357,15 +362,32 @@ def _canonical_write_provenance(source: Any, trusted: Any, *, raw_ingest: bool) 
     external = raw_ingest or source_is_external(source_name)
     provenance = {
         "source": source_name,
-        "trusted": False if external else requested,
-        "trust_origin": "external_ingress" if external else "local_service",
+        "trusted": False,
+        "review_state": REVIEW_PENDING,
+        "trust_origin": "external_ingress" if external else "service_review_gate",
     }
-    if external and requested:
+    if requested:
         # An auditable code, not a copy of source content or a caller-controlled
         # trust assertion.  Operators can see that a downgrade happened without
         # turning it into prompt-visible metadata.
         provenance["trust_downgraded"] = True
     return provenance
+
+
+def _local_cli_provenance() -> dict:
+    """Return the explicit local-owner provenance reserved for ``engraphis-cli``.
+
+    A terminal command entered on the device that owns the database is an intentional
+    local capability, like a direct ``MemoryEngine`` call. It is not a transport
+    assertion: HTTP, dashboard, import, and MCP entry points continue to use
+    ``_canonical_write_provenance`` and therefore cannot self-approve content.
+    """
+    return {
+        "source": "cli",
+        "trusted": True,
+        "review_state": REVIEW_APPROVED,
+        "trust_origin": "local_cli_operator",
+    }
 
 
 def _clean_name(value: Any, *, field: str) -> str:
@@ -770,13 +792,16 @@ class MemoryService:
                allowed_workspaces: Optional[list] = None,
                extractor: Optional[str] = None,
                graph_extractor: Optional[str] = None,
-               retention_supervisor: Optional[str] = None) -> "MemoryService":
+               retention_supervisor: Optional[str] = None,
+               allow_automatic_critical_retention: Optional[bool] = None,
+               query_planner=None) -> "MemoryService":
         # extractor / graph_extractor default to the configured backends
         # (ENGRAPHIS_EXTRACTOR — "none" | "chunk" | "llm" | "llm_structured";
         # ENGRAPHIS_GRAPH_EXTRACTOR — "regex" by default) so the dashboard,
         # auto-maintenance, MCP server, and CLI all honor the same config knob. An
         # explicit value (e.g. extractor="none") still overrides the environment.
-        if extractor is None or graph_extractor is None or retention_supervisor is None:
+        if (extractor is None or graph_extractor is None or retention_supervisor is None
+                or allow_automatic_critical_retention is None):
             from engraphis.config import settings
             if extractor is None:
                 extractor = settings.extractor
@@ -784,6 +809,8 @@ class MemoryService:
                 graph_extractor = settings.graph_extractor
             if retention_supervisor is None:
                 retention_supervisor = settings.retention_supervisor
+            if allow_automatic_critical_retention is None:
+                allow_automatic_critical_retention = settings.allow_automatic_critical_retention
         # One-time, safe upgrade path for a self-host whose ENGRAPHIS_DB_PATH already
         # holds a v1-shaped database (see docstring) — must run before Store() ever
         # touches the file. No-ops instantly for a fresh install or an already-v2 db.
@@ -799,6 +826,8 @@ class MemoryService:
             vector_backend=vector_backend, rerank_model=rerank_model,
             extractor=extractor, graph_extractor=graph_extractor,
             retention_supervisor=retention_supervisor, connect=connect,
+            allow_automatic_critical_retention=bool(allow_automatic_critical_retention),
+            query_planner=query_planner,
         )
         return cls(engine, allowed_workspaces=allowed_workspaces)
 
@@ -1009,19 +1038,24 @@ class MemoryService:
                  session_id: Optional[str] = None, mtype: str = "semantic",
                  scope: Optional[str] = None, title: str = "", importance: float = 0.0,
                  keywords: Optional[list] = None, metadata: Optional[dict] = None,
-                 source: str = "agent", trusted: bool = True,
+                 source: str = "agent", trusted: bool = False,
                  kind: Optional[str] = None, resolve_conflicts: bool = True,
                  retention_class: Optional[str] = None,
                  retention_reason: str = "",
                  valid_from: Optional[float] = None,
-                 subject_key: str = "", claim_kind: str = "") -> dict:
+                 subject_key: str = "", claim_kind: str = "",
+                 _local_cli_operator: bool = False) -> dict:
         """Store one memory. Returns its id, resolved scope, and the resolution
         outcome (``op``: add/noop/invalidate/relate — see
         ``MemoryEngine.remember_with_resolution``).
         """
         content = _clean_text(content, field="content", max_chars=MAX_CONTENT_CHARS)
         title = _clean_text(title, field="title", max_chars=MAX_TITLE_CHARS, required=False)
-        provenance = _canonical_write_provenance(source, trusted, raw_ingest=False)
+        provenance = (
+            _local_cli_provenance()
+            if _local_cli_operator else
+            _canonical_write_provenance(source, trusted, raw_ingest=False)
+        )
         ws = self._clean_ws(workspace)
         rp = _clean_name(repo, field="repo") if repo else None
         mt = _enum(mtype, MemoryType, "mtype")
@@ -1125,6 +1159,28 @@ class MemoryService:
         )
         return out
 
+    def remember_local_cli(self, content: str, *, workspace: str, title: str = "",
+                           metadata: Optional[dict] = None,
+                           resolve_conflicts: bool = True) -> dict:
+        """Store an explicit local operator command as prompt-eligible memory.
+
+        This is intentionally a narrow in-process capability for ``engraphis-cli``.
+        It reuses the normal service validation, workspace authorization, resolution,
+        receipts, and storage path, but records an approved local-owner provenance.
+        Do not expose it through HTTP, MCP, dashboard, or import routes: those are
+        transport boundaries and must continue through the pending-review write path.
+        """
+        return self.remember(
+            content,
+            workspace=workspace,
+            title=title,
+            metadata=metadata,
+            source="cli",
+            trusted=True,
+            resolve_conflicts=resolve_conflicts,
+            _local_cli_operator=True,
+        )
+
     def ingest(self, content: str, *, workspace: str, repo: Optional[str] = None,
                session_id: Optional[str] = None, mtype: str = "semantic",
                scope: Optional[str] = None, metadata: Optional[dict] = None,
@@ -1208,11 +1264,10 @@ class MemoryService:
             text, workspace=workspace, repo=repo, title=title, mtype=mtype,
             scope=scope, importance=importance, metadata=metadata,
             retention_class=retention_class, retention_reason=retention_reason,
-            # Intent actions originate from the authenticated local dashboard, not
-            # imported resource text. They retain normal local-memory semantics;
-            # import and remote-ingestion paths explicitly pass trusted=False.
+            # Dashboard intent is still a public service ingress.  It can describe
+            # its source but cannot self-approve model-visible memory.
             valid_from=valid_from, subject_key=subject_key, claim_kind=claim_kind,
-            source="intent_api", trusted=True,
+            source="intent_api", trusted=False,
         )
         return {"operation": "remember", **out}
 
@@ -1235,6 +1290,8 @@ class MemoryService:
                       candidate_depth: str = "fixed",
                       response_mode: str = "full",
                       diagnostics: bool = False,
+                      planning: str = "off",
+                      mtype_limits: Optional[dict] = None,
                       reinforce: bool = False,
                       record_receipt: bool = True) -> dict:
         intent_clean = _clean_text(
@@ -1257,6 +1314,7 @@ class MemoryService:
             token_budget=token_budget, retrieval_profile=retrieval_profile,
             candidate_depth=candidate_depth,
             response_mode=response_mode, diagnostics=diagnostics,
+            planning=planning, mtype_limits=mtype_limits,
             intent=intent_clean, graph_layers=layers,
             reinforce=reinforce, record_receipt=record_receipt,
         )
@@ -1743,6 +1801,8 @@ class MemoryService:
                response_mode: str = "full",
                diagnostics: bool = False,
                include_untrusted: bool = False,
+               planning: str = "off",
+               mtype_limits: Optional[dict] = None,
                record_receipt: bool = True) -> dict:
         """Retrieve the most relevant memories for ``query`` within scope."""
         query = _clean_text(query, field="query", max_chars=MAX_CONTENT_CHARS)
@@ -1782,6 +1842,7 @@ class MemoryService:
         if response_mode not in RESPONSE_MODES:
             raise ValidationError("response_mode must be one of: compact, full")
         include_untrusted = _strict_bool(include_untrusted, field="include_untrusted")
+        planning, mtype_limits = _planning_controls(planning, mtype_limits)
 
         # A configured workspace binding or a bound dashboard user must never do a
         # workspace-less (global) recall — either case represents a tenant boundary.
@@ -1798,6 +1859,7 @@ class MemoryService:
                 return _empty_recall(
                     query, token_budget=token_budget, response_mode=response_mode,
                     retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                    planning=planning, mtype_limits=mtype_limits,
                     valid_at=valid_at,
                     known_at=known_at, note=f"no workspace named '{ws}' yet",
                 )
@@ -1808,6 +1870,7 @@ class MemoryService:
                     return _empty_recall(
                     query, token_budget=token_budget, response_mode=response_mode,
                     retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                    planning=planning, mtype_limits=mtype_limits,
                     valid_at=valid_at,
                         known_at=known_at,
                         note=f"no repo named '{rp}' in workspace '{ws}' yet",
@@ -1821,6 +1884,7 @@ class MemoryService:
                     return _empty_recall(
                         query, token_budget=token_budget, response_mode=response_mode,
                         retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                        planning=planning, mtype_limits=mtype_limits,
                         valid_at=valid_at,
                         known_at=known_at, note=f"no session with id '{sid}'",
                     )
@@ -1844,6 +1908,8 @@ class MemoryService:
             candidate_depth=candidate_depth,
             diagnostics=bool(diagnostics),
             include_untrusted=include_untrusted,
+            planning=planning,
+            mtype_limits=mtype_limits,
         )
         memories = []
         for chunk in result.chunks:
@@ -1895,12 +1961,17 @@ class MemoryService:
             "candidate_k_requested": result.candidate_k_requested,
             "candidate_k_used": result.candidate_k_used,
             "candidate_depth_reason": result.candidate_depth_reason,
+            "context_revision": result.context_revision,
+            "planning": result.planning_mode,
+            "mtype_limits": dict(mtype_limits),
             "response_mode": response_mode,
             "include_untrusted": include_untrusted,
             "score_semantics": dict(RECALL_SCORE_SEMANTICS),
         }
         if diagnostics:
             out["retrieval_trace"] = result.retrieval_trace or []
+            out["planning_details"] = result.planning_details or {}
+            out["graph_traversal_details"] = result.graph_traversal_details or []
         if record_receipt:
             out["receipt"] = self.store.record_receipt(
                 "recall", workspace_id=wid or "", repo_id=rid or "", actor="agent",
@@ -1912,6 +1983,9 @@ class MemoryService:
                           "candidate_depth": result.candidate_depth_mode,
                           "candidate_k_requested": result.candidate_k_requested,
                           "candidate_k_used": result.candidate_k_used,
+                          "planning": result.planning_mode,
+                          "context_revision": result.context_revision,
+                          "mtype_limits": mtype_limits,
                           "response_mode": response_mode,
                           "historical": result.historical,
                           "token_usage": usage},
@@ -1937,6 +2011,8 @@ class MemoryService:
         retrieval_profile: str = "balanced",
         candidate_depth: str = "adaptive",
         diagnostics: bool = False,
+        planning: str = "off",
+        mtype_limits: Optional[dict] = None,
     ) -> dict:
         """Return prompt context without retrieving when supplied history fits.
 
@@ -1991,6 +2067,7 @@ class MemoryService:
         if as_of is not None and valid_at is not None and as_of != valid_at:
             raise ValidationError("as_of and valid_at must match when both are supplied")
         valid_at = valid_at if valid_at is not None else as_of
+        planning, mtype_limits = _planning_controls(planning, mtype_limits)
         wid, rid = self._require_scope(workspace, repo)
         sid = None
         if session_id:
@@ -2021,6 +2098,8 @@ class MemoryService:
             retrieval_profile=retrieval_profile,
             candidate_depth=candidate_depth,
             diagnostics=diagnostics,
+            planning=planning,
+            mtype_limits=mtype_limits,
             reinforce=False,
         )
         sources = []
@@ -2059,9 +2138,16 @@ class MemoryService:
         out = {
             "query": clean_query,
             "context": result.context,
+            "context_revision": result.context_revision,
+            "planning": planning,
+            "mtype_limits": dict(mtype_limits),
             "decision": result.to_dict(),
             "sources": sources,
         }
+        if diagnostics and result.recall is not None:
+            out["retrieval_trace"] = result.recall.retrieval_trace or []
+            out["planning_details"] = result.recall.planning_details or {}
+            out["graph_traversal_details"] = result.recall.graph_traversal_details or []
         out["receipt"] = self.store.record_receipt(
             "adaptive_context", workspace_id=wid, repo_id=rid or "", actor="agent",
             target_count=len(sources), status="ok",
@@ -2071,6 +2157,9 @@ class MemoryService:
                 "result_count": len(sources),
                 "retrieval_profile": retrieval_profile,
                 "candidate_depth": candidate_depth,
+                "planning": planning,
+                "context_revision": result.context_revision,
+                "mtype_limits": mtype_limits,
                 "historical": any(
                     anchor is not None for anchor in (as_of, valid_at, known_at)
                 ),
@@ -2091,7 +2180,9 @@ class MemoryService:
                         retrieval_profile: str = "balanced",
                         candidate_depth: str = "fixed",
                         response_mode: str = "full",
-                        diagnostics: bool = False) -> dict:
+                        diagnostics: bool = False,
+                        planning: str = "off",
+                        mtype_limits: Optional[dict] = None) -> dict:
         """Grounded recall: an answer built strictly from retrieved memories, with
         ``[n]`` citations and an explicit abstain when evidence is insufficient
         (``core.grounded``). This path is offline/deterministic (extractive answer) — no
@@ -2135,6 +2226,7 @@ class MemoryService:
         response_mode = str(response_mode or "full").strip().casefold()
         if response_mode not in RESPONSE_MODES:
             raise ValidationError("response_mode must be one of: compact, full")
+        planning, mtype_limits = _planning_controls(planning, mtype_limits)
         if min_support is not None:
             try:
                 min_support = float(min_support)
@@ -2159,6 +2251,7 @@ class MemoryService:
                     query, reason=f"no workspace named '{ws}' yet",
                     token_budget=token_budget, response_mode=response_mode,
                     retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                    planning=planning, mtype_limits=mtype_limits,
                     valid_at=valid_at,
                     known_at=known_at,
                 )
@@ -2171,6 +2264,7 @@ class MemoryService:
                         reason=f"no repo named '{rp}' in workspace '{ws}' yet",
                         token_budget=token_budget, response_mode=response_mode,
                         retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                        planning=planning, mtype_limits=mtype_limits,
                         valid_at=valid_at,
                         known_at=known_at,
                     )
@@ -2184,6 +2278,7 @@ class MemoryService:
                         query, reason=f"no session with id '{sid}'",
                         token_budget=token_budget, response_mode=response_mode,
                         retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
+                        planning=planning, mtype_limits=mtype_limits,
                         valid_at=valid_at,
                         known_at=known_at,
                     )
@@ -2202,9 +2297,12 @@ class MemoryService:
             max_citations=max_citations, token_budget=token_budget,
             retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
             diagnostics=bool(diagnostics),
+            planning=planning,
+            mtype_limits=mtype_limits,
         )
         out = {"query": query, **ans.to_dict()}
         out["response_mode"] = response_mode
+        out["mtype_limits"] = dict(mtype_limits)
         if response_mode == "compact":
             compact_citations = []
             for citation in out.get("citations") or []:
@@ -2223,6 +2321,9 @@ class MemoryService:
                       "candidate_depth": out.get("candidate_depth"),
                       "candidate_k_requested": out.get("candidate_k_requested"),
                       "candidate_k_used": out.get("candidate_k_used"),
+                      "planning": out.get("planning"),
+                      "context_revision": out.get("context_revision"),
+                      "mtype_limits": mtype_limits,
                       "response_mode": response_mode,
                       "historical": bool(out.get("historical")),
                       "token_usage": out.get("usage") or {}},
@@ -2489,7 +2590,7 @@ class MemoryService:
         # reached either raw recall path.
         memories = [
             memory for memory in memories
-            if provenance_is_trusted(memory.get("provenance"))
+            if prompt_eligible(memory.get("provenance"), memory.get("metadata"))
         ]
         llm = None
         if synthesize:
@@ -4809,15 +4910,26 @@ class MemoryService:
                     + (" AND repo_id=?" if rid else "")
                 )
                 params: tuple[Any, ...] = (wid, rid) if rid else (wid,)
-                snapshot = self.store.conn.execute(
-                    f"SELECT COUNT(*) AS n, MAX(id) AS upper_id FROM memories "
-                    f"WHERE {live_where}", params,
-                ).fetchone()
-                total = int(snapshot["n"] or 0)
-                if total > MAX_GRAPH_INDEX_MEMORIES:
+                # This job creates derived graph state.  Fetch only bounded
+                # provenance/metadata first, then apply the one canonical
+                # prompt/derived-state predicate before any record content is read.
+                # JSON predicates alone would miss legacy/mixed metadata forms.
+                candidates = self.store.conn.execute(
+                    f"SELECT id, metadata, provenance FROM memories WHERE {live_where} "
+                    "ORDER BY id LIMIT ?",
+                    (*params, MAX_GRAPH_INDEX_MEMORIES + 1),
+                ).fetchall()
+                if len(candidates) > MAX_GRAPH_INDEX_MEMORIES:
                     raise ValidationError(
                         "graph index job exceeds the memory candidate limit; filter by repository"
                     )
+                approved_candidates = [
+                    row for row in candidates
+                    if prompt_eligible(
+                        _loads(row["provenance"], {}), _loads(row["metadata"], {})
+                    )
+                ]
+                total = len(approved_candidates)
                 entity_before = int(self.store.conn.execute(
                     "SELECT COUNT(*) AS n FROM entities WHERE workspace_id=?", (wid,)
                 ).fetchone()["n"])
@@ -4851,7 +4963,7 @@ class MemoryService:
                     "repo": repo,
                     "extractor": clean_extractor,
                     "dry_run": bool(dry_run),
-                    "upper_memory_id": snapshot["upper_id"] or "",
+                    "upper_memory_id": candidates[-1]["id"] if candidates else "",
                 }
                 self.store.conn.execute(
                     "INSERT INTO jobs(id, workspace_id, repo_id, kind, state, dry_run, "
@@ -4986,7 +5098,7 @@ class MemoryService:
                     final_state = "cancelled"
                     break
                 id_sql = (
-                    "SELECT id FROM memories WHERE workspace_id=? "
+                    "SELECT id, metadata, provenance FROM memories WHERE workspace_id=? "
                     "AND COALESCE(scope, 'workspace')!='session' "
                     "AND expired_at IS NULL AND valid_to IS NULL AND id>?"
                 )
@@ -4999,14 +5111,19 @@ class MemoryService:
                     id_params.append(upper_memory_id)
                 id_sql += " ORDER BY id LIMIT ?"
                 id_params.append(GRAPH_INDEX_BATCH_SIZE)
-                memory_ids = [row["id"] for row in self.store.conn.execute(
+                candidate_rows = self.store.conn.execute(
                     id_sql, id_params
-                ).fetchall()]
-                if not memory_ids:
+                ).fetchall()
+                if not candidate_rows:
                     final_state = "completed"
                     break
-                for memory_id in memory_ids:
+                for candidate in candidate_rows:
+                    memory_id = candidate["id"]
                     last_memory_id = memory_id
+                    if not prompt_eligible(
+                        _loads(candidate["provenance"], {}), _loads(candidate["metadata"], {})
+                    ):
+                        continue
                     cancelled = self.store.conn.execute(
                         "SELECT cancel_requested, state, runner_id FROM jobs WHERE id=?",
                         (job_id,),
@@ -5023,7 +5140,7 @@ class MemoryService:
                             self.store.conn.execute("BEGIN IMMEDIATE")
                             transaction_started = True
                         memory_sql = (
-                            "SELECT id, repo_id, title, content, metadata FROM memories "
+                            "SELECT id, repo_id, title, content, metadata, provenance FROM memories "
                             "WHERE id=? AND workspace_id=? AND expired_at IS NULL "
                             "AND valid_to IS NULL "
                             "AND COALESCE(scope, 'workspace')!='session'"
@@ -5035,7 +5152,9 @@ class MemoryService:
                         memory = self.store.conn.execute(
                             memory_sql, memory_params
                         ).fetchone()
-                        if memory is not None:
+                        if memory is not None and prompt_eligible(
+                            _loads(memory["provenance"], {}), _loads(memory["metadata"], {})
+                        ):
                             try:
                                 metadata = json.loads(memory["metadata"] or "{}")
                             except (TypeError, ValueError, RecursionError):
@@ -7202,7 +7321,7 @@ class MemoryService:
         import time as _time
         now = _time.time()
         rows = self.store.conn.execute(
-            "SELECT metadata FROM memories WHERE workspace_id=? "
+            "SELECT metadata, provenance FROM memories WHERE workspace_id=? "
             "AND COALESCE(scope, 'workspace')!='session' "
             "AND (valid_from IS NULL OR valid_from<=?) "
             "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL "
@@ -7211,6 +7330,12 @@ class MemoryService:
             try:
                 meta = _json.loads(row["metadata"] or "{}")
             except ValueError:
+                continue
+            try:
+                provenance = _json.loads(row["provenance"] or "{}")
+            except ValueError:
+                provenance = meta.get("provenance") if isinstance(meta, dict) else {}
+            if not prompt_eligible(provenance, meta):
                 continue
             if self.engine._has_structured_graph_metadata(meta):
                 return True
@@ -7235,7 +7360,7 @@ class MemoryService:
         import time as _time
         now = _time.time()
         rows = self.store.conn.execute(
-            "SELECT id, repo_id, title, content, metadata FROM memories "
+            "SELECT id, repo_id, title, content, metadata, provenance FROM memories "
             "WHERE workspace_id=? AND COALESCE(scope, 'workspace')!='session' "
             "AND (valid_from IS NULL OR valid_from<=?) "
             "AND (valid_to IS NULL OR ?<valid_to) AND expired_at IS NULL",
@@ -7245,6 +7370,12 @@ class MemoryService:
                 meta = _json.loads(r["metadata"] or "{}")
             except ValueError:
                 meta = {}
+            try:
+                provenance = _json.loads(r["provenance"] or "{}")
+            except ValueError:
+                provenance = meta.get("provenance") if isinstance(meta, dict) else {}
+            if not prompt_eligible(provenance, meta):
+                continue
             if self.engine._has_structured_graph_metadata(meta):
                 try:
                     _graph_feed(self.store, r["content"] or "", workspace_id=wid,
@@ -7344,9 +7475,40 @@ def _compact_provenance(value: Any) -> dict:
     return {key: value[key] for key in keys if key in value}
 
 
+def _planning_controls(planning: str, mtype_limits: Optional[dict]) -> tuple[str, dict]:
+    mode = str(planning or "off").strip().casefold()
+    if mode not in PLANNING_MODES:
+        choices = ", ".join(sorted(PLANNING_MODES))
+        raise ValidationError(f"planning must be one of: {choices}")
+    if mtype_limits is None:
+        return mode, {}
+    if not isinstance(mtype_limits, dict):
+        raise ValidationError(
+            "mtype_limits must be an object of memory type to maximum count"
+        )
+    normalized = {}
+    for raw_type, raw_limit in mtype_limits.items():
+        mtype = _enum(raw_type, MemoryType, "mtype_limits key")
+        if isinstance(raw_limit, bool) or not isinstance(raw_limit, int):
+            raise ValidationError("mtype_limits values must be non-negative integers")
+        if raw_limit < 0:
+            raise ValidationError("mtype_limits values must be non-negative integers")
+        normalized[mtype.value] = raw_limit
+    return mode, normalized
+
+
+def _empty_context_revision() -> str:
+    canonical = json.dumps(
+        {"token_counter": "engraphis.regex.v1", "packed": [], "context": ""},
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _empty_recall(query: str, *, token_budget: int, response_mode: str,
                   retrieval_profile: str, candidate_depth: str, valid_at: Optional[float],
-                  known_at: Optional[float], note: str) -> dict:
+                  known_at: Optional[float], note: str, planning: str = "off",
+                  mtype_limits: Optional[dict] = None) -> dict:
     """Stable empty response for unknown scopes, including additive v2 accounting."""
     return {
         "query": query,
@@ -7372,6 +7534,9 @@ def _empty_recall(query: str, *, token_budget: int, response_mode: str,
         "candidate_k_requested": 50,
         "candidate_k_used": 50,
         "candidate_depth_reason": "no retrieval for unknown scope",
+        "context_revision": _empty_context_revision(),
+        "planning": planning,
+        "mtype_limits": dict(mtype_limits or {}),
         "response_mode": response_mode,
         "score_semantics": dict(RECALL_SCORE_SEMANTICS),
         "note": note,
@@ -7380,7 +7545,8 @@ def _empty_recall(query: str, *, token_budget: int, response_mode: str,
 
 def _empty_grounded(query: str, *, reason: str, token_budget: int,
                     response_mode: str, retrieval_profile: str, candidate_depth: str,
-                    valid_at: Optional[float], known_at: Optional[float]) -> dict:
+                    valid_at: Optional[float], known_at: Optional[float],
+                    planning: str = "off", mtype_limits: Optional[dict] = None) -> dict:
     payload = _empty_recall(
         query,
         token_budget=token_budget,
@@ -7389,6 +7555,8 @@ def _empty_grounded(query: str, *, reason: str, token_budget: int,
         candidate_depth=candidate_depth,
         valid_at=valid_at,
         known_at=known_at,
+        planning=planning,
+        mtype_limits=mtype_limits,
         note=reason,
     )
     payload.pop("count", None)

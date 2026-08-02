@@ -19,7 +19,7 @@ def _app(monkeypatch, tmp_path, *, token=""):
     return create_app()
 
 
-def test_local_agent_write_is_open_core(monkeypatch, tmp_path):
+def test_local_agent_write_is_pending_until_human_review(monkeypatch, tmp_path):
     with TestClient(
         _app(monkeypatch, tmp_path), client=("127.0.0.1", 50000)
     ) as client:
@@ -30,10 +30,13 @@ def test_local_agent_write_is_open_core(monkeypatch, tmp_path):
         assert response.status_code == 200
         recalled = client.get("/api/recall?q=Redis&workspace=demo")
         assert recalled.status_code == 200
-        assert any(
+        assert not any(
             "Redis" in (memory.get("content") or "")
             for memory in recalled.json()["memories"]
         )
+        record = client.app.state.service.store.get_memory(response.json()["id"])
+        assert record.provenance["trusted"] is False
+        assert record.provenance["review_state"] == "pending"
 
 
 def test_configured_local_token_is_constant_time_bearer_gate(monkeypatch, tmp_path):

@@ -4,8 +4,22 @@ import pytest
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
 from engraphis.backends.reranker import IdentityReranker
 from engraphis.core import graphrank
+from engraphis.core.graph_policy import (
+    DeterministicIntentGraphTraversalPolicy,
+    UniformGraphTraversalPolicy,
+)
 from engraphis.core.graphrank import personalized_pagerank
-from engraphis.core.interfaces import Edge, MemoryRecord, MemoryType, Node, Scope, SearchFilter
+from engraphis.core.engine import MemoryEngine
+from engraphis.core.interfaces import (
+    Edge,
+    GraphLayer,
+    GraphTraversalPlan,
+    MemoryRecord,
+    MemoryType,
+    Node,
+    Scope,
+    SearchFilter,
+)
 from engraphis.core.recall import RecallEngine
 from engraphis.core.store import Store
 
@@ -270,7 +284,247 @@ def test_recall_end_to_end_with_ppr_default():
     store, wid, emb, index, ids = _graph_fixture()
     eng = RecallEngine(store, emb, index, IdentityReranker())
     assert eng.graph_mode == "ppr"
-    res = eng.recall("alphasvc login", SearchFilter(workspace_id=wid), k=5)
+    # This fixture writes directly to Store, so it deliberately has no explicit
+    # prompt-approval provenance.  The test exercises PPR rather than the
+    # prompt-safety boundary; opt into inspection recall for that purpose.
+    res = eng.recall(
+        "alphasvc login", SearchFilter(workspace_id=wid), k=5, include_untrusted=True,
+    )
     assert res.count >= 1
     assert any(c["id"] == ids["m1"] for c in res.chunks)
+    store.close()
+
+
+# ── opt-in graph traversal policy ────────────────────────────────────────────
+
+def _layered_graph_fixture():
+    """One causal and one entity path from alpha, with equal base weights."""
+    store = Store(":memory:")
+    wid = store.get_or_create_workspace("w")
+    emb = DeterministicEmbedder(dim=64)
+    index = NumpyVectorIndex(store)
+    entities = {
+        name: store.upsert_entity(Node(
+            id="", name=name, ntype="service", workspace_id=wid,
+        ))
+        for name in ("alphasvc", "causedsvc", "entitysvc")
+    }
+    store.upsert_edge(Edge(
+        id="", src=entities["alphasvc"], dst=entities["causedsvc"],
+        relation="causes", layer=GraphLayer.CAUSAL, workspace_id=wid,
+    ))
+    store.upsert_edge(Edge(
+        id="", src=entities["alphasvc"], dst=entities["entitysvc"],
+        relation="calls", layer=GraphLayer.ENTITY, workspace_id=wid,
+    ))
+    ids = {}
+    for tag, entity, text in (
+        ("causal", "causedsvc", "causedsvc records the causal outcome."),
+        ("entity", "entitysvc", "entitysvc records the organizational relationship."),
+    ):
+        ids[tag] = store.add_memory(MemoryRecord(
+            id="", content=text, mtype=MemoryType.SEMANTIC,
+            scope=Scope.WORKSPACE, workspace_id=wid,
+            embedding=emb.embed([text])[0],
+        ))
+        store.link_memory_entity(
+            memory_id=ids[tag], entity_id=entities[entity], workspace_id=wid, repo_id=None,
+            source_kind="test",
+        )
+    return store, wid, emb, index, ids
+
+
+def test_uniform_graph_policy_preserves_ppr_scores():
+    store, wid, emb, index, _ = _layered_graph_fixture()
+    from engraphis.core.store import now_ts
+    flt = SearchFilter(workspace_id=wid)
+    baseline = RecallEngine(store, emb, index, IdentityReranker())
+    explicit = RecallEngine(
+        store, emb, index, IdentityReranker(),
+        graph_traversal_policy=UniformGraphTraversalPolicy(),
+    )
+    assert explicit._graph_arm("why alphasvc", flt, now_ts()) == baseline._graph_arm(
+        "why alphasvc", flt, now_ts(),
+    )
+    store.close()
+
+
+def test_memory_engine_injects_opt_in_graph_policy():
+    store, _, emb, index, _ = _layered_graph_fixture()
+    policy = DeterministicIntentGraphTraversalPolicy()
+    engine = MemoryEngine(store, emb, index, IdentityReranker(), graph_traversal_policy=policy)
+    assert engine.recall_engine.graph_traversal_policy is policy
+    store.close()
+
+
+def test_graph_traversal_plan_normalizes_safe_policy_data():
+    plan = GraphTraversalPlan(
+        intent="causal",
+        layer_weights=(("causal", "9"),),
+        reason_codes="causal_query_cue",
+    )
+
+    assert plan.layer_weights == ((GraphLayer.CAUSAL, 9.0),)
+    assert plan.multiplier(GraphLayer.CAUSAL) == 4.0
+    assert plan.reason_codes == ("causal_query_cue",)
+    with pytest.raises(ValueError, match="finite"):
+        GraphTraversalPlan(layer_weights=((GraphLayer.CAUSAL, float("nan")),))
+    with pytest.raises(ValueError, match="repeat"):
+        GraphTraversalPlan(
+            layer_weights=((GraphLayer.CAUSAL, 1.0), (GraphLayer.CAUSAL, 2.0)),
+        )
+
+
+def test_intent_graph_policy_gives_clear_question_words_precedence():
+    policy = DeterministicIntentGraphTraversalPolicy()
+
+    # A relation word elsewhere in the question must not turn a temporal or
+    # entity question into a causal one.  This is intentionally a small,
+    # explainable cue rule rather than a claim to do general NLU.
+    assert policy.plan("when did alphasvc cause the outage?").intent == "temporal"
+    assert policy.plan("who caused the outage?").intent == "entity"
+    assert policy.plan("why did the outage happen after the deploy?").intent == "causal"
+    assert policy.plan("alphasvc status").intent == "uniform"
+
+
+def test_intent_graph_policy_prefers_causal_path_but_keeps_entity_reachable():
+    store, wid, emb, index, ids = _layered_graph_fixture()
+    from engraphis.core.store import now_ts
+    engine = RecallEngine(
+        store, emb, index, IdentityReranker(),
+        graph_traversal_policy=DeterministicIntentGraphTraversalPolicy(),
+    )
+    scores = engine._graph_arm("why did alphasvc change?", SearchFilter(workspace_id=wid), now_ts())
+    assert ids["causal"] in scores
+    assert ids["entity"] in scores
+    assert scores[ids["causal"]] > scores[ids["entity"]]
+    store.close()
+
+
+def test_intent_graph_policy_cannot_override_hard_layer_filter():
+    store, wid, emb, index, ids = _layered_graph_fixture()
+    from engraphis.core.store import now_ts
+    engine = RecallEngine(
+        store, emb, index, IdentityReranker(),
+        graph_traversal_policy=DeterministicIntentGraphTraversalPolicy(),
+    )
+    scores = engine._graph_arm(
+        "why did alphasvc change?",
+        SearchFilter(workspace_id=wid, graph_layers=[GraphLayer.ENTITY]),
+        now_ts(),
+    )
+    assert ids["entity"] in scores
+    assert ids["causal"] not in scores
+    store.close()
+
+
+def test_intent_graph_policy_is_reported_only_in_diagnostics():
+    store, wid, emb, index, _ = _layered_graph_fixture()
+    engine = RecallEngine(
+        store, emb, index, IdentityReranker(),
+        graph_traversal_policy=DeterministicIntentGraphTraversalPolicy(),
+    )
+    ordinary = engine.recall("why did alphasvc change?", SearchFilter(workspace_id=wid), k=2)
+    diagnostic = engine.recall(
+        "why did alphasvc change?", SearchFilter(workspace_id=wid), k=2, diagnostics=True,
+    )
+    assert ordinary.graph_traversal_details is None
+    assert diagnostic.graph_traversal_details[0]["policy"] == (
+        "engraphis.graph_traversal.intent_layered.v1"
+    )
+    assert diagnostic.graph_traversal_details[0]["plan"]["intent"] == "causal"
+    assert diagnostic.graph_traversal_details[0]["plan"]["layer_weights"]["causal"] == 4.0
+    assert diagnostic.graph_traversal_details[0]["candidate_scores"]
+    store.close()
+
+
+class _FailingGraphTraversalPolicy:
+    identity = "tests.graph_traversal.failing"
+
+    def plan(self, query, *, filter=None):
+        del query, filter
+        raise RuntimeError("intent policy unavailable")
+
+
+class _InvalidGraphTraversalPolicy:
+    identity = "tests.graph_traversal.invalid"
+
+    def plan(self, query, *, filter=None):
+        del query, filter
+        return object()
+
+
+class _MutatingGraphTraversalPolicy:
+    identity = "tests.graph_traversal.mutating"
+
+    def __init__(self):
+        self.delegate = DeterministicIntentGraphTraversalPolicy()
+
+    def plan(self, query, *, filter=None):
+        # A policy is injected code, but it must not be able to turn its soft
+        # preference into a mutable retrieval boundary.
+        filter.workspace_id = "ws_not_owned"
+        filter.repo_id = "repo_not_owned"
+        filter.valid_at = None
+        filter.known_at = None
+        filter.graph_layers.clear()
+        return self.delegate.plan(query, filter=filter)
+
+
+def test_graph_policy_cannot_mutate_the_live_scope_time_or_layer_filter():
+    store, wid, emb, index, ids = _layered_graph_fixture()
+    from engraphis.core.store import now_ts
+
+    anchor = now_ts() + 1.0
+    flt = SearchFilter(
+        workspace_id=wid,
+        valid_at=anchor,
+        known_at=anchor,
+        graph_layers=[GraphLayer.CAUSAL, GraphLayer.ENTITY],
+    )
+    engine = RecallEngine(
+        store, emb, index, IdentityReranker(),
+        graph_traversal_policy=_MutatingGraphTraversalPolicy(),
+    )
+
+    scores = engine._graph_arm("why did alphasvc change?", flt, anchor)
+
+    assert flt.workspace_id == wid
+    assert flt.repo_id is None
+    assert flt.valid_at == anchor and flt.known_at == anchor
+    assert flt.graph_layers == [GraphLayer.CAUSAL, GraphLayer.ENTITY]
+    assert scores[ids["causal"]] > scores[ids["entity"]]
+    store.close()
+
+
+@pytest.mark.parametrize(
+    ("policy", "fallback_reason"),
+    [
+        (_FailingGraphTraversalPolicy(), "policy_unavailable"),
+        (_InvalidGraphTraversalPolicy(), "invalid_policy_output"),
+    ],
+)
+def test_graph_policy_failure_falls_back_to_uniform_and_is_diagnostic_only(
+    policy,
+    fallback_reason,
+):
+    store, wid, emb, index, _ = _layered_graph_fixture()
+    from engraphis.core.store import now_ts
+
+    flt = SearchFilter(workspace_id=wid)
+    baseline = RecallEngine(store, emb, index, IdentityReranker())
+    fallback = RecallEngine(
+        store, emb, index, IdentityReranker(), graph_traversal_policy=policy,
+    )
+
+    # Direct graph-arm callers are protected too, not just recall().
+    assert fallback._graph_arm("why did alphasvc change?", flt, now_ts()) == (
+        baseline._graph_arm("why did alphasvc change?", flt, now_ts())
+    )
+    diagnostic = fallback.recall(
+        "why did alphasvc change?", flt, k=2, diagnostics=True,
+    )
+    detail = diagnostic.graph_traversal_details[0]
+    assert detail["fallback_reason"] == fallback_reason
+    assert detail["plan"]["intent"] == "uniform"
     store.close()

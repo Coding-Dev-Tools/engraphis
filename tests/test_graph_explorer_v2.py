@@ -780,10 +780,12 @@ def _seed_service() -> tuple[MemoryService, str, str, str]:
     memory_a = service.store.add_memory(MemoryRecord(
         id="", content="Alpha uses Beta.", workspace_id=workspace_id,
         scope=Scope.WORKSPACE,
+        provenance={"trusted": True, "review_state": "approved"},
     ))
     memory_b = service.store.add_memory(MemoryRecord(
         id="", content="Beta causes Gamma.", workspace_id=workspace_id,
         scope=Scope.WORKSPACE,
+        provenance={"trusted": True, "review_state": "approved"},
     ))
     alpha = service.store.upsert_entity(Node(
         id="", name="Alpha", ntype="concept", workspace_id=workspace_id,
@@ -1217,10 +1219,13 @@ def test_explicit_graph_index_dry_run_is_persisted_counted_and_audited():
 
 def test_mutating_graph_index_is_bounded_atomic_and_returns_ready():
     service = MemoryService.create(":memory:", graph_extractor="none")
-    service.remember(
+    pending = service.remember(
         "Alice Johnson works at Acme Corporation.",
         workspace="acme",
         scope="workspace",
+    )
+    service.engine.approve_for_prompt(
+        pending["id"], reviewer="test", reason="approved fixture"
     )
 
     started = service.start_graph_index_job(workspace="acme", dry_run=False)
@@ -1441,6 +1446,7 @@ def test_explicit_graph_index_write_populates_evidence_and_advances_generation()
     memory_id = service.store.add_memory(MemoryRecord(
         id="", content="Alice works at Acme Corp.", workspace_id=workspace_id,
         scope=Scope.WORKSPACE,
+        provenance={"trusted": True, "review_state": "approved"},
     ))
     initial = service.graph_index_status(workspace="acme")["index"]["generation"]
 
@@ -1476,6 +1482,7 @@ def test_graph_index_job_honors_persisted_cancellation(monkeypatch):
     for content in ("Alice knows Bob.", "Carol knows Dana."):
         service.store.add_memory(MemoryRecord(
             id="", content=content, workspace_id=workspace_id, scope=Scope.WORKSPACE,
+            provenance={"trusted": True, "review_state": "approved"},
         ))
     entered = threading.Event()
     release = threading.Event()
@@ -1531,8 +1538,11 @@ def test_graph_reads_return_explicit_rebuilding_conflict():
 def test_cross_service_scene_never_returns_partial_rebuild(tmp_path, monkeypatch):
     database = tmp_path / "scene-race.db"
     writer = MemoryService.create(str(database), graph_extractor="none")
-    writer.remember("Alpha works at Acme.", workspace="acme", scope="workspace")
-    writer.remember("Beta works at Bravo.", workspace="acme", scope="workspace")
+    for content in ("Alpha works at Acme.", "Beta works at Bravo."):
+        pending = writer.remember(content, workspace="acme", scope="workspace")
+        writer.engine.approve_for_prompt(
+            pending["id"], reviewer="test", reason="approved fixture"
+        )
     ordered = writer.store.conn.execute(
         "SELECT content FROM memories ORDER BY id"
     ).fetchall()

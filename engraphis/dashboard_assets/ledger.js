@@ -38,6 +38,7 @@
     graphIncludeCode: false,
     graphSavedView: 'schema',
     consolidationReview: null,
+    reviewCsrf: '',
     hostedLoaded: new Set(),
     license: null,
   };
@@ -192,13 +193,69 @@
     if (!token) token = window.prompt('Enter this deployment’s ENGRAPHIS_API_TOKEN:') || '';
     if (!token) return false;
     try {
-      await api('/auth/session', { method: 'POST', body: { token } });
+      const session = await api('/auth/session', { method: 'POST', body: { token } });
+      state.reviewCsrf = text(session && session.review_csrf_token);
       token = '';
       return true;
     } catch (error) {
       token = '';
       showNotice(`Authentication failed: ${error.message}`);
       return false;
+    }
+  }
+
+  async function reviewCsrfToken() {
+    if (state.reviewCsrf) return state.reviewCsrf;
+    const response = await fetch(`${location.origin}/dashboard/review/csrf`, {
+      headers: { 'X-Engraphis-Browser-Session': '1' },
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !payload || !payload.review_csrf_token) {
+      const error = new Error(errorMessage(payload, response.status));
+      error.status = response.status;
+      throw error;
+    }
+    state.reviewCsrf = text(payload.review_csrf_token);
+    return state.reviewCsrf;
+  }
+
+  async function approveForPrompt(memory) {
+    if (!memory || !memory.id) return;
+    const provenance = memory.provenance || {};
+    const reviewState = provenance.review_state || 'pending';
+    const reason = window.prompt(
+      `Why is this ${reviewState} record safe to include in model context?`,
+    );
+    if (reason === null) return;
+    if (!reason.trim()) {
+      showNotice('A non-empty review reason is required.');
+      return;
+    }
+    if (!window.confirm(
+      'Approve this record for model context? This creates a fresh, audited approved memory; the reviewed source remains preserved.',
+    )) return;
+    try {
+      const csrf = await reviewCsrfToken();
+      const response = await fetch(`${location.origin}/dashboard/review/approve`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Engraphis-Browser-Session': '1',
+          'X-Engraphis-Review-CSRF': csrf,
+        },
+        body: JSON.stringify({ memory_id: memory.id, reason: reason.trim() }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const error = new Error(errorMessage(payload, response.status));
+        error.status = response.status;
+        throw error;
+      }
+      showNotice('Approved successor created. The reviewed source remains in the audit trail.');
+      await selectWorkspace(state.workspace);
+      if (payload.id) await selectMemory(payload.id);
+    } catch (error) {
+      showNotice(`Could not approve this memory: ${error.message}`);
     }
   }
 
@@ -793,9 +850,14 @@
           ['Valid from', relative(memory.valid_from)],
           ['Valid to', memory.valid_to ? relative(memory.valid_to) : 'current'],
           ['Source', memory.provenance && (memory.provenance.source || memory.provenance.kind)],
+          ['Review', memory.provenance && (memory.provenance.review_state || 'pending')],
         ]),
       );
       const actions = node('div', 'detail-actions');
+      const provenance = memory.provenance || {};
+      if (provenance.review_state !== 'approved' || provenance.trusted !== true) {
+        actions.append(button('Approve for prompt…', 'primary-button', () => approveForPrompt(memory)));
+      }
       actions.append(
         button('Edit', 'secondary-button', () => openEditor(memory)),
         button(memory.pinned ? 'Unpin' : 'Pin', 'secondary-button', () => togglePin(memory)),

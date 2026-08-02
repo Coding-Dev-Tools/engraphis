@@ -114,7 +114,7 @@ def test_supervisor_failure_degrades_to_default_retention():
     assert "retention_supervision" not in record.metadata
 
 
-def test_non_finite_supervisor_values_fall_back_to_label_presets():
+def test_automatic_critical_retention_defaults_to_normal_when_supervised_by_llm():
     class NonFiniteSupervisor:
         def decide(self, *args, **kwargs):
             return RetentionDecision(
@@ -123,6 +123,23 @@ def test_non_finite_supervisor_values_fall_back_to_label_presets():
 
     engine = MemoryEngine.create(":memory:", retention_supervisor="none")
     engine.retention_supervisor = NonFiniteSupervisor()
+    wid = engine.store.get_or_create_workspace("acme")
+    mid = engine.remember("Critical policy.", workspace_id=wid)
+    record = engine.store.get_memory(mid)
+    assert record.importance == 0.5
+    assert record.stability == 1.0
+
+
+def test_owner_can_opt_in_to_automatic_critical_retention():
+    class CriticalSupervisor:
+        def decide(self, *args, **kwargs):
+            return RetentionDecision(label="critical")
+
+    engine = MemoryEngine.create(
+        ":memory:", retention_supervisor="none",
+        allow_automatic_critical_retention=True,
+    )
+    engine.retention_supervisor = CriticalSupervisor()
     wid = engine.store.get_or_create_workspace("acme")
     mid = engine.remember("Critical policy.", workspace_id=wid)
     record = engine.store.get_memory(mid)

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import unicodedata
 from typing import Optional
 
 from engraphis.core.interfaces import MemoryRecord
@@ -35,6 +36,16 @@ SUBJECT_TOKEN_JACCARD = 0.40
 # write hides a currently-live fact from ordinary recall.
 STRONG_SUBJECT_TOKEN_JACCARD = 0.55
 STRONG_JOINT_EMBED_SIM = 0.45
+
+
+def _normalise_claim_text(value: str) -> str:
+    """Compare keyed claims independent of harmless spacing and punctuation."""
+    return " ".join(
+        "".join(
+            character for character in str(value or "")
+            if not unicodedata.category(character).startswith("P")
+        ).split()
+    ).casefold()
 
 class ResolutionOp(str, Enum):
     ADD = "add"                # genuinely new -> insert
@@ -103,8 +114,8 @@ def resolve(candidate_text: str, neighbors: list[tuple[float, MemoryRecord]], *,
         # claim equality is about the stored content.  Comparing title+content to
         # content would turn an identical titled write into a false supersession.
         duplicate_text = candidate_content if candidate_content is not None else candidate_text
-        candidate_normalized = " ".join(duplicate_text.split()).casefold()
-        record_normalized = " ".join(rec.content.split()).casefold()
+        candidate_normalized = _normalise_claim_text(duplicate_text)
+        record_normalized = _normalise_claim_text(rec.content)
         if candidate_normalized == record_normalized:
             return Resolution(
                 ResolutionOp.NOOP,

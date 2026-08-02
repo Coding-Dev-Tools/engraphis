@@ -89,6 +89,10 @@ class GroundedAnswer:
     candidate_k_used: int = 50
     candidate_depth_reason: str = "fixed requested depth"
     retrieval_trace: Optional[list[dict]] = None
+    context_revision: str = ""
+    planning_mode: str = "off"
+    planning_details: Optional[dict] = None
+    graph_traversal_details: Optional[list[dict]] = None
 
     def to_dict(self) -> dict:
         payload = {
@@ -109,9 +113,15 @@ class GroundedAnswer:
             "candidate_k_requested": self.candidate_k_requested,
             "candidate_k_used": self.candidate_k_used,
             "candidate_depth_reason": self.candidate_depth_reason,
+            "context_revision": self.context_revision,
+            "planning": self.planning_mode,
         }
         if self.retrieval_trace is not None:
             payload["retrieval_trace"] = self.retrieval_trace
+        if self.planning_details is not None:
+            payload["planning_details"] = self.planning_details
+        if self.graph_traversal_details is not None:
+            payload["graph_traversal_details"] = self.graph_traversal_details
         return payload
 
 
@@ -340,6 +350,10 @@ def build_grounded_answer(query: str, result: RecallResult, embedder, *,
         "candidate_k_used": result.candidate_k_used,
         "candidate_depth_reason": result.candidate_depth_reason,
         "retrieval_trace": result.retrieval_trace,
+        "context_revision": result.context_revision,
+        "planning_mode": result.planning_mode,
+        "planning_details": result.planning_details,
+        "graph_traversal_details": result.graph_traversal_details,
     }
     recall_metadata["usage"]["answer_tokens"] = 0
 

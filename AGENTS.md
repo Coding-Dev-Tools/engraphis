@@ -91,14 +91,17 @@ python -m scripts.migrate_to_v2 --old engraphis_v1.db --new engraphis_v2.db
 ```
 query
   └─ SearchFilter (scope + valid_at/known_at anchors)    core/interfaces.py
+     └─ optional QueryPlanner (off by default; original + at most 2 routes)
+                                                       core/query_planner.py
      └─ 4 retrieval arms (run in parallel, then fused):
         • vector   — VectorIndex.search (cosine)         backends/vector_*.py
         • lexical  — Store.fts_search (FTS5/BM25 + LIKE fallback)   core/store.py
         • graph    — Personalized PageRank over entities+links      core/recall.py + core/graphrank.py
                      (graph_mode="1hop" keeps the old expansion for ablation)
         • code     — symbols/files/calls with memory bridges          core/engine.py
-     └─ RRF fusion + six-term weighted score             core/scoring.py
+     └─ priority-weighted query/arm RRF + six-term score  core/scoring.py
      └─ rerank top-N                                      backends/reranker.py
+     └─ optional post-rerank memory-type maxima
      └─ context packing (token budget) + optional explicit reinforcement
                                                        core/recall.py / core/store.py
 ```

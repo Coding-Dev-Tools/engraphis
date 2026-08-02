@@ -50,10 +50,12 @@ from typing import Any, Optional
 from engraphis.core.graph_layers import merge_graph_layers, normalize_graph_layer
 from engraphis.core.interfaces import MemoryRecord, MemoryType, Scope, SearchFilter
 from engraphis.core.poisoning import (
+    PoisoningDecision,
     apply_quarantine_metadata,
     assess_untrusted_payload,
     metadata_is_quarantined,
-    provenance_is_trusted,
+    prompt_eligible,
+    provenance_is_approved,
 )
 from engraphis.core.store import Store, now_ts
 
@@ -789,7 +791,7 @@ class SyncEngine:
         # into its provenance, graph state, or temporal validity. This runs after
         # all scope checks above so malformed remote rows are still rejected rather
         # than being disguised as harmless trust conflicts.
-        if existing is not None and provenance_is_trusted(existing.provenance):
+        if existing is not None and provenance_is_approved(existing.provenance):
             if not dry_run and rec.content != existing.content:
                 self.store.audit(
                     "sync:%s" % _clamp_str(src_device or "peer", 128),
@@ -820,6 +822,23 @@ class SyncEngine:
             rec.provenance = dict(existing.provenance or {})
         else:
             self._rehome_external_record(rec, src_device=src_device)
+        # Quarantine is sticky across peer last-writer-wins updates. A benign-looking
+        # same-id payload must not erase a local governance decision; only the local
+        # interactive approval path may create a separate approved successor.
+        if existing is not None and (
+                metadata_is_quarantined(existing.metadata)
+                or bool((existing.provenance or {}).get("quarantined"))):
+            rec.metadata = apply_quarantine_metadata(
+                rec.metadata, PoisoningDecision(True, reasons=("inherited_quarantine",))
+            )
+            rec.provenance = dict(rec.metadata["provenance"])
+            at = existing.valid_to if existing.valid_to is not None else now_ts()
+            # Preserve the locally governed interval rather than letting a peer's
+            # LWW timestamps reactivate or future-date a quarantined record.
+            rec.valid_from = existing.valid_from
+            rec.valid_to = at
+            rec.valid_to_recorded_at = now_ts()
+            rec.embedding = None
         if existing is None:
             if not dry_run:
                 self._write(rec, commit=False)
@@ -889,7 +908,8 @@ class SyncEngine:
             # memory, where it could influence graph recall despite the peer payload
             # itself being untrusted. Links wholly inside the untrusted replica stay
             # inspectable, but only a local trusted write may connect trusted nodes.
-            if provenance_is_trusted(ma.provenance) or provenance_is_trusted(mb.provenance):
+            if (prompt_eligible(ma.provenance, ma.metadata)
+                    or prompt_eligible(mb.provenance, mb.metadata)):
                 continue
             pending += 1
             if pending >= APPLY_BATCH:
@@ -1015,6 +1035,7 @@ class SyncEngine:
         provenance = {
             "source": "sync",
             "trusted": False,
+            "review_state": "pending",
             "trust_origin": "sync_untrusted",
         }
         if device:

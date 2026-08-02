@@ -45,12 +45,14 @@ def _service() -> MemoryService:
 
 
 def cmd_ingest(args: argparse.Namespace) -> None:
-    out = _service().remember(
+    # A terminal command is the local database owner's explicit memory action. It is
+    # not a public transport assertion, so use the service's narrow local-owner path;
+    # normal HTTP/MCP/import writes remain pending review by design.
+    out = _service().remember_local_cli(
         args.content,
         workspace=args.namespace,
         title=args.key or "",
         metadata={"source": "cli"} | (args.metadata or {}),
-        source="cli",
     )
     print(f"Stored: {out['id']} (workspace={out['workspace']}, op={out['op']})")
     if out.get("resolution"):

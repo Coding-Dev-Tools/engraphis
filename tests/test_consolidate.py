@@ -332,8 +332,9 @@ def test_structured_consolidation_blocks_graph_writes_for_untrusted_sources():
         llm=_StructuredConsolidationLLM(),
     )
 
-    digest = eng.store.get_memory(report["digests_created"][0]["id"])
-    assert digest.provenance["trusted"] is False
+    # Pending inputs cannot be supplied to an LLM consolidator or create a
+    # derivative graph bridge. Review/approval comes before any derived state.
+    assert report["digests_created"] == []
     assert eng.store.edges_in_scope(SearchFilter(workspace_id=wid, repo_id=rid)) == []
 
 
@@ -610,20 +611,15 @@ def _cluster_with_one_secret_untrusted_source():
     return eng, wid, rid, ids
 
 
-def test_digest_inherits_strictest_sensitivity_and_trust_of_its_sources():
+def test_digest_is_not_created_from_a_cluster_with_pending_sources():
     eng, wid, rid, ids = _cluster_with_one_secret_untrusted_source()
 
     report = consolidate(eng, workspace_id=wid, repo_id=rid)
 
-    digest = eng.store.get_memory(report["digests_created"][0]["id"])
-    # The laundering channel is real: the secret source is quoted verbatim.
-    assert "CI run 101" in digest.content
-    assert digest.sensitivity == "secret", "a digest quoting secret sources must not sync"
-    assert digest.provenance.get("trusted") is False
-    assert digest.metadata["provenance"]["trusted"] is False
-    # Inheritance must not clobber the provenance the digest already carries.
-    assert digest.metadata["provenance"]["source"] == "consolidation"
-    assert set(digest.metadata["provenance"]["consolidates"]) == set(ids)
+    # A source cluster is a derived-state read. One pending source blocks it
+    # rather than letting a digest carry a downgraded copy of source text.
+    assert report["digests_created"] == []
+    assert all(eng.store.get_memory(memory_id).valid_to is None for memory_id in ids)
 
 
 def test_untrusted_consolidation_never_reaches_graph_extraction():
@@ -650,7 +646,7 @@ def test_untrusted_consolidation_never_reaches_graph_extraction():
 
     report = consolidate(eng, workspace_id=wid, repo_id=rid)
 
-    assert report["digests_created"]
+    assert report["digests_created"] == []
     assert extractor.calls == []
     assert evolved == []
 
@@ -664,13 +660,10 @@ def test_unlabelled_legacy_sources_fail_closed_during_consolidation():
     eng.store.conn.commit()
 
     report = consolidate(eng, workspace_id=wid, repo_id=rid)
-    digest = eng.store.get_memory(report["digests_created"][0]["id"])
-
-    assert digest.provenance["trusted"] is False
-    assert digest.metadata["provenance"]["trusted"] is False
+    assert report["digests_created"] == []
 
 
-def test_profile_digest_inherits_strictest_sensitivity_and_trust():
+def test_profile_digest_excludes_pending_sources():
     from engraphis.core.consolidate import consolidate_profiles
 
     eng, wid, rid, name = _engine_with_entity_mentions()
@@ -689,11 +682,11 @@ def test_profile_digest_inherits_strictest_sensitivity_and_trust():
 
     report = consolidate_profiles(eng, workspace_id=wid, repo_id=rid)
 
+    assert len(report["profiles_created"]) == 1
     profile = eng.store.get_memory(report["profiles_created"][0]["id"])
-    assert profile.sensitivity == "sensitive"
-    assert profile.provenance.get("trusted") is False
-    assert profile.metadata["provenance"]["source"] == "profile_consolidation"
-    assert evolved == []
+    assert source.id not in profile.metadata["provenance"]["profiles"]
+    assert profile.provenance["review_state"] == "approved"
+    assert evolved == [profile.id]
 
 
 # ── scan-limit regression: the type filter must run in SQL, not in Python ───────────

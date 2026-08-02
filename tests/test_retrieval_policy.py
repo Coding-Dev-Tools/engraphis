@@ -154,7 +154,9 @@ def test_recall_exposes_the_adaptive_candidate_depth_used():
 
     assert result.candidate_depth_mode == "adaptive"
     assert result.candidate_k_requested == 50
-    assert result.candidate_k_used == 15
+    # The adaptive policy starts at 15, then the prompt-safe retrieval arms
+    # overfetch to a bounded page depth for explicitly approved evidence.
+    assert result.candidate_k_used == 60
     assert result.candidate_depth_reason == "adaptive balanced floor"
 
 

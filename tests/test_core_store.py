@@ -575,6 +575,7 @@ def test_code_history_closes_live_rows_and_supports_time_travel(store):
     mid = store.add_memory(MemoryRecord(
         id="", content="The old implementation called helper.",
         workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+        provenance={"source": "test", "trusted": True, "review_state": "approved"},
     ))
     symbol_id = store.upsert_symbol(
         repo_id=rid, kind="function", name="old", fqname="old",
@@ -626,6 +627,7 @@ def test_code_memory_link_listing_requires_visible_symbol_and_memory(store):
     rid = store.get_or_create_repo(wid, "r")
     mid = store.add_memory(MemoryRecord(
         id="", content="deploy", workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+        provenance={"source": "test", "trusted": True, "review_state": "approved"},
     ))
     symbol_id = store.upsert_symbol(
         repo_id=rid, kind="function", name="deploy", fqname="deploy",

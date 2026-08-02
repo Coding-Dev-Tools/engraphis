@@ -32,6 +32,16 @@ class _LLMResponseClient:
         return httpx.Response(self.status, request=request, text=self.body)
 
 
+class _LLMTimeoutClient:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        request = httpx.Request("POST", url)
+        raise httpx.ReadTimeout("private provider timeout detail", request=request)
+
+
 @pytest.mark.parametrize("value", [
     "provider.example/v1",
     "http://provider.example/v1",
@@ -120,6 +130,23 @@ def test_llm_malformed_response_does_not_reflect_provider_payload():
     assert str(caught.value) == "Unexpected LLM response format"
     assert marker not in repr(caught.value)
     assert caught.value.__suppress_context__ is True
+
+
+def test_llm_deadline_is_forwarded_without_retry_or_provider_detail_leakage():
+    client = LLMClient(
+        provider="openai", model="safe-model", api_key="safe-key",
+        base_url="https://provider.example",
+    )
+    client._http.close()
+    timeout_client = _LLMTimeoutClient()
+    client._http = timeout_client
+
+    with pytest.raises(TimeoutError, match="exceeded its deadline") as caught:
+        client.chat([{"role": "user", "content": "hello"}], timeout=0.25)
+
+    assert len(timeout_client.calls) == 1
+    assert timeout_client.calls[0][1]["timeout"] == 0.25
+    assert "private provider timeout detail" not in repr(caught.value)
 
 
 def test_api_embedder_logs_no_model_endpoint_or_provider_index(monkeypatch, caplog):

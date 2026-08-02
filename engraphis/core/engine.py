@@ -33,18 +33,22 @@ from engraphis.core.adaptive_context import AdaptiveContextResult, fit_recent_hi
 from engraphis.core.interfaces import (
     MemoryRecord,
     MemoryType,
+    GraphTraversalPolicy,
+    QueryPlanner,
     RetentionDecision,
     Scope,
     SearchFilter,
 )
 from engraphis.core.poisoning import (
+    REVIEW_APPROVED,
+    REVIEW_PENDING,
     PoisoningDecision,
     apply_quarantine_metadata,
     assess_untrusted_payload,
     inspection_eligible,
-    metadata_is_trusted,
+    metadata_is_quarantined,
     prompt_eligible,
-    provenance_is_trusted,
+    provenance_is_approved,
 )
 from engraphis.core.recall import RecallEngine, RecallResult
 from engraphis.core.retrieval_policy import (
@@ -302,12 +306,22 @@ class _CodeSymbolMatcher:
 class MemoryEngine:
     def __init__(self, store: Store, embedder, vector_index, reranker=None,
                  *, auto_evolve: bool = True, extractor=None,
-                 graph_extractor=None, retention_supervisor=None) -> None:
+                 graph_extractor=None, retention_supervisor=None,
+                 allow_automatic_critical_retention: bool = False,
+                 graph_traversal_policy: Optional[GraphTraversalPolicy] = None,
+                 query_planner: Optional[QueryPlanner] = None) -> None:
         self.store = store
         self.embedder = embedder
         self.index = vector_index
         self.reranker = reranker or IdentityReranker()
-        self.recall_engine = RecallEngine(store, embedder, vector_index, self.reranker)
+        self.recall_engine = RecallEngine(
+            store,
+            embedder,
+            vector_index,
+            self.reranker,
+            graph_traversal_policy=graph_traversal_policy,
+            query_planner=query_planner,
+        )
         # Memory evolution (A-MEM-style): writing a new note also updates
         # how its neighbors are connected, so the network improves bidirectionally.
         self.auto_evolve = auto_evolve
@@ -316,6 +330,9 @@ class MemoryEngine:
         # Optional graph extractor (backends.graph_extractor). None = no graph population.
         self.graph_extractor = graph_extractor
         self.retention_supervisor = retention_supervisor
+        # A remote classifier is advisory. It cannot silently grant the long-lived
+        # "critical" class unless the host deliberately opts into that policy.
+        self.allow_automatic_critical_retention = bool(allow_automatic_critical_retention)
         # Serializes the resolve→insert critical section of the write path (see
         # remember_with_resolution). RLock: ingest()/import paths may nest writes.
         self._write_lock = threading.RLock()
@@ -334,7 +351,10 @@ class MemoryEngine:
                rerank_model: Optional[str] = None, extractor: str = "none",
                graph_extractor: str = "none",
                retention_supervisor: str = "none",
-               auto_evolve: bool = True, connect=None) -> "MemoryEngine":
+               allow_automatic_critical_retention: bool = False,
+               auto_evolve: bool = True, connect=None,
+               graph_traversal_policy: Optional[GraphTraversalPolicy] = None,
+               query_planner: Optional[QueryPlanner] = None) -> "MemoryEngine":
         from engraphis.backends.extractor import PassthroughExtractor, get_extractor
         from engraphis.backends.graph_extractor import get_graph_extractor as _get_ge
         from engraphis.backends.retention import get_retention_supervisor
@@ -349,7 +369,10 @@ class MemoryEngine:
         supervisor = get_retention_supervisor(retention_supervisor)
         engine = cls(store, embedder, index, reranker, auto_evolve=auto_evolve,
                      extractor=ext, graph_extractor=ge,
-                     retention_supervisor=supervisor)
+                     retention_supervisor=supervisor,
+                     allow_automatic_critical_retention=allow_automatic_critical_retention,
+                     graph_traversal_policy=graph_traversal_policy,
+                     query_planner=query_planner)
         engine._rebuild_versioned_embeddings()
         return engine
 
@@ -429,7 +452,8 @@ class MemoryEngine:
                  metadata: Optional[dict] = None, valid_from: Optional[float] = None,
                  resolve_conflicts: bool = True, candidate_k: int = 5,
                  subject_key: str = "", claim_kind: str = "",
-                 _trusted_graph_keys: Optional[frozenset] = None) -> dict:
+                 _trusted_graph_keys: Optional[frozenset] = None,
+                 _approval_override: bool = False) -> dict:
         """Store one memory with deterministic conflict resolution.
 
         Returns ``{"id", "op", ...}`` where ``op`` is one of:
@@ -490,9 +514,23 @@ class MemoryEngine:
             provenance["trusted"] = True
             provenance.setdefault("trust_origin", "local_engine")
         provenance.setdefault("source", "local_engine")
+        # The direct engine is an in-process capability.  Public transports set an
+        # explicit pending state before reaching it; a direct trusted write remains
+        # compatible and is the only implicit local approval boundary.
+        if provenance.get("trusted") is True:
+            provenance.setdefault("review_state", REVIEW_APPROVED)
+        else:
+            provenance.setdefault("review_state", REVIEW_PENDING)
         write_metadata["provenance"] = provenance
-        poisoning = assess_untrusted_payload(content, title=title, metadata=write_metadata)
-        trusted_write = metadata_is_trusted(write_metadata)
+        poisoning = (
+            PoisoningDecision(False)
+            if _approval_override else
+            assess_untrusted_payload(content, title=title, metadata=write_metadata)
+        )
+        # Resolution changes existing validity and links. It therefore runs only for
+        # content that already satisfies the full prompt/derived-state predicate;
+        # pending evidence is stored passively and cannot reinforce or supersede it.
+        trusted_write = prompt_eligible(provenance, write_metadata)
         text = f"{title}\n{content}" if title else content
         # Embedding is the expensive, thread-safe part — compute it BEFORE taking the
         # write lock so concurrent writers only serialize the fast resolve+insert step.
@@ -549,15 +587,14 @@ class MemoryEngine:
         # Untrusted records are retained as passive inspection evidence.  They may
         # not deduplicate into, invalidate, relate to, reinforce, or otherwise
         # mutate higher-trust memory; that is a trust lattice, not a detector score.
-        if resolve_conflicts and not poisoning.quarantined:
+        if resolve_conflicts and trusted_write and not poisoning.quarantined:
             decision, neighbors = self._resolve_against_neighbors(
                 text, vec, workspace_id=workspace_id, repo_id=repo_id,
                 session_id=session_id, scope=scope, mtype=mtype,
                 candidate_k=candidate_k, subject_key=subject_key,
                 claim_kind=claim_kind, valid_at=valid_from, content=content,
-                trusted_write=trusted_write,
             )
-        if (resolve_conflicts and not poisoning.quarantined
+        if (resolve_conflicts and trusted_write and not poisoning.quarantined
                 and subject_key and valid_from is not None):
             # A durable claim has a temporal identity in addition to its text. A
             # scheduled successor can be a better prose match than the version visible
@@ -574,7 +611,7 @@ class MemoryEngine:
                 record for record in claim_history
                 if record.valid_from is not None and record.valid_from <= valid_from
                 and (record.valid_to is None or valid_from < record.valid_to)
-                and provenance_is_trusted(record.provenance) == trusted_write
+                and prompt_eligible(record.provenance, record.metadata)
             ]
             if predecessors:
                 predecessor = max(
@@ -821,6 +858,11 @@ class MemoryEngine:
         label = str(decision.label or "normal").lower()
         if label not in {"ephemeral", "normal", "critical"}:
             label = "normal"
+        if source == "llm" and label == "critical" and not self.allow_automatic_critical_retention:
+            # The supervisor sees text it does not authoritatively vouch for. Its
+            # "critical" label therefore defaults to normal retention; an explicit
+            # user/host retention_class remains a separate, bounded path.
+            label = "normal"
         if not decision.retain:
             label = "ephemeral"
         preset_stability = {"ephemeral": 0.25, "normal": 1.0, "critical": 8.0}[label]
@@ -932,8 +974,7 @@ class MemoryEngine:
                                    scope: Scope, mtype: MemoryType, candidate_k: int,
                                    subject_key: str = "", claim_kind: str = "",
                                    valid_at: Optional[float] = None,
-                                   content: Optional[str] = None,
-                                   trusted_write: bool = True):
+                                   content: Optional[str] = None):
         """Fetch same-scope neighbors via the vector index and run the deterministic
         resolver (``core.resolve``). Returns ``(decision, neighbors)`` so the caller can
         also evolve the neighborhood. Never raises — a broken/missing index degrades to
@@ -971,7 +1012,7 @@ class MemoryEngine:
             if (nrec and nrec.workspace_id == workspace_id and nrec.repo_id == repo_id
                     and nrec.scope == scope and nrec.mtype == mtype
                     and (scope != Scope.SESSION or nrec.session_id == session_id)
-                    and provenance_is_trusted(nrec.provenance) == trusted_write
+                    and prompt_eligible(nrec.provenance, nrec.metadata)
                     and (memory_matches_filter(nrec, flt)
                          or (current_fallback and nrec.expired_at is None
                              and nrec.valid_to is None))):
@@ -1002,7 +1043,7 @@ class MemoryEngine:
             authoritative = [
                 record for record in claim_history
                 if memory_matches_filter(record, flt, at=valid_at)
-                and provenance_is_trusted(record.provenance) == trusted_write
+                and prompt_eligible(record.provenance, record.metadata)
             ]
             if not authoritative and valid_at is not None:
                 # A backfill before the first recorded version has no visible
@@ -1014,7 +1055,7 @@ class MemoryEngine:
                     if record.expired_at is None
                     and record.valid_from is not None
                     and record.valid_from > valid_at
-                    and provenance_is_trusted(record.provenance) == trusted_write
+                    and prompt_eligible(record.provenance, record.metadata)
                 ]
                 if later:
                     authoritative = [min(
@@ -1150,6 +1191,8 @@ class MemoryEngine:
                diagnostics: bool = False,
                include_untrusted: bool = False,
                prompt_only: bool = False,
+               planning: str = "off",
+               mtype_limits: Optional[dict] = None,
                reinforce: bool = False) -> RecallResult:
         flt = self._recall_filter(
             workspace_id=workspace_id, repo_id=repo_id, session_id=session_id,
@@ -1166,6 +1209,8 @@ class MemoryEngine:
             diagnostics=diagnostics,
             include_untrusted=bool(include_untrusted),
             prompt_only=bool(prompt_only),
+            planning=planning,
+            mtype_limits=mtype_limits,
         )
 
     def adaptive_context(
@@ -1188,6 +1233,8 @@ class MemoryEngine:
         retrieval_profile: str = "balanced",
         candidate_depth: str = "adaptive",
         diagnostics: bool = False,
+        planning: str = "off",
+        mtype_limits: Optional[dict] = None,
         reinforce: bool = False,
     ) -> AdaptiveContextResult:
         """Choose raw history, compact recall, or a wider raw-history fallback.
@@ -1295,6 +1342,8 @@ class MemoryEngine:
             candidate_depth=candidate_depth,
             diagnostics=diagnostics,
             prompt_only=True,
+            planning=planning,
+            mtype_limits=mtype_limits,
             reinforce=False,
         )
         # Confidence must describe evidence the agent will actually see, not a
@@ -1383,6 +1432,8 @@ class MemoryEngine:
                         token_budget: Optional[int] = None,
                         retrieval_profile: str = "balanced", candidate_depth: str = "fixed",
                         diagnostics: bool = False,
+                        planning: str = "off",
+                        mtype_limits: Optional[dict] = None,
                         max_citations: int = 5, reinforce: bool = True):
         """Recall, then answer *strictly from* what was recalled — with citations and an
         explicit abstain when the evidence is too weak (``core.grounded``). Offline and
@@ -1407,6 +1458,8 @@ class MemoryEngine:
             retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
             diagnostics=diagnostics,
             prompt_only=True,
+            planning=planning,
+            mtype_limits=mtype_limits,
         )
         floor = _grounded.GROUNDED_SUPPORT_FLOOR if min_support is None else min_support
         answer = _grounded.build_grounded_answer(query, result, self.embedder, llm=llm,
@@ -1566,8 +1619,20 @@ class MemoryEngine:
             raise KeyError(f"no memory with id '{memory_id}'")
         metadata = dict(old.metadata)
         metadata["corrects"] = memory_id
-        if old.provenance:
-            metadata["provenance"] = dict(old.provenance)
+        # Missing/legacy provenance is deliberately not allowed to fall through to
+        # the direct-engine trusted default.  Corrections preserve an approved source
+        # only when it was explicitly approved; every other record remains reviewable
+        # but prompt-ineligible.
+        metadata["provenance"] = (
+            dict(old.provenance)
+            if provenance_is_approved(old.provenance)
+            else {
+                "source": str((old.provenance or {}).get("source") or "legacy_unverified"),
+                "trusted": False,
+                "review_state": REVIEW_PENDING,
+                "trust_origin": "derived_unapproved",
+            }
+        )
         new_id = self.remember(
             new_content, workspace_id=old.workspace_id, repo_id=old.repo_id,
             session_id=old.session_id, mtype=old.mtype,
@@ -1589,6 +1654,57 @@ class MemoryEngine:
         # current recall while keeping semantic time travel complete.
         return {"id": new_id, "superseded": [memory_id], "reason": reason}
 
+    def approve_for_prompt(self, memory_id: str, *, reviewer: str,
+                           reason: str = "", replacement_content: Optional[str] = None) -> dict:
+        """Create an explicitly approved successor for governed human review.
+
+        This is intentionally an engine-only primitive.  MCP and ordinary REST ingress
+        never expose it: their caller can be prompted by the very content under review.
+        The interactive dashboard/TTY owner ceremony is responsible for choosing a
+        reviewer identity before it calls this method.
+        """
+        old = self.store.get_memory(memory_id)
+        if old is None:
+            raise KeyError(f"no memory with id '{memory_id}'")
+        reviewer = str(reviewer or "").strip()
+        if not reviewer:
+            raise ValueError("reviewer is required for approval")
+        content = str(replacement_content if replacement_content is not None else old.content)
+        metadata = {
+            "approved_from": old.id,
+            "approval": {
+                "reviewer": reviewer[:200],
+                "reason": str(reason or "")[:500],
+            },
+            "provenance": {
+                "source": "human_review",
+                "trusted": True,
+                "review_state": REVIEW_APPROVED,
+                "trust_origin": "human_approval",
+                "approved_from": old.id,
+            },
+        }
+        result = self.remember_with_resolution(
+            content,
+            workspace_id=old.workspace_id,
+            repo_id=old.repo_id,
+            session_id=old.session_id,
+            mtype=old.mtype,
+            scope=_writable_scope(old.scope, old.repo_id),
+            title=old.title,
+            importance=old.importance,
+            keywords=old.keywords,
+            metadata=metadata,
+            valid_from=old.valid_from,
+            resolve_conflicts=False,
+            _approval_override=True,
+        )
+        self.store.audit(
+            "human_review", "approve", result["id"],
+            f"from={old.id}; reviewer={reviewer[:200]}; reason={str(reason or '')[:500]}",
+        )
+        return {"id": result["id"], "approved_from": old.id, "reviewer": reviewer}
+
     def promote(self, memory_id: str, target_scope: Scope, *, reason: str = "",
                 actor: str = "user") -> dict:
         """Widen one live memory's scope without rewriting it in place.
@@ -1603,7 +1719,7 @@ class MemoryEngine:
             raise KeyError(f"no memory with id '{memory_id}'")
         if not inspection_eligible(old.provenance, old.metadata):
             raise ValueError("untrusted memory cannot be promoted: record is quarantined")
-        if not provenance_is_trusted(old.provenance):
+        if not provenance_is_approved(old.provenance):
             raise ValueError("untrusted memory cannot be promoted; create a fresh approved local memory")
         now = now_ts()
         if (old.expired_at is not None
@@ -1635,8 +1751,16 @@ class MemoryEngine:
             "to_scope": target_scope.value,
             "reason": reason[:500],
         }
-        if old.provenance:
-            metadata["provenance"] = dict(old.provenance)
+        metadata["provenance"] = (
+            dict(old.provenance)
+            if provenance_is_approved(old.provenance)
+            else {
+                "source": str((old.provenance or {}).get("source") or "legacy_unverified"),
+                "trusted": False,
+                "review_state": REVIEW_PENDING,
+                "trust_origin": "derived_unapproved",
+            }
+        )
 
         result = self.remember_with_resolution(
             old.content,
@@ -1678,10 +1802,11 @@ class MemoryEngine:
             "reason": reason[:500],
         }
         promoted_provenance = dict(promoted.provenance)
-        trusted = all(bool((record.provenance or {}).get("trusted", True))
+        trusted = all(provenance_is_approved(record.provenance)
                       for record in (old, promoted))
         if not trusted:
             promoted_provenance["trusted"] = False
+            promoted_provenance["review_state"] = REVIEW_PENDING
         promoted_metadata["provenance"] = promoted_provenance
         self.store.conn.execute(
             "UPDATE memories SET pinned=?, sensitivity=?, stability=?, access_count=?, "
@@ -1771,7 +1896,7 @@ class MemoryEngine:
         pinned_any = any(r.pinned for r in sources)
         sensitivity = max((r.sensitivity or "normal" for r in sources),
                           key=lambda s: _SENSITIVITY_RANK.get(s, len(_SENSITIVITY_RANK)))
-        trusted = all(bool((r.provenance or {}).get("trusted", True)) for r in sources)
+        trusted = all(provenance_is_approved(r.provenance) for r in sources)
         if keywords is None:
             keywords, kseen = [], set()
             for r in sources:
@@ -1791,13 +1916,32 @@ class MemoryEngine:
         # loss from a governance operation that is supposed to preserve history. The
         # resolver is skipped here (the supersede decision is explicit), so the
         # still-live sources can't be deduplicated into, and evolution stays a no-op.
+        merge_metadata = {
+            "supersedes": list(ids),
+            "provenance": {
+                "source": "merge",
+                "trusted": trusted,
+                "review_state": REVIEW_APPROVED if trusted else REVIEW_PENDING,
+                "merges": list(ids),
+            },
+        }
+        # A merge is not an approval ceremony.  If any source was quarantined,
+        # preserve that containment even when the user supplies paraphrased merged
+        # content that no longer matches a detector rule.
+        if any(
+            metadata_is_quarantined(record.metadata)
+            or bool((record.provenance or {}).get("quarantined"))
+            for record in sources
+        ):
+            merge_metadata = apply_quarantine_metadata(
+                merge_metadata,
+                PoisoningDecision(True, reasons=("inherited_quarantine",)),
+            )
         merged_id = self.remember(
             merged_content, workspace_id=primary.workspace_id, repo_id=repo_id,
             session_id=primary.session_id, mtype=mt, scope=sc, title=title_final,
             importance=importance, keywords=keywords,
-            metadata={"supersedes": list(ids),
-                      "provenance": {"source": "merge", "trusted": trusted,
-                                     "merges": list(ids)}},
+            metadata=merge_metadata,
             resolve_conflicts=False,   # the supersede decision was just made explicitly
         )
         # Persist inherited confidentiality + protection (the write path defaults
@@ -1842,8 +1986,8 @@ class MemoryEngine:
         if not all(inspection_eligible(record.provenance, record.metadata)
                    for record in records):
             raise ValueError("quarantined memories cannot be linked")
-        if not all(provenance_is_trusted(record.provenance) for record in records):
-            raise ValueError("links require explicitly trusted memories")
+        if not all(provenance_is_approved(record.provenance) for record in records):
+            raise ValueError("links require explicitly approved memories")
         self.store.add_link(a, b, relation, layer=layer, reason=reason)
 
     def record_event(self, kind: str, content: str, *, workspace_id: str = "",
@@ -2130,11 +2274,18 @@ class MemoryEngine:
         linked = 0
         after_memory_id = ""
         while True:
-            records = self.store.list_memories_page(
+            page = self.store.list_memories_page(
                 memory_filter, after_id=after_memory_id, limit=250,
             )
-            if not records:
+            if not page:
                 break
+            records = [
+                record for record in page
+                if prompt_eligible(record.provenance, record.metadata)
+            ]
+            if not records:
+                after_memory_id = page[-1].id
+                continue
             linked_per_memory = {record.id: 0 for record in records}
             symbol_cursor: Optional[tuple[str, str, str]] = None
             while True:
@@ -2163,7 +2314,7 @@ class MemoryEngine:
                     last_symbol["file"], last_symbol["fqname"], last_symbol["id"],
                 )
             self.store.conn.commit()
-            after_memory_id = records[-1].id
+            after_memory_id = page[-1].id
         self.store.prune_code_memory_links(repo_id)
         return linked
 

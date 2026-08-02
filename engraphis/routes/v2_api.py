@@ -8,6 +8,8 @@ Engraphis Cloud.
 from __future__ import annotations
 
 import datetime as _datetime
+import http.client
+import hashlib
 import json
 import hmac
 import logging
@@ -23,7 +25,7 @@ from typing import Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictInt
 
 from engraphis import licensing
 from engraphis.config import DEFAULT_RELAY_URL, canonicalize_relay_url, settings
@@ -216,6 +218,13 @@ def _managed_call(fn, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
     except CloudFeatureError as exc:
+        # A managed-compute 401/402/403 is an authoritative hosted-service decision,
+        # not a local presentation failure.  Keep the persisted session and compatibility
+        # cache in step with it before returning the redacted dashboard error; otherwise a
+        # lapsed, revoked, or de-authorized account can keep seeing paid features enabled
+        # until a later background entitlement poll happens to run.
+        if exc.status in {401, 402, 403}:
+            _record_authoritative_denial()
         logger.warning("managed cloud operation failed (%s, status=%s, transient=%s)",
                        type(exc).__name__, exc.status, exc.transient)
         detail = {"error": _managed_error_message(exc), "managed_cloud": True,
@@ -386,6 +395,28 @@ def _score_keyword_recall(query: str, memories: list[dict]) -> list[dict]:
         scored.append((index, item))
     scored.sort(key=lambda pair: (-pair[1]["relative_score"], pair[0]))
     return [item for _index, item in scored]
+
+
+def _apply_keyword_mtype_limits(
+    memories: list[dict],
+    limits: Optional[dict],
+    *,
+    k: int,
+) -> list[dict]:
+    """Apply the semantic recall type-cap contract to degraded lexical results."""
+    selected = []
+    counts: dict[str, int] = {}
+    normalized = {str(key): int(value) for key, value in (limits or {}).items()}
+    for memory in memories:
+        if len(selected) >= max(0, int(k)):
+            break
+        mtype = str(memory.get("memory_type") or memory.get("mtype") or "semantic")
+        limit = normalized.get(mtype)
+        if limit is not None and counts.get(mtype, 0) >= limit:
+            continue
+        selected.append(memory)
+        counts[mtype] = counts.get(mtype, 0) + 1
+    return selected
 
 
 # ── health / bootstrap ────────────────────────────────────────────────────────
@@ -1016,9 +1047,16 @@ def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
            token_budget: Optional[int] = Query(default=None, ge=0, le=32_768),
            retrieval_profile: str = "balanced", candidate_depth: str = "fixed",
            response_mode: str = "full",
-           diagnostics: bool = False):
+           diagnostics: bool = False, planning: str = "off",
+           mtype_limits: Optional[str] = None):
     ws = workspace or _default_ws()
     mtypes = [mtype] if mtype else None
+    try:
+        parsed_limits = json.loads(mtype_limits) if mtype_limits else None
+        if parsed_limits is not None and not isinstance(parsed_limits, dict):
+            raise ValueError
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise _invalid_request() from None
     try:
         out = service().recall(
             q, workspace=ws, k=k, mtypes=mtypes, as_of=as_of,
@@ -1026,6 +1064,7 @@ def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
             token_budget=token_budget, retrieval_profile=retrieval_profile,
             candidate_depth=candidate_depth,
             response_mode=response_mode, diagnostics=diagnostics,
+            planning=planning, mtype_limits=parsed_limits,
         )
     except ValidationError:
         logger.info("dashboard recall request rejected")
@@ -1035,9 +1074,10 @@ def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
             logger.error("dashboard recall failed (%s)", type(exc).__name__)
             raise HTTPException(status_code=500, detail={"error": "internal server error"})
         mems = _keyword_search(
-            ws, q, k, as_of=as_of, valid_at=valid_at, known_at=known_at,
+            ws, q, -1, as_of=as_of, valid_at=valid_at, known_at=known_at,
         )
         mems = _score_keyword_recall(q, mems)
+        mems = _apply_keyword_mtype_limits(mems, parsed_limits, k=k)
         if response_mode == "compact":
             # Preserve the public compact-response contract even when semantic recall
             # degrades to the keyword path during an embedding migration.
@@ -1061,8 +1101,13 @@ def recall(q: str = Query(...), workspace: Optional[str] = None, k: int = 8,
                 "memories": mems, "mode": "keyword", "response_mode": response_mode,
                 "retrieval_profile": retrieval_profile,
                 "candidate_depth": candidate_depth,
+                "planning": planning,
+                "mtype_limits": parsed_limits or {},
                 "candidate_k_requested": 50, "candidate_k_used": 0,
                 "candidate_depth_reason": "keyword fallback",
+                "context_revision": hashlib.sha256(
+                    b'{"token_counter":"engraphis.regex.v1","packed":[],"context":""}'
+                ).hexdigest(),
                 "score_semantics": dict(_KEYWORD_SCORE_SEMANTICS),
                 "valid_at": valid_at if valid_at is not None else as_of,
                 "known_at": known_at, "historical": historical,
@@ -1099,6 +1144,8 @@ class _AnswerReq(BaseModel):
     candidate_depth: str = "fixed"
     response_mode: str = "full"
     diagnostics: bool = False
+    planning: str = "off"
+    mtype_limits: Optional[dict[str, StrictInt]] = None
 
 
 @router.post("/answer")
@@ -1125,6 +1172,8 @@ def answer(req: _AnswerReq):
         candidate_depth=req.candidate_depth,
         response_mode=req.response_mode,
         diagnostics=req.diagnostics,
+        planning=req.planning,
+        mtype_limits=req.mtype_limits,
         max_citations=req.max_citations,
         min_support=req.min_support,
     )
@@ -1464,6 +1513,8 @@ class _IntentRecallReq(BaseModel):
     candidate_depth: str = "fixed"
     response_mode: str = "compact"
     diagnostics: bool = False
+    planning: str = "off"
+    mtype_limits: Optional[dict[str, StrictInt]] = None
 
 
 @router.post("/intent/recall")
@@ -1476,6 +1527,7 @@ def intent_recall(req: _IntentRecallReq):
         token_budget=req.token_budget, retrieval_profile=req.retrieval_profile,
         candidate_depth=req.candidate_depth,
         response_mode=req.response_mode, diagnostics=req.diagnostics,
+        planning=req.planning, mtype_limits=req.mtype_limits,
     )
 
 
@@ -2658,12 +2710,12 @@ def _fetch_authoritative_entitlement() -> Optional[dict]:
         # traceback on a background thread.
         try:
             exc.read(_ENTITLEMENT_MAX_RESPONSE_BYTES + 1)
-        except (OSError, ValueError):
+        except (OSError, ValueError, http.client.HTTPException):
             pass
         finally:
             try:
                 exc.close()
-            except (OSError, ValueError):
+            except (OSError, ValueError, http.client.HTTPException):
                 pass
         if status in (401, 402, 403):
             _record_authoritative_denial()

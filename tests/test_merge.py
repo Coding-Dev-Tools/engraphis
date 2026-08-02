@@ -58,8 +58,12 @@ def test_merge_reports_compaction_number():
 
 def test_merge_removes_duplicates_from_live_recall():
     svc = _svc()
-    a = svc.remember("The API rate limit is 100 requests per second.", workspace="w", mtype="semantic")
-    b = svc.remember("Our API allows 100 req/s.", workspace="w", mtype="semantic")
+    pending_a = svc.remember("The API rate limit is 100 requests per second.", workspace="w", mtype="semantic")
+    pending_b = svc.remember("Our API allows 100 req/s.", workspace="w", mtype="semantic")
+    # Public service writes are review-gated; use approved fixture records to
+    # exercise the separate merge-and-recall behavior.
+    a = svc.engine.approve_for_prompt(pending_a["id"], reviewer="test", reason="fixture")
+    b = svc.engine.approve_for_prompt(pending_b["id"], reviewer="test", reason="fixture")
     out = svc.merge([a["id"], b["id"]], "API rate limit: 100 req/s.", workspace="w")
     ids = {m["id"] for m in svc.recall("api rate limit", workspace="w", k=10)["memories"]}
     assert a["id"] not in ids and b["id"] not in ids, "retired sources must not surface in recall"

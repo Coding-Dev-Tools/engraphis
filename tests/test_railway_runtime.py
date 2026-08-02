@@ -26,6 +26,9 @@ def test_railway_manifest_builds_the_runtime_image_and_uses_readiness():
     assert manifest["deploy"] == {
         "healthcheckPath": "/api/ready",
         "healthcheckTimeout": 300,
+        # Railway otherwise defaults the SIGTERM-to-SIGKILL grace period to zero.
+        # Give Uvicorn time to stop taking requests and close SQLite cleanly.
+        "drainingSeconds": 30,
         "restartPolicyType": "ON_FAILURE",
         "restartPolicyMaxRetries": 10,
     }
@@ -39,6 +42,11 @@ def test_container_runtime_matches_the_railway_persistence_and_port_contract():
     assert 'ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]' in dockerfile
     assert 'CMD ["engraphis-dashboard", "--no-open"]' in dockerfile
     assert "os.environ.get('PORT') or os.environ.get('ENGRAPHIS_PORT','8700')" in dockerfile
+    # Railway binds an IPv6-only listener. ``localhost`` lets urllib try the matching
+    # loopback family, whereas a literal 127.0.0.1 probe would keep the Docker health
+    # state unhealthy even while the Railway readiness endpoint is serving traffic.
+    assert "http://localhost:%s/api/ready" in dockerfile
+    assert "http://127.0.0.1:%s/api/ready" not in dockerfile
     assert "useradd --create-home --uid 10001 engraphis" in dockerfile
     assert "HF_HOME=/data/.cache/huggingface" in dockerfile
     assert "ENGRAPHIS_STATE_DIR=/data/.engraphis" in dockerfile

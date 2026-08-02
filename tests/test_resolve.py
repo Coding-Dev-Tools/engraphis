@@ -153,6 +153,23 @@ def test_keyed_duplicate_ignores_existing_display_title():
     assert res.target_id == "mem_titled"
 
 
+def test_keyed_duplicate_ignores_harmless_punctuation():
+    neighbor = MemoryRecord(
+        id="mem_punctuated",
+        content="The API timeout is 30 seconds.",
+        subject_key="api-timeout",
+        claim_kind="configured_value",
+    )
+    res = resolve(
+        "The API timeout is 30 seconds!",
+        [(0.99, neighbor)],
+        subject_key="api-timeout",
+        claim_kind="configured_value",
+    )
+    assert res.op == ResolutionOp.NOOP
+    assert res.target_id == "mem_punctuated"
+
+
 def test_keyed_duplicate_with_matching_display_title_compares_content_only():
     neighbor = MemoryRecord(
         id="mem_titled",

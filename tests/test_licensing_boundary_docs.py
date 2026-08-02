@@ -108,6 +108,16 @@ def test_public_docs_state_the_license_and_lapse_boundaries():
     )
 
 
+def test_example_configuration_does_not_describe_hosted_grace_or_consent_as_local_access():
+    example = _text(".env.example")
+    plain_example = " ".join(example.replace("#", "").split())
+
+    assert "separate local-only write grace" not in example
+    assert "private control plane" in example
+    assert "never restricts the free local core" in example
+    assert "does not establish a cloud credential or authorize an upload" in plain_example
+
+
 def test_vendor_authority_is_not_shipped_in_the_public_tree():
     private_paths = (
         "engraphis/billing.py",

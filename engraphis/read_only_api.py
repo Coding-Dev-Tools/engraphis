@@ -1,11 +1,12 @@
 """Small read-only HTTP surface for shared recall and repository-graph queries."""
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 
 from engraphis.config import settings
 from engraphis.local_auth import bearer_ok
@@ -27,6 +28,8 @@ class IntentRecallRequest(BaseModel):
     candidate_depth: str = "fixed"
     response_mode: str = "compact"
     diagnostics: bool = False
+    planning: str = "off"
+    mtype_limits: Optional[dict[str, StrictInt]] = None
 
 
 class CodePathRequest(BaseModel):
@@ -93,13 +96,22 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
                retrieval_profile: str = "balanced",
                candidate_depth: str = "fixed",
                response_mode: str = "compact",
-               diagnostics: bool = False):
+               diagnostics: bool = False,
+               planning: str = "off",
+               mtype_limits: Optional[str] = None):
+        try:
+            parsed_limits = json.loads(mtype_limits) if mtype_limits else None
+            if parsed_limits is not None and not isinstance(parsed_limits, dict):
+                raise ValueError
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail="invalid mtype_limits") from exc
         return run(
             svc.recall, query, workspace=workspace, repo=repo, k=k,
             as_of=as_of, valid_at=valid_at, known_at=known_at,
             token_budget=token_budget, retrieval_profile=retrieval_profile,
             candidate_depth=candidate_depth,
             response_mode=response_mode, diagnostics=diagnostics,
+            planning=planning, mtype_limits=parsed_limits,
             reinforce=False, intent="http_read_only", record_receipt=False,
         )
 
@@ -113,6 +125,7 @@ def create_read_only_app(service: Optional[MemoryService] = None, *,
             retrieval_profile=req.retrieval_profile,
             candidate_depth=req.candidate_depth,
             response_mode=req.response_mode, diagnostics=req.diagnostics,
+            planning=req.planning, mtype_limits=req.mtype_limits,
             reinforce=False, record_receipt=False,
         )
 

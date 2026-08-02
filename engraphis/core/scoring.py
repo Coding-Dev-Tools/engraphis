@@ -29,13 +29,6 @@ INTERACTION_BOOST = {
 # memory into a near-instantly forgotten one.  New v2 writes are validated positive.
 DEFAULT_STABILITY_DAYS = 1.0
 
-# Proactive recall is an agenda, not an answer-ranking path.  A memory the caller
-# deliberately marked important remains eligible for that agenda even after its raw
-# Ebbinghaus score has decayed.  This floor affects only the queryless ranking; it
-# never mutates stability or changes normal query recall.
-PROACTIVE_IMPORTANCE_RETENTION_FLOOR = 0.80
-
-
 @dataclass(frozen=True)
 class Weights:
     r: float = 1.0   # retention (Ebbinghaus)
@@ -64,8 +57,10 @@ def retention(stability: float, last_access: Optional[float], now: float) -> flo
     """Ebbinghaus R(t) = exp(-Δt_days / S).
 
     ``stability=0`` is a v1-import compatibility sentinel for an unspecified
-    value, so it deliberately means the v2 default of one day.  It is *not* a
-    request to hard-forget the record; forgetting only lowers priority.
+    value, so it deliberately means the v2 default of one day.  Negative and
+    non-finite legacy values are treated the same way rather than producing an
+    inverted or non-finite score.  None of these values requests hard deletion;
+    forgetting only lowers priority.
     """
     try:
         supplied = float(stability)
@@ -134,18 +129,19 @@ def score_proactive(rec: MemoryRecord, *, now: float, weights: Optional[Weights]
                     importance_retention_floor: Optional[float] = None) -> float:
     """Rank a queryless proactive agenda without turning decay into hard deletion.
 
-    The raw retention curve still governs ordinary memories.  Explicitly important
-    records receive a bounded eligibility floor, so a useful week-old policy is not
-    displaced solely by a newly written zero-importance scratch note.
+    Importance is valuable while the record is retained, but it must not create an
+    immortal second retention term.  ``importance_retention_floor`` remains accepted
+    for call compatibility and deliberately no longer alters scoring.
     """
     w = weights or weights_for(rec.mtype)
     importance = min(max(float(rec.importance or 0.0), 0.0), 1.0)
-    floor = PROACTIVE_IMPORTANCE_RETENTION_FLOOR
-    if importance_retention_floor is not None:
-        floor = min(max(float(importance_retention_floor), 0.0), 1.0)
-    r = max(
-        retention(rec.stability, rec.last_access, now),
-        importance * floor,
-    )
+    del importance_retention_floor
+    r = retention(rec.stability, rec.last_access, now)
     rec_ref = rec.valid_from if rec.valid_from is not None else rec.ingested_at
-    return w.i * importance + w.c * recency(rec_ref, now) + w.r * r
+    importance_signal = importance * r
+    return (
+        w.i * importance_signal
+        + w.c * recency(rec_ref, now)
+        + w.r * r
+        - w.x * staleness_penalty(rec.valid_to, now)
+    )

@@ -111,6 +111,11 @@ def _score(
                         SearchFilter(workspace_id=wid),
                         k=k,
                         retrieval_profile=retrieval_profile,
+                        # Fixtures seed Store directly and therefore carry no
+                        # write-time prompt approval.  This is a retrieval-arm
+                        # ablation, so request inspection visibility explicitly
+                        # instead of accidentally measuring provenance gating.
+                        include_untrusted=True,
                     ).chunks
                 ]
             else:

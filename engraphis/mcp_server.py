@@ -27,7 +27,7 @@ import json
 import logging
 from typing import Annotated, List, Optional
 
-from pydantic import Field
+from pydantic import Field, StrictInt
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -278,6 +278,12 @@ def engraphis_recall(
                     "represented in the packed context.")] = "full",
     diagnostics: Annotated[bool, Field(
         description="Include per-arm raw/normalized/fusion/rerank diagnostics.")] = False,
+    planning: Annotated[str, Field(
+        description="Query planning: off preserves the single-query path; auto enables "
+                    "bounded offline or injected planning.")] = "off",
+    mtype_limits: Annotated[Optional[dict[str, StrictInt]], Field(
+        description="Optional maximum returned count per memory type; limits never boost "
+                    "relevance.")] = None,
 ) -> str:
     """Retrieve the memories most relevant to a query (hybrid vector + lexical + graph).
 
@@ -303,6 +309,8 @@ def engraphis_recall(
             retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
             response_mode=response_mode,
             diagnostics=diagnostics,
+            planning=planning,
+            mtype_limits=mtype_limits,
         ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -341,6 +349,10 @@ def engraphis_recall_context(
         description="Optional system-time Unix timestamp.")] = None,
     diagnostics: Annotated[bool, Field(
         description="Include detailed retrieval scoring trace.")] = False,
+    planning: Annotated[str, Field(
+        description="off preserves single-query recall; auto enables bounded planning.")] = "off",
+    mtype_limits: Annotated[Optional[dict[str, StrictInt]], Field(
+        description="Optional maximum returned count per memory type.")] = None,
 ) -> str:
     """Return one hard-budget context plus compact source identities.
 
@@ -365,6 +377,8 @@ def engraphis_recall_context(
             candidate_depth=candidate_depth,
             response_mode="compact",
             diagnostics=diagnostics,
+            planning=planning,
+            mtype_limits=mtype_limits,
             intent="recall_context",
         )
         by_id = {
@@ -449,6 +463,10 @@ def engraphis_recall_grounded(
                     "in the cited answer.")] = "full",
     diagnostics: Annotated[bool, Field(
         description="Include detailed retrieval scoring trace.")] = False,
+    planning: Annotated[str, Field(
+        description="off preserves single-query recall; auto enables bounded planning.")] = "off",
+    mtype_limits: Annotated[Optional[dict[str, StrictInt]], Field(
+        description="Optional maximum returned count per memory type.")] = None,
 ) -> str:
     """Answer a question *strictly from* stored memories, with citations — or abstain.
 
@@ -482,7 +500,8 @@ def engraphis_recall_grounded(
             known_at=known_at, token_budget=token_budget,
             retrieval_profile=retrieval_profile, candidate_depth=candidate_depth,
             response_mode=response_mode,
-            diagnostics=diagnostics, min_support=min_support, llm=llm,
+            diagnostics=diagnostics, planning=planning, mtype_limits=mtype_limits,
+            min_support=min_support, llm=llm,
         ))
     except Exception as exc:  # noqa: BLE001
         return _err(exc)
@@ -527,6 +546,10 @@ def engraphis_answer(
         description="full includes citation bodies; compact omits them.")] = "full",
     diagnostics: Annotated[bool, Field(
         description="Include detailed retrieval scoring trace.")] = False,
+    planning: Annotated[str, Field(
+        description="off preserves single-query recall; auto enables bounded planning.")] = "off",
+    mtype_limits: Annotated[Optional[dict[str, StrictInt]], Field(
+        description="Optional maximum returned count per memory type.")] = None,
 ) -> str:
     """Backward-compatible alias for ``engraphis_recall_grounded``.
 
@@ -539,6 +562,7 @@ def engraphis_answer(
         token_budget=token_budget, retrieval_profile=retrieval_profile,
         candidate_depth=candidate_depth,
         response_mode=response_mode, diagnostics=diagnostics,
+        planning=planning, mtype_limits=mtype_limits,
         min_support=min_support, synthesize=synthesize,
     )
 

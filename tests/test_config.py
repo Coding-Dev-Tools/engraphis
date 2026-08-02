@@ -84,7 +84,11 @@ def test_service_builds_offline_with_default_rerank_model(monkeypatch):
     monkeypatch.delenv("ENGRAPHIS_RERANK_MODEL", raising=False)
     from engraphis.service import MemoryService
     svc = MemoryService.create(":memory:", rerank_model=(Settings().rerank_model or None))
-    assert svc.remember("a durable fact", workspace="w", repo="r")["stored"] is True
+    pending = svc.remember("a durable fact", workspace="w", repo="r")
+    assert pending["stored"] is True
+    svc.engine.approve_for_prompt(
+        pending["id"], reviewer="test_operator", reason="offline control",
+    )
     assert svc.recall("a durable fact", workspace="w", repo="r")["count"] >= 1
 
 

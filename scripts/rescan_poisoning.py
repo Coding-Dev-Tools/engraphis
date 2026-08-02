@@ -16,7 +16,7 @@ from engraphis.config import settings
 from engraphis.core.poisoning import (
     apply_quarantine_metadata,
     assess_untrusted_payload,
-    provenance_is_trusted,
+    provenance_is_approved,
     source_is_external,
 )
 from engraphis.core.interfaces import SearchFilter
@@ -40,7 +40,8 @@ def _iter_records(store: Store, workspace_id: Optional[str]):
 
 def rescan(db_path: str, *, apply: bool = False,
            only_workspace: Optional[str] = None,
-           mark_unverified: bool = True) -> dict:
+           mark_unverified: bool = True,
+           demote_unapproved: bool = True) -> dict:
     """Report or apply durable untrusted/quarantine labels to existing records.
 
     ``mark_unverified`` fails closed for rows with no explicit trust provenance.
@@ -49,7 +50,11 @@ def rescan(db_path: str, *, apply: bool = False,
     """
     if db_path != ":memory:" and not Path(db_path).is_file():
         raise FileNotFoundError(f"database does not exist: {db_path}")
-    store = Store(db_path)
+    # A dry run is an inspection operation, not a normal Store open: schema
+    # initialization can migrate a legacy database, create a backup, or set WAL
+    # mode even when this function never executes an UPDATE.  Open it read-only so
+    # the preview cannot modify the database or create sidecar files.
+    store = Store(db_path, read_only=not apply)
     try:
         workspace_id = None
         if only_workspace:
@@ -76,10 +81,15 @@ def rescan(db_path: str, *, apply: bool = False,
             provenance = dict(record.provenance or metadata.get("provenance") or {})
             source = str(provenance.get("source") or "").strip()
             explicitly_untrusted = provenance.get("trusted") is False
-            unverified = not provenance_is_trusted(provenance)
+            # A historical ``trusted: true`` bit alone was caller-controlled and
+            # predates the review gate.  Only its explicit approved state may
+            # remain prompt-eligible after the migration.
+            unverified = not provenance_is_approved(provenance)
             external = source_is_external(source)
-            should_downgrade = explicitly_untrusted or external or (
-                mark_unverified and unverified
+            should_downgrade = (
+                explicitly_untrusted or external
+                or (mark_unverified and unverified)
+                or (demote_unapproved and not provenance_is_approved(provenance))
             )
             if unverified:
                 summary["unverified"] += 1
@@ -90,6 +100,7 @@ def rescan(db_path: str, *, apply: bool = False,
             provenance.update({
                 "source": source or "legacy_unverified",
                 "trusted": False,
+                "review_state": "pending",
                 "trust_origin": "rescan_unverified",
             })
             metadata["provenance"] = dict(provenance)
@@ -115,17 +126,20 @@ def rescan(db_path: str, *, apply: bool = False,
                 # Close a live record now, but retain a prior governed closure instead
                 # of rewriting historical validity to the scan time.
                 quarantined_at = now_ts()
-                effective_valid_to = record.valid_to or quarantined_at
+                effective_valid_to = min(record.valid_to, quarantined_at) \
+                    if record.valid_to is not None else quarantined_at
                 store.conn.execute(
                     "UPDATE memories SET metadata=?, provenance=?, "
-                    "valid_to=COALESCE(valid_to, ?), "
-                    "valid_to_recorded_at=CASE WHEN valid_to IS NULL THEN ? "
+                    "valid_to=CASE WHEN valid_to IS NULL OR valid_to>? THEN ? "
+                    "ELSE valid_to END, "
+                    "valid_to_recorded_at=CASE WHEN valid_to IS NULL OR valid_to>? THEN ? "
                     "ELSE valid_to_recorded_at END WHERE id=?",
                     (
                         json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
                         json.dumps(metadata["provenance"], ensure_ascii=False,
                                    separators=(",", ":")),
-                        quarantined_at, quarantined_at, record.id,
+                        quarantined_at, quarantined_at, quarantined_at, quarantined_at,
+                        record.id,
                     ),
                 )
                 store.conn.execute("DELETE FROM mem_vectors WHERE id=?", (record.id,))
@@ -173,10 +187,13 @@ def main() -> None:
                         help="write changes (default is dry-run)")
     parser.add_argument("--keep-unlabelled", action="store_true",
                         help="do not downgrade legacy rows with no explicit trust label")
+    parser.add_argument("--keep-unapproved", action="store_true",
+                        help="do not demote records that were not explicitly approved")
     args = parser.parse_args()
     print(json.dumps(rescan(
         args.db, apply=args.apply, only_workspace=args.only,
         mark_unverified=not args.keep_unlabelled,
+        demote_unapproved=not args.keep_unapproved,
     ), indent=2, sort_keys=True))
 
 

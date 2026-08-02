@@ -8,12 +8,12 @@ https://engraphis.com/
 
 https://discord.com/invite/Wfr2ejBmY
 
-**Give your AI agents a memory. See it, search it, and maintain it, all in a beautiful WebUI on your own machine.**
+**Give coding agents durable project memory so the next session can retrieve the current decision, its evidence, and its history.**
 
 <p align="center">
-  <img src="docs/images/knowledge-graph.png" alt="Engraphis Knowledge Graph tab: force-directed entity-relation network" width="100%">
+  <img src="docs/images/engraphis-benefit-flow.png" alt="Project history becomes scoped memory, hybrid recall, and bounded cited context for an agent" width="100%">
   <br>
-  <sup>Knowledge Graph · run <code>engraphis-dashboard</code> to see it live</sup>
+  <sup>Preserve a project decision · retrieve its supporting evidence · hand the next agent a bounded context</sup>
 </p>
 
 ---
@@ -21,11 +21,6 @@ https://discord.com/invite/Wfr2ejBmY
 > **Open-core boundary:** this repository contains the free local engine, dashboard, MCP server,
 > and customer-side clients. Hosted sync, analytics, automation, and team services run on the
 > official hosted service; their server implementations are not distributed here.
-
-> **Support continued Engraphis development with Pro.** [Start a 3-day Pro trial](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro&trial=pro#billing)
-> or [subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro#billing).
-
----
 
 ## Measured token and context savings
 
@@ -107,13 +102,8 @@ An agent should not have to reconstruct a project from scattered chat history on
 Engraphis turns local project knowledge into scoped, time-aware memory; retrieves the evidence
 that supports the current question; and returns a bounded, attributable context packet.
 
-<p align="center">
-  <img src="docs/images/engraphis-benefit-flow.png" alt="Diagram: project history becomes scoped and temporal Engraphis memory, hybrid recall, then bounded cited context for an agent" width="100%">
-  <br>
-  <sup>Store durable project knowledge · retrieve supporting evidence · give the agent only what it needs</sup>
-</p>
-
-The flow is the essential path. See [measured token and context savings](#measured-token-and-context-savings)
+The core task is continuity: retrieve the current, supported project decision without dragging the
+whole history into the next prompt. See [measured token and context savings](#measured-token-and-context-savings)
 for the short version of how much less history an agent has to carry.
 
 | Agent need | What Engraphis changes |
@@ -302,6 +292,40 @@ in the [MCP tool reference](docs/MCP_TOOLS.md).
 For unattended jobs, `engraphis_start_session`, `engraphis_remember`, and
 `engraphis_record_event` use workspace `default` when `workspace` is omitted.
 
+### Review gate for MCP, REST, imports, and sync
+
+Every public write enters review as `pending`, regardless of a caller-supplied `source` or
+`trusted` label. That includes MCP, dashboard/REST intent writes, imports, sync, and extractor
+output. Detector matches are instead `quarantined` immediately. Pending and quarantined records
+remain inspectable and auditable, but cannot enter model-ready recall/context, resolution,
+links, graph/code backfill, or derived prompt context. Corrections, promotions, and merges fail
+closed unless every input is explicitly approved.
+
+Approval creates a fresh `approved` successor and preserves the reviewed source plus an audit
+link; it never relabels the source in place. There is deliberately no MCP tool or general REST
+approval endpoint. A local owner can approve through the dashboard's **Approve for prompt**
+action after configuring `ENGRAPHIS_API_TOKEN` (short-lived browser session plus CSRF confirmation),
+or from an interactive terminal:
+
+```bash
+python -m scripts.approve_memory mem_... --reason "verified against the owner runbook"
+```
+
+The command rejects redirected input and requires typing its displayed confirmation. Hosted
+owner/admin approval is performed by the hosted service, not this local package. The direct
+in-process `MemoryEngine` remains a documented trusted-code boundary for code that already has
+local database authority; do not expose it to untrusted transports. Existing stores can be
+inspected without writes, then migrated deliberately:
+
+```bash
+python -m scripts.rescan_poisoning --db engraphis.db
+python -m scripts.rescan_poisoning --db engraphis.db --apply
+```
+
+The dry run opens the database read-only. The applying pass demotes historical non-approved
+records to pending review, quarantines detected payloads, retires their derived bridges, and
+records an audit event.
+
 ## Quickstart: repository graph
 
 ```bash
@@ -378,7 +402,36 @@ For an agent prompt, prefer `engraphis_recall_context`: it returns one hard-budg
 `token_counter`), and optional diagnostics. Accounting is exact for the named counter; inject the
 reader's tokenizer when reader-model token parity is required. `engraphis_recall` remains the compatible full-recall
 surface; use `response_mode="compact"` when the packed context is enough and full memory bodies
-would duplicate it. Both default to the `balanced` retrieval profile; `auto` remains opt-in.
+would duplicate it. Both default to the `balanced` retrieval profile and `planning="off"`.
+Opt-in `planning="auto"` keeps the original query, admits at most two deterministic or injected
+query routes, and fuses them before reranking against the original query. `mtype_limits`, when
+provided, are post-rerank maximum counts rather than relevance boosts. Every packed response has a
+stable `context_revision` derived from the token-counter identity and ordered packed excerpts, so a
+host can retain an unchanged prompt prefix. Planner output, per-query rankings, cap drops, and
+fallback reasons appear only with `diagnostics=True`.
+
+The offline planner is the default injected implementation. An application can opt into an LLM
+planner without coupling `core/` to a provider:
+
+```python
+from engraphis.backends.query_planner import LLMQueryPlanner
+from engraphis.core.engine import MemoryEngine
+
+engine = MemoryEngine.create(
+    "engraphis.db",
+    query_planner=LLMQueryPlanner(my_llm),
+)
+result = engine.recall(
+    "why does ReleaseGate depend on AuditLog?",
+    workspace_id="ws_...",
+    planning="auto",
+    mtype_limits={"working": 1, "semantic": 3},
+)
+```
+
+Planner failures and provider deadlines fail open to the original single-query plan. Planned recall
+remains opt-in until the checked-in budget, safety, and official LongMemEval-V2 gates justify a
+default change.
 
 For bi-temporal reads, `valid_at` selects what was true at a Unix timestamp and `known_at` selects
 what Engraphis had learned then. `as_of` remains a compatibility alias for `valid_at`; supplying
@@ -446,6 +499,9 @@ changes end-to-end; managed compute is a separate readable-snapshot service. See
 
 [Subscribe to Pro](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_pricing#billing)
 to support the project and add hosted services.
+
+[Compare hosted plans](https://api.engraphis.com/account?plan=pro&interval=monthly&utm_source=engraphis&utm_medium=docs&utm_campaign=pro_conversion&utm_content=readme_intro#billing)
+when you are ready to evaluate the service boundary and billing options.
 
 | | Free (available now) | Pro: $10/mo or $100/yr | Team: $20/seat/mo or $200/seat/yr |
 |---|---|---|---|
@@ -677,6 +733,7 @@ All via environment (or `.env`):
 | `ENGRAPHIS_CHUNK_TOKENIZER_REVISION` | Not set | Optional immutable tokenizer/model revision recorded in the chunk-counter identity; pin this for reproducible benchmark artifacts |
 | `ENGRAPHIS_GRAPH_EXTRACTOR` | `regex` | `regex` = offline heuristic NER; `none` = disable heuristic text extraction (validated `llm_structured` metadata still feeds the graph) |
 | `ENGRAPHIS_RETENTION_SUPERVISOR` | `none` | `none` = deterministic only; `llm` = sends a bounded excerpt to the configured provider for advisory ephemeral/normal/critical classification |
+| `ENGRAPHIS_ALLOW_AUTOMATIC_CRITICAL_RETENTION` | `false` | Opt in only when an LLM supervisor may automatically assign the long-lived `critical` class; explicit user-selected critical retention is unaffected |
 | `ENGRAPHIS_WHISPER_MODEL` | Not set | Enables local faster-whisper audio/video transcription |
 | `ENGRAPHIS_POSTGRES_DSN` | Not set | CLI-only PostgreSQL source; used for the connection and never stored |
 | `ENGRAPHIS_POSTGRES_CONNECT_TIMEOUT` | `10` | PostgreSQL introspection connection timeout in seconds (bounded to 1–120) |
@@ -696,7 +753,7 @@ All via environment (or `.env`):
 | `ENGRAPHIS_CLOUD_REFRESH_CREDENTIAL` | Not set | Bootstrap-only rotating hosted credential; after first use the owner-only cloud session replacement takes precedence |
 | `ENGRAPHIS_CLOUD_TOKEN_SUBJECT` | `member` | Subject fixed during hosted bootstrap (`device` or `member`); set explicitly with an environment-only refresh credential |
 | `ENGRAPHIS_CLOUD_ACCESS_TOKEN` | Not set | Optional short-lived access token for ephemeral jobs |
-| `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | *(auto)* | Operator override only; default follows whether a cloud session is configured (connected = allowed, local-only = never). `0` opts a connected installation out, `1` forces it on |
+| `ENGRAPHIS_MANAGED_COMPUTE_CONSENT` | *(auto)* | Operator override only; default follows whether a cloud session is configured (connected = allowed, local-only = never). `0` opts a connected installation out; `1` permits local snapshot preparation but does not create a cloud credential or authorize an upload |
 
 See `.env.example` for the full customer-runtime and managed-service client options.
 

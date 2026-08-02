@@ -1,10 +1,9 @@
-"""Deterministic write-time guard for untrusted memory payloads.
+"""Deterministic write-time guard for memory payloads.
 
 This module intentionally does not attempt to decide whether a fact is true.  It
-recognises a small, explainable set of prompt-injection and exfiltration shapes in
-payloads that the caller has *already* labelled untrusted.  A match quarantines the
-payload for inspection instead of dropping it, mutating trusted memories, or relying
-on an online classifier.
+recognises a small, explainable set of prompt-injection and exfiltration shapes before
+they receive a trust decision.  A match quarantines the payload for inspection instead
+of dropping it, mutating trusted memories, or relying on an online classifier.
 """
 from __future__ import annotations
 
@@ -14,8 +13,10 @@ import unicodedata
 from typing import Any, Mapping, Optional
 
 
-POLICY_VERSION = "deterministic-v2"
+POLICY_VERSION = "deterministic-v3"
 QUARANTINE_STATE = "quarantined"
+REVIEW_PENDING = "pending"
+REVIEW_APPROVED = "approved"
 
 # Source labels below identify producers outside the local memory authority.  They
 # are enforced by the service/sync boundaries, not trusted merely because a payload
@@ -51,7 +52,7 @@ _SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "privilege_impersonation",
         re.compile(
-            r"(?:^|\n)\s*(?:system|developer|assistant)\s*"
+            r"(?:^|\s|;)\s*(?:system|developer|assistant)\s*"
             r"(?:message|prompt|instructions?)\s*[:\-]",
             re.IGNORECASE,
         ),
@@ -90,21 +91,96 @@ _SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 _SINGLE_LETTER_RUN = re.compile(
-    r"(?<!\w)(?:[a-z]\s+){3,}[a-z](?!\w)",
+    r"(?<!\w)(?:[a-z][ \t]+){2,}[a-z](?!\w)",
     re.IGNORECASE,
 )
 
+# Unicode TR39 v15.1.0 ASCII detector projection, vendored here from
+# https://www.unicode.org/Public/security/15.1.0/confusables.txt.  The full TR39
+# data maps many characters to non-ASCII and multi-character skeletons that cannot
+# affect this ASCII-only signal grammar; this pinned projection retains every common
+# Cyrillic/Greek ASCII-lookalike relevant to the detector without a runtime package.
+# Keeping it in core also makes the policy deterministic and offline-capable.
+TR39_CONFUSABLES_VERSION = "15.1.0"
+_TR39_ASCII_SKELETON = str.maketrans({
+    # Cyrillic
+    "а": "a", "в": "b", "с": "c", "е": "e", "һ": "h", "і": "i",
+    "ј": "j", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p",
+    "ѕ": "s", "т": "t", "у": "y", "х": "x", "ԁ": "d", "ԛ": "q",
+    # Greek
+    "α": "a", "β": "b", "ϲ": "c", "ε": "e", "η": "n", "ι": "i",
+    "κ": "k", "μ": "m", "ν": "v", "ο": "o", "ρ": "p", "τ": "t",
+    "υ": "u", "χ": "x", "γ": "y", "ζ": "z",
+})
+
+# Reconstruct only words that participate in the narrowly-scoped detector grammar.
+# A generic whitespace-stripping regex cannot know where a run such as
+# ``i g n o r e t h e i n s t r u c t i o n s`` should be separated and used to
+# turn it into an unmatchable blob.  Exact segmentation keeps normal prose intact.
+_SPACED_SIGNAL_WORDS = frozenset({
+    "ignore", "disregard", "forget", "override", "bypass", "all", "any", "the",
+    "previous", "instruction", "instructions", "rule", "rules", "prompt", "prompts",
+    "system", "message", "messages", "reveal", "exfiltrate", "send", "upload",
+    "export", "print", "display", "secret", "secrets", "credential", "credentials",
+    "password", "passwords", "api", "key", "keys", "token", "tokens", "environment",
+    "variable", "variables", "do", "not", "dont", "never", "tell", "inform", "mention",
+    "show", "notify", "user", "owner", "operator", "when", "if", "later", "future",
+    "next", "session", "agent", "request",
+})
+
+
+def _segment_signal_words(letters: str) -> tuple[str, ...]:
+    """Return an exact signal-vocabulary segmentation, or no segmentation.
+
+    The dynamic program is deliberately all-or-nothing: unknown text must retain its
+    original spacing instead of being altered into a new phrase by a safety helper.
+    """
+    lower = letters.casefold()
+    best: list[tuple[str, ...] | None] = [None] * (len(lower) + 1)
+    best[0] = ()
+    for end in range(1, len(lower) + 1):
+        choices: list[tuple[str, ...]] = []
+        for start in range(max(0, end - 16), end):
+            word = lower[start:end]
+            if word in _SPACED_SIGNAL_WORDS and best[start] is not None:
+                choices.append((*best[start], word))
+        if choices:
+            # Prefer the fewest, then longest-leading, words for deterministic output.
+            best[end] = min(choices, key=lambda words: (len(words), tuple(-len(w) for w in words)))
+    return best[-1] or ()
+
+
+def _restore_spaced_signal_words(match: re.Match[str]) -> str:
+    letters = "".join(match.group(0).split())
+    words = _segment_signal_words(letters)
+    return " ".join(words) if words else match.group(0)
+
 
 def _canonical_payload_text(text: str) -> str:
-    """Normalize common presentation tricks before deterministic signal checks."""
-    normalized = unicodedata.normalize("NFKC", text or "")
-    normalized = "".join(
-        character for character in normalized
-        if unicodedata.category(character) not in {"Cf", "Cc"} or character in "\n\t"
-    )
+    """Normalize presentation tricks before deterministic signal checks.
+
+    This is defense in depth, not an authority decision: public ingress remains pending
+    review even if no current deterministic signal matches.
+    """
+    # Decompose after compatibility normalization so a precomposed accented glyph
+    # cannot retain its mark merely because it is no longer category ``Mn``.
+    normalized = unicodedata.normalize("NFKD", unicodedata.normalize("NFKC", text or ""))
+    parts: list[str] = []
+    for character in normalized:
+        category = unicodedata.category(character)
+        if category in {"Cf", "Mn"}:
+            continue
+        if category == "Cc":
+            # Controls must not survive into the detector text, but whitespace-like
+            # controls still separate words. Replacing them before removal avoids
+            # turning ``ignore\nprevious`` into an unmatchable single token.
+            if character.isspace():
+                parts.append(" ")
+            continue
+        parts.append(character)
     return _SINGLE_LETTER_RUN.sub(
-        lambda match: "".join(match.group(0).split()),
-        normalized,
+        _restore_spaced_signal_words,
+        unicodedata.normalize("NFKC", "".join(parts)).casefold().translate(_TR39_ASCII_SKELETON),
     )
 
 
@@ -130,6 +206,15 @@ def provenance_is_trusted(provenance: object) -> bool:
     fail closed until the rescan/approval workflow has classified them.
     """
     return isinstance(provenance, Mapping) and provenance.get("trusted") is True
+
+
+def provenance_is_approved(provenance: object) -> bool:
+    """Require both explicit trust and an explicit human/local approval state."""
+    return (
+        provenance_is_trusted(provenance)
+        and isinstance(provenance, Mapping)
+        and provenance.get("review_state") == REVIEW_APPROVED
+    )
 
 
 def metadata_is_trusted(metadata: object) -> bool:
@@ -169,7 +254,7 @@ def prompt_eligible(provenance: object, metadata: object = None) -> bool:
     approved, non-quarantined record is required before anything is packed for an agent.
     """
     return (
-        provenance_is_trusted(provenance)
+        provenance_is_approved(provenance)
         and metadata_is_trusted(metadata)
         and inspection_eligible(provenance, metadata)
     )
@@ -177,19 +262,9 @@ def prompt_eligible(provenance: object, metadata: object = None) -> bool:
 
 def source_is_external(source: object) -> bool:
     """Recognize external producers, including namespaced adapter instances."""
-    label = str(source or "").strip().casefold()
+    label = _canonical_payload_text(str(source or "")).strip().casefold()
     base = label.split(":", 1)[0].split("/", 1)[0]
     return base in EXTERNAL_SOURCES
-
-
-def _is_explicitly_untrusted(provenance: Mapping[str, Any]) -> bool:
-    """Only an explicit false label opts an input into payload inspection.
-
-    Existing direct-core callers that omit provenance are trusted local writes.  This
-    keeps their behaviour unchanged and ensures a string such as ``"false"`` cannot
-    accidentally be interpreted as an authority-changing boolean.
-    """
-    return provenance.get("trusted") is False
 
 
 def _is_sticky_quarantine(metadata: Mapping[str, Any]) -> bool:
@@ -209,10 +284,6 @@ def assess_untrusted_payload(content: str, *, title: str = "",
     meta = _mapping(metadata)
     if _is_sticky_quarantine(meta):
         return PoisoningDecision(True, reasons=("inherited_quarantine",))
-    provenance = _mapping(meta.get("provenance"))
-    if not _is_explicitly_untrusted(provenance):
-        return PoisoningDecision(False)
-
     reasons = detect_payload_signals(content, title=title)
     return PoisoningDecision(bool(reasons), reasons=reasons)
 

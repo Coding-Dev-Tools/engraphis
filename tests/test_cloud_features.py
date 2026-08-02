@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from concurrent.futures import ThreadPoolExecutor
+import http.client
 from io import BytesIO
 import urllib.error
 import urllib.request
@@ -443,3 +444,37 @@ def test_private_service_error_body_is_never_reflected(
     assert captured.value.status == status
     assert captured.value.transient is transient
     assert secret not in str(captured.value)
+
+
+def test_truncated_private_error_response_keeps_the_public_status(monkeypatch) -> None:
+    """Provider diagnostics cannot turn a 403 into an internal-error traceback."""
+
+    error = urllib.error.HTTPError(
+        "https://compute.example.test/private",
+        403,
+        "denied",
+        {},
+        BytesIO(b'{"detail":"private"}'),
+    )
+
+    def fail_drain(*args, **kwargs):
+        raise http.client.IncompleteRead(b'{"detail":"pri')
+
+    error.read = fail_drain
+    error.close = fail_drain
+
+    class _Opener:
+        def open(self, request, timeout):
+            raise error
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *handlers: _Opener())
+    client = CloudFeatureClient(
+        "https://compute.example.test", "org_1", "access-token"
+    )
+
+    with pytest.raises(CloudFeatureError) as captured:
+        client._request("GET", "/private")
+
+    assert captured.value.status == 403
+    assert captured.value.transient is False
+    assert str(captured.value) == "Engraphis Cloud authorization was rejected."

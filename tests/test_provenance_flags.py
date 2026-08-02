@@ -20,12 +20,14 @@ def _first_provenance(svc, query, **scope):
     return recs[0]["provenance"]
 
 
-def test_defaults_are_trusted_agent():
+def test_public_agent_write_is_pending_review():
     s = _svc()
     s.remember("Default provenance fact about zebras.", workspace="acme")
     prov = _first_provenance(s, "zebras", workspace="acme")
     assert prov["source"] == "agent"
-    assert prov["trusted"] is True
+    assert prov["trusted"] is False
+    assert prov["review_state"] == "pending"
+    assert prov["trust_origin"] == "service_review_gate"
     assert "kind" not in prov
 
 

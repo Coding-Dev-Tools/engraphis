@@ -7,6 +7,8 @@ bounded raw-history fallback when retrieved evidence is weak.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -30,6 +32,28 @@ class AdaptiveContextResult:
     truncated_history: bool = False
     token_counter: str = "unknown"
     recall: Optional[RecallResult] = None
+    context_revision: str = ""
+
+    def __post_init__(self) -> None:
+        if self.context_revision:
+            return
+        # Reuse the recall revision only when that packed recall context is the
+        # context actually emitted. A weak-retrieval history fallback retains the
+        # RecallResult for diagnostics, but its prompt prefix is different and must
+        # therefore receive a different cache revision.
+        if (
+            self.recall is not None
+            and self.recall.context_revision
+            and self.context == self.recall.context
+        ):
+            self.context_revision = self.recall.context_revision
+            return
+        canonical = json.dumps(
+            {"token_counter": self.token_counter, "context": self.context},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        self.context_revision = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def to_dict(self) -> dict:
         """Return privacy-safe routing telemetry without duplicating source text."""
@@ -45,6 +69,7 @@ class AdaptiveContextResult:
             "widened": self.widened,
             "truncated_history": self.truncated_history,
             "token_counter": self.token_counter,
+            "context_revision": self.context_revision,
         }
 
 
@@ -88,7 +113,11 @@ def fit_recent_history(
             (index for index, character in enumerate(fitted) if character.isspace()),
             -1,
         )
-        fitted = fitted[boundary + 1:].lstrip() if boundary >= 0 else ""
+        # With an unbroken tail (URL, hash, base64, minified code), the binary-search
+        # suffix already satisfies the declared budget.  Returning an empty history
+        # here discarded exactly the recent fallback state this helper exists to keep.
+        if boundary >= 0:
+            fitted = fitted[boundary + 1:].lstrip()
 
     # A non-additive custom tokenizer can have unusual boundary behavior.  This
     # final guard preserves the hard-budget contract even for such counters.

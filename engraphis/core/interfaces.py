@@ -161,6 +161,28 @@ class ContextUsage:
     token_counter: str = "estimate_tokens"
 
 
+@dataclass(frozen=True)
+class PlannedQuery:
+    """One bounded retrieval query emitted by a ``QueryPlanner``.
+
+    ``priority`` is one-based: lower values contribute more weight during rank
+    fusion. ``mtypes`` narrows only this query; the caller's scope, temporal, and
+    trust filters remain mandatory for every planned query.
+    """
+    text: str
+    priority: int = 1
+    profile: str = "balanced"
+    mtypes: tuple[MemoryType, ...] = ()
+
+
+@dataclass(frozen=True)
+class RetrievalPlan:
+    """A bounded, inspectable plan for one recall request."""
+    queries: tuple[PlannedQuery, ...]
+    mtype_limits: dict[MemoryType, int] = field(default_factory=dict)
+    reason_codes: tuple[str, ...] = ()
+
+
 @dataclass
 class Node:
     """A knowledge-graph node (entity or concept)."""
@@ -306,11 +328,100 @@ class CandidateDepthPolicy(Protocol):
                         profile: str, mode: str) -> tuple[int, str]: ...
 
 
+@dataclass(frozen=True)
+class GraphTraversalPlan:
+    """Inspectable, bounded layer preferences for one graph-retrieval query.
+
+    Layer values are soft multipliers, never permissions: ``SearchFilter`` remains
+    the only mechanism allowed to include or exclude graph layers, scope, temporal
+    visibility, or trust-sensitive records.  An empty tuple means uniform weights
+    and is deliberately equivalent to the historical PPR behavior.
+    """
+    intent: str = "uniform"
+    layer_weights: tuple[tuple[GraphLayer, float], ...] = ()
+    reason_codes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Canonicalize policy output before it can affect graph ranking.
+
+        Policies are injected extension code.  Keeping their data contract finite,
+        typed, and duplicate-free makes failure fall back to uniform traversal
+        rather than letting malformed weights turn into an availability issue or
+        a non-deterministic first-match choice.
+        """
+        normalized = []
+        seen = set()
+        for entry in self.layer_weights:
+            if not isinstance(entry, tuple) or len(entry) != 2:
+                raise ValueError("graph traversal layer_weights must be (layer, weight) pairs")
+            raw_layer, raw_weight = entry
+            layer = GraphLayer(raw_layer)
+            if layer in seen:
+                raise ValueError("graph traversal layer_weights may not repeat a layer")
+            try:
+                weight = float(raw_weight)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("graph traversal weights must be finite numbers") from exc
+            if not math.isfinite(weight):
+                raise ValueError("graph traversal weights must be finite numbers")
+            seen.add(layer)
+            normalized.append((layer, weight))
+        reason_codes = (
+            (self.reason_codes,)
+            if isinstance(self.reason_codes, str)
+            else tuple(str(code) for code in self.reason_codes)
+        )
+        object.__setattr__(self, "intent", str(self.intent or "uniform"))
+        object.__setattr__(self, "layer_weights", tuple(normalized))
+        object.__setattr__(self, "reason_codes", reason_codes)
+
+    def multiplier(self, layer: GraphLayer) -> float:
+        """Return a safe non-zero multiplier for ``layer``.
+
+        The bounds retain weak reachability through non-preferred layers and stop
+        injected policies from turning a local graph edge into an unbounded score
+        amplification mechanism.
+        """
+        for candidate, value in self.layer_weights:
+            if candidate == layer:
+                try:
+                    numeric = float(value)
+                    if not math.isfinite(numeric):
+                        return 1.0
+                    return min(4.0, max(0.25, numeric))
+                except (TypeError, ValueError):
+                    return 1.0
+        return 1.0
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "intent": self.intent,
+            "layer_weights": {
+                layer.value: self.multiplier(layer)
+                for layer in GraphLayer
+            },
+            "reason_codes": list(self.reason_codes),
+        }
+
+
+@runtime_checkable
+class GraphTraversalPolicy(Protocol):
+    """Choose soft graph-layer weights without coupling core to an LLM backend."""
+    def plan(self, query: str, *, filter: Optional[SearchFilter] = None) -> GraphTraversalPlan: ...
+
+
+@runtime_checkable
+class QueryPlanner(Protocol):
+    """Produce a retrieval plan without coupling core to an LLM backend."""
+    def plan(self, query: str, *, filter: Optional[SearchFilter] = None,
+             timeout_s: Optional[float] = None) -> RetrievalPlan: ...
+
+
 @runtime_checkable
 class LLM(Protocol):
     """External or local model for synthesis and structured extraction (§8.2)."""
     def complete(self, messages: list[dict], **kw: Any) -> str: ...
-    def extract_json(self, prompt: str, schema: dict) -> Any: ...
+    def extract_json(self, prompt: str, schema: dict, **kw: Any) -> Any: ...
 
 
 @runtime_checkable

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ast
 import calendar
+import http.client
 import io
 import json
 import os
@@ -1068,6 +1069,37 @@ def test_a_direct_token_denial_also_settles_the_compatibility_cache(
     error = urllib.error.HTTPError(
         CONTROL_URL, status, "denied", {}, io.BytesIO(b"{}")
     )
+    _serve(monkeypatch, _FakeControlPlane(error=error))
+
+    assert v2_api._fetch_authoritative_entitlement() is None
+    settled = v2_api._read_entitlement_cache()
+    assert settled["plan"] == "team"
+    assert settled["cloud_access_active"] is False
+    assert settled["features"] == []
+
+
+def test_a_truncated_direct_token_denial_still_settles_the_cache(monkeypatch) -> None:
+    """A malformed 402 body cannot keep stale paid features visible indefinitely."""
+
+    _connect(monkeypatch, pinned_token=True)
+    cached = {
+        "plan": "team",
+        "features": SERVER_HOSTED_ENTITLEMENTS["team"],
+        "cloud_access_active": True,
+        "organization_id": ORGANIZATION,
+        "fetched_at": time.time() - 3600,
+    }
+    cached.update(v2_api._unknown_trial_facts())
+    v2_api._write_entitlement_cache(cached)
+    error = urllib.error.HTTPError(
+        CONTROL_URL, 402, "payment required", {}, io.BytesIO(b"{}")
+    )
+
+    def fail_drain(*args, **kwargs):
+        raise http.client.IncompleteRead(b'{"detail":"pri')
+
+    error.read = fail_drain
+    error.close = fail_drain
     _serve(monkeypatch, _FakeControlPlane(error=error))
 
     assert v2_api._fetch_authoritative_entitlement() is None

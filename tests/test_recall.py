@@ -1,7 +1,7 @@
 from engraphis.backends import DeterministicEmbedder, NumpyVectorIndex
 from engraphis.backends.reranker import IdentityReranker
 from engraphis.core.interfaces import MemoryRecord, Scope, SearchFilter
-from engraphis.core.recall import RecallEngine
+from engraphis.core.recall import RecallEngine, _absolute_retrieval_support
 from engraphis.core.retrieval_policy import ProfileConfig
 from engraphis.core.store import Store
 
@@ -14,6 +14,14 @@ def _engine():
 
 
 def _add(store, emb, wid, rid, text, **kw):
+    # These direct Store fixtures model locally approved test data. Public ingress
+    # coverage uses MemoryService and must remain pending until review.
+    provenance = dict(kw.get("provenance") or {
+        "source": "test", "trusted": True, "review_state": "approved",
+    })
+    if provenance.get("trusted") is True:
+        provenance.setdefault("review_state", "approved")
+    kw["provenance"] = provenance
     return store.add_memory(MemoryRecord(id="", content=text, workspace_id=wid, repo_id=rid,
                                          embedding=emb.embed([text])[0], **kw))
 
@@ -52,7 +60,7 @@ def test_recall_returns_relevant_first():
     assert "pnpm" in res.context.lower()
 
 
-def test_lexical_absolute_support_includes_title_text():
+def test_lexical_absolute_support_does_not_allow_title_only_evidence():
     store, emb, eng = _engine()
     wid = store.get_or_create_workspace("w")
     rid = store.get_or_create_repo(wid, "r")
@@ -73,7 +81,14 @@ def test_lexical_absolute_support_includes_title_text():
     )
 
     assert [chunk["id"] for chunk in result.chunks] == [memory_id]
-    assert result.chunks[0]["absolute_support"] > 0.0
+    assert result.chunks[0]["absolute_support"] == 0.0
+
+
+def test_absolute_support_treats_non_finite_cosine_as_no_evidence():
+    assert _absolute_retrieval_support(
+        "credential rotation", "unrelated prose", title="credential rotation",
+        semantic_cosine=float("nan"),
+    ) == 0.0
 
 
 def test_prompt_only_recall_continues_past_untrusted_arm_candidates():
@@ -412,7 +427,10 @@ def test_prompt_overfetch_never_reduces_the_requested_candidate_depth():
     )
 
     assert result.candidate_k_requested == 500
-    assert result.candidate_k_used == 500
+    # Diagnostics expose the actual post-overfetch page depth, not the policy
+    # starting depth, so operators can distinguish an ordinary recall from one
+    # that searched further for approved evidence.
+    assert result.candidate_k_used == 750
     assert requested[0] == 750
 
 
@@ -445,6 +463,7 @@ def test_prompt_only_overfetch_stays_bounded_for_large_untrusted_scopes():
 
     assert result.chunks == []
     assert index.requested == [4, 256]
+    assert result.candidate_k_used == 256
     assert max(index.requested) < len(untrusted_ids)
 
 

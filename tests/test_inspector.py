@@ -5,6 +5,7 @@ pytest.importorskip("fastapi", reason="full-stack extra not installed")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from engraphis.config import settings  # noqa: E402
+from engraphis.core.interfaces import Scope  # noqa: E402
 from engraphis.inspector import create_app  # noqa: E402
 from engraphis.service import MemoryService  # noqa: E402
 
@@ -13,10 +14,16 @@ from engraphis.service import MemoryService  # noqa: E402
 def client(monkeypatch):
     monkeypatch.setattr(settings, "api_token", "")
     svc = MemoryService.create(":memory:")
-    svc.remember("Until 2026-01 the rate limit was 100 requests per minute per API key.",
-                 workspace="acme", repo="backend")
-    out = svc.remember("As of 2026-02 the rate limit was raised to 500 requests per minute "
-                       "per API key.", workspace="acme", repo="backend")
+    workspace_id = svc.store.get_or_create_workspace("acme")
+    repo_id = svc.store.get_or_create_repo(workspace_id, "backend")
+    svc.engine.remember(
+        "Until 2026-01 the rate limit was 100 requests per minute per API key.",
+        workspace_id=workspace_id, repo_id=repo_id, scope=Scope.REPO,
+    )
+    out = svc.engine.remember_with_resolution(
+        "As of 2026-02 the rate limit was raised to 500 requests per minute per API key.",
+        workspace_id=workspace_id, repo_id=repo_id, scope=Scope.REPO,
+    )
     assert out["op"] == "invalidate"
     return TestClient(create_app(svc)), out
 

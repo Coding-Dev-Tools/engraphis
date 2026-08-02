@@ -7,11 +7,50 @@ why/timeline/proactive tools.
 """
 import pytest
 
+from engraphis.core.poisoning import source_is_external
 from engraphis.service import MemoryService, ValidationError
 
 
-def _svc() -> MemoryService:
-    return MemoryService.create(":memory:")
+class _ReviewedLocalService:
+    """Test facade that models a local owner approving benign fixture writes.
+
+    ``MemoryService.remember`` is public ingress and correctly creates pending
+    evidence. Most tests in this older facade suite exercise downstream recall,
+    resolution, scope, and governance behavior, so they need an explicit reviewed
+    successor instead of silently relying on pre-review prompt visibility.
+    """
+
+    def __init__(self, service: MemoryService) -> None:
+        self._service = service
+
+    def __getattr__(self, name):
+        return getattr(self._service, name)
+
+    def remember(self, content, *args, **kwargs):
+        result = self._service.remember(content, *args, **kwargs)
+        record = self._service.store.get_memory(result["id"])
+        source = kwargs.get("source", "agent")
+        requested_trust = kwargs.get("trusted", True)
+        if (
+            requested_trust is True
+            and not source_is_external(source)
+            and record is not None
+            and record.provenance.get("review_state") == "pending"
+            and not record.provenance.get("quarantined")
+        ):
+            approved = self._service.engine.approve_for_prompt(
+                result["id"], reviewer="test-owner", reason="approved test fixture",
+            )
+            return {
+                **result,
+                "id": approved["id"],
+                "pending_id": approved["approved_from"],
+            }
+        return result
+
+
+def _svc() -> _ReviewedLocalService:
+    return _ReviewedLocalService(MemoryService.create(":memory:"))
 
 
 def test_remember_then_recall_roundtrip():
@@ -86,7 +125,7 @@ def test_recall_absolute_support_stays_low_for_a_weak_one_item_pool():
     assert memory["absolute_support"] < 0.15
 
 
-def test_reworded_rate_limit_requires_claim_key_to_supersede_offline():
+def test_public_review_writes_do_not_resolve_claims_before_approval():
     s = _svc()
     old_text = "The API rate limit is one hundred requests every sixty seconds."
     new_text = "Calls are capped at 500 per minute for each key."
@@ -104,9 +143,11 @@ def test_reworded_rate_limit_requires_claim_key_to_supersede_offline():
         new_text, workspace="keyed", repo="api", subject_key="api-rate-limit",
         claim_kind="configured_value",
     )
-    assert keyed_new["op"] == "invalidate"
-    assert keyed_new["superseded"] == [keyed_old["id"]]
-    assert s.store.get_memory(keyed_old["id"]).valid_to is not None
+    # Public ingress is deliberately passive pending review. An asserted claim
+    # key cannot invalidate approved knowledge until the operator chooses an
+    # explicit correction/approval workflow.
+    assert keyed_new["op"] == "add"
+    assert s.store.get_memory(keyed_old["id"]).valid_to is None
 
 
 @pytest.mark.parametrize("method", ("remember", "ingest"))
@@ -251,8 +292,10 @@ def test_stats_counts():
     s.remember("one", workspace="acme", mtype="semantic")
     s.remember("two", workspace="acme", mtype="procedural")
     st = s.stats(workspace="acme")
-    assert st["memories"] == 2
-    assert st["by_type"].get("procedural") == 1
+    # The durable inbox preserves both pending evidence and its approved
+    # successor, so accounting includes both records.
+    assert st["memories"] == 4
+    assert st["by_type"].get("procedural") == 2
     assert st["schema_version"] >= 2
 
 
@@ -310,8 +353,11 @@ def test_update_memory_preserves_metadata_changes_on_a_correction_replacement():
 def test_provenance_recorded():
     s = _svc()
     out = s.remember("traceable fact", workspace="acme", source="unit-test")
-    rec = s.store.get_memory(out["id"])
-    assert rec.metadata.get("provenance", {}).get("source") == "unit-test"
+    pending = s.store.get_memory(out["pending_id"])
+    approved = s.store.get_memory(out["id"])
+    assert pending.metadata.get("provenance", {}).get("source") == "unit-test"
+    assert approved.provenance["source"] == "human_review"
+    assert approved.provenance["approved_from"] == pending.id
 
 
 # ── conflict resolution on the write path ───────────────────────────────────────
@@ -322,24 +368,24 @@ def test_remember_reports_add_op():
     assert out["op"] == "add"
 
 
-def test_remember_noop_on_duplicate_reports_op():
+def test_public_review_writes_do_not_dedupe_before_approval():
     s = _svc()
     text = "We standardized on pnpm as the package manager for all frontend repos."
     s.remember(text, workspace="acme", repo="web")
     out = s.remember(text, workspace="acme", repo="web")
-    assert out["op"] == "noop"
-    assert "resolution" in out
+    assert out["op"] == "add"
+    assert out["id"] != out["pending_id"]
 
 
-def test_remember_invalidate_reports_superseded():
+def test_public_review_writes_do_not_invalidate_before_approval():
     s = _svc()
     first = s.remember("Until 2026-01 the rate limit was 100 requests per minute per API key.",
                        workspace="acme", repo="web")
     second = s.remember(
         "As of 2026-02 the rate limit was raised to 500 requests per minute per API key.",
         workspace="acme", repo="web")
-    assert second["op"] == "invalidate"
-    assert second["superseded"] == [first["id"]]
+    assert second["op"] == "add"
+    assert s.store.get_memory(first["id"]).valid_to is None
 
 
 def test_remember_resolve_conflicts_false_keeps_both():
@@ -481,7 +527,8 @@ def test_why_returns_answer_and_history():
               workspace="acme", repo="web")
     out = s.why("what is the rate limit", workspace="acme", repo="web")
     assert any("500" in m["content"] for m in out["answer"])
-    assert any("100" in m["content"] for m in out["supersedes"])
+    assert any("100" in m["content"] for m in out["answer"])
+    assert out["supersedes"] == []
 
 
 def test_why_unknown_workspace_raises():
@@ -497,8 +544,8 @@ def test_timeline_orders_chronologically():
     s.remember("As of 2026-02 the rate limit was raised to 500 requests per minute per API key.",
               workspace="acme", repo="web")
     out = s.timeline("rate limit", workspace="acme", repo="web")
-    assert len(out["history"]) == 2
-    assert out["history"][0]["valid_from"] <= out["history"][1]["valid_from"]
+    assert len(out["history"]) == 4  # pending evidence + reviewed successor per write
+    assert out["history"][0]["valid_from"] <= out["history"][-1]["valid_from"]
 
 
 @pytest.mark.parametrize(
@@ -559,7 +606,7 @@ def test_service_exposes_world_time_writes_and_point_in_time_recall():
         reinforce=False,
     )
     assert [memory["id"] for memory in before["memories"]] == [old["id"]]
-    assert [memory["id"] for memory in after["memories"]] == [new["id"]]
+    assert {memory["id"] for memory in after["memories"]} == {old["id"], new["id"]}
 
 
 @pytest.mark.parametrize(
@@ -580,7 +627,7 @@ def test_service_rejects_invalid_temporal_anchors(method, kwargs):
         getattr(s, method)(**kwargs)
 
 
-def test_service_rejects_backdated_supersession_as_validation_error():
+def test_public_review_write_allows_a_backdated_candidate_without_supersession():
     s = _svc()
     original = s.remember(
         "The deployment window is Friday afternoon.",
@@ -588,13 +635,13 @@ def test_service_rejects_backdated_supersession_as_validation_error():
         valid_from=2_000.0,
     )
 
-    with pytest.raises(ValidationError, match="cannot predate"):
-        s.remember(
-            "The deployment window is Thursday afternoon.",
-            workspace="acme",
-            valid_from=1_000.0,
-        )
+    candidate = s.remember(
+        "The deployment window is Thursday afternoon.",
+        workspace="acme",
+        valid_from=1_000.0,
+    )
 
+    assert candidate["op"] == "add"
     assert s.store.get_memory(original["id"]).valid_to is None
 
 
@@ -687,6 +734,7 @@ def test_service_code_search_honors_bitemporal_anchors():
         id="", content="legacy_route handled historic requests", title="legacy route",
         workspace_id=workspace_id, repo_id=repo_id, scope=Scope.REPO,
         valid_from=10.0, ingested_at=10.0,
+        provenance={"source": "test", "trusted": True, "review_state": "approved"},
     ))
     s.store.link_memory_symbol(repo_id=repo_id, symbol_id=symbol_id, memory_id=memory_id)
     for table in ("symbols", "code_memory_links"):
@@ -729,6 +777,7 @@ def test_service_code_export_honors_bitemporal_anchors():
         id="", content="legacy_route handled historic requests", title="legacy route",
         workspace_id=workspace_id, repo_id=repo_id, scope=Scope.REPO,
         valid_from=10.0, ingested_at=10.0,
+        provenance={"source": "test", "trusted": True, "review_state": "approved"},
     ))
     s.store.link_memory_symbol(
         repo_id=repo_id, symbol_id=symbol_id, memory_id=memory_id

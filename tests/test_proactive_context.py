@@ -35,8 +35,9 @@ def test_ai_context_accepts_only_cited_llm_synthesis():
 
 def test_service_proactive_context_is_deterministic_and_cited():
     svc = MemoryService.create(":memory:", embed_model="")
-    svc.remember("Engraphis stores local memories in SQLite.", workspace="acme",
-                 scope="workspace", title="Storage backend", importance=0.8)
+    pending = svc.remember("Engraphis stores local memories in SQLite.", workspace="acme",
+                           scope="workspace", title="Storage backend", importance=0.8)
+    svc.engine.approve_for_prompt(pending["id"], reviewer="test", reason="approved fixture")
     out = svc.proactive_context(workspace="acme", task="work on persistence", k=5)
     assert out["workspace"] == "acme"
     assert out["grounded"] is True
@@ -82,8 +83,9 @@ def test_service_proactive_context_bounds_agent_inputs():
 
 def test_api_proactive_context_round_trip():
     svc = MemoryService.create(":memory:", embed_model="")
-    svc.remember("Use PASETO for auth tokens.", workspace="acme",
-                 scope="workspace", title="Auth convention", importance=0.9)
+    pending = svc.remember("Use PASETO for auth tokens.", workspace="acme",
+                           scope="workspace", title="Auth convention", importance=0.9)
+    svc.engine.approve_for_prompt(pending["id"], reviewer="test", reason="approved fixture")
     v2_api.set_service(svc)
     app = FastAPI()
     app.include_router(v2_api.router)

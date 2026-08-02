@@ -57,6 +57,13 @@ def _seed_entities(svc, workspace, rows, edges):
     return wid, id_of
 
 
+def _approve(svc, pending):
+    """Create a prompt-eligible fixture through the approval primitive."""
+    return svc.engine.approve_for_prompt(
+        pending["id"], reviewer="test", reason="approved fixture"
+    )
+
+
 def test_graph_returns_seeded_nodes_and_edges():
     svc = MemoryService.create(":memory:")
     _wid, id_of = _seed_entities(
@@ -177,8 +184,8 @@ def test_remember_populates_graph_when_extractor_wired():
     """Ingest through the wired extractor writes entities, so the Graph tab has
     nodes for freshly remembered content (new users, day one)."""
     svc = MemoryService.create(":memory:", graph_extractor="regex")
-    svc.remember("Alice Johnson works at Acme Corp.", workspace="acme",
-                 scope="workspace")
+    _approve(svc, svc.remember("Alice Johnson works at Acme Corp.", workspace="acme",
+                               scope="workspace"))
     nodes = svc.graph(workspace="acme")["nodes"]
     labels = {n["label"] for n in nodes}
     assert "Alice Johnson" in labels and "Acme Corp" in labels
@@ -268,6 +275,7 @@ def test_team_graph_entity_with_mixed_session_and_workspace_history_is_visible()
             "Alice Johnson works at Shared Corporation.", workspace="acme", repo="r",
             scope="repo",
         )
+        public = _approve(svc, public)
         for memory_id in (private["id"], public["id"]):
             memory = svc.store.get_memory(memory_id)
             graph_feed(
@@ -295,10 +303,11 @@ def test_graph_index_excludes_session_scoped_memories():
             "Private Falcon works at Hidden Corporation.", workspace="acme", repo="r",
             session_id=session["session_id"], scope="session",
         )
-        svc.remember(
+        public = svc.remember(
             "Public Robin works at Visible Corporation.", workspace="acme", repo="r",
             scope="repo",
         )
+        _approve(svc, public)
 
         set_current_user({"id": "usr_bob", "email": "bob@test", "role": "member"})
         job = svc.start_graph_index_job(workspace="acme", dry_run=False)
@@ -317,25 +326,23 @@ def test_graph_index_excludes_session_scoped_memories():
         set_current_user(None)
 
 
-def test_structured_extractor_metadata_populates_graph_without_regex_extractor():
-    """llm_structured emits validated entity/relation hints; those should feed the
-    graph directly even when the regex text graph extractor is disabled."""
+def test_approved_extractor_content_does_not_launder_structured_graph_hints():
+    """Approval releases reviewed text, not caller/extractor-supplied graph metadata."""
     pytest.importorskip("pydantic")
     svc = MemoryService.create(":memory:", graph_extractor="none")
     svc.engine.extractor = StructuredLLMExtractor(_StructuredGraphLLM())
-    svc.ingest("raw transcript blob", workspace="acme", scope="workspace")
+    ingested = svc.ingest("raw transcript blob", workspace="acme", scope="workspace")
+    for fact in ingested["facts"]:
+        _approve(svc, {"id": fact["id"]})
 
-    g = svc.graph(workspace="acme")
-    id_by_label = {n["label"]: n["id"] for n in g["nodes"]}
-    assert {"Engraphis", "SQLite"} <= set(id_by_label)
-    assert {"from": id_by_label["Engraphis"], "to": id_by_label["SQLite"],
-            "label": "stores_in", "layer": "semantic"} in g["edges"]
+    graph = svc.graph(workspace="acme")
+    assert graph["nodes"] == [] and graph["edges"] == []
 
 
 def test_graph_hides_edges_from_forgotten_memory():
     svc = MemoryService.create(":memory:", graph_extractor="regex")
-    out = svc.remember("Alice Johnson works at Acme Corp.", workspace="acme",
-                       scope="workspace")
+    out = _approve(svc, svc.remember("Alice Johnson works at Acme Corp.", workspace="acme",
+                                     scope="workspace"))
     assert svc.graph(workspace="acme")["edges"]
 
     svc.forget(out["id"], workspace="acme")
@@ -348,7 +355,9 @@ def test_graph_lazy_backfills_structured_metadata_without_regex_extractor():
     svc.store.add_memory(MemoryRecord(
         id="", content="Engraphis stores memories in SQLite.",
         workspace_id=wid, scope=Scope.WORKSPACE, mtype=MemoryType.SEMANTIC,
-        metadata={"entities": ["Engraphis", "SQLite"],
+        provenance={"trusted": True, "review_state": "approved"},
+        metadata={"provenance": {"trusted": True, "review_state": "approved"},
+                  "entities": ["Engraphis", "SQLite"],
                   "relations": [{"source": "engraphis", "relation": "stores_in",
                                  "target": "SQLite"}]},
     ))
@@ -370,7 +379,9 @@ def test_graph_lazy_backfill_logs_failure_without_exception_text(monkeypatch, ca
         workspace_id=wid,
         scope=Scope.WORKSPACE,
         mtype=MemoryType.SEMANTIC,
-        metadata={"entities": ["Engraphis", "SQLite"]},
+        provenance={"trusted": True, "review_state": "approved"},
+        metadata={"provenance": {"trusted": True, "review_state": "approved"},
+                  "entities": ["Engraphis", "SQLite"]},
     ))
 
     def fail_feed(*args, **kwargs):
@@ -391,8 +402,9 @@ def test_graph_lazy_backfills_preexisting_memories():
     is later enabled (an update), the first Graph-tab open backfills that
     workspace's graph from its existing memories — no manual migration."""
     svc = MemoryService.create(":memory:", graph_extractor="none")
-    svc.remember("Alice Johnson works at Acme Corp.", workspace="acme",
-                 scope="workspace")
+    pending = svc.remember("Alice Johnson works at Acme Corp.", workspace="acme",
+                           scope="workspace")
+    _approve(svc, pending)
     assert svc.graph(workspace="acme")["nodes"] == []      # extractor off -> no backfill
 
     svc.engine.graph_extractor = get_graph_extractor("regex")   # simulate the update
@@ -403,8 +415,8 @@ def test_graph_lazy_backfills_preexisting_memories():
 def test_graph_falls_back_to_direct_memory_links_without_entities():
     """A-MEM links form a useful graph even when entity extraction is disabled."""
     svc = MemoryService.create(":memory:", graph_extractor="none")
-    first = svc.remember("Synthetic alpha", workspace="acme", scope="workspace")
-    second = svc.remember("Synthetic beta", workspace="acme", scope="workspace")
+    first = _approve(svc, svc.remember("Synthetic alpha", workspace="acme", scope="workspace"))
+    second = _approve(svc, svc.remember("Synthetic beta", workspace="acme", scope="workspace"))
     svc.link(first["id"], second["id"], workspace="acme", relation="causes")
 
     graph = svc.graph(workspace="acme")
@@ -428,15 +440,17 @@ def test_graph_memory_link_fallback_excludes_session_scope():
         "Private beta", workspace="acme", repo="r",
         session_id=session["session_id"], scope="session",
     )
-    svc.link(private_a["id"], private_b["id"], workspace="acme", relation="causes")
+    # Simulate a pre-gate session link; normal service linking now rejects
+    # unapproved records before it can create this legacy derived state.
+    svc.store.add_link(private_a["id"], private_b["id"], "causes")
 
     assert svc.graph(workspace="acme")["nodes"] == []
 
 
 def test_graph_memory_link_fallback_respects_empty_layer_filter():
     svc = MemoryService.create(":memory:", graph_extractor="none")
-    first = svc.remember("Synthetic alpha", workspace="acme", scope="workspace")
-    second = svc.remember("Synthetic beta", workspace="acme", scope="workspace")
+    first = _approve(svc, svc.remember("Synthetic alpha", workspace="acme", scope="workspace"))
+    second = _approve(svc, svc.remember("Synthetic beta", workspace="acme", scope="workspace"))
     svc.link(first["id"], second["id"], workspace="acme", relation="causes")
 
     graph = svc.graph(workspace="acme", layers=[])
@@ -452,14 +466,14 @@ def test_graph_memory_link_fallback_samples_links_before_unrelated_memories():
         svc.remember(
             f"Unlinked memory {index}", workspace="acme", scope="workspace"
         )
-    first = svc.remember(
+    first = _approve(svc, svc.remember(
         "Orchid deployment requires manual approval.",
         workspace="acme", scope="workspace",
-    )
-    second = svc.remember(
+    ))
+    second = _approve(svc, svc.remember(
         "Jupiter telemetry is retained for thirty days.",
         workspace="acme", scope="workspace",
-    )
+    ))
     svc.link(first["id"], second["id"], workspace="acme", relation="causes")
 
     graph = svc.graph(workspace="acme", limit=2)
@@ -475,8 +489,8 @@ def test_graph_memory_link_fallback_projects_bounded_content_excerpts():
     """Fallback SQL must not materialize full memory bodies just to label nodes."""
     svc = MemoryService.create(":memory:", graph_extractor="none")
     svc.engine.auto_evolve = False
-    first = svc.remember("A" * 100_000, workspace="acme", scope="workspace")
-    second = svc.remember("B" * 100_000, workspace="acme", scope="workspace")
+    first = _approve(svc, svc.remember("A" * 100_000, workspace="acme", scope="workspace"))
+    second = _approve(svc, svc.remember("B" * 100_000, workspace="acme", scope="workspace"))
     svc.link(first["id"], second["id"], workspace="acme", relation="causes")
     statements = []
     svc.store.conn.set_trace_callback(statements.append)
@@ -499,8 +513,8 @@ def test_graph_memory_link_fallback_projects_bounded_content_excerpts():
 def test_graph_memory_link_fallback_honors_the_requested_as_of_anchor():
     svc = MemoryService.create(":memory:", graph_extractor="none")
     svc.engine.auto_evolve = False
-    first = svc.remember("Historical alpha", workspace="acme", scope="workspace")
-    second = svc.remember("Historical beta", workspace="acme", scope="workspace")
+    first = _approve(svc, svc.remember("Historical alpha", workspace="acme", scope="workspace"))
+    second = _approve(svc, svc.remember("Historical beta", workspace="acme", scope="workspace"))
     svc.link(first["id"], second["id"], workspace="acme", relation="causes")
     svc.store.conn.execute(
         "UPDATE memories SET valid_from=?, valid_to=? WHERE id IN (?, ?)",
@@ -523,8 +537,8 @@ def test_graph_memory_link_fallback_honors_the_requested_as_of_anchor():
 def test_graph_memory_link_fallback_honors_both_temporal_anchors():
     svc = MemoryService.create(":memory:", graph_extractor="none")
     svc.engine.auto_evolve = False
-    first = svc.remember("Historical alpha", workspace="acme", scope="workspace")
-    second = svc.remember("Historical beta", workspace="acme", scope="workspace")
+    first = _approve(svc, svc.remember("Historical alpha", workspace="acme", scope="workspace"))
+    second = _approve(svc, svc.remember("Historical beta", workspace="acme", scope="workspace"))
     svc.link(first["id"], second["id"], workspace="acme", relation="causes")
     svc.store.conn.execute(
         "UPDATE memories SET valid_from=100, ingested_at=100 WHERE id IN (?, ?)",
@@ -552,8 +566,8 @@ def test_graph_memory_link_fallback_honors_both_temporal_anchors():
 def test_graph_lazy_backfill_is_idempotent():
     """Re-opening the Graph tab must not duplicate entities."""
     svc = MemoryService.create(":memory:", graph_extractor="regex")
-    svc.remember("Alice Johnson works at Acme Corp.", workspace="acme",
-                 scope="workspace")
+    _approve(svc, svc.remember("Alice Johnson works at Acme Corp.", workspace="acme",
+                               scope="workspace"))
     first = svc.graph(workspace="acme")["stats"]["entities"]
     second = svc.graph(workspace="acme")["stats"]["entities"]
     assert first == second and first >= 2
@@ -945,7 +959,8 @@ def test_graph_include_code_batches_linked_memory_lookups(monkeypatch):
     mem_ids = []
     for i in range(3):
         mid = svc.remember(f"Memory number {i}.", workspace="acme", repo="web",
-                           scope="repo", resolve_conflicts=False)["id"]
+                           scope="repo", resolve_conflicts=False)
+        mid = _approve(svc, mid)["id"]
         mem_ids.append(mid)
         symbol_id = svc.store.upsert_symbol(
             repo_id=rid, kind="function", name=f"fn{i}", fqname=f"fn{i}",

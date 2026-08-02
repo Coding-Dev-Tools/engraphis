@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import tempfile
@@ -1215,6 +1216,7 @@ def test_code_search_and_memory_paths_honor_historical_anchors():
         id="", content="old_fn used the historical path", title="old path",
         workspace_id=wid, repo_id=rid, scope=Scope.REPO,
         valid_from=10.0, ingested_at=10.0,
+        provenance={"source": "test", "trusted": True, "review_state": "approved"},
     ))
     eng.store.link_memory_symbol(
         repo_id=rid, symbol_id=symbol_id, memory_id=memory_id,
@@ -1298,10 +1300,12 @@ def test_code_reads_apply_session_visibility_to_every_memory_surface():
     repo_memory = eng.store.add_memory(MemoryRecord(
         id="", content="deploy uses the public release process", title="repo deploy",
         workspace_id=wid, repo_id=rid, scope=Scope.REPO,
+        provenance={"source": "test", "trusted": True, "review_state": "approved"},
     ))
     session_memory = eng.store.add_memory(MemoryRecord(
         id="", content="deploy uses a private session token", title="session deploy secret",
         workspace_id=wid, repo_id=rid, session_id=session_id, scope=Scope.SESSION,
+        provenance={"source": "test", "trusted": True, "review_state": "approved"},
     ))
     for memory_id in (repo_memory, session_memory):
         eng.store.link_memory_symbol(
@@ -1395,6 +1399,18 @@ def test_rebuild_code_memory_links_keysets_past_five_thousand_session_records():
         ") VALUES (?,?,?,?,?,?,?,?,?,?)",
         rows,
     )
+    approved_provenance = {
+        "source": "human_review", "trusted": True, "review_state": "approved",
+    }
+    eng.store.conn.execute(
+        "UPDATE memories SET metadata=?, provenance=? WHERE id=?",
+        (
+            json.dumps({"provenance": approved_provenance}),
+            json.dumps(approved_provenance),
+            target_id,
+        ),
+    )
+    eng.store.conn.commit()
     eng.store.link_memory_symbol(
         repo_id=rid, symbol_id=symbol_id, memory_id=target_id,
     )

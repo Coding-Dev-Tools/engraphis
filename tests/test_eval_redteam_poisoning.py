@@ -35,7 +35,7 @@ def test_redteam_fixture_covers_delayed_attacks_and_controls():
 def test_redteam_fixture_reports_containment_and_control_behavior():
     report = redteam_poisoning.run()
 
-    assert report["schema"] == "engraphis-redteam-poisoning/v3"
+    assert report["schema"] == "engraphis-redteam-poisoning/v4"
     assert report["scope"]["fixture"] == "deterministic offline delayed-trigger cases"
     assert report["cases"] == {
         "total": 7,
@@ -51,11 +51,12 @@ def test_redteam_fixture_reports_containment_and_control_behavior():
     assert report["write_time"]["bypass_attack_quarantine_rate"]["rate"] == 0.0
     # The service boundary downgrades a forged trusted import before the policy runs.
     assert report["write_time"]["mislabeled_attack_quarantine_rate"]["rate"] == 1.0
-    assert report["delayed_trigger"]["asr"]["rate"] == 0.0
-    assert report["delayed_trigger"]["answer_containment"]["rate"] == 1.0
-    expected_answer_rate = report["delayed_trigger"]["expected_answer_rate"]
-    assert expected_answer_rate["rate"] == 1.0
-    assert report["delayed_trigger"]["trusted_answer_rate"] == expected_answer_rate
+    containment = report["delayed_trigger"]["labeled_untrusted_retrieval_path_containment"]
+    assert containment["rate"] == 1.0
+    assert "labeled-untrusted" in containment["definition"]
+    assert "asr" not in report["delayed_trigger"]
+    assert report["delayed_trigger"]["reviewed_evidence_answer_rate"]["rate"] == 1.0
+    assert report["delayed_trigger"]["approved_benign_evidence_rate"]["rate"] == 1.0
     # Normal recall is prompt context: it must not surface even the non-quarantined
     # bypass record in a later session. Explicit inspection remains available for
     # operators without becoming evidence for the answering path.
@@ -78,7 +79,7 @@ def test_redteam_fixture_reports_containment_and_control_behavior():
 def test_redteam_cli_json_is_machine_readable(capsys):
     assert redteam_poisoning.main(["--json"]) == 0
     report = json.loads(capsys.readouterr().out)
-    assert report["delayed_trigger"]["asr"]["definition"]
+    assert report["delayed_trigger"]["labeled_untrusted_retrieval_path_containment"]["definition"]
 
 
 def test_redteam_dataset_rejects_attack_without_marker(tmp_path: Path):
