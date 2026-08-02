@@ -32,6 +32,8 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Fixed
 
+- The production image now removes build-only pip and its vendored dependency snapshot after
+  installation, eliminating unreachable vulnerable packages from the runtime attack surface.
 - Automatic LLM retention supervision now discards proposed retention values when it
   demotes an unapproved `critical` label; legacy poisoning rescans also honor
   `--keep-unlabelled`, and code-memory exports apply eligibility before their result cap.

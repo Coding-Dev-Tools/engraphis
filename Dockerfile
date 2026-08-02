@@ -36,10 +36,15 @@ COPY scripts ./scripts
 # Railway runs CPU workloads.  Install the CPU-only PyTorch wheel before the embedding
 # stack so pip cannot select PyPI's multi-gigabyte CUDA dependency chain.  The public
 # customer image needs the dashboard/server surface, MCP-over-HTTP, and its advertised local
-# OCR path; transcription, PostgreSQL, and code graph remain opt-in deployment baggage.
+# OCR path; transcription, PostgreSQL, and code graph remain opt-in deployment baggage. pip is
+# build-only here, so remove it and its vendored dependency snapshot from the runtime image.
 RUN pip install --upgrade pip "setuptools>=83" \
     && pip install --index-url https://download.pytorch.org/whl/cpu torch \
-    && pip install ".[server,mcp,documents,cloud-sync]"
+    && pip install ".[server,mcp,documents,cloud-sync]" \
+    && rm -rf /root/.cache/pip \
+        /usr/local/lib/python3.11/site-packages/pip \
+        /usr/local/lib/python3.11/site-packages/pip-*.dist-info \
+    && rm -f /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.11
 
 # Create the non-root app user and pre-own /data. NOTE: the container starts as root so
 # docker-entrypoint.sh can chown a freshly-mounted (root-owned) persistent volume, then

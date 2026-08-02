@@ -66,6 +66,10 @@ def test_railway_image_is_cpu_only_and_installs_only_its_runtime_surface():
     assert "https://download.pytorch.org/whl/cpu torch" in dockerfile
     assert 'pip install ".[server,mcp,documents,cloud-sync]"' in dockerfile
     assert 'pip install ".[all]"' not in dockerfile
+    # pip is needed while building the image, but no production command invokes it.
+    # Its vendored dependency snapshot must not remain in the runtime attack surface.
+    assert "rm -rf /root/.cache/pip" in dockerfile
+    assert "/usr/local/lib/python3.11/site-packages/pip" in dockerfile
 
 
 def test_platform_port_precedes_a_fixed_engraphis_port(monkeypatch):
