@@ -162,6 +162,28 @@ def test_rescan_fails_closed_for_unlabelled_legacy_row(tmp_path):
     after.close()
 
 
+def test_rescan_keep_unlabelled_does_not_demote_unlabelled_legacy_row(tmp_path):
+    path = tmp_path / "keep-unlabelled.db"
+    store = Store(str(path))
+    workspace_id = store.get_or_create_workspace("w")
+    store.add_memory(MemoryRecord(
+        id="mem_unlabelled", content="Historical import without provenance.",
+        workspace_id=workspace_id, scope=Scope.WORKSPACE,
+    ))
+    store.conn.execute("UPDATE memories SET provenance='{}', metadata='{}' WHERE id='mem_unlabelled'")
+    store.conn.commit()
+    store.close()
+
+    report = rescan(str(path), apply=True, mark_unverified=False, demote_unapproved=True)
+    assert report["unverified"] == 1
+    assert report["unchanged"] == 1
+    assert report["downgraded_untrusted"] == 0
+
+    after = Store(str(path))
+    assert after.get_memory("mem_unlabelled").provenance == {}
+    after.close()
+
+
 def test_rescan_retires_live_graph_state_for_a_downgraded_record(tmp_path):
     path = tmp_path / "legacy-graph.db"
     store = Store(str(path))

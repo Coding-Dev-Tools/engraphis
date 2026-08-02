@@ -85,11 +85,15 @@ def rescan(db_path: str, *, apply: bool = False,
             # predates the review gate.  Only its explicit approved state may
             # remain prompt-eligible after the migration.
             unverified = not provenance_is_approved(provenance)
+            unlabelled = "trusted" not in provenance
             external = source_is_external(source)
             should_downgrade = (
                 explicitly_untrusted or external
-                or (mark_unverified and unverified)
-                or (demote_unapproved and not provenance_is_approved(provenance))
+                # ``--keep-unlabelled`` protects records with no trust declaration;
+                # ``--keep-unapproved`` separately controls records that made a
+                # declaration but never completed review.
+                or (mark_unverified and unlabelled)
+                or (demote_unapproved and not unlabelled and unverified)
             )
             if unverified:
                 summary["unverified"] += 1

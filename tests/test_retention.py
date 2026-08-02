@@ -130,6 +130,20 @@ def test_automatic_critical_retention_defaults_to_normal_when_supervised_by_llm(
     assert record.stability == 1.0
 
 
+def test_automatic_critical_demotion_discards_finite_llm_retention_values():
+    class CriticalSupervisor:
+        def decide(self, *args, **kwargs):
+            return RetentionDecision(label="critical", importance=0.9, stability=8.0)
+
+    engine = MemoryEngine.create(":memory:", retention_supervisor="none")
+    engine.retention_supervisor = CriticalSupervisor()
+    wid = engine.store.get_or_create_workspace("acme")
+    mid = engine.remember("Critical policy.", workspace_id=wid, importance=0.7)
+    record = engine.store.get_memory(mid)
+    assert record.importance == 0.7
+    assert record.stability == 1.0
+
+
 def test_owner_can_opt_in_to_automatic_critical_retention():
     class CriticalSupervisor:
         def decide(self, *args, **kwargs):

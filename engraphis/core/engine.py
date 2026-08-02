@@ -858,16 +858,18 @@ class MemoryEngine:
         label = str(decision.label or "normal").lower()
         if label not in {"ephemeral", "normal", "critical"}:
             label = "normal"
+        demoted_automatic_critical = False
         if source == "llm" and label == "critical" and not self.allow_automatic_critical_retention:
             # The supervisor sees text it does not authoritatively vouch for. Its
             # "critical" label therefore defaults to normal retention; an explicit
             # user/host retention_class remains a separate, bounded path.
             label = "normal"
+            demoted_automatic_critical = True
         if not decision.retain:
             label = "ephemeral"
         preset_stability = {"ephemeral": 0.25, "normal": 1.0, "critical": 8.0}[label]
         preset_importance = {"ephemeral": 0.1, "normal": 0.5, "critical": 0.9}[label]
-        if decision.importance is not None:
+        if decision.importance is not None and not demoted_automatic_critical:
             proposed_importance = _bounded_finite(
                 decision.importance, default=preset_importance,
                 minimum=0.0, maximum=1.0,
@@ -881,7 +883,8 @@ class MemoryEngine:
         )
         final_importance = max(caller_importance, proposed_importance)
         final_stability = _bounded_finite(
-            decision.stability if decision.stability is not None else preset_stability,
+            decision.stability if decision.stability is not None
+            and not demoted_automatic_critical else preset_stability,
             default=preset_stability, minimum=0.05, maximum=100.0,
         )
         signal = {

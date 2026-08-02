@@ -330,9 +330,15 @@ def test_public_capability_and_support_docs_match_the_shipped_tree():
 
     changelog = _text("CHANGELOG.md")
     evidence = _text("eval/EVIDENCE.md")
+    runbook = _text("docs/PUBLIC_BENCHMARK_RUNBOOK.md")
+    seed_script = _text("scripts/seed_from_obsidian.py")
     assert changelog.count("## [1.3.0] - 2026-08-01") == 1
     assert "ENGRAPHIS_EVIDENCE_RUN_DIR=/path/to/restricted/longmemeval-v2" in evidence
     assert "/private/longmemeval-v2" not in evidence
+    assert "ENGRAPHIS_BENCHMARK_RUN_DIR=/path/to/restricted/benchmark-run" in runbook
+    assert "private/point.json" not in runbook
+    assert "private/comparison-series.json" not in runbook
+    assert "C:/Users/home/" not in seed_script
     assert "ForceGraph + D3 renderer" in changelog
     assert "## [1.1.0] - 2026-07-26" in changelog
     assert "Public 1.1.0 hosted-connect and graph-experience release." in changelog

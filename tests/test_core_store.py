@@ -648,6 +648,31 @@ def test_code_memory_link_listing_requires_visible_symbol_and_memory(store):
     assert store.list_code_memory_links(rid) == []
 
 
+def test_code_memory_link_limit_excludes_pending_rows_before_capping(store):
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    symbol_id = store.upsert_symbol(
+        repo_id=rid, kind="function", name="deploy", fqname="deploy",
+        file="deploy.py", span="1-1",
+    )
+    pending = store.add_memory(MemoryRecord(
+        id="", content="Pending deploy note.", workspace_id=wid, repo_id=rid,
+        scope=Scope.REPO,
+        provenance={"source": "import", "trusted": False, "review_state": "pending"},
+    ))
+    approved = store.add_memory(MemoryRecord(
+        id="", content="Approved deploy note.", workspace_id=wid, repo_id=rid,
+        scope=Scope.REPO,
+        provenance={"source": "human_review", "trusted": True, "review_state": "approved"},
+    ))
+    store.link_memory_symbol(repo_id=rid, symbol_id=symbol_id, memory_id=pending)
+    store.link_memory_symbol(repo_id=rid, symbol_id=symbol_id, memory_id=approved)
+
+    rows = store.list_code_memory_links(rid, limit=1)
+
+    assert [row["memory_id"] for row in rows] == [approved]
+
+
 def test_memory_entity_incidence_is_scoped_and_temporal(store):
     wid = store.get_or_create_workspace("w")
     rid = store.get_or_create_repo(wid, "r")

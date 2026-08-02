@@ -3869,16 +3869,22 @@ class Store:
             sql += " AND " + " AND ".join(where)
             params.extend(visibility_params)
         sql += " ORDER BY l.created_at, l.id"
-        if limit is not None:
-            sql += " LIMIT ?"
-            params.append(max(0, int(limit)))  # never -1 == SQLite "unlimited"
-        rows = self.conn.execute(sql, params).fetchall()
-        return [
-            {key: value for key, value in dict(row).items()
-             if key not in {"metadata", "provenance"}}
-            for row in rows
-            if _row_is_prompt_eligible(row["provenance"], row["metadata"])
-        ]
+        if limit is not None and int(limit) <= 0:
+            return []
+        # This bridge feeds export/code-path/scene features. Filter each source before
+        # counting it, so pending links cannot exhaust the public result cap.
+        eligible_limit = None if limit is None else int(limit)
+        out = []
+        for row in self.conn.execute(sql, params):
+            if not _row_is_prompt_eligible(row["provenance"], row["metadata"]):
+                continue
+            out.append({
+                key: value for key, value in dict(row).items()
+                if key not in {"metadata", "provenance"}
+            })
+            if eligible_limit is not None and len(out) >= eligible_limit:
+                break
+        return out
 
     def memories_for_symbol(self, repo_id: str, symbol_id: str, *,
                             flt: Optional[SearchFilter] = None,

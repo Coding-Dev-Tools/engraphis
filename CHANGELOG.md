@@ -32,6 +32,9 @@ All notable changes to Engraphis are documented here. Format loosely follows
 
 ### Fixed
 
+- Automatic LLM retention supervision now discards proposed retention values when it
+  demotes an unapproved `critical` label; legacy poisoning rescans also honor
+  `--keep-unlabelled`, and code-memory exports apply eligibility before their result cap.
 - `engraphis connect` now treats its printed summary as a provider trust boundary: only bounded,
   printable registration metadata is rendered, preventing malformed control-plane values from
   being reflected into CLI or JSON output.
