@@ -667,6 +667,39 @@ def test_memory_entity_incidence_is_scoped_and_temporal(store):
             for row in rows] == [(mid, entity_id, "text_mention")]
 
 
+def test_prompt_memory_entity_limit_excludes_pending_rows_before_capping(store):
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    entity_id = store.upsert_entity(Node(
+        id="", name="Deploy", ntype="service", workspace_id=wid, repo_id=rid,
+    ))
+    pending = store.add_memory(MemoryRecord(
+        id="", content="Pending deployment note.", workspace_id=wid, repo_id=rid,
+        scope=Scope.REPO,
+        provenance={"source": "import", "trusted": False, "review_state": "pending"},
+    ))
+    approved = store.add_memory(MemoryRecord(
+        id="", content="Approved deployment note.", workspace_id=wid, repo_id=rid,
+        scope=Scope.REPO,
+        provenance={"source": "test", "trusted": True, "review_state": "approved"},
+    ))
+    store.link_memory_entity(
+        memory_id=pending, entity_id=entity_id, workspace_id=wid, repo_id=rid,
+        source_kind="test", confidence=1.0,
+    )
+    store.link_memory_entity(
+        memory_id=approved, entity_id=entity_id, workspace_id=wid, repo_id=rid,
+        source_kind="test", confidence=0.5,
+    )
+
+    rows = store.list_memory_entities(
+        SearchFilter(workspace_id=wid, repo_id=rid), entity_ids=[entity_id],
+        prompt_only=True, limit=1,
+    )
+
+    assert [row["memory_id"] for row in rows] == [approved]
+
+
 def test_memory_entity_lookup_chunks_large_memory_id_filters(store, monkeypatch):
     from engraphis.core import store as store_mod
 

@@ -39,11 +39,25 @@ STRONG_JOINT_EMBED_SIM = 0.45
 
 
 def _normalise_claim_text(value: str) -> str:
-    """Compare keyed claims independent of harmless spacing and punctuation."""
+    """Compare keyed claims independent of whitespace and terminal punctuation.
+
+    Punctuation inside a token is part of the claim value: removing it would
+    conflate versions (``v1.2``/``v12``), paths, and identifiers.  Only a
+    separator at a whitespace or string boundary is presentation punctuation.
+    """
+    raw = str(value or "")
     return " ".join(
         "".join(
-            character for character in str(value or "")
-            if not unicodedata.category(character).startswith("P")
+            " " if (
+                unicodedata.category(character).startswith("P")
+                and (
+                    index == 0
+                    or index == len(raw) - 1
+                    or raw[index - 1].isspace()
+                    or raw[index + 1].isspace()
+                )
+            ) else character
+            for index, character in enumerate(raw)
         ).split()
     ).casefold()
 

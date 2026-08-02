@@ -2452,8 +2452,14 @@ class Store:
     def list_memory_entities(self, flt: Optional[SearchFilter] = None, *,
                              entity_ids: Optional[list[str]] = None,
                              memory_ids: Optional[list[str]] = None,
-                             limit: Optional[int] = None) -> list[dict]:
-        """Return bounded scoped/temporal incidence rows for graph retrieval."""
+                             limit: Optional[int] = None,
+                             prompt_only: bool = False) -> list[dict]:
+        """Return bounded scoped/temporal incidence rows for graph retrieval.
+
+        ``prompt_only`` applies the canonical trust predicate before ``limit``.
+        Derived graph bridges otherwise let pending records exhaust a raw SQL
+        result window and hide lower-ranked approved evidence.
+        """
         # Consolidation scans up to 2,000 memories, while portable SQLite builds may
         # allow only 999 bind variables. Partition ID filters before building the SQL
         # predicate; each pair of chunks is disjoint, so merging preserves results.
@@ -2476,13 +2482,19 @@ class Store:
                 for memory_chunk in memory_chunks
                 for row in self.list_memory_entities(
                     flt, entity_ids=entity_chunk, memory_ids=memory_chunk,
+                    prompt_only=prompt_only,
                 )
             ]
             rows.sort(key=lambda row: (-float(row.get("confidence") or 0.0), row["id"]))
             return rows if limit is None else rows[:max(0, int(limit))]
+        if prompt_only and limit is not None and int(limit) <= 0:
+            return []
         valid_at, known_at = _temporal_anchors(flt)
         sql = (
-            "SELECT me.* FROM memory_entities me "
+            "SELECT me.*"
+            + (", m.provenance AS memory_provenance, m.metadata AS memory_metadata"
+               if prompt_only else "")
+            + " FROM memory_entities me "
             "JOIN memories m ON m.id=me.memory_id WHERE "
             "(me.valid_from IS NULL OR me.valid_from<=?) "
             "AND (me.valid_to IS NULL OR ?<me.valid_to "
@@ -2522,10 +2534,23 @@ class Store:
             sql += f" AND me.memory_id IN ({marks})"
             params.extend(memory_ids)
         sql += " ORDER BY me.confidence DESC, me.id"
-        if limit is not None:
+        if limit is not None and not prompt_only:
             sql += " LIMIT ?"
             params.append(max(0, int(limit)))
-        return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
+        if not prompt_only:
+            return [dict(row) for row in self.conn.execute(sql, params).fetchall()]
+        eligible_limit = None if limit is None else max(0, int(limit))
+        rows: list[dict] = []
+        for row in self.conn.execute(sql, params):
+            item = dict(row)
+            if not _row_is_prompt_eligible(
+                item.pop("memory_provenance", None), item.pop("memory_metadata", None),
+            ):
+                continue
+            rows.append(item)
+            if eligible_limit is not None and len(rows) >= eligible_limit:
+                break
+        return rows
 
     def upsert_edge(self, edge: Edge, *, commit: bool = True) -> str:
         eid = edge.id or ids.new_id("edge")

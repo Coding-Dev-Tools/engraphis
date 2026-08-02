@@ -170,6 +170,23 @@ def test_keyed_duplicate_ignores_harmless_punctuation():
     assert res.target_id == "mem_punctuated"
 
 
+def test_keyed_duplicate_preserves_semantic_punctuation():
+    neighbor = MemoryRecord(
+        id="mem_versioned",
+        content="The API version is v1.2.",
+        subject_key="api-version",
+        claim_kind="configured_value",
+    )
+    res = resolve(
+        "The API version is v12.",
+        [(0.99, neighbor)],
+        subject_key="api-version",
+        claim_kind="configured_value",
+    )
+    assert res.op == ResolutionOp.INVALIDATE
+    assert res.target_id == "mem_versioned"
+
+
 def test_keyed_duplicate_with_matching_display_title_compares_content_only():
     neighbor = MemoryRecord(
         id="mem_titled",

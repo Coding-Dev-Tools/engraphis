@@ -989,7 +989,7 @@ class RecallEngine:
             *(endpoint for edge in edges_by_id.values() for endpoint in (edge.src, edge.dst)),
         })
         incidence = self.store.list_memory_entities(
-            flt, entity_ids=incidence_entity_ids, limit=12_000,
+            flt, entity_ids=incidence_entity_ids, limit=12_000, prompt_only=prompt_only,
         )
         # Links are graph evidence in their own right. Restricting their endpoints
         # to incidence rows silently drops a linked memory which has no entity
@@ -1099,7 +1099,7 @@ class RecallEngine:
             related_ids.add(edge.src)
             related_ids.add(edge.dst)
         rows = self.store.list_memory_entities(
-            flt, entity_ids=sorted(related_ids), limit=12_000
+            flt, entity_ids=sorted(related_ids), limit=12_000, prompt_only=prompt_only,
         )
         eligible_ids = (
             self._prompt_eligible_memory_ids({

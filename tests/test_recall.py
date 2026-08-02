@@ -244,7 +244,9 @@ def test_graph_arm_filters_incidence_to_ppr_frontier_before_cap(monkeypatch):
         for index in range(12_000)
     ]
 
-    def list_memory_entities(flt, *, entity_ids=None, memory_ids=None, limit=None):
+    def list_memory_entities(
+        flt, *, entity_ids=None, memory_ids=None, limit=None, prompt_only=False,
+    ):
         # This models a crowded global prefix which does not contain checkout's
         # incidence. The real target remains available when constrained first.
         if entity_ids is None:
