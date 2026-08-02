@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from engraphis.core.engine import MemoryEngine
-from engraphis.core.interfaces import SearchFilter
+from engraphis.core.interfaces import MemoryRecord, Scope, SearchFilter
 
 
 def test_code_profile_bridges_symbols_to_scoped_memories(tmp_path):
@@ -200,3 +200,70 @@ def test_code_arm_resolves_incident_symbols_before_global_symbol_cap():
 
     assert entry_id != late_id
     assert memory_id in scores
+
+
+def test_code_memory_rank_limits_apply_after_prompt_eligibility():
+    engine = MemoryEngine.create(":memory:")
+    workspace_id = engine.store.get_or_create_workspace("acme")
+    repo_id = engine.store.get_or_create_repo(workspace_id, "api")
+    symbol_id = engine.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="deploy", fqname="deploy",
+        file="deploy.py", span="1-1",
+    )
+    pending = [
+        engine.store.add_memory(MemoryRecord(
+            id="", content=f"Pending deploy credential {index}.", workspace_id=workspace_id,
+            repo_id=repo_id, scope=Scope.REPO,
+            provenance={"source": "import", "trusted": False, "review_state": "pending"},
+        ))
+        for index in range(5)
+    ]
+    approved = engine.store.add_memory(MemoryRecord(
+        id="", content="Approved deploy credential.", workspace_id=workspace_id,
+        repo_id=repo_id, scope=Scope.REPO,
+        provenance={"source": "human_review", "trusted": True, "review_state": "approved"},
+    ))
+    for memory_id in pending:
+        engine.store.link_memory_symbol(
+            repo_id=repo_id, symbol_id=symbol_id, memory_id=memory_id, confidence=1.0,
+        )
+    engine.store.link_memory_symbol(
+        repo_id=repo_id, symbol_id=symbol_id, memory_id=approved, confidence=0.1,
+    )
+    flt = SearchFilter(workspace_id=workspace_id, repo_id=repo_id)
+
+    assert [row["id"] for row in engine.store.memories_for_symbol(
+        repo_id, symbol_id, flt=flt, limit=1,
+    )] == [approved]
+    assert [row["id"] for row in engine.store.memories_for_symbols(
+        repo_id, [symbol_id], flt=flt, limit=1,
+    )[symbol_id]] == [approved]
+
+    bounded_symbol = engine.store.upsert_symbol(
+        repo_id=repo_id, kind="function", name="bounded", fqname="bounded",
+        file="bounded.py", span="1-1",
+    )
+    for index in range(4):
+        pending_id = engine.store.add_memory(MemoryRecord(
+            id="", content=f"Pending bounded evidence {index}.", workspace_id=workspace_id,
+            repo_id=repo_id, scope=Scope.REPO,
+            provenance={"source": "import", "trusted": False, "review_state": "pending"},
+        ))
+        engine.store.link_memory_symbol(
+            repo_id=repo_id, symbol_id=bounded_symbol, memory_id=pending_id, confidence=1.0,
+        )
+    approved_bounded = engine.store.add_memory(MemoryRecord(
+        id="", content="Approved bounded evidence.", workspace_id=workspace_id,
+        repo_id=repo_id, scope=Scope.REPO,
+        provenance={"source": "human_review", "trusted": True, "review_state": "approved"},
+    ))
+    engine.store.link_memory_symbol(
+        repo_id=repo_id, symbol_id=bounded_symbol, memory_id=approved_bounded, confidence=0.1,
+    )
+
+    assert [row["id"] for row in engine.store.memories_for_symbol(
+        repo_id, bounded_symbol, flt=flt, limit=1,
+    )] == [approved_bounded]
+    assert [row["id"] for row in engine.store.memories_for_symbols(
+        repo_id, [bounded_symbol], flt=flt, limit=1,
+    )[bounded_symbol]] == [approved_bounded]

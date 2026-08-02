@@ -1698,6 +1698,16 @@ class MemoryEngine:
             if provenance_is_approved(old.provenance):
                 raise ValueError("memory is already approved")
 
+            now = now_ts()
+            if (
+                old.expired_at is not None
+                or (old.valid_from is not None and old.valid_from > now)
+                or (old.valid_to is not None and old.valid_to <= now)
+            ):
+                raise ValueError("only a live pending memory can be approved")
+            if old.provenance.get("review_state") != REVIEW_PENDING:
+                raise ValueError("only a pending memory can be approved")
+
             # ``approved_from`` lives in structured provenance and metadata rather than a
             # mutable text field. Approval is an owner-driven, infrequent ceremony, so a
             # bounded exact-scope scan is both portable to SQLite builds without JSON1 and
@@ -1748,8 +1758,21 @@ class MemoryEngine:
                 metadata=metadata,
                 valid_from=old.valid_from,
                 resolve_conflicts=False,
+                subject_key=old.subject_key,
+                claim_kind=old.claim_kind,
                 _approval_override=True,
             )
+            # The ordinary write path intentionally starts with normal sensitivity and
+            # no pin.  An approval changes review state, not confidentiality or the
+            # stable identity of the governed claim.
+            if old.sensitivity and old.sensitivity != "normal":
+                self.store.conn.execute(
+                    "UPDATE memories SET sensitivity=? WHERE id=?",
+                    (old.sensitivity, result["id"]),
+                )
+                self.store.conn.commit()
+            if old.pinned:
+                self.store.set_pinned(result["id"], True)
             self.store.audit(
                 "human_review", "approve", result["id"],
                 f"from={old.id}; reviewer={reviewer[:200]}; reason={reason[:500]}",

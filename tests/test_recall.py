@@ -311,6 +311,41 @@ def test_graph_arm_traverses_links_to_memories_without_entity_incidence():
     assert linked_only in scores
 
 
+def test_graph_arm_excludes_pending_edge_support_bridges_before_ppr():
+    from engraphis.core.interfaces import Edge, Node
+
+    store, emb, eng = _engine()
+    wid = store.get_or_create_workspace("w")
+    rid = store.get_or_create_repo(wid, "r")
+    redis = store.upsert_entity(Node(
+        id="", name="Redis", ntype="tech", workspace_id=wid, repo_id=rid,
+    ))
+    checkout = store.upsert_entity(Node(
+        id="", name="checkout", ntype="module", workspace_id=wid, repo_id=rid,
+    ))
+    pending = _add(
+        store, emb, wid, rid, "Pending import says Redis reaches checkout.",
+        provenance={"source": "import", "trusted": False, "review_state": "pending"},
+    )
+    approved = _add(store, emb, wid, rid, "Checkout has approved deployment evidence.")
+    store.upsert_edge(Edge(
+        id="", src=redis, dst=checkout, relation="used_by", workspace_id=wid,
+        repo_id=rid, provenance={"memory_id": pending},
+    ))
+    store.link_memory_entity(
+        memory_id=approved, entity_id=checkout, workspace_id=wid, repo_id=rid,
+        source_kind="test", confidence=1.0,
+    )
+
+    scores = eng._graph_arm_ppr(
+        "What does Redis use?", SearchFilter(workspace_id=wid, repo_id=rid),
+        now=10**12, prompt_only=True,
+    )
+
+    assert pending not in scores
+    assert approved not in scores
+
+
 def test_graph_arm_backfills_workspace_mentions_for_a_later_repo_entity():
     from engraphis.core.interfaces import Edge, Node
 

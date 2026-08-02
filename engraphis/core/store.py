@@ -49,8 +49,6 @@ VECTOR_SCAN_BATCH = 2000
 # Bound placeholders per ``IN (...)`` so a batched lookup stays under SQLite's
 # SQLITE_MAX_VARIABLE_NUMBER (999 before 3.32, 32766 after) on every build.
 IN_CLAUSE_CHUNK = 500
-
-
 def now_ts() -> float:
     return time.time()
 
@@ -3874,65 +3872,40 @@ class Store:
         if where:
             sql += " AND " + " AND ".join(where)
             params.extend(visibility_params)
-        sql += (
-            " ORDER BY l.confidence DESC, m.importance DESC, m.ingested_at DESC LIMIT ?"
-        )
-        params.append(max(1, min(100, int(limit))))
-        rows = self.conn.execute(sql, params).fetchall()
+        sql += " ORDER BY l.confidence DESC, m.importance DESC, m.ingested_at DESC, l.id, m.id"
+        row_limit = max(1, min(100, int(limit)))
         out = []
-        for row in rows:
+        for row in self.conn.execute(sql, params):
             item = dict(row)
             if not _row_is_prompt_eligible(item.get("provenance"), item.get("metadata")):
                 continue
             item["provenance"] = _loads(item.get("provenance"), {})
             item.pop("metadata", None)
             out.append(item)
+            if len(out) >= row_limit:
+                break
         return out
 
     def memories_for_symbols(self, repo_id: str, symbol_ids: list[str], *,
                              flt: Optional[SearchFilter] = None,
                              limit: int = 20) -> dict[str, list[dict]]:
-        """Return a bounded memory ranking for many symbols in one SQL query."""
+        """Return bounded prompt-safe memory rankings with indexed per-symbol lookups.
+
+        A window-function query with an outer ``row_rank`` cap still makes SQLite
+        sort every matching partition before it can apply that cap.  Issuing one
+        indexed, limited lookup per requested symbol instead gives the prompt-facing
+        path a real physical bound even when an untrusted import owns many links.
+        """
         unique_ids = list(dict.fromkeys(
             str(symbol_id) for symbol_id in symbol_ids if str(symbol_id)
         ))[:500]
         if not unique_ids:
             return {}
-        per_symbol_limit = max(1, min(100, int(limit)))
-        placeholders = ",".join("?" for _ in unique_ids)
-        sql = (
-            "WITH ranked AS ("
-            "SELECT l.symbol_id, m.id, m.title, m.content, m.mtype, m.scope, "
-            "m.importance, m.provenance, m.metadata, l.relation, l.confidence, "
-            "ROW_NUMBER() OVER (PARTITION BY l.symbol_id "
-            "ORDER BY l.confidence DESC, m.importance DESC, "
-            "m.ingested_at DESC, l.id, m.id) AS row_rank "
-            "FROM code_memory_links l JOIN memories m ON m.id=l.memory_id "
-            f"WHERE l.repo_id=? AND l.symbol_id IN ({placeholders})"
-        )
-        params: list[Any] = [repo_id, *unique_ids]
-        link_visibility, link_params = _temporal_visibility_sql("l", flt)
-        sql += " AND " + link_visibility
-        params.extend(link_params)
-        where, visibility_params = self._where(flt, include_invalid=False, alias="m")
-        if where:
-            sql += " AND " + " AND ".join(where)
-            params.extend(visibility_params)
-        sql += (
-            ") SELECT symbol_id, id, title, content, mtype, scope, importance, "
-            "provenance, metadata, relation, confidence FROM ranked WHERE row_rank<=? "
-            "ORDER BY symbol_id, row_rank"
-        )
-        params.append(per_symbol_limit)
         grouped: dict[str, list[dict]] = {}
-        for row in self.conn.execute(sql, params).fetchall():
-            item = dict(row)
-            if not _row_is_prompt_eligible(item.get("provenance"), item.get("metadata")):
-                continue
-            symbol_id = str(item.pop("symbol_id"))
-            item["provenance"] = _loads(item.get("provenance"), {})
-            item.pop("metadata", None)
-            grouped.setdefault(symbol_id, []).append(item)
+        for symbol_id in unique_ids:
+            rows = self.memories_for_symbol(repo_id, symbol_id, flt=flt, limit=limit)
+            if rows:
+                grouped[symbol_id] = rows
         return grouped
 
     def symbols_for_memory(self, repo_id: str, memory_id: str, *,

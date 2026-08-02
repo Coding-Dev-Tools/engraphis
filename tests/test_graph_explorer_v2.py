@@ -1396,6 +1396,30 @@ def test_graph_job_memory_candidate_limit_fails_before_persisting(monkeypatch):
     ).fetchone()["n"] == 0
 
 
+def test_graph_job_candidate_limit_ignores_pending_rows(monkeypatch):
+    service = MemoryService.create(":memory:", graph_extractor="none")
+    workspace_id = service.store.get_or_create_workspace("acme")
+    for index in range(105):
+        service.store.add_memory(MemoryRecord(
+            id="", content=f"Pending graph candidate {index}.", workspace_id=workspace_id,
+            scope=Scope.WORKSPACE,
+            provenance={"source": "import", "trusted": False, "review_state": "pending"},
+        ))
+    service.store.add_memory(MemoryRecord(
+        id="", content="One approved graph candidate.", workspace_id=workspace_id,
+        scope=Scope.WORKSPACE,
+        provenance={"source": "human_review", "trusted": True, "review_state": "approved"},
+    ))
+    monkeypatch.setattr(service_module, "MAX_GRAPH_INDEX_MEMORIES", 1)
+    monkeypatch.setattr(MemoryService, "_run_graph_index_job", lambda *_args, **_kwargs: None)
+
+    started = service.start_graph_index_job(workspace="acme", dry_run=True)
+
+    assert started["total_items"] == 1
+    for worker in service._graph_job_threads.values():
+        worker.join(5)
+
+
 def test_active_graph_job_blocks_workspace_lifecycle_and_terminal_rows_are_deleted():
     service, _alpha, _beta, _gamma = _seed_service()
     workspace_id = service.store.get_or_create_workspace("acme")

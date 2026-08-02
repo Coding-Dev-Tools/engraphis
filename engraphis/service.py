@@ -4910,26 +4910,38 @@ class MemoryService:
                     + (" AND repo_id=?" if rid else "")
                 )
                 params: tuple[Any, ...] = (wid, rid) if rid else (wid,)
-                # This job creates derived graph state.  Fetch only bounded
-                # provenance/metadata first, then apply the one canonical
-                # prompt/derived-state predicate before any record content is read.
-                # JSON predicates alone would miss legacy/mixed metadata forms.
-                candidates = self.store.conn.execute(
-                    f"SELECT id, metadata, provenance FROM memories WHERE {live_where} "
-                    "ORDER BY id LIMIT ?",
-                    (*params, MAX_GRAPH_INDEX_MEMORIES + 1),
-                ).fetchall()
-                if len(candidates) > MAX_GRAPH_INDEX_MEMORIES:
-                    raise ValidationError(
-                        "graph index job exceeds the memory candidate limit; filter by repository"
+                # This job creates derived graph state. Scan lightweight metadata in
+                # deterministic pages and apply the canonical predicate before the
+                # capacity guard: pending rows must not consume the approved-index
+                # budget. JSON predicates alone would miss legacy/mixed metadata forms.
+                total = 0
+                upper_memory_id = ""
+                after_memory_id = ""
+                while True:
+                    page_sql = (
+                        f"SELECT id, metadata, provenance FROM memories WHERE {live_where} "
+                        "AND id>? ORDER BY id LIMIT ?"
                     )
-                approved_candidates = [
-                    row for row in candidates
-                    if prompt_eligible(
-                        _loads(row["provenance"], {}), _loads(row["metadata"], {})
-                    )
-                ]
-                total = len(approved_candidates)
+                    candidates = self.store.conn.execute(
+                        page_sql,
+                        (*params, after_memory_id, GRAPH_INDEX_BATCH_SIZE),
+                    ).fetchall()
+                    if not candidates:
+                        break
+                    after_memory_id = str(candidates[-1]["id"])
+                    upper_memory_id = after_memory_id
+                    for candidate in candidates:
+                        if not prompt_eligible(
+                            _loads(candidate["provenance"], {}),
+                            _loads(candidate["metadata"], {}),
+                        ):
+                            continue
+                        total += 1
+                        if total > MAX_GRAPH_INDEX_MEMORIES:
+                            raise ValidationError(
+                                "graph index job exceeds the memory candidate limit; "
+                                "filter by repository"
+                            )
                 entity_before = int(self.store.conn.execute(
                     "SELECT COUNT(*) AS n FROM entities WHERE workspace_id=?", (wid,)
                 ).fetchone()["n"])
@@ -4963,7 +4975,7 @@ class MemoryService:
                     "repo": repo,
                     "extractor": clean_extractor,
                     "dry_run": bool(dry_run),
-                    "upper_memory_id": candidates[-1]["id"] if candidates else "",
+                    "upper_memory_id": upper_memory_id,
                 }
                 self.store.conn.execute(
                     "INSERT INTO jobs(id, workspace_id, repo_id, kind, state, dry_run, "

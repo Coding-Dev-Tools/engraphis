@@ -4,12 +4,13 @@ import builtins
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
 
 from engraphis import mcp_cli
-from scripts import inspector, start_dashboard, start_server
+from scripts import approve_memory, inspector, start_dashboard, start_server
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +74,67 @@ def test_dashboard_missing_server_extra_does_not_print_db_path(monkeypatch, caps
     output = capsys.readouterr()
     assert sensitive not in output.out + output.err
     assert 'pip install "engraphis[server]"' in output.err
+
+
+def test_approval_cli_uses_configured_memory_service_factory(monkeypatch):
+    captured = {}
+
+    class FakeStore:
+        def close(self):
+            captured["closed"] = True
+
+    class FakeEngine:
+        def approve_for_prompt(self, memory_id, *, reviewer, reason):
+            captured["approval"] = (memory_id, reviewer, reason)
+            return {"id": "mem_approved"}
+
+    class FakeService:
+        store = FakeStore()
+        engine = FakeEngine()
+
+        @classmethod
+        def create(cls, db_path, **kwargs):
+            captured["create"] = (db_path, kwargs)
+            return cls()
+
+    output = []
+    monkeypatch.setattr(approve_memory, "MemoryService", FakeService)
+    monkeypatch.setattr(
+        approve_memory,
+        "settings",
+        SimpleNamespace(
+            db_path="configured-encrypted.db",
+            embed_model="configured-embedder",
+            embed_dim=768,
+            rerank_model="configured-reranker",
+            allowed_workspaces=["acme"],
+        ),
+    )
+    monkeypatch.setattr(approve_memory.sys, "argv", [
+        "approve_memory.py", "mem_pending", "--reason", "verified by owner",
+    ])
+    monkeypatch.setattr(approve_memory.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(
+        approve_memory.sys,
+        "stdout",
+        SimpleNamespace(isatty=lambda: True, write=output.append, flush=lambda: None),
+    )
+    monkeypatch.setattr(builtins, "input", lambda _prompt: "APPROVE mem_pending")
+
+    approve_memory.main()
+
+    assert captured["create"] == (
+        "configured-encrypted.db",
+        {
+            "embed_model": "configured-embedder",
+            "embed_dim": 768,
+            "rerank_model": "configured-reranker",
+            "allowed_workspaces": ["acme"],
+        },
+    )
+    assert captured["approval"] == ("mem_pending", approve_memory.getpass.getuser(), "verified by owner")
+    assert captured["closed"] is True
+    assert "mem_approved" in "".join(output)
 
 
 def test_local_cli_ingest_is_recallable_across_clean_processes(tmp_path):

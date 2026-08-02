@@ -10,7 +10,7 @@ import getpass
 import sys
 
 from engraphis.config import settings
-from engraphis.core.engine import MemoryEngine
+from engraphis.service import MemoryService
 
 
 def main() -> None:
@@ -26,13 +26,19 @@ def main() -> None:
     entered = input(f"Type '{phrase}' to release this memory: ").strip()
     if entered != phrase:
         parser.error("approval confirmation did not match")
-    engine = MemoryEngine.create(args.db)
+    service = MemoryService.create(
+        args.db,
+        embed_model=settings.embed_model or None,
+        embed_dim=settings.embed_dim or 384,
+        rerank_model=settings.rerank_model or None,
+        allowed_workspaces=settings.allowed_workspaces,
+    )
     try:
-        result = engine.approve_for_prompt(
+        result = service.engine.approve_for_prompt(
             args.memory_id, reviewer=args.reviewer, reason=args.reason,
         )
     finally:
-        engine.store.close()
+        service.store.close()
     print(result["id"])
 
 

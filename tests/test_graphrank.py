@@ -326,6 +326,7 @@ def _layered_graph_fixture():
             id="", content=text, mtype=MemoryType.SEMANTIC,
             scope=Scope.WORKSPACE, workspace_id=wid,
             embedding=emb.embed([text])[0],
+            provenance={"source": "test", "trusted": True, "review_state": "approved"},
         ))
         store.link_memory_entity(
             memory_id=ids[tag], entity_id=entities[entity], workspace_id=wid, repo_id=None,

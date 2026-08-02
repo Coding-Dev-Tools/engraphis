@@ -263,6 +263,7 @@ class RecallEngine:
                         now,
                         candidate_k=arm_candidate_k,
                         traversal_plan=graph_plan,
+                        prompt_only=prompt_only,
                     )
                     if run_config.graph else {}
                 )
@@ -853,18 +854,55 @@ class RecallEngine:
         *,
         candidate_k: int = 50,
         traversal_plan: Optional[GraphTraversalPlan] = None,
+        prompt_only: bool = False,
     ) -> dict[str, float]:
         if flt.graph_layers is not None and not flt.graph_layers:
             return {}
         if self.graph_mode == "1hop":
-            return self._graph_arm_1hop(query, flt, now, candidate_k=candidate_k)
+            return self._graph_arm_1hop(
+                query, flt, now, candidate_k=candidate_k, prompt_only=prompt_only,
+            )
         return self._graph_arm_ppr(
             query,
             flt,
             now,
             candidate_k=candidate_k,
             traversal_plan=traversal_plan,
+            prompt_only=prompt_only,
         )
+
+    def _prompt_eligible_memory_ids(self, memory_ids: set[str]) -> set[str]:
+        """Return only approved, non-quarantined memory nodes for prompt PPR."""
+        if not memory_ids:
+            return set()
+        records = self.store.get_memories(sorted(memory_ids))
+        return {
+            memory_id
+            for memory_id, record in records.items()
+            if prompt_eligible(record.provenance, record.metadata)
+        }
+
+    @staticmethod
+    def _edge_source_memory_ids(edge) -> set[str]:
+        provenance = edge.provenance if isinstance(edge.provenance, dict) else {}
+        values = [provenance.get("memory_id")]
+        many = provenance.get("memory_ids")
+        if isinstance(many, (list, tuple, set)):
+            values.extend(many)
+        return {str(value) for value in values if value}
+
+    def _prompt_eligible_edges(self, edges: list) -> list:
+        """Keep direct edges and edges whose every memory support is prompt-eligible."""
+        source_ids = (
+            set().union(*(self._edge_source_memory_ids(edge) for edge in edges))
+            if edges else set()
+        )
+        eligible_ids = self._prompt_eligible_memory_ids(source_ids)
+        return [
+            edge for edge in edges
+            if not (sources := self._edge_source_memory_ids(edge))
+            or sources <= eligible_ids
+        ]
 
     def _graph_arm_ppr(
         self,
@@ -874,6 +912,7 @@ class RecallEngine:
         *,
         candidate_k: int = 50,
         traversal_plan: Optional[GraphTraversalPlan] = None,
+        prompt_only: bool = False,
     ) -> dict[str, float]:
         """Personalized PageRank arm: build the scoped
         entity/memory graph — entity↔entity edges (bi-temporal), memory↔entity
@@ -920,9 +959,13 @@ class RecallEngine:
             frontier.difference_update(batch)
             expanded.update(batch)
             next_frontier: set[str] = set()
-            for edge in self.store.neighbors(
-                    batch, at=now, layers=flt.graph_layers, flt=flt,
-                    limit=edge_cap - len(edges_by_id)):
+            edges = self.store.neighbors(
+                batch, at=now, layers=flt.graph_layers, flt=flt,
+                limit=edge_cap - len(edges_by_id),
+            )
+            if prompt_only:
+                edges = self._prompt_eligible_edges(edges)
+            for edge in edges:
                 if edge.id in edges_by_id:
                     continue
                 edges_by_id[edge.id] = edge
@@ -968,13 +1011,24 @@ class RecallEngine:
         # Expand from the entity-incidence frontier before adding the bounded newest
         # memory window. An older unmentioned endpoint can then participate in PPR
         # through its visible link instead of being silently dropped by that window.
-        memory_ids = sorted(incidence_memory_ids | {
+        memory_ids = incidence_memory_ids | {
             endpoint
             for link in frontier_links
             for endpoint in (link["a"], link["b"])
         } | {
             memory.id for memory in self.store.list_memories(flt, limit=12_000)
-        })
+        }
+        if prompt_only:
+            memory_ids = self._prompt_eligible_memory_ids(memory_ids)
+            incidence = [
+                row for row in incidence
+                if str(row.get("memory_id") or "") in memory_ids
+            ]
+            frontier_links = [
+                link for link in frontier_links
+                if link["a"] in memory_ids and link["b"] in memory_ids
+            ]
+        memory_ids = sorted(memory_ids)
         incidence_strength: dict[tuple[str, str], float] = {}
         for row in incidence:
             memory_id = str(row.get("memory_id") or "")
@@ -1004,7 +1058,6 @@ class RecallEngine:
                 GraphLayer(str(link.get("layer") or GraphLayer.SEMANTIC.value)),
             )
 
-
         ranked = personalized_pagerank(adj, [ent(eid) for eid in seeds])
         memory_scores = [
             (nid, score) for nid, score in ranked.items()
@@ -1020,6 +1073,7 @@ class RecallEngine:
         now: float,
         *,
         candidate_k: int = 50,
+        prompt_only: bool = False,
     ) -> dict[str, float]:
         entity_map = self._seed_entity_map(query, flt)
         patterns = {
@@ -1036,19 +1090,29 @@ class RecallEngine:
         if not seed_ids:
             return {}
         related_ids = set(seed_ids)
-        for edge in self.store.neighbors(
+        edges = self.store.neighbors(
             seed_ids, at=now, layers=flt.graph_layers, flt=flt
-        ):
+        )
+        if prompt_only:
+            edges = self._prompt_eligible_edges(edges)
+        for edge in edges:
             related_ids.add(edge.src)
             related_ids.add(edge.dst)
         rows = self.store.list_memory_entities(
             flt, entity_ids=sorted(related_ids), limit=12_000
         )
+        eligible_ids = (
+            self._prompt_eligible_memory_ids({
+                str(row.get("memory_id") or "")
+                for row in rows if row.get("memory_id")
+            })
+            if prompt_only else None
+        )
         out: dict[str, float] = {}
         if rows:
             for row in rows:
                 memory_id = str(row.get("memory_id") or "")
-                if memory_id:
+                if memory_id and (eligible_ids is None or memory_id in eligible_ids):
                     out[memory_id] = (
                         out.get(memory_id, 0.0)
                         + max(0.0, float(row.get("confidence") or 0.0))
