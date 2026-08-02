@@ -787,7 +787,7 @@ class MemoryService:
     @classmethod
     def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
                embed_revision: Optional[str] = None,
-               embed_dim: int = 384, vector_backend: str = "auto",
+               embed_dim: int = 384, vector_backend: str = "numpy",
                rerank_model: Optional[str] = None,
                allowed_workspaces: Optional[list] = None,
                extractor: Optional[str] = None,

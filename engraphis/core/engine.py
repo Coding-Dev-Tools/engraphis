@@ -347,7 +347,7 @@ class MemoryEngine:
     @classmethod
     def create(cls, db_path: str = ":memory:", *, embed_model: Optional[str] = None,
                embed_revision: Optional[str] = None,
-               embed_dim: int = 384, vector_backend: str = "auto",
+               embed_dim: int = 384, vector_backend: str = "numpy",
                rerank_model: Optional[str] = None, extractor: str = "none",
                graph_extractor: str = "none",
                retention_supervisor: str = "none",

@@ -11,6 +11,7 @@ MATCH directly, so ``search`` expands the ANN window until it has enough visible
 """
 from __future__ import annotations
 
+import sys
 from typing import Optional
 
 import numpy as np
@@ -33,6 +34,17 @@ class SqliteVecVectorIndex:
     """ANN over embeddings using the sqlite-vec extension."""
 
     def __init__(self, store: Store, dim: int) -> None:
+        # sqlite-vec is a loadable SQLite extension.  SQLCipher ships a different
+        # SQLite build, and loading both native libraries into one interpreter has
+        # caused hard crashes rather than a normal Python exception.  An `auto`
+        # request below can safely use NumPy instead; an explicit sqlite-vec
+        # request gets this actionable error before any unsafe native call.
+        if any(name == "sqlcipher3" or name.startswith("sqlcipher3.")
+               for name in sys.modules):
+            raise RuntimeError(
+                "sqlite-vec cannot share a process with SQLCipher; use "
+                "vector_backend='numpy' or run the accelerated backend in a fresh process"
+            )
         import sqlite_vec  # lazy: optional dependency / native extension
         self.store = store
         self.dim = dim

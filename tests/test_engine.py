@@ -146,10 +146,8 @@ def test_engine_infers_scope_and_rejects_impossible_parents():
         eng.remember("broken", workspace_id=wid, repo_id=rid, scope=Scope.WORKSPACE)
 
 
-def test_engine_falls_back_to_numpy_index_offline(monkeypatch):
-    """The factory's fallback CONTRACT, independent of what this environment happens to
-    have installed (sqlite-vec is now a [test] dependency, so simulate its absence):
-    sqlite-vec unavailable → NumPy reference index, never an error."""
+def test_engine_auto_falls_back_to_numpy_index_offline(monkeypatch):
+    """The opt-in auto selector remains resilient when sqlite-vec is unavailable."""
     import engraphis.backends.vector_sqlitevec as vs
 
     class _Unavailable:
@@ -157,15 +155,14 @@ def test_engine_falls_back_to_numpy_index_offline(monkeypatch):
             raise ImportError("sqlite_vec not installed (simulated)")
 
     monkeypatch.setattr(vs, "SqliteVecVectorIndex", _Unavailable)
-    eng = MemoryEngine.create(":memory:")
+    eng = MemoryEngine.create(":memory:", vector_backend="auto")
     assert isinstance(eng.index, NumpyVectorIndex)
 
 
-def test_engine_prefers_sqlitevec_index_when_available():
-    pytest.importorskip("sqlite_vec", reason="sqlite-vec extra not installed")
-    from engraphis.backends.vector_sqlitevec import SqliteVecVectorIndex
+def test_engine_defaults_to_numpy_index_even_when_sqlitevec_is_available():
+    """The public constructor must remain deterministic and numpy-only by default."""
     eng = MemoryEngine.create(":memory:")
-    assert isinstance(eng.index, SqliteVecVectorIndex)
+    assert isinstance(eng.index, NumpyVectorIndex)
 
 
 def test_engine_respects_memory_type_and_scope():

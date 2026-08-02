@@ -83,7 +83,9 @@ def test_service_builds_offline_with_default_rerank_model(monkeypatch):
     # (DeterministicEmbedder + IdentityReranker) and serves a round-trip — the CI path.
     monkeypatch.delenv("ENGRAPHIS_RERANK_MODEL", raising=False)
     from engraphis.service import MemoryService
+    from engraphis.backends.vector_numpy import NumpyVectorIndex
     svc = MemoryService.create(":memory:", rerank_model=(Settings().rerank_model or None))
+    assert isinstance(svc.engine.index, NumpyVectorIndex)
     pending = svc.remember("a durable fact", workspace="w", repo="r")
     assert pending["stored"] is True
     svc.engine.approve_for_prompt(

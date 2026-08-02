@@ -10,7 +10,18 @@ import sqlite3
 
 import pytest
 
-sqlcipher3 = pytest.importorskip("sqlcipher3", reason="encryption extra not installed")
+pytestmark = pytest.mark.native_sqlcipher
+
+
+@pytest.fixture(autouse=True)
+def _require_sqlcipher():
+    """Defer the native import until after sqlite-vec integration tests finish.
+
+    sqlite-vec and SQLCipher expose incompatible SQLite ABIs when loaded into
+    the same interpreter.  The suite orders their marked integration tests so
+    both real backends are still exercised without risking a native crash.
+    """
+    pytest.importorskip("sqlcipher3", reason="encryption extra not installed")
 
 from engraphis.backends import encrypted_db  # noqa: E402
 from engraphis.service import MemoryService  # noqa: E402
@@ -24,6 +35,8 @@ def _hits(res):
 
 
 def test_encrypts_at_rest_unreadable_without_key(monkeypatch, tmp_path):
+    import sqlcipher3
+
     monkeypatch.setenv("ENGRAPHIS_DB_KEY", KEY)
     db = str(tmp_path / "m.db")
     svc = MemoryService.create(db)

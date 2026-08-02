@@ -225,6 +225,10 @@ select = ["E4", "E7", "E9", "F"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "native_sqlitevec: tests that load the sqlite-vec native SQLite extension",
+    "native_sqlcipher: tests that import the SQLCipher native SQLite driver",
+]
 filterwarnings = [
     # Third-party (Starlette's TestClient), not our code and not fixable without a
     # dependency bump — silence just this one message so the suite output stays clean.
